@@ -25,7 +25,7 @@ diffs, and gates destructive changes on human approval.  Trajectory intelligence
 extracts product signal from agent execution traces.  A three-tier JIT execution
 model allows state machine transition logic to be hot-swapped at runtime without
 process restarts.  The framework is implemented as a 16-crate Rust workspace with
-246 tests across 97 source files (16,604 lines of Rust), backed by PostgreSQL for
+253 tests across 97 source files (16,604 lines of Rust), backed by PostgreSQL for
 event sourcing, Redis for actor mailboxes, and ClickHouse for observability.  A
 live Claude-powered LLM agent demonstrates the full feedback loop: natural language
 requests are interpreted into OData operations, state machine transitions are
@@ -700,7 +700,7 @@ observability data, with a safety checker ensuring correctness.
 
 ### 11.1 Test Coverage
 
-The Temper workspace contains 246 tests across 16 crates. Key categories:
+The Temper workspace contains 253 tests across 16 crates. Key categories:
 
 | Category                       | Count | Crates                                     |
 |--------------------------------|------:|--------------------------------------------|

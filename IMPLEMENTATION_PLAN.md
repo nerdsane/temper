@@ -2,9 +2,19 @@
 
 **ALL 8 PHASES COMPLETE.** The full vision is implemented and verified end-to-end.
 
-**Final state**: 246 tests passing, 16 crates, 16,604 lines of Rust, 26 commits.
-Real Postgres persistence, ClickHouse observability, Claude-powered agent,
-trajectory capture, evolution records, product intelligence digest.
+**Final state**: 253 tests passing, 16 crates, 28 commits.
+Real Postgres persistence, ClickHouse observability (Telemetry as Views),
+Claude-powered conversational agent, trajectory capture, Cedar ABAC in
+dispatch pipeline, sentinel background actor, evolution records persisted
+to files, prompt registry with A/B testing, product intelligence digest.
+
+All 6 post-implementation gaps also closed:
+1. Wide events emitted from entity actor → ClickHouse on every transition
+2. Cedar AuthZ enforced before every bound action dispatch (403 on deny)
+3. Evolution records written to JSON files on disk
+4. Sentinel runs as background tokio task watching ClickHouse
+5. /odata/$hints endpoint serves trajectory-learned agent hints
+6. Prompt registry tracks version performance for A/B testing
 
 ---
 

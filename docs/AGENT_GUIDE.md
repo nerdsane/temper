@@ -385,7 +385,7 @@ The server exposes OData v4 endpoints:
 }
 ```
 
-The `events` array is the entity's full audit trail — every state transition with timestamps and parameters. This is the event sourcing log that will be persisted to Postgres.
+The `events` array is the entity's full audit trail — every state transition with timestamps and parameters. Events are persisted to Postgres (when `DATABASE_URL` is set) and projected as metrics + spans to ClickHouse (when `CLICKHOUSE_URL` is set) via Telemetry as Views.
 
 ### OData Query Examples
 
@@ -427,7 +427,7 @@ The SecurityContext is built from HTTP headers. Cedar policies are loaded from `
 - `resource.status`, `resource.customerId`, `resource.total`
 - `context.rateLimitExceeded`, `context.timeOfDay`
 
-System principals (internal processes) bypass all checks.
+System principals (internal processes) bypass all checks. Denied requests return `403 Forbidden` with the Cedar policy reason. The engine defaults to permissive (allow-all) and is configured with Cedar policy files at startup.
 
 ---
 
