@@ -23,6 +23,7 @@ pub mod memory;
 pub mod schema;
 pub mod store;
 pub mod trajectory;
+pub mod clickhouse;
 
 // Re-export the most commonly used types at the crate root.
 pub use error::ObserveError;
@@ -30,3 +31,4 @@ pub use memory::InMemoryStore;
 pub use schema::{LOG_COLUMNS, METRIC_COLUMNS, SPAN_COLUMNS};
 pub use store::{ObservabilityStore, ResultRow, ResultSet, SqlParam};
 pub use trajectory::{TrajectoryContext, TrajectoryOutcome};
+pub use clickhouse::{ClickHouseStore, SpanRecord, LogRecord, MetricRecord};

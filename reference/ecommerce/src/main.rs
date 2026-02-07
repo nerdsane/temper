@@ -1,13 +1,14 @@
 //! Temper Reference App: Agentic E-Commerce
 //!
-//! A fully agent-operated e-commerce backend serving OData v4 APIs.
-//! Entity actors process real state machine transitions verified by DST.
-//!
 //! Modes:
-//! - Without DATABASE_URL: in-memory only (actors lose state on restart)
-//! - With DATABASE_URL: events persisted to Postgres (actors rebuild from journal)
+//! - `cargo run -p ecommerce` — start the OData server
+//! - `cargo run -p ecommerce -- agent "Create an order with a widget"` — run the LLM agent
 //!
-//! Run with: cargo run -p ecommerce
+//! Environment:
+//! - DATABASE_URL: Postgres connection (optional, falls back to in-memory)
+//! - ANTHROPIC_API_KEY: Required for agent mode
+
+mod agent;
 
 use std::collections::HashMap;
 
@@ -27,7 +28,36 @@ async fn main() {
         )
         .init();
 
-    tracing::info!("Temper Ecommerce — starting");
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.len() >= 3 && args[1] == "agent" {
+        // Agent mode: run the LLM agent with the given prompt
+        let prompt = args[2..].join(" ");
+        run_agent(&prompt).await;
+    } else {
+        // Server mode: start the OData HTTP server
+        run_server().await;
+    }
+}
+
+async fn run_agent(prompt: &str) {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .expect("ANTHROPIC_API_KEY must be set for agent mode");
+
+    tracing::info!(prompt, "Starting agent");
+
+    let mut agent = agent::CustomerAgent::new("http://localhost:3000", &api_key);
+    let response = agent.handle(prompt).await;
+
+    println!("\nAgent: {response}");
+
+    if let Some(order_id) = &agent.last_order_id {
+        println!("(Last order ID: {order_id})");
+    }
+}
+
+async fn run_server() {
+    tracing::info!("Temper Ecommerce — starting server");
 
     let csdl = parse_csdl(CSDL_XML).expect("Failed to parse CSDL");
     tracing::info!(schemas = csdl.schemas.len(), "CSDL loaded");
@@ -37,7 +67,6 @@ async fn main() {
     let mut tla_sources = HashMap::new();
     tla_sources.insert("Order".to_string(), ORDER_TLA.to_string());
 
-    // Connect to Postgres if DATABASE_URL is set
     let state = match std::env::var("DATABASE_URL") {
         Ok(database_url) => {
             tracing::info!("Connecting to PostgreSQL...");
@@ -45,7 +74,6 @@ async fn main() {
                 .await
                 .expect("Failed to connect to PostgreSQL");
 
-            // Run migrations
             temper_store_postgres::migration::run_migrations(&pool)
                 .await
                 .expect("Failed to run migrations");
@@ -55,7 +83,7 @@ async fn main() {
             ServerState::with_persistence(system, csdl, CSDL_XML.to_string(), tla_sources, store)
         }
         Err(_) => {
-            tracing::warn!("DATABASE_URL not set — running in-memory mode (no persistence)");
+            tracing::warn!("DATABASE_URL not set — running in-memory mode");
             ServerState::with_tla(system, csdl, CSDL_XML.to_string(), tla_sources)
         }
     };
