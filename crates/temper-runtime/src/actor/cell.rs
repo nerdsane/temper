@@ -1,10 +1,10 @@
-use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use super::actor_ref::{ActorId, ActorRef, Envelope, SystemSignal};
 use super::context::ActorContext;
 use super::errors::ActorError;
 use super::traits::Actor;
+use crate::mailbox::{self, MailboxReceiver, DEFAULT_MAILBOX_CAPACITY};
 use crate::supervision::SupervisionStrategy;
 
 /// The ActorCell is the runtime container for an actor instance.
@@ -13,16 +13,27 @@ use crate::supervision::SupervisionStrategy;
 pub struct ActorCell<A: Actor> {
     actor: A,
     id: ActorId,
+    mailbox_capacity: usize,
 }
 
 impl<A: Actor> ActorCell<A> {
     pub fn new(actor: A, id: ActorId) -> Self {
-        Self { actor, id }
+        Self {
+            actor,
+            id,
+            mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
+        }
+    }
+
+    /// Set custom mailbox capacity (TigerStyle: explicit budgets).
+    pub fn with_mailbox_capacity(mut self, capacity: usize) -> Self {
+        self.mailbox_capacity = capacity;
+        self
     }
 
     /// Spawn the actor cell as a tokio task. Returns the ActorRef for external communication.
     pub fn spawn(self) -> ActorRef<A::Msg> {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mailbox::mailbox(self.mailbox_capacity);
         let id = self.id.clone();
 
         let actor_ref = ActorRef {
@@ -39,7 +50,7 @@ impl<A: Actor> ActorCell<A> {
     /// 1. pre_start → initialize state
     /// 2. loop: receive message → handle
     /// 3. post_stop → cleanup
-    async fn run(self, mut rx: mpsc::UnboundedReceiver<Envelope<A::Msg>>) {
+    async fn run(self, mut rx: MailboxReceiver<A::Msg>) {
         let actor = self.actor;
         let id = self.id;
         let strategy = actor.supervision_strategy();
@@ -59,7 +70,6 @@ impl<A: Actor> ActorCell<A> {
                 }
                 Err(e) => {
                     error!(actor = %id, error = %e, "actor pre_start failed");
-                    // If init fails, decide based on supervision strategy
                     if should_restart(&strategy, restart_count) {
                         restart_count += 1;
                         warn!(actor = %id, restart = restart_count, "restarting after init failure");
@@ -96,7 +106,6 @@ impl<A: Actor> ActorCell<A> {
                         ctx.reply_channel = Some(reply);
                         if let Err(e) = actor.handle(msg, &mut state, &mut ctx).await {
                             error!(actor = %id, error = %e, "actor handle (ask) failed");
-                            // Try to send error reply if reply channel wasn't consumed
                             if let Some(tx) = ctx.reply_channel.take() {
                                 let _ = tx.send(Err(ActorError::custom(format!(
                                     "handler failed: {e}"
@@ -108,8 +117,6 @@ impl<A: Actor> ActorCell<A> {
                                 break 'message_loop false;
                             }
                         }
-                        // If handler didn't reply, it's a programming error — drop the channel
-                        // (caller gets Stopped error from RecvError).
                         ctx.reply_channel = None;
                     }
                     Envelope::Signal(signal) => match signal {
@@ -134,7 +141,6 @@ impl<A: Actor> ActorCell<A> {
                 warn!(actor = %id, restart = restart_count, "restarting");
                 let backoff = strategy.backoff_duration(restart_count);
                 tokio::time::sleep(backoff).await;
-                // Loop continues → re-enters pre_start
             } else {
                 info!(actor = %id, "actor stopped");
                 return;

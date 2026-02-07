@@ -1,10 +1,11 @@
 use std::fmt;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use super::errors::ActorError;
 use super::traits::Message;
+use crate::mailbox::MailboxSender;
 
 /// An envelope wrapping a message with an optional reply channel.
 pub(crate) enum Envelope<M: Message> {
@@ -35,7 +36,7 @@ pub enum SystemSignal {
 ///
 /// ActorRef is cheap to clone and can be sent across threads/tasks.
 pub struct ActorRef<M: Message> {
-    pub(crate) sender: mpsc::UnboundedSender<Envelope<M>>,
+    pub(crate) sender: MailboxSender<M>,
     pub(crate) id: ActorId,
 }
 
@@ -67,9 +68,7 @@ impl<M: Message> ActorRef<M> {
     /// Send a message to the actor without waiting for a response.
     /// This is the primary communication pattern (tell / fire-and-forget).
     pub fn tell(&self, msg: M) -> Result<(), ActorError> {
-        self.sender
-            .send(Envelope::Tell(msg))
-            .map_err(|_| ActorError::SendFailed)
+        self.sender.send(Envelope::Tell(msg))
     }
 
     /// Send a message and wait for a typed response.
@@ -81,9 +80,7 @@ impl<M: Message> ActorRef<M> {
     ) -> Result<R, ActorError> {
         let (tx, rx) = oneshot::channel();
 
-        self.sender
-            .send(Envelope::Ask { msg, reply: tx })
-            .map_err(|_| ActorError::SendFailed)?;
+        self.sender.send(Envelope::Ask { msg, reply: tx })?;
 
         let result = tokio::time::timeout(timeout, rx)
             .await
@@ -101,9 +98,7 @@ impl<M: Message> ActorRef<M> {
 
     /// Send a system signal to the actor.
     pub fn signal(&self, sig: SystemSignal) -> Result<(), ActorError> {
-        self.sender
-            .send(Envelope::Signal(sig))
-            .map_err(|_| ActorError::SendFailed)
+        self.sender.send(Envelope::Signal(sig))
     }
 
     /// Stop the actor gracefully.
@@ -125,6 +120,9 @@ impl<M: Message> Clone for ActorRef<M> {
         }
     }
 }
+
+// Re-export Envelope for use by the mailbox module.
+// This avoids circular dependencies.
 
 impl<M: Message> fmt::Debug for ActorRef<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
