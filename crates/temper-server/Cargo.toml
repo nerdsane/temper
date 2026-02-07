@@ -11,6 +11,7 @@ temper-runtime = { workspace = true }
 temper-odata = { workspace = true }
 temper-spec = { workspace = true }
 temper-jit = { workspace = true }
+temper-store-postgres = { workspace = true }
 axum = { workspace = true }
 hyper = { workspace = true }
 tower = { workspace = true }

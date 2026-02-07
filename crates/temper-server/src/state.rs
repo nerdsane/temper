@@ -8,9 +8,9 @@ use temper_jit::table::TransitionTable;
 use temper_runtime::actor::ActorRef;
 use temper_runtime::ActorSystem;
 use temper_spec::csdl::CsdlDocument;
+use temper_store_postgres::PostgresEventStore;
 
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
-
 
 /// Shared state for the Temper HTTP server.
 #[derive(Clone)]
@@ -27,6 +27,8 @@ pub struct ServerState {
     pub transition_tables: Arc<HashMap<String, Arc<TransitionTable>>>,
     /// Live actor registry: (entity_type, entity_id) → ActorRef.
     pub actor_registry: Arc<RwLock<HashMap<String, ActorRef<EntityMsg>>>>,
+    /// Optional Postgres event store for persistence.
+    pub event_store: Option<Arc<PostgresEventStore>>,
 }
 
 impl ServerState {
@@ -53,6 +55,7 @@ impl ServerState {
             entity_set_map: Arc::new(entity_set_map),
             transition_tables: Arc::new(HashMap::new()),
             actor_registry: Arc::new(RwLock::new(HashMap::new())),
+            event_store: None,
         }
     }
 
@@ -65,6 +68,19 @@ impl ServerState {
             tables.insert(entity_type.clone(), Arc::new(table));
         }
         state.transition_tables = Arc::new(tables);
+        state
+    }
+
+    /// Create ServerState with TLA+ sources AND Postgres persistence.
+    pub fn with_persistence(
+        system: ActorSystem,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        tla_sources: HashMap<String, String>,
+        store: PostgresEventStore,
+    ) -> Self {
+        let mut state = Self::with_tla(system, csdl, csdl_xml, tla_sources);
+        state.event_store = Some(Arc::new(store));
         state
     }
 
@@ -87,13 +103,15 @@ impl ServerState {
         // Get transition table for this entity type
         let table = self.transition_tables.get(entity_type)?;
 
-        // Spawn new actor
-        let actor = EntityActor::new(
-            entity_type,
-            entity_id,
-            table.clone(),
-            serde_json::json!({}),
-        );
+        // Spawn new actor — with persistence if store is configured
+        let actor = match &self.event_store {
+            Some(store) => EntityActor::with_persistence(
+                entity_type, entity_id, table.clone(), serde_json::json!({}), store.clone(),
+            ),
+            None => EntityActor::new(
+                entity_type, entity_id, table.clone(), serde_json::json!({}),
+            ),
+        };
         let actor_ref = self.actor_system.spawn(actor, &key);
 
         // Register

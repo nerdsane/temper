@@ -42,6 +42,9 @@ pub struct EntityState {
     pub fields: serde_json::Value,
     /// Event log (append-only history of all transitions).
     pub events: Vec<EntityEvent>,
+    /// Current event sourcing sequence number (for persistence).
+    #[serde(default)]
+    pub sequence_nr: u64,
 }
 
 /// A recorded state transition event.

@@ -24,6 +24,8 @@ use std::sync::Arc;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
+use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_store_postgres::PostgresEventStore;
 
 use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_PER_ENTITY,
@@ -31,15 +33,18 @@ use super::types::{
 };
 
 /// The entity actor -- processes actions through a TransitionTable.
+/// Optionally persists events to PostgreSQL via the EventStore trait.
 pub struct EntityActor {
     entity_type: String,
     entity_id: String,
     table: Arc<TransitionTable>,
     initial_fields: serde_json::Value,
+    /// Optional event store for persistence. None = in-memory only.
+    event_store: Option<Arc<PostgresEventStore>>,
 }
 
 impl EntityActor {
-    /// Create a new entity actor with the given type, ID, transition table, and initial fields.
+    /// Create a new entity actor (in-memory only, no persistence).
     pub fn new(
         entity_type: impl Into<String>,
         entity_id: impl Into<String>,
@@ -51,6 +56,96 @@ impl EntityActor {
             entity_id: entity_id.into(),
             table,
             initial_fields,
+            event_store: None,
+        }
+    }
+
+    /// Create a new entity actor with Postgres persistence.
+    pub fn with_persistence(
+        entity_type: impl Into<String>,
+        entity_id: impl Into<String>,
+        table: Arc<TransitionTable>,
+        initial_fields: serde_json::Value,
+        store: Arc<PostgresEventStore>,
+    ) -> Self {
+        Self {
+            entity_type: entity_type.into(),
+            entity_id: entity_id.into(),
+            table,
+            initial_fields,
+            event_store: Some(store),
+        }
+    }
+
+    /// Persistence ID for this entity: "EntityType:EntityId".
+    fn persistence_id(&self) -> String {
+        format!("{}:{}", self.entity_type, self.entity_id)
+    }
+
+    /// Persist an event to Postgres (if store is configured).
+    async fn persist_event(store: &PostgresEventStore, persistence_id: &str, state: &mut EntityState, event: &EntityEvent) {
+        let envelope = PersistenceEnvelope {
+            sequence_nr: state.sequence_nr + 1,
+            event_type: event.action.clone(),
+            payload: serde_json::to_value(event).unwrap_or_default(),
+            metadata: EventMetadata {
+                event_id: uuid::Uuid::now_v7(),
+                causation_id: uuid::Uuid::now_v7(),
+                correlation_id: uuid::Uuid::now_v7(),
+                timestamp: event.timestamp,
+                actor_id: persistence_id.to_string(),
+            },
+        };
+
+        match store.append(persistence_id, state.sequence_nr, &[envelope]).await {
+            Ok(new_seq) => {
+                state.sequence_nr = new_seq;
+                tracing::debug!(entity = %state.entity_id, seq = new_seq, "event persisted");
+            }
+            Err(e) => {
+                tracing::error!(
+                    entity = %state.entity_id, error = %e,
+                    "failed to persist event — state advanced but not durable"
+                );
+            }
+        }
+    }
+
+    /// Replay events from Postgres to rebuild state (called in pre_start).
+    async fn replay_events(store: &PostgresEventStore, persistence_id: &str, state: &mut EntityState) {
+        match store.read_events(persistence_id, 0).await {
+            Ok(envelopes) => {
+                for env in &envelopes {
+                    if let Ok(event) = serde_json::from_value::<EntityEvent>(env.payload.clone()) {
+                        state.status = event.to_status.clone();
+                        if event.action.to_lowercase().contains("additem") {
+                            state.item_count += 1;
+                        } else if event.action.to_lowercase().contains("removeitem") {
+                            state.item_count = state.item_count.saturating_sub(1);
+                        }
+                        state.events.push(event);
+                    }
+                    state.sequence_nr = env.sequence_nr;
+                }
+                if !envelopes.is_empty() {
+                    if let Some(obj) = state.fields.as_object_mut() {
+                        obj.insert("Status".into(), serde_json::Value::String(state.status.clone()));
+                    }
+                    tracing::info!(
+                        entity = %state.entity_id,
+                        replayed = envelopes.len(),
+                        status = %state.status,
+                        seq = state.sequence_nr,
+                        "state rebuilt from event journal"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    entity = %state.entity_id, error = %e,
+                    "failed to read events for replay — starting fresh"
+                );
+            }
         }
     }
 }
@@ -61,7 +156,6 @@ impl Actor for EntityActor {
 
     async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<Self::State, ActorError> {
         let mut fields = self.initial_fields.clone();
-        // Ensure standard fields
         if let Some(obj) = fields.as_object_mut() {
             obj.entry("Id".to_string())
                 .or_insert(serde_json::Value::String(self.entity_id.clone()));
@@ -69,14 +163,22 @@ impl Actor for EntityActor {
                 .or_insert(serde_json::Value::String(self.table.initial_state.clone()));
         }
 
-        Ok(EntityState {
+        let mut state = EntityState {
             entity_type: self.entity_type.clone(),
             entity_id: self.entity_id.clone(),
             status: self.table.initial_state.clone(),
             item_count: 0,
             fields,
             events: Vec::new(),
-        })
+            sequence_nr: 0,
+        };
+
+        // Replay events from Postgres to rebuild state (if persistence is configured)
+        if let Some(ref store) = self.event_store {
+            Self::replay_events(store, &self.persistence_id(), &mut state).await;
+        }
+
+        Ok(state)
     }
 
     async fn handle(
@@ -157,13 +259,20 @@ impl Actor for EntityActor {
                         }
 
                         // Record event
-                        state.events.push(EntityEvent {
+                        let event = EntityEvent {
                             action: name.clone(),
                             from_status,
                             to_status: state.status.clone(),
                             timestamp: chrono::Utc::now(),
                             params: params.clone(),
-                        });
+                        };
+
+                        // Persist to Postgres (if configured)
+                        if let Some(ref store) = self.event_store {
+                            Self::persist_event(store, &self.persistence_id(), state, &event).await;
+                        }
+
+                        state.events.push(event);
 
                         // TigerStyle: Assert postconditions after every transition.
                         debug_assert!(
