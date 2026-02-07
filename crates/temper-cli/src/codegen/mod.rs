@@ -12,6 +12,7 @@ use temper_codegen::generate_entity_module;
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::build_spec_model;
 
+
 /// Run the `temper codegen` command.
 ///
 /// Reads specs from `specs_dir`, generates Rust code, and writes to `output_dir`.

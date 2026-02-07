@@ -7,6 +7,7 @@ use tower_http::trace::TraceLayer;
 use crate::dispatch;
 use crate::state::ServerState;
 
+
 /// Build the axum router with all OData routes.
 ///
 /// Route structure:

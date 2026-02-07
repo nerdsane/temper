@@ -8,11 +8,11 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use cedar_policy::{
-    Authorizer, Context, Entities, EntityUid, PolicySet, Request,
-    Decision, Response as CedarResponse,
+    Authorizer, Context, Decision, Entities, EntityUid, PolicySet, Request,
+    Response as CedarResponse,
 };
 
-use crate::context::{SecurityContext, PrincipalKind};
+use crate::context::{PrincipalKind, SecurityContext};
 use crate::error::AuthzError;
 
 /// The result of an authorization check.
@@ -25,6 +25,7 @@ pub enum AuthzDecision {
 }
 
 impl AuthzDecision {
+    /// Returns `true` if the authorization decision is `Allow`.
     pub fn is_allowed(&self) -> bool {
         matches!(self, AuthzDecision::Allow)
     }

@@ -1,6 +1,7 @@
 //! Generate message enums from CSDL Actions and Functions.
 
 use temper_spec::csdl::{Action, Function};
+
 use crate::entity::{csdl_type_to_rust, to_snake_case};
 
 /// Generate the message enum for an entity's actor.

@@ -21,13 +21,12 @@
 //! - **Deterministic**: Same input → same output. No randomness in transition logic.
 
 use std::sync::Arc;
+#[cfg(test)]
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use temper_jit::table::TransitionTable;
 use temper_runtime::actor::{Actor, ActorContext, ActorError, Message};
-
-#[cfg(test)]
-use std::time::Duration;
 
 // TigerStyle: Fixed resource budgets. No unbounded growth.
 // These are hard limits, not suggestions. Violations are assertion failures.
@@ -73,10 +72,15 @@ pub struct EntityState {
 /// A recorded state transition event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityEvent {
+    /// The action that triggered the transition.
     pub action: String,
+    /// The status before the transition.
     pub from_status: String,
+    /// The status after the transition.
     pub to_status: String,
+    /// When the transition occurred.
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Parameters passed with the action.
     pub params: serde_json::Value,
 }
 
@@ -100,6 +104,7 @@ pub struct EntityActor {
 }
 
 impl EntityActor {
+    /// Create a new entity actor with the given type, ID, transition table, and initial fields.
     pub fn new(
         entity_type: impl Into<String>,
         entity_id: impl Into<String>,

@@ -7,6 +7,7 @@ use super::traits::Actor;
 use crate::mailbox::{self, MailboxReceiver, DEFAULT_MAILBOX_CAPACITY};
 use crate::supervision::SupervisionStrategy;
 
+
 /// The ActorCell is the runtime container for an actor instance.
 /// It owns the actor, its state, its mailbox receiver, and drives the message loop.
 /// This is an internal type — users interact through ActorRef only.
@@ -17,6 +18,7 @@ pub struct ActorCell<A: Actor> {
 }
 
 impl<A: Actor> ActorCell<A> {
+    /// Create a new actor cell with the given actor and ID.
     pub fn new(actor: A, id: ActorId) -> Self {
         Self {
             actor,

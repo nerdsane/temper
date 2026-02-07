@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::records::*;
 
+
 /// Stores evolution records. In-memory implementation for now.
 /// Production: Git (source of truth) + Postgres (indexed for querying).
 #[derive(Clone)]
@@ -22,6 +23,7 @@ struct StoreInner {
 }
 
 impl RecordStore {
+    /// Create a new, empty record store.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(StoreInner {
@@ -36,44 +38,54 @@ impl RecordStore {
 
     // --- Insert ---
 
+    /// Insert an observation record into the store.
     pub fn insert_observation(&self, record: ObservationRecord) {
         self.inner.write().unwrap().observations.insert(record.header.id.clone(), record);
     }
 
+    /// Insert a problem record into the store.
     pub fn insert_problem(&self, record: ProblemRecord) {
         self.inner.write().unwrap().problems.insert(record.header.id.clone(), record);
     }
 
+    /// Insert an analysis record into the store.
     pub fn insert_analysis(&self, record: AnalysisRecord) {
         self.inner.write().unwrap().analyses.insert(record.header.id.clone(), record);
     }
 
+    /// Insert a decision record into the store.
     pub fn insert_decision(&self, record: DecisionRecord) {
         self.inner.write().unwrap().decisions.insert(record.header.id.clone(), record);
     }
 
+    /// Insert an insight record into the store.
     pub fn insert_insight(&self, record: InsightRecord) {
         self.inner.write().unwrap().insights.insert(record.header.id.clone(), record);
     }
 
     // --- Query ---
 
+    /// Retrieve an observation record by ID.
     pub fn get_observation(&self, id: &str) -> Option<ObservationRecord> {
         self.inner.read().unwrap().observations.get(id).cloned()
     }
 
+    /// Retrieve a problem record by ID.
     pub fn get_problem(&self, id: &str) -> Option<ProblemRecord> {
         self.inner.read().unwrap().problems.get(id).cloned()
     }
 
+    /// Retrieve an analysis record by ID.
     pub fn get_analysis(&self, id: &str) -> Option<AnalysisRecord> {
         self.inner.read().unwrap().analyses.get(id).cloned()
     }
 
+    /// Retrieve a decision record by ID.
     pub fn get_decision(&self, id: &str) -> Option<DecisionRecord> {
         self.inner.read().unwrap().decisions.get(id).cloned()
     }
 
+    /// Retrieve an insight record by ID.
     pub fn get_insight(&self, id: &str) -> Option<InsightRecord> {
         self.inner.read().unwrap().insights.get(id).cloned()
     }

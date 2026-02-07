@@ -7,12 +7,17 @@ use crate::entity;
 use crate::messages;
 use crate::state_machine;
 
+
+/// Errors that can occur during code generation.
 #[derive(Debug, thiserror::Error)]
 pub enum CodegenError {
+    /// The requested entity type was not found in the CSDL model.
     #[error("entity type '{0}' not found in CSDL")]
     EntityNotFound(String),
+    /// No domain schema was found in the CSDL document.
     #[error("no domain schema found")]
     NoDomainSchema,
+    /// A general code generation error.
     #[error("codegen error: {0}")]
     Other(String),
 }

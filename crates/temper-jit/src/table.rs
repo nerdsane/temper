@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use stateright::Model as _;
 use temper_spec::tlaplus::StateMachine;
 
+
 // ---------------------------------------------------------------------------
 // Core types
 // ---------------------------------------------------------------------------

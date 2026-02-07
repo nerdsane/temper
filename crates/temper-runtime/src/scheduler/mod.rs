@@ -10,8 +10,8 @@
 //!   actors can be crashed — all controlled by the seed
 //! - **Single-threaded**: no real concurrency, all non-determinism eliminated
 
-use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,7 @@ pub struct DeterministicRng {
 }
 
 impl DeterministicRng {
+    /// Create a new PRNG with the given seed. A zero seed is replaced with 1.
     pub fn new(seed: u64) -> Self {
         // Ensure non-zero state
         Self { state: if seed == 0 { 1 } else { seed } }

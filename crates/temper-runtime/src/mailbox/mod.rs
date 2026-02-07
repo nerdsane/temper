@@ -13,6 +13,7 @@ use crate::actor::actor_ref::Envelope;
 use crate::actor::errors::ActorError;
 use crate::actor::traits::Message;
 
+
 /// Default mailbox capacity. Sized for typical entity actors.
 /// TigerStyle: This is a budget, not a suggestion.
 pub const DEFAULT_MAILBOX_CAPACITY: usize = 1_000;

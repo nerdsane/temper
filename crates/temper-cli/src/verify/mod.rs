@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::build_spec_model;
 
+
 /// Run the `temper verify` command.
 ///
 /// Loads specs from the given directory, builds the spec model, and reports

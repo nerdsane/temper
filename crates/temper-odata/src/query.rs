@@ -12,44 +12,63 @@ use crate::error::ODataError;
 /// All parsed OData system query options.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct QueryOptions {
+    /// The `$filter` expression, if present.
     pub filter: Option<FilterExpr>,
+    /// The `$select` property list, if present.
     pub select: Option<Vec<String>>,
+    /// The `$expand` items, if present.
     pub expand: Option<Vec<ExpandItem>>,
+    /// The `$orderby` clauses, if present.
     pub orderby: Option<Vec<OrderByClause>>,
+    /// The `$top` limit, if present.
     pub top: Option<usize>,
+    /// The `$skip` offset, if present.
     pub skip: Option<usize>,
+    /// The `$count` flag, if present.
     pub count: Option<bool>,
 }
 
 /// An item in a `$expand` clause, optionally with nested query options.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpandItem {
+    /// The navigation property name to expand.
     pub property: String,
+    /// Nested query options for this expand item.
     pub options: Option<ExpandOptions>,
 }
 
 /// Nested query options inside an `$expand` item.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ExpandOptions {
+    /// Nested `$select` property list.
     pub select: Option<Vec<String>>,
+    /// Nested `$filter` expression.
     pub filter: Option<FilterExpr>,
+    /// Nested `$orderby` clauses.
     pub orderby: Option<Vec<OrderByClause>>,
+    /// Nested `$top` limit.
     pub top: Option<usize>,
+    /// Nested `$skip` offset.
     pub skip: Option<usize>,
+    /// Nested `$expand` items.
     pub expand: Option<Vec<ExpandItem>>,
 }
 
 /// A single clause in `$orderby`, e.g. `CreatedAt desc`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderByClause {
+    /// The property name to sort by.
     pub property: String,
+    /// The sort direction (ascending or descending).
     pub direction: OrderDirection,
 }
 
 /// Sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderDirection {
+    /// Ascending order (default).
     Asc,
+    /// Descending order.
     Desc,
 }
 
@@ -81,32 +100,49 @@ pub enum FilterExpr {
 /// Binary operators in `$filter`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOperator {
+    /// Equal.
     Eq,
+    /// Not equal.
     Ne,
+    /// Greater than.
     Gt,
+    /// Greater than or equal.
     Ge,
+    /// Less than.
     Lt,
+    /// Less than or equal.
     Le,
+    /// Logical AND.
     And,
+    /// Logical OR.
     Or,
+    /// Enum flag check.
     Has,
 }
 
 /// Unary operators in `$filter`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOperator {
+    /// Logical negation.
     Not,
 }
 
 /// A literal value in an OData expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ODataValue {
+    /// The null literal.
     Null,
+    /// A boolean literal (`true` or `false`).
     Boolean(bool),
+    /// A 64-bit integer literal.
     Int(i64),
+    /// A 64-bit floating-point literal.
     Float(f64),
+    /// A string literal (single-quoted in OData).
     String(String),
+    /// A GUID literal.
     Guid(uuid::Uuid),
+    /// A DateTimeOffset literal.
     DateTimeOffset(chrono::DateTime<chrono::Utc>),
 }
 

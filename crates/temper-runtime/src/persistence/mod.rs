@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Marker trait for domain events.
+
 /// Events must be serializable (for persistence) and Send + 'static (for async).
 pub trait DomainEvent: Send + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug + 'static {}
 
@@ -88,20 +89,28 @@ pub trait EventStore: Send + Sync + 'static {
 /// A persisted event with metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistenceEnvelope {
+    /// Monotonic sequence number within the entity's journal.
     pub sequence_nr: u64,
+    /// Fully qualified event type name.
     pub event_type: String,
+    /// Serialized event payload.
     pub payload: serde_json::Value,
+    /// Event metadata (causation, correlation, timestamp).
     pub metadata: EventMetadata,
 }
 
+/// Errors that can occur during event persistence operations.
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
+    /// Optimistic concurrency check failed (another writer appended first).
     #[error("optimistic concurrency violation: expected sequence {expected}, got {actual}")]
     ConcurrencyViolation { expected: u64, actual: u64 },
 
+    /// Event serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serialization(String),
 
+    /// Underlying storage backend returned an error.
     #[error("storage error: {0}")]
     Storage(String),
 }

@@ -6,8 +6,11 @@ use crate::store::RecordStore;
 /// Validation result for a record chain.
 #[derive(Debug)]
 pub struct ChainValidation {
+    /// Whether the chain is well-formed.
     pub is_valid: bool,
+    /// Validation errors found in the chain.
     pub errors: Vec<String>,
+    /// Number of records in the chain.
     pub chain_length: usize,
 }
 

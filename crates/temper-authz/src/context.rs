@@ -1,7 +1,8 @@
 //! Security context — extracted from HTTP request, carried through actor dispatch.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 
 /// The kind of principal making the request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

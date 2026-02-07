@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+/// Errors that can occur during actor lifecycle and message handling.
 #[derive(Error, Debug)]
 pub enum ActorError {
     #[error("actor stopped")]
@@ -28,6 +29,7 @@ pub enum ActorError {
 }
 
 impl ActorError {
+    /// Create a custom error with a descriptive message.
     pub fn custom(msg: impl Into<String>) -> Self {
         Self::Custom(anyhow::anyhow!("{}", msg.into()))
     }

@@ -173,6 +173,48 @@ fn extract_string_set(source: &str, start_line: &str) -> Vec<String> {
     result
 }
 
+/// Check if a line is a section boundary that terminates transition extraction.
+fn is_section_boundary(trimmed: &str) -> bool {
+    trimmed.starts_with("\\*")
+        && (trimmed.contains("Safety Invariant") || trimmed.contains("Liveness Propert"))
+}
+
+/// Check if a line is a Next-state relation (terminates transition extraction).
+fn is_next_state_relation(trimmed: &str) -> bool {
+    trimmed.starts_with("Next") && trimmed.contains("==")
+}
+
+/// Check if a line is an action definition (has `==` and is not a guard/init/meta).
+fn is_action_definition(trimmed: &str) -> bool {
+    trimmed.contains(" ==")
+        && !trimmed.contains("Statuses ==")
+        && !trimmed.contains("States ==")
+        && !trimmed.contains("vars ==")
+        && !is_guard_definition(trimmed)
+        && !trimmed.starts_with("Init ==")
+        && !trimmed.starts_with("Next")
+        && !trimmed.starts_with("Spec")
+        && !trimmed.starts_with("ASSUME")
+}
+
+/// Extract an action name from a definition line, preserving parens for has_parameters.
+fn extract_action_name(trimmed: &str) -> Option<String> {
+    let name_part = trimmed.split("==").next().unwrap_or("").trim();
+    let clean = name_part.split('(').next().unwrap_or(name_part).trim();
+    if !clean.is_empty() && clean.chars().next().map_or(false, |c| c.is_uppercase()) {
+        Some(name_part.to_string())
+    } else {
+        None
+    }
+}
+
+/// Save a completed action as a Transition (helper to reduce repetition).
+fn save_action(
+    name: &str, guard: &str, effect: &str, states: &[String], out: &mut Vec<Transition>,
+) {
+    out.push(build_transition(name, guard, effect, states));
+}
+
 fn extract_transitions(source: &str, states: &[String]) -> Vec<Transition> {
     let mut transitions = Vec::new();
     let mut current_action: Option<String> = None;
@@ -180,107 +222,51 @@ fn extract_transitions(source: &str, states: &[String]) -> Vec<Transition> {
     let mut current_effect = String::new();
     let mut in_action = false;
 
-    // Find action definitions: ActionName == or ActionName(param) ==
     for line in source.lines() {
         let trimmed = line.trim();
 
-        // Detect section boundaries — stop extracting transitions at Safety/Liveness sections
-        // Must be a section header (starts with \* ==== or \* Safety/Liveness keyword)
-        if trimmed.starts_with("\\*") && (trimmed.contains("Safety Invariant") || trimmed.contains("Liveness Propert"))
-        {
+        if is_section_boundary(trimmed) || is_next_state_relation(trimmed) {
             if let Some(name) = current_action.take() {
-                transitions.push(build_transition(&name, &current_guard, &current_effect, states));
+                save_action(&name, &current_guard, &current_effect, states, &mut transitions);
             }
             break;
         }
 
-        // Skip comments
         if trimmed.starts_with("\\*") {
             continue;
         }
 
-        // Also stop at Next-state relation
-        if trimmed.starts_with("Next") && trimmed.contains("==") {
+        if is_action_definition(trimmed) {
             if let Some(name) = current_action.take() {
-                transitions.push(build_transition(&name, &current_guard, &current_effect, states));
+                save_action(&name, &current_guard, &current_effect, states, &mut transitions);
             }
-            break;
-        }
-
-        if trimmed.contains(" ==") && !trimmed.contains("Statuses ==")
-            && !trimmed.contains("States ==") && !trimmed.contains("vars ==")
-            && !is_guard_definition(trimmed) && !trimmed.starts_with("Init ==")
-            && !trimmed.starts_with("Next") && !trimmed.starts_with("Spec")
-            && !trimmed.starts_with("ASSUME")
-        {
-            // Save previous action
-            if let Some(name) = current_action.take() {
-                transitions.push(build_transition(
-                    &name,
-                    &current_guard,
-                    &current_effect,
-                    states,
-                ));
-            }
-
-            // Extract action name — keep the raw name_part (with parens) so
-            // build_transition can detect has_parameters correctly
-            let name_part = trimmed.split("==").next().unwrap_or("").trim();
-            let clean_name = name_part
-                .split('(')
-                .next()
-                .unwrap_or(name_part)
-                .trim()
-                .to_string();
-
-            if !clean_name.is_empty() && clean_name.chars().next().map_or(false, |c| c.is_uppercase()) {
-                // Store the raw name_part (e.g., "CancelOrder(reason)") so has_parameters works
-                current_action = Some(name_part.to_string());
+            if let Some(action_name) = extract_action_name(trimmed) {
+                current_action = Some(action_name);
                 current_guard.clear();
                 current_effect.clear();
                 in_action = true;
-
-                // Capture rest of line after ==
                 if let Some(rest) = trimmed.split("==").nth(1) {
-                    let rest = rest.trim();
-                    categorize_line(rest, &mut current_guard, &mut current_effect);
+                    categorize_line(rest.trim(), &mut current_guard, &mut current_effect);
                 }
             }
             continue;
         }
 
         if in_action {
-            // End of action: next top-level definition (not empty lines — those are just spacing)
-            if trimmed.contains(" ==")
-                    && !trimmed.starts_with("/\\")
-                    && !trimmed.starts_with("\\/")
-            {
+            if trimmed.contains(" ==") && !trimmed.starts_with("/\\") && !trimmed.starts_with("\\/") {
                 if let Some(name) = current_action.take() {
-                    transitions.push(build_transition(
-                        &name,
-                        &current_guard,
-                        &current_effect,
-                        states,
-                    ));
+                    save_action(&name, &current_guard, &current_effect, states, &mut transitions);
                 }
                 in_action = false;
                 continue;
             }
-
             categorize_line(trimmed, &mut current_guard, &mut current_effect);
         }
     }
 
-    // Don't forget the last action
     if let Some(name) = current_action.take() {
-        transitions.push(build_transition(
-            &name,
-            &current_guard,
-            &current_effect,
-            states,
-        ));
+        save_action(&name, &current_guard, &current_effect, states, &mut transitions);
     }
-
     transitions
 }
 

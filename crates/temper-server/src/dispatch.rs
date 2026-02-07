@@ -6,8 +6,7 @@
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-
-use temper_odata::path::{ODataPath, KeyValue, parse_path};
+use temper_odata::path::{KeyValue, ODataPath, parse_path};
 use temper_odata::query::parse_query_options;
 
 use crate::response::{odata_error, ODataResponse, ODataXmlResponse};
@@ -192,6 +191,7 @@ pub async fn handle_odata_post(
     }
 }
 
+/// Handle the OData service document request at the root endpoint.
 pub async fn handle_service_document(State(state): State<ServerState>) -> impl IntoResponse {
     let entity_sets: Vec<serde_json::Value> = state.entity_set_map.keys()
         .map(|name| serde_json::json!({"name": name, "kind": "EntitySet", "url": name}))
@@ -202,6 +202,7 @@ pub async fn handle_service_document(State(state): State<ServerState>) -> impl I
     }
 }
 
+/// Handle the OData `$metadata` request, returning the CSDL XML document.
 pub async fn handle_metadata(State(state): State<ServerState>) -> impl IntoResponse {
     ODataXmlResponse { body: state.csdl_xml.as_ref().clone() }
 }

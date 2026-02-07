@@ -12,6 +12,7 @@ use crate::error::ObserveError;
 use crate::schema::{LOG_COLUMNS, METRIC_COLUMNS, SPAN_COLUMNS};
 use crate::store::{ObservabilityStore, ResultRow, ResultSet, SqlParam};
 
+
 /// An in-memory row is a map from column name to JSON value.
 type Row = Vec<(String, JsonValue)>;
 

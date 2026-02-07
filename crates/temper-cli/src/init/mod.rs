@@ -5,6 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+
 /// Minimal CSDL template for a new project.
 const CSDL_TEMPLATE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">

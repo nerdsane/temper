@@ -5,7 +5,9 @@ use axum::response::{IntoResponse, Response};
 
 /// An OData-formatted JSON response.
 pub struct ODataResponse {
+    /// HTTP status code for the response.
     pub status: StatusCode,
+    /// JSON body payload.
     pub body: serde_json::Value,
 }
 
@@ -40,6 +42,7 @@ pub fn odata_error(status: StatusCode, code: &str, message: &str) -> ODataRespon
 
 /// An OData XML response (for $metadata).
 pub struct ODataXmlResponse {
+    /// The XML body content.
     pub body: String,
 }
 

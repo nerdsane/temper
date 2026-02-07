@@ -27,6 +27,7 @@ pub enum RecordType {
 }
 
 impl RecordType {
+    /// Return the single-character prefix for this record type (e.g., "O", "P", "A").
     pub fn prefix(&self) -> &'static str {
         match self {
             RecordType::Observation => "O",
@@ -96,11 +97,17 @@ pub struct ObservationRecord {
 /// Classification of an observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObservationClass {
+    /// Performance degradation (latency, throughput).
     Performance,
+    /// Error rate anomaly.
     ErrorRate,
+    /// State machine invariant or liveness violation.
     StateMachine,
+    /// Security-related event.
     Security,
+    /// Trajectory pattern anomaly.
     Trajectory,
+    /// Resource usage anomaly (CPU, memory, connections).
     ResourceUsage,
 }
 
@@ -188,26 +195,37 @@ pub struct DecisionRecord {
 /// The decision outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Decision {
+    /// The proposed change is approved.
     Approved,
+    /// The proposed change is rejected.
     Rejected,
+    /// The decision is deferred for later.
     Deferred,
 }
 
 /// Summary of verification cascade results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationSummary {
+    /// Whether the Stateright model check passed.
     pub stateright_pass: bool,
+    /// Number of states explored by Stateright.
     pub stateright_states_explored: u64,
+    /// Whether the deterministic simulation passed.
     pub simulation_pass: bool,
+    /// Whether property-based tests passed.
     pub proptest_pass: bool,
+    /// Number of proptest cases executed.
     pub proptest_cases: u64,
 }
 
 /// Implementation plan for an approved change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImplementationPlan {
+    /// The codegen command to run (e.g., "temper codegen --from-spec v47").
     pub codegen_command: String,
+    /// Whether a database migration is required.
     pub migration_required: bool,
+    /// Deployment strategy (e.g., "Rolling restart", "Blue-green").
     pub deployment_strategy: String,
 }
 

@@ -7,6 +7,7 @@ use super::errors::ActorError;
 use super::traits::Message;
 use crate::mailbox::MailboxSender;
 
+
 /// An envelope wrapping a message with an optional reply channel.
 pub(crate) enum Envelope<M: Message> {
     /// Fire-and-forget message.
@@ -43,12 +44,16 @@ pub struct ActorRef<M: Message> {
 /// Unique identifier for an actor instance.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ActorId {
+    /// Human-readable name of the actor.
     pub name: String,
+    /// Hierarchical path (e.g., "system/orders/order-1").
     pub path: String,
+    /// Unique identifier for this actor incarnation.
     pub uid: uuid::Uuid,
 }
 
 impl ActorId {
+    /// Create a new actor ID with the given name and path.
     pub fn new(name: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
             name: name.into(),

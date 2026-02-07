@@ -11,12 +11,17 @@ use temper_spec::csdl::CsdlDocument;
 
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 
+
 /// Shared state for the Temper HTTP server.
 #[derive(Clone)]
 pub struct ServerState {
+    /// The actor system for spawning and managing entity actors.
     pub actor_system: Arc<ActorSystem>,
+    /// Parsed CSDL document describing the entity model.
     pub csdl: Arc<CsdlDocument>,
+    /// Raw CSDL XML string for serving via `$metadata`.
     pub csdl_xml: Arc<String>,
+    /// Maps entity set names to entity type names.
     pub entity_set_map: Arc<HashMap<String, String>>,
     /// Transition table per entity type (built from TLA+ specs).
     pub transition_tables: Arc<HashMap<String, Arc<TransitionTable>>>,
