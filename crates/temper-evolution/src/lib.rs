@@ -17,7 +17,7 @@ pub mod insight;
 // Re-export primary types at crate root.
 pub use records::{
     RecordHeader, RecordType, RecordStatus, RecordId,
-    ObservationRecord, ProblemRecord, AnalysisRecord, DecisionRecord, InsightRecord,
+    ObservationRecord, ObservationClass, ProblemRecord, AnalysisRecord, DecisionRecord, InsightRecord,
     Decision, InsightCategory, InsightSignal,
 };
 pub use store::RecordStore;

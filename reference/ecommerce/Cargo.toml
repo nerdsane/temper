@@ -16,6 +16,7 @@ temper-server = { workspace = true }
 temper-spec = { workspace = true }
 temper-store-postgres = { workspace = true }
 temper-observe = { workspace = true }
+temper-evolution = { workspace = true }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 axum = { workspace = true }
