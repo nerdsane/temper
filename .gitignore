@@ -1,0 +1,30 @@
+# Build artifacts
+/target
+**/target
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Generated code (regenerable from specs)
+reference/*/generated/
+
+# Secrets
+*.pem
+*.key
+credentials.json
+
+# Logs
+*.log

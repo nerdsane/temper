@@ -1,0 +1,19 @@
+[package]
+name = "temper-evolution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Schema evolution and migration management for Temper entity services"
+
+[dependencies]
+temper-runtime = { workspace = true }
+temper-observe = { workspace = true }
+temper-spec = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "temper-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Model checking and property-based testing for Temper specifications"
+
+[dependencies]
+temper-runtime = { workspace = true }
+temper-spec = { workspace = true }
+stateright = { workspace = true }
+proptest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

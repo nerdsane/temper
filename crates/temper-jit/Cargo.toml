@@ -1,0 +1,15 @@
+[package]
+name = "temper-jit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "JIT compilation and query optimization for Temper entity operations"
+
+[dependencies]
+temper-runtime = { workspace = true }
+temper-spec = { workspace = true }
+temper-verify = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

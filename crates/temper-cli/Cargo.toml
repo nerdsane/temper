@@ -1,0 +1,21 @@
+[package]
+name = "temper-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Command-line interface for Temper specification management and code generation"
+
+[[bin]]
+name = "temper"
+path = "src/main.rs"
+
+[dependencies]
+temper-spec = { workspace = true }
+temper-codegen = { workspace = true }
+temper-verify = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

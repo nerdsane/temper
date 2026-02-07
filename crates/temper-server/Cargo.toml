@@ -1,0 +1,21 @@
+[package]
+name = "temper-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "HTTP server assembly for Temper entity services"
+
+[dependencies]
+temper-runtime = { workspace = true }
+temper-odata = { workspace = true }
+temper-authz = { workspace = true }
+temper-observe = { workspace = true }
+axum = { workspace = true }
+hyper = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "temper-optimize"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Runtime optimization and adaptive tuning for Temper entity services"
+
+[dependencies]
+temper-runtime = { workspace = true }
+temper-observe = { workspace = true }
+temper-jit = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }

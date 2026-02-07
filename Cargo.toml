@@ -1,0 +1,107 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/temper-macros",
+    "crates/temper-runtime",
+    "crates/temper-spec",
+    "crates/temper-codegen",
+    "crates/temper-odata",
+    "crates/temper-authz",
+    "crates/temper-observe",
+    "crates/temper-verify",
+    "crates/temper-store-postgres",
+    "crates/temper-store-redis",
+    "crates/temper-server",
+    "crates/temper-cli",
+    "crates/temper-evolution",
+    "crates/temper-jit",
+    "crates/temper-optimize",
+    "reference/ecommerce",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging / Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# HTTP
+axum = "0.8"
+hyper = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json", "chrono", "uuid"] }
+fred = { version = "10", features = ["subscriber-client"] }
+
+# Auth
+cedar-policy = "4"
+
+# Verification
+stateright = "0.31"
+proptest = "1"
+
+# OpenTelemetry
+opentelemetry = "0.28"
+opentelemetry-otlp = "0.28"
+opentelemetry_sdk = "0.28"
+tracing-opentelemetry = "0.29"
+
+# XML (CSDL parsing)
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Proc macro support (for temper-codegen)
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+# UUID
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Testing
+tokio-test = "0.4"
+
+# Internal crates
+temper-macros = { path = "crates/temper-macros" }
+temper-runtime = { path = "crates/temper-runtime" }
+temper-spec = { path = "crates/temper-spec" }
+temper-codegen = { path = "crates/temper-codegen" }
+temper-odata = { path = "crates/temper-odata" }
+temper-authz = { path = "crates/temper-authz" }
+temper-observe = { path = "crates/temper-observe" }
+temper-verify = { path = "crates/temper-verify" }
+temper-store-postgres = { path = "crates/temper-store-postgres" }
+temper-store-redis = { path = "crates/temper-store-redis" }
+temper-server = { path = "crates/temper-server" }
+temper-cli = { path = "crates/temper-cli" }
+temper-evolution = { path = "crates/temper-evolution" }
+temper-jit = { path = "crates/temper-jit" }
+temper-optimize = { path = "crates/temper-optimize" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
