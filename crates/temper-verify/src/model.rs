@@ -19,7 +19,7 @@ use temper_spec::tlaplus::StateMachine;
 ///
 /// Consists of the current entity status (e.g. "Draft", "Submitted") and a
 /// simple item counter that tracks how many items have been added.
-#[derive(Clone, Debug, Hash, PartialEq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TemperModelState {
     /// Current status value (mirrors the TLA+ `status` variable).
     pub status: String,
@@ -34,7 +34,7 @@ impl fmt::Display for TemperModelState {
 }
 
 /// An action that the model can take, corresponding to a TLA+ transition.
-#[derive(Clone, Debug, Hash, PartialEq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TemperModelAction {
     /// The transition name (e.g. "SubmitOrder", "CancelOrder").
     pub name: String,

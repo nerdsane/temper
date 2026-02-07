@@ -1,21 +1,19 @@
-//! temper-verify: Model checking and property-based testing for Temper.
+//! temper-verify: Model checking, simulation, and property-based testing.
 //!
-//! Uses Stateright for exhaustive model checking and proptest for
-//! property-based testing of TLA+ behavioral specifications.
-//!
-//! # Architecture
-//!
-//! The verification pipeline:
-//! 1. Parse a TLA+ spec into a `StateMachine` (via `temper-spec`)
-//! 2. Build a `TemperModel` from the state machine (`model` module)
-//! 3. Run exhaustive model checking (`checker` module)
-//! 4. Orchestrate multi-level verification (`cascade` module)
+//! Three-level verification cascade:
+//! 1. **Stateright model checking** — exhaustive state-space exploration
+//! 2. **Deterministic simulation** — FoundationDB/TigerBeetle-style fault injection
+//! 3. **Property-based tests** — random action sequences with invariant checking
 
 pub mod model;
 pub mod checker;
 pub mod cascade;
+pub mod simulation;
+pub mod proptest_gen;
 
-// Re-export key types for convenience.
+// Re-export key types.
 pub use model::{TemperModel, TemperModelState, TemperModelAction, build_model, build_model_from_tla};
 pub use checker::{VerificationResult, check_model};
 pub use cascade::{VerificationCascade, CascadeResult, CascadeLevel, LevelResult};
+pub use simulation::{SimConfig, SimulationResult, run_simulation, run_multi_seed_simulation};
+pub use proptest_gen::{PropTestResult, run_prop_tests};
