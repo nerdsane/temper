@@ -263,6 +263,29 @@ This produces for each entity:
 
 **IMPORTANT: Never hand-edit files in `generated/`.** They will be overwritten on next codegen run. If you need to change behavior, modify the specs.
 
+### How Entity Actors Work at Runtime
+
+At runtime, entities are NOT served by the generated Rust code directly. Instead, the server builds a **JIT TransitionTable** from the TLA+ source using `TransitionTable::from_tla_source()`. This table is the same verified artifact that passes the 3-level cascade. Each entity gets its own actor:
+
+```
+HTTP Request → OData Parse → Actor Registry (get or spawn) → Entity Actor → TransitionTable.evaluate() → Response
+```
+
+The entity actor holds:
+- `status`: Current state machine state (e.g., "Draft", "Submitted")
+- `item_count`: Number of items (for guards like `SubmitRequiresItems`)
+- `fields`: All entity fields as JSON
+- `events`: Append-only event log of all transitions
+
+When an action is dispatched, the actor evaluates it through the TransitionTable:
+1. Find matching rule by action name
+2. Check `from_states` guard (is current status valid for this action?)
+3. Check additional guards (e.g., `ItemCountMin(1)` for SubmitOrder)
+4. If guards pass: apply effects (SetState, IncrementItems, EmitEvent), record event
+5. If guards fail: return 409 Conflict with error message
+
+**Critical**: Always use `TransitionTable::from_tla_source(tla_source)` in production, NOT `from_state_machine(sm)`. The `from_tla_source` variant resolves `CanXxx` guard predicates from the TLA+ source, producing correct guard constraints. The `from_state_machine` variant may miss guards that reference predicates.
+
 ---
 
 ## 5. Verification Cascade
@@ -312,6 +335,57 @@ The server exposes OData v4 endpoints:
 | POST | `/odata/Orders` | Create order |
 | POST | `/odata/Orders('id')/Ns.SubmitOrder` | Invoke bound action |
 | GET | `/odata/Orders('id')/Ns.GetOrderTotal()` | Invoke bound function |
+
+### What Responses Look Like
+
+**POST /odata/Orders** (create — spawns actor in Draft):
+```json
+{
+    "@odata.context": "$metadata#Orders/$entity",
+    "entity_type": "Order",
+    "entity_id": "019c3949-8405-...",
+    "status": "Draft",
+    "item_count": 0,
+    "fields": {"Id": "019c3949-8405-...", "Status": "Draft"},
+    "events": []
+}
+```
+
+**POST /odata/Orders('id')/Ns.AddItem** (action — real transition):
+```json
+{
+    "@odata.context": "$metadata#Orders/$entity",
+    "status": "Draft",
+    "item_count": 1,
+    "events": [
+        {"action": "AddItem", "from_status": "Draft", "to_status": "Draft", "params": {"ProductId": "p1"}}
+    ]
+}
+```
+
+**POST /odata/Orders('id')/Ns.SubmitOrder** (guard enforced):
+```json
+{
+    "status": "Submitted",
+    "item_count": 1,
+    "events": [
+        {"action": "AddItem", "from_status": "Draft", "to_status": "Draft"},
+        {"action": "SubmitOrder", "from_status": "Draft", "to_status": "Submitted"}
+    ]
+}
+```
+
+**Invalid action (409 Conflict)** — e.g., SubmitOrder with 0 items or CancelOrder from Shipped:
+```json
+{
+    "error": {
+        "code": "ActionFailed",
+        "message": "Action 'SubmitOrder' not valid from state 'Draft'"
+    }
+}
+```
+
+The `events` array is the entity's full audit trail — every state transition with timestamps and parameters. This is the event sourcing log that will be persisted to Postgres.
 
 ### OData Query Examples
 
@@ -592,13 +666,45 @@ Three tiers of execution, from most to least rigid:
 | Anti-Pattern | Why It's Wrong | Do This Instead |
 |-------------|---------------|-----------------|
 | Hand-editing generated code | Will be overwritten on next codegen | Modify the CSDL/TLA+ specs |
+| Using `from_state_machine()` in production | Misses `CanXxx` guard resolution | Use `TransitionTable::from_tla_source()` |
 | Skipping verification | Deploys unverified state machines | Always run `temper verify` |
-| Calling actions without checking $metadata | May attempt invalid transitions | Read Agent.Hint annotations first |
-| Ignoring `ValidFromStates` | Action will fail with 409 Conflict | Check entity status before calling action |
+| Calling actions without checking status | Will get 409 Conflict | GET entity first, check `status` field |
+| Calling actions without reading $metadata | May attempt invalid transitions | Read Agent.Hint annotations first |
 | Hard-coding entity URLs | Breaks if entity set names change | Read service document at `/odata` first |
 | Writing provider-specific observability queries | Breaks when swapping Logfire↔Datadog | Use canonical SQL schema (spans, logs, metrics) |
 | Modifying Cedar policies without human approval | Security change requires human gate | Submit as evolution A-Record for review |
 | Creating evolution records without evidence | Unverifiable claims | Include SQL evidence queries in O-Records |
+| Naming TLA+ guards `CanXxx(param)` | Guards must NOT have parameters | Use `CanXxx ==` (no parens) for guards, `ActionName(param) ==` for actions |
+
+---
+
+## 15. DST-First Development Methodology
+
+When adding new features or changing state machines, follow the **DST-first** approach:
+
+1. **Write the TLA+ spec change** (add states, transitions, invariants)
+2. **Write DST tests** that exercise the new behavior through the actor system:
+   ```rust
+   #[tokio::test]
+   async fn dst_new_feature() {
+       let system = ActorSystem::new("dst");
+       let table = Arc::new(TransitionTable::from_tla_source(MY_TLA));
+       let actor = EntityActor::new("Order", "test-1", table, json!({}));
+       let actor_ref = system.spawn(actor, "test-1");
+       // Exercise the new transition...
+   }
+   ```
+3. **Run DST tests** — they will fail if guards are wrong, transitions are missing, or invariants are violated
+4. **Fix bugs found by DST** — these are real bugs that would manifest in production
+5. **Run the full verification cascade** (`temper verify`) to prove correctness at all 3 levels
+6. **Wire into HTTP** — the same TransitionTable that passes DST runs in the entity actors
+
+This approach caught three real bugs during Temper's own development:
+- `SubmitOrder` succeeding with 0 items (guard not enforced)
+- `CancelOrder` missing entirely from the transition table (filtered as a guard predicate)
+- Guard predicates not detected for parameterized actions like `CancelOrder(reason)`
+
+All three were found by DST tests before any HTTP request was made.
 
 ---
 

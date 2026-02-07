@@ -606,23 +606,23 @@ observability data, with a safety checker ensuring correctness.
 
 ### 11.1 Test Coverage
 
-The Temper workspace contains 187 tests across 35 source files in 16 crates.
-Key test categories:
+The Temper workspace contains 235 tests across 16 crates. Key categories:
 
 | Category                       | Count | Crates                                     |
 |--------------------------------|------:|--------------------------------------------|
-| Actor runtime and scheduler    |    15 | temper-runtime                             |
+| Actor runtime and scheduler    |    19 | temper-runtime                             |
 | Specification parsing          |     6 | temper-spec                                |
-| OData query/path parsing       |    33 | temper-odata                               |
+| OData query/path parsing       |    35 | temper-odata                               |
 | Code generation                |     6 | temper-codegen                             |
-| Verification cascade           |    20 | temper-verify                              |
-| Evolution records and chains   |    16 | temper-evolution                           |
+| Verification (model+sim+prop)  |    27 | temper-verify                              |
+| Entity actor DST tests         |     7 | temper-server                              |
+| HTTP integration tests         |     8 | temper-server                              |
+| Evolution records and chains   |    19 | temper-evolution                           |
 | JIT tables and hot-swap        |    15 | temper-jit                                 |
 | Authorization engine           |    10 | temper-authz                               |
-| Observability schemas          |     4 | temper-observe                             |
-| Trajectory types               |     6 | temper-observe                             |
-| Optimizer actors and safety    |    11 | temper-optimize                            |
-| Storage (Postgres, Redis)      |    22 | temper-store-postgres, temper-store-redis   |
+| Observability and trajectory   |    18 | temper-observe                             |
+| Optimizer actors and safety    |    15 | temper-optimize                            |
+| Storage (Postgres, Redis)      |    33 | temper-store-postgres, temper-store-redis   |
 | CLI subcommands                |    14 | temper-cli                                 |
 
 ### 11.2 Reference Application
@@ -653,6 +653,40 @@ transition counts, message counts, and final actor states.  Heavy fault injectio
 faults affect message delivery, not state machine transition logic--the transition
 table enforces guards regardless of the delivery path.
 
+### 11.4 End-to-End Functional Validation
+
+The reference application serves real state machine transitions through HTTP.
+Entity actors process OData actions through JIT TransitionTables built from the
+same TLA+ specs verified by the cascade.  A representative interaction sequence:
+
+```
+POST /odata/Orders         → 201, spawns actor in "Draft", item_count=0
+POST .../AddItem           → 200, status="Draft", item_count=1, events=[AddItem]
+POST .../SubmitOrder       → 200, status="Submitted", events=[AddItem, SubmitOrder]
+POST .../SubmitOrder       → 409, "Action 'SubmitOrder' not valid from state 'Submitted'"
+POST .../CancelOrder       → 200, status="Cancelled", events=[..., CancelOrder]
+```
+
+### 11.5 Bugs Found by DST-First Development
+
+The DST-first methodology--writing actor-level simulation tests before wiring
+HTTP--discovered three guard resolution bugs that would have been invisible to
+unit tests or HTTP smoke tests:
+
+| Bug | Root Cause | Impact if Shipped |
+|-----|-----------|-------------------|
+| `SubmitOrder` succeeds with 0 items | `TransitionTable::from_state_machine()` used unresolved TLA+ transitions; `CanSubmit` predicate's `Cardinality(items) > 0` guard was not encoded | Agents could submit empty orders, violating the `SubmitRequiresItems` invariant |
+| `CancelOrder` missing from transition table entirely | `resolve_transitions()` filtered `!name.starts_with("Can")`, catching both `CanCancel` (guard) and `CancelOrder` (action) | Agents could never cancel orders; 409 on every attempt |
+| `CancelOrder` and `InitiateReturn` had `has_parameters=false` | TLA+ extractor stripped `(reason)` from the name before checking for parentheses | Guard/action distinction broken; parameterized actions treated as guard predicates and excluded |
+
+The fix introduced `TransitionTable::from_tla_source()` which builds the table
+from the verified Stateright model's resolved transitions, ensuring that the
+exact same guard semantics verified at Level 1 (exhaustive model checking) are
+enforced at runtime.  This establishes a critical invariant:
+
+> **The transition table in the HTTP-serving entity actor is identical to the
+> one verified by the three-level cascade.**
+
 ---
 
 ## 12. Conclusion and Future Work
@@ -675,6 +709,15 @@ Temper makes the following contributions:
 
 5. A three-tier JIT execution model with atomic hot-swap and shadow testing for
    zero-downtime state machine evolution.
+
+6. A DST-first development methodology where actor-level simulation tests
+   validate state machine behavior before HTTP wiring, catching guard
+   resolution bugs that would be invisible to integration tests.
+
+7. End-to-end functional validation: the same `TransitionTable` verified by
+   Stateright, deterministic simulation, and property tests runs inside
+   HTTP-serving entity actors, establishing a provable chain from formal
+   specification to production behavior.
 
 ### 12.2 Future Work
 
