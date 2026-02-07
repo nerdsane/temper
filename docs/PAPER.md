@@ -561,18 +561,74 @@ that autonomous optimization cannot violate correctness invariants.
 
 ---
 
-## 9. SQL-Based Observability
+## 9. Observability: Telemetry as Views
 
-### 9.1 Provider-Swappable Interface
+### 9.1 The Problem with Traditional Telemetry
 
-The `ObservabilityStore` trait defines three methods--`query_spans`,
-`query_logs`, `query_metrics`--each accepting a SQL string and typed parameters.
-Provider adapters (Logfire, Datadog, ClickHouse) implement this trait, mapping
-their native storage into the canonical virtual tables.
+In conventional systems, developers must choose between metrics, traces, and
+logs at instrumentation time.  This creates rigid tradeoffs: choosing metrics
+gives precise aggregation but loses context; choosing traces gives detail but
+imprecise statistics.  These decisions are made early and are costly to change.
 
-### 9.2 Canonical Schemas
+In an agentic system, this problem is worse: agents don't write instrumentation
+code at all.  They write TLA+ specs.  The platform must handle all observability
+without any agent involvement in deciding metrics vs traces vs logs.
 
-Three virtual tables provide a provider-independent query surface:
+### 9.2 Wide Events as the Unified Primitive
+
+Temper solves this by treating every entity actor transition as a "wide event"
+containing all context.  The `from_transition()` function automatically
+constructs a `WideEvent` from the actor's transition data--no instrumentation
+code required.  Each wide event contains:
+
+- **Measurements**: Numeric values for aggregation (`transition_count`,
+  `duration_ms`, `item_count`).
+- **Tags**: Low-cardinality dimensions safe for metric grouping
+  (`entity_type`, `operation`, `status`, `success`).
+- **Attributes**: High-cardinality context for debugging (`entity_id`,
+  `params`, `from_status`).  NOT included in metric tags--this is how
+  cardinality is decoupled from cost.
+
+### 9.3 Dual-View Projection
+
+The platform projects each wide event into two optimized views:
+
+**Aggregated View (Metrics):** `project_to_metrics()` extracts measurements
+and tags only.  Attributes are discarded.  Each measurement becomes a metric
+data point with low-cardinality tags, providing 100%-precise, long-retention
+data for monitoring and alerting.  Each point includes an `exemplar.trace_id`
+linking back to the full contextual event.
+
+**Contextual View (Spans):** `project_to_span()` includes everything--
+measurements, tags, and attributes.  This provides the full-detail view for
+debugging, investigation, and trajectory analysis.
+
+```
+Entity Actor Transition
+    │
+    ├──► Aggregated View (Metrics)
+    │    temper.SubmitOrder.duration_ms{entity_type=Order,operation=SubmitOrder}
+    │    + exemplar.trace_id → click to see the full trace
+    │
+    └──► Contextual View (Span)
+         trace_id, entity_id=order-123, from_status=Draft, params={...}
+         + all measurements as raw attributes
+```
+
+### 9.4 Cost Decoupling
+
+The critical insight: `entity_id` is high-cardinality (one per entity).  In
+traditional telemetry, adding it as a metric tag causes cardinality explosion
+and bill shock.  With Telemetry as Views, `entity_id` is an Attribute--zero
+cost in metrics, full detail in traces.  An operator can *promote* an Attribute
+to a Tag at runtime if they decide the cost is worth it for a specific
+investigation, without any code change.
+
+### 9.5 Provider-Swappable SQL Interface
+
+The `ObservabilityStore` trait provides a SQL query interface over three
+canonical virtual tables.  Provider adapters (ClickHouse, Logfire, Datadog)
+implement this trait:
 
 | Table     | Columns                                                                                    |
 |-----------|--------------------------------------------------------------------------------------------|
@@ -580,19 +636,11 @@ Three virtual tables provide a provider-independent query surface:
 | `logs`    | `timestamp`, `level`, `service`, `message`, `attributes`                                   |
 | `metrics` | `metric_name`, `timestamp`, `value`, `tags`                                                |
 
-### 9.3 Portable Evidence
+### 9.6 Portable Evidence
 
-Evolution records carry SQL queries as evidence strings.  For example, an
-`ObservationRecord` might carry:
-
-```sql
-SELECT p99(duration_ns) FROM spans WHERE operation = 'handle'
-```
-
-Because the query targets the canonical schema rather than a provider-specific
-API, the evidence is portable across observability backends.  A team that
-migrates from Logfire to Datadog retains the full chain of evidence in its
-Evolution Records.
+Evolution records carry SQL queries as evidence strings targeting the canonical
+schema rather than provider-specific APIs.  A team migrating from Logfire to
+Datadog retains the full chain of evidence in its Evolution Records.
 
 ---
 

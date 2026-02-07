@@ -13,7 +13,7 @@ This document is the primary reference for LLM agents building applications with
 5. [Verification Cascade (How You Prove Correctness)](#5-verification-cascade)
 6. [Running the Server](#6-running-the-server)
 7. [Authorization (Cedar ABAC)](#7-authorization)
-8. [Observability (SQL Interface)](#8-observability)
+8. [Observability — Telemetry as Views](#8-observability--telemetry-as-views)
 9. [Evolution Engine (How the System Improves)](#9-evolution-engine)
 10. [Trajectory Intelligence (How You Optimize Agents)](#10-trajectory-intelligence)
 11. [JIT Optimization (Hot-Swap Without Redeploy)](#11-jit-optimization)
@@ -431,36 +431,60 @@ System principals (internal processes) bypass all checks.
 
 ---
 
-## 8. Observability
+## 8. Observability — Telemetry as Views
 
-All observability queries use SQL through the `ObservabilityStore` trait. This is provider-agnostic — works with Logfire, Datadog, ClickHouse, or any SQL-compatible backend.
+Temper uses **Telemetry as Views**: agents don't write instrumentation code. Every entity actor transition automatically emits a "wide event" containing all context. The platform projects it into two views:
 
-### Canonical Tables
+| View | Contains | Purpose | Retention |
+|------|----------|---------|-----------|
+| **Aggregated (Metrics)** | Measurements + Tags (low-cardinality) | Monitoring, alerting, SLOs | Long |
+| **Contextual (Spans)** | Everything (tags + attributes + measurements) | Debugging, investigation, trajectories | Short |
 
-**spans** (distributed traces):
-```sql
-SELECT trace_id, span_id, service, operation, status, duration_ns,
-       start_time, end_time, attributes
-FROM spans
-WHERE service = 'temper' AND duration_ns > 100000000
-  AND start_time > now() - INTERVAL '1 hour'
+### How It Works
+
+Every `EntityEvent` is automatically converted to a `WideEvent` with three field types:
+
+- **Tags** (low-cardinality, in both views): `entity_type`, `operation`, `status`, `success`
+- **Attributes** (high-cardinality, contextual only): `entity_id`, `params`, `from_status`
+- **Measurements** (numeric, aggregated in metrics): `transition_count`, `duration_ms`, `item_count`
+
+The platform then projects:
+```
+Actor Transition → WideEvent
+    ├── project_to_metrics() → temper.SubmitOrder.duration_ms{entity_type=Order,operation=SubmitOrder}
+    │                          + exemplar.trace_id linking back to the trace
+    └── project_to_span()   → full detail: entity_id, params, from_status, measurements
 ```
 
-**logs** (structured logs):
+### Cost Decoupling
+
+`entity_id` is an Attribute (NOT a Tag). This means:
+- **In metrics**: zero cost — not a metric tag, no cardinality explosion
+- **In traces**: full detail — available for debugging
+- **At runtime**: an operator can promote it to a Tag if they need metric-level precision for a specific investigation
+
+No code change needed. No agent involvement. The classification is a platform policy.
+
+### SQL Query Interface
+
+All queries use SQL through the `ObservabilityStore` trait (provider-agnostic):
+
 ```sql
-SELECT timestamp, level, service, message, attributes
-FROM logs
-WHERE level IN ('error', 'critical')
+-- Metrics: precise aggregation
+SELECT metric_name, avg(value) FROM metrics
+WHERE metric_name = 'temper.SubmitOrder.duration_ms'
+GROUP BY toStartOfMinute(timestamp)
+
+-- Spans: full context
+SELECT trace_id, attributes FROM spans
+WHERE operation = 'Order.SubmitOrder' AND status = 'error'
+
+-- Exemplar: jump from metric to trace
+SELECT tags FROM metrics WHERE metric_name = 'temper.SubmitOrder.duration_ms'
+-- → tags contains exemplar.trace_id → click to see the full trace
 ```
 
-**metrics** (time-series):
-```sql
-SELECT metric_name, timestamp, value, tags
-FROM metrics
-WHERE metric_name = 'temper.actor.mailbox_depth'
-```
-
-Evolution records reference these queries as portable SQL. Swapping from Logfire to Datadog doesn't break any evolution records — the SQL is the contract.
+Evolution records reference these as portable SQL. Swapping providers doesn't break evidence chains.
 
 ---
 
