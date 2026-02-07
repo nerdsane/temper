@@ -1,234 +1,11 @@
-//! Transition tables: state machine transitions as DATA, not code.
+//! Transition evaluation logic.
 //!
-//! A [`TransitionTable`] encodes the complete set of transition rules for a single
-//! entity type. It can be built from a TLA+ [`StateMachine`] spec and evaluated
-//! at runtime without any compiled transition logic.
+//! Evaluates whether a transition can fire given the current runtime context
+//! and computes the resulting state.
 
-use serde::{Deserialize, Serialize};
-use stateright::Model as _;
-use temper_spec::tlaplus::StateMachine;
-
-
-// ---------------------------------------------------------------------------
-// Core types
-// ---------------------------------------------------------------------------
-
-/// A transition table: state machine transitions as DATA, not code.
-/// Can be hot-swapped per-actor without restart.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransitionTable {
-    /// The entity this table governs (e.g. "Order").
-    pub entity_name: String,
-    /// All valid state values.
-    pub states: Vec<String>,
-    /// The state an entity starts in.
-    pub initial_state: String,
-    /// Ordered list of transition rules.
-    pub rules: Vec<TransitionRule>,
-}
-
-/// A single transition rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransitionRule {
-    /// Action name (e.g. "SubmitOrder").
-    pub name: String,
-    /// States this transition may fire from.
-    pub from_states: Vec<String>,
-    /// Target state after the transition (if deterministic).
-    pub to_state: Option<String>,
-    /// Guard condition evaluated before the transition fires.
-    pub guard: Guard,
-    /// Effects applied after the transition fires.
-    pub effects: Vec<Effect>,
-}
-
-/// A guard condition (evaluated before a transition fires).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum Guard {
-    /// No guard -- always passes.
-    Always,
-    /// Current state must be in the given set.
-    StateIn(Vec<String>),
-    /// `items.len() >= N`.
-    ItemCountMin(usize),
-    /// All inner guards must pass.
-    And(Vec<Guard>),
-}
-
-/// An effect applied after a transition fires.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum Effect {
-    /// Change the entity status.
-    SetState(String),
-    /// Add an item (increment item count).
-    IncrementItems,
-    /// Remove an item (decrement item count).
-    DecrementItems,
-    /// Emit a named event.
-    EmitEvent(String),
-}
-
-/// The result of evaluating a transition.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TransitionResult {
-    /// The new state after the transition (may be unchanged).
-    pub new_state: String,
-    /// Effects that were applied.
-    pub effects: Vec<Effect>,
-    /// Whether the transition succeeded.
-    pub success: bool,
-}
-
-// ---------------------------------------------------------------------------
-// Guard evaluation
-// ---------------------------------------------------------------------------
-
-impl Guard {
-    /// Evaluate this guard against the current runtime context.
-    pub fn evaluate(&self, current_state: &str, item_count: usize) -> bool {
-        match self {
-            Guard::Always => true,
-            Guard::StateIn(states) => states.iter().any(|s| s == current_state),
-            Guard::ItemCountMin(n) => item_count >= *n,
-            Guard::And(guards) => guards.iter().all(|g| g.evaluate(current_state, item_count)),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// TransitionTable construction
-// ---------------------------------------------------------------------------
+use super::types::{TransitionResult, TransitionTable};
 
 impl TransitionTable {
-    /// Build a [`TransitionTable`] from a TLA+ [`StateMachine`] specification.
-    ///
-    /// Each [`Transition`](temper_spec::tlaplus::Transition) in the spec is
-    /// converted into a [`TransitionRule`] with:
-    /// - A `StateIn` guard derived from `from_states`.
-    /// - A `SetState` effect derived from `to_state`.
-    /// - An `EmitEvent` effect for every transition (using the action name).
-    pub fn from_state_machine(sm: &StateMachine) -> Self {
-        let rules = sm
-            .transitions
-            .iter()
-            .map(|t| {
-                // Build the guard --------------------------------------------------
-                let guard = if t.from_states.is_empty() {
-                    Guard::Always
-                } else {
-                    Guard::StateIn(t.from_states.clone())
-                };
-
-                // Build effects ----------------------------------------------------
-                let mut effects: Vec<Effect> = Vec::new();
-
-                if let Some(ref to) = t.to_state {
-                    effects.push(Effect::SetState(to.clone()));
-                }
-
-                // Derive additional effects from the raw effect expression.
-                let expr = t.effect_expr.to_lowercase();
-                if expr.contains("items' = items \\union") || expr.contains("items' = items \\cup") {
-                    effects.push(Effect::IncrementItems);
-                }
-                if expr.contains("items' = items \\") && expr.contains("\\{") {
-                    // set difference pattern: items' = items \ {item}
-                    // already handled below
-                }
-                if expr.contains("items' = items \\") && !expr.contains("union") && !expr.contains("cup") {
-                    effects.push(Effect::DecrementItems);
-                }
-
-                // Always emit an event named after the action.
-                effects.push(Effect::EmitEvent(t.name.clone()));
-
-                TransitionRule {
-                    name: t.name.clone(),
-                    from_states: t.from_states.clone(),
-                    to_state: t.to_state.clone(),
-                    guard,
-                    effects,
-                }
-            })
-            .collect();
-
-        // Determine initial state: first state in the list, or "Draft" as fallback.
-        let initial_state = sm
-            .states
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "Draft".to_string());
-
-        TransitionTable {
-            entity_name: sm.module_name.clone(),
-            states: sm.states.clone(),
-            initial_state,
-            rules,
-        }
-    }
-
-    /// Build a TransitionTable from raw TLA+ source with full guard resolution.
-    ///
-    /// This resolves `CanXxx` predicates by parsing their definitions from the
-    /// source, producing correct `from_states` and `requires_items` constraints.
-    /// This is the constructor that should be used in production — it matches
-    /// what the Stateright model checker and DST simulation verify.
-    pub fn from_tla_source(tla_source: &str) -> Self {
-        let model: temper_verify::TemperModel = temper_verify::build_model_from_tla(tla_source, 3);
-
-        // Build transition rules directly from the verified model's resolved transitions.
-        // These have correct from_states and requires_items from CanXxx guard resolution.
-        let rules: Vec<TransitionRule> = model.transitions.iter().map(|rt| {
-            let mut effects: Vec<Effect> = Vec::new();
-            if let Some(ref target) = rt.to_state {
-                effects.push(Effect::SetState(target.clone()));
-            }
-            if rt.is_add_item {
-                effects.push(Effect::IncrementItems);
-            }
-            if rt.modifies_items && !rt.is_add_item {
-                effects.push(Effect::DecrementItems);
-            }
-            effects.push(Effect::EmitEvent(rt.name.clone()));
-
-            // Build guard from resolved constraints
-            let mut guards = vec![];
-            if !rt.from_states.is_empty() {
-                guards.push(Guard::StateIn(rt.from_states.clone()));
-            }
-            if rt.requires_items {
-                guards.push(Guard::ItemCountMin(1));
-            }
-
-            let guard = match guards.len() {
-                0 => Guard::Always,
-                1 => guards.into_iter().next().unwrap(),
-                _ => Guard::And(guards),
-            };
-
-            TransitionRule {
-                name: rt.name.clone(),
-                from_states: rt.from_states.clone(),
-                to_state: rt.to_state.clone(),
-                guard,
-                effects,
-            }
-        }).collect();
-
-        let initial_state = if model.states.contains(&"Draft".to_string()) {
-            "Draft".to_string()
-        } else {
-            model.states.first().cloned().unwrap_or_default()
-        };
-
-        TransitionTable {
-            entity_name: "Entity".to_string(),
-            states: model.states.clone(),
-            initial_state,
-            rules,
-        }
-    }
-
     /// Evaluate whether a transition can fire given the current runtime context.
     ///
     /// Returns `Some(TransitionResult)` with `success: true` if a matching rule
@@ -242,7 +19,7 @@ impl TransitionTable {
         action: &str,
     ) -> Option<TransitionResult> {
         // Find all rules that match the action name.
-        let matching: Vec<&TransitionRule> =
+        let matching: Vec<_> =
             self.rules.iter().filter(|r| r.name == action).collect();
 
         if matching.is_empty() {
@@ -295,7 +72,7 @@ impl TransitionTable {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::types::*;
     use temper_spec::tlaplus::{StateMachine, Transition};
 
     /// Helper: build a reference Order state machine similar to order.tla.
@@ -426,7 +203,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Test 2: Valid transition — Draft + SubmitOrder -> Submitted
+    // Test 2: Valid transition -- Draft + SubmitOrder -> Submitted
     // ------------------------------------------------------------------
     #[test]
     fn evaluate_valid_submit_order() {
@@ -443,7 +220,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Test 3: Invalid transition — Shipped + AddItem -> None
+    // Test 3: Invalid transition -- Shipped + AddItem -> None
     // ------------------------------------------------------------------
     #[test]
     fn evaluate_invalid_shipped_add_item() {
@@ -470,7 +247,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Test 5: Guard evaluation — StateIn
+    // Test 5: Guard evaluation -- StateIn
     // ------------------------------------------------------------------
     #[test]
     fn guard_state_in() {
@@ -481,7 +258,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Test 6: Guard evaluation — ItemCountMin
+    // Test 6: Guard evaluation -- ItemCountMin
     // ------------------------------------------------------------------
     #[test]
     fn guard_item_count_min() {
@@ -493,7 +270,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Test 7: Guard evaluation — And combinator
+    // Test 7: Guard evaluation -- And combinator
     // ------------------------------------------------------------------
     #[test]
     fn guard_and_combinator() {
@@ -536,19 +313,24 @@ mod tests {
     }
 }
 
-#[test]
-fn debug_tla_table() {
-    let tla = include_str!("../../../test-fixtures/specs/order.tla");
-    let table = TransitionTable::from_tla_source(tla);
-    for rule in &table.rules {
-        eprintln!("{}: from_states={:?} to={:?} guard={:?}", rule.name, rule.from_states, rule.to_state, rule.guard);
+#[cfg(test)]
+mod tla_tests {
+    use super::super::types::TransitionTable;
+
+    #[test]
+    fn debug_tla_table() {
+        let tla = include_str!("../../../../test-fixtures/specs/order.tla");
+        let table = TransitionTable::from_tla_source(tla);
+        for rule in &table.rules {
+            eprintln!("{}: from_states={:?} to={:?} guard={:?}", rule.name, rule.from_states, rule.to_state, rule.guard);
+        }
+        // Find CancelOrder
+        let cancel = table.rules.iter().find(|r| r.name == "CancelOrder");
+        eprintln!("\nCancelOrder: {:?}", cancel);
+        // Try evaluate
+        let r = table.evaluate("Draft", 0, "CancelOrder");
+        eprintln!("Evaluate Draft+CancelOrder: {:?}", r);
+        let r = table.evaluate("Shipped", 1, "CancelOrder");
+        eprintln!("Evaluate Shipped+CancelOrder: {:?}", r);
     }
-    // Find CancelOrder
-    let cancel = table.rules.iter().find(|r| r.name == "CancelOrder");
-    eprintln!("\nCancelOrder: {:?}", cancel);
-    // Try evaluate
-    let r = table.evaluate("Draft", 0, "CancelOrder");
-    eprintln!("Evaluate Draft+CancelOrder: {:?}", r);
-    let r = table.evaluate("Shipped", 1, "CancelOrder");
-    eprintln!("Evaluate Shipped+CancelOrder: {:?}", r);
 }

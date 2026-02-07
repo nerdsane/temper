@@ -1,4 +1,4 @@
-//! Generic entity actor powered by JIT transition tables.
+//! EntityActor: processes actions through a TransitionTable.
 //!
 //! This is the bridge between the actor runtime and the state machine specs.
 //! Each entity actor holds its current state and a TransitionTable, and
@@ -14,88 +14,23 @@
 //!
 //! - **Assertions in production**: Pre/postcondition assertions on every transition.
 //!   Status must be in the valid state set. Item count must not go negative.
-//!   Event log must grow monotonically. These are not debug-only — they run always.
+//!   Event log must grow monotonically. These are not debug-only -- they run always.
 //! - **Bounded execution**: Max events per entity (10,000), max items (1,000).
 //!   No unbounded growth. Violations are detected immediately, not at OOM.
 //! - **Explicit error handling**: Every match arm handled. No unwrap on user input.
-//! - **Deterministic**: Same input → same output. No randomness in transition logic.
+//! - **Deterministic**: Same input -> same output. No randomness in transition logic.
 
 use std::sync::Arc;
-#[cfg(test)]
-use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use temper_jit::table::TransitionTable;
-use temper_runtime::actor::{Actor, ActorContext, ActorError, Message};
+use temper_runtime::actor::{Actor, ActorContext, ActorError};
 
-// TigerStyle: Fixed resource budgets. No unbounded growth.
-// These are hard limits, not suggestions. Violations are assertion failures.
+use super::types::{
+    EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_PER_ENTITY,
+    MAX_ITEMS_PER_ENTITY,
+};
 
-/// Maximum events per entity before the actor refuses new transitions.
-const MAX_EVENTS_PER_ENTITY: usize = 10_000;
-/// Maximum items an entity can hold.
-const MAX_ITEMS_PER_ENTITY: usize = 1_000;
-
-/// Messages the entity actor can receive.
-#[derive(Debug)]
-pub enum EntityMsg {
-    /// Execute a state machine action (e.g., "SubmitOrder", "CancelOrder").
-    Action {
-        name: String,
-        params: serde_json::Value,
-    },
-    /// Get the current entity state.
-    GetState,
-    /// Get a specific field value.
-    GetField { field: String },
-}
-
-impl Message for EntityMsg {}
-
-/// The entity's runtime state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EntityState {
-    /// Entity type (e.g., "Order").
-    pub entity_type: String,
-    /// Entity ID.
-    pub entity_id: String,
-    /// Current status (state machine state).
-    pub status: String,
-    /// Item count (for entities with collections).
-    pub item_count: usize,
-    /// All entity fields as a JSON object.
-    pub fields: serde_json::Value,
-    /// Event log (append-only history of all transitions).
-    pub events: Vec<EntityEvent>,
-}
-
-/// A recorded state transition event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EntityEvent {
-    /// The action that triggered the transition.
-    pub action: String,
-    /// The status before the transition.
-    pub from_status: String,
-    /// The status after the transition.
-    pub to_status: String,
-    /// When the transition occurred.
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    /// Parameters passed with the action.
-    pub params: serde_json::Value,
-}
-
-/// The response returned from an action or query.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EntityResponse {
-    /// Whether the action succeeded.
-    pub success: bool,
-    /// The current entity state after the action.
-    pub state: EntityState,
-    /// Error message if the action failed.
-    pub error: Option<String>,
-}
-
-/// The entity actor — processes actions through a TransitionTable.
+/// The entity actor -- processes actions through a TransitionTable.
 pub struct EntityActor {
     entity_type: String,
     entity_id: String,
@@ -170,7 +105,7 @@ impl Actor for EntityActor {
                     state.item_count, MAX_ITEMS_PER_ENTITY
                 );
 
-                // TigerStyle: Budget enforcement (not just assertions — hard limits)
+                // TigerStyle: Budget enforcement (not just assertions -- hard limits)
                 if state.events.len() >= MAX_EVENTS_PER_ENTITY {
                     ctx.reply(EntityResponse {
                         success: false,
@@ -308,14 +243,14 @@ impl Actor for EntityActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use temper_runtime::ActorSystem;
-    use temper_spec::tlaplus::extract_state_machine;
     use temper_jit::table::TransitionTable;
 
-    const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
+    const ORDER_TLA: &str = include_str!("../../../../test-fixtures/specs/order.tla");
 
     fn order_table() -> Arc<TransitionTable> {
-        // Use from_tla_source which resolves CanXxx guards — matches what DST verifies
+        // Use from_tla_source which resolves CanXxx guards -- matches what DST verifies
         Arc::new(TransitionTable::from_tla_source(ORDER_TLA))
     }
 
@@ -348,7 +283,7 @@ mod tests {
         let actor = EntityActor::new("Order", "order-2", table, serde_json::json!({}));
         let actor_ref = system.spawn(actor, "order-2");
 
-        // Add an item (Draft → Draft, item_count 0 → 1)
+        // Add an item (Draft -> Draft, item_count 0 -> 1)
         let r: EntityResponse = actor_ref
             .ask(
                 EntityMsg::Action {
@@ -363,7 +298,7 @@ mod tests {
         assert_eq!(r.state.status, "Draft");
         assert_eq!(r.state.item_count, 1);
 
-        // Submit (Draft → Submitted)
+        // Submit (Draft -> Submitted)
         let r: EntityResponse = actor_ref
             .ask(
                 EntityMsg::Action {
@@ -386,7 +321,7 @@ mod tests {
         let actor = EntityActor::new("Order", "order-3", table, serde_json::json!({}));
         let actor_ref = system.spawn(actor, "order-3");
 
-        // Try to submit with 0 items — should fail
+        // Try to submit with 0 items -- should fail
         let r: EntityResponse = actor_ref
             .ask(
                 EntityMsg::Action {
@@ -408,7 +343,7 @@ mod tests {
         let actor = EntityActor::new("Order", "order-4", table, serde_json::json!({}));
         let actor_ref = system.spawn(actor, "order-4");
 
-        // Draft → AddItem → SubmitOrder → ConfirmOrder → ProcessOrder → ShipOrder → DeliverOrder
+        // Draft -> AddItem -> SubmitOrder -> ConfirmOrder -> ProcessOrder -> ShipOrder -> DeliverOrder
         let actions = vec![
             ("AddItem", serde_json::json!({})),
             ("SubmitOrder", serde_json::json!({})),
@@ -493,7 +428,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Try to cancel — should fail
+        // Try to cancel -- should fail
         let r: EntityResponse = actor_ref
             .ask(
                 EntityMsg::Action {

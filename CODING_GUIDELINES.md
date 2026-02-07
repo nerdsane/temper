@@ -47,11 +47,28 @@ pub use shadow::{shadow_test, ShadowResult, TestCase};
 **Rule**: If a type appears in another crate's function signatures, it MUST be
 re-exported from the crate root.
 
-### 1.2 Module Layout
+### 1.2 File Size Limits
+
+TigerStyle mandates 70 lines per function because "there's a sharp
+discontinuity between fitting on a screen and having to scroll."
+The same reasoning applies to files for agent context windows:
+
+| Threshold | Rule |
+|-----------|------|
+| **≤ 300 lines** | Preferred. Agent reads the whole file in one pass. |
+| **301-500 lines** | Acceptable if the file has a single concern. Add a `// SECTION:` comment to mark logical boundaries. |
+| **> 500 lines** | **Must split.** Convert flat file to a directory module. |
+
+When splitting, follow TigerStyle "push ifs up, fors down":
+- `mod.rs` — re-exports, no logic
+- `types.rs` — structs, enums, trait definitions
+- Other files — one concern each (parser, builder, evaluator)
+
+### 1.3 Module Layout
 
 Choose ONE pattern per crate and be consistent:
 
-**Flat files** (for crates with ≤ 6 modules, no sub-modules):
+**Flat files** (for crates with ≤ 6 modules, each file ≤ 500 lines):
 ```
 src/
 ├── lib.rs          # declarations + re-exports
@@ -77,7 +94,7 @@ src/
 **Never mix** flat files and directory modules at the same level within a
 crate (the `system.rs` next to `actor/` anti-pattern).
 
-### 1.3 File Ordering Within a Module
+### 1.4 File Ordering Within a Module
 
 Follow TigerStyle — read top-to-bottom, most important first:
 
@@ -112,7 +129,7 @@ fn extract_guard(...) { ... }
 mod tests { ... }
 ```
 
-### 1.4 Import Organization
+### 1.5 Import Organization
 
 Three groups, separated by blank lines (Firecracker convention):
 

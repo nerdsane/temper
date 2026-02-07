@@ -1,280 +1,13 @@
-//! Generate Stateright models from TLA+ StateMachine definitions.
+//! Model builder: constructs a `TemperModel` from TLA+ `StateMachine` definitions.
 //!
-//! This module translates a `temper_spec::tlaplus::StateMachine` into a
-//! Stateright `Model` that can be exhaustively explored by a model checker.
-//! The generated model captures:
-//!   - Status-based states with an item counter
-//!   - Transitions as named actions with source/target state guards
-//!   - Safety invariants as Stateright "always" properties
-//!
-//! Because Stateright's `Property::always` requires a bare function pointer
-//! (not a capturing closure), all invariant data lives inside `TemperModel`
-//! and is accessed via the `&TemperModel` reference in property conditions.
+//! Resolves `CanXxx` guard predicates, transitions, and invariants from
+//! raw TLA+ source into pre-computed structures for efficient model checking.
 
-use std::fmt;
-use stateright::{Model, Property};
 use temper_spec::tlaplus::StateMachine;
 
-/// The state tracked by the Temper model during verification.
-///
-/// Consists of the current entity status (e.g. "Draft", "Submitted") and a
-/// simple item counter that tracks how many items have been added.
-#[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TemperModelState {
-    /// Current status value (mirrors the TLA+ `status` variable).
-    pub status: String,
-    /// Number of items currently in the entity (simplified from the TLA+ set).
-    pub item_count: usize,
-}
-
-impl fmt::Display for TemperModelState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}(items={})", self.status, self.item_count)
-    }
-}
-
-/// An action that the model can take, corresponding to a TLA+ transition.
-#[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TemperModelAction {
-    /// The transition name (e.g. "SubmitOrder", "CancelOrder").
-    pub name: String,
-    /// The target status after taking this action (if deterministic).
-    pub target_state: Option<String>,
-}
-
-impl fmt::Display for TemperModelAction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.target_state {
-            Some(target) => write!(f, "{} -> {}", self.name, target),
-            None => write!(f, "{}", self.name),
-        }
-    }
-}
-
-/// A resolved transition used internally by the model, pre-computed from a
-/// TLA+ `Transition` for efficient matching during state exploration.
-#[derive(Clone, Debug)]
-pub struct ResolvedTransition {
-    /// The action name.
-    pub name: String,
-    /// States from which this transition can fire.
-    pub from_states: Vec<String>,
-    /// The target state (if deterministic).
-    pub to_state: Option<String>,
-    /// Whether this transition modifies the item count.
-    pub modifies_items: bool,
-    /// Whether this is an "add item" action (increments counter).
-    pub is_add_item: bool,
-    /// Whether this transition requires item_count > 0 to fire.
-    pub requires_items: bool,
-}
-
-/// The kind of check an invariant performs.
-#[derive(Clone, Debug)]
-pub enum InvariantKind {
-    /// status must be in a known set of states.
-    StatusInSet,
-    /// When status is in trigger_states, item_count must be > 0.
-    ItemCountPositive,
-    /// When status is in trigger_states, status must also be in required_states.
-    Implication,
-}
-
-/// A safety invariant resolved for runtime checking.
-#[derive(Clone, Debug)]
-pub struct ResolvedInvariant {
-    /// The invariant name.
-    pub name: String,
-    /// States in which this invariant's check is activated (empty = always).
-    pub trigger_states: Vec<String>,
-    /// For implication invariants: the set of valid target states.
-    pub required_states: Vec<String>,
-    /// The kind of check this invariant performs.
-    pub kind: InvariantKind,
-}
-
-/// The Stateright model generated from a TLA+ `StateMachine`.
-///
-/// This struct holds all the pre-computed transition and invariant data needed
-/// to implement the `Model` trait efficiently. Invariant data is stored here
-/// (rather than captured in closures) because Stateright's `Property::always`
-/// requires a bare `fn` pointer.
-#[derive(Clone)]
-pub struct TemperModel {
-    /// All valid status values from the specification.
-    pub states: Vec<String>,
-    /// Pre-resolved transitions.
-    pub transitions: Vec<ResolvedTransition>,
-    /// Pre-resolved safety invariants (accessible to property fn pointers via &self).
-    pub invariants: Vec<ResolvedInvariant>,
-    /// The initial status (first state from Init, typically "Draft").
-    initial_status: String,
-    /// Maximum item count for bounded exploration.
-    max_items: usize,
-}
-
-// -- Property condition functions (bare fn pointers) --------------------------
-//
-// Stateright requires `fn(&M, &M::State) -> bool`, so we define standalone
-// functions that read invariant configuration from the model.
-
-/// Check that the current status is in the set of valid states (TypeInvariant).
-fn check_status_in_set(model: &TemperModel, state: &TemperModelState) -> bool {
-    model.states.contains(&state.status)
-}
-
-/// Check that when status is in a trigger set, item_count > 0.
-/// This function checks ALL ItemCountPositive invariants.
-fn check_item_count_positive(model: &TemperModel, state: &TemperModelState) -> bool {
-    for inv in &model.invariants {
-        if !matches!(inv.kind, InvariantKind::ItemCountPositive) {
-            continue;
-        }
-        if inv.trigger_states.contains(&state.status) && state.item_count == 0 {
-            return false;
-        }
-    }
-    true
-}
-
-/// Check all implication invariants: when status is in trigger_states,
-/// it must also be in required_states.
-///
-/// If required_states is empty, or none of the required_states are valid
-/// order statuses, the invariant is trivially true (it constrains a variable
-/// other than order status, like payment_status, which we don't model).
-fn check_implications(model: &TemperModel, state: &TemperModelState) -> bool {
-    for inv in &model.invariants {
-        if !matches!(inv.kind, InvariantKind::Implication) {
-            continue;
-        }
-        if inv.trigger_states.contains(&state.status) {
-            // Filter required_states to only those that are valid order statuses.
-            // If an invariant's RHS references a non-status variable (like
-            // payment_status), those values won't be in model.states and the
-            // invariant is trivially satisfied (we can't check it).
-            let valid_required: Vec<&String> = inv
-                .required_states
-                .iter()
-                .filter(|s| model.states.contains(s))
-                .collect();
-
-            if valid_required.is_empty() {
-                continue; // Trivially true (constrains non-status variables)
-            }
-            if !valid_required.contains(&&state.status) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-impl Model for TemperModel {
-    type State = TemperModelState;
-    type Action = TemperModelAction;
-
-    fn init_states(&self) -> Vec<Self::State> {
-        vec![TemperModelState {
-            status: self.initial_status.clone(),
-            item_count: 0,
-        }]
-    }
-
-    fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
-        for t in &self.transitions {
-            // A transition is enabled if its from_states list is empty (always
-            // enabled) or the current status is in the from_states list.
-            let status_ok = t.from_states.is_empty()
-                || t.from_states.iter().any(|s| s == &state.status);
-
-            if !status_ok {
-                continue;
-            }
-
-            // For "add item" transitions, enforce the max_items bound.
-            if t.is_add_item && state.item_count >= self.max_items {
-                continue;
-            }
-
-            // For "remove item" transitions, require at least one item.
-            if t.modifies_items && !t.is_add_item && state.item_count == 0 {
-                continue;
-            }
-
-            // Transitions requiring items (e.g. SubmitOrder) need item_count > 0.
-            if t.requires_items && state.item_count == 0 {
-                continue;
-            }
-
-            actions.push(TemperModelAction {
-                name: t.name.clone(),
-                target_state: t.to_state.clone(),
-            });
-        }
-    }
-
-    fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
-        // Find the matching resolved transition.
-        let resolved = self.transitions.iter().find(|t| t.name == action.name)?;
-
-        let new_status = action
-            .target_state
-            .unwrap_or_else(|| state.status.clone());
-
-        let new_item_count = if resolved.is_add_item {
-            state.item_count + 1
-        } else if resolved.modifies_items && !resolved.is_add_item {
-            state.item_count.saturating_sub(1)
-        } else {
-            state.item_count
-        };
-
-        Some(TemperModelState {
-            status: new_status,
-            item_count: new_item_count,
-        })
-    }
-
-    fn properties(&self) -> Vec<Property<Self>> {
-        let mut props = Vec::new();
-
-        // Check if we have a StatusInSet invariant.
-        let has_status_check = self
-            .invariants
-            .iter()
-            .any(|i| matches!(i.kind, InvariantKind::StatusInSet));
-        if has_status_check {
-            props.push(Property::always("TypeInvariant", check_status_in_set));
-        }
-
-        // Check if we have any ItemCountPositive invariants.
-        let has_item_check = self
-            .invariants
-            .iter()
-            .any(|i| matches!(i.kind, InvariantKind::ItemCountPositive));
-        if has_item_check {
-            props.push(Property::always(
-                "ItemCountInvariants",
-                check_item_count_positive,
-            ));
-        }
-
-        // Check if we have any Implication invariants.
-        let has_implication = self
-            .invariants
-            .iter()
-            .any(|i| matches!(i.kind, InvariantKind::Implication));
-        if has_implication {
-            props.push(Property::always(
-                "ImplicationInvariants",
-                check_implications,
-            ));
-        }
-
-        props
-    }
-}
+use super::types::{
+    InvariantKind, ResolvedInvariant, ResolvedTransition, TemperModel,
+};
 
 /// Build a `TemperModel` from a parsed TLA+ `StateMachine`.
 ///
@@ -748,8 +481,9 @@ fn extract_quoted_set(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stateright::Model;
 
-    const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
+    const ORDER_TLA: &str = include_str!("../../../../test-fixtures/specs/order.tla");
 
     fn build_order_model() -> TemperModel {
         build_model_from_tla(ORDER_TLA, 2)
@@ -777,7 +511,7 @@ mod tests {
     #[test]
     fn test_draft_actions_include_add_item() {
         let model = build_order_model();
-        let state = TemperModelState {
+        let state = super::super::types::TemperModelState {
             status: "Draft".to_string(),
             item_count: 0,
         };
@@ -793,7 +527,7 @@ mod tests {
     #[test]
     fn test_submitted_does_not_allow_add_item() {
         let model = build_order_model();
-        let state = TemperModelState {
+        let state = super::super::types::TemperModelState {
             status: "Submitted".to_string(),
             item_count: 1,
         };
@@ -809,11 +543,11 @@ mod tests {
     #[test]
     fn test_draft_to_submitted_transition() {
         let model = build_order_model();
-        let state = TemperModelState {
+        let state = super::super::types::TemperModelState {
             status: "Draft".to_string(),
             item_count: 1,
         };
-        let action = TemperModelAction {
+        let action = super::super::types::TemperModelAction {
             name: "SubmitOrder".to_string(),
             target_state: Some("Submitted".to_string()),
         };
@@ -827,11 +561,11 @@ mod tests {
     #[test]
     fn test_submitted_to_confirmed_transition() {
         let model = build_order_model();
-        let state = TemperModelState {
+        let state = super::super::types::TemperModelState {
             status: "Submitted".to_string(),
             item_count: 1,
         };
-        let action = TemperModelAction {
+        let action = super::super::types::TemperModelAction {
             name: "ConfirmOrder".to_string(),
             target_state: Some("Confirmed".to_string()),
         };
@@ -843,11 +577,11 @@ mod tests {
     #[test]
     fn test_add_item_increments_count() {
         let model = build_order_model();
-        let state = TemperModelState {
+        let state = super::super::types::TemperModelState {
             status: "Draft".to_string(),
             item_count: 0,
         };
-        let action = TemperModelAction {
+        let action = super::super::types::TemperModelAction {
             name: "AddItem".to_string(),
             target_state: None,
         };
@@ -865,12 +599,6 @@ mod tests {
             "Model should have at least one property"
         );
     }
-}
-
-#[cfg(test)]
-mod debug_tests {
-    use super::*;
-    const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
 
     #[test]
     fn debug_resolved_transitions() {
