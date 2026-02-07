@@ -654,15 +654,10 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 name = "ecommerce"
 version = "0.1.0"
 dependencies = [
- "serde",
- "serde_json",
- "temper-authz",
- "temper-observe",
- "temper-odata",
+ "axum",
  "temper-runtime",
  "temper-server",
- "temper-store-postgres",
- "temper-store-redis",
+ "temper-spec",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3050,17 +3045,19 @@ name = "temper-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "hyper",
  "serde",
  "serde_json",
- "temper-authz",
- "temper-observe",
  "temper-odata",
  "temper-runtime",
+ "temper-spec",
  "tokio",
+ "tokio-test",
  "tower",
  "tower-http",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
