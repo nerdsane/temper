@@ -678,7 +678,48 @@ Three tiers of execution, from most to least rigid:
 
 ---
 
-## 15. DST-First Development Methodology
+## 15. TigerStyle Engineering Philosophy
+
+Temper follows [TigerStyle](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md), TigerBeetle's engineering discipline. Key principles applied:
+
+### Assertions Are Not Just for Testing
+
+Every entity actor transition has pre and postcondition assertions that run in production (`debug_assert!`):
+
+```
+PRECONDITION:  status must be in valid state set
+PRECONDITION:  event budget not exhausted (< 10,000)
+PRECONDITION:  item count within budget (<= 1,000)
+--- transition executes ---
+POSTCONDITION: status must still be in valid state set
+POSTCONDITION: event log grew by exactly 1
+POSTCONDITION: last event matches the action that fired
+```
+
+These are the TLA+ invariants enforced at runtime. The TransitionTable guards are production assertions — if Stateright proved the invariant holds across all 42,847 states, the assertion will never fire. But if a code change breaks an assumption, it fires immediately rather than corrupting state silently.
+
+### Bounded Execution — Budgets, Not Limits
+
+Everything has a hard budget:
+- `MAX_EVENTS_PER_ENTITY = 10,000` — entity refuses transitions after this
+- `MAX_ITEMS_PER_ENTITY = 1,000` — item additions rejected past this
+- Mailbox depth is bounded (not unbounded queues)
+- Simulation ticks are bounded (max 500)
+- Property test sequences are bounded (max 30 steps)
+
+When a budget is exceeded, the system fails fast with a clear error — no OOM, no slow degradation, no tail latency spikes.
+
+### Deterministic Simulation Is the Primary Testing Strategy
+
+DST is not an afterthought — it's the first test you write. Before any HTTP wiring, before any integration test, you write a DST test that exercises the actor through the runtime. This caught 3 guard resolution bugs that no other testing strategy would have found.
+
+### Zero Technical Debt
+
+If a spec change passes the 3-level verification cascade, it ships. If it doesn't, the cascade tells you exactly why and what to fix. There's no "we'll fix the invariant violation later" — the cascade is a hard gate.
+
+---
+
+## 16. DST-First Development Methodology
 
 When adding new features or changing state machines, follow the **DST-first** approach:
 

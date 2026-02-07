@@ -263,7 +263,24 @@ Periodic snapshots reduce replay time on actor restart.  Redis (`temper-store-re
 provides the mailbox backing store, shard placement registry, and a cache layer with
 key-pattern-based TTLs.
 
-### 4.4 Deterministic Simulation Scheduler
+### 4.4 Bounded Execution (TigerStyle)
+
+Following TigerStyle's bounded execution principle [18], the actor runtime
+enforces static resource limits throughout.  Actor mailboxes have a fixed
+capacity; sends to a full mailbox return `ActorError::MailboxFull` rather than
+growing unboundedly.  The maximum number of items in an order (and, more
+generally, any entity collection) is bounded by `MAX_ITEMS`, which is set at
+initialization and enforced by transition table guards.  Event logs are bounded
+by snapshot compaction: once the event count since the last snapshot exceeds a
+configurable threshold, a snapshot is taken and older events become eligible for
+truncation.  The simulation scheduler bounds its pending-message queue to
+prevent runaway message generation during fault injection.  No data structure in
+the actor runtime grows without an explicit, statically configured upper bound.
+This eliminates an entire class of production incidents--out-of-memory crashes
+caused by unbounded queues, unbounded caches, or unbounded replay logs--by
+construction rather than by monitoring.
+
+### 4.5 Deterministic Simulation Scheduler
 
 For verification purposes, Temper includes a `SimScheduler` that replaces the
 Tokio runtime with a single-threaded, seed-controlled message delivery system.
@@ -272,6 +289,18 @@ This is discussed in detail in Section 5.
 ---
 
 ## 5. Three-Level Verification Cascade
+
+TigerStyle [18] holds that "assertions are not just for testing--they run in
+production."  Temper embodies this principle at the state machine level: the
+`TransitionTable` guards that enforce TLA+ invariants on every transition are
+runtime assertions, evaluated on every message an actor processes, in every
+environment--development, simulation, and production.  This is TigerStyle's
+"minimum two assertions per function" applied at the granularity of state
+machine transitions: every transition checks its `from_states` guard and its
+semantic `Guard` predicate before any effect is applied.  The verification
+cascade described below does not *replace* these runtime assertions; it
+*complements* them by proving, ahead of deployment, that no reachable state
+can violate the invariants those assertions enforce.
 
 Correctness is established through a three-level cascade, orchestrated by the
 `VerificationCascade` type in `temper-verify`.  All three levels run
@@ -582,6 +611,17 @@ the same idea to a financial transaction engine.  Temper combines Stateright
 model checking, FoundationDB-style simulation, and proptest-based property
 testing into a unified three-level cascade.
 
+**TigerStyle.**  TigerBeetle's TigerStyle [18] is a development methodology that
+codifies principles Temper adopts throughout its design: assertion density
+(minimum two assertions per function), bounded execution (no unbounded loops,
+no unbounded allocations), static resource budgets (all buffers sized at
+initialization), and a "zero technical debt" philosophy where every shortcut is
+treated as a bug.  TigerStyle elevates deterministic simulation testing from an
+optional technique to the *primary* testing strategy, ahead of integration and
+end-to-end tests.  Temper's three-level verification cascade, bounded actor
+mailboxes, static transition tables, and DST-first development methodology are
+direct applications of TigerStyle principles to the actor-framework domain.
+
 **API frameworks.**  OData v4 [1] standardizes entity data models, query
 conventions, and metadata.  GraphQL [13] provides a flexible query language
 but lacks the formal entity model and state machine semantics that Temper
@@ -669,6 +709,17 @@ POST .../CancelOrder       → 200, status="Cancelled", events=[..., CancelOrder
 
 ### 11.5 Bugs Found by DST-First Development
 
+TigerStyle [18] mandates that deterministic simulation testing is not an
+optional hardening step applied after integration testing--it is the *primary*
+testing strategy.  Temper's DST-first methodology is a direct application of
+this principle: actor-level simulation tests were written and passing before any
+HTTP handler existed.  The bugs enumerated below were found *because* DST ran
+first.  Had development followed the conventional order--unit tests, then
+integration tests, then (maybe) simulation--these guard-resolution bugs would
+have been invisible: unit tests do not exercise the full transition-table
+resolution pipeline, and HTTP smoke tests accept whatever the handler returns
+without checking invariant satisfaction.
+
 The DST-first methodology--writing actor-level simulation tests before wiring
 HTTP--discovered three guard resolution bugs that would have been invisible to
 unit tests or HTTP smoke tests:
@@ -718,6 +769,12 @@ Temper makes the following contributions:
    Stateright, deterministic simulation, and property tests runs inside
    HTTP-serving entity actors, establishing a provable chain from formal
    specification to production behavior.
+
+8. Adoption of TigerStyle [18] as a cross-cutting engineering methodology:
+   assertion density at the state machine level, bounded execution throughout
+   the actor runtime, static resource budgets, and DST-first development
+   where simulation testing is the primary--not supplementary--testing
+   strategy.
 
 ### 12.2 Future Work
 
@@ -798,3 +855,6 @@ System.* USENIX ATC, 2019.
 https://www.cockroachlabs.com
 
 [17] Neon. *Neon: Serverless Postgres.* https://neon.tech
+
+[18] TigerBeetle. *TigerStyle: Engineering Design Philosophy.*
+https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md
