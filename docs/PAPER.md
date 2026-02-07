@@ -11,7 +11,7 @@
 We present Temper, an actor-based application framework for building API backends
 whose primary consumers are autonomous LLM agents rather than human-operated
 frontends.  Temper takes a specification-first approach: an OData v4 Common Schema
-Definition Language (CSDL) document defines the data model, TLA+ modules define
+Definition Language (CSDL) document defines the data model, I/O Automaton specifications [7b] define
 behavioral state machines with safety invariants and liveness properties, and Cedar
 policies define attribute-based access control.  Code is derived from these
 specifications and is treated as a regenerable artifact.  A custom tokio-based actor
@@ -68,7 +68,7 @@ address:
 
 Temper's key insight is that **specifications, not code, should be the durable
 artifact**.  A CSDL document defines what entities exist and how they relate.  A
-TLA+ module defines what transitions are legal and what invariants must hold.  A
+I/O Automaton defines what transitions are legal and what invariants must hold.  A
 Cedar policy defines who may do what.  Code is generated from these
 specifications and can be regenerated whenever the specifications change.  Agents
 read and modify specifications--structured, bounded, verifiable artifacts--rather
@@ -92,7 +92,7 @@ is dual-licensed under MIT and Apache-2.0.
 ### 2.1 Crate Map
 
 ```
-temper-spec          Specification parsing: CSDL, TLA+, unified model
+temper-spec          Specification parsing: CSDL, I/O Automata, unified model
 temper-macros        Proc-macro utilities
 temper-runtime       Actor system: traits, mailbox, supervision, scheduler
 temper-codegen       Code generation from specifications
@@ -115,7 +115,7 @@ reference/ecommerce  Reference application: agentic e-commerce
 ```
 +---------------------------------------------------------------------+
 |                    SPECIFICATION LAYER                               |
-|  model.csdl.xml    order.tla    payment.tla    policies/*.cedar     |
+|  model.csdl.xml  order.ioa.toml  payment.ioa.toml  policies/*.cedar  |
 +---------------------------------------------------------------------+
           |                  |                  |
           v                  v                  v
@@ -177,7 +177,7 @@ Temper extends the CSDL vocabulary with a custom namespace (`Temper.Vocab`) that
 annotates entities with:
 
 - **State machine metadata:** `StateMachine.States`, `StateMachine.InitialState`,
-  `StateMachine.TlaSpec`, and per-action `ValidFromStates` / `TargetState`.
+  `StateMachine.Spec`, and per-action `ValidFromStates` / `TargetState`.
 - **Agent hints:** `Agent.Hint`, `Agent.CommonPattern`, `Agent.SuccessRate`--
   populated from trajectory analysis and surfaced through OData `$metadata`.
 - **Sharding:** `ShardKey` annotations for shard-aware actor placement.
@@ -189,24 +189,34 @@ can `GET /odata/$metadata`, parse the XML, discover available entity types and
 actions, read state machine constraints, and follow agent hints--all without
 inspecting source code.
 
-### 3.2 TLA+ as the Behavioral Specification
+### 3.2 I/O Automata as the Behavioral Specification
 
-Each stateful entity type has an associated TLA+ module that specifies its
-complete lifecycle.  The `order.tla` module, for example, defines:
+Each stateful entity type has an associated I/O Automaton specification based
+on the Lynch-Tuttle formalism [7b].  An I/O Automaton is a labeled state
+transition system where each action is specified by a precondition (predicate
+on pre-state) and an effect (state change program), and actions are classified
+as input (from the environment), output (to the environment), or internal
+(private state transitions).
 
-- **State space:** 10 order statuses, 7 payment statuses, 7 shipment statuses.
-- **Guards:** Preconditions such as `CanSubmit`, which requires `status = "Draft"`,
-  at least one item, and a shipping address.
-- **Actions:** 14 state transitions including `AddItem`, `SubmitOrder`,
-  `ConfirmOrder`, `CancelOrder`, `InitiateReturn`, and `RefundOrder`.
-- **Safety invariants:** `ShipRequiresPayment` (cannot ship without captured
-  payment), `SubmitRequiresItems`, `SubmitRequiresAddress`,
-  `PaymentRefundConsistency`.
-- **Liveness properties:** `SubmittedProgress` (a submitted order is eventually
-  confirmed or cancelled), `ProcessingProgress`, `ReturnProgress`.
+The reference Order automaton (`order.ioa.toml`) defines:
 
-The specification is formally structured as `Spec == Init /\ [][Next]_vars /\ WF_vars(Next)`,
-following the standard TLA+ idiom for a fair specification with stuttering steps.
+- **State space:** 10 order statuses from `Draft` to `Refunded`.
+- **Actions:** 12 transitions classified as input (from environment: `AddItem`,
+  `CancelOrder`, `InitiateReturn`), internal (state machine steps: `SubmitOrder`,
+  `ConfirmOrder`, `ShipOrder`), and output (events: `OrderSubmittedEvent`).
+- **Preconditions:** Per-action guards specified declaratively: `from = ["Draft"]`
+  and `guard = "items > 0"` for `SubmitOrder`.
+- **Effects:** Target state (`to = "Submitted"`) and side effects (`Increment`,
+  `Decrement`, `Emit`).
+- **Safety invariants:** `SubmitRequiresItems`, `ShipRequiresPayment`,
+  `CancelledIsFinal`, `RefundedIsFinal`.
+
+The TOML serialization compiles losslessly to a `StateMachine` intermediate
+representation that feeds the verification cascade (Stateright model checking,
+deterministic simulation, property-based testing) and the runtime
+`TransitionTable`.  The precondition/effect style maps directly to the
+`TransitionRule` guards and effects used at runtime, and the input/output/internal
+classification maps to the actor model's message taxonomy.
 
 ### 3.3 Cedar ABAC as the Security Specification
 
@@ -298,7 +308,7 @@ This is discussed in detail in Section 5.
 
 TigerStyle [18] holds that "assertions are not just for testing--they run in
 production."  Temper embodies this principle at the state machine level: the
-`TransitionTable` guards that enforce TLA+ invariants on every transition are
+`TransitionTable` guards that enforce automaton invariants on every transition are
 runtime assertions, evaluated on every message an actor processes, in every
 environment--development, simulation, and production.  This is TigerStyle's
 "minimum two assertions per function" applied at the granularity of state
@@ -314,10 +324,11 @@ independently; all must pass before deployment.
 
 ### 5.1 Level 1: Exhaustive Model Checking
 
-The TLA+ specification is translated into a `TemperModel` that implements the
-Stateright `Model` trait [3].  Stateright performs breadth-first exhaustive
+The I/O Automaton specification compiles to a `StateMachine` intermediate
+representation, which is then translated into a `TemperModel` that implements
+the Stateright `Model` trait [3].  Stateright performs breadth-first exhaustive
 exploration of the state space, checking every safety invariant at every
-reachable state.  For the reference Order state machine with `MAX_ITEMS = 2`,
+reachable state.  For the reference Order automaton with `MAX_ITEMS = 2`,
 the model checker explores the full state graph and confirms that all
 properties hold.
 
@@ -375,7 +386,7 @@ L3 Property Tests PASSED: 1000 cases, 30 max steps
 
 ### 5.4 Cascade Orchestration
 
-The `VerificationCascade` builder accepts a TLA+ source string and configuration
+The `VerificationCascade` builder accepts an I/O Automaton specification and configuration
 parameters (number of simulation seeds, property test cases, max items), then
 runs all three levels and produces a `CascadeResult`:
 
@@ -410,8 +421,8 @@ immutable, linked chain of typed records:
    assessment (affected users, severity, trend).
 
 3. **A-Record (Analysis):** Root cause analysis with one or more `SolutionOption`s.
-   Each option specifies a specification diff (CSDL changes, TLA+ changes, Cedar
-   policy changes), the impact on TLA+ invariants, a risk level, and an
+   Each option specifies a specification diff (CSDL changes, automaton spec changes, Cedar
+   policy changes), the impact on safety invariants, a risk level, and an
    estimated complexity.
 
 4. **D-Record (Decision):** A human approval or rejection of a proposed change.
@@ -504,7 +515,7 @@ product intelligence report, organized by category.
 
 State machine transitions are represented at three tiers of abstraction:
 
-1. **Compiled (Tier 1):** Rust code generated from the TLA+ specification by
+1. **Compiled (Tier 1):** Rust code generated from the I/O Automaton specification by
    `temper-codegen`.  Maximum performance, requires recompilation to change.
 
 2. **Interpretable (Tier 2):** A `TransitionTable`--a data structure encoding
@@ -571,7 +582,7 @@ gives precise aggregation but loses context; choosing traces gives detail but
 imprecise statistics.  These decisions are made early and are costly to change.
 
 In an agentic system, this problem is worse: agents don't write instrumentation
-code at all.  They write TLA+ specs.  The platform must handle all observability
+code at all.  They write I/O Automaton specs.  The platform must handle all observability
 without any agent involvement in deciding metrics vs traces vs logs.
 
 ### 9.2 Wide Events as the Unified Primitive
@@ -751,7 +762,7 @@ table enforces guards regardless of the delivery path.
 
 The reference application serves real state machine transitions through HTTP.
 Entity actors process OData actions through JIT TransitionTables built from the
-same TLA+ specs verified by the cascade.  A representative interaction sequence:
+same I/O Automaton specs verified by the cascade.  A representative interaction sequence:
 
 ```
 POST /odata/Orders         → 201, spawns actor in "Draft", item_count=0
@@ -780,9 +791,9 @@ unit tests or HTTP smoke tests:
 
 | Bug | Root Cause | Impact if Shipped |
 |-----|-----------|-------------------|
-| `SubmitOrder` succeeds with 0 items | `TransitionTable::from_state_machine()` used unresolved TLA+ transitions; `CanSubmit` predicate's `Cardinality(items) > 0` guard was not encoded | Agents could submit empty orders, violating the `SubmitRequiresItems` invariant |
+| `SubmitOrder` succeeds with 0 items | `TransitionTable::from_state_machine()` used unresolved transitions; the `CanSubmit` predicate's `Cardinality(items) > 0` guard was not encoded | Agents could submit empty orders, violating the `SubmitRequiresItems` invariant |
 | `CancelOrder` missing from transition table entirely | `resolve_transitions()` filtered `!name.starts_with("Can")`, catching both `CanCancel` (guard) and `CancelOrder` (action) | Agents could never cancel orders; 409 on every attempt |
-| `CancelOrder` and `InitiateReturn` had `has_parameters=false` | TLA+ extractor stripped `(reason)` from the name before checking for parentheses | Guard/action distinction broken; parameterized actions treated as guard predicates and excluded |
+| `CancelOrder` and `InitiateReturn` had `has_parameters=false` | Specification extractor stripped `(reason)` from the name before checking for parentheses | Guard/action distinction broken; parameterized actions treated as guard predicates and excluded |
 
 The fix introduced `TransitionTable::from_tla_source()` which builds the table
 from the verified Stateright model's resolved transitions, ensuring that the
@@ -816,7 +827,7 @@ Product Digest: "Add SplitOrder action to Order entity"
 The full feedback loop is verified:
 
 1. Natural language → Claude → OData tool calls
-2. Entity actors process transitions through TLA+-verified TransitionTables
+2. Entity actors process transitions through formally verified TransitionTables
 3. Events persist to PostgreSQL (survives server restart)
 4. Trajectory spans capture to ClickHouse (operation, intent, status)
 5. Trajectory analysis queries ClickHouse for patterns
@@ -831,7 +842,7 @@ The full feedback loop is verified:
 
 Temper makes the following contributions:
 
-1. A specification-first architecture where CSDL, TLA+, and Cedar documents are
+1. A specification-first architecture where CSDL, I/O Automaton, and Cedar documents are
    the durable artifacts and code is derived.
 
 2. A three-level verification cascade combining exhaustive model checking,
@@ -911,6 +922,9 @@ https://github.com/proptest-rs/proptest
 
 [7] L. Lamport. *Specifying Systems: The TLA+ Language and Tools for Hardware
 and Software Engineers.* Addison-Wesley, 2002.
+
+[7b] N. Lynch and M. Tuttle. *An Introduction to Input/Output Automata.*
+CWI Quarterly, 2(3):219-246, 1989.
 
 [8] J. Armstrong. *Making Reliable Distributed Systems in the Presence of
 Software Errors.* PhD Thesis, Royal Institute of Technology, Stockholm, 2003.

@@ -34,7 +34,7 @@ You edit three types of specification files:
 | File | Format | Purpose |
 |------|--------|---------|
 | `model.csdl.xml` | OData CSDL (XML) | Data model: entity types, properties, navigation, actions, functions |
-| `*.tla` | TLA+ | Behavior: state machines, transitions, guards, invariants, liveness |
+| `*.ioa.toml` | I/O Automaton TOML | Behavior: state machines, transitions, guards, invariants |
 | `*.cedar` | Cedar | Security: attribute-based access control policies |
 
 Everything else is generated from these specs. If you need to change behavior, change the spec — never hand-edit generated code.
@@ -42,7 +42,7 @@ Everything else is generated from these specs. If you need to change behavior, c
 ### The Lifecycle
 
 ```
-1. DEFINE   → Write/modify CSDL + TLA+ + Cedar specs
+1. DEFINE   → Write/modify CSDL + I/O Automaton + Cedar specs
 2. GENERATE → temper codegen (produces Rust actor code)
 3. VERIFY   → temper verify (3-level cascade: model check + simulation + property tests)
 4. DEPLOY   → temper serve (starts OData v4 HTTP server)
@@ -61,8 +61,8 @@ A Temper project has this layout:
 my-project/
 ├── specs/                          # SOURCE OF TRUTH — you edit these
 │   ├── model.csdl.xml              # OData CSDL data model
-│   ├── order.tla                   # TLA+ spec for Order entity
-│   ├── payment.tla                 # TLA+ spec for Payment entity
+│   ├── order.ioa.toml              # I/O Automaton spec for Order entity
+│   ├── payment.ioa.toml            # I/O Automaton spec for Payment entity
 │   └── policies/
 │       ├── order.cedar             # Cedar policies for Order
 │       └── customer.cedar          # Cedar policies for Customer
@@ -112,7 +112,7 @@ CSDL defines **what** your API exposes. It follows the OData v4 Common Schema De
   <NavigationProperty Name="Items" Type="Collection(Temper.MyApp.OrderItem)"
                       ContainsTarget="true"/>
 
-  <!-- State machine annotations (link to TLA+) -->
+  <!-- State machine annotations (link to automaton spec) -->
   <Annotation Term="Temper.Vocab.StateMachine.States">
     <Collection>
       <String>Draft</String>
@@ -121,7 +121,7 @@ CSDL defines **what** your API exposes. It follows the OData v4 Common Schema De
     </Collection>
   </Annotation>
   <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Draft"/>
-  <Annotation Term="Temper.Vocab.StateMachine.TlaSpec" String="order.tla"/>
+  <Annotation Term="Temper.Vocab.StateMachine.Spec" String="order.ioa.toml"/>
 </EntityType>
 ```
 
@@ -157,7 +157,7 @@ CSDL defines **what** your API exposes. It follows the OData v4 Common Schema De
 |-----------|-----------|---------|
 | `StateMachine.States` | EntityType | Valid states for this entity |
 | `StateMachine.InitialState` | EntityType | Starting state |
-| `StateMachine.TlaSpec` | EntityType | Path to TLA+ file |
+| `StateMachine.Spec` | EntityType | Path to I/O Automaton specification file |
 | `StateMachine.ValidFromStates` | Action | States this action can fire from |
 | `StateMachine.TargetState` | Action | State after action completes |
 | `Agent.Hint` | Action, Function, EntityType | Usage hint for LLM agents |
@@ -166,49 +166,51 @@ CSDL defines **what** your API exposes. It follows the OData v4 Common Schema De
 | `ShardKey` | EntityType | Property used for sharding |
 | `AuthZ.CedarPolicy` | EntityType, Action | Path to Cedar policy file |
 
-### 3.2 TLA+ (Behavioral Specification)
+### 3.2 I/O Automaton TOML (Behavioral Specification)
 
-TLA+ defines **how** entities behave — state machines, transition guards, and invariants.
+I/O Automaton TOML defines **how** entities behave — state machines, transition guards, and invariants.  Based on the Lynch-Tuttle I/O Automata formalism, each action has a precondition (from + guard) and an effect (to + state changes).
 
-```tla
----- MODULE Order ----
-EXTENDS Naturals
+```toml
+[automaton]
+name = "Order"
+states = ["Draft", "Submitted", "Cancelled"]
+initial = "Draft"
 
-VARIABLES status, items
+[[state]]
+name = "items"
+type = "counter"
+initial = "0"
 
-OrderStatuses == {"Draft", "Submitted", "Cancelled"}
+[[action]]
+name = "SubmitOrder"
+kind = "internal"
+from = ["Draft"]
+to = "Submitted"
+guard = "items > 0"
+params = ["ShippingAddressId", "PaymentMethod"]
+hint = "Submit a draft order. Requires at least one item."
 
-Init ==
-    /\ status = "Draft"
-    /\ items = {}
+[[action]]
+name = "CancelOrder"
+kind = "input"
+from = ["Draft", "Submitted"]
+to = "Cancelled"
+params = ["Reason"]
+hint = "Cancel an order. Only from Draft or Submitted."
 
-CanSubmit == status = "Draft" /\ Cardinality(items) > 0
-
-SubmitOrder ==
-    /\ CanSubmit
-    /\ status' = "Submitted"
-    /\ UNCHANGED items
-
-CancelOrder(reason) ==
-    /\ status \in {"Draft", "Submitted"}
-    /\ status' = "Cancelled"
-    /\ UNCHANGED items
-
-\* Safety: submitted orders must have items
-SubmitRequiresItems ==
-    status = "Submitted" => Cardinality(items) > 0
-
-Spec == Init /\ [][Next]_<<status, items>>
-====
+[[invariant]]
+name = "SubmitRequiresItems"
+when = ["Submitted"]
+assert = "items > 0"
 ```
 
-**Rules for TLA+ specs that Temper can parse:**
+**Rules for I/O Automaton specs:**
 
-1. State sets: Define as `XxxStatuses == {"State1", "State2", ...}`. The first set found is the primary.
-2. Guards: Name them `CanXxx ==` (no parameters). These are extracted as predicates.
-3. Actions: Name them `ActionName ==` or `ActionName(param) ==` with primed variables in effects.
-4. Invariants: Place after a `\* Safety Invariants` comment. Name them descriptively.
-5. Liveness: Place after a `\* Liveness Properties` comment. Use `~>` (leads-to).
+1. `[automaton]`: Define `name`, `states` (all valid status values), and `initial` state.
+2. `[[state]]`: Declare state variables with `name`, `type` (`counter`, `bool`, `string`, `set`), and `initial` value.
+3. `[[action]]`: Define actions with `name`, `kind` (`input`/`output`/`internal`), `from` states, `to` state, optional `guard`, `params`, and `hint`.
+4. `[[invariant]]`: Define safety invariants with `name`, `when` (trigger states), and `assert` expression.
+5. Action kinds: `input` = from environment (HTTP), always enabled in from-states; `output` = emitted events; `internal` = private state transitions.
 
 ### 3.3 Cedar (Access Control)
 
@@ -265,7 +267,7 @@ This produces for each entity:
 
 ### How Entity Actors Work at Runtime
 
-At runtime, entities are NOT served by the generated Rust code directly. Instead, the server builds a **JIT TransitionTable** from the TLA+ source using `TransitionTable::from_tla_source()`. This table is the same verified artifact that passes the 3-level cascade. Each entity gets its own actor:
+At runtime, entities are NOT served by the generated Rust code directly. Instead, the server builds a **JIT TransitionTable** from the I/O Automaton specification using `TransitionTable::from_tla_source()`. This table is the same verified artifact that passes the 3-level cascade. Each entity gets its own actor:
 
 ```
 HTTP Request → OData Parse → Actor Registry (get or spawn) → Entity Actor → TransitionTable.evaluate() → Response
@@ -284,7 +286,7 @@ When an action is dispatched, the actor evaluates it through the TransitionTable
 4. If guards pass: apply effects (SetState, IncrementItems, EmitEvent), record event
 5. If guards fail: return 409 Conflict with error message
 
-**Critical**: Always use `TransitionTable::from_tla_source(tla_source)` in production, NOT `from_state_machine(sm)`. The `from_tla_source` variant resolves `CanXxx` guard predicates from the TLA+ source, producing correct guard constraints. The `from_state_machine` variant may miss guards that reference predicates.
+**Critical**: Always use `TransitionTable::from_tla_source(spec_source)` in production, NOT `from_state_machine(sm)`. The `from_tla_source` variant resolves guard predicates from the specification source, producing correct guard constraints. The `from_state_machine` variant may miss guards that reference predicates.
 
 ---
 
@@ -532,7 +534,7 @@ recommendation = 0  # option index
 [[options]]
 description = "Compound shard key: entity_id + region"
 spec_diff = "+ShardKey: entity_id,region"
-tla_impact = "NONE"
+invariant_impact = "NONE"
 risk = "low"
 ```
 
@@ -655,21 +657,21 @@ Three tiers of execution, from most to least rigid:
 
 1. Add `<EntityType>` to `model.csdl.xml` with properties, key, and navigation
 2. Add `<EntitySet>` to the `<EntityContainer>`
-3. Write a TLA+ spec (`entity.tla`) with states, transitions, invariants
-4. Link via `<Annotation Term="Temper.Vocab.StateMachine.TlaSpec" String="entity.tla"/>`
+3. Write an I/O Automaton spec (`entity.ioa.toml`) with states, actions, invariants
+4. Link via `<Annotation Term="Temper.Vocab.StateMachine.Spec" String="entity.ioa.toml"/>`
 5. Write Cedar policies in `specs/policies/entity.cedar`
 6. Run `temper codegen` then `temper verify`
 
 ### Adding a New Action to an Existing Entity
 
 1. Add `<Action>` to CSDL with parameters and `ValidFromStates` annotation
-2. Add the transition to the TLA+ spec (guard + state change)
+2. Add the action to the automaton spec (from/to states + guard)
 3. Update Cedar policies if needed
 4. Run `temper codegen` then `temper verify`
 
 ### Changing a State Machine
 
-1. Modify the TLA+ spec (add/remove states, change transitions)
+1. Modify the automaton spec (add/remove states, change actions)
 2. Update CSDL `StateMachine.States` annotation to match
 3. Update any action `ValidFromStates` annotations
 4. Run `temper verify` — the cascade will catch any invariant violations
@@ -689,7 +691,7 @@ Three tiers of execution, from most to least rigid:
 
 | Anti-Pattern | Why It's Wrong | Do This Instead |
 |-------------|---------------|-----------------|
-| Hand-editing generated code | Will be overwritten on next codegen | Modify the CSDL/TLA+ specs |
+| Hand-editing generated code | Will be overwritten on next codegen | Modify the CSDL/automaton specs |
 | Using `from_state_machine()` in production | Misses `CanXxx` guard resolution | Use `TransitionTable::from_tla_source()` |
 | Skipping verification | Deploys unverified state machines | Always run `temper verify` |
 | Calling actions without checking status | Will get 409 Conflict | GET entity first, check `status` field |
@@ -698,7 +700,7 @@ Three tiers of execution, from most to least rigid:
 | Writing provider-specific observability queries | Breaks when swapping Logfire↔Datadog | Use canonical SQL schema (spans, logs, metrics) |
 | Modifying Cedar policies without human approval | Security change requires human gate | Submit as evolution A-Record for review |
 | Creating evolution records without evidence | Unverifiable claims | Include SQL evidence queries in O-Records |
-| Naming TLA+ guards `CanXxx(param)` | Guards must NOT have parameters | Use `CanXxx ==` (no parens) for guards, `ActionName(param) ==` for actions |
+| Putting guards inline in action params | Guards are separate from action parameters | Use `guard = "items > 0"` for preconditions, `params = [...]` for action inputs |
 
 ---
 
@@ -720,7 +722,7 @@ POSTCONDITION: event log grew by exactly 1
 POSTCONDITION: last event matches the action that fired
 ```
 
-These are the TLA+ invariants enforced at runtime. The TransitionTable guards are production assertions — if Stateright proved the invariant holds across all 42,847 states, the assertion will never fire. But if a code change breaks an assumption, it fires immediately rather than corrupting state silently.
+These are the automaton invariants enforced at runtime. The TransitionTable guards are production assertions — if Stateright proved the invariant holds across all 42,847 states, the assertion will never fire. But if a code change breaks an assumption, it fires immediately rather than corrupting state silently.
 
 ### Bounded Execution — Budgets, Not Limits
 
@@ -747,7 +749,7 @@ If a spec change passes the 3-level verification cascade, it ships. If it doesn'
 
 When adding new features or changing state machines, follow the **DST-first** approach:
 
-1. **Write the TLA+ spec change** (add states, transitions, invariants)
+1. **Write the automaton spec change** (add states, actions, invariants)
 2. **Write DST tests** that exercise the new behavior through the actor system:
    ```rust
    #[tokio::test]

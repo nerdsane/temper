@@ -392,7 +392,7 @@ or a dedicated `tests/` directory.
 
 ### 7.3 Test Fixtures
 
-Test fixtures (sample CSDL, TLA+ specs) live in `test-fixtures/` at the
+Test fixtures (sample CSDL, I/O Automaton specs) live in `test-fixtures/` at the
 workspace root. Framework crates MUST NOT reference `reference/` directories.
 
 ### 7.4 Test Naming
@@ -457,7 +457,7 @@ unsafe { ... }
 
 ### 10.1 Specs Are Source of Truth
 
-Agents modify `.csdl.xml`, `.tla`, and `.cedar` files.
+Agents modify `.csdl.xml`, `.ioa.toml`, and `.cedar` files.
 Agents run `temper codegen` and `temper verify`.
 Agents NEVER hand-edit generated code.
 
