@@ -3089,11 +3089,13 @@ dependencies = [
 name = "temper-store-redis"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "fred",
  "serde",
  "serde_json",
  "temper-runtime",
  "thiserror",
+ "tokio",
  "uuid",
 ]
 

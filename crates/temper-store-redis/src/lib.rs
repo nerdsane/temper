@@ -1,4 +1,14 @@
-//! temper-store-redis: Redis caching and storage backend for Temper.
+//! temper-store-redis: Redis storage backend for Temper.
 //!
-//! Provides cache-aside and write-through caching patterns for entity
-//! operations, with support for entity invalidation and pub/sub events.
+//! Provides:
+//! - Actor mailbox streams (Redis Streams for actor message queues)
+//! - Actor placement cache (consistent hashing lookup)
+//! - Distributed locks (for shard rebalancing)
+//! - OData Function response cache (read-only, safe to cache)
+//! - Entity state cache (read-through for hot entities)
+
+pub mod keys;
+pub mod mailbox;
+pub mod placement;
+pub mod cache;
+pub mod error;
