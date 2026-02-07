@@ -118,8 +118,8 @@ mod tests {
 
     #[test]
     fn test_build_spec_model_from_reference() {
-        let csdl_xml = include_str!("../../../../reference/ecommerce/specs/model.csdl.xml");
-        let order_tla = include_str!("../../../../reference/ecommerce/specs/order.tla");
+        let csdl_xml = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
+        let order_tla = include_str!("../../../../test-fixtures/specs/order.tla");
 
         let csdl = parse_csdl(csdl_xml).expect("CSDL should parse");
 

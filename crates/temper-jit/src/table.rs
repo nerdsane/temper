@@ -537,7 +537,7 @@ mod tests {
 
 #[test]
 fn debug_tla_table() {
-    let tla = include_str!("../../../reference/ecommerce/specs/order.tla");
+    let tla = include_str!("../../../test-fixtures/specs/order.tla");
     let table = TransitionTable::from_tla_source(tla);
     for rule in &table.rules {
         eprintln!("{}: from_states={:?} to={:?} guard={:?}", rule.name, rule.from_states, rule.to_state, rule.guard);

@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_parse_reference_ecommerce_csdl() {
-        let xml = include_str!("../../../../reference/ecommerce/specs/model.csdl.xml");
+        let xml = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
         let doc = parse_csdl(xml).expect("should parse without error");
 
         assert_eq!(doc.version, "4.0");

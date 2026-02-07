@@ -126,8 +126,8 @@ mod tests {
     use temper_spec::model::build_spec_model;
 
     fn load_reference_spec() -> SpecModel {
-        let csdl_xml = include_str!("../../../reference/ecommerce/specs/model.csdl.xml");
-        let order_tla = include_str!("../../../reference/ecommerce/specs/order.tla");
+        let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+        let order_tla = include_str!("../../../test-fixtures/specs/order.tla");
 
         let csdl = parse_csdl(csdl_xml).unwrap();
         let mut tla_sources = HashMap::new();

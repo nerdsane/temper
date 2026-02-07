@@ -229,7 +229,7 @@ mod tests {
         // Use the reference ecommerce specs that ship with the project
         let specs_dir = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../reference/ecommerce/specs"
+            "/../../test-fixtures/specs"
         );
         let specs_path = Path::new(specs_dir);
 

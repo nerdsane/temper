@@ -307,7 +307,7 @@ mod tests {
     use temper_spec::tlaplus::extract_state_machine;
     use temper_jit::table::TransitionTable;
 
-    const ORDER_TLA: &str = include_str!("../../../reference/ecommerce/specs/order.tla");
+    const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
 
     fn order_table() -> Arc<TransitionTable> {
         // Use from_tla_source which resolves CanXxx guards — matches what DST verifies

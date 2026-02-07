@@ -36,15 +36,15 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_state() -> ServerState {
-        let csdl_xml = include_str!("../../../reference/ecommerce/specs/model.csdl.xml");
+        let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
         let csdl = parse_csdl(csdl_xml).unwrap();
         let system = ActorSystem::new("test");
         ServerState::new(system, csdl, csdl_xml.to_string())
     }
 
     fn test_state_with_tla() -> ServerState {
-        let csdl_xml = include_str!("../../../reference/ecommerce/specs/model.csdl.xml");
-        let order_tla = include_str!("../../../reference/ecommerce/specs/order.tla");
+        let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+        let order_tla = include_str!("../../../test-fixtures/specs/order.tla");
         let csdl = parse_csdl(csdl_xml).unwrap();
         let system = ActorSystem::new("test-tla");
         let mut tla = std::collections::HashMap::new();

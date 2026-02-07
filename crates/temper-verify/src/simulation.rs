@@ -291,7 +291,7 @@ pub fn run_multi_seed_simulation(
 mod tests {
     use super::*;
 
-    const ORDER_TLA: &str = include_str!("../../../reference/ecommerce/specs/order.tla");
+    const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
 
     #[test]
     fn test_simulation_no_faults() {

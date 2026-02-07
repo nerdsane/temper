@@ -372,7 +372,7 @@ mod tests {
     use super::*;
     use crate::model::{InvariantKind, ResolvedInvariant};
 
-    const ORDER_TLA: &str = include_str!("../../../reference/ecommerce/specs/order.tla");
+    const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
 
     // -- Test 1: Reference order spec passes ----------------------------------
 

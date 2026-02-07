@@ -749,7 +749,7 @@ fn extract_quoted_set(s: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    const ORDER_TLA: &str = include_str!("../../../reference/ecommerce/specs/order.tla");
+    const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
 
     fn build_order_model() -> TemperModel {
         build_model_from_tla(ORDER_TLA, 2)
@@ -870,7 +870,7 @@ mod tests {
 #[cfg(test)]
 mod debug_tests {
     use super::*;
-    const ORDER_TLA: &str = include_str!("../../../reference/ecommerce/specs/order.tla");
+    const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
 
     #[test]
     fn debug_resolved_transitions() {

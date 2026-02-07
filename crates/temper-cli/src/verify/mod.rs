@@ -159,7 +159,7 @@ mod tests {
     fn test_verify_reference_specs() {
         let specs_dir = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../reference/ecommerce/specs"
+            "/../../test-fixtures/specs"
         );
 
         if !Path::new(specs_dir).join("model.csdl.xml").exists() {

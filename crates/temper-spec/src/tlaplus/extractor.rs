@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_extract_reference_order_tla() {
-        let tla = include_str!("../../../../reference/ecommerce/specs/order.tla");
+        let tla = include_str!("../../../../test-fixtures/specs/order.tla");
         let sm = extract_state_machine(tla).expect("should extract without error");
 
         assert_eq!(sm.module_name, "Order");
@@ -622,7 +622,7 @@ mod debug {
     use super::*;
     #[test]
     fn debug_cancel() {
-        let tla = include_str!("../../../../reference/ecommerce/specs/order.tla");
+        let tla = include_str!("../../../../test-fixtures/specs/order.tla");
         let sm = extract_state_machine(tla).unwrap();
         for t in &sm.transitions {
             if t.name.contains("Cancel") || t.name.contains("Initiate") {

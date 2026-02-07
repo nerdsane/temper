@@ -72,7 +72,7 @@ mod tests {
     use super::*;
     use crate::model::build_model_from_tla;
 
-    const ORDER_TLA: &str = include_str!("../../../reference/ecommerce/specs/order.tla");
+    const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
 
     #[test]
     fn test_check_model_completes() {
