@@ -2920,6 +2920,7 @@ dependencies = [
  "serde_json",
  "temper-runtime",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -2995,6 +2996,7 @@ dependencies = [
  "sqlx",
  "temper-runtime",
  "thiserror",
+ "tokio",
  "tracing",
  "tracing-opentelemetry",
 ]
