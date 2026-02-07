@@ -2,6 +2,8 @@
 //! Production deployments would back this with Git + Postgres.
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use crate::records::*;
@@ -120,6 +122,60 @@ impl RecordStore {
             RecordType::Insight => inner.insights.len(),
         }
     }
+
+    /// Save all records to a directory as JSON files.
+    ///
+    /// Creates subdirectories for each record type.
+    pub fn save_to_directory(&self, dir: &Path) -> std::io::Result<()> {
+        let inner = self.inner.read().unwrap();
+
+        let sub_dir = dir.join("observations");
+        fs::create_dir_all(&sub_dir)?;
+        for (id, record) in &inner.observations {
+            let path = sub_dir.join(format!("{id}.json"));
+            let json = serde_json::to_string_pretty(record)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            fs::write(&path, json)?;
+        }
+
+        let sub_dir = dir.join("problems");
+        fs::create_dir_all(&sub_dir)?;
+        for (id, record) in &inner.problems {
+            let path = sub_dir.join(format!("{id}.json"));
+            let json = serde_json::to_string_pretty(record)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            fs::write(&path, json)?;
+        }
+
+        let sub_dir = dir.join("analyses");
+        fs::create_dir_all(&sub_dir)?;
+        for (id, record) in &inner.analyses {
+            let path = sub_dir.join(format!("{id}.json"));
+            let json = serde_json::to_string_pretty(record)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            fs::write(&path, json)?;
+        }
+
+        let sub_dir = dir.join("decisions");
+        fs::create_dir_all(&sub_dir)?;
+        for (id, record) in &inner.decisions {
+            let path = sub_dir.join(format!("{id}.json"));
+            let json = serde_json::to_string_pretty(record)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            fs::write(&path, json)?;
+        }
+
+        let sub_dir = dir.join("insights");
+        fs::create_dir_all(&sub_dir)?;
+        for (id, record) in &inner.insights {
+            let path = sub_dir.join(format!("{id}.json"));
+            let json = serde_json::to_string_pretty(record)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            fs::write(&path, json)?;
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for RecordStore {
@@ -220,5 +276,58 @@ mod tests {
         });
 
         assert_eq!(store.count(RecordType::Observation), 1);
+    }
+
+    #[test]
+    fn test_save_to_directory() {
+        let store = RecordStore::new();
+
+        let obs = ObservationRecord {
+            header: RecordHeader::new(RecordType::Observation, "test"),
+            source: "test-save".into(),
+            classification: ObservationClass::Performance,
+            evidence_query: "SELECT 1".into(),
+            threshold_field: None,
+            threshold_value: None,
+            observed_value: Some(42.0),
+            context: serde_json::json!({}),
+        };
+        let obs_id = obs.header.id.clone();
+        store.insert_observation(obs);
+
+        let insight = InsightRecord {
+            header: RecordHeader::new(RecordType::Insight, "test"),
+            category: InsightCategory::UnmetIntent,
+            signal: InsightSignal {
+                intent: "test insight".into(),
+                volume: 100, success_rate: 0.5,
+                trend: "stable".into(), growth_rate: None,
+            },
+            recommendation: "do something".into(),
+            priority_score: 0.7,
+        };
+        let insight_id = insight.header.id.clone();
+        store.insert_insight(insight);
+
+        let tmp = std::env::temp_dir().join("temper-store-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        store.save_to_directory(&tmp).unwrap();
+
+        assert!(tmp.join("observations").is_dir());
+        assert!(tmp.join("problems").is_dir());
+        assert!(tmp.join("analyses").is_dir());
+        assert!(tmp.join("decisions").is_dir());
+        assert!(tmp.join("insights").is_dir());
+
+        let obs_path = tmp.join("observations").join(format!("{obs_id}.json"));
+        assert!(obs_path.exists(), "Observation file should exist");
+        let content = std::fs::read_to_string(&obs_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["source"], "test-save");
+
+        let insight_path = tmp.join("insights").join(format!("{insight_id}.json"));
+        assert!(insight_path.exists(), "Insight file should exist");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

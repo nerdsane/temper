@@ -7,6 +7,8 @@
 //! - `cargo run -p ecommerce -- analyze` — trajectory analysis + evolution records
 
 mod agent;
+mod prompt_registry;
+mod sentinel;
 
 use std::collections::HashMap;
 
@@ -181,5 +183,11 @@ async fn run_server() {
     let addr = "0.0.0.0:3000";
     tracing::info!(addr, "OData v4 API listening");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    // Spawn sentinel if ClickHouse is configured
+    if let Ok(ch_url) = std::env::var("CLICKHOUSE_URL") {
+        let ch = ch_url.clone();
+        tokio::spawn(async move { sentinel::run_sentinel(&ch, 30).await });
+    }
+
     axum::serve(listener, app).await.unwrap();
 }

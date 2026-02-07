@@ -164,6 +164,12 @@ pub async fn handle_odata_post(
                 None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{set_name}' not found")).into_response(),
             };
 
+            // Cedar AuthZ check: verify the caller is authorized for this action
+            let authz_result = state.authorize(&[], &action, &entity_type, &std::collections::HashMap::new());
+            if let Err(reason) = authz_result {
+                return odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason).into_response();
+            }
+
             // REAL DISPATCH: send action to entity actor
             match state.dispatch_action(&entity_type, &key_str, &action, body_json).await {
                 Ok(response) => {
@@ -205,4 +211,13 @@ pub async fn handle_service_document(State(state): State<ServerState>) -> impl I
 /// Handle the OData `$metadata` request, returning the CSDL XML document.
 pub async fn handle_metadata(State(state): State<ServerState>) -> impl IntoResponse {
     ODataXmlResponse { body: state.csdl_xml.as_ref().clone() }
+}
+
+/// Handle the $hints endpoint, returning trajectory-learned agent hints as JSON.
+pub async fn handle_hints(State(state): State<ServerState>) -> impl IntoResponse {
+    let hints = state.agent_hints.read().unwrap().clone();
+    ODataResponse {
+        status: StatusCode::OK,
+        body: serde_json::to_value(&hints).unwrap_or_default(),
+    }
 }

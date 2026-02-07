@@ -8,6 +8,8 @@ use temper_jit::table::TransitionTable;
 use temper_runtime::actor::ActorRef;
 use temper_runtime::ActorSystem;
 use temper_spec::csdl::CsdlDocument;
+use temper_authz::{AuthzEngine, AuthzDecision, SecurityContext};
+use temper_observe::clickhouse::ClickHouseStore;
 use temper_store_postgres::PostgresEventStore;
 
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
@@ -29,6 +31,12 @@ pub struct ServerState {
     pub actor_registry: Arc<RwLock<HashMap<String, ActorRef<EntityMsg>>>>,
     /// Optional Postgres event store for persistence.
     pub event_store: Option<Arc<PostgresEventStore>>,
+    /// Agent hints learned from trajectory analysis, keyed by action name.
+    pub agent_hints: Arc<RwLock<HashMap<String, String>>>,
+    /// Optional ClickHouse store for Telemetry as Views emission.
+    pub clickhouse: Option<Arc<ClickHouseStore>>,
+    /// Cedar ABAC authorization engine.
+    pub authz: Arc<AuthzEngine>,
 }
 
 impl ServerState {
@@ -56,6 +64,9 @@ impl ServerState {
             transition_tables: Arc::new(HashMap::new()),
             actor_registry: Arc::new(RwLock::new(HashMap::new())),
             event_store: None,
+            agent_hints: Arc::new(RwLock::new(HashMap::new())),
+            clickhouse: None,
+            authz: Arc::new(AuthzEngine::permissive()),
         }
     }
 
@@ -84,6 +95,20 @@ impl ServerState {
         state
     }
 
+    /// Create ServerState with full infrastructure (Postgres + ClickHouse).
+    pub fn with_full_infra(
+        system: ActorSystem,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        tla_sources: HashMap<String, String>,
+        pg_store: PostgresEventStore,
+        ch_store: ClickHouseStore,
+    ) -> Self {
+        let mut state = Self::with_persistence(system, csdl, csdl_xml, tla_sources, pg_store);
+        state.clickhouse = Some(Arc::new(ch_store));
+        state
+    }
+
     /// Get or spawn an entity actor. Returns the ActorRef.
     pub fn get_or_spawn_actor(
         &self,
@@ -103,12 +128,15 @@ impl ServerState {
         // Get transition table for this entity type
         let table = self.transition_tables.get(entity_type)?;
 
-        // Spawn new actor — with persistence if store is configured
-        let actor = match &self.event_store {
-            Some(store) => EntityActor::with_persistence(
-                entity_type, entity_id, table.clone(), serde_json::json!({}), store.clone(),
+        // Spawn new actor — with available infrastructure
+        let actor = match (&self.event_store, &self.clickhouse) {
+            (Some(pg), Some(ch)) => EntityActor::with_full_infra(
+                entity_type, entity_id, table.clone(), serde_json::json!({}), pg.clone(), ch.clone(),
             ),
-            None => EntityActor::new(
+            (Some(pg), None) => EntityActor::with_persistence(
+                entity_type, entity_id, table.clone(), serde_json::json!({}), pg.clone(),
+            ),
+            _ => EntityActor::new(
                 entity_type, entity_id, table.clone(), serde_json::json!({}),
             ),
         };
@@ -121,6 +149,16 @@ impl ServerState {
         }
 
         Some(actor_ref)
+    }
+
+    /// Check authorization for an action using the Cedar ABAC engine.
+    pub fn authorize(&self, headers: &[(String, String)], action: &str, resource_type: &str, resource_attrs: &std::collections::HashMap<String, serde_json::Value>) -> Result<(), String> {
+        let ctx = SecurityContext::from_headers(headers);
+        let decision = self.authz.authorize_or_bypass(&ctx, action, resource_type, resource_attrs);
+        match decision {
+            AuthzDecision::Allow => Ok(()),
+            AuthzDecision::Deny(reason) => Err(format!("Authorization denied: {reason}")),
+        }
     }
 
     /// Dispatch an action to an entity actor and wait for the response.
@@ -161,5 +199,13 @@ impl ServerState {
             .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(5))
             .await
             .map_err(|e| format!("Actor query failed: {e}"))
+    }
+
+
+    /// Update Agent.Hint annotations based on trajectory analysis.
+    ///
+    /// Stores hints in a map keyed by action name. Served via /odata/$hints.
+    pub fn enrich_metadata(&self, action_name: &str, hint: &str) {
+        self.agent_hints.write().unwrap().insert(action_name.to_string(), hint.to_string());
     }
 }

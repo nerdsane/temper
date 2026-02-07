@@ -13,12 +13,14 @@ use crate::state::ServerState;
 /// Route structure:
 /// - GET  /odata                      → service document
 /// - GET  /odata/$metadata            → CSDL XML
+/// - GET  /odata/$hints               → agent hints JSON
 /// - GET  /odata/{*path}              → entity set / entity / navigation / function
 /// - POST /odata/{*path}              → create entity / bound action
 pub fn build_router(state: ServerState) -> Router {
     let odata = Router::new()
         .route("/", get(dispatch::handle_service_document))
         .route("/$metadata", get(dispatch::handle_metadata))
+        .route("/$hints", get(dispatch::handle_hints))
         .route("/{*path}", get(dispatch::handle_odata_get).post(dispatch::handle_odata_post));
 
     Router::new()
