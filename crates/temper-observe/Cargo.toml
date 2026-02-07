@@ -16,6 +16,8 @@ tracing-opentelemetry = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
 sqlx = { workspace = true }
 reqwest = { workspace = true }
 

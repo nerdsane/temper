@@ -24,6 +24,7 @@ pub mod schema;
 pub mod store;
 pub mod trajectory;
 pub mod clickhouse;
+pub mod wide_event;
 
 // Re-export the most commonly used types at the crate root.
 pub use error::ObserveError;
@@ -32,3 +33,4 @@ pub use schema::{LOG_COLUMNS, METRIC_COLUMNS, SPAN_COLUMNS};
 pub use store::{ObservabilityStore, ResultRow, ResultSet, SqlParam};
 pub use trajectory::{TrajectoryContext, TrajectoryOutcome};
 pub use clickhouse::{ClickHouseStore, SpanRecord, LogRecord, MetricRecord};
+pub use wide_event::{WideEvent, from_transition, project_to_metrics, project_to_span, project_to_log};

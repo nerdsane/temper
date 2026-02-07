@@ -3235,6 +3235,7 @@ dependencies = [
 name = "temper-observe"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -3247,6 +3248,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-opentelemetry",
+ "uuid",
 ]
 
 [[package]]
