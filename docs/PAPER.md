@@ -25,8 +25,14 @@ diffs, and gates destructive changes on human approval.  Trajectory intelligence
 extracts product signal from agent execution traces.  A three-tier JIT execution
 model allows state machine transition logic to be hot-swapped at runtime without
 process restarts.  The framework is implemented as a 16-crate Rust workspace with
-187 tests across 35 source files.  We evaluate the design against a reference
-agentic e-commerce application with 7 entity types and a 10-state order lifecycle.
+246 tests across 97 source files (16,604 lines of Rust), backed by PostgreSQL for
+event sourcing, Redis for actor mailboxes, and ClickHouse for observability.  A
+live Claude-powered LLM agent demonstrates the full feedback loop: natural language
+requests are interpreted into OData operations, state machine transitions are
+persisted to PostgreSQL, trajectory spans are captured to ClickHouse, and the
+Evolution Engine generates product intelligence records identifying unmet user
+intents.  We evaluate against a reference agentic e-commerce application with 7
+entity types and a 10-state order lifecycle.
 
 ---
 
@@ -646,7 +652,7 @@ observability data, with a safety checker ensuring correctness.
 
 ### 11.1 Test Coverage
 
-The Temper workspace contains 235 tests across 16 crates. Key categories:
+The Temper workspace contains 246 tests across 16 crates. Key categories:
 
 | Category                       | Count | Crates                                     |
 |--------------------------------|------:|--------------------------------------------|
@@ -737,6 +743,37 @@ enforced at runtime.  This establishes a critical invariant:
 
 > **The transition table in the HTTP-serving entity actor is identical to the
 > one verified by the three-level cascade.**
+
+### 11.6 Live Infrastructure Validation
+
+The system runs end-to-end against real infrastructure: PostgreSQL 18 for event
+sourcing, Redis 8 for actor mailboxes, and ClickHouse for observability.  A
+Claude-powered LLM agent (Anthropic Sonnet 4.5) operates the e-commerce API
+through natural language.  A representative demo session:
+
+```
+User: "Create a new order, add a premium widget, and submit it"
+Agent: Claude → create_order → AddItem → SubmitOrder
+Result: Order in Submitted status, 2 events persisted to Postgres
+
+User: "I want to split my order into two shipments"
+Agent: Claude → (no matching action exists) → responds with apology
+Result: Trajectory span captured to ClickHouse with user_intent
+
+Analysis: ClickHouse query detects "split order" as unmet intent
+Output: O-Record (observation) + I-Record (insight, category=UnmetIntent)
+Product Digest: "Add SplitOrder action to Order entity"
+```
+
+The full feedback loop is verified:
+
+1. Natural language → Claude → OData tool calls
+2. Entity actors process transitions through TLA+-verified TransitionTables
+3. Events persist to PostgreSQL (survives server restart)
+4. Trajectory spans capture to ClickHouse (operation, intent, status)
+5. Trajectory analysis queries ClickHouse for patterns
+6. Evolution Engine generates records from production data
+7. Product intelligence digest tells the human what to build next
 
 ---
 

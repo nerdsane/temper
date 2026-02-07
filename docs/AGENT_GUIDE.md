@@ -749,7 +749,32 @@ All three were found by DST tests before any HTTP request was made.
 
 ---
 
-## Appendix: CLI Reference
+## Appendix A: Infrastructure Setup
+
+```bash
+# Start Postgres, Redis, ClickHouse
+docker compose up -d
+
+# Copy environment template
+cp .env.example .env
+
+# Start server with persistence
+DATABASE_URL=postgres://temper:temper_dev@localhost:5432/temper cargo run -p ecommerce
+
+# Run the conversational agent (needs ANTHROPIC_API_KEY)
+cargo run -p ecommerce -- agent
+
+# Run a single agent command
+cargo run -p ecommerce -- agent "Create an order and submit it"
+
+# Run trajectory analysis
+CLICKHOUSE_URL=http://localhost:8123 cargo run -p ecommerce -- analyze
+
+# Run the full E2E demo
+./scripts/demo.sh
+```
+
+## Appendix B: CLI Reference
 
 ```
 temper init <name>              Create a new Temper project
@@ -758,3 +783,13 @@ temper codegen [--specs-dir DIR] [--output-dir DIR]
 temper verify [--specs-dir DIR] Run 3-level verification cascade
 temper serve [--port PORT]      Start development server (default: 3000)
 ```
+
+## Appendix C: Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | For persistence | Postgres connection string |
+| `REDIS_URL` | For caching | Redis connection string |
+| `CLICKHOUSE_URL` | For trajectories | ClickHouse HTTP endpoint |
+| `ANTHROPIC_API_KEY` | For agent mode | Claude API key |
+| `RUST_LOG` | No | Log level (default: `info,temper=debug`) |
