@@ -665,10 +665,12 @@ name = "ecommerce"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "reqwest",
  "serde",
  "serde_json",
  "sqlx",
+ "temper-observe",
  "temper-runtime",
  "temper-server",
  "temper-spec",
