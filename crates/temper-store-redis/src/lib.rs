@@ -12,3 +12,9 @@ pub mod mailbox;
 pub mod placement;
 pub mod cache;
 pub mod error;
+
+// Re-export primary types at crate root.
+pub use error::RedisStoreError;
+pub use mailbox::{MailboxEntry, MailboxStore, InMemoryMailbox};
+pub use placement::{Placement, PlacementStore, InMemoryPlacement};
+pub use cache::{CacheStore, InMemoryCache};
