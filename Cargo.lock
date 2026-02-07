@@ -2969,6 +2969,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "stateright",
  "temper-runtime",
  "temper-spec",
  "temper-verify",
@@ -3051,6 +3052,7 @@ dependencies = [
  "hyper",
  "serde",
  "serde_json",
+ "temper-jit",
  "temper-odata",
  "temper-runtime",
  "temper-spec",

@@ -42,6 +42,16 @@ mod tests {
         ServerState::new(system, csdl, csdl_xml.to_string())
     }
 
+    fn test_state_with_tla() -> ServerState {
+        let csdl_xml = include_str!("../../../reference/ecommerce/specs/model.csdl.xml");
+        let order_tla = include_str!("../../../reference/ecommerce/specs/order.tla");
+        let csdl = parse_csdl(csdl_xml).unwrap();
+        let system = ActorSystem::new("test-tla");
+        let mut tla = std::collections::HashMap::new();
+        tla.insert("Order".to_string(), order_tla.to_string());
+        ServerState::with_tla(system, csdl, csdl_xml.to_string(), tla)
+    }
+
     #[tokio::test]
     async fn test_service_document() {
         let app = build_router(test_state());
@@ -143,7 +153,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_bound_action() {
-        let app = build_router(test_state());
+        let app = build_router(test_state_with_tla());
         let response = app
             .oneshot(
                 Request::post("/odata/Orders('abc-123')/Temper.Ecommerce.CancelOrder")
@@ -154,11 +164,11 @@ mod tests {
             .await
             .unwrap();
 
+        // Real dispatch: CancelOrder from Draft → Cancelled (200 OK)
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["action"], "CancelOrder");
-        assert_eq!(json["status"], "dispatched");
+        assert_eq!(json["status"], "Cancelled");
     }
 
     #[tokio::test]

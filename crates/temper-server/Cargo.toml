@@ -10,6 +10,7 @@ description = "HTTP server assembly for Temper entity services"
 temper-runtime = { workspace = true }
 temper-odata = { workspace = true }
 temper-spec = { workspace = true }
+temper-jit = { workspace = true }
 axum = { workspace = true }
 hyper = { workspace = true }
 tower = { workspace = true }

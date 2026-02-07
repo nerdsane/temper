@@ -54,19 +54,19 @@ impl fmt::Display for TemperModelAction {
 /// A resolved transition used internally by the model, pre-computed from a
 /// TLA+ `Transition` for efficient matching during state exploration.
 #[derive(Clone, Debug)]
-struct ResolvedTransition {
+pub struct ResolvedTransition {
     /// The action name.
-    name: String,
+    pub name: String,
     /// States from which this transition can fire.
-    from_states: Vec<String>,
+    pub from_states: Vec<String>,
     /// The target state (if deterministic).
-    to_state: Option<String>,
+    pub to_state: Option<String>,
     /// Whether this transition modifies the item count.
-    modifies_items: bool,
+    pub modifies_items: bool,
     /// Whether this is an "add item" action (increments counter).
-    is_add_item: bool,
+    pub is_add_item: bool,
     /// Whether this transition requires item_count > 0 to fire.
-    requires_items: bool,
+    pub requires_items: bool,
 }
 
 /// The kind of check an invariant performs.
@@ -104,7 +104,7 @@ pub struct TemperModel {
     /// All valid status values from the specification.
     pub states: Vec<String>,
     /// Pre-resolved transitions.
-    transitions: Vec<ResolvedTransition>,
+    pub transitions: Vec<ResolvedTransition>,
     /// Pre-resolved safety invariants (accessible to property fn pointers via &self).
     pub invariants: Vec<ResolvedInvariant>,
     /// The initial status (first state from Init, typically "Draft").
@@ -507,9 +507,10 @@ fn resolve_transitions(
     sm.transitions
         .iter()
         .filter(|t| {
-            // Filter out guard definitions (CanXxx). These are predicate
-            // definitions in TLA+, not actual transitions.
-            !t.name.starts_with("Can")
+            // Filter out guard definitions (CanXxx without parameters).
+            // Guards: CanSubmit, CanCancel (no parens in original TLA+)
+            // NOT guards: CancelOrder (has parameters, is a real action)
+            !(t.name.starts_with("Can") && !t.has_parameters)
         })
         .map(|t| {
             let name_lower = t.name.to_lowercase();
@@ -863,5 +864,19 @@ mod tests {
             !props.is_empty(),
             "Model should have at least one property"
         );
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+    const ORDER_TLA: &str = include_str!("../../../reference/ecommerce/specs/order.tla");
+
+    #[test]
+    fn debug_resolved_transitions() {
+        let model = build_model_from_tla(ORDER_TLA, 2);
+        for t in &model.transitions {
+            eprintln!("{}: from={:?} to={:?} requires_items={}", t.name, t.from_states, t.to_state, t.requires_items);
+        }
     }
 }

@@ -12,7 +12,7 @@ pub mod simulation;
 pub mod proptest_gen;
 
 // Re-export key types.
-pub use model::{TemperModel, TemperModelState, TemperModelAction, build_model, build_model_from_tla};
+pub use model::{TemperModel, TemperModelState, TemperModelAction, ResolvedTransition, build_model, build_model_from_tla};
 pub use checker::{VerificationResult, check_model};
 pub use cascade::{VerificationCascade, CascadeResult, CascadeLevel, LevelResult};
 pub use simulation::{SimConfig, SimulationResult, run_simulation, run_multi_seed_simulation};

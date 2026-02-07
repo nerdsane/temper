@@ -10,6 +10,7 @@ description = "JIT compilation and query optimization for Temper entity operatio
 temper-runtime = { workspace = true }
 temper-spec = { workspace = true }
 temper-verify = { workspace = true }
+stateright = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

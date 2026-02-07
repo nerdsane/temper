@@ -5,6 +5,7 @@
 //! at runtime without any compiled transition logic.
 
 use serde::{Deserialize, Serialize};
+use stateright::Model as _;
 use temper_spec::tlaplus::StateMachine;
 
 // ---------------------------------------------------------------------------
@@ -160,6 +161,68 @@ impl TransitionTable {
         TransitionTable {
             entity_name: sm.module_name.clone(),
             states: sm.states.clone(),
+            initial_state,
+            rules,
+        }
+    }
+
+    /// Build a TransitionTable from raw TLA+ source with full guard resolution.
+    ///
+    /// This resolves `CanXxx` predicates by parsing their definitions from the
+    /// source, producing correct `from_states` and `requires_items` constraints.
+    /// This is the constructor that should be used in production — it matches
+    /// what the Stateright model checker and DST simulation verify.
+    pub fn from_tla_source(tla_source: &str) -> Self {
+        let model: temper_verify::TemperModel = temper_verify::build_model_from_tla(tla_source, 3);
+
+        // Build transition rules directly from the verified model's resolved transitions.
+        // These have correct from_states and requires_items from CanXxx guard resolution.
+        let rules: Vec<TransitionRule> = model.transitions.iter().map(|rt| {
+            let mut effects: Vec<Effect> = Vec::new();
+            if let Some(ref target) = rt.to_state {
+                effects.push(Effect::SetState(target.clone()));
+            }
+            if rt.is_add_item {
+                effects.push(Effect::IncrementItems);
+            }
+            if rt.modifies_items && !rt.is_add_item {
+                effects.push(Effect::DecrementItems);
+            }
+            effects.push(Effect::EmitEvent(rt.name.clone()));
+
+            // Build guard from resolved constraints
+            let mut guards = vec![];
+            if !rt.from_states.is_empty() {
+                guards.push(Guard::StateIn(rt.from_states.clone()));
+            }
+            if rt.requires_items {
+                guards.push(Guard::ItemCountMin(1));
+            }
+
+            let guard = match guards.len() {
+                0 => Guard::Always,
+                1 => guards.into_iter().next().unwrap(),
+                _ => Guard::And(guards),
+            };
+
+            TransitionRule {
+                name: rt.name.clone(),
+                from_states: rt.from_states.clone(),
+                to_state: rt.to_state.clone(),
+                guard,
+                effects,
+            }
+        }).collect();
+
+        let initial_state = if model.states.contains(&"Draft".to_string()) {
+            "Draft".to_string()
+        } else {
+            model.states.first().cloned().unwrap_or_default()
+        };
+
+        TransitionTable {
+            entity_name: "Entity".to_string(),
+            states: model.states.clone(),
             initial_state,
             rules,
         }
@@ -470,4 +533,21 @@ mod tests {
         let r = table.evaluate("Shipped", 1, "CancelOrder").unwrap();
         assert!(!r.success);
     }
+}
+
+#[test]
+fn debug_tla_table() {
+    let tla = include_str!("../../../reference/ecommerce/specs/order.tla");
+    let table = TransitionTable::from_tla_source(tla);
+    for rule in &table.rules {
+        eprintln!("{}: from_states={:?} to={:?} guard={:?}", rule.name, rule.from_states, rule.to_state, rule.guard);
+    }
+    // Find CancelOrder
+    let cancel = table.rules.iter().find(|r| r.name == "CancelOrder");
+    eprintln!("\nCancelOrder: {:?}", cancel);
+    // Try evaluate
+    let r = table.evaluate("Draft", 0, "CancelOrder");
+    eprintln!("Evaluate Draft+CancelOrder: {:?}", r);
+    let r = table.evaluate("Shipped", 1, "CancelOrder");
+    eprintln!("Evaluate Shipped+CancelOrder: {:?}", r);
 }

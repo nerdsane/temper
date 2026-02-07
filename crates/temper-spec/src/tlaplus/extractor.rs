@@ -223,17 +223,19 @@ fn extract_transitions(source: &str, states: &[String]) -> Vec<Transition> {
                 ));
             }
 
-            // Extract action name
+            // Extract action name — keep the raw name_part (with parens) so
+            // build_transition can detect has_parameters correctly
             let name_part = trimmed.split("==").next().unwrap_or("").trim();
-            let name = name_part
+            let clean_name = name_part
                 .split('(')
                 .next()
                 .unwrap_or(name_part)
                 .trim()
                 .to_string();
 
-            if !name.is_empty() && name.chars().next().map_or(false, |c| c.is_uppercase()) {
-                current_action = Some(name);
+            if !clean_name.is_empty() && clean_name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                // Store the raw name_part (e.g., "CancelOrder(reason)") so has_parameters works
+                current_action = Some(name_part.to_string());
                 current_guard.clear();
                 current_effect.clear();
                 in_action = true;
@@ -310,7 +312,14 @@ fn build_transition(
 ) -> Transition {
     let from_states = extract_from_states(guard, states);
     let to_state = extract_to_state(effect, states);
-    let has_parameters = name.contains('(');
+    // Check if the raw action definition had parameters by looking for
+    // parenthesized patterns in the guard (e.g., "CancelOrder(reason)")
+    // Since the name may already be cleaned, also check the guard for param patterns
+    let has_parameters = name.contains('(')
+        || guard.contains("\\E reason \\in")
+        || guard.contains("\\E item \\in")
+        || effect.contains("reason'")
+        || effect.contains("return_reason'");
     let clean_name = name.split('(').next().unwrap_or(name).to_string();
 
     Transition {
@@ -605,5 +614,20 @@ States == {"Active", "Inactive", "Deleted"}
 "#;
         let states = extract_states(source).unwrap();
         assert_eq!(states, vec!["Active", "Inactive", "Deleted"]);
+    }
+}
+
+#[cfg(test)]
+mod debug {
+    use super::*;
+    #[test]
+    fn debug_cancel() {
+        let tla = include_str!("../../../../reference/ecommerce/specs/order.tla");
+        let sm = extract_state_machine(tla).unwrap();
+        for t in &sm.transitions {
+            if t.name.contains("Cancel") || t.name.contains("Initiate") {
+                eprintln!("{}: from={:?} to={:?} has_params={}", t.name, t.from_states, t.to_state, t.has_parameters);
+            }
+        }
     }
 }
