@@ -1,8 +1,8 @@
 //! Agent orchestrator: interprets user requests via Claude, executes OData actions.
 
+use opentelemetry::trace::{Span, Tracer};
+use opentelemetry::KeyValue;
 use serde_json::Value;
-
-use temper_observe::clickhouse::{ClickHouseStore, SpanRecord};
 
 use super::claude::{self, Message};
 use super::client::TemperClient;
@@ -53,8 +53,6 @@ pub struct CustomerAgent {
     trace_id: String,
     /// Current turn number.
     turn_number: u32,
-    /// Optional ClickHouse store for trajectory capture.
-    clickhouse: Option<ClickHouseStore>,
 }
 
 impl CustomerAgent {
@@ -68,19 +66,12 @@ impl CustomerAgent {
             last_order_id: None,
             trace_id: uuid::Uuid::now_v7().to_string(),
             turn_number: 0,
-            clickhouse: None,
         }
-    }
-
-    /// Enable trajectory capture to ClickHouse.
-    pub fn set_clickhouse(&mut self, url: &str) {
-        self.clickhouse = Some(ClickHouseStore::new(url));
     }
 
     /// Process a user request. Returns the agent's response.
     pub async fn handle(&mut self, user_input: &str) -> String {
         self.turn_number += 1;
-        let turn = self.turn_number;
         let start = chrono::Utc::now();
 
         self.conversation.push(Message {
@@ -131,7 +122,7 @@ impl CustomerAgent {
                         content: response,
                     });
                     let elapsed = (chrono::Utc::now() - start).num_nanoseconds().unwrap_or(0) as u64;
-                    self.record_span("trajectory.complete", "ok", elapsed, user_input).await;
+                    self.record_span("trajectory.complete", "ok", elapsed, user_input);
                     return msg;
                 }
 
@@ -151,7 +142,7 @@ impl CustomerAgent {
                         self.last_order_id = Some(id.clone());
                     }
                     let status = if result.is_ok() { "ok" } else { "error" };
-                    self.record_span("odata.POST.CreateOrder", status, 0, user_input).await;
+                    self.record_span("odata.POST.CreateOrder", status, 0, user_input);
                     self.feed_tool_result(&response, &result_text);
                 }
 
@@ -260,32 +251,20 @@ impl CustomerAgent {
         });
     }
 
-    /// Record a trajectory span in ClickHouse (if configured).
-    async fn record_span(&self, operation: &str, status: &str, duration_ns: u64, user_intent: &str) {
-        let Some(ref ch) = self.clickhouse else { return };
-
-        // ClickHouse DateTime64 needs "YYYY-MM-DD HH:MM:SS" format (no T, no timezone)
-        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        let span = SpanRecord {
-            trace_id: self.trace_id.clone(),
-            span_id: uuid::Uuid::now_v7().to_string(),
-            parent_span_id: None,
-            service: "temper-agent".into(),
-            operation: operation.into(),
-            status: status.into(),
-            duration_ns,
-            start_time: now.clone(),
-            end_time: now,
-            attributes: serde_json::json!({
-                "turn": self.turn_number,
-                "user_intent": user_intent,
-                "order_id": self.last_order_id,
-            }).to_string(),
-        };
-
-        if let Err(e) = ch.insert_span(&span).await {
-            tracing::warn!(error = %e, "failed to record trajectory span");
-        }
+    /// Record a trajectory span via the OTEL global tracer.
+    fn record_span(&self, operation: &str, status: &str, duration_ns: u64, user_intent: &str) {
+        let tracer = opentelemetry::global::tracer("temper-agent");
+        let mut span = tracer.span_builder(operation.to_string())
+            .with_attributes(vec![
+                KeyValue::new("turn", self.turn_number as i64),
+                KeyValue::new("user_intent", user_intent.to_string()),
+                KeyValue::new("order_id", self.last_order_id.clone().unwrap_or_default()),
+                KeyValue::new("trace_id", self.trace_id.clone()),
+                KeyValue::new("status", status.to_string()),
+                KeyValue::new("duration_ns", duration_ns as i64),
+            ])
+            .start(&tracer);
+        span.end();
     }
 }
 

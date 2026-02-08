@@ -23,7 +23,6 @@
 use std::sync::Arc;
 
 use temper_jit::table::TransitionTable;
-use temper_observe::clickhouse::ClickHouseStore;
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
@@ -35,7 +34,8 @@ use super::types::{
 };
 
 /// The entity actor -- processes actions through a TransitionTable.
-/// Optionally persists events to PostgreSQL and emits wide events to ClickHouse.
+/// Optionally persists events to PostgreSQL. Wide events are emitted
+/// via the OTEL SDK (no-op when OTEL is not initialised).
 pub struct EntityActor {
     entity_type: String,
     entity_id: String,
@@ -43,8 +43,6 @@ pub struct EntityActor {
     initial_fields: serde_json::Value,
     /// Optional event store for persistence. None = in-memory only.
     event_store: Option<Arc<PostgresEventStore>>,
-    /// Optional ClickHouse store for Telemetry as Views emission.
-    clickhouse: Option<Arc<ClickHouseStore>>,
     /// Trace ID for correlating all events from this actor.
     trace_id: String,
 }
@@ -63,7 +61,6 @@ impl EntityActor {
             table,
             initial_fields,
             event_store: None,
-            clickhouse: None,
             trace_id: uuid::Uuid::now_v7().to_string(),
         }
     }
@@ -82,27 +79,6 @@ impl EntityActor {
             table,
             initial_fields,
             event_store: Some(store),
-            clickhouse: None,
-            trace_id: uuid::Uuid::now_v7().to_string(),
-        }
-    }
-
-    /// Create a new entity actor with full infrastructure (Postgres + ClickHouse).
-    pub fn with_full_infra(
-        entity_type: impl Into<String>,
-        entity_id: impl Into<String>,
-        table: Arc<TransitionTable>,
-        initial_fields: serde_json::Value,
-        pg_store: Arc<PostgresEventStore>,
-        ch_store: Arc<ClickHouseStore>,
-    ) -> Self {
-        Self {
-            entity_type: entity_type.into(),
-            entity_id: entity_id.into(),
-            table,
-            initial_fields,
-            event_store: Some(pg_store),
-            clickhouse: Some(ch_store),
             trace_id: uuid::Uuid::now_v7().to_string(),
         }
     }
@@ -302,25 +278,14 @@ impl Actor for EntityActor {
                             Self::persist_event(store, &self.persistence_id(), state, &event).await;
                         }
 
-                        // Telemetry as Views: emit wide event → metrics + span to ClickHouse
-                        if let Some(ref ch) = self.clickhouse {
-                            let wide = wide_event::from_transition(
-                                &state.entity_type, &state.entity_id, &name,
-                                &event.from_status, &state.status, true, 0,
-                                &event.params, state.item_count, &self.trace_id,
-                            );
-                            let span = wide_event::project_to_span(&wide);
-                            let metrics = wide_event::project_to_metrics(&wide);
-
-                            if let Err(e) = ch.insert_span(&span).await {
-                                tracing::warn!(error = %e, "failed to emit span to ClickHouse");
-                            }
-                            for metric in &metrics {
-                                if let Err(e) = ch.insert_metric(metric).await {
-                                    tracing::warn!(error = %e, "failed to emit metric to ClickHouse");
-                                }
-                            }
-                        }
+                        // Telemetry as Views: emit wide event → OTEL span + metrics
+                        let wide = wide_event::from_transition(
+                            &state.entity_type, &state.entity_id, &name,
+                            &event.from_status, &state.status, true, 0,
+                            &event.params, state.item_count, &self.trace_id,
+                        );
+                        wide_event::emit_span(&wide);
+                        wide_event::emit_metrics(&wide);
 
                         state.events.push(event);
 

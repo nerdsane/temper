@@ -1,55 +1,21 @@
 //! ClickHouse adapter for the [`ObservabilityStore`] trait.
 //!
 //! Queries ClickHouse via its HTTP API and maps results into [`ResultSet`].
+//! Write path is handled by OTEL SDK + OTLP export; this module is query-only.
 
 use std::collections::HashMap;
-
-use serde::{Deserialize, Serialize};
 
 use crate::error::ObserveError;
 use crate::store::{ObservabilityStore, ResultRow, ResultSet, SqlParam};
 
-/// A span record matching the ClickHouse `spans` table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpanRecord {
-    pub trace_id: String,
-    pub span_id: String,
-    pub parent_span_id: Option<String>,
-    pub service: String,
-    pub operation: String,
-    pub status: String,
-    pub duration_ns: u64,
-    pub start_time: String,
-    pub end_time: String,
-    pub attributes: String,
-}
-
-/// A log record matching the ClickHouse `logs` table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogRecord {
-    pub timestamp: String,
-    pub level: String,
-    pub service: String,
-    pub message: String,
-    pub attributes: String,
-}
-
-/// A metric record matching the ClickHouse `metrics` table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetricRecord {
-    pub metric_name: String,
-    pub timestamp: String,
-    pub value: f64,
-    pub tags: String,
-}
-
-/// ClickHouse implementation of [`ObservabilityStore`].
+/// ClickHouse implementation of [`ObservabilityStore`] (query-only).
 pub struct ClickHouseStore {
     base_url: String,
     client: reqwest::Client,
 }
 
 impl ClickHouseStore {
+    /// Create a new ClickHouse store pointing at the given HTTP API base URL.
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
@@ -57,6 +23,7 @@ impl ClickHouseStore {
         }
     }
 
+    /// Return the configured base URL.
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -97,51 +64,6 @@ impl ClickHouseStore {
         }
 
         parse_json_each_row(&body)
-    }
-
-    async fn execute_insert(&self, sql: &str) -> Result<(), ObserveError> {
-        let resp = self.client.post(&self.query_url())
-            .body(sql.to_string())
-            .send().await
-            .map_err(|e| ObserveError::ConnectionError(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ObserveError::ProviderError(format!("ClickHouse INSERT failed: {body}")));
-        }
-        Ok(())
-    }
-
-    /// Insert a span into ClickHouse.
-    pub async fn insert_span(&self, span: &SpanRecord) -> Result<(), ObserveError> {
-        let parent = span.parent_span_id.as_deref()
-            .map(|p| format!("'{}'", p.replace('\'', "''")))
-            .unwrap_or_else(|| "NULL".into());
-        let sql = format!(
-            "INSERT INTO spans VALUES ('{}','{}',{},'{}','{}','{}',{},'{}','{}','{}')",
-            span.trace_id, span.span_id, parent, span.service, span.operation,
-            span.status, span.duration_ns, span.start_time, span.end_time, span.attributes,
-        );
-        self.execute_insert(&sql).await
-    }
-
-    /// Insert a log into ClickHouse.
-    pub async fn insert_log(&self, log: &LogRecord) -> Result<(), ObserveError> {
-        let sql = format!(
-            "INSERT INTO logs VALUES ('{}','{}','{}','{}','{}')",
-            log.timestamp, log.level, log.service,
-            log.message.replace('\'', "''"), log.attributes,
-        );
-        self.execute_insert(&sql).await
-    }
-
-    /// Insert a metric into ClickHouse.
-    pub async fn insert_metric(&self, metric: &MetricRecord) -> Result<(), ObserveError> {
-        let sql = format!(
-            "INSERT INTO metrics VALUES ('{}','{}',{},'{}')",
-            metric.metric_name, metric.timestamp, metric.value, metric.tags,
-        );
-        self.execute_insert(&sql).await
     }
 }
 
@@ -228,17 +150,5 @@ mod tests {
         let body = "{\"a\":1}\n{\"a\":2}";
         let rs = parse_json_each_row(body).unwrap();
         assert_eq!(rs.len(), 2);
-    }
-
-    #[test]
-    fn test_span_record_serialize() {
-        let span = SpanRecord {
-            trace_id: "t1".into(), span_id: "s1".into(), parent_span_id: None,
-            service: "api".into(), operation: "GET".into(), status: "ok".into(),
-            duration_ns: 1000, start_time: "2025-01-01T00:00:00Z".into(),
-            end_time: "2025-01-01T00:00:01Z".into(), attributes: "{}".into(),
-        };
-        let json = serde_json::to_value(&span).unwrap();
-        assert_eq!(json["trace_id"], "t1");
     }
 }

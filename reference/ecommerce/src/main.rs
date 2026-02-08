@@ -26,6 +26,17 @@ async fn main() {
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,temper=debug".into()))
         .init();
 
+    // Initialise OTEL tracing if OTLP_ENDPOINT is set
+    let _otel_guard = std::env::var("OTLP_ENDPOINT").ok().and_then(|endpoint| {
+        match temper_observe::otel::init_tracing(&endpoint, "temper-ecommerce") {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to initialise OTEL tracing");
+                None
+            }
+        }
+    });
+
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() >= 2 && args[1] == "agent" {
@@ -44,7 +55,6 @@ async fn main() {
 async fn run_agent_single(prompt: &str) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY required");
     let mut agent = agent::CustomerAgent::new("http://localhost:3000", &api_key);
-    if let Ok(ch) = std::env::var("CLICKHOUSE_URL") { agent.set_clickhouse(&ch); }
     let response = agent.handle(prompt).await;
     println!("\nAgent: {response}");
 }
@@ -52,7 +62,6 @@ async fn run_agent_single(prompt: &str) {
 async fn run_agent_interactive() {
     let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY required");
     let mut agent = agent::CustomerAgent::new("http://localhost:3000", &api_key);
-    if let Ok(ch) = std::env::var("CLICKHOUSE_URL") { agent.set_clickhouse(&ch); }
 
     println!("Temper E-Commerce Agent (type 'quit' to exit)");
     println!("Server must be running on localhost:3000\n");
@@ -76,7 +85,7 @@ async fn run_analysis() {
     use temper_observe::ObservabilityStore as _;
     use temper_evolution::{
         RecordHeader, RecordType, ObservationRecord, ObservationClass,
-        InsightRecord, InsightCategory, InsightSignal,
+        InsightRecord, InsightSignal,
         RecordStore, compute_priority_score, classify_insight, generate_digest,
     };
 

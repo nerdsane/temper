@@ -387,7 +387,7 @@ The server exposes OData v4 endpoints:
 }
 ```
 
-The `events` array is the entity's full audit trail — every state transition with timestamps and parameters. Events are persisted to Postgres (when `DATABASE_URL` is set) and projected as metrics + spans to ClickHouse (when `CLICKHOUSE_URL` is set) via Telemetry as Views.
+The `events` array is the entity's full audit trail — every state transition with timestamps and parameters. Events are persisted to Postgres (when `DATABASE_URL` is set) and emitted as OTEL spans + metrics via Telemetry as Views (when `OTLP_ENDPOINT` is set). The OTEL SDK exports to any OTLP-compatible backend (ClickHouse, Datadog, Grafana, Jaeger).
 
 ### OData Query Examples
 
@@ -450,13 +450,16 @@ Every `EntityEvent` is automatically converted to a `WideEvent` with three field
 - **Attributes** (high-cardinality, contextual only): `entity_id`, `params`, `from_status`
 - **Measurements** (numeric, aggregated in metrics): `transition_count`, `duration_ms`, `item_count`
 
-The platform then projects:
+The platform then projects via the OTEL SDK:
 ```
 Actor Transition → WideEvent
-    ├── project_to_metrics() → temper.SubmitOrder.duration_ms{entity_type=Order,operation=SubmitOrder}
-    │                          + exemplar.trace_id linking back to the trace
-    └── project_to_span()   → full detail: entity_id, params, from_status, measurements
+    ├── emit_metrics() → OTEL Meter → OTLP exporter → any backend
+    │    temper.SubmitOrder.duration_ms{entity_type=Order,operation=SubmitOrder}
+    └── emit_span()    → OTEL Tracer → OTLP exporter → any backend
+         Order.SubmitOrder span with entity_id, params, from_status, measurements
 ```
+
+When OTEL is not initialized (e.g., tests or local dev without `OTLP_ENDPOINT`), the global no-op tracer/meter silently discards data — no conditional logic needed.
 
 ### Cost Decoupling
 
@@ -778,22 +781,24 @@ All three were found by DST tests before any HTTP request was made.
 ## Appendix A: Infrastructure Setup
 
 ```bash
-# Start Postgres, Redis, ClickHouse
+# Start Postgres, Redis, ClickHouse, OTEL Collector
 docker compose up -d
 
 # Copy environment template
 cp .env.example .env
 
-# Start server with persistence
-DATABASE_URL=postgres://temper:temper_dev@localhost:5432/temper cargo run -p ecommerce
+# Start server with persistence + OTEL telemetry
+DATABASE_URL=postgres://temper:temper_dev@localhost:5432/temper \
+OTLP_ENDPOINT=http://localhost:4318 \
+cargo run -p ecommerce
 
 # Run the conversational agent (needs ANTHROPIC_API_KEY)
-cargo run -p ecommerce -- agent
+OTLP_ENDPOINT=http://localhost:4318 cargo run -p ecommerce -- agent
 
 # Run a single agent command
-cargo run -p ecommerce -- agent "Create an order and submit it"
+OTLP_ENDPOINT=http://localhost:4318 cargo run -p ecommerce -- agent "Create an order and submit it"
 
-# Run trajectory analysis
+# Run trajectory analysis (reads from ClickHouse)
 CLICKHOUSE_URL=http://localhost:8123 cargo run -p ecommerce -- analyze
 
 # Run the full E2E demo
@@ -816,6 +821,7 @@ temper serve [--port PORT]      Start development server (default: 3000)
 |----------|----------|-------------|
 | `DATABASE_URL` | For persistence | Postgres connection string |
 | `REDIS_URL` | For caching | Redis connection string |
-| `CLICKHOUSE_URL` | For trajectories | ClickHouse HTTP endpoint |
+| `OTLP_ENDPOINT` | For telemetry export | OTLP collector base URL (e.g., `http://localhost:4318`) |
+| `CLICKHOUSE_URL` | For analysis queries | ClickHouse HTTP endpoint (read path for trajectory analysis) |
 | `ANTHROPIC_API_KEY` | For agent mode | Claude API key |
 | `RUST_LOG` | No | Log level (default: `info,temper=debug`) |

@@ -20,6 +20,7 @@
 
 pub mod error;
 pub mod memory;
+pub mod otel;
 pub mod schema;
 pub mod store;
 pub mod trajectory;
@@ -32,5 +33,5 @@ pub use memory::InMemoryStore;
 pub use schema::{LOG_COLUMNS, METRIC_COLUMNS, SPAN_COLUMNS};
 pub use store::{ObservabilityStore, ResultRow, ResultSet, SqlParam};
 pub use trajectory::{TrajectoryContext, TrajectoryOutcome};
-pub use clickhouse::{ClickHouseStore, SpanRecord, LogRecord, MetricRecord};
-pub use wide_event::{WideEvent, from_transition, project_to_metrics, project_to_span, project_to_log};
+pub use clickhouse::ClickHouseStore;
+pub use wide_event::{WideEvent, from_transition, emit_span, emit_metrics};

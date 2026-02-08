@@ -27,9 +27,9 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use opentelemetry::trace::{Span, Status, Tracer};
+use opentelemetry::KeyValue;
 use serde::{Deserialize, Serialize};
-
-use crate::clickhouse::{LogRecord, MetricRecord, SpanRecord};
 
 /// A wide event: the unified telemetry primitive emitted by entity actors.
 ///
@@ -142,82 +142,77 @@ pub fn from_transition(
 }
 
 // =========================================================================
-// View Projections
+// View Projections → OTEL SDK
 // =========================================================================
 
-/// Project to the **Aggregated View** (metrics).
+/// Project to the **Contextual View** (OTEL span).
 ///
-/// Extracts measurements + tags only. Attributes are discarded.
-/// Each measurement becomes a metric data point with low-cardinality tags.
-/// Exemplar trace_id links each point back to the full contextual event.
-pub fn project_to_metrics(event: &WideEvent) -> Vec<MetricRecord> {
-    let ch_ts = event.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
+/// Includes EVERYTHING: measurements, tags, attributes.
+/// If OTEL is not initialised the global no-op tracer silently discards.
+pub fn emit_span(event: &WideEvent) {
+    let tracer = opentelemetry::global::tracer("temper");
+    let span_name = format!("{}.{}", event.entity_type, event.operation);
 
-    event.measurements.iter().map(|(name, value)| {
+    // Build attributes: tags + high-cardinality attrs + measurements
+    let mut attrs: Vec<KeyValue> = Vec::new();
+
+    // Tags (low-cardinality)
+    for (k, v) in &event.tags {
+        attrs.push(KeyValue::new(k.clone(), v.clone()));
+    }
+
+    // Attributes (high-cardinality contextual data)
+    for (k, v) in &event.attributes {
+        attrs.push(KeyValue::new(k.clone(), v.to_string()));
+    }
+
+    // Measurements as span attributes (raw values)
+    for (k, v) in &event.measurements {
+        attrs.push(KeyValue::new(k.clone(), *v));
+    }
+
+    // Correlation IDs
+    attrs.push(KeyValue::new("temper.trace_id", event.trace_id.clone()));
+    attrs.push(KeyValue::new("temper.span_id", event.span_id.clone()));
+    attrs.push(KeyValue::new("temper.from_status", event.from_status.clone()));
+    attrs.push(KeyValue::new("temper.to_status", event.to_status.clone()));
+
+    let status = if event.success {
+        Status::Ok
+    } else {
+        Status::error(String::new())
+    };
+
+    let mut span = tracer.span_builder(span_name)
+        .with_attributes(attrs)
+        .start(&tracer);
+
+    span.set_status(status);
+    span.end();
+}
+
+/// Project to the **Aggregated View** (OTEL metrics).
+///
+/// Records measurements via counters/histograms. Only low-cardinality
+/// tags are used as metric attributes — high-cardinality attributes are
+/// excluded to avoid bill shock.
+///
+/// If OTEL is not initialised the global no-op meter silently discards.
+pub fn emit_metrics(event: &WideEvent) {
+    let meter = opentelemetry::global::meter("temper");
+
+    // Low-cardinality tag attributes only (the cost decoupling)
+    let tag_attrs: Vec<KeyValue> = event.tags.iter()
+        .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
+        .collect();
+
+    // Each measurement becomes a separate metric data point
+    for (name, value) in &event.measurements {
         let metric_name = format!("temper.{}.{}", event.operation, name);
 
-        // Tags go into the metric — these are low-cardinality, safe for aggregation
-        let mut metric_tags = event.tags.clone();
-        // Add exemplar link: the trace_id lets you jump from metric → trace
-        metric_tags.insert("exemplar.trace_id".into(), event.trace_id.clone());
-
-        MetricRecord {
-            metric_name,
-            timestamp: ch_ts.clone(),
-            value: *value,
-            tags: serde_json::to_string(&metric_tags).unwrap_or_default(),
-        }
-    }).collect()
-}
-
-/// Project to the **Contextual View** (span).
-///
-/// Includes EVERYTHING: measurements, tags, attributes, messages.
-/// This is the full-detail view for debugging, investigation, and trajectory analysis.
-pub fn project_to_span(event: &WideEvent) -> SpanRecord {
-    let ch_ts = event.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
-
-    // Merge all context into attributes
-    let mut all_attrs = serde_json::Map::new();
-    for (k, v) in &event.tags {
-        all_attrs.insert(k.clone(), serde_json::json!(v));
-    }
-    for (k, v) in &event.attributes {
-        all_attrs.insert(k.clone(), v.clone());
-    }
-    for (k, v) in &event.measurements {
-        all_attrs.insert(k.clone(), serde_json::json!(v));
-    }
-
-    SpanRecord {
-        trace_id: event.trace_id.clone(),
-        span_id: event.span_id.clone(),
-        parent_span_id: None,
-        service: "temper".into(),
-        operation: format!("{}.{}", event.entity_type, event.operation),
-        status: if event.success { "ok" } else { "error" }.into(),
-        duration_ns: event.duration_ns,
-        start_time: ch_ts.clone(),
-        end_time: ch_ts,
-        attributes: serde_json::to_string(&all_attrs).unwrap_or_default(),
-    }
-}
-
-/// Project messages to the **Log View**.
-pub fn project_to_log(event: &WideEvent, message: &str, level: &str) -> LogRecord {
-    let ch_ts = event.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
-
-    LogRecord {
-        timestamp: ch_ts,
-        level: level.into(),
-        service: "temper".into(),
-        message: message.into(),
-        attributes: serde_json::json!({
-            "entity_type": event.entity_type,
-            "entity_id": event.entity_id,
-            "operation": event.operation,
-            "trace_id": event.trace_id,
-        }).to_string(),
+        // Use a gauge-style recording via histogram (supports arbitrary values)
+        let histogram = meter.f64_histogram(metric_name).build();
+        histogram.record(*value, &tag_attrs);
     }
 }
 
@@ -248,54 +243,17 @@ mod tests {
     }
 
     #[test]
-    fn test_metrics_exclude_high_cardinality() {
+    fn test_emit_span_noop() {
+        // With no OTEL init, the global no-op tracer silently discards — no panic.
         let event = sample_event();
-        let metrics = project_to_metrics(&event);
-
-        assert!(metrics.len() >= 2); // transition_count + duration_ms + item_count
-
-        for m in &metrics {
-            let tags: HashMap<String, String> = serde_json::from_str(&m.tags).unwrap();
-            // Tags include low-cardinality fields
-            assert!(tags.contains_key("entity_type"));
-            assert!(tags.contains_key("operation"));
-            // Tags do NOT include high-cardinality attributes
-            assert!(!tags.contains_key("entity_id"));
-            assert!(!tags.contains_key("params"));
-            // Exemplar link IS present
-            assert!(tags.contains_key("exemplar.trace_id"));
-        }
+        emit_span(&event);
     }
 
     #[test]
-    fn test_span_includes_everything() {
+    fn test_emit_metrics_noop() {
+        // With no OTEL init, the global no-op meter silently discards — no panic.
         let event = sample_event();
-        let span = project_to_span(&event);
-
-        assert_eq!(span.trace_id, "trace-abc");
-        assert_eq!(span.operation, "Order.SubmitOrder");
-        assert_eq!(span.status, "ok");
-
-        let attrs: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&span.attributes).unwrap();
-        // Span includes both tags AND attributes
-        assert_eq!(attrs["entity_type"], "Order");
-        assert_eq!(attrs["entity_id"], "order-123");
-        assert_eq!(attrs["operation"], "SubmitOrder");
-        assert_eq!(attrs["from_status"], "Draft");
-        // Span includes measurements as raw values
-        assert_eq!(attrs["transition_count"], 1.0);
-    }
-
-    #[test]
-    fn test_exemplar_links_metric_to_trace() {
-        let event = sample_event();
-        let metrics = project_to_metrics(&event);
-
-        let tags: HashMap<String, String> = serde_json::from_str(&metrics[0].tags).unwrap();
-        assert_eq!(tags["exemplar.trace_id"], "trace-abc");
-        // An operator can click this exemplar to jump from the metric graph
-        // directly to the trace that produced this specific data point.
+        emit_metrics(&event);
     }
 
     #[test]
@@ -305,23 +263,20 @@ mod tests {
         // cardinality explosion and bill shock.
         //
         // With Telemetry as Views:
-        // - entity_id is an Attribute → NOT in metrics → zero cost
-        // - entity_id IS in the span → full debugging capability
+        // - entity_id is an Attribute → NOT in metric tags → zero cost
+        // - entity_id IS in the span attributes → full debugging capability
         // - An operator can PROMOTE it to a Tag at runtime if they decide
         //   the cost is worth it for a specific investigation.
 
         let event = sample_event();
-        let metrics = project_to_metrics(&event);
-        let span = project_to_span(&event);
 
-        // Metric: no entity_id
-        let tags: HashMap<String, String> = serde_json::from_str(&metrics[0].tags).unwrap();
-        assert!(!tags.contains_key("entity_id"), "entity_id must NOT be a metric tag");
+        // Tags (used for metrics) do NOT include high-cardinality fields
+        assert!(!event.tags.contains_key("entity_id"));
+        assert!(!event.tags.contains_key("params"));
 
-        // Span: has entity_id
-        let attrs: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&span.attributes).unwrap();
-        assert!(attrs.contains_key("entity_id"), "entity_id must be in span attributes");
+        // Attributes (used for spans) include high-cardinality fields
+        assert!(event.attributes.contains_key("entity_id"));
+        assert!(event.attributes.contains_key("params"));
     }
 
     #[test]
@@ -332,9 +287,7 @@ mod tests {
             &serde_json::json!({}), 0, "trace-def",
         );
 
-        let span = project_to_span(&event);
-        assert_eq!(span.status, "error");
-
+        assert!(!event.success);
         assert_eq!(event.tags["success"], "false");
     }
 }

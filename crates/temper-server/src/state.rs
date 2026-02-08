@@ -9,7 +9,6 @@ use temper_runtime::actor::ActorRef;
 use temper_runtime::ActorSystem;
 use temper_spec::csdl::CsdlDocument;
 use temper_authz::{AuthzEngine, AuthzDecision, SecurityContext};
-use temper_observe::clickhouse::ClickHouseStore;
 use temper_store_postgres::PostgresEventStore;
 
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
@@ -33,8 +32,6 @@ pub struct ServerState {
     pub event_store: Option<Arc<PostgresEventStore>>,
     /// Agent hints learned from trajectory analysis, keyed by action name.
     pub agent_hints: Arc<RwLock<HashMap<String, String>>>,
-    /// Optional ClickHouse store for Telemetry as Views emission.
-    pub clickhouse: Option<Arc<ClickHouseStore>>,
     /// Cedar ABAC authorization engine.
     pub authz: Arc<AuthzEngine>,
 }
@@ -65,7 +62,6 @@ impl ServerState {
             actor_registry: Arc::new(RwLock::new(HashMap::new())),
             event_store: None,
             agent_hints: Arc::new(RwLock::new(HashMap::new())),
-            clickhouse: None,
             authz: Arc::new(AuthzEngine::permissive()),
         }
     }
@@ -95,20 +91,6 @@ impl ServerState {
         state
     }
 
-    /// Create ServerState with full infrastructure (Postgres + ClickHouse).
-    pub fn with_full_infra(
-        system: ActorSystem,
-        csdl: CsdlDocument,
-        csdl_xml: String,
-        tla_sources: HashMap<String, String>,
-        pg_store: PostgresEventStore,
-        ch_store: ClickHouseStore,
-    ) -> Self {
-        let mut state = Self::with_persistence(system, csdl, csdl_xml, tla_sources, pg_store);
-        state.clickhouse = Some(Arc::new(ch_store));
-        state
-    }
-
     /// Get or spawn an entity actor. Returns the ActorRef.
     pub fn get_or_spawn_actor(
         &self,
@@ -129,14 +111,11 @@ impl ServerState {
         let table = self.transition_tables.get(entity_type)?;
 
         // Spawn new actor — with available infrastructure
-        let actor = match (&self.event_store, &self.clickhouse) {
-            (Some(pg), Some(ch)) => EntityActor::with_full_infra(
-                entity_type, entity_id, table.clone(), serde_json::json!({}), pg.clone(), ch.clone(),
-            ),
-            (Some(pg), None) => EntityActor::with_persistence(
+        let actor = match &self.event_store {
+            Some(pg) => EntityActor::with_persistence(
                 entity_type, entity_id, table.clone(), serde_json::json!({}), pg.clone(),
             ),
-            _ => EntityActor::new(
+            None => EntityActor::new(
                 entity_type, entity_id, table.clone(), serde_json::json!({}),
             ),
         };

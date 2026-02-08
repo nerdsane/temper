@@ -25,13 +25,14 @@ diffs, and gates destructive changes on human approval.  Trajectory intelligence
 extracts product signal from agent execution traces.  A three-tier JIT execution
 model allows state machine transition logic to be hot-swapped at runtime without
 process restarts.  The framework is implemented as a 16-crate Rust workspace with
-253 tests across 97 source files (16,604 lines of Rust), backed by PostgreSQL for
-event sourcing, Redis for actor mailboxes, and ClickHouse for observability.  A
-live Claude-powered LLM agent demonstrates the full feedback loop: natural language
-requests are interpreted into OData operations, state machine transitions are
-persisted to PostgreSQL, trajectory spans are captured to ClickHouse, and the
-Evolution Engine generates product intelligence records identifying unmet user
-intents.  We evaluate against a reference agentic e-commerce application with 7
+259 tests across 97 source files (16,604 lines of Rust), backed by PostgreSQL for
+event sourcing, Redis for actor mailboxes, and an OTLP-based observability pipeline
+that exports to any OpenTelemetry-compatible backend.  A live Claude-powered LLM
+agent demonstrates the full feedback loop: natural language requests are interpreted
+into OData operations, state machine transitions are persisted to PostgreSQL,
+telemetry is exported via OTLP to an OpenTelemetry Collector (which forwards to
+ClickHouse or any other backend), and the Evolution Engine generates product
+intelligence records identifying unmet user intents.  We evaluate against a reference agentic e-commerce application with 7
 entity types and a 10-state order lifecycle.
 
 ---
@@ -98,7 +99,7 @@ temper-runtime       Actor system: traits, mailbox, supervision, scheduler
 temper-codegen       Code generation from specifications
 temper-odata         OData v4 query/path parsing and error types
 temper-authz         Cedar ABAC engine
-temper-observe       Observability: store trait, schemas, trajectory types
+temper-observe       Observability: OTEL+OTLP export, store trait, schemas, trajectory
 temper-verify        Three-level verification cascade
 temper-store-postgres Postgres event store and snapshot store
 temper-store-redis   Redis mailbox, cache, shard placement
@@ -600,31 +601,36 @@ code required.  Each wide event contains:
   `params`, `from_status`).  NOT included in metric tags--this is how
   cardinality is decoupled from cost.
 
-### 9.3 Dual-View Projection
+### 9.3 Dual-View Projection via OTEL SDK
 
-The platform projects each wide event into two optimized views:
+The platform projects each wide event into two optimized views using the
+OpenTelemetry SDK.  When OTEL is not initialized (e.g., in tests), the global
+no-op tracer and meter silently discard data--no conditional logic is needed at
+call sites.
 
-**Aggregated View (Metrics):** `project_to_metrics()` extracts measurements
-and tags only.  Attributes are discarded.  Each measurement becomes a metric
-data point with low-cardinality tags, providing 100%-precise, long-retention
-data for monitoring and alerting.  Each point includes an `exemplar.trace_id`
-linking back to the full contextual event.
+**Aggregated View (Metrics):** `emit_metrics()` records each measurement via
+an OTEL histogram instrument, using only low-cardinality tags as metric
+attributes.  High-cardinality attributes are excluded, providing 100%-precise,
+long-retention data for monitoring and alerting without cardinality explosion.
 
-**Contextual View (Spans):** `project_to_span()` includes everything--
-measurements, tags, and attributes.  This provides the full-detail view for
-debugging, investigation, and trajectory analysis.
+**Contextual View (Spans):** `emit_span()` creates an OTEL span via the global
+tracer, attaching everything--measurements, tags, and attributes--as span
+attributes.  This provides the full-detail view for debugging, investigation,
+and trajectory analysis.
 
 ```
 Entity Actor Transition
     │
-    ├──► Aggregated View (Metrics)
+    ├──► emit_metrics() → OTEL Meter → OTLP exporter → any backend
     │    temper.SubmitOrder.duration_ms{entity_type=Order,operation=SubmitOrder}
-    │    + exemplar.trace_id → click to see the full trace
     │
-    └──► Contextual View (Span)
-         trace_id, entity_id=order-123, from_status=Draft, params={...}
-         + all measurements as raw attributes
+    └──► emit_span() → OTEL Tracer → OTLP exporter → any backend
+         Order.SubmitOrder span with entity_id, from_status, params, measurements
 ```
+
+The write path is fully backend-agnostic: setting `OTLP_ENDPOINT` to a
+different collector sends telemetry to Datadog, Grafana, Jaeger, or any
+OTLP-compatible backend without code changes.
 
 ### 9.4 Cost Decoupling
 
@@ -635,11 +641,12 @@ cost in metrics, full detail in traces.  An operator can *promote* an Attribute
 to a Tag at runtime if they decide the cost is worth it for a specific
 investigation, without any code change.
 
-### 9.5 Provider-Swappable SQL Interface
+### 9.5 Provider-Swappable Query Interface
 
-The `ObservabilityStore` trait provides a SQL query interface over three
-canonical virtual tables.  Provider adapters (ClickHouse, Logfire, Datadog)
-implement this trait:
+The write path uses the OTEL SDK with OTLP export (backend-agnostic).  The
+read path uses the `ObservabilityStore` trait, which provides a SQL query
+interface over three canonical virtual tables.  Provider adapters (ClickHouse,
+Logfire, Datadog) implement this trait:
 
 | Table     | Columns                                                                                    |
 |-----------|--------------------------------------------------------------------------------------------|
@@ -711,7 +718,7 @@ observability data, with a safety checker ensuring correctness.
 
 ### 11.1 Test Coverage
 
-The Temper workspace contains 253 tests across 16 crates. Key categories:
+The Temper workspace contains 259 tests across 16 crates. Key categories:
 
 | Category                       | Count | Crates                                     |
 |--------------------------------|------:|--------------------------------------------|
@@ -725,7 +732,7 @@ The Temper workspace contains 253 tests across 16 crates. Key categories:
 | Evolution records and chains   |    19 | temper-evolution                           |
 | JIT tables and hot-swap        |    15 | temper-jit                                 |
 | Authorization engine           |    10 | temper-authz                               |
-| Observability and trajectory   |    18 | temper-observe                             |
+| Observability and trajectory   |    28 | temper-observe                             |
 | Optimizer actors and safety    |    15 | temper-optimize                            |
 | Storage (Postgres, Redis)      |    33 | temper-store-postgres, temper-store-redis   |
 | CLI subcommands                |    14 | temper-cli                                 |
@@ -806,18 +813,29 @@ enforced at runtime.  This establishes a critical invariant:
 ### 11.6 Live Infrastructure Validation
 
 The system runs end-to-end against real infrastructure: PostgreSQL 18 for event
-sourcing, Redis 8 for actor mailboxes, and ClickHouse for observability.  A
-Claude-powered LLM agent (Anthropic Sonnet 4.5) operates the e-commerce API
-through natural language.  A representative demo session:
+sourcing, Redis 8 for actor mailboxes, an OpenTelemetry Collector for telemetry
+ingestion, and ClickHouse as the observability backend.  The Docker Compose
+environment provisions all four services.  A Claude-powered LLM agent (Anthropic
+Sonnet 4.5) operates the e-commerce API through natural language.
+
+The OTEL write path is verified end-to-end: entity actor transitions emit spans
+via `emit_span()` and metrics via `emit_metrics()`, which flow through the OTEL
+SDK's batch processor, out via OTLP/HTTP to the collector, and into ClickHouse's
+`otel_traces` table.  A representative demo session:
 
 ```
-User: "Create a new order, add a premium widget, and submit it"
-Agent: Claude → create_order → AddItem → SubmitOrder
+User: "Create a new order, add a headset, and submit it"
+Agent: Claude → create_order → AddItem → SubmitOrder → respond
 Result: Order in Submitted status, 2 events persisted to Postgres
+OTEL:   3 spans exported (odata.POST.CreateOrder, Order.AddItem, Order.SubmitOrder)
+        All spans carry Telemetry as Views attributes:
+        - Tags: entity_type=Order, operation=SubmitOrder, success=true
+        - Attributes: entity_id=..., from_status=Draft, params={...}
+        - Measurements: transition_count=1, duration_ms=0, item_count=1
 
 User: "I want to split my order into two shipments"
 Agent: Claude → (no matching action exists) → responds with apology
-Result: Trajectory span captured to ClickHouse with user_intent
+Result: Trajectory span exported via OTLP with user_intent attribute
 
 Analysis: ClickHouse query detects "split order" as unmet intent
 Output: O-Record (observation) + I-Record (insight, category=UnmetIntent)
@@ -829,10 +847,13 @@ The full feedback loop is verified:
 1. Natural language → Claude → OData tool calls
 2. Entity actors process transitions through formally verified TransitionTables
 3. Events persist to PostgreSQL (survives server restart)
-4. Trajectory spans capture to ClickHouse (operation, intent, status)
-5. Trajectory analysis queries ClickHouse for patterns
+4. Wide events emit via OTEL SDK → OTLP/HTTP → Collector → ClickHouse
+5. Trajectory analysis queries ClickHouse for patterns (read path unchanged)
 6. Evolution Engine generates records from production data
 7. Product intelligence digest tells the human what to build next
+
+The write path is backend-agnostic: changing `OTLP_ENDPOINT` redirects all
+telemetry to a different backend (Datadog, Grafana, Jaeger) without code changes.
 
 ---
 
@@ -957,3 +978,6 @@ https://www.cockroachlabs.com
 
 [18] TigerBeetle. *TigerStyle: Engineering Design Philosophy.*
 https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md
+
+[19] OpenTelemetry. *OpenTelemetry Specification.*
+https://opentelemetry.io/docs/specs/otel/
