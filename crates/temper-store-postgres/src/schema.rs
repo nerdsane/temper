@@ -6,12 +6,16 @@
 /// CREATE TABLE statement for the events journal.
 ///
 /// Each row stores a single domain event for a particular entity. The
-/// `(entity_type, entity_id, sequence_nr)` UNIQUE constraint enforces
+/// `(tenant, entity_type, entity_id, sequence_nr)` UNIQUE constraint enforces
 /// optimistic concurrency — two writers attempting to persist the same
 /// sequence number will conflict, and only one will succeed.
+///
+/// The `tenant` column defaults to `'default'` for backward compatibility
+/// with single-tenant deployments.
 pub const CREATE_EVENTS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS events (
     id            BIGSERIAL    NOT NULL,
+    tenant        TEXT         NOT NULL DEFAULT 'default',
     entity_type   TEXT         NOT NULL,
     entity_id     TEXT         NOT NULL,
     sequence_nr   BIGINT       NOT NULL,
@@ -20,7 +24,7 @@ CREATE TABLE IF NOT EXISTS events (
     metadata      JSONB        NOT NULL,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
     PRIMARY KEY (id),
-    UNIQUE (entity_type, entity_id, sequence_nr)
+    UNIQUE (tenant, entity_type, entity_id, sequence_nr)
 );";
 
 /// CREATE TABLE statement for the snapshots table.
@@ -30,12 +34,13 @@ CREATE TABLE IF NOT EXISTS events (
 /// `save_snapshot` replaces older rows via the composite primary key.
 pub const CREATE_SNAPSHOTS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS snapshots (
+    tenant        TEXT         NOT NULL DEFAULT 'default',
     entity_type   TEXT         NOT NULL,
     entity_id     TEXT         NOT NULL,
     sequence_nr   BIGINT       NOT NULL,
     state         BYTEA        NOT NULL,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    PRIMARY KEY (entity_type, entity_id)
+    PRIMARY KEY (tenant, entity_type, entity_id)
 );";
 
 #[cfg(test)]
@@ -46,6 +51,7 @@ mod tests {
     fn events_table_contains_required_columns() {
         let sql = CREATE_EVENTS_TABLE.to_uppercase();
         for col in &[
+            "TENANT",
             "ENTITY_TYPE",
             "ENTITY_ID",
             "SEQUENCE_NR",
@@ -66,11 +72,11 @@ mod tests {
         let sql = CREATE_EVENTS_TABLE.to_uppercase();
         assert!(
             sql.contains("UNIQUE"),
-            "events schema should enforce a UNIQUE constraint on (entity_type, entity_id, sequence_nr)"
+            "events schema should enforce a UNIQUE constraint on (tenant, entity_type, entity_id, sequence_nr)"
         );
-        // The three columns must appear together inside the UNIQUE clause.
         let unique_pos = sql.find("UNIQUE").unwrap();
         let after_unique = &sql[unique_pos..];
+        assert!(after_unique.contains("TENANT"), "UNIQUE constraint missing tenant");
         assert!(after_unique.contains("ENTITY_TYPE"), "UNIQUE constraint missing entity_type");
         assert!(after_unique.contains("ENTITY_ID"), "UNIQUE constraint missing entity_id");
         assert!(after_unique.contains("SEQUENCE_NR"), "UNIQUE constraint missing sequence_nr");
@@ -79,7 +85,7 @@ mod tests {
     #[test]
     fn snapshots_table_contains_required_columns() {
         let sql = CREATE_SNAPSHOTS_TABLE.to_uppercase();
-        for col in &["ENTITY_TYPE", "ENTITY_ID", "SEQUENCE_NR", "STATE", "CREATED_AT"] {
+        for col in &["TENANT", "ENTITY_TYPE", "ENTITY_ID", "SEQUENCE_NR", "STATE", "CREATED_AT"] {
             assert!(
                 sql.contains(col),
                 "snapshots schema missing column: {col}"
@@ -92,6 +98,7 @@ mod tests {
         let sql = CREATE_SNAPSHOTS_TABLE.to_uppercase();
         let pk_pos = sql.find("PRIMARY KEY").expect("snapshots schema missing PRIMARY KEY");
         let after_pk = &sql[pk_pos..];
+        assert!(after_pk.contains("TENANT"), "PRIMARY KEY missing tenant");
         assert!(after_pk.contains("ENTITY_TYPE"), "PRIMARY KEY missing entity_type");
         assert!(after_pk.contains("ENTITY_ID"), "PRIMARY KEY missing entity_id");
     }

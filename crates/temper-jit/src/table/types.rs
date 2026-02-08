@@ -3,6 +3,8 @@
 //! A [`TransitionTable`] encodes the complete set of transition rules for a single
 //! entity type as DATA, not code. It can be hot-swapped per-actor without restart.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -45,8 +47,12 @@ pub enum Guard {
     Always,
     /// Current state must be in the given set.
     StateIn(Vec<String>),
-    /// `items.len() >= N`.
+    /// `items.len() >= N` (legacy alias for `CounterMin { var: "items", min: N }`).
     ItemCountMin(usize),
+    /// A named counter must be >= N.
+    CounterMin { var: String, min: usize },
+    /// A named boolean variable must be true.
+    BoolTrue(String),
     /// All inner guards must pass.
     And(Vec<Guard>),
 }
@@ -56,10 +62,16 @@ pub enum Guard {
 pub enum Effect {
     /// Change the entity status.
     SetState(String),
-    /// Add an item (increment item count).
+    /// Add an item (legacy alias for `IncrementCounter("items")`).
     IncrementItems,
-    /// Remove an item (decrement item count).
+    /// Remove an item (legacy alias for `DecrementCounter("items")`).
     DecrementItems,
+    /// Increment a named counter variable.
+    IncrementCounter(String),
+    /// Decrement a named counter variable.
+    DecrementCounter(String),
+    /// Set a named boolean variable.
+    SetBool { var: String, value: bool },
     /// Emit a named event.
     EmitEvent(String),
 }
@@ -75,18 +87,48 @@ pub struct TransitionResult {
     pub success: bool,
 }
 
+/// Runtime context for guard evaluation.
+///
+/// Passed to [`Guard::check()`] to provide the full entity state. The legacy
+/// [`Guard::evaluate()`] method builds a minimal context from `item_count`.
+#[derive(Debug, Clone, Default)]
+pub struct EvalContext {
+    /// Named counter values (e.g., "items" -> 2, "review_cycles" -> 1).
+    pub counters: BTreeMap<String, usize>,
+    /// Named boolean values (e.g., "assignee_set" -> true).
+    pub booleans: BTreeMap<String, bool>,
+}
+
 // ---------------------------------------------------------------------------
 // Guard evaluation
 // ---------------------------------------------------------------------------
 
 impl Guard {
-    /// Evaluate this guard against the current runtime context.
+    /// Evaluate this guard against the current runtime context (legacy API).
+    ///
+    /// Uses a single `item_count` mapped to the `"items"` counter. For
+    /// multi-counter or boolean guard support, use [`check()`](Self::check).
     pub fn evaluate(&self, current_state: &str, item_count: usize) -> bool {
+        let mut ctx = EvalContext::default();
+        ctx.counters.insert("items".to_string(), item_count);
+        self.check(current_state, &ctx)
+    }
+
+    /// Evaluate this guard against a full evaluation context.
+    pub fn check(&self, current_state: &str, ctx: &EvalContext) -> bool {
         match self {
             Guard::Always => true,
             Guard::StateIn(states) => states.iter().any(|s| s == current_state),
-            Guard::ItemCountMin(n) => item_count >= *n,
-            Guard::And(guards) => guards.iter().all(|g| g.evaluate(current_state, item_count)),
+            Guard::ItemCountMin(n) => {
+                ctx.counters.get("items").copied().unwrap_or(0) >= *n
+            }
+            Guard::CounterMin { var, min } => {
+                ctx.counters.get(var).copied().unwrap_or(0) >= *min
+            }
+            Guard::BoolTrue(var) => {
+                ctx.booleans.get(var).copied().unwrap_or(false)
+            }
+            Guard::And(guards) => guards.iter().all(|g| g.check(current_state, ctx)),
         }
     }
 }

@@ -35,23 +35,39 @@ impl PostgresEventStore {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Split a `"entity_type:entity_id"` persistence ID into its two parts.
+/// Split a persistence ID into `(tenant, entity_type, entity_id)`.
 ///
-/// Returns `Err(PersistenceError::Storage)` when the format is invalid.
-pub fn parse_persistence_id(persistence_id: &str) -> Result<(&str, &str), PersistenceError> {
-    let colon_pos = persistence_id.find(':').ok_or_else(|| {
-        PersistenceError::Storage(format!(
-            "invalid persistence_id (expected 'entity_type:entity_id'): {persistence_id}"
-        ))
-    })?;
-    let entity_type = &persistence_id[..colon_pos];
-    let entity_id = &persistence_id[colon_pos + 1..];
-    if entity_type.is_empty() || entity_id.is_empty() {
-        return Err(PersistenceError::Storage(format!(
-            "invalid persistence_id (empty entity_type or entity_id): {persistence_id}"
-        )));
+/// Accepts both the new 3-segment format (`tenant:type:id`) and the
+/// legacy 2-segment format (`type:id`). Legacy IDs are assigned to
+/// the `"default"` tenant.
+pub fn parse_persistence_id(persistence_id: &str) -> Result<(&str, &str, &str), PersistenceError> {
+    let parts: Vec<&str> = persistence_id.splitn(3, ':').collect();
+    match parts.len() {
+        3 => {
+            let tenant = parts[0];
+            let entity_type = parts[1];
+            let entity_id = parts[2];
+            if tenant.is_empty() || entity_type.is_empty() || entity_id.is_empty() {
+                return Err(PersistenceError::Storage(format!(
+                    "invalid persistence_id (empty segment): {persistence_id}"
+                )));
+            }
+            Ok((tenant, entity_type, entity_id))
+        }
+        2 => {
+            let entity_type = parts[0];
+            let entity_id = parts[1];
+            if entity_type.is_empty() || entity_id.is_empty() {
+                return Err(PersistenceError::Storage(format!(
+                    "invalid persistence_id (empty segment): {persistence_id}"
+                )));
+            }
+            Ok(("default", entity_type, entity_id))
+        }
+        _ => Err(PersistenceError::Storage(format!(
+            "invalid persistence_id (expected 'tenant:type:id' or 'type:id'): {persistence_id}"
+        ))),
     }
-    Ok((entity_type, entity_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +90,7 @@ impl EventStore for PostgresEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        let (entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
 
         let mut tx = self
             .pool
@@ -82,12 +98,11 @@ impl EventStore for PostgresEventStore {
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
 
-        // Verify the current maximum sequence_nr matches what the caller
-        // expects.  This is the "read" side of optimistic locking.
         let row: Option<(i64,)> = sqlx::query_as(
             "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
-             WHERE entity_type = $1 AND entity_id = $2",
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
         )
+        .bind(tenant)
         .bind(entity_type)
         .bind(entity_id)
         .fetch_optional(&mut *tx)
@@ -109,9 +124,10 @@ impl EventStore for PostgresEventStore {
                 .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
 
             sqlx::query(
-                "INSERT INTO events (entity_type, entity_id, sequence_nr, event_type, payload, metadata) \
-                 VALUES ($1, $2, $3, $4, $5, $6)",
+                "INSERT INTO events (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
             )
+            .bind(tenant)
             .bind(entity_type)
             .bind(entity_id)
             .bind(new_seq as i64)
@@ -121,9 +137,6 @@ impl EventStore for PostgresEventStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| {
-                // If the database reports a unique-violation we surface it
-                // as a concurrency error.  sqlx wraps PG errors in
-                // `sqlx::Error::Database`.
                 let msg = e.to_string();
                 if msg.contains("unique") || msg.contains("duplicate key") {
                     PersistenceError::ConcurrencyViolation {
@@ -151,14 +164,15 @@ impl EventStore for PostgresEventStore {
         persistence_id: &str,
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
-        let (entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
 
         let rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> = sqlx::query_as(
             "SELECT sequence_nr, event_type, payload, metadata \
              FROM events \
-             WHERE entity_type = $1 AND entity_id = $2 AND sequence_nr > $3 \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND sequence_nr > $4 \
              ORDER BY sequence_nr ASC",
         )
+        .bind(tenant)
         .bind(entity_type)
         .bind(entity_id)
         .bind(from_sequence as i64)
@@ -190,14 +204,15 @@ impl EventStore for PostgresEventStore {
         sequence_nr: u64,
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
-        let (entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
 
         sqlx::query(
-            "INSERT INTO snapshots (entity_type, entity_id, sequence_nr, state) \
-             VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (entity_type, entity_id) \
-             DO UPDATE SET sequence_nr = $3, state = $4, created_at = now()",
+            "INSERT INTO snapshots (tenant, entity_type, entity_id, sequence_nr, state) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (tenant, entity_type, entity_id) \
+             DO UPDATE SET sequence_nr = $4, state = $5, created_at = now()",
         )
+        .bind(tenant)
         .bind(entity_type)
         .bind(entity_id)
         .bind(sequence_nr as i64)
@@ -216,12 +231,13 @@ impl EventStore for PostgresEventStore {
         &self,
         persistence_id: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
-        let (entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
 
         let row: Option<(i64, Vec<u8>)> = sqlx::query_as(
             "SELECT sequence_nr, state FROM snapshots \
-             WHERE entity_type = $1 AND entity_id = $2",
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
         )
+        .bind(tenant)
         .bind(entity_type)
         .bind(entity_id)
         .fetch_optional(&self.pool)
@@ -243,18 +259,31 @@ mod tests {
     // -- persistence_id parsing ---------------------------------------------
 
     #[test]
-    fn parse_valid_persistence_id() {
-        let (entity_type, entity_id) = parse_persistence_id("Order:abc-123").unwrap();
+    fn parse_3_segment_persistence_id() {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id("ecommerce:Order:abc-123").unwrap();
+        assert_eq!(tenant, "ecommerce");
         assert_eq!(entity_type, "Order");
         assert_eq!(entity_id, "abc-123");
     }
 
     #[test]
-    fn parse_persistence_id_with_multiple_colons() {
-        // Only the first colon is the delimiter; the rest belong to the id.
-        let (entity_type, entity_id) = parse_persistence_id("Order:abc:def:ghi").unwrap();
+    fn parse_legacy_2_segment_persistence_id() {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id("Order:abc-123").unwrap();
+        assert_eq!(tenant, "default");
         assert_eq!(entity_type, "Order");
-        assert_eq!(entity_id, "abc:def:ghi");
+        assert_eq!(entity_id, "abc-123");
+    }
+
+    #[test]
+    fn parse_3_segment_with_colons_in_id() {
+        // splitn(3, ':') puts everything after the second colon into entity_id
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id("linear:Issue:ISS-1:sub").unwrap();
+        assert_eq!(tenant, "linear");
+        assert_eq!(entity_type, "Issue");
+        assert_eq!(entity_id, "ISS-1:sub");
     }
 
     #[test]
@@ -267,20 +296,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_persistence_id_empty_entity_type() {
-        let err = parse_persistence_id(":abc-123").unwrap_err();
-        assert!(
-            matches!(err, PersistenceError::Storage(_)),
-            "expected Storage error for empty entity_type, got: {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_persistence_id_empty_entity_id() {
-        let err = parse_persistence_id("Order:").unwrap_err();
-        assert!(
-            matches!(err, PersistenceError::Storage(_)),
-            "expected Storage error for empty entity_id, got: {err:?}"
-        );
+    fn parse_persistence_id_empty_segment() {
+        assert!(parse_persistence_id(":Order:abc").is_err());
+        assert!(parse_persistence_id("tenant::abc").is_err());
+        assert!(parse_persistence_id("tenant:Order:").is_err());
+        assert!(parse_persistence_id(":abc").is_err());
+        assert!(parse_persistence_id("Order:").is_err());
     }
 }

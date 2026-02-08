@@ -1,4 +1,4 @@
-//! Deterministic simulation scheduler.
+//! Deterministic simulation scheduler and actor system.
 //!
 //! Provides a single-threaded, seed-controlled message delivery system
 //! inspired by FoundationDB's simulation testing and TigerBeetle's VOPR.
@@ -9,9 +9,30 @@
 //! - **Fault injection**: messages can be delayed, reordered, dropped, or
 //!   actors can be crashed — all controlled by the seed
 //! - **Single-threaded**: no real concurrency, all non-determinism eliminated
+//!
+//! ## Modules
+//!
+//! - [`clock`]: Simulation-aware clock (`WallClock` / `LogicalClock`)
+//! - [`id_gen`]: Simulation-aware UUID generator (`RealIdGen` / `DeterministicIdGen`)
+//! - [`context`]: Thread-local `SimContext` with `sim_now()` and `sim_uuid()`
+//! - [`sim_handler`]: Type-erased `SimActorHandler` trait
+//! - [`sim_actor_system`]: `SimActorSystem` — runs real handlers through the scheduler
+
+pub mod clock;
+pub mod id_gen;
+pub mod context;
+pub mod sim_handler;
+pub mod sim_actor_system;
+
+// Re-export key types from submodules.
+pub use clock::{SimClock, WallClock, LogicalClock};
+pub use id_gen::{SimIdGen, RealIdGen, DeterministicIdGen};
+pub use context::{sim_now, sim_uuid, install_sim_context, install_deterministic_context, SimContextGuard};
+pub use sim_handler::{SimActorHandler, SpecInvariant, SpecAssert};
+pub use sim_actor_system::{SimActorSystem, SimActorSystemConfig, SimActorResult, ActorInvariantViolation};
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -177,9 +198,11 @@ pub struct SimScheduler {
     /// Priority queue of pending messages (ordered by delivery time).
     pending: BinaryHeap<SimMessage>,
     /// Per-actor mailbox of delivered (ready to process) messages.
-    mailboxes: HashMap<String, VecDeque<SimMessage>>,
-    /// Actor states.
-    actor_states: HashMap<String, SimActorState>,
+    /// BTreeMap ensures deterministic iteration order.
+    mailboxes: BTreeMap<String, VecDeque<SimMessage>>,
+    /// Actor states. BTreeMap ensures deterministic iteration order
+    /// (critical for reproducible crash selection).
+    actor_states: BTreeMap<String, SimActorState>,
     /// Fault injection config.
     fault_config: FaultConfig,
     /// Next message ID.
@@ -199,8 +222,8 @@ impl SimScheduler {
             rng: DeterministicRng::new(seed),
             current_time: 0,
             pending: BinaryHeap::new(),
-            mailboxes: HashMap::new(),
-            actor_states: HashMap::new(),
+            mailboxes: BTreeMap::new(),
+            actor_states: BTreeMap::new(),
             fault_config,
             next_msg_id: 0,
             dropped: Vec::new(),

@@ -1,8 +1,9 @@
-//! Orchestrate the three-level verification cascade.
+//! Orchestrate the verification cascade.
 //!
 //! Levels:
 //! 1. **Model Check** — exhaustive state-space exploration via Stateright
 //! 2. **Deterministic Simulation** — FoundationDB/TigerBeetle-style fault injection
+//! 2b. **Actor Simulation** — real TransitionTable::evaluate() through SimActorSystem
 //! 3. **Property Tests** — random action sequences with invariant checking
 //!
 //! Each level produces a pass/fail result. All levels run independently.
@@ -14,13 +15,34 @@ use crate::proptest_gen::{self, PropTestResult};
 
 use temper_runtime::scheduler::FaultConfig;
 
+/// Result of an actor simulation level (Level 2b).
+///
+/// This is provided by the caller since the actor simulation handler lives
+/// in `temper-server` (which depends on `temper-verify`, not the other way).
+#[derive(Debug, Clone)]
+pub struct ActorSimResult {
+    /// Whether all invariants held.
+    pub all_invariants_held: bool,
+    /// Total transitions across all seeds.
+    pub total_transitions: u64,
+    /// Total seeds tested.
+    pub seeds_tested: u64,
+    /// Summary text.
+    pub summary: String,
+}
+
+/// A function that runs actor simulation and returns the result.
+pub type ActorSimRunner = Box<dyn Fn(u64) -> ActorSimResult>;
+
 /// The levels available in the verification cascade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CascadeLevel {
     /// Level 1: Exhaustive model checking via Stateright.
     ModelCheck,
-    /// Level 2: Deterministic simulation with fault injection.
+    /// Level 2: Deterministic simulation with fault injection (model-level).
     Simulation,
+    /// Level 2b: Actor simulation — real TransitionTable::evaluate() through SimActorSystem.
+    ActorSimulation,
     /// Level 3: Property-based testing with random action sequences.
     PropertyTest,
 }
@@ -30,6 +52,7 @@ impl std::fmt::Display for CascadeLevel {
         match self {
             CascadeLevel::ModelCheck => write!(f, "Level 1: Model Check"),
             CascadeLevel::Simulation => write!(f, "Level 2: Deterministic Simulation"),
+            CascadeLevel::ActorSimulation => write!(f, "Level 2b: Actor Simulation"),
             CascadeLevel::PropertyTest => write!(f, "Level 3: Property Tests"),
         }
     }
@@ -66,9 +89,10 @@ impl CascadeResult {
     }
 }
 
-/// Orchestrates the three-level verification cascade.
+/// Orchestrates the verification cascade.
 pub struct VerificationCascade {
     tla_source: Option<String>,
+    ioa_source: Option<String>,
     state_machine: Option<temper_spec::tlaplus::StateMachine>,
     max_items: usize,
     /// Number of simulation seeds to test.
@@ -79,31 +103,62 @@ pub struct VerificationCascade {
     prop_test_cases: u64,
     /// Max steps per property test case.
     prop_test_max_steps: usize,
+    /// Optional actor simulation runner (Level 2b).
+    actor_sim_runner: Option<ActorSimRunner>,
 }
 
 impl VerificationCascade {
     pub fn new(state_machine: temper_spec::tlaplus::StateMachine) -> Self {
         Self {
             tla_source: None,
+            ioa_source: None,
             state_machine: Some(state_machine),
             max_items: 2,
             sim_seeds: 10,
             sim_ticks: 200,
             prop_test_cases: 1000,
             prop_test_max_steps: 30,
+            actor_sim_runner: None,
         }
     }
 
-    pub fn from_tla(tla_source: &str) -> Self {
+    /// Create from I/O Automaton TOML source (preferred).
+    pub fn from_ioa(ioa_toml: &str) -> Self {
         Self {
-            tla_source: Some(tla_source.to_string()),
+            tla_source: None,
+            ioa_source: Some(ioa_toml.to_string()),
             state_machine: None,
             max_items: 2,
             sim_seeds: 10,
             sim_ticks: 200,
             prop_test_cases: 1000,
             prop_test_max_steps: 30,
+            actor_sim_runner: None,
         }
+    }
+
+    pub fn from_tla(tla_source: &str) -> Self {
+        Self {
+            tla_source: Some(tla_source.to_string()),
+            ioa_source: None,
+            state_machine: None,
+            max_items: 2,
+            sim_seeds: 10,
+            sim_ticks: 200,
+            prop_test_cases: 1000,
+            prop_test_max_steps: 30,
+            actor_sim_runner: None,
+        }
+    }
+
+    /// Set the actor simulation runner (Level 2b).
+    ///
+    /// The runner receives the number of seeds to test and returns an
+    /// `ActorSimResult`. This is provided by the caller because the handler
+    /// implementation lives in `temper-server`.
+    pub fn with_actor_sim(mut self, runner: ActorSimRunner) -> Self {
+        self.actor_sim_runner = Some(runner);
+        self
     }
 
     pub fn with_max_items(mut self, max_items: usize) -> Self {
@@ -121,47 +176,52 @@ impl VerificationCascade {
         self
     }
 
-    /// Run the full three-level verification cascade.
+    /// Run the full verification cascade.
     pub fn run(&self) -> CascadeResult {
         let mut levels = Vec::new();
-        let tla_source = self.get_tla_source();
 
         // Level 1: Stateright model checking
         let model = self.build_temper_model();
         let l1 = self.run_model_check(&model);
         levels.push(l1);
 
-        // Level 2: Deterministic simulation
-        let l2 = self.run_simulation(&tla_source);
+        // Level 2: Deterministic simulation (model-level)
+        let l2 = self.run_simulation_level(&model);
         levels.push(l2);
 
+        // Level 2b: Actor simulation (real TransitionTable::evaluate())
+        if let Some(ref runner) = self.actor_sim_runner {
+            let l2b = self.run_actor_simulation(runner);
+            levels.push(l2b);
+        }
+
         // Level 3: Property-based tests
-        let l3 = self.run_prop_tests(&tla_source);
+        let l3 = self.run_prop_tests_level(&model);
         levels.push(l3);
 
         let all_passed = levels.iter().all(|l| l.passed);
         CascadeResult { all_passed, levels }
     }
 
-    fn get_tla_source(&self) -> String {
+    fn get_tla_source(&self) -> Option<String> {
         if let Some(ref source) = self.tla_source {
-            source.clone()
+            Some(source.clone())
         } else if let Some(ref sm) = self.state_machine {
-            // Reconstruct a minimal TLA+ source for simulation/proptest
-            // In practice, the raw source should be passed via from_tla()
-            format!("---- MODULE {} ----\n====", sm.module_name)
+            Some(format!("---- MODULE {} ----\n====", sm.module_name))
         } else {
-            panic!("VerificationCascade requires TLA+ source or StateMachine");
+            None
         }
     }
 
     fn build_temper_model(&self) -> TemperModel {
-        if let Some(ref source) = self.tla_source {
+        if let Some(ref source) = self.ioa_source {
+            model::build_model_from_ioa(source, self.max_items)
+        } else if let Some(ref source) = self.tla_source {
             model::build_model_from_tla(source, self.max_items)
         } else if let Some(ref sm) = self.state_machine {
             model::build_model_with_max_items(sm, self.max_items)
         } else {
-            panic!("VerificationCascade requires TLA+ source or StateMachine");
+            panic!("VerificationCascade requires IOA, TLA+, or StateMachine");
         }
     }
 
@@ -193,7 +253,7 @@ impl VerificationCascade {
     }
 
     /// Level 2: Deterministic simulation with fault injection.
-    fn run_simulation(&self, tla_source: &str) -> LevelResult {
+    fn run_simulation_level(&self, _model: &TemperModel) -> LevelResult {
         let base_config = SimConfig {
             seed: 1,
             max_ticks: self.sim_ticks,
@@ -203,7 +263,15 @@ impl VerificationCascade {
             faults: FaultConfig::light(),
         };
 
-        let results = simulation::run_multi_seed_simulation(tla_source, &base_config, self.sim_seeds);
+        let results: Vec<simulation::SimulationResult> = if let Some(ref ioa) = self.ioa_source {
+            simulation::run_multi_seed_simulation_from_ioa(ioa, &base_config, self.sim_seeds)
+        } else if let Some(ref tla) = self.tla_source {
+            simulation::run_multi_seed_simulation(tla, &base_config, self.sim_seeds)
+        } else {
+            // Model-only: use a dummy source
+            let tla = self.get_tla_source().unwrap_or_default();
+            simulation::run_multi_seed_simulation(&tla, &base_config, self.sim_seeds)
+        };
 
         let all_passed = results.iter().all(|r| r.all_invariants_held);
         let total_transitions: u64 = results.iter().map(|r| r.total_transitions).sum();
@@ -238,8 +306,14 @@ impl VerificationCascade {
     }
 
     /// Level 3: Property-based tests.
-    fn run_prop_tests(&self, tla_source: &str) -> LevelResult {
-        let result = proptest_gen::run_prop_tests_from_tla(tla_source, self.prop_test_cases, self.prop_test_max_steps);
+    fn run_prop_tests_level(&self, model: &TemperModel) -> LevelResult {
+        let result = if let Some(ref ioa) = self.ioa_source {
+            proptest_gen::run_prop_tests_from_ioa(ioa, self.prop_test_cases, self.prop_test_max_steps)
+        } else if let Some(ref tla) = self.tla_source {
+            proptest_gen::run_prop_tests_from_tla(tla, self.prop_test_cases, self.prop_test_max_steps)
+        } else {
+            proptest_gen::run_prop_tests_on_model(model, self.prop_test_cases, self.prop_test_max_steps)
+        };
         let passed = result.passed;
 
         let summary = if passed {
@@ -263,6 +337,29 @@ impl VerificationCascade {
             prop_test: Some(result),
         }
     }
+
+    /// Level 2b: Actor simulation with real TransitionTable::evaluate().
+    fn run_actor_simulation(&self, runner: &ActorSimRunner) -> LevelResult {
+        let result = runner(self.sim_seeds);
+
+        let summary = if result.all_invariants_held {
+            format!(
+                "L2b Actor Simulation PASSED: {} seeds, {} transitions",
+                result.seeds_tested, result.total_transitions,
+            )
+        } else {
+            format!("L2b Actor Simulation FAILED: {}", result.summary)
+        };
+
+        LevelResult {
+            level: CascadeLevel::ActorSimulation,
+            passed: result.all_invariants_held,
+            summary,
+            verification: None,
+            simulation: None,
+            prop_test: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -270,6 +367,7 @@ mod tests {
     use super::*;
 
     const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
+    const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 
     #[test]
     fn test_full_cascade_passes() {
@@ -279,6 +377,19 @@ mod tests {
 
         let result = cascade.run();
         assert!(result.all_passed, "Full cascade should pass for reference spec");
+        assert_eq!(result.levels.len(), 3);
+    }
+
+    #[test]
+    fn test_full_cascade_passes_ioa() {
+        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
+            .with_sim_seeds(5)
+            .with_prop_test_cases(100);
+
+        let result = cascade.run();
+        for level in &result.levels {
+            assert!(level.passed, "IOA cascade level failed: {}", level.summary);
+        }
         assert_eq!(result.levels.len(), 3);
     }
 

@@ -5,7 +5,9 @@
 //! processes action messages by evaluating transitions through the table.
 
 mod actor;
+pub mod sim_handler;
 pub mod types;
 
 pub use actor::EntityActor;
+pub use sim_handler::EntityActorHandler;
 pub use types::{EntityEvent, EntityMsg, EntityResponse, EntityState};

@@ -20,16 +20,17 @@
 //!
 //! ## Why This Matters for Agentic Systems
 //!
-//! Agents don't write instrumentation code. They write TLA+ specs, and the actors
+//! Agents don't write instrumentation code. They write I/O Automaton specs, and the actors
 //! emit events automatically. The platform must handle all observability without
 //! any agent involvement in deciding metrics vs traces vs logs.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use opentelemetry::trace::{Span, Status, Tracer};
 use opentelemetry::KeyValue;
 use serde::{Deserialize, Serialize};
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 /// A wide event: the unified telemetry primitive emitted by entity actors.
 ///
@@ -60,16 +61,16 @@ pub struct WideEvent {
 
     // --- Tags (low-cardinality, included in metrics) ---
     /// Tags safe for metric grouping: entity_type, operation, status, success.
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
 
     // --- Attributes (high-cardinality, contextual view only) ---
     /// Attributes for debugging: entity_id, params, event details.
     /// NOT included in metric tags — this is the cost decoupling.
-    pub attributes: HashMap<String, serde_json::Value>,
+    pub attributes: BTreeMap<String, serde_json::Value>,
 
     // --- Measurements (numeric values for aggregation) ---
     /// Measurements: transition_count=1, duration_ms, item_count, etc.
-    pub measurements: HashMap<String, f64>,
+    pub measurements: BTreeMap<String, f64>,
 }
 
 /// Classification of a field for view projection.
@@ -102,24 +103,24 @@ pub fn from_transition(
     item_count: usize,
     trace_id: &str,
 ) -> WideEvent {
-    let span_id = uuid::Uuid::now_v7().to_string();
+    let span_id = sim_uuid().to_string();
 
     // Tags: low-cardinality, safe for metric grouping
-    let mut tags = HashMap::new();
+    let mut tags = BTreeMap::new();
     tags.insert("entity_type".into(), entity_type.into());
     tags.insert("operation".into(), operation.into());
     tags.insert("status".into(), to_status.into());
     tags.insert("success".into(), success.to_string());
 
     // Attributes: high-cardinality, contextual only
-    let mut attributes = HashMap::new();
+    let mut attributes = BTreeMap::new();
     attributes.insert("entity_id".into(), serde_json::json!(entity_id));
     attributes.insert("from_status".into(), serde_json::json!(from_status));
     attributes.insert("params".into(), params.clone());
     attributes.insert("item_count".into(), serde_json::json!(item_count));
 
     // Measurements: numeric values for aggregation
-    let mut measurements = HashMap::new();
+    let mut measurements = BTreeMap::new();
     measurements.insert("transition_count".into(), 1.0);
     measurements.insert("duration_ms".into(), duration_ns as f64 / 1_000_000.0);
     measurements.insert("item_count".into(), item_count as f64);
@@ -132,7 +133,7 @@ pub fn from_transition(
         to_status: to_status.into(),
         success,
         duration_ns,
-        timestamp: Utc::now(),
+        timestamp: sim_now(),
         trace_id: trace_id.into(),
         span_id,
         tags,

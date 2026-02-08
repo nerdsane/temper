@@ -4,9 +4,7 @@
 //! formats, so the verification cascade and runtime work unchanged.
 
 use super::types::*;
-use crate::tlaplus::{
-    Invariant as TlaInvariant, LivenessProperty, StateMachine, Transition,
-};
+use crate::tlaplus::{Invariant as TlaInvariant, StateMachine, Transition};
 
 /// Errors from parsing an automaton specification.
 #[derive(Debug, thiserror::Error)]
@@ -62,9 +60,22 @@ pub fn to_state_machine(automaton: &Automaton) -> StateMachine {
     let invariants = automaton
         .invariants
         .iter()
-        .map(|inv| TlaInvariant {
-            name: inv.name.clone(),
-            expr: inv.assert.clone(),
+        .map(|inv| {
+            // Encode `when` states as a trigger prefix so the model builder
+            // can extract trigger_states via extract_trigger_states().
+            let trigger = if inv.when.is_empty() {
+                String::new()
+            } else {
+                let states = inv.when.iter()
+                    .map(|s| format!("\"{s}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("status \\in {{{states}}} => ")
+            };
+            TlaInvariant {
+                name: inv.name.clone(),
+                expr: format!("{trigger}{}", inv.assert),
+            }
         })
         .collect();
 

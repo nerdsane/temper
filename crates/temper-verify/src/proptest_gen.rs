@@ -1,7 +1,7 @@
-//! Property-based testing from TLA+ specifications.
+//! Property-based testing from I/O Automaton specifications.
 //!
 //! This module generates random action sequences against a `TemperModel` built
-//! from a TLA+ `StateMachine`, checking all invariants after every transition.
+//! from a specification `StateMachine`, checking all invariants after every transition.
 //! Two execution modes are provided:
 //!
 //! - [`run_prop_tests`]: A lightweight, manual random-testing loop.
@@ -13,7 +13,8 @@ use stateright::Model;
 use temper_spec::tlaplus::StateMachine;
 
 use crate::model::{
-    build_model, build_model_from_tla, TemperModel, TemperModelAction, TemperModelState,
+    build_model, build_model_from_ioa, build_model_from_tla, TemperModel, TemperModelAction,
+    TemperModelState,
 };
 
 // ---------------------------------------------------------------------------
@@ -97,15 +98,15 @@ fn enabled_actions(model: &TemperModel, state: &TemperModelState) -> Vec<TemperM
 // Mode 1 -- lightweight manual loop
 // ---------------------------------------------------------------------------
 
-/// Run property-based tests on a TLA+ state machine.
+/// Run property-based tests on a specification state machine.
 ///
 /// Generates `num_cases` random action sequences of up to `max_steps` length,
 /// checking all invariants after each step.  Uses a simple deterministic PRNG
 /// seeded from the case index so that results are reproducible.
 ///
-/// This variant builds the model from a `StateMachine` without TLA+ source,
-/// so `CanXxx` guard predicates may not be fully resolved.  Prefer
-/// [`run_prop_tests_from_tla`] when the raw TLA+ source is available.
+/// This variant builds the model from a `StateMachine` without raw source,
+/// so guard predicates may not be fully resolved. Prefer
+/// [`run_prop_tests_from_ioa`] when the IOA source is available.
 pub fn run_prop_tests(
     sm: &StateMachine,
     num_cases: u64,
@@ -115,10 +116,20 @@ pub fn run_prop_tests(
     run_prop_tests_on_model(&model, num_cases, max_steps)
 }
 
-/// Run property-based tests from raw TLA+ source.
+/// Run property-based tests from I/O Automaton TOML source.
+pub fn run_prop_tests_from_ioa(
+    ioa_toml: &str,
+    num_cases: u64,
+    max_steps: usize,
+) -> PropTestResult {
+    let model = build_model_from_ioa(ioa_toml, 2);
+    run_prop_tests_on_model(&model, num_cases, max_steps)
+}
+
+/// Run property-based tests from raw TLA+ source (legacy format).
 ///
 /// This builds the model via [`build_model_from_tla`] which fully resolves
-/// `CanXxx` guard predicates, producing correct transition guards.
+/// guard predicates, producing correct transition guards.
 pub fn run_prop_tests_from_tla(
     tla_source: &str,
     num_cases: u64,
@@ -212,8 +223,8 @@ pub fn run_prop_tests_on_model(
 /// failure is found, proptest shrinks the vector towards smaller values and
 /// shorter prefixes, producing a minimal counterexample.
 ///
-/// This variant builds the model from a `StateMachine` without TLA+ source.
-/// Prefer [`run_prop_tests_with_shrinking_from_tla`] when the raw source is
+/// This variant builds the model from a `StateMachine` without raw source.
+/// Prefer [`run_prop_tests_with_shrinking_from_ioa`] when the IOA source is
 /// available.
 pub fn run_prop_tests_with_shrinking(
     sm: &StateMachine,
@@ -224,8 +235,18 @@ pub fn run_prop_tests_with_shrinking(
     run_prop_tests_with_shrinking_on_model(&model, num_cases, max_steps)
 }
 
+/// Run property-based tests with shrinking from I/O Automaton TOML source.
+pub fn run_prop_tests_with_shrinking_from_ioa(
+    ioa_toml: &str,
+    num_cases: u32,
+    max_steps: usize,
+) -> PropTestResult {
+    let model = build_model_from_ioa(ioa_toml, 2);
+    run_prop_tests_with_shrinking_on_model(&model, num_cases, max_steps)
+}
+
 /// Run property-based tests with shrinking, building the model from raw TLA+
-/// source for full guard resolution.
+/// source (legacy format) for full guard resolution.
 pub fn run_prop_tests_with_shrinking_from_tla(
     tla_source: &str,
     num_cases: u32,

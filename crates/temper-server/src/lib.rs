@@ -9,7 +9,9 @@ mod dispatch;
 mod response;
 mod state;
 pub mod entity_actor;
+pub mod registry;
 
 pub use router::build_router;
 pub use state::ServerState;
-pub use entity_actor::{EntityActor, EntityMsg, EntityResponse, EntityState};
+pub use registry::SpecRegistry;
+pub use entity_actor::{EntityActor, EntityActorHandler, EntityMsg, EntityResponse, EntityState};

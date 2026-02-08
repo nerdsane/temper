@@ -37,8 +37,29 @@ pub fn run(specs_dir: &str) -> Result<()> {
     let csdl = parse_csdl(&csdl_xml)
         .with_context(|| format!("Failed to parse CSDL from {}", csdl_path.display()))?;
 
-    // Read TLA+ spec files
+    // Read IOA TOML specs (preferred) and TLA+ specs (legacy)
+    let ioa_sources = read_ioa_sources(specs_path)?;
     let tla_sources = read_tla_sources(specs_path)?;
+
+    // Run IOA verification cascade if IOA files found
+    if !ioa_sources.is_empty() {
+        println!("\nRunning IOA verification cascade...");
+        for (entity_name, ioa_source) in &ioa_sources {
+            println!("\n  Verifying {entity_name}...");
+            let cascade = temper_verify::cascade::VerificationCascade::from_ioa(ioa_source)
+                .with_sim_seeds(5)
+                .with_prop_test_cases(100);
+            let result = cascade.run();
+            for level in &result.levels {
+                let status = if level.passed { "PASS" } else { "FAIL" };
+                println!("    [{status}] {}", level.summary);
+            }
+            if !result.all_passed {
+                anyhow::bail!("IOA verification failed for entity '{entity_name}'");
+            }
+        }
+        println!("\nIOA verification cascade: ALL PASSED");
+    }
 
     // Build spec model (which includes cross-validation)
     let spec = build_spec_model(csdl, tla_sources);
@@ -103,6 +124,41 @@ pub fn run(specs_dir: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Read all `.ioa.toml` files from the specs directory.
+fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
+    let mut sources = HashMap::new();
+
+    if !specs_dir.is_dir() {
+        return Ok(sources);
+    }
+
+    for entry in fs::read_dir(specs_dir)
+        .with_context(|| format!("Failed to read specs directory: {}", specs_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+
+        if file_name.ends_with(".ioa.toml") {
+            let entity_name = file_name
+                .strip_suffix(".ioa.toml")
+                .unwrap_or_default();
+            let entity_name = to_pascal_case(entity_name);
+
+            let source = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read IOA file: {}", path.display()))?;
+
+            sources.insert(entity_name, source);
+        }
+    }
+
+    Ok(sources)
 }
 
 /// Read all `.tla` files from the specs directory.

@@ -1,7 +1,7 @@
-//! Model builder: constructs a `TemperModel` from TLA+ `StateMachine` definitions.
+//! Model builder: constructs a `TemperModel` from specification `StateMachine` definitions.
 //!
-//! Resolves `CanXxx` guard predicates, transitions, and invariants from
-//! raw TLA+ source into pre-computed structures for efficient model checking.
+//! Resolves guard predicates, transitions, and invariants from I/O Automaton or
+//! TLA+ sources into pre-computed structures for efficient model checking.
 
 use temper_spec::tlaplus::StateMachine;
 
@@ -9,7 +9,7 @@ use super::types::{
     InvariantKind, ResolvedInvariant, ResolvedTransition, TemperModel,
 };
 
-/// Build a `TemperModel` from a parsed TLA+ `StateMachine`.
+/// Build a `TemperModel` from a parsed specification `StateMachine`.
 ///
 /// The model uses a bounded item count (default: 2) to keep the state space
 /// finite and tractable for exhaustive model checking.
@@ -30,6 +30,17 @@ pub fn build_model_from_tla(tla_source: &str, max_items: usize) -> TemperModel {
     build_model_impl(&sm, max_items, Some(tla_source))
 }
 
+/// Build a `TemperModel` from I/O Automaton TOML source.
+///
+/// The IOA format has explicit guards, so no TLA+ source parsing is needed.
+/// The automaton is converted to a `StateMachine` IR for compatibility.
+pub fn build_model_from_ioa(ioa_toml: &str, max_items: usize) -> TemperModel {
+    let automaton = temper_spec::automaton::parse_automaton(ioa_toml)
+        .expect("failed to parse I/O Automaton TOML");
+    let sm = temper_spec::automaton::parser::to_state_machine(&automaton);
+    build_model_impl(&sm, max_items, None)
+}
+
 fn build_model_impl(
     sm: &StateMachine,
     max_items: usize,
@@ -39,13 +50,8 @@ fn build_model_impl(
     let transitions = resolve_transitions(sm, &guard_map);
     let invariants = resolve_invariants(sm);
 
-    // The initial status is typically the first state listed, but we prefer
-    // "Draft" if present (matching the common TLA+ Init pattern).
-    let initial_status = if sm.states.contains(&"Draft".to_string()) {
-        "Draft".to_string()
-    } else {
-        sm.states.first().cloned().unwrap_or_else(|| "Unknown".to_string())
-    };
+    // Initial status: first state listed in the spec.
+    let initial_status = sm.states.first().cloned().unwrap_or_default();
 
     TemperModel {
         states: sm.states.clone(),

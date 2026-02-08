@@ -41,6 +41,18 @@ enum Commands {
         /// Port to listen on
         #[arg(short, long, default_value = "3000")]
         port: u16,
+        /// Run in developer mode (interview + spec generation)
+        #[arg(long)]
+        dev: bool,
+        /// Run in production mode (operate within specs)
+        #[arg(long)]
+        production: bool,
+        /// Directory containing IOA TOML and CSDL specs (for production mode)
+        #[arg(long)]
+        specs_dir: Option<String>,
+        /// Tenant name
+        #[arg(long, default_value = "default")]
+        tenant: String,
     },
 }
 
@@ -55,7 +67,13 @@ async fn main() -> anyhow::Result<()> {
             output_dir,
         } => codegen::run(&specs_dir, &output_dir)?,
         Commands::Verify { specs_dir } => verify::run(&specs_dir)?,
-        Commands::Serve { port } => serve::run(port).await?,
+        Commands::Serve {
+            port,
+            dev,
+            production,
+            specs_dir,
+            tenant,
+        } => serve::run(port, dev, production, specs_dir, tenant).await?,
     }
 
     Ok(())
@@ -126,7 +144,11 @@ mod tests {
     fn test_cli_parse_serve_default_port() {
         let cli = Cli::parse_from(["temper", "serve"]);
         match cli.command {
-            Commands::Serve { port } => assert_eq!(port, 3000),
+            Commands::Serve { port, dev, production, .. } => {
+                assert_eq!(port, 3000);
+                assert!(!dev);
+                assert!(!production);
+            }
             _ => panic!("expected Serve command"),
         }
     }
@@ -135,7 +157,36 @@ mod tests {
     fn test_cli_parse_serve_custom_port() {
         let cli = Cli::parse_from(["temper", "serve", "--port", "8080"]);
         match cli.command {
-            Commands::Serve { port } => assert_eq!(port, 8080),
+            Commands::Serve { port, .. } => assert_eq!(port, 8080),
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_dev_mode() {
+        let cli = Cli::parse_from(["temper", "serve", "--dev"]);
+        match cli.command {
+            Commands::Serve { dev, .. } => assert!(dev),
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_production_mode() {
+        let cli = Cli::parse_from([
+            "temper", "serve", "--production", "--specs-dir", "my-specs", "--tenant", "ecommerce",
+        ]);
+        match cli.command {
+            Commands::Serve {
+                production,
+                specs_dir,
+                tenant,
+                ..
+            } => {
+                assert!(production);
+                assert_eq!(specs_dir, Some("my-specs".into()));
+                assert_eq!(tenant, "ecommerce");
+            }
             _ => panic!("expected Serve command"),
         }
     }

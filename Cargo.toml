@@ -16,7 +16,7 @@ members = [
     "crates/temper-evolution",
     "crates/temper-jit",
     "crates/temper-optimize",
-    "reference/ecommerce",
+    "crates/temper-platform",
 ]
 
 [workspace.package]
@@ -103,6 +103,7 @@ temper-cli = { path = "crates/temper-cli" }
 temper-evolution = { path = "crates/temper-evolution" }
 temper-jit = { path = "crates/temper-jit" }
 temper-optimize = { path = "crates/temper-optimize" }
+temper-platform = { path = "crates/temper-platform" }
 
 [profile.release]
 lto = true

@@ -25,11 +25,38 @@ This document is the primary reference for LLM agents building applications with
 
 ## 1. Core Concepts
 
-Temper is an **actor-based, OData v4 API backend framework** designed for agentic programming. The key principle:
+Temper is a **conversational application platform**. The key principle:
 
-> **Specifications are the durable artifact. Code is derived and regenerable.**
+> **You describe what you want. The system builds it, verifies it, and evolves it.**
 
-You edit three types of specification files:
+Temper operates through two separated conversational contexts:
+
+| Context | Who | Purpose |
+|---------|-----|---------|
+| **Developer Chat** | Developer / builder | Interview → generate specs → verify → deploy |
+| **Production Chat** | End users | Operate the app → unmet intents → evolution pipeline |
+
+The developer never writes specs by hand. They describe their domain through conversation.
+The system generates I/O Automaton specs, CSDL data models, and Cedar policies, runs the
+verification cascade, and deploys entity actors — all within the chat.
+
+When end users hit capabilities that don't exist, their unmet intents flow through the
+Evolution Engine. The developer reviews and approves changes via the Developer Chat.
+
+### The Lifecycle
+
+```
+1. CONVERSE → Developer describes domain in Developer Chat
+2. GENERATE → System produces IOA specs + CSDL + Cedar from conversation
+3. VERIFY   → 3-level cascade (model check + simulation + property tests)
+4. DEPLOY   → Hot-swap: entity actors live, OData API serving
+5. USE      → End users operate the app via Production Chat
+6. OBSERVE  → Trajectory intelligence captures unmet intents
+7. EVOLVE   → Evolution Engine proposes spec changes → developer approves
+8. REPEAT   → Back to step 1, system grows from conversation
+```
+
+Three types of specification files are generated (not hand-written):
 
 | File | Format | Purpose |
 |------|--------|---------|
@@ -37,19 +64,8 @@ You edit three types of specification files:
 | `*.ioa.toml` | I/O Automaton TOML | Behavior: state machines, transitions, guards, invariants |
 | `*.cedar` | Cedar | Security: attribute-based access control policies |
 
-Everything else is generated from these specs. If you need to change behavior, change the spec — never hand-edit generated code.
-
-### The Lifecycle
-
-```
-1. DEFINE   → Write/modify CSDL + I/O Automaton + Cedar specs
-2. GENERATE → temper codegen (produces Rust actor code)
-3. VERIFY   → temper verify (3-level cascade: model check + simulation + property tests)
-4. DEPLOY   → temper serve (starts OData v4 HTTP server)
-5. OBSERVE  → Production telemetry flows to observability store (SQL-queryable)
-6. EVOLVE   → Evolution Engine proposes spec changes from production data
-7. REPEAT   → Human approves → back to step 1
-```
+Everything else is derived from these specs. If behavior needs to change, it happens
+through conversation — the system regenerates the specs and re-verifies.
 
 ---
 

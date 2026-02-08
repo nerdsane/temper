@@ -47,12 +47,12 @@ mod tests {
 
     fn test_state_with_tla() -> ServerState {
         let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
-        let order_tla = include_str!("../../../test-fixtures/specs/order.tla");
+        let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
         let csdl = parse_csdl(csdl_xml).unwrap();
-        let system = ActorSystem::new("test-tla");
-        let mut tla = std::collections::HashMap::new();
-        tla.insert("Order".to_string(), order_tla.to_string());
-        ServerState::with_tla(system, csdl, csdl_xml.to_string(), tla)
+        let system = ActorSystem::new("test-ioa");
+        let mut specs = std::collections::HashMap::new();
+        specs.insert("Order".to_string(), order_ioa.to_string());
+        ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs)
     }
 
     #[tokio::test]

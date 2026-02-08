@@ -1,6 +1,6 @@
 //! EntityActor: processes actions through a TransitionTable.
 //!
-//! This is the bridge between the actor runtime and the state machine specs.
+//! This is the bridge between the actor runtime and the I/O Automaton specs.
 //! Each entity actor holds its current state and a TransitionTable, and
 //! processes action messages by evaluating transitions through the table.
 //!
@@ -20,12 +20,14 @@
 //! - **Explicit error handling**: Every match arm handled. No unwrap on user input.
 //! - **Deterministic**: Same input -> same output. No randomness in transition logic.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use temper_jit::table::TransitionTable;
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_store_postgres::PostgresEventStore;
 
 use super::types::{
@@ -61,7 +63,7 @@ impl EntityActor {
             table,
             initial_fields,
             event_store: None,
-            trace_id: uuid::Uuid::now_v7().to_string(),
+            trace_id: sim_uuid().to_string(),
         }
     }
 
@@ -79,7 +81,7 @@ impl EntityActor {
             table,
             initial_fields,
             event_store: Some(store),
-            trace_id: uuid::Uuid::now_v7().to_string(),
+            trace_id: sim_uuid().to_string(),
         }
     }
 
@@ -95,9 +97,9 @@ impl EntityActor {
             event_type: event.action.clone(),
             payload: serde_json::to_value(event).unwrap_or_default(),
             metadata: EventMetadata {
-                event_id: uuid::Uuid::now_v7(),
-                causation_id: uuid::Uuid::now_v7(),
-                correlation_id: uuid::Uuid::now_v7(),
+                event_id: sim_uuid(),
+                causation_id: sim_uuid(),
+                correlation_id: sim_uuid(),
                 timestamp: event.timestamp,
                 actor_id: persistence_id.to_string(),
             },
@@ -174,6 +176,8 @@ impl Actor for EntityActor {
             entity_id: self.entity_id.clone(),
             status: self.table.initial_state.clone(),
             item_count: 0,
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
             fields,
             events: Vec::new(),
             sequence_nr: 0,
@@ -243,6 +247,16 @@ impl Actor for EntityActor {
                                 temper_jit::table::Effect::DecrementItems => {
                                     state.item_count = state.item_count.saturating_sub(1);
                                 }
+                                temper_jit::table::Effect::IncrementCounter(var) => {
+                                    *state.counters.entry(var.clone()).or_insert(0) += 1;
+                                }
+                                temper_jit::table::Effect::DecrementCounter(var) => {
+                                    let val = state.counters.entry(var.clone()).or_insert(0);
+                                    *val = val.saturating_sub(1);
+                                }
+                                temper_jit::table::Effect::SetBool { var, value } => {
+                                    state.booleans.insert(var.clone(), *value);
+                                }
                                 temper_jit::table::Effect::EmitEvent(evt) => {
                                     tracing::info!(
                                         entity_type = %state.entity_type,
@@ -269,7 +283,7 @@ impl Actor for EntityActor {
                             action: name.clone(),
                             from_status,
                             to_status: state.status.clone(),
-                            timestamp: chrono::Utc::now(),
+                            timestamp: sim_now(),
                             params: params.clone(),
                         };
 
@@ -371,11 +385,10 @@ mod tests {
     use temper_runtime::ActorSystem;
     use temper_jit::table::TransitionTable;
 
-    const ORDER_TLA: &str = include_str!("../../../../test-fixtures/specs/order.tla");
+    const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 
     fn order_table() -> Arc<TransitionTable> {
-        // Use from_tla_source which resolves CanXxx guards -- matches what DST verifies
-        Arc::new(TransitionTable::from_tla_source(ORDER_TLA))
+        Arc::new(TransitionTable::from_ioa_source(ORDER_IOA))
     }
 
     // =============================================

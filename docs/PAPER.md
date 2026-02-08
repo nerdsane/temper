@@ -68,12 +68,16 @@ address:
    detect and correct these autonomously.
 
 Temper's key insight is that **specifications, not code, should be the durable
-artifact**.  A CSDL document defines what entities exist and how they relate.  A
-I/O Automaton defines what transitions are legal and what invariants must hold.  A
-Cedar policy defines who may do what.  Code is generated from these
-specifications and can be regenerated whenever the specifications change.  Agents
-read and modify specifications--structured, bounded, verifiable artifacts--rather
-than arbitrary source code.
+artifact** — and that **specifications themselves should be generated from
+conversation**.  A developer describes their domain through a conversational
+interview; the system generates I/O Automaton specifications, CSDL data models,
+and Cedar policies from that conversation.  Code is generated from these
+specifications and can be regenerated whenever the specifications change.
+When end users encounter capabilities the system lacks, their unmet intents
+flow through an Evolution Engine that proposes specification changes for
+developer approval.  The system continuously evolves from both developer
+intent and production feedback, with a three-level verification cascade
+gating every change.
 
 The remainder of this paper is organized as follows.  Section 2 presents the
 overall architecture.  Sections 3--5 describe the specification layer, the actor
@@ -863,8 +867,9 @@ telemetry to a different backend (Datadog, Grafana, Jaeger) without code changes
 
 Temper makes the following contributions:
 
-1. A specification-first architecture where CSDL, I/O Automaton, and Cedar documents are
-   the durable artifacts and code is derived.
+1. A conversation-first architecture where specifications are generated from
+   developer interviews, code is derived from specifications, and the system
+   self-evolves from production trajectory intelligence.
 
 2. A three-level verification cascade combining exhaustive model checking,
    deterministic simulation with fault injection, and property-based testing.
@@ -893,9 +898,97 @@ Temper makes the following contributions:
    where simulation testing is the primary--not supplementary--testing
    strategy.
 
-### 12.2 Future Work
+### 12.2 Conversational Development: The Full Vision
 
-Several directions remain open:
+The specification-first architecture described above still assumes that a
+developer writes CSDL, I/O Automaton, and Cedar specifications by hand.
+The full vision eliminates this assumption: **specifications are generated
+from conversation, code is generated from specifications, and the system
+self-evolves from production trajectories.**
+
+The developer interacts with Temper through a conversational interface — the
+**Developer Chat** — which interviews them about their domain, generates
+specifications from the conversation, runs the verification cascade, and
+hot-deploys entity actors in real time.  A representative session:
+
+```
+Developer: "I want a project management tool like Linear"
+System:    "What are the core entities you manage?"
+Developer: "Issues and projects. Issues go through a workflow."
+System:    "What states does an issue go through?"
+Developer: "Backlog, todo, in progress, in review, done. You can cancel them."
+System:    [generates issue.ioa.toml: 6 states, infers CreateIssue/StartWork/
+            SubmitForReview/Approve/Complete/CancelIssue actions]
+           [runs verification cascade — passes]
+           [registers tenant, entity actors live]
+           "Issue entity is live. Try it — what would you do first?"
+Developer: "Create a bug for the login page"
+System:    [agent creates ISS-1 in Backlog via OData]
+           "Created ISS-1 in Backlog. What's next?"
+Developer: "I want to assign it to someone"
+System:    [AssignIssue doesn't exist → captured as UnmetIntent]
+           "I can't do that yet. Should issues have an assignee?
+            What states can you assign from?"
+Developer: "Any state except Done and Cancelled"
+System:    [adds AssignIssue action + assignee_set boolean guard to spec]
+           [re-runs verification cascade — passes]
+           [hot-swaps TransitionTable via SwapController]
+           "Done. Try assigning ISS-1 now."
+```
+
+#### Two-Context Separation
+
+The system maintains two clearly separated contexts:
+
+1. **Developer Chat** (design-time).  The developer builds and evolves the
+   application through conversation.  Every exchange may generate or modify
+   specifications.  The verification cascade gates every change.  The
+   developer has full control over the entity model.
+
+2. **Production Chat** (runtime).  End users interact with the deployed
+   application through a separate conversational interface.  The agent
+   operates strictly within the current specifications — it cannot modify
+   the entity model.  Unmet user intents flow into the Evolution Engine:
+
+   ```
+   User attempts action → agent fails → trajectory span (outcome=failed,
+     user_intent="split order into shipments") → OTEL → ClickHouse
+     → Sentinel → O-Record → I-Record (UnmetIntent)
+     → Developer reviews → D-Record (Approved/Rejected)
+     → If approved: spec change → verify → hot-swap
+   ```
+
+   The developer retains the approval gate (D-Record) for all behavioral
+   changes.  The system may autonomously observe, formalize problems, and
+   propose solutions, but production user intents never modify the
+   application without developer consent.
+
+#### Conversational Development Pipeline
+
+The Developer Chat implements a three-stage pipeline:
+
+1. **Interview**: The system asks structured questions to elicit entity types,
+   states, transitions, guards, and invariants.  It uses the IOA formalism
+   as a template: "What states does X go through?", "What actions can happen
+   from state Y?", "Are there any conditions required for Z?"
+
+2. **Generate + Verify**: Each conversational exchange that implies a spec
+   change triggers: IOA TOML generation → CSDL generation → verification
+   cascade (model check + simulation + property tests).  If verification
+   fails, the system explains the violation and asks the developer to
+   clarify.
+
+3. **Deploy + Test**: On successful verification, the system registers the
+   tenant spec in the SpecRegistry, hot-swaps the TransitionTable, and
+   invites the developer to test the new behavior in the same conversation.
+
+This pipeline makes the development loop interactive and immediate: the
+developer describes intent, the system materializes it as a verified
+specification, and the result is testable within seconds.
+
+### 12.3 Remaining Future Work
+
+Several additional directions remain open:
 
 - **Distributed clustering.**  The current actor system is single-node.
   Extending `temper-runtime` with a cluster membership protocol and remote
@@ -905,11 +998,7 @@ Several directions remain open:
   would allow hot-loading new actor logic without restarting the host process,
   complementing the JIT transition table layer.
 
-- **Multi-tenancy.**  The current design assumes a single tenant.  Adding
-  tenant-scoped actor systems, per-tenant CSDL overlays, and Cedar policy
-  namespacing would support SaaS deployment.
-
-- **Cloud deployment.**  Packaging the framework as a managed service with
+- **Cloud deployment.**  Packaging the platform as a managed service with
   infrastructure-as-code templates for AWS/GCP/Azure would lower the barrier
   to adoption.
 

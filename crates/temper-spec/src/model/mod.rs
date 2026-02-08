@@ -4,13 +4,13 @@ use std::collections::HashMap;
 use crate::csdl;
 use crate::tlaplus;
 
-/// The unified specification model that links CSDL + TLA+.
+/// The unified specification model that links CSDL + specification sources (IOA/TLA+).
 /// This is what codegen consumes to produce Rust actors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpecModel {
     /// The CSDL document (data model).
     pub csdl: csdl::CsdlDocument,
-    /// TLA+ state machines keyed by entity type name.
+    /// State machines keyed by entity type name (from IOA or TLA+ sources).
     pub state_machines: HashMap<String, tlaplus::StateMachine>,
     /// Validation results from linking.
     pub validation: ValidationResult,
@@ -28,9 +28,9 @@ impl ValidationResult {
     }
 }
 
-/// Build a unified SpecModel from a CSDL document and TLA+ sources.
+/// Build a unified SpecModel from a CSDL document and specification sources.
 ///
-/// `tla_sources` maps entity type name → TLA+ source text.
+/// `spec_sources` maps entity type name → specification source text (IOA or TLA+).
 pub fn build_spec_model(
     csdl: csdl::CsdlDocument,
     tla_sources: HashMap<String, String>,
@@ -38,7 +38,7 @@ pub fn build_spec_model(
     let mut state_machines = HashMap::new();
     let mut validation = ValidationResult::default();
 
-    // Parse each TLA+ source
+    // Parse each specification source
     for (entity_name, source) in &tla_sources {
         match tlaplus::extract_state_machine(source) {
             Ok(sm) => {
@@ -52,39 +52,39 @@ pub fn build_spec_model(
         }
     }
 
-    // Cross-validate CSDL annotations against TLA+ specs
+    // Cross-validate CSDL annotations against specification state machines
     for schema in &csdl.schemas {
         for entity_type in &schema.entity_types {
             if let Some(csdl_states) = entity_type.state_machine_states() {
                 if let Some(sm) = state_machines.get(&entity_type.name) {
-                    // Verify all CSDL-declared states exist in TLA+
+                    // Verify all CSDL-declared states exist in spec
                     for state in &csdl_states {
                         if !sm.states.contains(state) {
                             validation.errors.push(format!(
-                                "{}: CSDL declares state '{}' but TLA+ spec does not contain it",
+                                "{}: CSDL declares state '{}' but specification does not contain it",
                                 entity_type.name, state
                             ));
                         }
                     }
-                    // Verify all TLA+ states are in CSDL
+                    // Verify all spec states are in CSDL
                     for state in &sm.states {
                         if !csdl_states.contains(state) {
                             validation.warnings.push(format!(
-                                "{}: TLA+ has state '{}' not declared in CSDL annotations",
+                                "{}: specification has state '{}' not declared in CSDL annotations",
                                 entity_type.name, state
                             ));
                         }
                     }
                 } else if entity_type.tla_spec_path().is_some() {
                     validation.warnings.push(format!(
-                        "{}: has TlaSpec annotation but no TLA+ source was provided",
+                        "{}: has TlaSpec annotation but no specification source was provided",
                         entity_type.name
                     ));
                 }
             }
         }
 
-        // Validate action valid-from states against TLA+ transitions
+        // Validate action valid-from states against specification transitions
         for action in &schema.actions {
             if let Some(from_states) = action.valid_from_states() {
                 if let Some(binding_type) = action.binding_type() {
@@ -93,7 +93,7 @@ pub fn build_spec_model(
                         for state in &from_states {
                             if !sm.states.contains(state) {
                                 validation.errors.push(format!(
-                                    "Action {}: ValidFromStates contains '{}' which is not in {}'s TLA+ states",
+                                    "Action {}: ValidFromStates contains '{}' which is not in {}'s specification states",
                                     action.name, state, entity_name
                                 ));
                             }

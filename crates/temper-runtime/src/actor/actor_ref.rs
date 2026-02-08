@@ -58,7 +58,7 @@ impl ActorId {
         Self {
             name: name.into(),
             path: path.into(),
-            uid: uuid::Uuid::now_v7(),
+            uid: crate::scheduler::sim_uuid(),
         }
     }
 }

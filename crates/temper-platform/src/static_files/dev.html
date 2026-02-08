@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Temper Developer Studio</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/toml.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/xml.min.js"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+:root {
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #c9d1d9; --text-muted: #8b949e; --accent: #58a6ff;
+  --success: #3fb950; --warning: #d29922; --error: #f85149;
+}
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
+
+/* Status Bar */
+.status-bar { background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 6px 16px; display: flex; align-items: center; gap: 16px; font-size: 13px; }
+.status-bar .logo { font-weight: 700; color: var(--accent); }
+.status-bar .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.badge-dev { background: #1f6feb33; color: var(--accent); }
+.badge-ok { background: #23883033; color: var(--success); }
+.badge-running { background: #d2992233; color: var(--warning); }
+.badge-fail { background: #f8514933; color: var(--error); }
+.status-bar .spacer { flex: 1; }
+
+/* Main Layout */
+.main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr auto;
+  overflow: hidden; }
+
+/* Chat Panel */
+.chat-panel { display: flex; flex-direction: column; border-right: 1px solid var(--border); }
+.chat-header { padding: 10px 16px; border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: 14px; background: var(--surface); }
+.chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex;
+  flex-direction: column; gap: 12px; }
+.msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; font-size: 14px;
+  line-height: 1.5; word-wrap: break-word; white-space: pre-wrap; }
+.msg-user { align-self: flex-end; background: #1f6feb; color: #fff; }
+.msg-agent { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); }
+.chat-input { display: flex; padding: 12px; border-top: 1px solid var(--border);
+  background: var(--surface); gap: 8px; }
+.chat-input textarea { flex: 1; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px; color: var(--text); font-size: 14px; resize: none;
+  font-family: inherit; outline: none; }
+.chat-input textarea:focus { border-color: var(--accent); }
+.chat-input button { background: var(--accent); color: #fff; border: none; border-radius: 8px;
+  padding: 10px 20px; cursor: pointer; font-weight: 600; font-size: 14px; }
+.chat-input button:hover { opacity: 0.9; }
+
+/* Spec Panel */
+.spec-panel { display: flex; flex-direction: column; }
+.spec-tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); }
+.spec-tab { padding: 10px 16px; cursor: pointer; font-size: 13px; font-weight: 500;
+  color: var(--text-muted); border-bottom: 2px solid transparent; }
+.spec-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.spec-tab:hover { color: var(--text); }
+.spec-content { flex: 1; overflow: auto; padding: 0; }
+.spec-content pre { margin: 0; padding: 16px; }
+.spec-content code { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 13px; line-height: 1.6; }
+.spec-empty { padding: 40px; text-align: center; color: var(--text-muted); font-size: 14px; }
+
+/* Verification Bar */
+.verify-bar { grid-column: 1 / -1; border-top: 1px solid var(--border);
+  background: var(--surface); padding: 8px 16px; display: flex; gap: 24px;
+  align-items: center; font-size: 13px; }
+.verify-level { display: flex; align-items: center; gap: 6px; }
+.verify-dot { width: 8px; height: 8px; border-radius: 50%; }
+.dot-pending { background: var(--text-muted); }
+.dot-running { background: var(--warning); animation: pulse 1s infinite; }
+.dot-passed { background: var(--success); }
+.dot-failed { background: var(--error); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+/* Approval Banner */
+.approval-banner { background: #d2992233; border: 1px solid var(--warning);
+  border-radius: 8px; margin: 8px 16px; padding: 12px 16px; }
+.approval-banner h4 { color: var(--warning); margin-bottom: 4px; font-size: 13px; }
+.approval-banner p { font-size: 13px; margin-bottom: 8px; }
+.approval-actions { display: flex; gap: 8px; }
+.approval-actions button { padding: 6px 16px; border-radius: 6px; border: none;
+  cursor: pointer; font-size: 12px; font-weight: 600; }
+.btn-approve { background: var(--success); color: #fff; }
+.btn-reject { background: var(--error); color: #fff; }
+</style>
+</head>
+<body>
+
+<div class="status-bar">
+  <span class="logo">Temper</span>
+  <span class="badge badge-dev">DEV</span>
+  <span id="tenant-label">Tenant: —</span>
+  <span id="entity-count">Entities: 0</span>
+  <span class="spacer"></span>
+  <span id="phase-label">Phase: Welcome</span>
+  <span id="conn-status" class="badge badge-running">Connecting...</span>
+</div>
+
+<div class="main">
+  <div class="chat-panel">
+    <div class="chat-header">Developer Chat</div>
+    <div class="chat-messages" id="messages"></div>
+    <div id="approval-area"></div>
+    <div class="chat-input">
+      <textarea id="input" rows="2" placeholder="Describe what you want to build..."></textarea>
+      <button id="send-btn" onclick="sendMessage()">Send</button>
+    </div>
+  </div>
+
+  <div class="spec-panel">
+    <div class="spec-tabs">
+      <div class="spec-tab active" data-tab="ioa" onclick="switchTab('ioa')">IOA TOML</div>
+      <div class="spec-tab" data-tab="csdl" onclick="switchTab('csdl')">CSDL XML</div>
+      <div class="spec-tab" data-tab="cedar" onclick="switchTab('cedar')">Cedar</div>
+    </div>
+    <div class="spec-content" id="spec-content">
+      <div class="spec-empty">Specs will appear here as you design your application.</div>
+    </div>
+  </div>
+
+  <div class="verify-bar">
+    <span style="font-weight:600">Verification:</span>
+    <div class="verify-level">
+      <div class="verify-dot dot-pending" id="dot-l1"></div>
+      <span>L1 Model Check</span>
+    </div>
+    <div class="verify-level">
+      <div class="verify-dot dot-pending" id="dot-l2"></div>
+      <span>L2 Simulation</span>
+    </div>
+    <div class="verify-level">
+      <div class="verify-dot dot-pending" id="dot-l3"></div>
+      <span>L3 Property Tests</span>
+    </div>
+    <span class="spacer"></span>
+    <span id="verify-summary" style="color:var(--text-muted)">Waiting for specs</span>
+  </div>
+</div>
+
+<script>
+const specs = { ioa: {}, csdl: '', cedar: '' };
+let currentTab = 'ioa';
+let ws;
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/dev/ws`);
+
+  ws.onopen = () => {
+    document.getElementById('conn-status').textContent = 'Connected';
+    document.getElementById('conn-status').className = 'badge badge-ok';
+  };
+
+  ws.onclose = () => {
+    document.getElementById('conn-status').textContent = 'Disconnected';
+    document.getElementById('conn-status').className = 'badge badge-fail';
+    setTimeout(connect, 3000);
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    handleMessage(msg);
+  };
+}
+
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'agent_response':
+      addMessage(msg.content, false);
+      break;
+    case 'spec_update':
+      handleSpecUpdate(msg);
+      break;
+    case 'verify_status':
+      handleVerifyStatus(msg);
+      break;
+    case 'deploy_status':
+      handleDeployStatus(msg);
+      break;
+    case 'phase_update':
+      document.getElementById('phase-label').textContent = `Phase: ${msg.phase}`;
+      break;
+    case 'evolution_event':
+      addMessage(`[Evolution] ${msg.summary}`, false);
+      break;
+    case 'approval_request':
+      showApproval(msg);
+      break;
+    case 'error':
+      addMessage(`Error: ${msg.message}`, false);
+      break;
+  }
+}
+
+function handleSpecUpdate(msg) {
+  if (msg.spec_type === 'ioa_toml') {
+    specs.ioa[msg.entity_name] = msg.content;
+  } else if (msg.spec_type === 'csdl_xml') {
+    specs.csdl = msg.content;
+  } else if (msg.spec_type === 'cedar') {
+    specs.cedar = msg.content;
+  }
+  const count = Object.keys(specs.ioa).length;
+  document.getElementById('entity-count').textContent = `Entities: ${count}`;
+  renderSpec();
+}
+
+function handleVerifyStatus(msg) {
+  const dotMap = { 'L1 Model Check': 'dot-l1', 'Level 1: Model Check': 'dot-l1',
+    'L2 Simulation': 'dot-l2', 'Level 2: Deterministic Simulation': 'dot-l2',
+    'L3 Property Tests': 'dot-l3', 'Level 3: Property Tests': 'dot-l3' };
+  const statusMap = { pending: 'dot-pending', running: 'dot-running',
+    passed: 'dot-passed', failed: 'dot-failed' };
+  for (const [key, id] of Object.entries(dotMap)) {
+    if (msg.level.includes(key.split(' ').pop())) {
+      const el = document.getElementById(id);
+      if (el) el.className = `verify-dot ${statusMap[msg.status] || 'dot-pending'}`;
+    }
+  }
+  document.getElementById('verify-summary').textContent = msg.summary;
+}
+
+function handleDeployStatus(msg) {
+  if (msg.success) {
+    document.getElementById('tenant-label').textContent = `Tenant: ${msg.tenant}`;
+    addMessage(`Deployed successfully: ${msg.summary}`, false);
+  } else {
+    addMessage(`Deploy failed: ${msg.summary}`, false);
+  }
+}
+
+function showApproval(msg) {
+  const area = document.getElementById('approval-area');
+  area.innerHTML = `
+    <div class="approval-banner">
+      <h4>Evolution Request (priority: ${msg.priority.toFixed(2)})</h4>
+      <p>${msg.description}</p>
+      <div class="approval-actions">
+        <button class="btn-approve" onclick="respond('${msg.request_id}', true)">Approve</button>
+        <button class="btn-reject" onclick="respond('${msg.request_id}', false)">Reject</button>
+      </div>
+    </div>`;
+}
+
+function respond(requestId, approved) {
+  ws.send(JSON.stringify({
+    type: 'approval_response', request_id: requestId,
+    approved, rationale: approved ? 'Approved by developer' : 'Rejected by developer'
+  }));
+  document.getElementById('approval-area').innerHTML = '';
+}
+
+function sendMessage() {
+  const input = document.getElementById('input');
+  const text = input.value.trim();
+  if (!text) return;
+  addMessage(text, true);
+  ws.send(JSON.stringify({ type: 'chat', content: text }));
+  input.value = '';
+}
+
+function addMessage(text, isUser) {
+  const div = document.createElement('div');
+  div.className = `msg ${isUser ? 'msg-user' : 'msg-agent'}`;
+  div.textContent = text;
+  const container = document.getElementById('messages');
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.spec-tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.tab === tab));
+  renderSpec();
+}
+
+function renderSpec() {
+  const el = document.getElementById('spec-content');
+  let content = '';
+  let lang = 'toml';
+  if (currentTab === 'ioa') {
+    const entries = Object.entries(specs.ioa);
+    content = entries.length ? entries.map(([name, src]) =>
+      `# === ${name} ===\n${src}`).join('\n\n') : '';
+    lang = 'toml';
+  } else if (currentTab === 'csdl') {
+    content = specs.csdl;
+    lang = 'xml';
+  } else {
+    content = specs.cedar;
+    lang = 'plaintext';
+  }
+  if (!content) {
+    el.innerHTML = '<div class="spec-empty">No specs generated yet.</div>';
+    return;
+  }
+  el.innerHTML = `<pre><code class="language-${lang}"></code></pre>`;
+  el.querySelector('code').textContent = content;
+  hljs.highlightElement(el.querySelector('code'));
+}
+
+document.getElementById('input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+
+connect();
+</script>
+</body>
+</html>

@@ -7,14 +7,14 @@
 //! - All non-determinism is controlled by a seed
 //! - Faults (message delay/drop/reorder, actor crash) are injected
 //! - Any failure is reproducible by replaying the same seed
-//! - State machine invariants are checked after every transition
+//! - Specification invariants are checked after every transition
 
 use temper_runtime::scheduler::{
     DeterministicRng, FaultConfig, SimActorState, SimScheduler,
 };
 use stateright::Model;
 
-use crate::model::{build_model_from_tla, TemperModel, TemperModelAction, TemperModelState};
+use crate::model::{build_model_from_ioa, build_model_from_tla, TemperModel, TemperModelAction, TemperModelState};
 
 /// Configuration for a simulation run.
 #[derive(Debug, Clone)]
@@ -103,6 +103,27 @@ pub struct InvariantViolation {
     pub tick: u64,
 }
 
+/// Run a deterministic simulation from I/O Automaton TOML source.
+pub fn run_simulation_from_ioa(ioa_toml: &str, config: &SimConfig) -> SimulationResult {
+    let model = build_model_from_ioa(ioa_toml, config.max_items);
+    run_simulation_impl(&model, config)
+}
+
+/// Run simulation across multiple seeds from I/O Automaton TOML source.
+pub fn run_multi_seed_simulation_from_ioa(
+    ioa_toml: &str,
+    base_config: &SimConfig,
+    num_seeds: u64,
+) -> Vec<SimulationResult> {
+    (0..num_seeds)
+        .map(|i| {
+            let mut config = base_config.clone();
+            config.seed = base_config.seed.wrapping_add(i);
+            run_simulation_from_ioa(ioa_toml, &config)
+        })
+        .collect()
+}
+
 /// Run a deterministic simulation of multiple entity actors.
 ///
 /// Each actor independently processes random action sequences through
@@ -110,6 +131,10 @@ pub struct InvariantViolation {
 /// Invariants are checked after every transition.
 pub fn run_simulation(tla_source: &str, config: &SimConfig) -> SimulationResult {
     let model = build_model_from_tla(tla_source, config.max_items);
+    run_simulation_impl(&model, config)
+}
+
+fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationResult {
     let mut sched = SimScheduler::new(config.seed, config.faults.clone());
     let mut rng = DeterministicRng::new(config.seed.wrapping_add(1));
 
@@ -223,7 +248,9 @@ pub fn run_simulation(tla_source: &str, config: &SimConfig) -> SimulationResult 
     }
 }
 
-/// Check invariants on a state using the model's properties.
+/// Check invariants on a state using the model's resolved invariants.
+///
+/// All invariant data comes from the spec — no hardcoded entity knowledge.
 fn check_invariants_on_state(
     model: &TemperModel,
     actor_id: &str,
@@ -233,20 +260,9 @@ fn check_invariants_on_state(
     tick: u64,
     violations: &mut Vec<InvariantViolation>,
 ) {
-    use stateright::Model;
+    use crate::model::InvariantKind;
 
-    // Check each property
-    for property in model.properties() {
-        let name = property.name;
-        // Properties are checked via the model's within_boundary / property evaluation
-        // Since stateright properties use fn pointers, we call them directly
-        // The property.condition is fn(&M, &M::State) -> bool
-        // We need to access it — but Property doesn't expose its condition directly.
-        // Instead, we implement the check manually based on the model's invariant data.
-    }
-
-    // Manual invariant checks based on model's invariant structure
-    // Check: status must be in valid states
+    // TypeInvariant: status must be in valid state set
     if !model.states.contains(&state_after.status) {
         violations.push(InvariantViolation {
             actor_id: actor_id.to_string(),
@@ -258,17 +274,37 @@ fn check_invariants_on_state(
         });
     }
 
-    // Check: item count invariants (submitted requires items > 0)
-    let requires_items_states = ["Submitted", "Confirmed", "Processing", "Shipped", "Delivered"];
-    if requires_items_states.contains(&state_after.status.as_str()) && state_after.item_count == 0 {
-        violations.push(InvariantViolation {
-            actor_id: actor_id.to_string(),
-            action: action_name.to_string(),
-            state_before: state_before.clone(),
-            state_after: state_after.clone(),
-            invariant: "SubmitRequiresItems: item_count must be > 0".to_string(),
-            tick,
-        });
+    // Check each resolved invariant from the spec
+    for inv in &model.invariants {
+        let triggered = inv.trigger_states.is_empty()
+            || inv.trigger_states.contains(&state_after.status);
+        if !triggered {
+            continue;
+        }
+
+        let violated = match inv.kind {
+            InvariantKind::StatusInSet => !model.states.contains(&state_after.status),
+            InvariantKind::ItemCountPositive => state_after.item_count == 0,
+            InvariantKind::Implication => {
+                let valid: Vec<&String> = inv
+                    .required_states
+                    .iter()
+                    .filter(|s| model.states.contains(s))
+                    .collect();
+                !valid.is_empty() && !valid.contains(&&state_after.status)
+            }
+        };
+
+        if violated {
+            violations.push(InvariantViolation {
+                actor_id: actor_id.to_string(),
+                action: action_name.to_string(),
+                state_before: state_before.clone(),
+                state_after: state_after.clone(),
+                invariant: inv.name.clone(),
+                tick,
+            });
+        }
     }
 }
 
@@ -278,11 +314,12 @@ pub fn run_multi_seed_simulation(
     base_config: &SimConfig,
     num_seeds: u64,
 ) -> Vec<SimulationResult> {
+    let model = build_model_from_tla(tla_source, base_config.max_items);
     (0..num_seeds)
         .map(|i| {
             let mut config = base_config.clone();
             config.seed = base_config.seed.wrapping_add(i);
-            run_simulation(tla_source, &config)
+            run_simulation_impl(&model, &config)
         })
         .collect()
 }
@@ -443,12 +480,16 @@ mod tests {
         let result = run_simulation(ORDER_TLA, &config);
         assert_eq!(result.actor_final_states.len(), 2);
 
+        // Derive valid states from the spec — no hardcoded entity knowledge.
+        let model = build_model_from_tla(ORDER_TLA, config.max_items);
+
         for (id, state) in &result.actor_final_states {
             assert!(id.starts_with("entity-"));
-            // Status should be a valid Order state
-            let valid = ["Draft", "Submitted", "Confirmed", "Processing", "Shipped",
-                         "Delivered", "Cancelled", "ReturnRequested", "Returned", "Refunded"];
-            assert!(valid.contains(&state.status.as_str()), "Invalid state: {}", state.status);
+            assert!(
+                model.states.contains(&state.status),
+                "Status '{}' not in spec states {:?}",
+                state.status, model.states
+            );
         }
     }
 }

@@ -3,22 +3,36 @@
 //! Evaluates whether a transition can fire given the current runtime context
 //! and computes the resulting state.
 
-use super::types::{TransitionResult, TransitionTable};
+use super::types::{EvalContext, TransitionResult, TransitionTable};
 
 impl TransitionTable {
-    /// Evaluate whether a transition can fire given the current runtime context.
+    /// Evaluate whether a transition can fire (legacy API with single item count).
     ///
-    /// Returns `Some(TransitionResult)` with `success: true` if a matching rule
-    /// is found and its guard passes, or `Some(TransitionResult)` with
-    /// `success: false` if a rule matches by name but its guard fails.
-    /// Returns `None` if no rule with the given `action` name exists.
+    /// For multi-counter or boolean guard support, use
+    /// [`evaluate_ctx()`](Self::evaluate_ctx).
     pub fn evaluate(
         &self,
         current_state: &str,
         item_count: usize,
         action: &str,
     ) -> Option<TransitionResult> {
-        // Find all rules that match the action name.
+        let mut ctx = EvalContext::default();
+        ctx.counters.insert("items".to_string(), item_count);
+        self.evaluate_ctx(current_state, &ctx, action)
+    }
+
+    /// Evaluate whether a transition can fire with a full evaluation context.
+    ///
+    /// Returns `Some(TransitionResult)` with `success: true` if a matching rule
+    /// is found and its guard passes, or `Some(TransitionResult)` with
+    /// `success: false` if a rule matches by name but its guard fails.
+    /// Returns `None` if no rule with the given `action` name exists.
+    pub fn evaluate_ctx(
+        &self,
+        current_state: &str,
+        ctx: &EvalContext,
+        action: &str,
+    ) -> Option<TransitionResult> {
         let matching: Vec<_> =
             self.rules.iter().filter(|r| r.name == action).collect();
 
@@ -27,7 +41,6 @@ impl TransitionTable {
         }
 
         for rule in &matching {
-            // Check from_states constraint first.
             let state_ok = rule.from_states.is_empty()
                 || rule.from_states.iter().any(|s| s == current_state);
 
@@ -35,8 +48,7 @@ impl TransitionTable {
                 continue;
             }
 
-            // Evaluate the guard.
-            if !rule.guard.evaluate(current_state, item_count) {
+            if !rule.guard.check(current_state, ctx) {
                 return Some(TransitionResult {
                     new_state: current_state.to_string(),
                     effects: vec![],
@@ -44,7 +56,6 @@ impl TransitionTable {
                 });
             }
 
-            // Guard passed -- compute result.
             let new_state = rule
                 .to_state
                 .clone()
@@ -57,7 +68,6 @@ impl TransitionTable {
             });
         }
 
-        // A rule exists but no from_states matched (guard effectively failed).
         Some(TransitionResult {
             new_state: current_state.to_string(),
             effects: vec![],
@@ -71,6 +81,7 @@ impl TransitionTable {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(deprecated)] // Tests exercise the legacy from_state_machine() path.
 mod tests {
     use super::super::types::*;
     use temper_spec::tlaplus::{StateMachine, Transition};

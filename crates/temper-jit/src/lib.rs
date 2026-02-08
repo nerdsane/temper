@@ -15,6 +15,6 @@ pub mod swap;
 pub mod shadow;
 
 // Re-export primary types at crate root.
-pub use table::{TransitionTable, TransitionRule, TransitionResult, Guard, Effect};
+pub use table::{TransitionTable, TransitionRule, TransitionResult, Guard, Effect, EvalContext};
 pub use swap::{SwapController, SwapResult};
 pub use shadow::{shadow_test, ShadowResult, TestCase, Mismatch};

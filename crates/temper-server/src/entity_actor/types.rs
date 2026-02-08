@@ -1,5 +1,7 @@
 //! Types for the entity actor: messages, state, events, and responses.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use temper_runtime::actor::Message;
 
@@ -36,8 +38,14 @@ pub struct EntityState {
     pub entity_id: String,
     /// Current status (state machine state).
     pub status: String,
-    /// Item count (for entities with collections).
+    /// Item count (legacy — prefer `counters["items"]` for new code).
     pub item_count: usize,
+    /// Named counter variables (e.g., "items", "review_cycles").
+    #[serde(default)]
+    pub counters: BTreeMap<String, usize>,
+    /// Named boolean variables (e.g., "assignee_set", "has_address").
+    #[serde(default)]
+    pub booleans: BTreeMap<String, bool>,
     /// All entity fields as a JSON object.
     pub fields: serde_json::Value,
     /// Event log (append-only history of all transitions).

@@ -13,7 +13,7 @@
 //! TLA+ remains available for humans who want temporal reasoning.
 
 mod types;
-mod parser;
+pub mod parser;
 
 pub use types::*;
-pub use parser::parse_automaton;
+pub use parser::{parse_automaton, to_state_machine};

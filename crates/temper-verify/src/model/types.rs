@@ -11,9 +11,9 @@ use std::fmt;
 /// simple item counter that tracks how many items have been added.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TemperModelState {
-    /// Current status value (mirrors the TLA+ `status` variable).
+    /// Current status value (mirrors the specification's `status` variable).
     pub status: String,
-    /// Number of items currently in the entity (simplified from the TLA+ set).
+    /// Number of items currently in the entity (simplified from the specification's set).
     pub item_count: usize,
 }
 
@@ -23,7 +23,7 @@ impl fmt::Display for TemperModelState {
     }
 }
 
-/// An action that the model can take, corresponding to a TLA+ transition.
+/// An action that the model can take, corresponding to a specification transition.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TemperModelAction {
     /// The transition name (e.g. "SubmitOrder", "CancelOrder").
@@ -42,7 +42,7 @@ impl fmt::Display for TemperModelAction {
 }
 
 /// A resolved transition used internally by the model, pre-computed from a
-/// TLA+ `Transition` for efficient matching during state exploration.
+/// specification `Transition` for efficient matching during state exploration.
 #[derive(Clone, Debug)]
 pub struct ResolvedTransition {
     /// The action name.
@@ -83,7 +83,7 @@ pub struct ResolvedInvariant {
     pub kind: InvariantKind,
 }
 
-/// The Stateright model generated from a TLA+ `StateMachine`.
+/// The Stateright model generated from an I/O Automaton specification.
 ///
 /// This struct holds all the pre-computed transition and invariant data needed
 /// to implement the `Model` trait efficiently. Invariant data is stored here

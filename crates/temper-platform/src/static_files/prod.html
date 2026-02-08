@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Temper Production</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+:root {
+  --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de;
+  --text: #1f2328; --text-muted: #656d76; --accent: #0969da;
+  --success: #1a7f37; --error: #cf222e;
+}
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
+
+.header { background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 12px 24px; display: flex; align-items: center; gap: 12px; }
+.header .logo { font-weight: 700; font-size: 18px; color: var(--accent); }
+.header .spacer { flex: 1; }
+.header .badge { padding: 2px 10px; border-radius: 12px; font-size: 12px;
+  font-weight: 600; background: #ddf4ff; color: var(--accent); }
+
+.chat-area { flex: 1; overflow-y: auto; padding: 24px; max-width: 800px;
+  margin: 0 auto; width: 100%; display: flex; flex-direction: column; gap: 16px; }
+
+.msg { max-width: 80%; padding: 12px 16px; border-radius: 16px; font-size: 15px;
+  line-height: 1.5; word-wrap: break-word; white-space: pre-wrap; }
+.msg-user { align-self: flex-end; background: var(--accent); color: #fff; }
+.msg-agent { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); }
+
+.input-area { border-top: 1px solid var(--border); padding: 16px 24px;
+  max-width: 800px; margin: 0 auto; width: 100%; display: flex; gap: 10px; }
+.input-area textarea { flex: 1; border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px 16px; font-size: 15px; resize: none; font-family: inherit;
+  outline: none; background: var(--bg); color: var(--text); }
+.input-area textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #0969da22; }
+.input-area button { background: var(--accent); color: #fff; border: none;
+  border-radius: 12px; padding: 12px 24px; cursor: pointer; font-weight: 600;
+  font-size: 15px; }
+.input-area button:hover { opacity: 0.9; }
+
+#conn-status { font-size: 12px; color: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <span class="logo">Temper Production</span>
+  <span class="badge">PROD</span>
+  <span class="spacer"></span>
+  <span id="conn-status">Connecting...</span>
+</div>
+
+<div class="chat-area" id="messages">
+  <div class="msg msg-agent">Welcome! How can I help you today?</div>
+</div>
+
+<div class="input-area">
+  <textarea id="input" rows="2" placeholder="Type a message..."></textarea>
+  <button onclick="sendMessage()">Send</button>
+</div>
+
+<script>
+let ws;
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/prod/ws`);
+
+  ws.onopen = () => {
+    document.getElementById('conn-status').textContent = 'Connected';
+    document.getElementById('conn-status').style.color = '#1a7f37';
+  };
+
+  ws.onclose = () => {
+    document.getElementById('conn-status').textContent = 'Disconnected';
+    document.getElementById('conn-status').style.color = '#cf222e';
+    setTimeout(connect, 3000);
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'agent_response') {
+      addMessage(msg.content, false);
+    } else if (msg.type === 'error') {
+      addMessage('Error: ' + msg.message, false);
+    }
+  };
+}
+
+function sendMessage() {
+  const input = document.getElementById('input');
+  const text = input.value.trim();
+  if (!text) return;
+  addMessage(text, true);
+  ws.send(JSON.stringify({ type: 'chat', content: text }));
+  input.value = '';
+}
+
+function addMessage(text, isUser) {
+  const div = document.createElement('div');
+  div.className = `msg ${isUser ? 'msg-user' : 'msg-agent'}`;
+  div.textContent = text;
+  const container = document.getElementById('messages');
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+document.getElementById('input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+
+connect();
+</script>
+</body>
+</html>
