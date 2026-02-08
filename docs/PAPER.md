@@ -1,6 +1,6 @@
 # Temper: A Formally Verified, Self-Evolving Actor Framework for Agentic API Backends
 
-**Seshadri Nalla**
+**Seshendra Nalla**
 
 *Draft -- February 2026*
 
@@ -112,7 +112,7 @@ temper-cli           CLI: init, codegen, verify, serve subcommands
 temper-evolution     Evolution Engine: records, chain validation, insights
 temper-jit           JIT transition tables, hot-swap, shadow testing
 temper-optimize      Self-driving optimizer actors, safety checker
-reference/ecommerce  Reference application: agentic e-commerce
+temper-platform      Conversational dev platform: interview, deploy, prod chat
 ```
 
 ### 2.2 Three-Tier Architecture
@@ -741,17 +741,15 @@ The Temper workspace contains 259 tests across 16 crates. Key categories:
 | Storage (Postgres, Redis)      |    33 | temper-store-postgres, temper-store-redis   |
 | CLI subcommands                |    14 | temper-cli                                 |
 
-### 11.2 Reference Application
+### 11.2 Conversational Platform
 
-The reference application (`reference/ecommerce`) models an agentic e-commerce
-platform with three agent personas (CustomerAgent, OperationsAgent,
-SupportAgent) operating on behalf of human customers.  The data model defines:
-
-- 7 entity types, 3 enum types, 6 bound actions on Order, 3 on Payment, 2 on
-  Shipment, 1 unbound action (SubmitFeedback), 4 bound functions, and 2
-  unbound functions.
-- The Order entity has a 10-state lifecycle with 14 transitions, 6 safety
-  invariants, and 3 liveness properties.
+The `temper-platform` crate implements the full conversational development
+experience.  Developers describe their application through a structured
+interview (entities, states, actions, guards, invariants), the system generates
+IOA TOML specs + CSDL + Cedar policies, runs the verification cascade, and
+hot-deploys entity actors.  Production users interact through a separate chat
+context; unmet intents feed back through the Evolution Engine for developer
+approval.
 
 ### 11.3 Verification Results
 

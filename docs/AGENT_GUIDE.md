@@ -812,13 +812,14 @@ cargo run -p ecommerce
 OTLP_ENDPOINT=http://localhost:4318 cargo run -p ecommerce -- agent
 
 # Run a single agent command
-OTLP_ENDPOINT=http://localhost:4318 cargo run -p ecommerce -- agent "Create an order and submit it"
+# Start the conversational developer platform
+temper serve --dev
 
-# Run trajectory analysis (reads from ClickHouse)
-CLICKHOUSE_URL=http://localhost:8123 cargo run -p ecommerce -- analyze
+# Start in production mode with pre-built specs
+temper serve --production --specs-dir specs --tenant my-app
 
-# Run the full E2E demo
-./scripts/demo.sh
+# With OTEL tracing enabled
+OTLP_ENDPOINT=http://localhost:4318 temper serve --dev
 ```
 
 ## Appendix B: CLI Reference
