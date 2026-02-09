@@ -1,35 +1,37 @@
-# Temper: Positioning
+# Temper: An Observation About Enterprise SaaS
 
-## 1. Thesis
+## 1. The Pattern
 
-Every enterprise SaaS is a state machine + integrations + authorization. If you accept that premise, the entire backend is derivable from a conversation.
+Spend enough time looking at enterprise SaaS backends and a pattern starts to emerge. An e-commerce order moves through Draft, Submitted, Confirmed, Shipped, Delivered. A support ticket goes from Open to InProgress to Resolved to Closed. A subscription cycles between Active, PastDue, Suspended, Cancelled.
 
-An Order has states (Draft, Submitted, Shipped). A Subscription has states (Active, PastDue, Cancelled). An Approval has states (Drafted, PendingApproval, Approved). The business logic is the transitions between them, the guards that prevent invalid transitions, and the invariants that must always hold.
+The business logic in each case is a state machine: states, transitions between them, guards that prevent invalid transitions ("you can't submit an empty order"), and invariants that must always hold ("cancelled is final"). The entities are different, but the shape of the problem is the same.
 
-The rest -- persistence, API endpoints, authorization, observability, webhooks -- is infrastructure that follows mechanically from the state machine definition. Temper derives all of it from a single IOA TOML specification, verified before deployment.
+What surrounds this core? Persistence, API endpoints, authorization, webhooks, observability. These layers are important -- critical, even -- but they follow mechanically from the state machine definition. If I know the states, transitions, and invariants, I can derive the rest.
 
-## 2. The Decomposition
+This is not a new observation. State machines are a well-studied formalism. What's interesting is asking: *how far can you push this?* If the state machine is the essential artifact, what becomes possible?
 
-Every SaaS backend decomposes into six layers. Temper replaces each with a declarative primitive:
+## 2. What Falls Out
 
-| Traditional Layer | Temper Primitive | Code Path |
-|---|---|---|
-| ORM models, migrations | CSDL XML | `temper-spec/src/csdl/parser.rs` auto-generates OData entity types |
-| Controller code, service layers | IOA TOML specs | `TransitionTable::from_ioa_source()` in `temper-jit/src/table/builder.rs` |
-| if/else workflow chains | TransitionTable rules | Guards, effects, from/to states evaluated by `TransitionTable::evaluate_ctx()` |
-| Auth middleware | Cedar ABAC policies | Cedar policy engine evaluates `Action in [AllowedActions]` per principal/resource |
-| Webhook/API integrations | Integration Engine | `[[integration]]` declarations in IOA TOML, outbox pattern via event journal |
-| Manual instrumentation | Automatic WideEvent telemetry | `temper-observe/src/wide_event.rs` emits spans + metrics for every action |
+If you accept the premise that the state machine is the core, each layer of a traditional SaaS backend maps to a declarative primitive:
 
-The developer writes none of these layers. The conversational platform (`temper-platform`) interviews the developer, generates all specs, and the verification cascade validates them before deployment.
+| What you'd normally write | What it maps to |
+|---|---|
+| ORM models, migrations | A CSDL data model |
+| Controllers, service layers | IOA TOML specifications |
+| if/else workflow logic | TransitionTable guards and effects |
+| Auth middleware | Cedar ABAC policies |
+| Webhook integrations | Integration declarations (outbox pattern) |
+| Manual instrumentation | Automatic telemetry from transitions |
 
-## 3. Pattern Mapping
+The question is whether this mapping is a useful simplification or an over-reduction that loses expressiveness. Temper is an attempt to find out.
 
-Five IOA specifications demonstrate the pattern across different business domains. Each follows the same structure: states, guards, effects, invariants, integrations.
+## 3. Five Patterns
 
-### 3.1 E-Commerce Order (`reference-apps/ecommerce/specs/order.ioa.toml`)
+To test how far the IOA approach stretches, we wrote specifications for five different SaaS patterns. All five parse, verify through a four-level cascade (SMT symbolic checking, exhaustive model checking, deterministic simulation, and property-based testing), and run in the same actor runtime.
 
-**Context**: A 10-state order lifecycle handling the full flow from draft through delivery, cancellation, and returns.
+### E-Commerce Order (`reference-apps/ecommerce/specs/order.ioa.toml`)
+
+The most complex spec: 10 states, 12 transition actions. Multi-state cancellation (from Draft, Submitted, or Confirmed). A counter guard (`items > 0`) prevents empty orders from reaching Submitted. Terminal states (Cancelled, Refunded) have no outbound transitions. Integration hooks fire on SubmitOrder, ConfirmOrder, and ShipOrder.
 
 ```
 Draft --> Submitted --> Confirmed --> Processing --> Shipped --> Delivered
@@ -41,193 +43,79 @@ Draft --> Submitted --> Confirmed --> Processing --> Shipped --> Delivered
                                                                Refunded
 ```
 
-**Key invariants**:
-- `SubmitRequiresItems`: No empty orders reach Submitted (guard: `items > 0`)
-- `CancelledIsFinal` / `RefundedIsFinal`: Terminal states have no outbound transitions
+### Support Ticket (`test-fixtures/specs/ticket.ioa.toml`)
 
-**Integrations**: `notify_fulfillment` on SubmitOrder, `charge_payment` on ConfirmOrder, `notify_shipping` on ShipOrder.
+A back-and-forth workflow: agents reply, customers respond, the ticket bounces between InProgress and WaitingOnCustomer. The `replies` counter prevents resolution without engagement. Closed is terminal; Resolved can be reopened.
 
-This is the most complex spec in the reference app and exercises multi-state cancellation (Draft, Submitted, or Confirmed), counter guards, and the full integration webhook pattern.
+### Approval Workflow (`test-fixtures/specs/approval.ioa.toml`)
 
-### 3.2 Support Ticket (`test-fixtures/specs/ticket.ioa.toml`)
+Boolean guards (`is_true has_reviewer`) prevent submission without a reviewer. Revise resets the boolean, forcing reassignment. The `approvals` counter proves approval happened.
 
-**Context**: Customer support workflow with agent assignment, back-and-forth replies, and resolution tracking.
+### Subscription Management (`test-fixtures/specs/subscription.ioa.toml`)
 
-```
-Open --> InProgress <--> WaitingOnCustomer
-              |
-          Resolved --> Closed
-              |
-             Open (reopen)
-```
+Payment failure escalation: Active → PastDue → Suspended → Expired. Self-transitions (EnableAutoRenew, DisableAutoRenew) modify booleans without changing status, demonstrating that state variables and status are orthogonal. Integration hooks fire on PaymentFailed and SuspendSubscription.
 
-**Key invariants**:
-- `ClosedIsFinal`: Closed tickets cannot be reopened
-- `ResolvedNeedsReply`: Cannot resolve without at least one agent reply (`replies > 0`)
+### Issue Tracker (`test-fixtures/specs/issue.ioa.toml`)
 
-**Liveness**: From Open, the ticket eventually reaches Resolved or Closed. The `replies` counter and `customer_responded` boolean track engagement state independently of the status lifecycle.
+Assignee tracking via boolean, review cycle counting. StartWork requires an assignee. Both RequestChanges and ApproveReview increment the review counter, giving a built-in velocity metric.
 
-### 3.3 Approval Workflow (`test-fixtures/specs/approval.ioa.toml`)
+Each of these took minutes to write and passed the full verification cascade on the first or second attempt. The harder question -- whether this pattern library covers enough of the real-world design space to be useful -- remains open.
 
-**Context**: Document or change request approval with reviewer assignment, rejection/revision cycles, and withdrawal.
+## 4. What Works
 
-```
-Drafted --> PendingApproval --> Approved
-   ^              |
-   |           Rejected
-   |              |
-   +--(Revise)----+
-   |
-Withdrawn <-- Drafted/PendingApproval
-```
+Everything below maps to working code. 441 tests pass across 16 crates.
 
-**Key invariants**:
-- `ApprovedHasApproval`: Approved state requires `approvals > 0`
-- `WithdrawnIsFinal`: Withdrawal is permanent
+- **IOA TOML parser** with six section types: automaton, state, action, invariant, liveness, integration
+- **4-level verification cascade**: L0 SMT symbolic, L1 Stateright exhaustive, L2 deterministic simulation with fault injection, L3 proptest
+- **Actor runtime** with Postgres event sourcing, hot-swap via SwapController, multi-tenant SpecRegistry
+- **OData API** auto-generated from CSDL entity types
+- **Conversational platform** that interviews developers, generates specs, and deploys through the cascade
+- **Integration engine** (outbox pattern): webhooks dispatched asynchronously from the event journal
+- **Automatic telemetry**: two-layer OTEL spans (HTTP + actor) with real durations verified in ClickHouse
+- **Cedar ABAC** authorization evaluated per action
+- **Evolution engine** that captures unmet user intents from production
 
-The boolean guard pattern (`is_true has_reviewer`) prevents submission without a reviewer -- a common business rule. Revise resets `has_reviewer` to false, forcing reassignment before re-submission.
+Performance through the full OData HTTP stack with Postgres: ~28ns for rule evaluation, ~18ms per persisted action end-to-end, ~591ms for 100 concurrent checkouts (2,200 actions/sec).
 
-### 3.4 Subscription Management (`test-fixtures/specs/subscription.ioa.toml`)
+## 5. What Doesn't Work (Yet)
 
-**Context**: SaaS subscription with payment failure escalation, suspension, and cancellation.
-
-```
-Active <-- RetryPayment -- PastDue --> Suspended --> Expired
-  |                           |            |
-  +------+--------------------+------------+
-         |
-     Cancelled
-```
-
-**Key invariants**:
-- `CancelledIsFinal` / `ExpiredIsFinal`: Terminal states
-- `PastDueHasFailure`: The `payment_failures` counter must be > 0 whenever in PastDue, Suspended, or Expired
-
-**Integrations**: `billing_webhook` fires on PaymentFailed, `dunning_notice` fires on SuspendSubscription. Self-transitions (`EnableAutoRenew`, `DisableAutoRenew`) modify the `auto_renew` boolean without changing status -- demonstrating that state variables and status are orthogonal.
-
-### 3.5 Issue Tracker (`test-fixtures/specs/issue.ioa.toml`)
-
-**Context**: Project management issue lifecycle with assignee tracking and review cycles.
-
-```
-Backlog --> InProgress --> Review --> Done --> Archived
-   ^           ^             |         |
-   |           +---(changes)-+         |
-   |           +-------(reopen)--------+
-```
-
-**Key invariants**:
-- `ArchivedIsFinal`: Archived issues cannot be reopened
-- `StartRequiresAssignee`: InProgress/Review/Done states assert `assignee_set = true`
-
-**Liveness**: From Backlog, issues eventually reach Done or Archived. The `review_cycles` counter tracks how many times code review occurs (both RequestChanges and ApproveReview increment it), providing a built-in velocity metric.
-
-## 4. What Works Today
-
-Every claim below maps to working code. Test counts from `cargo test --workspace`.
-
-**Specification and parsing** (temper-spec, 16+ tests):
-- IOA TOML parser: `parse_automaton()` in `crates/temper-spec/src/automaton/parser.rs`
-- CSDL XML parser: `parse_csdl()` in `crates/temper-spec/src/csdl/parser.rs`
-- Validation rejects invalid from/to states, missing initial states
-
-**4-level verification cascade** (temper-verify, `crates/temper-verify/src/cascade.rs`):
-- Level 0: SMT symbolic verification -- guard satisfiability, invariant induction, unreachable state detection
-- Level 1: Stateright BFS exhaustive model checking -- explores every reachable state
-- Level 2: Deterministic simulation with fault injection -- SimActorSystem with crash/restart
-- Level 3: Property-based testing via proptest -- random action sequences
-
-**Runtime** (temper-jit + temper-runtime + temper-server):
-- `TransitionTable::from_ioa_source()` builds the runtime rule engine
-- `SwapController` in `temper-jit/src/swap.rs` enables hot-swap of transition tables
-- Entity actors with Postgres event sourcing (`temper-store-postgres`)
-- Multi-tenant `SpecRegistry` in `temper-server/src/registry.rs`: `register_tenant()` maps (TenantId, EntityType) to specs
-- OData API auto-generated from CSDL entity types
-
-**Conversational platform** (temper-platform, 53+ unit tests, 9 E2E tests):
-- Developer interview agent: Welcome through EntityDiscovery through SpecReview through Deployed
-- Spec generators: `generate_ioa_toml()`, `generate_csdl_xml()`, `generate_cedar_policies()`
-- Verify-and-deploy pipeline: parse, VerificationCascade, `register_tenant()`
-- Production chat agent with dynamic system prompt from OData `$metadata`
-- Evolution pipeline: `UnmetIntentCollector` captures production gaps
-
-**Observability** (temper-observe):
-- `WideEvent` automatic telemetry for every action execution
-- OTEL SDK integration: spans + metrics via OTLP/HTTP
-- ClickHouse read path for analysis and sentinel queries
-
-**Authorization**:
-- Cedar ABAC policy evaluation per action
-- Policies generated alongside IOA and CSDL specs
-
-**Deterministic simulation testing** (temper-verify):
-- 16 E2E business simulation tests (9 scripted, 4 random, 3 determinism proofs)
-- 6 rigorous determinism proofs: bit-exact replay across 10 runs with heavy fault injection
-- `sim_now()` / `sim_uuid()` for fully deterministic time and IDs
-
-**Workspace**: 16 crates, 446+ tests passing, zero failures.
-
-## 5. Current Limitations
-
-| Limitation | Impact | Workaround |
+| Gap | Why it matters | Current workaround |
 |---|---|---|
-| No floating-point in state model | Cannot track prices/amounts as state variables | Use Postgres event payload fields for decimals; state model tracks status + counts |
-| No cross-entity invariants | Cannot express "Order.status == Shipped implies Shipment.status != Created" | Integration engine orchestrates cross-entity coordination via action triggers |
-| No conditional effects | Cannot express "if items > 5 then set bulk_discount true" | Decompose into multiple actions with different guards |
-| Single-node only | Vertical scaling; no horizontal distribution | Redis store traits designed (`MailboxStore`, `PlacementStore`) but not wired; in-memory actors suffice for moderate load |
-| No temporal guards | Cannot express "if last_payment > 30 days ago" | Integration engine schedules time-based actions via cron triggers |
-| No UI layer | OData API only; no built-in frontend | OData is a standard -- any frontend framework (React, Vue, etc.) or low-code tool can consume it |
-| Agent dependency for spec generation | Conversational platform requires an LLM (Claude, GPT, etc.) for interview and spec generation | Specs can be hand-authored in IOA TOML; the parser does not require an agent |
-| No string-valued state variables | State model has status, counters, and booleans only | Use entity payload fields for strings; state model captures the finite automaton |
+| No floating-point state variables | Can't track prices as state | Use Postgres event payload fields |
+| No cross-entity invariants | Can't express "Shipped implies Payment captured" | Integration engine orchestrates |
+| No conditional effects | Can't do "if items > 5 then bulk discount" | Decompose into actions with guards |
+| Single-node only | No horizontal scaling | Redis traits designed but not wired |
+| No temporal guards | Can't do "if idle > 30 days" | Integration engine cron triggers |
+| No UI layer | API only | OData is a standard; any frontend works |
+| Spec gen needs an LLM | Interview agent requires Claude/GPT | Specs are hand-writable IOA TOML |
+| No string state variables | Status + counters + booleans only | Finite automaton by design; strings in payload |
 
-## 6. The Agent-Native Thesis
+Some of these are fundamental to the approach (finite automaton = no strings in state). Others are engineering work (Redis wiring, temporal guards). Being clear about which is which matters.
 
-Temper is designed for a world where agents build and operate software.
+## 6. The Agent Angle
 
-**Agents generate specs.** The conversational platform (`temper-platform/src/deploy/pipeline.rs`) demonstrates the full loop: a developer describes what they want, the interview agent discovers entities and constraints, spec generators produce IOA TOML + CSDL + Cedar, and the verification cascade validates everything before deployment. The developer never writes code.
+There's a trendline worth paying attention to: agents are getting better at generating structured artifacts. Code, schemas, configurations. If you accept that trajectory, a few things follow.
 
-**Verification replaces code review.** The 4-level cascade (`temper-verify/src/cascade.rs`) is automated and exhaustive. SMT proves guard satisfiability symbolically. Stateright explores every reachable state. DST injects faults and verifies recovery. Proptest throws random sequences. No human reviewer can match this coverage. When verification fails, the system reports domain-level errors ("cancelled is final conflicts with cancel-from-done"), not internal implementation details.
+Agents could generate the specifications. The conversational platform already demonstrates this path -- a developer describes their domain, and the system produces IOA TOML, CSDL, and Cedar policies. The verification cascade catches errors that neither the agent nor the developer would notice through inspection alone.
 
-**OData IS the agent-facing interface.** The OData API generated from CSDL is not just for human frontends -- it is a structured, self-describing API that agents can navigate via `$metadata`. Production chat agents in `temper-platform` already use it: they read entity state, discover available actions, and execute them through the same API.
+Verification could replace code review for this class of problems. A four-level cascade that explores every reachable state, injects faults, and throws random sequences is more thorough than human review of imperative code. When it fails, it reports domain-level explanations ("cancelled is final conflicts with cancel-from-done"), not stack traces.
 
-**No code means no technical debt.** There are no controllers to refactor, no service layers to maintain, no ORM mappings to update. A spec change produces a new `TransitionTable`, verified and hot-swapped via `SwapController`. The old code simply ceases to exist.
+The OData API is already agent-friendly. Self-describing via `$metadata`, structured, standard. Production agents in temper-platform use it today.
 
-**The system improves from production usage.** The evolution engine (`temper-platform/src/evolution/`) captures unmet user intents -- actions users try to perform that the current spec does not support. These become O-Records (observation records) that feed back to the developer for approval, closing the loop between production behavior and spec evolution.
+No generated code means no technical debt to accumulate. A spec change produces a new TransitionTable, verified and hot-swapped. The old logic simply ceases to exist.
+
+Whether this adds up to something meaningful depends on how much of the enterprise SaaS design space actually fits the state machine pattern. The five specs above suggest the coverage is broader than you might expect. But five is not a proof.
 
 ## 7. The Evolution Loop
 
-Production usage generates trajectory data:
+The most interesting part might be what happens after deployment.
 
-```
-User Action (attempted)
-    |
-    v
-TransitionTable::evaluate_ctx()
-    |
-    +--> Success: WideEvent emitted, state updated
-    |
-    +--> Failure (action not available in current state):
-            |
-            v
-        UnmetIntentCollector
-            |
-            v
-        O-Record (observation: "user tried X in state Y")
-            |
-            v
-        Developer Review (approval gate)
-            |
-            +--> Approve: I-Record generated, new spec version
-            |         |
-            |         v
-            |     VerificationCascade
-            |         |
-            |         v
-            |     D-Record (deployment: hot-swap via SwapController)
-            |
-            +--> Reject: intent logged, no spec change
-```
+Production usage generates trajectory data. When a user tries an action the current spec doesn't support, the system captures it as an observation record. These observations surface to the developer as structured proposals: "users are trying to split orders into multiple shipments; here's a spec diff that would enable it." The developer approves or rejects. Approved changes run through the verification cascade and deploy via hot-swap.
 
-The O-P-A-D-I record chain (Observation, Proposal, Approval, Deployment, Impact) creates a complete audit trail from user behavior through spec evolution to production deployment. Every change is verified before it reaches production. Every rejection is recorded for future analysis.
+This creates a feedback loop between production behavior and system evolution. The developer stays in the approval seat, but the system does the discovery work. Over time, the specs converge toward what users actually need rather than what someone imagined at design time.
 
-This loop means the system does not just run -- it learns what users need and surfaces those needs to developers in a structured, verifiable way. The developer remains the approval gate, but the system does the discovery work.
+The O-P-A-D-I record chain (Observation, Proposal, Approval, Deployment, Impact) provides a complete audit trail for every behavioral change. It's early, but the loop is operational in the current implementation.
+
+---
+
+*Temper is a working system, not a vision document. The claims above are grounded in code paths and test counts. The open questions are genuine -- we don't know how far this approach extends, and we're curious to find out.*

@@ -8,46 +8,39 @@
 
 ## Abstract
 
-We present Temper, an actor-based application framework for building API backends
-whose primary consumers are autonomous LLM agents rather than human-operated
-frontends.  Temper takes a specification-first approach: an OData v4 Common Schema
-Definition Language (CSDL) document defines the data model, I/O Automaton specifications [7b] define
-behavioral state machines with safety invariants and liveness properties, and Cedar
-policies define attribute-based access control.  Code is derived from these
-specifications and is treated as a regenerable artifact.  A custom tokio-based actor
-runtime, inspired by Erlang/OTP and Akka, provides supervision, event sourcing, and
-deterministic simulation.  A four-level verification cascade--Z3 SMT symbolic verification,
-exhaustive model checking via Stateright with multi-variable state and liveness
-properties, deterministic simulation with seed-based fault injection,
-and property-based testing with automatic shrinking--establishes correctness before
-deployment.  An outbox-pattern integration engine dispatches webhooks asynchronously
-after state transitions, keeping the state machine pure and deterministically
-verifiable while enabling external system integrations.  A production feedback loop,
-the Evolution Engine, captures observations, formalizes problems in the style of
-Lamport, proposes solutions as specification diffs, and gates destructive changes on
-human approval.  Trajectory intelligence extracts product signal from agent execution
-traces.  A three-tier JIT execution model allows state machine transition logic to be
-hot-swapped at runtime without process restarts; a pre-built rule index provides
-sub-30-nanosecond action evaluation on the hot path.  The framework is implemented as
-a 16-crate Rust workspace with 440+ tests across the core crates and a reference
-application, backed by PostgreSQL for event sourcing and an OTLP-based observability
-pipeline that exports to any OpenTelemetry-compatible backend.  Two deployment paths
-are supported: a self-hosted path where a coding agent produces specs plus a Cargo
-crate with full verification tests and infrastructure, and a platform-hosted path
-where `temper serve --specs-dir` runs the verification cascade at startup and provides
-multi-tenant OData hosting.  Multi-tenancy allows multiple application tenants to
-coexist on a single server, each with independently verified specs dispatched through
-a shared `SpecRegistry`.  A live Claude-powered LLM agent demonstrates the full
-feedback loop: natural language requests are interpreted into OData operations, state
-machine transitions are persisted to PostgreSQL, telemetry is exported via OTLP to an
-OpenTelemetry Collector (which forwards to ClickHouse or any other backend), and the
-Evolution Engine generates product intelligence records identifying unmet user intents.
-We evaluate against a reference e-commerce application with three verified state
-machines (Order: 10 states, 14 actions; Payment: 6 states, 7 actions; Shipment: 7
-states, 7 actions), 22 DST tests including determinism proofs, a full O-P-A-D-I
-evolution chain, and a pattern library of four additional verified specifications
-(support ticket, approval workflow, subscription management, issue tracker) that
-demonstrate the generality of the IOA approach across common enterprise SaaS domains.
+Most enterprise SaaS applications follow a remarkably similar pattern: entities
+move through state machines, guards prevent invalid transitions, integrations
+notify external systems, and authorization policies control who can do what.
+An e-commerce order, a support ticket, a subscription, an approval workflow --
+the business logic in each case is a set of states, transitions, and invariants.
+The rest is infrastructure.
+
+This observation suggests that if the state machine is the essential artifact,
+then much of the surrounding code -- controllers, service layers, ORM mappings,
+webhook plumbing, instrumentation -- might be derivable rather than written.
+And if specifications can be generated from conversation rather than hand-coded,
+the feedback loop between what a user needs and what the system provides
+tightens considerably.
+
+We explore this idea through Temper, an actor-based framework where I/O Automaton
+specifications define behavioral state machines, a four-level verification cascade
+(SMT symbolic checking, exhaustive model checking, deterministic simulation, and
+property-based testing) establishes correctness before deployment, and an evolution
+engine captures unmet user intents from production to propose specification changes
+back to the developer.  The state machine stays pure and deterministically verifiable;
+external integrations follow an outbox pattern, dispatched asynchronously from the
+event journal.  A self-describing HTTP API is derived automatically from the data
+model, giving agents a structured interface they can navigate without documentation.
+A pre-built rule index yields sub-30ns action evaluation, while end-to-end benchmarks
+through the full HTTP stack with PostgreSQL persistence show ~18ms per action and
+~2,200 persisted actions per second under concurrent load.
+
+The framework is implemented as a 16-crate Rust workspace with 440+ tests and a
+reference e-commerce application (three entity types, seven verified specifications
+across different SaaS domains).  We do not claim this approach generalizes to all
+backend systems -- but for the substantial class of applications whose core logic
+is state machine shaped, the results suggest that specification-first, conversation-
+driven development is a practical path worth investigating further.
 
 ---
 
@@ -84,9 +77,10 @@ address:
 Temper's key insight is that **specifications, not code, should be the durable
 artifact** — and that **specifications themselves should be generated from
 conversation**.  A developer describes their domain through a conversational
-interview; the system generates I/O Automaton specifications, CSDL data models,
-and Cedar policies from that conversation.  Code is generated from these
-specifications and can be regenerated whenever the specifications change.
+interview; the system generates I/O Automaton behavioral specifications, OData
+CSDL data models, and Cedar authorization policies from that conversation.
+Code is generated from these specifications and can be regenerated whenever the
+specifications change.
 When end users encounter capabilities the system lacks, their unmet intents
 flow through an Evolution Engine that proposes specification changes for
 developer approval.  The system continuously evolves from both developer
@@ -187,7 +181,16 @@ state machine correctness.
 ### 3.1 CSDL as the Data Model Contract
 
 The Common Schema Definition Language (CSDL) is the XML schema format
-standardized by OASIS for OData v4 [1].  Temper uses CSDL as the single source
+standardized by OASIS for OData v4 [1].  The choice of OData over alternatives
+like GraphQL is deliberate: GraphQL optimizes for human developer flexibility
+(query what you want, shape the response), but that flexibility becomes a
+liability for agents, which must reason about query structure, cost, and
+output validity on every call.  OData's rigid entity model -- fixed entity types,
+declared actions, navigable relationships -- is more constrained, but constraints
+are exactly what agents need.  The `$metadata` endpoint returns a complete,
+machine-parseable XML contract; an agent can discover the full API surface,
+available actions, and state machine annotations without documentation or
+examples.  Temper uses CSDL as the single source
 of truth for the data model.  The reference e-commerce application defines seven
 entity types (`Customer`, `Address`, `Product`, `Order`, `OrderItem`, `Payment`,
 `Shipment`), three enum types (`OrderStatus`, `PaymentStatus`, `ShipmentStatus`),
@@ -213,7 +216,12 @@ inspecting source code.
 ### 3.2 I/O Automata as the Behavioral Specification
 
 Each stateful entity type has an associated I/O Automaton specification based
-on the Lynch-Tuttle formalism [7b].  An I/O Automaton is a labeled state
+on the Lynch-Tuttle formalism [7b].  We chose I/O Automata over TLA+ or plain
+finite state machines because the formalism's precondition/effect structure maps
+directly to the runtime evaluation model (guard check, then apply effects),
+and the input/output/internal action classification maps naturally to the actor
+model's message taxonomy (environment messages, emitted events, private
+transitions).  An I/O Automaton is a labeled state
 transition system where each action is specified by a precondition (predicate
 on pre-state) and an effect (state change program), and actions are classified
 as input (from the environment), output (to the environment), or internal
@@ -244,7 +252,11 @@ the actor model's message taxonomy.
 
 ### 3.3 Cedar ABAC as the Security Specification
 
-Authorization is modeled using Amazon's Cedar policy language [2].  Cedar
+Authorization is modeled using Amazon's Cedar policy language [2].  Cedar was
+chosen over XACML (verbose XML, poor tooling) and Zanzibar-style relationship
+models (designed for graph-shaped data, not entity state machines) because its
+`(principal, action, resource, context)` tuple maps directly to the OData
+request structure, and its policy language is amenable to formal analysis.  Cedar
 evaluates authorization requests of the form `(principal, action, resource,
 context)` against a policy set.  Temper's `AuthzEngine` translates OData
 operations into Cedar requests, supporting four principal kinds: `Customer`,
@@ -843,10 +855,13 @@ mailboxes, static transition tables, and DST-first development methodology are
 direct applications of TigerStyle principles to the actor-framework domain.
 
 **API frameworks.**  OData v4 [1] standardizes entity data models, query
-conventions, and metadata.  GraphQL [13] provides a flexible query language
-but lacks the formal entity model and state machine semantics that Temper
-requires.  REST frameworks (Rails, Django, Express) provide routing and ORM
-but no specification-level verification.
+conventions, and metadata; its rigid entity model and self-describing
+`$metadata` endpoint make it particularly suited to agent consumption (see
+Section 3.1).  GraphQL [13] provides a flexible query language but requires
+agents to reason about query structure and cost on every call, and lacks the
+formal entity model and state machine semantics that Temper requires.  REST
+frameworks (Rails, Django, Express) provide routing and ORM but no
+specification-level verification.
 
 **Attribute-based access control.**  XACML [14] defined the original ABAC
 standard but suffers from XML complexity.  Google Zanzibar [15] provides
