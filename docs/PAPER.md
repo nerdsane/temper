@@ -1,4 +1,4 @@
-# Temper: A Formally Verified, Self-Evolving Actor Framework for Agentic API Backends
+# Temper: What If Agents Could Converse Their Way to a Verified Backend?
 
 **Seshendra Nalla**
 
