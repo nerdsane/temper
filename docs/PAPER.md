@@ -848,19 +848,15 @@ mailboxes, static transition tables, and DST-first development methodology are
 direct applications of TigerStyle principles to the actor-framework domain.
 
 **API frameworks.**  OData v4 <sup>[1]</sup> standardizes entity data models, query
-conventions, and metadata; its rigid entity model and self-describing
-`$metadata` endpoint make it particularly suited to agent consumption (see
-Section 3.1).  GraphQL <sup>[14]</sup> provides a flexible query language but requires
-agents to reason about query structure and cost on every call, and lacks the
-formal entity model and state machine semantics that Temper requires.  REST
-frameworks (Rails, Django, Express) provide routing and ORM but no
-specification-level verification.
+conventions, and metadata.  GraphQL <sup>[14]</sup> provides a flexible query language
+but lacks the formal entity model that Temper requires.  REST frameworks
+(Rails, Django, Express) provide routing and ORM but no specification-level
+verification.  Section 3.1 discusses why OData's rigidity is an advantage
+for agent consumption.
 
 **Attribute-based access control.**  XACML <sup>[15]</sup> defined the original ABAC
-standard but suffers from XML complexity.  Google Zanzibar <sup>[16]</sup> provides
-relationship-based authorization at scale.  Amazon Cedar <sup>[2]</sup> offers a
-human-readable policy language with formal verification of policy properties.
-Temper uses Cedar for its combination of expressiveness and formal guarantees.
+standard.  Google Zanzibar <sup>[16]</sup> provides relationship-based authorization
+at scale.  Temper uses Amazon Cedar <sup>[2]</sup>; Section 3.3 discusses the rationale.
 
 **Self-optimizing systems.**  CockroachDB <sup>[17]</sup> performs automatic range
 splitting and rebalancing.  Neon <sup>[18]</sup> adjusts compute and storage resources
