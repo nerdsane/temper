@@ -1,5 +1,7 @@
 # Temper: What If Agents Could Converse Their Way to a Verified Backend?
 
+*A framework and platform research for agent-built, agent-operated API backends*
+
 **Seshendra Nalla**
 
 *Draft -- February 2026*
