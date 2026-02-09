@@ -2,64 +2,54 @@
 
 **This is research, not a product.**
 
-Temper is an exploration of a specific hypothesis: that most enterprise SaaS backends are state machines at their core, and if you accept that premise, the surrounding infrastructure -- persistence, API endpoints, authorization, webhooks, observability -- might be derivable from a specification rather than written by hand.
+Temper explores a hypothesis: most enterprise SaaS backends are state machines at their core -- an order moves through Draft, Submitted, Shipped, Delivered; a subscription cycles between Active, PastDue, Cancelled. If the state machine is the essential artifact, the surrounding infrastructure (persistence, API, authorization, webhooks, observability) follows mechanically from the specification.
 
-We're curious how far this idea stretches. The results so far are encouraging but the open questions are genuine.
+The question is how far this can be pushed. This codebase is an attempt to find out.
 
 ---
 
-## What this is
+## Overview
 
-An actor-based framework and conversational platform where:
+An actor-based framework where I/O Automaton specifications define entity behavior, a four-level verification cascade validates correctness before deployment, and a conversational platform generates specifications from developer interviews.
 
-- Developers describe what they want through conversation
-- The system generates I/O Automaton specifications, data models, and authorization policies
-- A four-level verification cascade (SMT symbolic, exhaustive model checking, deterministic simulation, property-based testing) validates everything before deployment
-- Entity actors serve a self-describing HTTP API, persisting state through event sourcing
-- Production usage feeds back through an evolution engine that surfaces unmet user intents
+- Specifications are declarative: states, transitions, guards, invariants, integrations
+- Verification is automated: SMT symbolic checking, exhaustive model checking, deterministic simulation, property-based testing
+- The HTTP API is derived from the data model -- agents can discover it through a metadata endpoint
+- Production usage feeds back through an evolution engine that captures unmet user intents
 
-There is a working reference e-commerce application with three verified entity types (Order, Payment, Shipment) and a pattern library of four additional verified specifications (support ticket, approval workflow, subscription management, issue tracker).
+A reference e-commerce application exercises the full stack: three entity types (Order, Payment, Shipment) verified through the cascade, persisted to Postgres, traced to ClickHouse. Four additional fixture specs (support ticket, approval workflow, subscription management, issue tracker) test the pattern across domains.
 
-## What this is not
+## Scope
 
-- **Not production-ready.** This is a research codebase. APIs will change. There are known limitations (see below).
-- **Not a general-purpose backend framework.** This approach works for applications whose core logic is state machine shaped. Many applications fit this pattern; some do not.
-- **Not a replacement for thinking about your domain.** The system generates specs from conversation, but the developer still needs to understand what they're building.
+This approach works for applications whose core logic is state machine shaped. That covers a meaningful subset of enterprise SaaS, but not all backend systems. The state model is a finite automaton (status + counters + booleans) -- no floating-point, no strings, no cross-entity invariants. Some of these are fundamental to the approach; others are engineering work not yet done.
 
-## Known limitations
-
-| Gap | Notes |
+| Limitation | Status |
 |-----|-------|
-| Single-node only | Redis traits designed but not wired for distribution |
-| No floating-point state variables | Finite automaton by design; use event payload fields |
-| No cross-entity invariants | Integration engine orchestrates across entities |
-| No temporal guards | No "if idle > 30 days" style conditions yet |
-| Agent dependency for spec generation | The conversational platform requires an LLM; specs are also hand-writable |
-| No UI layer | API only; any frontend framework can consume OData |
+| Single-node only | Redis traits designed, not wired |
+| No cross-entity invariants | Integration engine orchestrates |
+| No temporal guards | Planned via integration engine |
+| Spec generation requires an LLM | Specs are also hand-writable |
+| No UI layer | OData API; any frontend works |
 
-See [docs/POSITIONING.md](docs/POSITIONING.md) for a fuller discussion of what works and what doesn't.
+[docs/POSITIONING.md](docs/POSITIONING.md) has a fuller discussion.
 
-## Running it
+## Running
 
 ```bash
-# Verify all specs (runs the four-level cascade)
 cargo test --workspace
 
-# Start the server with the reference e-commerce app
 DATABASE_URL=postgres://user:pass@localhost/db cargo run -- serve \
   --specs-dir reference-apps/ecommerce/specs --tenant ecommerce
 
-# Run benchmarks
 ./scripts/bench.sh
-DATABASE_URL=postgres://... cargo bench -p ecommerce-reference --bench agent_checkout
 ```
 
-## Reading more
+## Documentation
 
-- [docs/PAPER.md](docs/PAPER.md) -- Research paper with architecture, verification cascade, and benchmark results
+- [docs/PAPER.md](docs/PAPER.md) -- Research paper
 - [docs/POSITIONING.md](docs/POSITIONING.md) -- The observation that motivated this work
-- [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md) -- Technical reference for agents building with Temper
+- [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md) -- Technical reference
 
 ## Status
 
-441 tests passing across 16 crates. The system is functional end-to-end -- from specification parsing through verification, actor dispatch, Postgres persistence, and OTEL telemetry export. Whether the approach generalizes beyond the patterns we've tested remains an open question.
+441 tests across 16 crates. Functional end-to-end: spec parsing, verification cascade, actor dispatch, Postgres persistence, OTEL telemetry. The open questions are about generality, not functionality.
