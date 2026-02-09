@@ -98,34 +98,8 @@ the framework against the reference application.  Section 12 concludes.
 
 ## 2. Architecture Overview
 
-Temper is implemented as a Rust workspace of 16 crates plus one reference
-application crate.  The workspace targets Rust edition 2024 (rustc 1.85+) and
-is dual-licensed under MIT and Apache-2.0.
-
-### 2.1 Crate Map
-
-```
-temper-spec          Specification parsing: CSDL, I/O Automata, unified model
-temper-macros        Proc-macro utilities
-temper-runtime       Actor system: traits, mailbox, supervision, scheduler
-temper-codegen       Code generation from specifications
-temper-odata         OData v4 query/path parsing and error types
-temper-authz         Cedar ABAC engine
-temper-observe       Observability: OTEL+OTLP export, store trait, schemas, trajectory
-temper-verify        Four-level verification cascade (SMT + model check + DST + proptest)
-temper-store-postgres Postgres event store and snapshot store
-temper-store-redis   Mailbox, cache, placement traits (in-memory; Redis planned)
-temper-server        Axum HTTP layer: router, dispatch, response
-temper-cli           CLI: init, codegen, verify, serve subcommands
-temper-evolution     Evolution Engine: records, chain validation, insights
-temper-jit           JIT transition tables, hot-swap, shadow testing
-temper-optimize      Self-driving optimizer actors, safety checker
-temper-platform      Conversational dev platform: interview, deploy, prod chat
-
-ecommerce-reference  Reference e-commerce app: 3 entity specs, 22 DST tests, cascade
-```
-
-### 2.2 Three-Tier Architecture
+The system is organized into four layers, each with a distinct role in the
+lifecycle of a specification:
 
 ```
 +---------------------------------------------------------------------+
@@ -136,7 +110,6 @@ ecommerce-reference  Reference e-commerce app: 3 entity specs, 22 DST tests, cas
           v                  v                  v
 +---------------------------------------------------------------------+
 |                      ACTOR RUNTIME                                  |
-|  temper-runtime  temper-jit  temper-store-*  temper-authz            |
 |                                                                     |
 |  +----------+  +----------+  +----------+  +----------+             |
 |  | OrderActor|  |PaymentActor| |ShipmentActor| |  ...   |           |
@@ -150,7 +123,6 @@ ecommerce-reference  Reference e-commerce app: 3 entity specs, 22 DST tests, cas
           v                  v                  v
 +---------------------------------------------------------------------+
 |                      HTTP SURFACE                                   |
-|  temper-server (Axum)    temper-odata (query/path parsing)          |
 |                                                                     |
 |  GET /tdata/Orders('{id}')?$expand=Items                            |
 |  POST /tdata/Orders('{id}')/SubmitOrder                             |
@@ -160,7 +132,6 @@ ecommerce-reference  Reference e-commerce app: 3 entity specs, 22 DST tests, cas
           v                  v                  v
 +---------------------------------------------------------------------+
 |                   FEEDBACK LOOP                                     |
-|  temper-observe   temper-evolution   temper-optimize                 |
 |                                                                     |
 |  Sentinel ──> O-Record ──> P-Record ──> A-Record ──> D-Record       |
 |                                                                     |
@@ -168,11 +139,33 @@ ecommerce-reference  Reference e-commerce app: 3 entity specs, 22 DST tests, cas
 +---------------------------------------------------------------------+
 ```
 
-The blocking/non-blocking boundary lies between the actor runtime and the HTTP
-surface.  The HTTP layer is fully asynchronous (Axum on Tokio).  Each actor
-processes messages sequentially--one at a time, no concurrent state access--
-providing the sequential consistency guarantee that simplifies reasoning about
-state machine correctness.
+**Specification layer.**  Three declarative artifacts define an application:
+a CSDL data model (entity types, relationships, actions), I/O Automaton specs
+(states, transitions, guards, invariants), and Cedar policies (authorization
+rules).  Nothing in this layer is imperative code.  A four-level verification
+cascade (Section 5) validates these specifications before they reach the runtime.
+
+**Actor runtime.**  Each entity instance is a lightweight actor that processes
+messages sequentially -- one at a time, no concurrent state access.  This
+sequential consistency guarantee simplifies reasoning about state machine
+correctness: if the transition table is correct and the initial state is
+valid, then every reachable state is valid.  Actor state is persisted through
+event sourcing to PostgreSQL; periodic snapshots reduce replay time on restart.
+
+**HTTP surface.**  The actor runtime is fronted by an HTTP API derived from the
+CSDL data model.  Agents interact with it through standard HTTP verbs:
+`GET` for queries, `POST` for actions, and `$metadata` for schema discovery.
+The API is self-describing -- an agent can read the metadata endpoint and
+discover the full surface without external documentation.
+
+**Feedback loop.**  Production telemetry flows back into the system through
+the Evolution Engine.  Unmet user intents become observation records, which
+surface as structured proposals for specification changes.  Approved changes
+run through the verification cascade and deploy via hot-swap, closing the
+loop between production behavior and system evolution.
+
+The framework is implemented in Rust (edition 2024) as 16 crates plus a
+reference application, totaling 440+ tests.
 
 ---
 
