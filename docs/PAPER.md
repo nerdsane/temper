@@ -174,7 +174,7 @@ reference application, totaling 440+ tests.
 ### 3.1 CSDL as the Data Model Contract
 
 The Common Schema Definition Language (CSDL) is the XML schema format
-standardized by OASIS for OData v4 [1].  The choice of OData over alternatives
+standardized by OASIS for OData v4 <sup>[1]</sup>.  The choice of OData over alternatives
 like GraphQL is deliberate: GraphQL optimizes for human developer flexibility
 (query what you want, shape the response), but that flexibility becomes a
 liability for agents, which must reason about query structure, cost, and
@@ -209,7 +209,7 @@ inspecting source code.
 ### 3.2 I/O Automata as the Behavioral Specification
 
 Each stateful entity type has an associated I/O Automaton specification based
-on the Lynch-Tuttle formalism [7b].  We chose I/O Automata over TLA+ or plain
+on the Lynch-Tuttle formalism <sup>[8]</sup>.  We chose I/O Automata over TLA+ or plain
 finite state machines because the formalism's precondition/effect structure maps
 directly to the runtime evaluation model (guard check, then apply effects),
 and the input/output/internal action classification maps naturally to the actor
@@ -245,7 +245,7 @@ the actor model's message taxonomy.
 
 ### 3.3 Cedar ABAC as the Security Specification
 
-Authorization is modeled using Amazon's Cedar policy language [2].  Cedar was
+Authorization is modeled using Amazon's Cedar policy language <sup>[2]</sup>.  Cedar was
 chosen over XACML (verbose XML, poor tooling) and Zanzibar-style relationship
 models (designed for graph-shaped data, not entity state machines) because its
 `(principal, action, resource, context)` tuple maps directly to the OData
@@ -329,7 +329,7 @@ retry, matching the actor runtime's existing supervision backoff strategy.
 
 ### 4.4 Bounded Execution (TigerStyle)
 
-Following TigerStyle's bounded execution principle [18], the actor runtime
+Following TigerStyle's bounded execution principle <sup>[19]</sup>, the actor runtime
 enforces static resource limits throughout.  Actor mailboxes have a fixed
 capacity; sends to a full mailbox return `ActorError::MailboxFull` rather than
 growing unboundedly.  The maximum number of items in an order (and, more
@@ -354,7 +354,7 @@ This is discussed in detail in Section 5.
 
 ## 5. Four-Level Verification Cascade
 
-TigerStyle [18] holds that "assertions are not just for testing--they run in
+TigerStyle <sup>[19]</sup> holds that "assertions are not just for testing--they run in
 production."  Temper embodies this principle at the state machine level: the
 `TransitionTable` guards that enforce automaton invariants on every transition are
 runtime assertions, evaluated on every message an actor processes, in every
@@ -373,7 +373,7 @@ all must pass before deployment.
 ### 5.1 From Specification to Verification Model
 
 The I/O Automaton TOML specification is translated directly into a
-`TemperModel` that implements the Stateright `Model` trait [3].  The `Automaton` struct parsed
+`TemperModel` that implements the Stateright `Model` trait <sup>[3]</sup>.  The `Automaton` struct parsed
 from TOML maps 1:1 to the model's structures.
 
 The verification model tracks multi-variable state:
@@ -467,7 +467,7 @@ bounds to small values.
 
 ### 5.5 Level 2: Deterministic Simulation
 
-Inspired by FoundationDB's simulation testing [4] and TigerBeetle's VOPR [5],
+Inspired by FoundationDB's simulation testing <sup>[4]</sup> and TigerBeetle's VOPR <sup>[5]</sup>,
 Level 2 runs multi-actor scenarios under controlled fault injection.  The key
 components are:
 
@@ -497,7 +497,7 @@ produces the identical execution trace.
 
 ### 5.6 Level 3: Property-Based Testing
 
-Level 3 uses proptest [6] to generate random action sequences and check
+Level 3 uses proptest <sup>[6]</sup> to generate random action sequences and check
 invariants after each step.  This complements Levels 0-2: Level 0 is algebraic
 but per-step; Level 1 is exhaustive but bounded; Level 2 simulates realistic
 multi-actor scenarios; Level 3 exercises long action sequences that may exceed
@@ -574,7 +574,7 @@ immutable, linked chain of typed records:
    values, and a classification (Performance, ErrorRate, StateMachine, Security,
    Trajectory, ResourceUsage).
 
-2. **P-Record (Problem):** A Lamport-style formal problem statement [7] derived
+2. **P-Record (Problem):** A Lamport-style formal problem statement <sup>[7]</sup> derived
    from the observation.  It specifies the problem precisely--invariants that
    must continue to hold, constraints on the solution space, and an impact
    assessment (affected users, severity, trend).
@@ -817,26 +817,26 @@ Datadog retains the full chain of evidence in its Evolution Records.
 
 ## 10. Related Work
 
-**Actor systems.**  Erlang/OTP [8] established the actor model for
+**Actor systems.**  Erlang/OTP <sup>[9]</sup> established the actor model for
 fault-tolerant distributed systems with supervision trees and let-it-crash
-semantics.  Akka [9] brought the model to the JVM with typed actors and
-cluster sharding.  Microsoft Orleans [10] introduced virtual actors with
-automatic activation and placement.  Temporal [11] provides durable execution
+semantics.  Akka <sup>[10]</sup> brought the model to the JVM with typed actors and
+cluster sharding.  Microsoft Orleans <sup>[11]</sup> introduced virtual actors with
+automatic activation and placement.  Temporal <sup>[12]</sup> provides durable execution
 for long-running workflows.  Temper draws supervision and sequential message
 processing from Erlang/Akka but adds specification-driven code generation and
 a verification cascade absent from all of these systems.
 
-**Formal verification.**  TLA+ [7] is the standard for specifying and
-model-checking concurrent and distributed systems.  Alloy [12] provides
-relational modeling with SAT-based analysis.  Stateright [3] brings
+**Formal verification.**  TLA+ <sup>[7]</sup> is the standard for specifying and
+model-checking concurrent and distributed systems.  Alloy <sup>[13]</sup> provides
+relational modeling with SAT-based analysis.  Stateright <sup>[3]</sup> brings
 model checking to Rust with an API designed for testing distributed protocols.
-FoundationDB's simulation testing framework [4] pioneered seed-based
-deterministic simulation for database systems; TigerBeetle's VOPR [5] applies
+FoundationDB's simulation testing framework <sup>[4]</sup> pioneered seed-based
+deterministic simulation for database systems; TigerBeetle's VOPR <sup>[5]</sup> applies
 the same idea to a financial transaction engine.  Temper combines Z3 SMT solving, Stateright
 model checking, FoundationDB-style simulation, and proptest-based property
 testing into a unified four-level cascade.
 
-**TigerStyle.**  TigerBeetle's TigerStyle [18] is a development methodology that
+**TigerStyle.**  TigerBeetle's TigerStyle <sup>[19]</sup> is a development methodology that
 codifies principles Temper adopts throughout its design: assertion density
 (minimum two assertions per function), bounded execution (no unbounded loops,
 no unbounded allocations), static resource budgets (all buffers sized at
@@ -847,23 +847,23 @@ end-to-end tests.  Temper's four-level verification cascade, bounded actor
 mailboxes, static transition tables, and DST-first development methodology are
 direct applications of TigerStyle principles to the actor-framework domain.
 
-**API frameworks.**  OData v4 [1] standardizes entity data models, query
+**API frameworks.**  OData v4 <sup>[1]</sup> standardizes entity data models, query
 conventions, and metadata; its rigid entity model and self-describing
 `$metadata` endpoint make it particularly suited to agent consumption (see
-Section 3.1).  GraphQL [13] provides a flexible query language but requires
+Section 3.1).  GraphQL <sup>[14]</sup> provides a flexible query language but requires
 agents to reason about query structure and cost on every call, and lacks the
 formal entity model and state machine semantics that Temper requires.  REST
 frameworks (Rails, Django, Express) provide routing and ORM but no
 specification-level verification.
 
-**Attribute-based access control.**  XACML [14] defined the original ABAC
-standard but suffers from XML complexity.  Google Zanzibar [15] provides
-relationship-based authorization at scale.  Amazon Cedar [2] offers a
+**Attribute-based access control.**  XACML <sup>[15]</sup> defined the original ABAC
+standard but suffers from XML complexity.  Google Zanzibar <sup>[16]</sup> provides
+relationship-based authorization at scale.  Amazon Cedar <sup>[2]</sup> offers a
 human-readable policy language with formal verification of policy properties.
 Temper uses Cedar for its combination of expressiveness and formal guarantees.
 
-**Self-optimizing systems.**  CockroachDB [16] performs automatic range
-splitting and rebalancing.  Neon [17] adjusts compute and storage resources
+**Self-optimizing systems.**  CockroachDB <sup>[17]</sup> performs automatic range
+splitting and rebalancing.  Neon <sup>[18]</sup> adjusts compute and storage resources
 based on workload.  Temper's optimizer actors operate at the application layer,
 adjusting query plans, cache policies, and actor placement based on
 observability data, with a safety checker ensuring correctness.
@@ -1045,7 +1045,7 @@ POST .../CancelOrder       → 200, status="Cancelled", events=[..., CancelOrder
 
 ### 11.6 Bugs Found by DST-First Development
 
-TigerStyle [18] mandates that deterministic simulation testing is not an
+TigerStyle <sup>[19]</sup> mandates that deterministic simulation testing is not an
 optional hardening step applied after integration testing--it is the *primary*
 testing strategy.  Temper's DST-first methodology is a direct application of
 this principle: actor-level simulation tests were written and passing before any
@@ -1185,7 +1185,7 @@ Temper makes the following contributions:
    HTTP-serving entity actors, establishing a provable chain from formal
    specification to production behavior.
 
-8. Adoption of TigerStyle [18] as a cross-cutting engineering methodology:
+8. Adoption of TigerStyle <sup>[19]</sup> as a cross-cutting engineering methodology:
    assertion density at the state machine level, bounded execution throughout
    the actor runtime, static resource budgets, and DST-first development
    where simulation testing is the primary--not supplementary--testing
@@ -1414,40 +1414,40 @@ https://github.com/proptest-rs/proptest
 [7] L. Lamport. *Specifying Systems: The TLA+ Language and Tools for Hardware
 and Software Engineers.* Addison-Wesley, 2002.
 
-[7b] N. Lynch and M. Tuttle. *An Introduction to Input/Output Automata.*
+[8] N. Lynch and M. Tuttle. *An Introduction to Input/Output Automata.*
 CWI Quarterly, 2(3):219-246, 1989.
 
-[8] J. Armstrong. *Making Reliable Distributed Systems in the Presence of
+[9] J. Armstrong. *Making Reliable Distributed Systems in the Presence of
 Software Errors.* PhD Thesis, Royal Institute of Technology, Stockholm, 2003.
 
-[9] Lightbend. *Akka: Build Concurrent, Distributed, and Resilient
+[10] Lightbend. *Akka: Build Concurrent, Distributed, and Resilient
 Message-Driven Applications.* https://akka.io
 
-[10] S. Bykov et al. *Orleans: Distributed Virtual Actors for
+[11] S. Bykov et al. *Orleans: Distributed Virtual Actors for
 Programmability and Scalability.* Microsoft Research Technical Report
 MSR-TR-2014-41, 2014.
 
-[11] Temporal Technologies. *Temporal: Durable Execution Platform.*
+[12] Temporal Technologies. *Temporal: Durable Execution Platform.*
 https://temporal.io
 
-[12] D. Jackson. *Software Abstractions: Logic, Language, and Analysis.*
+[13] D. Jackson. *Software Abstractions: Logic, Language, and Analysis.*
 MIT Press, 2012.
 
-[13] Facebook. *GraphQL Specification.* 2015. https://spec.graphql.org
+[14] Facebook. *GraphQL Specification.* 2015. https://spec.graphql.org
 
-[14] OASIS. *eXtensible Access Control Markup Language (XACML) Version 3.0.*
+[15] OASIS. *eXtensible Access Control Markup Language (XACML) Version 3.0.*
 OASIS Standard, 2013.
 
-[15] R. Pang et al. *Zanzibar: Google's Consistent, Global Authorization
+[16] R. Pang et al. *Zanzibar: Google's Consistent, Global Authorization
 System.* USENIX ATC, 2019.
 
-[16] CockroachDB. *CockroachDB: The Resilient Geo-Distributed SQL Database.*
+[17] CockroachDB. *CockroachDB: The Resilient Geo-Distributed SQL Database.*
 https://www.cockroachlabs.com
 
-[17] Neon. *Neon: Serverless Postgres.* https://neon.tech
+[18] Neon. *Neon: Serverless Postgres.* https://neon.tech
 
-[18] TigerBeetle. *TigerStyle: Engineering Design Philosophy.*
+[19] TigerBeetle. *TigerStyle: Engineering Design Philosophy.*
 https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md
 
-[19] OpenTelemetry. *OpenTelemetry Specification.*
+[20] OpenTelemetry. *OpenTelemetry Specification.*
 https://opentelemetry.io/docs/specs/otel/
