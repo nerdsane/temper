@@ -118,4 +118,4 @@ The O-P-A-D-I record chain (Observation, Proposal, Approval, Deployment, Impact)
 
 ---
 
-*Temper is a working system, not a vision document. The claims above are grounded in code paths and test counts. The open questions are genuine -- we don't know how far this approach extends, and we're curious to find out.*
+*This document describes the current state of the project. The five verified specs, the benchmark numbers, and the test counts reflect what exists today. What we haven't tested is whether this pattern holds across a broader set of real-world applications -- that's the next thing to figure out.*
