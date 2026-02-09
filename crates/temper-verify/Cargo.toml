@@ -13,3 +13,4 @@ stateright = { workspace = true }
 proptest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+z3 = { version = "0.19", features = ["bundled"] }

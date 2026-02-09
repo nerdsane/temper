@@ -1,11 +1,11 @@
 //! Generate Stateright models from I/O Automaton specifications.
 //!
-//! This module translates a `temper_spec::tlaplus::StateMachine` (the unified IR
-//! for both IOA and TLA+ sources) into a Stateright `Model` that can be
-//! exhaustively explored by a model checker. The generated model captures:
-//!   - Status-based states with an item counter
-//!   - Transitions as named actions with source/target state guards
+//! This module translates a parsed `Automaton` directly into a Stateright `Model`
+//! for exhaustive state-space exploration. The generated model captures:
+//!   - Multi-variable state (status + named counters + named booleans)
+//!   - Transitions as named actions with guards and effects
 //!   - Safety invariants as Stateright "always" properties
+//!   - Liveness properties as "eventually" / "always" properties
 //!
 //! Because Stateright's `Property::always` requires a bare function pointer
 //! (not a capturing closure), all invariant data lives inside `TemperModel`
@@ -15,8 +15,8 @@ pub mod builder;
 mod stateright_impl;
 pub mod types;
 
-pub use builder::{build_model, build_model_from_ioa, build_model_from_tla, build_model_with_max_items};
+pub use builder::{build_model_from_automaton, build_model_from_ioa};
 pub use types::{
-    InvariantKind, ResolvedInvariant, ResolvedTransition, TemperModel, TemperModelAction,
-    TemperModelState,
+    InvariantKind, LivenessKind, ModelEffect, ModelGuard, ResolvedInvariant, ResolvedLiveness,
+    ResolvedTransition, TemperModel, TemperModelAction, TemperModelState,
 };

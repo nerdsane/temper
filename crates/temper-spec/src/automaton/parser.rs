@@ -174,11 +174,13 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
     let mut state_vars: Vec<StateVar> = Vec::new();
     let mut actions: Vec<Action> = Vec::new();
     let mut invariants: Vec<Invariant> = Vec::new();
+    let mut liveness_props: Vec<Liveness> = Vec::new();
 
     let mut current_section = "";
     let mut current_action: Option<Action> = None;
     let mut current_invariant: Option<Invariant> = None;
     let mut current_state_var: Option<StateVar> = None;
+    let mut current_liveness: Option<Liveness> = None;
 
     for line in input.lines() {
         let trimmed = line.trim();
@@ -188,12 +190,12 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
 
         // Section headers
         if trimmed == "[automaton]" {
-            flush_current(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars);
+            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
             current_section = "automaton";
             continue;
         }
         if trimmed == "[[state]]" {
-            flush_current(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars);
+            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
             current_state_var = Some(StateVar {
                 name: String::new(),
                 var_type: "string".into(),
@@ -203,7 +205,7 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
             continue;
         }
         if trimmed == "[[action]]" {
-            flush_current(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars);
+            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
             current_action = Some(Action {
                 name: String::new(),
                 kind: "internal".into(),
@@ -218,13 +220,24 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
             continue;
         }
         if trimmed == "[[invariant]]" {
-            flush_current(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars);
+            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
             current_invariant = Some(Invariant {
                 name: String::new(),
                 when: Vec::new(),
                 assert: String::new(),
             });
             current_section = "invariant";
+            continue;
+        }
+        if trimmed == "[[liveness]]" {
+            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
+            current_liveness = Some(Liveness {
+                name: String::new(),
+                from: Vec::new(),
+                reaches: Vec::new(),
+                has_actions: None,
+            });
+            current_section = "liveness";
             continue;
         }
 
@@ -257,13 +270,61 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                             "params" => a.params = parse_string_array(&value),
                             "hint" => a.hint = Some(value.clone()),
                             "guard" => {
-                                // Simple guard: "items > 0" → MinCount
+                                // Format: "items > 0" → MinCount
                                 if value.contains('>') {
                                     let parts: Vec<&str> = value.split('>').collect();
                                     if parts.len() == 2 {
                                         let var = parts[0].trim().to_string();
                                         let min: usize = parts[1].trim().parse().unwrap_or(1);
                                         a.guard.push(Guard::MinCount { var, min: min + 1 });
+                                    }
+                                }
+                                // Format: "min var n" → MinCount
+                                else if value.starts_with("min ") {
+                                    let parts: Vec<&str> = value.splitn(3, ' ').collect();
+                                    if parts.len() == 3 {
+                                        let var = parts[1].to_string();
+                                        let min: usize = parts[2].parse().unwrap_or(1);
+                                        a.guard.push(Guard::MinCount { var, min });
+                                    }
+                                }
+                                // Format: "is_true var" → IsTrue
+                                else if value.starts_with("is_true ") {
+                                    let var = value.strip_prefix("is_true ").unwrap_or("").trim().to_string();
+                                    if !var.is_empty() {
+                                        a.guard.push(Guard::IsTrue { var });
+                                    }
+                                }
+                            }
+                            "effect" => {
+                                // Format: "increment var" → Increment
+                                if value.starts_with("increment ") {
+                                    let var = value.strip_prefix("increment ").unwrap_or("").trim().to_string();
+                                    if !var.is_empty() {
+                                        a.effect.push(Effect::Increment { var });
+                                    }
+                                }
+                                // Format: "decrement var" → Decrement
+                                else if value.starts_with("decrement ") {
+                                    let var = value.strip_prefix("decrement ").unwrap_or("").trim().to_string();
+                                    if !var.is_empty() {
+                                        a.effect.push(Effect::Decrement { var });
+                                    }
+                                }
+                                // Format: "set var true/false" → SetBool
+                                else if value.starts_with("set ") {
+                                    let parts: Vec<&str> = value.splitn(3, ' ').collect();
+                                    if parts.len() == 3 {
+                                        let var = parts[1].to_string();
+                                        let val = parts[2].trim() == "true";
+                                        a.effect.push(Effect::SetBool { var, value: val });
+                                    }
+                                }
+                                // Format: "emit event_name" → Emit
+                                else if value.starts_with("emit ") {
+                                    let event = value.strip_prefix("emit ").unwrap_or("").trim().to_string();
+                                    if !event.is_empty() {
+                                        a.effect.push(Effect::Emit { event });
                                     }
                                 }
                             }
@@ -281,12 +342,23 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                         }
                     }
                 }
+                "liveness" => {
+                    if let Some(ref mut l) = current_liveness {
+                        match key {
+                            "name" => l.name = value.clone(),
+                            "from" => l.from = parse_string_array(&value),
+                            "reaches" => l.reaches = parse_string_array(&value),
+                            "has_actions" => l.has_actions = Some(value == "true"),
+                            _ => {}
+                        }
+                    }
+                }
                 _ => {}
             }
         }
     }
 
-    flush_current(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars);
+    flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
 
     Ok(Automaton {
         automaton: AutomatonMeta {
@@ -297,16 +369,19 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
         state: state_vars,
         actions,
         invariants,
+        liveness: liveness_props,
     })
 }
 
-fn flush_current(
+fn flush_all(
     action: &mut Option<Action>,
     actions: &mut Vec<Action>,
     invariant: &mut Option<Invariant>,
     invariants: &mut Vec<Invariant>,
     state_var: &mut Option<StateVar>,
     state_vars: &mut Vec<StateVar>,
+    liveness: &mut Option<Liveness>,
+    liveness_props: &mut Vec<Liveness>,
 ) {
     if let Some(a) = action.take() {
         if !a.name.is_empty() {
@@ -321,6 +396,11 @@ fn flush_current(
     if let Some(sv) = state_var.take() {
         if !sv.name.is_empty() {
             state_vars.push(sv);
+        }
+    }
+    if let Some(l) = liveness.take() {
+        if !l.name.is_empty() {
+            liveness_props.push(l);
         }
     }
 }

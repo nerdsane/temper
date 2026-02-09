@@ -9,12 +9,11 @@
 //! - Any failure is reproducible by replaying the same seed
 //! - Specification invariants are checked after every transition
 
-use temper_runtime::scheduler::{
-    DeterministicRng, FaultConfig, SimActorState, SimScheduler,
-};
+use temper_runtime::scheduler::{DeterministicRng, FaultConfig, SimActorState, SimScheduler};
+
 use stateright::Model;
 
-use crate::model::{build_model_from_ioa, build_model_from_tla, TemperModel, TemperModelAction, TemperModelState};
+use crate::model::{build_model_from_ioa, InvariantKind, TemperModel, TemperModelAction, TemperModelState};
 
 /// Configuration for a simulation run.
 #[derive(Debug, Clone)]
@@ -27,8 +26,8 @@ pub struct SimConfig {
     pub num_actors: usize,
     /// Maximum actions per actor before it stops.
     pub max_actions_per_actor: usize,
-    /// Maximum items for bounded model checking.
-    pub max_items: usize,
+    /// Maximum counter value for bounded model checking.
+    pub max_counter: usize,
     /// Fault injection configuration.
     pub faults: FaultConfig,
 }
@@ -40,7 +39,7 @@ impl Default for SimConfig {
             max_ticks: 500,
             num_actors: 3,
             max_actions_per_actor: 20,
-            max_items: 2,
+            max_counter: 2,
             faults: FaultConfig::none(),
         }
     }
@@ -59,6 +58,7 @@ impl SimConfig {
         self
     }
 
+    /// Set the seed.
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
@@ -105,7 +105,7 @@ pub struct InvariantViolation {
 
 /// Run a deterministic simulation from I/O Automaton TOML source.
 pub fn run_simulation_from_ioa(ioa_toml: &str, config: &SimConfig) -> SimulationResult {
-    let model = build_model_from_ioa(ioa_toml, config.max_items);
+    let model = build_model_from_ioa(ioa_toml, config.max_counter);
     run_simulation_impl(&model, config)
 }
 
@@ -115,23 +115,14 @@ pub fn run_multi_seed_simulation_from_ioa(
     base_config: &SimConfig,
     num_seeds: u64,
 ) -> Vec<SimulationResult> {
+    let model = build_model_from_ioa(ioa_toml, base_config.max_counter);
     (0..num_seeds)
         .map(|i| {
             let mut config = base_config.clone();
             config.seed = base_config.seed.wrapping_add(i);
-            run_simulation_from_ioa(ioa_toml, &config)
+            run_simulation_impl(&model, &config)
         })
         .collect()
-}
-
-/// Run a deterministic simulation of multiple entity actors.
-///
-/// Each actor independently processes random action sequences through
-/// the state machine, with messages coordinated by the SimScheduler.
-/// Invariants are checked after every transition.
-pub fn run_simulation(tla_source: &str, config: &SimConfig) -> SimulationResult {
-    let model = build_model_from_tla(tla_source, config.max_items);
-    run_simulation_impl(&model, config)
 }
 
 fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationResult {
@@ -156,7 +147,6 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
 
     // Main simulation loop
     for tick in 0..config.max_ticks {
-        // Each tick: pick a random actor, pick a random valid action, apply it
         if actor_states.is_empty() {
             break;
         }
@@ -164,29 +154,24 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         let actor_idx = rng.next_bound(actor_states.len());
         let (ref actor_id, ref current_state) = actor_states[actor_idx];
 
-        // Check if this actor has reached its action limit
         if actor_action_counts[actor_idx] >= config.max_actions_per_actor {
             continue;
         }
 
-        // Check if actor is crashed in the scheduler
         if sched.actor_state(actor_id) == Some(&SimActorState::Crashed) {
             continue;
         }
 
-        // Get valid actions for current state
         let mut valid_actions = Vec::new();
         model.actions(current_state, &mut valid_actions);
 
         if valid_actions.is_empty() {
-            continue; // Terminal state
+            continue;
         }
 
-        // Pick a random action
         let action_idx = rng.next_bound(valid_actions.len());
         let action = valid_actions[action_idx].clone();
 
-        // Send as a message through the scheduler (may be delayed/dropped)
         let action_name = action.name.clone();
         sched.send(
             "sim-driver",
@@ -196,28 +181,22 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         );
         total_messages += 1;
 
-        // Advance the scheduler
         let delivered = sched.tick();
 
-        // Process delivered messages
         for msg in &delivered {
-            // Find the actor this was delivered to
             let target_idx = actor_states.iter().position(|(id, _)| id == &msg.to);
             let Some(idx) = target_idx else { continue };
 
             let (ref target_id, ref state_before) = actor_states[idx];
 
-            // Parse the action from the message
             let action: TemperModelAction = match serde_json::from_str(&msg.payload) {
                 Ok(a) => a,
                 Err(_) => continue,
             };
 
-            // Apply transition
             if let Some(new_state) = model.next_state(state_before, action.clone()) {
-                // Check invariants on the new state
                 check_invariants_on_state(
-                    &model,
+                    model,
                     target_id,
                     &action.name,
                     state_before,
@@ -232,7 +211,6 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
             }
         }
 
-        // Also tick the scheduler for pending messages
         sched.tick();
     }
 
@@ -260,8 +238,6 @@ fn check_invariants_on_state(
     tick: u64,
     violations: &mut Vec<InvariantViolation>,
 ) {
-    use crate::model::InvariantKind;
-
     // TypeInvariant: status must be in valid state set
     if !model.states.contains(&state_after.status) {
         violations.push(InvariantViolation {
@@ -282,9 +258,20 @@ fn check_invariants_on_state(
             continue;
         }
 
-        let violated = match inv.kind {
+        let violated = match &inv.kind {
             InvariantKind::StatusInSet => !model.states.contains(&state_after.status),
-            InvariantKind::ItemCountPositive => state_after.item_count == 0,
+            InvariantKind::CounterPositive { var } => {
+                state_after.counters.get(var).copied().unwrap_or(0) == 0
+            }
+            InvariantKind::BoolRequired { var } => {
+                !state_after.booleans.get(var).copied().unwrap_or(false)
+            }
+            InvariantKind::NoFurtherTransitions => {
+                // Check that no transitions are enabled from this state
+                let mut actions = Vec::new();
+                model.actions(state_after, &mut actions);
+                !actions.is_empty()
+            }
             InvariantKind::Implication => {
                 let valid: Vec<&String> = inv
                     .required_states
@@ -308,27 +295,11 @@ fn check_invariants_on_state(
     }
 }
 
-/// Run simulation across multiple seeds for broader coverage.
-pub fn run_multi_seed_simulation(
-    tla_source: &str,
-    base_config: &SimConfig,
-    num_seeds: u64,
-) -> Vec<SimulationResult> {
-    let model = build_model_from_tla(tla_source, base_config.max_items);
-    (0..num_seeds)
-        .map(|i| {
-            let mut config = base_config.clone();
-            config.seed = base_config.seed.wrapping_add(i);
-            run_simulation_impl(&model, &config)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
+    const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 
     #[test]
     fn test_simulation_no_faults() {
@@ -337,17 +308,20 @@ mod tests {
             max_ticks: 200,
             num_actors: 3,
             max_actions_per_actor: 15,
-            max_items: 2,
+            max_counter: 2,
             faults: FaultConfig::none(),
         };
 
-        let result = run_simulation(ORDER_TLA, &config);
+        let result = run_simulation_from_ioa(ORDER_IOA, &config);
         assert!(
             result.all_invariants_held,
             "No invariant violations expected without faults, got: {:?}",
             result.violations
         );
-        assert!(result.total_transitions > 0, "Should have applied some transitions");
+        assert!(
+            result.total_transitions > 0,
+            "Should have applied some transitions"
+        );
     }
 
     #[test]
@@ -357,11 +331,11 @@ mod tests {
             max_ticks: 300,
             num_actors: 3,
             max_actions_per_actor: 20,
-            max_items: 2,
+            max_counter: 2,
             faults: FaultConfig::light(),
         };
 
-        let result = run_simulation(ORDER_TLA, &config);
+        let result = run_simulation_from_ioa(ORDER_IOA, &config);
         assert!(
             result.all_invariants_held,
             "No invariant violations expected with light faults, got: {:?}",
@@ -376,19 +350,20 @@ mod tests {
             max_ticks: 300,
             num_actors: 5,
             max_actions_per_actor: 15,
-            max_items: 2,
+            max_counter: 2,
             faults: FaultConfig::heavy(),
         };
 
-        let result = run_simulation(ORDER_TLA, &config);
-        // Even with heavy faults, state machine invariants must hold
-        // (faults affect message delivery, not state machine correctness)
+        let result = run_simulation_from_ioa(ORDER_IOA, &config);
         assert!(
             result.all_invariants_held,
             "Invariants must hold even under heavy faults, got: {:?}",
             result.violations
         );
-        assert!(result.total_dropped > 0 || result.total_messages > 0, "Should have processed messages");
+        assert!(
+            result.total_dropped > 0 || result.total_messages > 0,
+            "Should have processed messages"
+        );
     }
 
     #[test]
@@ -398,26 +373,31 @@ mod tests {
             max_ticks: 100,
             num_actors: 2,
             max_actions_per_actor: 10,
-            max_items: 2,
+            max_counter: 2,
             faults: FaultConfig::light(),
         };
 
-        let result1 = run_simulation(ORDER_TLA, &config);
-        let result2 = run_simulation(ORDER_TLA, &config);
+        let result1 = run_simulation_from_ioa(ORDER_IOA, &config);
+        let result2 = run_simulation_from_ioa(ORDER_IOA, &config);
 
-        assert_eq!(result1.total_transitions, result2.total_transitions,
-            "Same seed must produce same number of transitions");
-        assert_eq!(result1.total_messages, result2.total_messages,
-            "Same seed must produce same number of messages");
+        assert_eq!(
+            result1.total_transitions, result2.total_transitions,
+            "Same seed must produce same number of transitions"
+        );
+        assert_eq!(
+            result1.total_messages, result2.total_messages,
+            "Same seed must produce same number of messages"
+        );
 
-        // Compare final states
-        for (i, ((id1, s1), (id2, s2))) in result1.actor_final_states.iter()
+        for (i, ((id1, s1), (id2, s2))) in result1
+            .actor_final_states
+            .iter()
             .zip(result2.actor_final_states.iter())
             .enumerate()
         {
             assert_eq!(id1, id2, "Actor {i} ID mismatch");
             assert_eq!(s1.status, s2.status, "Actor {i} status mismatch");
-            assert_eq!(s1.item_count, s2.item_count, "Actor {i} item_count mismatch");
+            assert_eq!(s1.counters, s2.counters, "Actor {i} counters mismatch");
         }
     }
 
@@ -426,19 +406,11 @@ mod tests {
         let config1 = SimConfig::default().with_seed(42);
         let config2 = SimConfig::default().with_seed(9999);
 
-        let result1 = run_simulation(ORDER_TLA, &config1);
-        let result2 = run_simulation(ORDER_TLA, &config2);
+        let result1 = run_simulation_from_ioa(ORDER_IOA, &config1);
+        let result2 = run_simulation_from_ioa(ORDER_IOA, &config2);
 
-        // Different seeds should produce different execution paths
-        // (not guaranteed but overwhelmingly likely)
-        let states1: Vec<&str> = result1.actor_final_states.iter().map(|(_, s)| s.status.as_str()).collect();
-        let states2: Vec<&str> = result2.actor_final_states.iter().map(|(_, s)| s.status.as_str()).collect();
-
-        // At least check they both ran
         assert!(result1.total_transitions > 0);
         assert!(result2.total_transitions > 0);
-        // Different seeds with 3 actors will almost certainly produce different final states
-        let _ = (states1, states2); // used for potential future assertion
     }
 
     #[test]
@@ -448,19 +420,18 @@ mod tests {
             max_ticks: 100,
             num_actors: 2,
             max_actions_per_actor: 10,
-            max_items: 2,
+            max_counter: 2,
             faults: FaultConfig::light(),
         };
 
-        let results = run_multi_seed_simulation(ORDER_TLA, &config, 10);
+        let results = run_multi_seed_simulation_from_ioa(ORDER_IOA, &config, 10);
         assert_eq!(results.len(), 10);
 
         for (i, result) in results.iter().enumerate() {
             assert!(
                 result.all_invariants_held,
                 "Seed {} failed with violations: {:?}",
-                result.seed,
-                result.violations
+                result.seed, result.violations
             );
             assert_eq!(result.seed, 1 + i as u64);
         }
@@ -473,22 +444,22 @@ mod tests {
             max_ticks: 50,
             num_actors: 2,
             max_actions_per_actor: 5,
-            max_items: 2,
+            max_counter: 2,
             faults: FaultConfig::none(),
         };
 
-        let result = run_simulation(ORDER_TLA, &config);
+        let result = run_simulation_from_ioa(ORDER_IOA, &config);
         assert_eq!(result.actor_final_states.len(), 2);
 
-        // Derive valid states from the spec — no hardcoded entity knowledge.
-        let model = build_model_from_tla(ORDER_TLA, config.max_items);
+        let model = build_model_from_ioa(ORDER_IOA, config.max_counter);
 
         for (id, state) in &result.actor_final_states {
             assert!(id.starts_with("entity-"));
             assert!(
                 model.states.contains(&state.status),
                 "Status '{}' not in spec states {:?}",
-                state.status, model.states
+                state.status,
+                model.states
             );
         }
     }

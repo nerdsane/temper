@@ -120,31 +120,100 @@ impl EntityActor {
     }
 
     /// Replay events from Postgres to rebuild state (called in pre_start).
-    async fn replay_events(store: &PostgresEventStore, persistence_id: &str, state: &mut EntityState) {
+    ///
+    /// Re-evaluates each event through the `TransitionTable` to reconstruct
+    /// all state variables (status, counters, booleans). This is option 2 from
+    /// the replay design: the TransitionTable is the authoritative source of
+    /// effects, so replay produces the same state as the original execution.
+    async fn replay_events(
+        table: &TransitionTable,
+        store: &PostgresEventStore,
+        persistence_id: &str,
+        state: &mut EntityState,
+    ) {
         match store.read_events(persistence_id, 0).await {
             Ok(envelopes) => {
                 for env in &envelopes {
                     if let Ok(event) = serde_json::from_value::<EntityEvent>(env.payload.clone()) {
-                        state.status = event.to_status.clone();
-                        if event.action.to_lowercase().contains("additem") {
-                            state.item_count += 1;
-                        } else if event.action.to_lowercase().contains("removeitem") {
-                            state.item_count = state.item_count.saturating_sub(1);
+                        // Re-evaluate through TransitionTable to get effects.
+                        // Build the same EvalContext the handler would have used.
+                        let mut eval_ctx = temper_jit::table::EvalContext::default();
+                        eval_ctx
+                            .counters
+                            .insert("items".to_string(), state.item_count);
+                        for (k, v) in &state.counters {
+                            eval_ctx.counters.insert(k.clone(), *v);
                         }
+                        for (k, v) in &state.booleans {
+                            eval_ctx.booleans.insert(k.clone(), *v);
+                        }
+
+                        if let Some(result) =
+                            table.evaluate_ctx(&state.status, &eval_ctx, &event.action)
+                        {
+                            if result.success {
+                                // Apply effects — same logic as handle()
+                                for effect in &result.effects {
+                                    match effect {
+                                        temper_jit::table::Effect::SetState(s) => {
+                                            state.status = s.clone();
+                                        }
+                                        temper_jit::table::Effect::IncrementItems => {
+                                            state.item_count += 1;
+                                        }
+                                        temper_jit::table::Effect::DecrementItems => {
+                                            state.item_count =
+                                                state.item_count.saturating_sub(1);
+                                        }
+                                        temper_jit::table::Effect::IncrementCounter(var) => {
+                                            *state.counters.entry(var.clone()).or_insert(0) += 1;
+                                        }
+                                        temper_jit::table::Effect::DecrementCounter(var) => {
+                                            let val =
+                                                state.counters.entry(var.clone()).or_insert(0);
+                                            *val = val.saturating_sub(1);
+                                        }
+                                        temper_jit::table::Effect::SetBool { var, value } => {
+                                            state.booleans.insert(var.clone(), *value);
+                                        }
+                                        temper_jit::table::Effect::EmitEvent(_)
+                                        | temper_jit::table::Effect::Custom(_) => {}
+                                    }
+                                }
+
+                                // If no SetState effect, use to_status from result
+                                let from_status = event.from_status.clone();
+                                if state.status == from_status
+                                    && !result.new_state.is_empty()
+                                {
+                                    state.status = result.new_state;
+                                }
+                            }
+                        } else {
+                            // TransitionTable doesn't know this action — fall back
+                            // to the stored to_status (safe: status is always stored).
+                            state.status = event.to_status.clone();
+                        }
+
                         state.events.push(event);
                     }
                     state.sequence_nr = env.sequence_nr;
                 }
                 if !envelopes.is_empty() {
                     if let Some(obj) = state.fields.as_object_mut() {
-                        obj.insert("Status".into(), serde_json::Value::String(state.status.clone()));
+                        obj.insert(
+                            "Status".into(),
+                            serde_json::Value::String(state.status.clone()),
+                        );
                     }
                     tracing::info!(
                         entity = %state.entity_id,
                         replayed = envelopes.len(),
                         status = %state.status,
                         seq = state.sequence_nr,
-                        "state rebuilt from event journal"
+                        counters = ?state.counters,
+                        booleans = ?state.booleans,
+                        "state rebuilt from event journal via TransitionTable"
                     );
                 }
             }
@@ -183,9 +252,11 @@ impl Actor for EntityActor {
             sequence_nr: 0,
         };
 
-        // Replay events from Postgres to rebuild state (if persistence is configured)
+        // Replay events from Postgres to rebuild state (if persistence is configured).
+        // Re-evaluates each event through the TransitionTable to reconstruct
+        // all state variables (status, counters, booleans) — not just item_count.
         if let Some(ref store) = self.event_store {
-            Self::replay_events(store, &self.persistence_id(), &mut state).await;
+            Self::replay_events(&self.table, store, &self.persistence_id(), &mut state).await;
         }
 
         Ok(state)
@@ -227,7 +298,15 @@ impl Actor for EntityActor {
                     return Ok(());
                 }
 
-                let result = self.table.evaluate(&state.status, state.item_count, &name);
+                let mut eval_ctx = temper_jit::table::EvalContext::default();
+                eval_ctx.counters.insert("items".to_string(), state.item_count);
+                for (k, v) in &state.counters {
+                    eval_ctx.counters.insert(k.clone(), *v);
+                }
+                for (k, v) in &state.booleans {
+                    eval_ctx.booleans.insert(k.clone(), *v);
+                }
+                let result = self.table.evaluate_ctx(&state.status, &eval_ctx, &name);
                 let event_count_before = state.events.len();
 
                 match result {

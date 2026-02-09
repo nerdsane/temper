@@ -20,6 +20,7 @@ This document is the primary reference for LLM agents building applications with
 12. [API Reference Quick Guide](#12-api-reference)
 13. [Common Workflows](#13-common-workflows)
 14. [Anti-Patterns to Avoid](#14-anti-patterns)
+15. [Conversational Vision: How to Represent Temper to Users](#15-conversational-vision)
 
 ---
 
@@ -64,19 +65,34 @@ Evolution Engine. The developer reviews and approves changes via the Developer C
 | **Platform-host** | `temper serve --specs-dir --tenant` | Specs only | Multi-tenant, future: hot-swap transitions |
 
 **Self-host path:** The coding agent produces a Cargo crate with specs, full verification cascade
-(Stateright + DST + property tests), and infrastructure (Docker Compose). The developer builds
-and deploys the binary. See `reference-apps/ecommerce/` for the canonical example.
+(SMT + Stateright + DST + property tests), and infrastructure (Docker Compose). The developer
+builds and deploys the binary. See `reference-apps/ecommerce/` for the canonical example.
 
 **Platform-host path:** The developer provides specs to `temper serve --specs-dir`, which runs
 the VerificationCascade at startup and rejects invalid specs. Multi-tenant hosting with
-domain-specific servers per tenant. Future: hot-swappable TransitionTables without build/deploy.
+domain-specific servers per tenant.
+
+**Single-node architecture.** The current runtime is single-process. Actor mailboxes
+use local `tokio::sync::mpsc` channels, not Redis.
+
+This is safe for the current request-response model because the Postgres event
+journal is the durable record. If the server crashes:
+1. In-flight `mpsc` messages are lost, but the HTTP caller gets a connection error
+2. On restart, actors replay their event journal from Postgres to rebuild state
+3. The caller retries — the actor is back at the last committed state
+
+Redis-backed mailboxes become necessary for **async inter-actor messaging** in a
+distributed deployment (messages between actors on different nodes). The
+`temper-store-redis` crate defines `MailboxStore`, `PlacementStore`, and
+`CacheStore` traits with in-memory stubs for this future. `REDIS_URL` is not
+read by the server today.
 
 ### The Full Lifecycle
 
 ```
 1. CONVERSE → Developer describes domain in Developer Chat
 2. GENERATE → System produces IOA specs + CSDL + Cedar from conversation
-3. VERIFY   → 3-level cascade (model check + simulation + property tests)
+3. VERIFY   → 4-level cascade (SMT + model check + simulation + property tests)
 4. DEPLOY   → Self-host binary or platform-host via temper serve
 5. USE      → End users operate the app via Production Chat
 6. OBSERVE  → Trajectory intelligence captures unmet intents
@@ -311,7 +327,7 @@ This produces for each entity:
 
 ### How Entity Actors Work at Runtime
 
-At runtime, entities are NOT served by the generated Rust code directly. Instead, the server builds a **JIT TransitionTable** from the I/O Automaton specification using `TransitionTable::from_ioa_source()`. This table is the same verified artifact that passes the 3-level cascade. Each entity gets its own actor:
+At runtime, entities are NOT served by the generated Rust code directly. Instead, the server builds a **JIT TransitionTable** from the I/O Automaton specification using `TransitionTable::from_ioa_source()`. Both the verification model and the runtime table derive from the same parsed `Automaton`, ensuring the behavior verified by the four-level cascade is identical to what runs in production. Each entity gets its own actor:
 
 ```
 HTTP Request → OData Parse → Actor Registry (get or spawn) → Entity Actor → TransitionTable.evaluate() → Response
@@ -319,33 +335,41 @@ HTTP Request → OData Parse → Actor Registry (get or spawn) → Entity Actor 
 
 The entity actor holds:
 - `status`: Current state machine state (e.g., "Draft", "Submitted")
-- `item_count`: Number of items (for guards like `SubmitRequiresItems`)
+- `counters`: Named counter variables (e.g., `{"items": 2, "spec_count": 1}`)
+- `booleans`: Named boolean variables (e.g., `{"has_address": true}`)
 - `fields`: All entity fields as JSON
 - `events`: Append-only event log of all transitions
 
-When an action is dispatched, the actor evaluates it through the TransitionTable:
+When an action is dispatched, the actor evaluates it through the TransitionTable
+with a full `EvalContext` containing counters and booleans:
 1. Find matching rule by action name
 2. Check `from_states` guard (is current status valid for this action?)
-3. Check additional guards (e.g., `ItemCountMin(1)` for SubmitOrder)
-4. If guards pass: apply effects (SetState, IncrementItems, EmitEvent), record event
+3. Check additional guards (`CounterMin`, `BoolTrue`, compound `And`)
+4. If guards pass: apply effects (`SetState`, `IncrementCounter`, `SetBool`, `EmitEvent`), record event
 5. If guards fail: return 409 Conflict with error message
 
-**Critical**: Always use `TransitionTable::from_ioa_source(ioa_toml)` in production, NOT `from_state_machine(sm)`. The `from_ioa_source` variant resolves guard predicates from the specification source, producing correct guard constraints. The `from_state_machine` variant may miss guards that reference predicates.
+**Critical**: `TransitionTable::from_ioa_source(ioa_toml)` is the sole production constructor. The TLA+ code path has been fully removed.
 
 ---
 
 ## 5. Verification Cascade
 
-Run the three-level verification cascade:
+Run the four-level verification cascade:
 
 ```bash
 temper verify --specs-dir specs
 ```
 
+### Level 0: Z3 SMT Symbolic Verification
+- **What**: Encodes guards and invariants as Z3 formulas, checks algebraically
+- **Finds**: Dead guards (actions that can never fire), non-inductive invariants, unreachable states
+- **Advantage**: Works on unbounded state spaces without enumerating states
+
 ### Level 1: Stateright Model Checking
-- **What**: Exhaustively explores every reachable state of the state machine
-- **Finds**: Invariant violations, deadlocks, unreachable states
-- **Guarantee**: If it passes, the invariant holds in ALL possible states
+- **What**: Exhaustively explores every reachable state of the multi-variable state machine
+- **Checks**: Safety invariants (always), liveness properties (eventually/no-deadlock)
+- **State**: Tracks status + named counters (BTreeMap) + named booleans (BTreeMap)
+- **Guarantee**: If it passes, the invariant holds in ALL reachable states
 
 ### Level 2: Deterministic Simulation
 - **What**: Runs multi-actor scenarios with fault injection (message delay, drop, actor crash)
@@ -358,7 +382,7 @@ temper verify --specs-dir specs
 - **Shrinking**: When a failure is found, proptest finds the minimal counterexample
 - **Cases**: 1000 random sequences of up to 30 steps each
 
-**All three levels must pass before deployment.**
+**All four levels must pass before deployment.**
 
 ---
 
@@ -369,15 +393,20 @@ temper verify --specs-dir specs
 The safest onboarding path: write specs to disk, verify, then serve.
 
 ```bash
-# 1. Verify specs pass the 3-level cascade
+# 1. Verify specs pass the 4-level cascade
 temper verify --specs-dir specs
 
-# 2. Start server with verified specs
-temper serve --specs-dir specs --tenant my-app --port 3000
+# 2. Start server with verified specs + Postgres persistence
+DATABASE_URL=postgres://myapp:myapp_dev@localhost:5432/myapp \
+  temper serve --specs-dir specs --tenant my-app --port 3000
 ```
 
 `temper serve --specs-dir` runs the verification cascade on every IOA spec before loading them.
 Invalid specs are rejected at startup — the server will not serve unverified entities.
+
+**IMPORTANT: Without `DATABASE_URL`, the server runs in-memory only.** Entity state
+is lost on restart. The server will log "No DATABASE_URL — running in-memory only"
+at startup. Always set `DATABASE_URL` for any deployment beyond local dev exploration.
 
 The server exposes OData v4 endpoints:
 
@@ -717,7 +746,7 @@ The recommended path for coding agents that generate specs:
 
 1. Write `model.csdl.xml` with entity types, entity sets, and actions
 2. Write `*.ioa.toml` for each entity with states, actions, guards, invariants
-3. Run `temper verify --specs-dir specs` — all 3 cascade levels must pass
+3. Run `temper verify --specs-dir specs` — all 4 cascade levels must pass
 4. Run `temper serve --specs-dir specs --tenant my-app`
 5. The OData API is now live at `/tdata`
 6. Use `X-Tenant-Id: my-app` header to target your tenant
@@ -754,6 +783,58 @@ The recommended path for coding agents that generate specs:
 4. Run `temper verify` on the proposed changes
 5. Submit as a Git PR for human review
 
+### Deployment-Ready Checklist
+
+Before deploying or handing off a Temper project, verify every item. Skipping
+any of these causes silent failures that are hard to diagnose after the fact.
+
+**Specs and Verification:**
+- [ ] All `*.ioa.toml` specs pass `temper verify` (4-level cascade: L0-L3)
+- [ ] `model.csdl.xml` entity types match IOA spec names and states
+- [ ] Cedar policies exist for each entity type in `specs/policies/`
+- [ ] No warnings from L0 SMT (dead guards, unreachable states)
+
+**Persistence (events survive restart):**
+- [ ] `DATABASE_URL` is set and points to a running Postgres instance
+- [ ] Server startup log shows "Postgres connected, migrations applied"
+- [ ] Server startup log does NOT show "running in-memory only"
+- [ ] After creating an entity and dispatching an action, query Postgres to confirm:
+  ```sql
+  SELECT event_type, payload->>'from_status', payload->>'to_status'
+  FROM events ORDER BY created_at DESC LIMIT 5;
+  ```
+  If this returns rows, persistence is working. If the table doesn't exist or
+  is empty after actions, something is wrong.
+
+**Telemetry (spans and metrics export):**
+- [ ] `OTLP_ENDPOINT` is set (e.g., `http://localhost:4318`) if telemetry is wanted
+- [ ] OTEL Collector is running and reachable at that endpoint
+- [ ] Server startup does not show OTEL initialization errors
+- [ ] If running under Claude Code or other OTEL-injecting tools, verify
+      telemetry is going to YOUR collector, not the tool's (see Appendix D)
+
+**Infrastructure (Docker Compose):**
+- [ ] Postgres volume mounted at `/var/lib/postgresql` (NOT `/var/lib/postgresql/data`)
+- [ ] OTEL Collector config mounted at `/etc/otelcol-contrib/config.yaml` (contrib image)
+- [ ] ClickHouse exporter uses `tcp://` protocol (port 9000), not `http://`
+- [ ] All services show `healthy` in `docker compose ps`
+- [ ] Redis: **not required for single-node deployment**. The Docker Compose
+      includes Redis for future distributed features, but the server does not
+      connect to it. Do not set `REDIS_URL` expecting it to do anything — actor
+      mailboxes are local `mpsc` channels, not Redis streams.
+
+**Runtime behavior:**
+- [ ] `GET /tdata` returns the service document listing all entity sets
+- [ ] `GET /tdata/$metadata` returns valid CSDL XML
+- [ ] Creating an entity returns 201 with `status` matching the initial state
+- [ ] Dispatching a valid action returns 200 with updated status
+- [ ] Dispatching an invalid action (wrong state) returns 409 Conflict
+- [ ] Guard enforcement works: e.g., SubmitOrder with 0 items returns 409
+
+**Multi-tenancy (if applicable):**
+- [ ] `X-Tenant-Id` header routes to the correct tenant
+- [ ] Different tenants see only their own entities
+
 ---
 
 ## 14. Anti-Patterns to Avoid
@@ -761,7 +842,7 @@ The recommended path for coding agents that generate specs:
 | Anti-Pattern | Why It's Wrong | Do This Instead |
 |-------------|---------------|-----------------|
 | Hand-editing generated code | Will be overwritten on next codegen | Modify the CSDL/automaton specs |
-| Using `from_state_machine()` in production | Misses `CanXxx` guard resolution | Use `TransitionTable::from_ioa_source()` |
+| Using any constructor other than `from_ioa_source()` | TLA+ path fully removed, only IOA is supported | Use `TransitionTable::from_ioa_source()` |
 | Skipping verification | Deploys unverified state machines | Always run `temper verify` |
 | Skipping `temper verify` before `temper serve --specs-dir` | Server now runs cascade at startup, but pre-verifying catches errors earlier | Always run `temper verify` first |
 | Calling actions without checking status | Will get 409 Conflict | GET entity first, check `status` field |
@@ -771,10 +852,78 @@ The recommended path for coding agents that generate specs:
 | Modifying Cedar policies without human approval | Security change requires human gate | Submit as evolution A-Record for review |
 | Creating evolution records without evidence | Unverifiable claims | Include SQL evidence queries in O-Records |
 | Putting guards inline in action params | Guards are separate from action parameters | Use `guard = "items > 0"` for preconditions, `params = [...]` for action inputs |
+| Deploying without `DATABASE_URL` | Server runs fine but events are lost on restart — silent data loss | Always set `DATABASE_URL`, verify "Postgres connected" in startup log |
+| Not querying Postgres after first deploy | No way to know if persistence is actually working | Run `SELECT COUNT(*) FROM events` after dispatching actions |
 
 ---
 
-## 15. TigerStyle Engineering Philosophy
+## 15. Conversational Vision: How to Represent Temper to Users
+
+When a coding agent (you) uses Temper to build applications for a developer, PM,
+or founder, follow these principles for how you communicate.
+
+### The User Does Not Need to Know the Internals
+
+Temper is like a compiler. The user writes what they want; the internals are hidden.
+A PM building a project tracker does not need to know about:
+- IOA TOML syntax or `[[invariant]]` sections
+- Z3 SMT formulas, Stateright BFS, or proptest shrinking
+- `TemperModel`, `TransitionTable`, `EvalContext`, or `ModelGuard`
+- State counts, guard satisfiability, or induction proofs
+
+**Default behavior: show only the result.** "Verified and live" or a plain-language
+explanation of what went wrong.
+
+### Progressive Disclosure (EXPLAIN ANALYZE Analogy)
+
+Like PostgreSQL's `EXPLAIN ANALYZE` or a compiler's `-v` flag, internals are
+available on demand — but never the default:
+
+| Level | Trigger | What the user sees |
+|-------|---------|-------------------|
+| **Result only** (default) | Any spec change | "✓ Verified" or domain-level error explanation |
+| **Spec summary** | "Show me what you generated" | Entity structure in plain language (states, actions, rules) |
+| **Cascade details** | "Show me verification details" | L0-L3 results, state counts, counterexample traces |
+
+### When Verification Fails, Explain the Domain Problem
+
+Never show the formal violation. Translate it:
+
+| Internal violation | What you say to the user |
+|-------------------|--------------------------|
+| `NoFurtherTransitions` invariant violated | "You said cancelled is final, but this change adds a transition out of Cancelled" |
+| `CounterPositive` invariant violated | "An order can reach Submitted with zero items — should submission require at least one item?" |
+| `BoolRequired` invariant violated | "An order can be shipped without payment being captured — should shipping require payment?" |
+| Guard unsatisfiable (dead code) | "The action 'Go' can never fire because items can never reach 10 with the current limits" |
+| Unreachable state | "The state 'Deploying' can never be reached from the initial state — is it needed?" |
+
+### Two Interaction Patterns
+
+**Interactive mode.** Go back and forth with the user, one entity at a time.
+Each exchange that implies a change triggers generation + verification immediately.
+
+**Plan mode.** The user describes everything upfront. Generate all specs at once,
+verify, deploy. Follow-up conversation refines incrementally.
+
+### Two-Context Separation
+
+Always maintain this separation when building for users:
+
+1. **Developer Chat** (design-time): The user builds and evolves the application.
+   You (the agent) generate specs, verify, and deploy. The user controls *what*
+   the app does without needing to understand *how* verification works.
+
+2. **Production Chat** (runtime): End users interact with the deployed app.
+   The production agent operates strictly within current specs — it cannot modify
+   the entity model. When users attempt something that doesn't exist, capture
+   the intent and surface it to the developer:
+   "Users are asking to split orders (47 attempts this week). Should I add that?"
+
+   The developer retains the approval gate for all behavioral changes.
+
+---
+
+## 16. TigerStyle Engineering Philosophy (Internal)
 
 Temper follows [TigerStyle](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md), TigerBeetle's engineering discipline. Key principles applied:
 
@@ -811,11 +960,11 @@ DST is not an afterthought — it's the first test you write. Before any HTTP wi
 
 ### Zero Technical Debt
 
-If a spec change passes the 3-level verification cascade, it ships. If it doesn't, the cascade tells you exactly why and what to fix. There's no "we'll fix the invariant violation later" — the cascade is a hard gate.
+If a spec change passes the 4-level verification cascade, it ships. If it doesn't, the cascade tells you exactly why and what to fix. There's no "we'll fix the invariant violation later" — the cascade is a hard gate.
 
 ---
 
-## 16. DST-First Development Methodology
+## 17. DST-First Development Methodology (Internal)
 
 When adding new features or changing state machines, follow the **DST-first** approach:
 
@@ -833,7 +982,7 @@ When adding new features or changing state machines, follow the **DST-first** ap
    ```
 3. **Run DST tests** — they will fail if guards are wrong, transitions are missing, or invariants are violated
 4. **Fix bugs found by DST** — these are real bugs that would manifest in production
-5. **Run the full verification cascade** (`temper verify`) to prove correctness at all 3 levels
+5. **Run the full verification cascade** (`temper verify`) to prove correctness at all 4 levels
 6. **Wire into HTTP** — the same TransitionTable that passes DST runs in the entity actors
 
 This approach caught three real bugs during Temper's own development:
@@ -954,11 +1103,13 @@ See `scripts/otel-collector.yaml` or `reference-apps/ecommerce/otel-collector-co
 
 ```bash
 DATABASE_URL=postgres://myapp:myapp_dev@localhost:5432/myapp
-REDIS_URL=redis://localhost:6379
 OTLP_ENDPOINT=http://localhost:4318
 CLICKHOUSE_URL=http://localhost:8123
 ANTHROPIC_API_KEY=sk-ant-...
 RUST_LOG=info,temper=debug
+
+# Not used yet (reserved for future distributed deployment):
+# REDIS_URL=redis://localhost:6379
 ```
 
 ### Running Under Claude Code or Other OTEL-Injecting Tools
@@ -982,7 +1133,7 @@ env -u OTEL_EXPORTER_OTLP_TRACES_ENDPOINT \
 temper init <name>              Create a new Temper project
 temper codegen [--specs-dir DIR] [--output-dir DIR]
                                 Generate Rust code from specs
-temper verify [--specs-dir DIR] Run 3-level verification cascade
+temper verify [--specs-dir DIR] Run 4-level verification cascade
 temper serve [--port PORT] [--specs-dir DIR] [--tenant NAME]
                                 Start platform server
                                 With --specs-dir: runs verification cascade, loads specs, serves tenant
@@ -993,8 +1144,8 @@ temper serve [--port PORT] [--specs-dir DIR] [--tenant NAME]
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `DATABASE_URL` | For persistence | Postgres connection string |
-| `REDIS_URL` | For caching | Redis connection string |
+| `DATABASE_URL` | For persistence | Postgres connection string. **Without this, events are lost on restart.** |
+| `REDIS_URL` | Not used | Reserved for future distributed deployment. Server does not read this. |
 | `OTLP_ENDPOINT` | For telemetry export | OTLP collector base URL (e.g., `http://localhost:4318`) |
 | `CLICKHOUSE_URL` | For analysis queries | ClickHouse HTTP endpoint (read path for trajectory analysis) |
 | `ANTHROPIC_API_KEY` | For agent mode | Claude API key |

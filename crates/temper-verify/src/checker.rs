@@ -34,7 +34,6 @@ pub struct VerificationResult {
 /// This spawns Stateright's BFS checker, joins it, and then inspects the
 /// discoveries to build a `VerificationResult`.
 pub fn check_model(model: &TemperModel) -> VerificationResult {
-    // Stateright's Model::checker() takes `self` by value, so we clone.
     let checker_result = model.clone().checker().spawn_bfs().join();
 
     let states_explored = checker_result.unique_state_count();
@@ -45,8 +44,6 @@ pub fn check_model(model: &TemperModel) -> VerificationResult {
 
     for (property_name, path) in discoveries {
         let mut trace = Vec::new();
-        // Path::into_vec() returns Vec<(State, Option<Action>)>.
-        // The first entry has None for the action (it is the initial state).
         let steps: Vec<_> = path.into_vec();
         for (state, action) in steps {
             trace.push((state, action));
@@ -70,21 +67,24 @@ pub fn check_model(model: &TemperModel) -> VerificationResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::build_model_from_tla;
+    use crate::model::build_model_from_ioa;
 
-    const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
+    const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 
     #[test]
     fn test_check_model_completes() {
-        let model = build_model_from_tla(ORDER_TLA, 2);
+        let model = build_model_from_ioa(ORDER_IOA, 2);
         let result = check_model(&model);
         assert!(result.is_complete, "checker should complete");
-        assert!(result.states_explored > 0, "should explore at least one state");
+        assert!(
+            result.states_explored > 0,
+            "should explore at least one state"
+        );
     }
 
     #[test]
     fn test_check_model_all_properties_hold() {
-        let model = build_model_from_tla(ORDER_TLA, 2);
+        let model = build_model_from_ioa(ORDER_IOA, 2);
         let result = check_model(&model);
         assert!(
             result.all_properties_hold,

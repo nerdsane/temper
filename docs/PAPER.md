@@ -16,8 +16,9 @@ behavioral state machines with safety invariants and liveness properties, and Ce
 policies define attribute-based access control.  Code is derived from these
 specifications and is treated as a regenerable artifact.  A custom tokio-based actor
 runtime, inspired by Erlang/OTP and Akka, provides supervision, event sourcing, and
-deterministic simulation.  A three-level verification cascade--exhaustive model
-checking via Stateright, deterministic simulation with seed-based fault injection,
+deterministic simulation.  A four-level verification cascade--Z3 SMT symbolic verification,
+exhaustive model checking via Stateright with multi-variable state and liveness
+properties, deterministic simulation with seed-based fault injection,
 and property-based testing with automatic shrinking--establishes correctness before
 deployment.  A production feedback loop, the Evolution Engine, captures observations,
 formalizes problems in the style of Lamport, proposes solutions as specification
@@ -25,8 +26,8 @@ diffs, and gates destructive changes on human approval.  Trajectory intelligence
 extracts product signal from agent execution traces.  A three-tier JIT execution
 model allows state machine transition logic to be hot-swapped at runtime without
 process restarts.  The framework is implemented as a 16-crate Rust workspace with
-411 tests across the core crates and a reference application, backed by PostgreSQL for
-event sourcing, Redis for actor mailboxes, and an OTLP-based observability pipeline
+450 tests across the core crates and a reference application, backed by PostgreSQL for
+event sourcing and an OTLP-based observability pipeline
 that exports to any OpenTelemetry-compatible backend.  Two deployment paths are
 supported: a self-hosted path where a coding agent produces specs plus a Cargo crate
 with full verification tests and infrastructure, and a platform-hosted path where
@@ -84,7 +85,7 @@ specifications and can be regenerated whenever the specifications change.
 When end users encounter capabilities the system lacks, their unmet intents
 flow through an Evolution Engine that proposes specification changes for
 developer approval.  The system continuously evolves from both developer
-intent and production feedback, with a three-level verification cascade
+intent and production feedback, with a four-level verification cascade
 gating every change.
 
 The remainder of this paper is organized as follows.  Section 2 presents the
@@ -112,9 +113,9 @@ temper-codegen       Code generation from specifications
 temper-odata         OData v4 query/path parsing and error types
 temper-authz         Cedar ABAC engine
 temper-observe       Observability: OTEL+OTLP export, store trait, schemas, trajectory
-temper-verify        Three-level verification cascade
+temper-verify        Four-level verification cascade (SMT + model check + DST + proptest)
 temper-store-postgres Postgres event store and snapshot store
-temper-store-redis   Redis mailbox, cache, shard placement
+temper-store-redis   Mailbox, cache, placement traits (in-memory; Redis planned)
 temper-server        Axum HTTP layer: router, dispatch, response
 temper-cli           CLI: init, codegen, verify, serve subcommands
 temper-evolution     Evolution Engine: records, chain validation, insights
@@ -226,12 +227,12 @@ The reference Order automaton (`order.ioa.toml`) defines:
 - **Safety invariants:** `SubmitRequiresItems`, `ShipRequiresPayment`,
   `CancelledIsFinal`, `RefundedIsFinal`.
 
-The TOML serialization compiles losslessly to a `StateMachine` intermediate
-representation that feeds the verification cascade (Stateright model checking,
-deterministic simulation, property-based testing) and the runtime
-`TransitionTable`.  The precondition/effect style maps directly to the
-`TransitionRule` guards and effects used at runtime, and the input/output/internal
-classification maps to the actor model's message taxonomy.
+The TOML serialization is parsed into an `Automaton` struct that feeds
+both the verification cascade (directly to `TemperModel` for Stateright model
+checking, simulation, and property tests) and the runtime `TransitionTable`.
+The precondition/effect style maps directly to the `TransitionRule` guards and
+effects used at runtime, and the input/output/internal classification maps to
+the actor model's message taxonomy.
 
 ### 3.3 Cedar ABAC as the Security Specification
 
@@ -290,9 +291,11 @@ while preventing infinite restart loops for deterministic failures.
 
 Actor state is persisted through an event sourcing model.  Every state transition
 emits events that are appended to a Postgres-backed event store (`temper-store-postgres`).
-Periodic snapshots reduce replay time on actor restart.  Redis (`temper-store-redis`)
-provides the mailbox backing store, shard placement registry, and a cache layer with
-key-pattern-based TTLs.
+Periodic snapshots reduce replay time on actor restart.  The `temper-store-redis`
+crate defines traits for mailbox streams, shard placement, and TTL-based caching
+with in-memory stub implementations.  Actor mailboxes currently use local
+`tokio::sync::mpsc` channels; Redis-backed implementations are planned for
+distributed deployment.
 
 ### 4.4 Bounded Execution (TigerStyle)
 
@@ -319,7 +322,7 @@ This is discussed in detail in Section 5.
 
 ---
 
-## 5. Three-Level Verification Cascade
+## 5. Four-Level Verification Cascade
 
 TigerStyle [18] holds that "assertions are not just for testing--they run in
 production."  Temper embodies this principle at the state machine level: the
@@ -333,29 +336,106 @@ cascade described below does not *replace* these runtime assertions; it
 *complements* them by proving, ahead of deployment, that no reachable state
 can violate the invariants those assertions enforce.
 
-Correctness is established through a three-level cascade, orchestrated by the
-`VerificationCascade` type in `temper-verify`.  All three levels run
-independently; all must pass before deployment.
+Correctness is established through a four-level cascade, orchestrated by the
+`VerificationCascade` type in `temper-verify`.  All levels run independently;
+all must pass before deployment.
 
-### 5.1 Level 1: Exhaustive Model Checking
+### 5.1 From Specification to Verification Model
 
-The I/O Automaton specification compiles to a `StateMachine` intermediate
-representation, which is then translated into a `TemperModel` that implements
-the Stateright `Model` trait [3].  Stateright performs breadth-first exhaustive
-exploration of the state space, checking every safety invariant at every
-reachable state.  For the reference Order automaton with `MAX_ITEMS = 2`,
-the model checker explores the full state graph and confirms that all
-properties hold.
+The I/O Automaton TOML specification is translated directly into a
+`TemperModel` that implements the Stateright `Model` trait [3].  The `Automaton` struct parsed
+from TOML maps 1:1 to the model's structures.
+
+The verification model tracks multi-variable state:
+
+```rust
+pub struct TemperModelState {
+    pub status: String,                    // e.g. "Draft", "Submitted"
+    pub counters: BTreeMap<String, usize>, // e.g. {"items": 2}
+    pub booleans: BTreeMap<String, bool>,  // e.g. {"has_address": true}
+}
+```
+
+Guards and effects from the IOA spec are translated directly:
+- `Guard::MinCount { var, min }` -> `ModelGuard::CounterMin { var, min }`
+- `Guard::IsTrue { var }` -> `ModelGuard::BoolTrue(var)`
+- `Effect::Increment { var }` -> `ModelEffect::IncrementCounter(var)`
+- `Effect::SetBool { var, value }` -> `ModelEffect::SetBool { var, value }`
+
+Invariant assertions are classified automatically from their expression:
+- `"items > 0"` -> `CounterPositive { var: "items" }`
+- `"payment_captured"` (bare bool identifier) -> `BoolRequired { var }`
+- `"no_further_transitions"` -> `NoFurtherTransitions`
+- A `TypeInvariant` (status in valid set) is always auto-included.
+
+Counter variables are bounded for finite exploration (default: 2).
+
+### 5.2 From Specification to Runtime TransitionTable
+
+The same IOA spec produces the runtime `TransitionTable` (in `temper-jit`),
+which is a data structure--not compiled code:
+
+```rust
+pub struct TransitionTable {
+    pub rules: Vec<TransitionRule>,  // Guard + Effect lists per action
+}
+```
+
+The `evaluate_ctx()` method interprets these rules at runtime, checking guards
+and applying effects.  The table is serializable and hot-swappable via
+`Arc<TransitionTable>`.  Both the verification model and the runtime table
+derive from the same `Automaton`, ensuring provable equivalence.
+
+### 5.3 Level 0: Symbolic Verification
+
+When state spaces are too large for BFS, Level 0 verifies properties
+algebraically using the Z3 SMT solver.  Each guard and invariant is encoded
+as a Z3 formula over bounded integer variables and booleans:
+
+1. **Guard satisfiability:** For each transition, check whether its guard can
+   ever be satisfied given the variable domains.  Unsatisfiable guards indicate
+   dead code (an action that can never fire).
+
+2. **Invariant induction:** For each (invariant, transition) pair: assuming the
+   invariant holds before the transition and the guard is satisfied, does the
+   invariant hold after applying the transition's effects?  If all pairs verify,
+   the invariant holds inductively--no BFS needed.
+
+3. **Unreachable state detection:** BFS from the initial state through
+   transition targets to find states that cannot be reached.
 
 ```
-L1 Model Check PASSED: 42,847 states explored, all properties hold
+L0 Symbolic PASSED: 10 guards satisfiable, 5 invariants inductive, 0 unreachable
+```
+
+Level 0 complements Level 1: it handles unbounded variable domains where BFS
+would explode, while Level 1 provides exhaustive path coverage within bounds.
+
+### 5.4 Level 1: Exhaustive Model Checking
+
+Stateright performs breadth-first exhaustive exploration of the multi-variable
+state space, checking safety and liveness properties at every reachable state.
+
+**Safety properties** (`Property::always`):
+- `TypeInvariant`: status in valid set
+- `CounterPositiveInvariants`: when triggered, counter > 0
+- `BoolRequiredInvariants`: when triggered, boolean is true
+- `NoFurtherTransitions`: when triggered, no actions are enabled
+- `ImplicationInvariants`: when triggered, status in required set
+
+**Liveness properties:**
+- `Property::eventually` for `ReachesState` (acyclic paths only)
+- `Property::always` for `NoDeadlock` (always has enabled actions)
+
+```
+L1 Model Check PASSED: states explored, all properties hold
 ```
 
 This level provides the strongest guarantee: no reachable state violates any
-safety invariant.  The trade-off is that state-space explosion limits
-`MAX_ITEMS` to small values.
+safety invariant.  The trade-off is that state-space explosion limits counter
+bounds to small values.
 
-### 5.2 Level 2: Deterministic Simulation
+### 5.5 Level 2: Deterministic Simulation
 
 Inspired by FoundationDB's simulation testing [4] and TigerBeetle's VOPR [5],
 Level 2 runs multi-actor scenarios under controlled fault injection.  The key
@@ -376,8 +456,7 @@ components are:
 A simulation run instantiates multiple entity actors, each processing random
 action sequences drawn from the valid actions for their current state.  After
 every transition, the invariant checker verifies that the new state satisfies
-all safety properties.  Multi-seed runs (`run_multi_seed_simulation`) sweep
-across seeds for broader coverage:
+all safety properties.  Multi-seed runs sweep across seeds for broader coverage:
 
 ```
 L2 Simulation PASSED: 10 seeds, 847 transitions, 23 dropped msgs
@@ -386,24 +465,54 @@ L2 Simulation PASSED: 10 seeds, 847 transitions, 23 dropped msgs
 Crucially, any failure is reproducible: re-running with the same seed
 produces the identical execution trace.
 
-### 5.3 Level 3: Property-Based Testing
+### 5.6 Level 3: Property-Based Testing
 
 Level 3 uses proptest [6] to generate random action sequences and check
-invariants after each step.  This complements Levels 1 and 2: Level 1 is
-exhaustive but bounded; Level 2 simulates realistic multi-actor scenarios;
-Level 3 exercises long action sequences that may exceed the model checker's
-state-space budget.  When a violation is found, proptest's shrinking algorithm
-reduces the sequence to a minimal counterexample.
+invariants after each step.  This complements Levels 0-2: Level 0 is algebraic
+but per-step; Level 1 is exhaustive but bounded; Level 2 simulates realistic
+multi-actor scenarios; Level 3 exercises long action sequences that may exceed
+the model checker's state-space budget.  When a violation is found, proptest's
+shrinking algorithm reduces the sequence to a minimal counterexample.
 
 ```
 L3 Property Tests PASSED: 1000 cases, 30 max steps
 ```
 
-### 5.4 Cascade Orchestration
+### 5.7 What Each Level Catches
 
-The `VerificationCascade` builder accepts an I/O Automaton specification and configuration
-parameters (number of simulation seeds, property test cases, max items), then
-runs all three levels and produces a `CascadeResult`:
+| Level | Method | Scope | Strengths |
+|-------|--------|-------|-----------|
+| L0 | Symbolic/algebraic | Unbounded variables | Dead guards, non-inductive invariants, unreachable states |
+| L1 | Exhaustive BFS | Bounded, all variables | All reachable states, safety + liveness, counterexamples |
+| L2 | Fault injection DST | Real code, multi-actor | Message delays/drops/crashes, concurrency bugs |
+| L3 | Random walks + shrinking | Long sequences | Sequences beyond BFS budget, minimal counterexamples |
+
+### 5.8 Faithfulness and Limitations
+
+**IOA deviations from Lynch-Tuttle formalism:**
+- *Input-enabledness* is violated: input actions have `from` guards.
+- The guard/effect language is restricted to counters and booleans.
+- No composition calculus or simulation relations.
+
+**Stateright limitations:**
+- `Property::eventually` only checks acyclic paths (no cycles).
+- No fairness assumptions: liveness cannot express "if action A is enabled
+  infinitely often, it eventually fires."
+
+**SMT verification limitations:**
+- Invariant induction proves per-step preservation, not reachability from
+  initial state (BFS still needed for base case).
+- The guard/effect language restricts what Z3 can reason about: only
+  integer counters and booleans, no arithmetic expressions or set operations.
+
+**Future work:** composition calculus for multi-entity verification,
+fairness-aware liveness checker, richer guard language with arithmetic.
+
+### 5.9 Cascade Orchestration
+
+The `VerificationCascade` builder accepts an I/O Automaton specification and
+configuration parameters, then runs all four levels and produces a
+`CascadeResult`:
 
 ```rust
 let cascade = VerificationCascade::from_ioa(ORDER_IOA)
@@ -441,9 +550,10 @@ immutable, linked chain of typed records:
    estimated complexity.
 
 4. **D-Record (Decision):** A human approval or rejection of a proposed change.
-   If approved, the record includes verification cascade results (Stateright
-   states explored, simulation pass/fail, proptest cases) and an implementation
-   plan (codegen command, migration required, deployment strategy).
+   If approved, the record includes verification cascade results (SMT
+   invariant induction, Stateright states explored, simulation pass/fail,
+   proptest cases) and an implementation plan (codegen command, migration
+   required, deployment strategy).
 
 5. **I-Record (Insight):** Product intelligence derived from trajectory analysis,
    categorized as UnmetIntent, Friction, or Workaround (see Section 7).
@@ -534,12 +644,12 @@ State machine transitions are represented at three tiers of abstraction:
    `temper-codegen`.  Maximum performance, requires recompilation to change.
 
 2. **Interpretable (Tier 2):** A `TransitionTable`--a data structure encoding
-   all transition rules for an entity type, built from the `StateMachine`
+   all transition rules for an entity type, built directly from the `Automaton`
    specification.  Each `TransitionRule` carries a `Guard` (evaluated at
-   runtime) and a list of `Effect`s (`SetState`, `IncrementItems`,
-   `DecrementItems`, `EmitEvent`).  Transitions are evaluated by matching the
-   action name, checking `from_states`, evaluating the guard, and applying
-   effects.
+   runtime against an `EvalContext` of counters and booleans) and a list of
+   `Effect`s (`SetState`, `IncrementCounter`, `DecrementCounter`, `SetBool`,
+   `EmitEvent`).  Transitions are evaluated by matching the action name,
+   checking `from_states`, evaluating the guard, and applying effects.
 
 3. **Overlay (Tier 3):** A hot-swappable `TransitionTable` managed by
    `SwapController`.  The controller holds an `Arc<RwLock<TransitionTable>>`
@@ -596,9 +706,7 @@ logs at instrumentation time.  This creates rigid tradeoffs: choosing metrics
 gives precise aggregation but loses context; choosing traces gives detail but
 imprecise statistics.  These decisions are made early and are costly to change.
 
-In an agentic system, this problem is worse: agents don't write instrumentation
-code at all.  They write I/O Automaton specs.  The platform must handle all observability
-without any agent involvement in deciding metrics vs traces vs logs.
+In an agentic system and Temper specifically, this problem is worse: agents write I/O Automaton specs.  The platform must handle all observability without relying on the coding agent's subjective (non-determinstic) involvement in deciding metrics vs traces vs logs, or being locally reactive to a particular fault scenario.
 
 ### 9.2 Wide Events as the Unified Primitive
 
@@ -643,17 +751,13 @@ Entity Actor Transition
 ```
 
 The write path is fully backend-agnostic: setting `OTLP_ENDPOINT` to a
-different collector sends telemetry to Datadog, Grafana, Jaeger, or any
+different collector sends telemetry to Datadog, or any
 OTLP-compatible backend without code changes.
 
-### 9.4 Cost Decoupling
+### 9.4 Cost of cardinality Decoupling
 
-The critical insight: `entity_id` is high-cardinality (one per entity).  In
-traditional telemetry, adding it as a metric tag causes cardinality explosion
-and bill shock.  With Telemetry as Views, `entity_id` is an Attribute--zero
-cost in metrics, full detail in traces.  An operator can *promote* an Attribute
-to a Tag at runtime if they decide the cost is worth it for a specific
-investigation, without any code change.
+The `entity_id` is high-cardinality (one per entity).  In
+traditional telemetry, adding it as a metric tag causes cardinality explosion. With Telemetry as Views, `entity_id` is an Attribute, full detail in traces.  An Agentic operator can *promote* an Attribute to a Tag at runtime if they decide the cost is worth it for a specific investigation (using the O-P-A-D-I evolution), without any code change.
 
 ### 9.5 Provider-Swappable Query Interface
 
@@ -693,9 +797,9 @@ relational modeling with SAT-based analysis.  Stateright [3] brings
 model checking to Rust with an API designed for testing distributed protocols.
 FoundationDB's simulation testing framework [4] pioneered seed-based
 deterministic simulation for database systems; TigerBeetle's VOPR [5] applies
-the same idea to a financial transaction engine.  Temper combines Stateright
+the same idea to a financial transaction engine.  Temper combines Z3 SMT solving, Stateright
 model checking, FoundationDB-style simulation, and proptest-based property
-testing into a unified three-level cascade.
+testing into a unified four-level cascade.
 
 **TigerStyle.**  TigerBeetle's TigerStyle [18] is a development methodology that
 codifies principles Temper adopts throughout its design: assertion density
@@ -704,7 +808,7 @@ no unbounded allocations), static resource budgets (all buffers sized at
 initialization), and a "zero technical debt" philosophy where every shortcut is
 treated as a bug.  TigerStyle elevates deterministic simulation testing from an
 optional technique to the *primary* testing strategy, ahead of integration and
-end-to-end tests.  Temper's three-level verification cascade, bounded actor
+end-to-end tests.  Temper's four-level verification cascade, bounded actor
 mailboxes, static transition tables, and DST-first development methodology are
 direct applications of TigerStyle principles to the actor-framework domain.
 
@@ -732,7 +836,7 @@ observability data, with a safety checker ensuring correctness.
 
 ### 11.1 Test Coverage
 
-The Temper workspace contains 411 tests across 16 crates and one reference
+The Temper workspace contains 450 tests across 16 crates and one reference
 application. Key categories:
 
 | Category                       | Count | Crates                                     |
@@ -741,7 +845,7 @@ application. Key categories:
 | Specification parsing          |    20 | temper-spec                                |
 | OData query/path parsing       |    35 | temper-odata                               |
 | Code generation                |     6 | temper-codegen                             |
-| Verification (model+sim+prop)  |    28 | temper-verify                              |
+| Verification (SMT+model+sim+prop) |  38 | temper-verify                              |
 | Entity actor DST tests         |     7 | temper-server                              |
 | HTTP + multi-tenant tests      |    33 | temper-server                              |
 | Evolution records and chains   |    23 | temper-evolution                           |
@@ -793,9 +897,10 @@ through the SimActorSystem:
 | Determinism proofs          |     2 | Bit-exact replay across 10 runs (seeds 42, 1337) |
 | Multi-seed sweep            |     1 | 20 seeds with light faults, all entities |
 
-**3 cascade tests.**  The `ecommerce_cascade.rs` test file runs the full three-level
-`VerificationCascade` on each entity spec independently, confirming that Stateright
-model checking, deterministic simulation, and property-based testing all pass.
+**3 cascade tests.**  The `ecommerce_cascade.rs` test file runs the full four-level
+`VerificationCascade` on each entity spec independently, confirming that SMT
+verification, Stateright model checking, deterministic simulation, and
+property-based testing all pass.
 
 **Evolution chain.**  The `evolution/` directory contains a complete O-P-A-D-I chain
 demonstrating the Evolution Engine's institutional memory:
@@ -815,13 +920,14 @@ the developer approves the change.
 All Temper projects follow the same development loop: converse, generate specs,
 verify, review, iterate, deploy.  The deployment step offers two paths.
 
-**Self-hosted (production-ready).**  The coding agent produces a Cargo crate with
+**Self-hosted .**  The coding agent produces a Cargo crate with
 specs, full verification tests (cascade + DST), and infrastructure (Docker Compose).
-The developer builds and deploys the binary.  The reference e-commerce application is
-the canonical example.  This path gives the developer full control over the build,
+The coding agent can also build and deploy the binary to the developer's preferred 
+hosting provider (ex: railway, etc).  The reference e-commerce application is
+an example.  This path gives the developer full control over the build,
 deployment, and infrastructure.
 
-**Platform-hosted (production-ready).**  `temper serve --specs-dir ./specs --tenant
+**Platform-hosted .**  `temper serve --specs-dir ./specs --tenant
 my-app` starts the server.  The serve command runs `VerificationCascade::from_ioa()`
 on every IOA spec before loading it into the SpecRegistry; invalid specs are rejected
 at startup, never loaded into the runtime.  Once loaded, the full OData API is live.
@@ -831,7 +937,8 @@ verified specs dispatched through a shared `SpecRegistry`.
 **Multi-tenancy.**  Both paths support multi-tenancy.  A system tenant provides
 shared infrastructure.  All tenants dispatch through a shared `SpecRegistry` that
 maps `(TenantId, EntityType)` to the verified `TransitionTable` and spec metadata.
-Postgres events and Redis keys are tenant-scoped.
+Postgres events are tenant-scoped.  The Redis key naming convention
+(`temper:{subsystem}:{tenant}:...`) is defined but not yet active.
 
 **E2E proof.**  The `compile_first_e2e` tests prove the full HTTP lifecycle through
 the platform-hosted path: entity creation, action dispatch, entity read, `$metadata`
@@ -839,13 +946,11 @@ retrieval, and service document discovery.  The `platform_e2e_dst` tests prove
 multi-tenant isolation: two tenants with different entity types coexist on the same
 server, each seeing only their own entities and actions.
 
-**Conversational development (vision, partially implemented).**  The full Developer
-Chat pipeline--structured interview, spec generation, verification, hot-deploy--is
-implemented at the agent layer.  Developers describe their application through
-conversation; the system generates IOA TOML + CSDL + Cedar, runs the verification
-cascade, and hot-deploys entity actors.  Production users interact through a separate
-chat context; unmet intents feed back through the Evolution Engine for developer
-approval.
+**Conversational development (vision, partially implemented).**  The Developer
+Chat pipeline--interview, spec generation, verification, hot-deploy--is partially
+implemented in `temper-platform` and dependent on the coding agent of choice
+(claude-code, cursor, etc) at the agent integration layer.  See Section 12.2 for
+the target experience and two-context separation model.
 
 ### 11.4 Verification Results
 
@@ -855,7 +960,8 @@ Running the full verification cascade on each entity specification:
 
 | Level | Method                    | Result  | Detail                                    |
 |-------|---------------------------|---------|-------------------------------------------|
-| L1    | Stateright model check    | PASSED  | 42,847 states explored, all properties hold |
+| L0    | Z3 SMT symbolic           | PASSED  | 10 guards satisfiable, 5 invariants inductive |
+| L1    | Stateright model check    | PASSED  | All properties hold (multi-variable state)  |
 | L2    | Deterministic simulation  | PASSED  | 10 seeds, 847 transitions, 23 dropped msgs |
 | L3    | Property-based tests      | PASSED  | 1,000 cases, 30 max steps per case         |
 
@@ -863,7 +969,8 @@ Running the full verification cascade on each entity specification:
 
 | Level | Method                    | Result  | Detail                                    |
 |-------|---------------------------|---------|-------------------------------------------|
-| L1    | Stateright model check    | PASSED  | All properties hold (3 terminal-state invariants verified) |
+| L0    | Z3 SMT symbolic           | PASSED  | All guards satisfiable, invariants inductive |
+| L1    | Stateright model check    | PASSED  | All properties hold (3 terminal-state invariants) |
 | L2    | Deterministic simulation  | PASSED  | 10 seeds, all invariants held              |
 | L3    | Property-based tests      | PASSED  | 1,000 cases, 30 max steps per case         |
 
@@ -871,6 +978,7 @@ Running the full verification cascade on each entity specification:
 
 | Level | Method                    | Result  | Detail                                    |
 |-------|---------------------------|---------|-------------------------------------------|
+| L0    | Z3 SMT symbolic           | PASSED  | All guards satisfiable, invariants inductive |
 | L1    | Stateright model check    | PASSED  | All properties hold (ReturnedIsFinal verified) |
 | L2    | Deterministic simulation  | PASSED  | 10 seeds, all invariants held              |
 | L3    | Property-based tests      | PASSED  | 1,000 cases, 30 max steps per case         |
@@ -920,58 +1028,38 @@ unit tests or HTTP smoke tests:
 | `CancelOrder` missing from transition table entirely | `resolve_transitions()` filtered `!name.starts_with("Can")`, catching both `CanCancel` (guard) and `CancelOrder` (action) | Agents could never cancel orders; 409 on every attempt |
 | `CancelOrder` and `InitiateReturn` had `has_parameters=false` | Specification extractor stripped `(reason)` from the name before checking for parentheses | Guard/action distinction broken; parameterized actions treated as guard predicates and excluded |
 
-The fix introduced `TransitionTable::from_tla_source()` which builds the table
-from the verified Stateright model's resolved transitions, ensuring that the
-exact same guard semantics verified at Level 1 (exhaustive model checking) are
-enforced at runtime.  This establishes a critical invariant:
+Event replay uses the `TransitionTable` as the authoritative source of effects:
+`replay_events()` re-evaluates each persisted event through `evaluate_ctx()`,
+applying the same effect logic as the original `handle()` call.  This
+reconstructs all state variables--status, named counters, and booleans--
+without storing effects in the event payload.  The event journal stores
+`(action, from_status, to_status, params)`; the `TransitionTable` provides
+the effects deterministically.
 
-> **The transition table in the HTTP-serving entity actor is identical to the
-> one verified by the three-level cascade.**
+The guard resolution fix introduced `TransitionTable::from_ioa_source()` which
+builds the table directly from the parsed `Automaton` — the same data structure
+used by the verification model.  This establishes a critical invariant:
+
+> **The transition table in the HTTP-serving entity actor derives from the
+> same `Automaton` verified by the four-level cascade.**
 
 ### 11.7 Live Infrastructure Validation
 
 The system runs end-to-end against real infrastructure: PostgreSQL 18 for event
-sourcing, Redis 8 for actor mailboxes, an OpenTelemetry Collector for telemetry
+sourcing, an OpenTelemetry Collector for telemetry
 ingestion, and ClickHouse as the observability backend.  The Docker Compose
-environment provisions all four services.  A Claude-powered LLM agent (Anthropic
-Sonnet 4.5) operates the e-commerce API through natural language.
+environment provisions all four services.
 
 The OTEL write path is verified end-to-end: entity actor transitions emit spans
 via `emit_span()` and metrics via `emit_metrics()`, which flow through the OTEL
 SDK's batch processor, out via OTLP/HTTP to the collector, and into ClickHouse's
-`otel_traces` table.  A representative demo session:
-
-```
-User: "Create a new order, add a headset, and submit it"
-Agent: Claude → create_order → AddItem → SubmitOrder → respond
-Result: Order in Submitted status, 2 events persisted to Postgres
-OTEL:   3 spans exported (odata.POST.CreateOrder, Order.AddItem, Order.SubmitOrder)
-        All spans carry Telemetry as Views attributes:
-        - Tags: entity_type=Order, operation=SubmitOrder, success=true
-        - Attributes: entity_id=..., from_status=Draft, params={...}
-        - Measurements: transition_count=1, duration_ms=0, item_count=1
-
-User: "I want to split my order into two shipments"
-Agent: Claude → (no matching action exists) → responds with apology
-Result: Trajectory span exported via OTLP with user_intent attribute
-
-Analysis: ClickHouse query detects "split order" as unmet intent
-Output: O-Record (observation) + I-Record (insight, category=UnmetIntent)
-Product Digest: "Add SplitOrder action to Order entity"
-```
-
-The full feedback loop is verified:
-
-1. Natural language → Claude → OData tool calls
-2. Entity actors process transitions through formally verified TransitionTables
-3. Events persist to PostgreSQL (survives server restart)
-4. Wide events emit via OTEL SDK → OTLP/HTTP → Collector → ClickHouse
-5. Trajectory analysis queries ClickHouse for patterns (read path unchanged)
-6. Evolution Engine generates records from production data
-7. Product intelligence digest tells the human what to build next
+`otel_traces` table.  Each span carries the full Telemetry as Views structure:
+tags (low-cardinality: `entity_type`, `operation`, `success`), attributes
+(high-cardinality: `entity_id`, `from_status`, `params`), and measurements
+(`transition_count`, `duration_ms`, `item_count`).
 
 The write path is backend-agnostic: changing `OTLP_ENDPOINT` redirects all
-telemetry to a different backend (Datadog, Grafana, Jaeger) without code changes.
+telemetry to Datadog, LogFire, or any OTLP-compatible backend without code changes.
 
 ---
 
@@ -985,7 +1073,8 @@ Temper makes the following contributions:
    developer interviews, code is derived from specifications, and the system
    self-evolves from production trajectory intelligence.
 
-2. A three-level verification cascade combining exhaustive model checking,
+2. A four-level verification cascade combining Z3 SMT symbolic verification,
+   exhaustive model checking with multi-variable state and liveness properties,
    deterministic simulation with fault injection, and property-based testing.
 
 3. An Evolution Engine with Lamport-style problem formalization, human approval
@@ -1018,107 +1107,164 @@ Temper makes the following contributions:
    infrastructure as code, and a complete O-P-A-D-I evolution chain showing
    how production observations lead to spec improvements.
 
-### 12.2 Development Flow and Deployment Paths
+### 12.2 Conversational Development Vision
 
-All Temper projects follow the same development loop: a developer and coding agent
-converse about the domain; the agent generates IOA specs, CSDL, and Cedar policies;
-the system runs the verification cascade; the developer reviews results and iterates
-until specs are locked in; then the developer chooses a deployment path.
+All Temper projects follow the same loop: converse, generate specs, verify, deploy
+(see Section 11.3 for the two deployment paths).  The conversational development
+pipeline--where a developer interacts with Temper through a **Developer Chat**
+that interviews them, generates specifications, runs the verification cascade,
+and hot-deploys entity actors--is partially implemented.  The interview agent,
+spec generators, and verify-and-deploy pipeline exist as working code in
+`temper-platform`; the gap is the coding agent integration layer that connects
+them end-to-end.
 
-**Self-hosted (production-ready).**  The coding agent produces a Cargo crate
-containing specs, full verification tests (cascade + DST), and infrastructure
-(Docker Compose for Postgres, Redis, ClickHouse, OTEL Collector).  The developer
-builds and deploys the binary.  The reference e-commerce application
-(`reference-apps/ecommerce/`) is the canonical example: 3 entity specs, 22 DST
-tests (scripted, random, fault-injected, determinism proofs), 3 cascade tests, and
-a complete O-P-A-D-I evolution chain.
-
-**Platform-hosted (production-ready).**  `temper serve --specs-dir ./specs --tenant
-my-app` starts a multi-tenant server.  The serve command runs
-`VerificationCascade::from_ioa()` on every IOA spec before loading it into the
-SpecRegistry; invalid specs are rejected at startup.  Multiple tenants coexist on
-a single server with tenant-scoped persistence.
-
-**Conversational development (vision, partially implemented).**  The developer
-interacts with Temper through a conversational interface--the **Developer Chat**--
-which interviews them about their domain, generates specifications from the
-conversation, runs the verification cascade, and hot-deploys entity actors in real
-time.  A representative session:
+A representative session showing the target experience:
 
 ```
-Developer: "I want a project management tool like Linear"
-System:    "What are the core entities you manage?"
-Developer: "Issues and projects. Issues go through a workflow."
-System:    "What states does an issue go through?"
-Developer: "Backlog, todo, in progress, in review, done. You can cancel them."
-System:    [generates issue.ioa.toml: 6 states, infers CreateIssue/StartWork/
-            SubmitForReview/Approve/Complete/CancelIssue actions]
-           [runs verification cascade — passes]
-           [registers tenant, entity actors live]
-           "Issue entity is live. Try it — what would you do first?"
+Developer: "I want to build something like Linear for my team"
+System:    "What's the main thing people create and track?"
+Developer: "Issues. They go through a workflow."
+System:    "What stages does an issue go through?"
+Developer: "Backlog, todo, in progress, in review, done.
+            You can cancel from anywhere except done."
+System:    "Got it. Here's what I'll set up:
+
+            Issue lifecycle:
+              Backlog → Todo → InProgress → InReview → Done
+              Cancel from any active state → Cancelled (final)
+
+            Actions: CreateIssue, Triage, StartWork, SubmitReview,
+                     ApproveReview, CancelIssue
+
+            I'll also enforce that cancelled issues can't be
+            reopened. Verifying now..."
+
+           ✓ Verified. Issue tracker is live.
+           "Want to try it?"
+
 Developer: "Create a bug for the login page"
-System:    [agent creates ISS-1 in Backlog via OData]
-           "Created ISS-1 in Backlog. What's next?"
-Developer: "I want to assign it to someone"
-System:    [AssignIssue doesn't exist → captured as UnmetIntent]
-           "I can't do that yet. Should issues have an assignee?
-            What states can you assign from?"
-Developer: "Any state except Done and Cancelled"
-System:    [adds AssignIssue action + assignee_set boolean guard to spec]
-           [re-runs verification cascade — passes]
-           [hot-swaps TransitionTable via SwapController]
-           "Done. Try assigning ISS-1 now."
+System:    "Created ISS-1 'Login page bug' in Backlog."
+
+Developer: "I need to assign issues to people"
+System:    "Issues don't have assignments yet. Should I add that?
+            Which stages can you assign from?"
+Developer: "Any stage except Done and Cancelled"
+System:    ✓ "Added assignments. Verified. Try assigning ISS-1."
 ```
+
+The default experience hides all internals.  The system translates natural
+descriptions into formal specifications, runs the four-level verification
+cascade, and surfaces only the result: verified and live, or a plain-language
+explanation of what went wrong.
+
+When verification fails, the system explains the *domain* problem, not the
+formal violation:
+
+```
+Developer: "Actually, let done issues be cancelled too"
+System:    "I can't do that — you said cancelled is final, so
+            allowing Cancel from Done would create a conflict.
+            Should I remove the 'cancelled is final' rule, or
+            keep it and only allow cancel from active stages?"
+```
+
+#### Progressive Disclosure of Internals
+
+The analogy is `EXPLAIN ANALYZE` in PostgreSQL or `rustc --emit=mir`: the
+default output is what matters to the user; the internals are one question
+away.  A developer who wants to understand *why* something was verified, or
+*how* the state machine is structured, can ask:
+
+```
+Developer: "Show me what you generated"
+System:    "Issue entity (issue.ioa.toml):
+              States: Backlog, Todo, InProgress, InReview, Done, Cancelled
+              Actions:
+                CreateIssue       → Backlog
+                Triage            Backlog → Todo
+                StartWork         Todo → InProgress
+                SubmitReview      InProgress → InReview
+                ApproveReview     InReview → Done
+                CancelIssue       [Backlog,Todo,InProgress,InReview] → Cancelled
+              Invariants:
+                CancelledIsFinal  no transitions out of Cancelled"
+
+Developer: "Show me the verification details"
+System:    "Verification cascade for Issue:
+              L0 SMT (Z3):      6 guards satisfiable, 2 invariants inductive
+              L1 Model Check:   18 states explored, all properties hold
+              L2 Simulation:    10 seeds, 312 transitions, 0 violations
+              L3 Property Tests: 1000 cases, 30 max steps, all passed"
+
+Developer: "Why did the cancel-from-done change fail?"
+System:    "The NoFurtherTransitions invariant on Cancelled
+            means no action can have Cancelled as a from-state.
+            But CancelIssue targets Cancelled, and you want it
+            to fire from Done — which means Done → Cancelled is
+            a valid transition. That's fine. The problem is that
+            if any future action were added from Cancelled, it
+            would violate the invariant. The L1 model checker
+            found this: in the state (Done, items=1), CancelIssue
+            fires, reaching Cancelled — but the invariant requires
+            no enabled actions from Cancelled, and currently none
+            exist, so it actually passes. Let me re-check...
+
+            Actually, the real conflict is: you said 'cancel from
+            anywhere except Done' earlier, and 'cancelled is final'
+            is already enforced. Adding Done to the cancel-from list
+            works — I was wrong. Updated and verified. ✓"
+```
+
+The three levels of disclosure mirror compiler/database conventions:
+1. **Result only** (default): "✓ Verified" or a domain-level explanation
+2. **Spec summary** ("show me what you generated"): entity structure in
+   plain language, no TOML syntax
+3. **Cascade details** ("show me verification details"): L0-L3 results,
+   state counts, counterexample traces — the `EXPLAIN ANALYZE` view
 
 #### Two-Context Separation
 
-The system maintains two clearly separated contexts:
+The system maintains two separated contexts:
 
 1. **Developer Chat** (design-time).  The developer builds and evolves the
-   application through conversation.  Every exchange may generate or modify
-   specifications.  The verification cascade gates every change.  The
-   developer has full control over the entity model.
+   application through conversation.  The system interviews, generates specs,
+   verifies, and deploys — the developer controls *what* the application
+   does without needing to understand *how* verification works.
 
 2. **Production Chat** (runtime).  End users interact with the deployed
-   application through a separate conversational interface.  The agent
-   operates strictly within the current specifications — it cannot modify
-   the entity model.  Unmet user intents flow into the Evolution Engine:
+   application.  The agent operates within the current specifications — it
+   cannot modify the entity model.  When users attempt something the system
+   can't do, the intent is captured and surfaced to the developer:
 
    ```
-   User attempts action → agent fails → trajectory span (outcome=failed,
-     user_intent="split order into shipments") → OTEL → ClickHouse
-     → Sentinel → O-Record → I-Record (UnmetIntent)
-     → Developer reviews → D-Record (Approved/Rejected)
-     → If approved: spec change → verify → hot-swap
+   User: "Split my order into two shipments"
+   Agent: (no matching action) → "I can't do that yet"
+   → Intent captured → Developer notified:
+     "Users are asking to split orders (47 attempts this week).
+      Should I add a SplitOrder action?"
+   → Developer approves/rejects → If approved: verify → deploy
    ```
 
-   The developer retains the approval gate (D-Record) for all behavioral
-   changes.  The system may autonomously observe, formalize problems, and
-   propose solutions, but production user intents never modify the
-   application without developer consent.
+   The developer retains the approval gate for all behavioral changes.
 
 #### Conversational Development Pipeline
 
-The Developer Chat implements a three-stage pipeline:
+The Developer Chat supports two interaction patterns:
 
-1. **Interview**: The system asks structured questions to elicit entity types,
-   states, transitions, guards, and invariants.  It uses the IOA formalism
-   as a template: "What states does X go through?", "What actions can happen
-   from state Y?", "Are there any conditions required for Z?"
+**Interactive mode.**  The system and developer go back and forth, refining
+one entity at a time.  Each exchange that implies a change triggers
+generation, verification, and deployment immediately.
 
-2. **Generate + Verify**: Each conversational exchange that implies a spec
-   change triggers: IOA TOML generation → CSDL generation → verification
-   cascade (model check + simulation + property tests).  If verification
-   fails, the system explains the violation and asks the developer to
-   clarify.
+**Plan mode.**  The developer describes everything upfront: "I want a project
+management tool with issues, projects, and sprints.  Issues go through
+backlog, todo, in progress, review, done."  The system generates all entities
+at once, verifies, and deploys.  Follow-up conversation refines incrementally.
 
-3. **Deploy + Test**: On successful verification, the system registers the
-   tenant spec in the SpecRegistry, hot-swaps the TransitionTable, and
-   invites the developer to test the new behavior in the same conversation.
-
-This pipeline makes the development loop interactive and immediate: the
-developer describes intent, the system materializes it as a verified
-specification, and the result is testable within seconds.
+Under the hood, both modes follow the same pipeline: the system translates
+the conversation into IOA specifications, generates CSDL and Cedar policies,
+runs the four-level verification cascade, and hot-deploys.  The developer
+experiences this as "describe → try it" with verification as an invisible
+gate that only surfaces when something is wrong.
 
 ### 12.3 Remaining Future Work
 
@@ -1129,22 +1275,28 @@ Several additional directions remain open:
   would run server-side before registration, bridging the gap between the
   self-hosted path and the full conversational pipeline.
 
-- **Distributed clustering.**  The current actor system is single-node.
-  Extending `temper-runtime` with a cluster membership protocol and remote
-  actor references would enable horizontal scaling.
+- **Distributed clustering.**  The current actor system is single-node;
+  actor mailboxes are local `mpsc` channels.  The `temper-store-redis` crate
+  defines `MailboxStore`, `PlacementStore`, and `CacheStore` traits with
+  in-memory stubs, but Redis-backed implementations are not yet wired in.
+  Extending `temper-runtime` with Redis-backed mailboxes, a cluster membership
+  protocol, and remote actor references would enable horizontal scaling.
 
 - **WASM actor bodies.**  Compiling actor message handlers to WebAssembly
   would allow hot-loading new actor logic without restarting the host process,
   complementing the JIT transition table layer.
 
 - **Cloud deployment.**  Packaging the platform as a managed service with
-  infrastructure-as-code templates for AWS/GCP/Azure would lower the barrier
-  to adoption.
+  popular hosting platforms (vercel, railway, fly.io, cloudflare, cloud providers, etc).
 
-- **Liveness verification.**  The current verification cascade checks safety
-  invariants exhaustively but does not model-check liveness properties (which
-  require fairness assumptions).  Integrating liveness checking into Level 1
-  would strengthen the guarantees.
+- **Fairness-aware liveness.**  The current liveness checking uses
+  Stateright's `Property::eventually` which only covers acyclic paths.
+  Full fairness assumptions ("if enabled infinitely often, eventually fires")
+  would require a custom checker or integration with a temporal logic tool.
+
+- **Multi-entity composition.**  Verifying properties that span multiple
+  entity types (e.g., "an order cannot be shipped unless its payment is
+  captured") requires a composition calculus not yet implemented.
 
 ---
 

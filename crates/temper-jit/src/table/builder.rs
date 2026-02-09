@@ -4,7 +4,6 @@
 //! has explicit `from`, `to`, `guard` fields — no inference needed.
 
 use temper_spec::automaton::{self, Automaton};
-use temper_spec::tlaplus::StateMachine;
 
 use super::types::{Effect, Guard, TransitionRule, TransitionTable};
 
@@ -93,7 +92,6 @@ impl TransitionTable {
                     }
                 } else {
                     // Fallback: infer item effects from action name convention.
-                    // Increment/decrement all counter state vars declared in the spec.
                     let name_lower = a.name.to_lowercase();
                     if name_lower.contains("additem") || name_lower.contains("add_item") {
                         effects.push(Effect::IncrementItems);
@@ -102,7 +100,9 @@ impl TransitionTable {
                                 effects.push(Effect::IncrementCounter(var.clone()));
                             }
                         }
-                    } else if name_lower.contains("removeitem") || name_lower.contains("remove_item") {
+                    } else if name_lower.contains("removeitem")
+                        || name_lower.contains("remove_item")
+                    {
                         effects.push(Effect::DecrementItems);
                         for var in &counter_vars {
                             if var != "items" {
@@ -128,129 +128,6 @@ impl TransitionTable {
             entity_name: automaton.automaton.name.clone(),
             states: automaton.automaton.states.clone(),
             initial_state: automaton.automaton.initial.clone(),
-            rules,
-        }
-    }
-
-    /// Build a [`TransitionTable`] from a legacy [`StateMachine`] specification.
-    ///
-    /// Parses `effect_expr` strings to infer item effects. Does NOT resolve
-    /// `CanXxx` guard predicates — use [`from_ioa_source()`](Self::from_ioa_source) instead.
-    #[deprecated(note = "use TransitionTable::from_ioa_source() — from_state_machine misses CanXxx guard resolution")]
-    pub fn from_state_machine(sm: &StateMachine) -> Self {
-        let rules = sm
-            .transitions
-            .iter()
-            .map(|t| {
-                let guard = if t.from_states.is_empty() {
-                    Guard::Always
-                } else {
-                    Guard::StateIn(t.from_states.clone())
-                };
-
-                let mut effects: Vec<Effect> = Vec::new();
-                if let Some(ref to) = t.to_state {
-                    effects.push(Effect::SetState(to.clone()));
-                }
-
-                let expr = t.effect_expr.to_lowercase();
-                if expr.contains("items' = items \\union")
-                    || expr.contains("items' = items \\cup")
-                {
-                    effects.push(Effect::IncrementItems);
-                }
-                if expr.contains("items' = items \\")
-                    && !expr.contains("union")
-                    && !expr.contains("cup")
-                {
-                    effects.push(Effect::DecrementItems);
-                }
-
-                effects.push(Effect::EmitEvent(t.name.clone()));
-
-                TransitionRule {
-                    name: t.name.clone(),
-                    from_states: t.from_states.clone(),
-                    to_state: t.to_state.clone(),
-                    guard,
-                    effects,
-                }
-            })
-            .collect();
-
-        let initial_state = sm
-            .states
-            .first()
-            .cloned()
-            .unwrap_or_default();
-
-        TransitionTable {
-            entity_name: sm.module_name.clone(),
-            states: sm.states.clone(),
-            initial_state,
-            rules,
-        }
-    }
-}
-
-// Legacy TLA+ builder — only needed by tests.
-#[cfg(test)]
-impl TransitionTable {
-    /// Build from raw TLA+ source via temper-verify model resolution.
-    /// Only available in tests (avoids pulling stateright/proptest into production).
-    pub fn from_tla_source(tla_source: &str) -> Self {
-        let model: temper_verify::TemperModel =
-            temper_verify::build_model_from_tla(tla_source, 3);
-        Self::from_verified_model(&model)
-    }
-
-    fn from_verified_model(model: &temper_verify::TemperModel) -> Self {
-        let rules: Vec<TransitionRule> = model
-            .transitions
-            .iter()
-            .map(|rt| {
-                let mut effects: Vec<Effect> = Vec::new();
-                if let Some(ref target) = rt.to_state {
-                    effects.push(Effect::SetState(target.clone()));
-                }
-                if rt.is_add_item {
-                    effects.push(Effect::IncrementItems);
-                }
-                if rt.modifies_items && !rt.is_add_item {
-                    effects.push(Effect::DecrementItems);
-                }
-                effects.push(Effect::EmitEvent(rt.name.clone()));
-
-                let mut guards = vec![];
-                if !rt.from_states.is_empty() {
-                    guards.push(Guard::StateIn(rt.from_states.clone()));
-                }
-                if rt.requires_items {
-                    guards.push(Guard::ItemCountMin(1));
-                }
-
-                let guard = match guards.len() {
-                    0 => Guard::Always,
-                    1 => guards.into_iter().next().unwrap(),
-                    _ => Guard::And(guards),
-                };
-
-                TransitionRule {
-                    name: rt.name.clone(),
-                    from_states: rt.from_states.clone(),
-                    to_state: rt.to_state.clone(),
-                    guard,
-                    effects,
-                }
-            })
-            .collect();
-
-        let initial_state = model.states.first().cloned().unwrap_or_default();
-
-        TransitionTable {
-            entity_name: "Entity".to_string(),
-            states: model.states.clone(),
-            initial_state,
             rules,
         }
     }

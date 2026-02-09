@@ -1,6 +1,7 @@
 //! Orchestrate the verification cascade.
 //!
 //! Levels:
+//! 0. **Symbolic Verification** — SMT-based algebraic verification (Z3)
 //! 1. **Model Check** — exhaustive state-space exploration via Stateright
 //! 2. **Deterministic Simulation** — FoundationDB/TigerBeetle-style fault injection
 //! 2b. **Actor Simulation** — real TransitionTable::evaluate() through SimActorSystem
@@ -10,8 +11,9 @@
 
 use crate::checker::{self, VerificationResult};
 use crate::model::{self, TemperModel};
-use crate::simulation::{self, SimConfig, SimulationResult};
 use crate::proptest_gen::{self, PropTestResult};
+use crate::simulation::{self, SimConfig, SimulationResult};
+use crate::smt::{self, SmtResult};
 
 use temper_runtime::scheduler::FaultConfig;
 
@@ -37,6 +39,8 @@ pub type ActorSimRunner = Box<dyn Fn(u64) -> ActorSimResult>;
 /// The levels available in the verification cascade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CascadeLevel {
+    /// Level 0: Symbolic verification via Z3 SMT solver.
+    SymbolicVerification,
     /// Level 1: Exhaustive model checking via Stateright.
     ModelCheck,
     /// Level 2: Deterministic simulation with fault injection (model-level).
@@ -50,6 +54,7 @@ pub enum CascadeLevel {
 impl std::fmt::Display for CascadeLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            CascadeLevel::SymbolicVerification => write!(f, "Level 0: Symbolic Verification"),
             CascadeLevel::ModelCheck => write!(f, "Level 1: Model Check"),
             CascadeLevel::Simulation => write!(f, "Level 2: Deterministic Simulation"),
             CascadeLevel::ActorSimulation => write!(f, "Level 2b: Actor Simulation"),
@@ -71,6 +76,7 @@ pub struct LevelResult {
     pub verification: Option<VerificationResult>,
     pub simulation: Option<SimulationResult>,
     pub prop_test: Option<PropTestResult>,
+    pub smt: Option<SmtResult>,
 }
 
 /// The aggregate result of running the full verification cascade.
@@ -91,10 +97,8 @@ impl CascadeResult {
 
 /// Orchestrates the verification cascade.
 pub struct VerificationCascade {
-    tla_source: Option<String>,
-    ioa_source: Option<String>,
-    state_machine: Option<temper_spec::tlaplus::StateMachine>,
-    max_items: usize,
+    ioa_source: String,
+    max_counter: usize,
     /// Number of simulation seeds to test.
     sim_seeds: u64,
     /// Simulation ticks per seed.
@@ -108,41 +112,11 @@ pub struct VerificationCascade {
 }
 
 impl VerificationCascade {
-    pub fn new(state_machine: temper_spec::tlaplus::StateMachine) -> Self {
-        Self {
-            tla_source: None,
-            ioa_source: None,
-            state_machine: Some(state_machine),
-            max_items: 2,
-            sim_seeds: 10,
-            sim_ticks: 200,
-            prop_test_cases: 1000,
-            prop_test_max_steps: 30,
-            actor_sim_runner: None,
-        }
-    }
-
-    /// Create from I/O Automaton TOML source (preferred).
+    /// Create from I/O Automaton TOML source.
     pub fn from_ioa(ioa_toml: &str) -> Self {
         Self {
-            tla_source: None,
-            ioa_source: Some(ioa_toml.to_string()),
-            state_machine: None,
-            max_items: 2,
-            sim_seeds: 10,
-            sim_ticks: 200,
-            prop_test_cases: 1000,
-            prop_test_max_steps: 30,
-            actor_sim_runner: None,
-        }
-    }
-
-    pub fn from_tla(tla_source: &str) -> Self {
-        Self {
-            tla_source: Some(tla_source.to_string()),
-            ioa_source: None,
-            state_machine: None,
-            max_items: 2,
+            ioa_source: ioa_toml.to_string(),
+            max_counter: 2,
             sim_seeds: 10,
             sim_ticks: 200,
             prop_test_cases: 1000,
@@ -152,25 +126,24 @@ impl VerificationCascade {
     }
 
     /// Set the actor simulation runner (Level 2b).
-    ///
-    /// The runner receives the number of seeds to test and returns an
-    /// `ActorSimResult`. This is provided by the caller because the handler
-    /// implementation lives in `temper-server`.
     pub fn with_actor_sim(mut self, runner: ActorSimRunner) -> Self {
         self.actor_sim_runner = Some(runner);
         self
     }
 
-    pub fn with_max_items(mut self, max_items: usize) -> Self {
-        self.max_items = max_items;
+    /// Set the maximum counter value for bounded exploration.
+    pub fn with_max_items(mut self, max_counter: usize) -> Self {
+        self.max_counter = max_counter;
         self
     }
 
+    /// Set the number of simulation seeds.
     pub fn with_sim_seeds(mut self, seeds: u64) -> Self {
         self.sim_seeds = seeds;
         self
     }
 
+    /// Set the number of property test cases.
     pub fn with_prop_test_cases(mut self, cases: u64) -> Self {
         self.prop_test_cases = cases;
         self
@@ -180,13 +153,17 @@ impl VerificationCascade {
     pub fn run(&self) -> CascadeResult {
         let mut levels = Vec::new();
 
+        // Level 0: SMT symbolic verification
+        let l0 = self.run_symbolic_verification();
+        levels.push(l0);
+
         // Level 1: Stateright model checking
         let model = self.build_temper_model();
         let l1 = self.run_model_check(&model);
         levels.push(l1);
 
         // Level 2: Deterministic simulation (model-level)
-        let l2 = self.run_simulation_level(&model);
+        let l2 = self.run_simulation_level();
         levels.push(l2);
 
         // Level 2b: Actor simulation (real TransitionTable::evaluate())
@@ -203,25 +180,57 @@ impl VerificationCascade {
         CascadeResult { all_passed, levels }
     }
 
-    fn get_tla_source(&self) -> Option<String> {
-        if let Some(ref source) = self.tla_source {
-            Some(source.clone())
-        } else if let Some(ref sm) = self.state_machine {
-            Some(format!("---- MODULE {} ----\n====", sm.module_name))
-        } else {
-            None
-        }
+    fn build_temper_model(&self) -> TemperModel {
+        model::build_model_from_ioa(&self.ioa_source, self.max_counter)
     }
 
-    fn build_temper_model(&self) -> TemperModel {
-        if let Some(ref source) = self.ioa_source {
-            model::build_model_from_ioa(source, self.max_items)
-        } else if let Some(ref source) = self.tla_source {
-            model::build_model_from_tla(source, self.max_items)
-        } else if let Some(ref sm) = self.state_machine {
-            model::build_model_with_max_items(sm, self.max_items)
+    /// Level 0: SMT symbolic verification.
+    fn run_symbolic_verification(&self) -> LevelResult {
+        let result = smt::verify_symbolic(&self.ioa_source, self.max_counter);
+        let passed = result.all_passed;
+
+        let dead_guards: Vec<&str> = result
+            .guard_satisfiability
+            .iter()
+            .filter(|(_, sat)| !sat)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let non_inductive: Vec<&str> = result
+            .inductive_invariants
+            .iter()
+            .filter(|(_, ind)| !ind)
+            .map(|(name, _)| name.as_str())
+            .collect();
+
+        let summary = if passed {
+            format!(
+                "L0 Symbolic PASSED: {} guards satisfiable, {} invariants inductive, {} unreachable",
+                result.guard_satisfiability.len(),
+                result.inductive_invariants.len(),
+                result.unreachable_states.len(),
+            )
         } else {
-            panic!("VerificationCascade requires IOA, TLA+, or StateMachine");
+            let mut issues = Vec::new();
+            if !dead_guards.is_empty() {
+                issues.push(format!("dead guards: {}", dead_guards.join(", ")));
+            }
+            if !non_inductive.is_empty() {
+                issues.push(format!(
+                    "non-inductive invariants: {}",
+                    non_inductive.join(", ")
+                ));
+            }
+            format!("L0 Symbolic WARNINGS: {}", issues.join("; "))
+        };
+
+        LevelResult {
+            level: CascadeLevel::SymbolicVerification,
+            passed,
+            summary,
+            verification: None,
+            simulation: None,
+            prop_test: None,
+            smt: Some(result),
         }
     }
 
@@ -249,36 +258,31 @@ impl VerificationCascade {
             verification: Some(verification),
             simulation: None,
             prop_test: None,
+            smt: None,
         }
     }
 
     /// Level 2: Deterministic simulation with fault injection.
-    fn run_simulation_level(&self, _model: &TemperModel) -> LevelResult {
+    fn run_simulation_level(&self) -> LevelResult {
         let base_config = SimConfig {
             seed: 1,
             max_ticks: self.sim_ticks,
             num_actors: 3,
             max_actions_per_actor: 20,
-            max_items: self.max_items,
+            max_counter: self.max_counter,
             faults: FaultConfig::light(),
         };
 
-        let results: Vec<simulation::SimulationResult> = if let Some(ref ioa) = self.ioa_source {
-            simulation::run_multi_seed_simulation_from_ioa(ioa, &base_config, self.sim_seeds)
-        } else if let Some(ref tla) = self.tla_source {
-            simulation::run_multi_seed_simulation(tla, &base_config, self.sim_seeds)
-        } else {
-            // Model-only: use a dummy source
-            let tla = self.get_tla_source().unwrap_or_default();
-            simulation::run_multi_seed_simulation(&tla, &base_config, self.sim_seeds)
-        };
+        let results = simulation::run_multi_seed_simulation_from_ioa(
+            &self.ioa_source,
+            &base_config,
+            self.sim_seeds,
+        );
 
         let all_passed = results.iter().all(|r| r.all_invariants_held);
         let total_transitions: u64 = results.iter().map(|r| r.total_transitions).sum();
         let total_dropped: u64 = results.iter().map(|r| r.total_dropped).sum();
-        let violations: Vec<_> = results.iter()
-            .flat_map(|r| r.violations.clone())
-            .collect();
+        let violations: Vec<_> = results.iter().flat_map(|r| r.violations.clone()).collect();
 
         let summary = if all_passed {
             format!(
@@ -288,11 +292,11 @@ impl VerificationCascade {
         } else {
             format!(
                 "L2 Simulation FAILED: {} violation(s) across {} seeds",
-                violations.len(), self.sim_seeds,
+                violations.len(),
+                self.sim_seeds,
             )
         };
 
-        // Return the first result as representative
         let representative = results.into_iter().next();
 
         LevelResult {
@@ -302,18 +306,17 @@ impl VerificationCascade {
             verification: None,
             simulation: representative,
             prop_test: None,
+            smt: None,
         }
     }
 
     /// Level 3: Property-based tests.
-    fn run_prop_tests_level(&self, model: &TemperModel) -> LevelResult {
-        let result = if let Some(ref ioa) = self.ioa_source {
-            proptest_gen::run_prop_tests_from_ioa(ioa, self.prop_test_cases, self.prop_test_max_steps)
-        } else if let Some(ref tla) = self.tla_source {
-            proptest_gen::run_prop_tests_from_tla(tla, self.prop_test_cases, self.prop_test_max_steps)
-        } else {
-            proptest_gen::run_prop_tests_on_model(model, self.prop_test_cases, self.prop_test_max_steps)
-        };
+    fn run_prop_tests_level(&self, _model: &TemperModel) -> LevelResult {
+        let result = proptest_gen::run_prop_tests_from_ioa(
+            &self.ioa_source,
+            self.prop_test_cases,
+            self.prop_test_max_steps,
+        );
         let passed = result.passed;
 
         let summary = if passed {
@@ -322,8 +325,16 @@ impl VerificationCascade {
                 result.total_cases, self.prop_test_max_steps,
             )
         } else {
-            let failure_desc = result.failure.as_ref()
-                .map(|f| format!("invariant '{}' violated after {} actions", f.invariant, f.action_sequence.len()))
+            let failure_desc = result
+                .failure
+                .as_ref()
+                .map(|f| {
+                    format!(
+                        "invariant '{}' violated after {} actions",
+                        f.invariant,
+                        f.action_sequence.len()
+                    )
+                })
                 .unwrap_or_else(|| "unknown failure".to_string());
             format!("L3 Property Tests FAILED: {}", failure_desc)
         };
@@ -335,6 +346,7 @@ impl VerificationCascade {
             verification: None,
             simulation: None,
             prop_test: Some(result),
+            smt: None,
         }
     }
 
@@ -358,6 +370,7 @@ impl VerificationCascade {
             verification: None,
             simulation: None,
             prop_test: None,
+            smt: None,
         }
     }
 }
@@ -366,19 +379,7 @@ impl VerificationCascade {
 mod tests {
     use super::*;
 
-    const ORDER_TLA: &str = include_str!("../../../test-fixtures/specs/order.tla");
     const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
-
-    #[test]
-    fn test_full_cascade_passes() {
-        let cascade = VerificationCascade::from_tla(ORDER_TLA)
-            .with_sim_seeds(5)
-            .with_prop_test_cases(100);
-
-        let result = cascade.run();
-        assert!(result.all_passed, "Full cascade should pass for reference spec");
-        assert_eq!(result.levels.len(), 3);
-    }
 
     #[test]
     fn test_full_cascade_passes_ioa() {
@@ -390,17 +391,19 @@ mod tests {
         for level in &result.levels {
             assert!(level.passed, "IOA cascade level failed: {}", level.summary);
         }
-        assert_eq!(result.levels.len(), 3);
+        // L0 + L1 + L2 + L3 = 4 levels
+        assert_eq!(result.levels.len(), 4);
     }
 
     #[test]
-    fn test_cascade_has_all_three_levels() {
-        let cascade = VerificationCascade::from_tla(ORDER_TLA)
+    fn test_cascade_has_all_levels() {
+        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
             .with_sim_seeds(3)
             .with_prop_test_cases(50);
 
         let result = cascade.run();
 
+        assert!(result.level_result(CascadeLevel::SymbolicVerification).is_some());
         assert!(result.level_result(CascadeLevel::ModelCheck).is_some());
         assert!(result.level_result(CascadeLevel::Simulation).is_some());
         assert!(result.level_result(CascadeLevel::PropertyTest).is_some());
@@ -408,11 +411,15 @@ mod tests {
 
     #[test]
     fn test_cascade_level_summaries() {
-        let cascade = VerificationCascade::from_tla(ORDER_TLA)
+        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
             .with_sim_seeds(3)
             .with_prop_test_cases(50);
 
         let result = cascade.run();
+
+        let l0 = result.level_result(CascadeLevel::SymbolicVerification).unwrap();
+        assert!(l0.summary.contains("L0"), "Should have L0 prefix");
+        assert!(l0.passed);
 
         let l1 = result.level_result(CascadeLevel::ModelCheck).unwrap();
         assert!(l1.summary.contains("L1"), "Should have L1 prefix");

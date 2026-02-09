@@ -1,25 +1,49 @@
 //! Core types for the Temper verification model.
 //!
-//! Contains the state, action, transition, invariant, and model struct definitions
-//! used by the Stateright model checker.
+//! Contains the state, action, transition, invariant, liveness, and model struct
+//! definitions used by the Stateright model checker.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// The state tracked by the Temper model during verification.
 ///
-/// Consists of the current entity status (e.g. "Draft", "Submitted") and a
-/// simple item counter that tracks how many items have been added.
+/// Multi-variable state: status + named counters + named booleans.
+/// This generalises the old `(status, item_count)` to handle arbitrary
+/// IOA `[[state]]` variable declarations.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TemperModelState {
     /// Current status value (mirrors the specification's `status` variable).
     pub status: String,
-    /// Number of items currently in the entity (simplified from the specification's set).
-    pub item_count: usize,
+    /// Named counter variables (e.g. `items`, `quantity`).
+    pub counters: BTreeMap<String, usize>,
+    /// Named boolean variables (e.g. `has_address`, `payment_captured`).
+    pub booleans: BTreeMap<String, bool>,
 }
 
 impl fmt::Display for TemperModelState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}(items={})", self.status, self.item_count)
+        write!(f, "{}", self.status)?;
+        if !self.counters.is_empty() {
+            let pairs: Vec<String> = self
+                .counters
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            write!(f, "({})", pairs.join(","))?;
+        }
+        if !self.booleans.is_empty() {
+            let pairs: Vec<String> = self
+                .booleans
+                .iter()
+                .filter(|(_, v)| **v)
+                .map(|(k, _)| k.clone())
+                .collect();
+            if !pairs.is_empty() {
+                write!(f, "[{}]", pairs.join(","))?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -41,8 +65,38 @@ impl fmt::Display for TemperModelAction {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Guards and effects — self-contained in temper-verify (mirror JIT types)
+// ---------------------------------------------------------------------------
+
+/// A guard condition for model checking.
+///
+/// Self-contained in temper-verify so we don't depend on temper-jit types.
+#[derive(Clone, Debug)]
+pub enum ModelGuard {
+    /// Always enabled (no guard).
+    Always,
+    /// A counter variable must be >= min.
+    CounterMin { var: String, min: usize },
+    /// A boolean variable must be true.
+    BoolTrue(String),
+    /// All sub-guards must hold.
+    And(Vec<ModelGuard>),
+}
+
+/// A state effect applied when a transition fires.
+#[derive(Clone, Debug)]
+pub enum ModelEffect {
+    /// Increment a counter variable by 1.
+    IncrementCounter(String),
+    /// Decrement a counter variable by 1 (saturating).
+    DecrementCounter(String),
+    /// Set a boolean variable to a value.
+    SetBool { var: String, value: bool },
+}
+
 /// A resolved transition used internally by the model, pre-computed from a
-/// specification `Transition` for efficient matching during state exploration.
+/// specification action for efficient matching during state exploration.
 #[derive(Clone, Debug)]
 pub struct ResolvedTransition {
     /// The action name.
@@ -51,21 +105,23 @@ pub struct ResolvedTransition {
     pub from_states: Vec<String>,
     /// The target state (if deterministic).
     pub to_state: Option<String>,
-    /// Whether this transition modifies the item count.
-    pub modifies_items: bool,
-    /// Whether this is an "add item" action (increments counter).
-    pub is_add_item: bool,
-    /// Whether this transition requires item_count > 0 to fire.
-    pub requires_items: bool,
+    /// Guard condition (beyond status check).
+    pub guard: ModelGuard,
+    /// Effects applied when the transition fires.
+    pub effects: Vec<ModelEffect>,
 }
 
-/// The kind of check an invariant performs.
+/// The kind of check a safety invariant performs.
 #[derive(Clone, Debug)]
 pub enum InvariantKind {
-    /// status must be in a known set of states.
+    /// Status must be in a known set of states (TypeInvariant).
     StatusInSet,
-    /// When status is in trigger_states, item_count must be > 0.
-    ItemCountPositive,
+    /// When status is in trigger_states, a counter must be > 0.
+    CounterPositive { var: String },
+    /// When status is in trigger_states, a boolean must be true.
+    BoolRequired { var: String },
+    /// When status is in trigger_states, no transitions should be enabled.
+    NoFurtherTransitions,
     /// When status is in trigger_states, status must also be in required_states.
     Implication,
 }
@@ -83,12 +139,39 @@ pub struct ResolvedInvariant {
     pub kind: InvariantKind,
 }
 
+// ---------------------------------------------------------------------------
+// Liveness properties
+// ---------------------------------------------------------------------------
+
+/// The kind of liveness property.
+#[derive(Clone, Debug)]
+pub enum LivenessKind {
+    /// From any `from` state, eventually reaches one of `targets`.
+    /// Checked via Stateright's `Property::eventually` (acyclic paths only).
+    ReachesState {
+        from: Vec<String>,
+        targets: Vec<String>,
+    },
+    /// From any `from` state, there is always at least one enabled action.
+    /// This is actually a safety property (always has actions).
+    NoDeadlock { from: Vec<String> },
+}
+
+/// A resolved liveness property.
+#[derive(Clone, Debug)]
+pub struct ResolvedLiveness {
+    /// The property name.
+    pub name: String,
+    /// The kind of liveness check.
+    pub kind: LivenessKind,
+}
+
 /// The Stateright model generated from an I/O Automaton specification.
 ///
-/// This struct holds all the pre-computed transition and invariant data needed
-/// to implement the `Model` trait efficiently. Invariant data is stored here
-/// (rather than captured in closures) because Stateright's `Property::always`
-/// requires a bare `fn` pointer.
+/// This struct holds all the pre-computed transition, invariant, and liveness
+/// data needed to implement the `Model` trait efficiently. Invariant data is
+/// stored here (rather than captured in closures) because Stateright's
+/// `Property::always` requires a bare `fn` pointer.
 #[derive(Clone)]
 pub struct TemperModel {
     /// All valid status values from the specification.
@@ -97,8 +180,16 @@ pub struct TemperModel {
     pub transitions: Vec<ResolvedTransition>,
     /// Pre-resolved safety invariants (accessible to property fn pointers via &self).
     pub invariants: Vec<ResolvedInvariant>,
+    /// Pre-resolved liveness properties.
+    pub liveness: Vec<ResolvedLiveness>,
     /// The initial status (first state from Init, typically "Draft").
     pub(crate) initial_status: String,
-    /// Maximum item count for bounded exploration.
-    pub(crate) max_items: usize,
+    /// Initial counter values from [[state]] declarations.
+    pub(crate) initial_counters: BTreeMap<String, usize>,
+    /// Initial boolean values from [[state]] declarations.
+    pub(crate) initial_booleans: BTreeMap<String, bool>,
+    /// Per-counter upper bounds for bounded exploration.
+    pub(crate) counter_bounds: BTreeMap<String, usize>,
+    /// Default upper bound for counters not in counter_bounds.
+    pub(crate) default_max_counter: usize,
 }

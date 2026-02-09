@@ -15,12 +15,14 @@ use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
 use temper_server::registry::SpecRegistry;
 use temper_spec::csdl::parse_csdl;
+use temper_store_postgres::PostgresEventStore;
 use temper_verify::cascade::VerificationCascade;
 
 /// Run the `temper serve` command.
 ///
 /// Starts the Temper platform server. Both build mode (accepting new specs)
 /// and use mode (serving deployed entities) can be active simultaneously.
+/// If `DATABASE_URL` is set, events are persisted to Postgres.
 pub async fn run(
     port: u16,
     specs_dir: Option<String>,
@@ -34,14 +36,34 @@ pub async fn run(
 
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
-    let state = if let Some(ref specs_path) = specs_dir {
-        // Load user specs from directory
+    // Connect to Postgres if DATABASE_URL is set.
+    let event_store = if let Ok(database_url) = std::env::var("DATABASE_URL") {
+        println!("  Connecting to Postgres...");
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .context("Failed to connect to Postgres")?;
+        temper_store_postgres::migration::run_migrations(&pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to run migrations: {e}"))?;
+        println!("  Postgres connected, migrations applied.");
+        Some(PostgresEventStore::new(pool))
+    } else {
+        println!("  No DATABASE_URL — running in-memory only (events not persisted).");
+        None
+    };
+
+    let mut state = if let Some(ref specs_path) = specs_dir {
         let registry = load_registry(specs_path, &tenant)?;
         PlatformState::with_registry(registry, api_key)
     } else {
-        // Empty registry — system tenant will be bootstrapped, user deploys via API
         PlatformState::new(api_key)
     };
+
+    // Wire up Postgres persistence if available.
+    if let Some(store) = event_store {
+        use std::sync::Arc;
+        state.server.event_store = Some(Arc::new(store));
+    }
 
     println!("Starting Temper platform server...");
     println!();

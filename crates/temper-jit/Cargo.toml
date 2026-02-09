@@ -14,5 +14,3 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-temper-verify = { workspace = true }
-stateright = { workspace = true }

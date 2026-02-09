@@ -20,6 +20,9 @@ pub struct Automaton {
     /// Safety invariants (must always hold).
     #[serde(default, rename = "invariant")]
     pub invariants: Vec<Invariant>,
+    /// Liveness properties (something eventually happens).
+    #[serde(default, rename = "liveness")]
+    pub liveness: Vec<Liveness>,
 }
 
 /// Automaton metadata.
@@ -129,4 +132,23 @@ pub struct Invariant {
     pub when: Vec<String>,
     /// The assertion (a simple expression).
     pub assert: String,
+}
+
+/// A liveness property.
+///
+/// Liveness properties assert that something "eventually happens" — a state
+/// is eventually reached, or deadlock never occurs from certain states.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Liveness {
+    /// Property name.
+    pub name: String,
+    /// States from which this property is checked.
+    #[serde(default)]
+    pub from: Vec<String>,
+    /// Target states that must eventually be reached.
+    #[serde(default)]
+    pub reaches: Vec<String>,
+    /// If true, asserts that actions are always available (no deadlock).
+    #[serde(default)]
+    pub has_actions: Option<bool>,
 }
