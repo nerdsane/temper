@@ -1140,16 +1140,15 @@ sourcing, an OpenTelemetry Collector for telemetry
 ingestion, and ClickHouse as the observability backend.  The Docker Compose
 environment provisions all four services.
 
-The OTEL write path is verified end-to-end: entity actor transitions emit spans
-via `emit_span()` and metrics via `emit_metrics()`, which flow through the OTEL
-SDK's batch processor, out via OTLP/HTTP to the collector, and into ClickHouse's
-`otel_traces` table.  Each span carries the full Telemetry as Views structure:
-tags (low-cardinality: `entity_type`, `operation`, `success`), attributes
-(high-cardinality: `entity_id`, `from_status`, `params`), and measurements
-(`transition_count`, `duration_ms`, `item_count`).
+The OTEL write path described in Section 9 is verified end-to-end: entity actor
+transitions emit spans and metrics via the wide event projections, which flow
+through the OTEL SDK's batch processor, out via OTLP/HTTP to the collector, and
+into ClickHouse's `otel_traces` table.  Span durations in ClickHouse match
+benchmark latencies (2--17ms per action with Postgres), confirming that the
+telemetry pipeline introduces no measurement distortion.
 
-The write path is backend-agnostic: changing `OTLP_ENDPOINT` redirects all
-telemetry to Datadog, LogFire, or any OTLP-compatible backend without code changes.
+As described in Section 9.3, the write path is backend-agnostic via
+`OTLP_ENDPOINT` configuration.
 
 ---
 
@@ -1199,14 +1198,11 @@ Temper makes the following contributions:
 
 ### 12.2 Conversational Development Vision
 
-All Temper projects follow the same loop: converse, generate specs, verify, deploy
-(see Section 11.3 for the two deployment paths).  The conversational development
-pipeline--where a developer interacts with Temper through a **Developer Chat**
-that interviews them, generates specifications, runs the verification cascade,
-and hot-deploys entity actors--is partially implemented.  The interview agent,
-spec generators, and verify-and-deploy pipeline exist as working code in
-`temper-platform`; the gap is the coding agent integration layer that connects
-them end-to-end.
+The development loop described in Section 11.3 (converse, generate, verify, deploy)
+is designed around two separated contexts: a Developer Chat for design-time evolution
+and a Production Chat for runtime operation.  The conversational pipeline is partially
+implemented in `temper-platform` (interview agent, spec generators, verify-and-deploy
+pipeline); the gap is the coding agent integration layer.
 
 A representative session showing the target experience:
 
