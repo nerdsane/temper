@@ -1,8 +1,7 @@
 //! Unmet intent collection and evolution record creation.
 //!
 //! Aggregates production [`UnmetIntent`]s, creates O-Records and I-Records
-//! in the evolution store, and broadcasts approval requests to the developer
-//! chat for high-priority insights.
+//! in the evolution store, and broadcasts events for high-priority insights.
 //!
 //! Emits a `temper.evolution.collect` OTEL span per collection with O-Record
 //! and I-Record IDs, priority score, and originating trace ID.
@@ -15,15 +14,17 @@ use serde::{Deserialize, Serialize};
 
 use temper_evolution::{
     classify_insight, compute_priority_score,
-    InsightCategory, InsightRecord, InsightSignal,
-    ObservationClass, ObservationRecord, RecordHeader, RecordStore, RecordType,
-    DecisionRecord, Decision, RecordStatus,
+    InsightRecord, InsightSignal,
+    ObservationClass, ObservationRecord, RecordHeader, RecordType,
+    DecisionRecord, Decision,
 };
+#[cfg(test)]
+use temper_evolution::InsightCategory;
 
-use crate::protocol::WsMessage;
+use crate::protocol::PlatformEvent;
 use crate::state::PlatformState;
 
-/// An unmet intent captured from the production agent.
+/// An unmet intent captured from production usage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnmetIntent {
     /// What the user wanted to do.
@@ -38,7 +39,7 @@ pub struct UnmetIntent {
     pub timestamp: DateTime<Utc>,
 }
 
-/// Threshold for broadcasting approval requests to the developer.
+/// Threshold for broadcasting high-priority evolution events.
 const HIGH_PRIORITY_THRESHOLD: f64 = 0.7;
 
 /// Collects unmet intents and creates evolution records.
@@ -125,7 +126,7 @@ impl UnmetIntentCollector {
         span.set_attribute(KeyValue::new("temper.priority_score", priority));
 
         // Broadcast evolution event
-        state.broadcast(WsMessage::EvolutionEvent {
+        state.broadcast(PlatformEvent::EvolutionEvent {
             event_type: "unmet_intent".into(),
             summary: format!(
                 "Unmet intent '{}' (priority: {:.2})",
@@ -134,19 +135,15 @@ impl UnmetIntentCollector {
             record_id: i_id.clone(),
         });
 
-        // High-priority intents get an approval request
+        // High-priority intents get an additional event
         if priority >= HIGH_PRIORITY_THRESHOLD {
-            state.broadcast(WsMessage::ApprovalRequest {
-                request_id: i_id,
-                description: format!(
-                    "Users are trying to '{}' but the system can't do it. Should we add this capability?",
+            state.broadcast(PlatformEvent::EvolutionEvent {
+                event_type: "high_priority_intent".into(),
+                summary: format!(
+                    "High-priority: users trying to '{}' — consider adding this capability",
                     unmet.user_intent,
                 ),
-                proposed_spec: format!(
-                    "# Proposed: add action for '{}'\n# Tenant: {}\n# Tool attempted: {}",
-                    unmet.user_intent, unmet.tenant, unmet.attempted_tool,
-                ),
-                priority,
+                record_id: i_id,
             });
         }
 
@@ -181,22 +178,12 @@ impl UnmetIntentCollector {
 
         record_store.insert_decision(d_record);
 
-        // If approved, update the insight status
-        if approved {
-            // The insight remains open — the deploy pipeline will resolve it
-            // after generating and verifying specs.
-            state.broadcast(WsMessage::EvolutionEvent {
-                event_type: "approval".into(),
-                summary: format!("Developer approved evolution request '{request_id}'"),
-                record_id: request_id.to_string(),
-            });
-        } else {
-            state.broadcast(WsMessage::EvolutionEvent {
-                event_type: "rejection".into(),
-                summary: format!("Developer rejected evolution request '{request_id}'"),
-                record_id: request_id.to_string(),
-            });
-        }
+        let event_type = if approved { "approval" } else { "rejection" };
+        state.broadcast(PlatformEvent::EvolutionEvent {
+            event_type: event_type.into(),
+            summary: format!("Developer {event_type} for evolution request '{request_id}'"),
+            record_id: request_id.to_string(),
+        });
     }
 }
 
@@ -208,7 +195,7 @@ mod tests {
         UnmetIntent {
             user_intent: "split order into shipments".into(),
             attempted_tool: "SplitOrder".into(),
-            tenant: "ecommerce".into(),
+            tenant: "alpha".into(),
             trace_id: "trace-001".into(),
             timestamp: Utc::now(),
         }
@@ -216,7 +203,7 @@ mod tests {
 
     #[test]
     fn test_collect_creates_observation() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
         let unmet = sample_unmet_intent();
 
         let _insight = UnmetIntentCollector::collect(&unmet, &state);
@@ -230,7 +217,7 @@ mod tests {
 
     #[test]
     fn test_collect_creates_insight() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
         let unmet = sample_unmet_intent();
 
         let insight = UnmetIntentCollector::collect(&unmet, &state);
@@ -245,7 +232,7 @@ mod tests {
 
     #[test]
     fn test_collect_classifies_as_unmet() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
         let unmet = sample_unmet_intent();
 
         let insight = UnmetIntentCollector::collect(&unmet, &state);
@@ -256,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_collect_broadcasts_evolution_event() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
         let mut rx = state.subscribe();
         let unmet = sample_unmet_intent();
 
@@ -264,7 +251,7 @@ mod tests {
 
         let mut events = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let WsMessage::EvolutionEvent { .. } = &msg {
+            if let PlatformEvent::EvolutionEvent { .. } = &msg {
                 events.push(msg);
             }
         }
@@ -273,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_collect_insight_links_to_observation() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
         let unmet = sample_unmet_intent();
 
         let insight = UnmetIntentCollector::collect(&unmet, &state);
@@ -288,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_handle_approval_approved() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
         let unmet = sample_unmet_intent();
         let insight = UnmetIntentCollector::collect(&unmet, &state);
 
@@ -304,18 +291,11 @@ mod tests {
             1,
             "Should create one D-Record"
         );
-        let decisions: Vec<_> = (0..100)
-            .filter_map(|_| {
-                // Can't iterate directly, but we know there's one
-                None::<()>
-            })
-            .collect();
-        let _ = decisions; // We verified count above
     }
 
     #[test]
     fn test_handle_approval_rejected() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
         let mut rx = state.subscribe();
         let unmet = sample_unmet_intent();
         let insight = UnmetIntentCollector::collect(&unmet, &state);
@@ -332,7 +312,7 @@ mod tests {
 
         let mut events = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let WsMessage::EvolutionEvent { event_type, .. } = &msg {
+            if let PlatformEvent::EvolutionEvent { event_type, .. } = &msg {
                 events.push(event_type.clone());
             }
         }
@@ -341,9 +321,8 @@ mod tests {
 
     #[test]
     fn test_evolution_collect_span_noop() {
-        // Verifies that OTEL span instrumentation in collect()
-        // doesn't panic when no OTEL provider is initialized (no-op tracer).
-        let state = PlatformState::new_dev(None);
+        // Verifies that OTEL span instrumentation doesn't panic with no-op tracer.
+        let state = PlatformState::new(None);
         let unmet = sample_unmet_intent();
         let insight = UnmetIntentCollector::collect(&unmet, &state);
         assert_eq!(insight.category, InsightCategory::UnmetIntent);
@@ -351,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_multiple_unmet_intents() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
 
         let unmet1 = sample_unmet_intent();
         let mut unmet2 = sample_unmet_intent();
@@ -361,9 +340,6 @@ mod tests {
         let i1 = UnmetIntentCollector::collect(&unmet1, &state);
         let i2 = UnmetIntentCollector::collect(&unmet2, &state);
 
-        // Each collect creates one O-Record and one I-Record.
-        // Record IDs use UUID v7 first-4-chars which may collide in fast tests
-        // (same millisecond), so we verify the returned records are distinct.
         assert_ne!(i1.signal.intent, i2.signal.intent, "insights should have different intents");
         assert_eq!(i1.signal.intent, "split order into shipments");
         assert_eq!(i2.signal.intent, "bulk update orders");

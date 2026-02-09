@@ -1,6 +1,6 @@
 //! The verify-and-deploy pipeline.
 //!
-//! Takes generated entity models, produces specs, runs the verification
+//! Takes pre-authored specs (IOA TOML + CSDL XML), runs the verification
 //! cascade, and registers the tenant with hot-deployed entity actors.
 //!
 //! Emits OTEL spans for the full pipeline and per-entity verification:
@@ -17,9 +17,28 @@ use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_verify::cascade::{CascadeResult, VerificationCascade};
 
-use crate::interview::{EntityModel, generate_ioa_toml, generate_csdl_xml};
-use crate::protocol::{WsMessage, VerifyStepStatus};
+use crate::protocol::{PlatformEvent, VerifyStepStatus};
 use crate::state::PlatformState;
+
+/// A pre-authored entity spec source.
+#[derive(Debug, Clone)]
+pub struct EntitySpecSource {
+    /// Entity type name (PascalCase, e.g. "Order").
+    pub entity_type: String,
+    /// Raw IOA TOML source.
+    pub ioa_source: String,
+}
+
+/// Input for the verify-and-deploy pipeline.
+#[derive(Debug, Clone)]
+pub struct DeployInput {
+    /// Tenant name to register.
+    pub tenant_name: String,
+    /// CSDL XML schema for this tenant's entities.
+    pub csdl_xml: String,
+    /// Pre-authored entity specs.
+    pub entities: Vec<EntitySpecSource>,
+}
 
 /// Result of a verify-and-deploy operation.
 #[derive(Debug, Clone)]
@@ -41,7 +60,7 @@ pub struct EntityDeployResult {
     pub entity_name: String,
     /// Whether verification passed.
     pub verified: bool,
-    /// The generated IOA TOML source.
+    /// The IOA TOML source.
     pub ioa_source: String,
     /// Cascade result details.
     pub cascade: Option<CascadeResult>,
@@ -53,55 +72,52 @@ pub struct DeployPipeline;
 impl DeployPipeline {
     /// Run the full verify-and-deploy pipeline.
     ///
-    /// 1. Generate IOA TOML for each entity
-    /// 2. Parse and validate each spec
-    /// 3. Run verification cascade (L1/L2/L3)
-    /// 4. Generate CSDL XML
-    /// 5. Register tenant in the live SpecRegistry
-    /// 6. Broadcast deployment status
+    /// 1. Parse and validate each IOA spec
+    /// 2. Run verification cascade (L1/L2/L3) per entity
+    /// 3. Parse CSDL XML
+    /// 4. Register tenant in the live SpecRegistry
+    /// 5. Broadcast deployment status
     ///
     /// Emits a parent `temper.deploy` span with child spans per entity.
     pub fn verify_and_deploy(
         state: &PlatformState,
-        tenant_name: &str,
-        entities: &[EntityModel],
-        namespace: &str,
+        input: &DeployInput,
     ) -> DeployResult {
         let tracer = global::tracer("temper");
         let mut deploy_span = tracer
             .span_builder("temper.deploy")
             .with_attributes(vec![
-                KeyValue::new("temper.tenant", tenant_name.to_string()),
-                KeyValue::new("temper.entity_count", entities.len() as i64),
+                KeyValue::new("temper.tenant", input.tenant_name.clone()),
+                KeyValue::new("temper.entity_count", input.entities.len() as i64),
             ])
             .start(&tracer);
 
         let mut entity_results = Vec::new();
         let mut all_passed = true;
 
-        // Step 1-3: Generate, parse, and verify each entity
-        for entity in entities {
+        // Step 1-2: Parse and verify each entity spec
+        for entity in &input.entities {
             let mut entity_span = tracer
-                .span_builder(format!("temper.verify.{}", entity.name))
+                .span_builder(format!("temper.verify.{}", entity.entity_type))
                 .with_attributes(vec![
-                    KeyValue::new("temper.entity", entity.name.clone()),
-                    KeyValue::new("temper.tenant", tenant_name.to_string()),
+                    KeyValue::new("temper.entity", entity.entity_type.clone()),
+                    KeyValue::new("temper.tenant", input.tenant_name.clone()),
                 ])
                 .start(&tracer);
 
-            state.broadcast(WsMessage::VerifyStatus {
-                level: format!("Verifying {}", entity.name),
+            state.broadcast(PlatformEvent::VerifyStatus {
+                tenant: input.tenant_name.clone(),
+                level: format!("Verifying {}", entity.entity_type),
                 status: VerifyStepStatus::Running,
-                summary: format!("Generating and verifying spec for {}", entity.name),
+                summary: format!("Parsing and verifying spec for {}", entity.entity_type),
             });
 
-            let ioa_source = generate_ioa_toml(entity);
-
-            // Parse the generated spec to validate it
-            let parse_result = automaton::parse_automaton(&ioa_source);
+            // Parse the IOA spec
+            let parse_result = automaton::parse_automaton(&entity.ioa_source);
             if let Err(e) = &parse_result {
-                state.broadcast(WsMessage::VerifyStatus {
-                    level: format!("{} Parse", entity.name),
+                state.broadcast(PlatformEvent::VerifyStatus {
+                    tenant: input.tenant_name.clone(),
+                    level: format!("{} Parse", entity.entity_type),
                     status: VerifyStepStatus::Failed,
                     summary: format!("Failed to parse IOA spec: {e}"),
                 });
@@ -111,9 +127,9 @@ impl DeployPipeline {
                 entity_span.set_attribute(KeyValue::new("temper.cascade_passed", false));
                 entity_span.end();
                 entity_results.push(EntityDeployResult {
-                    entity_name: entity.name.clone(),
+                    entity_name: entity.entity_type.clone(),
                     verified: false,
-                    ioa_source,
+                    ioa_source: entity.ioa_source.clone(),
                     cascade: None,
                 });
                 all_passed = false;
@@ -121,13 +137,14 @@ impl DeployPipeline {
             }
 
             // Run verification cascade
-            state.broadcast(WsMessage::VerifyStatus {
+            state.broadcast(PlatformEvent::VerifyStatus {
+                tenant: input.tenant_name.clone(),
                 level: "L1 Model Check".into(),
                 status: VerifyStepStatus::Running,
-                summary: format!("Running model check for {}", entity.name),
+                summary: format!("Running model check for {}", entity.entity_type),
             });
 
-            let cascade = VerificationCascade::from_ioa(&ioa_source)
+            let cascade = VerificationCascade::from_ioa(&entity.ioa_source)
                 .with_sim_seeds(5)
                 .with_prop_test_cases(100);
             let result = cascade.run();
@@ -139,7 +156,8 @@ impl DeployPipeline {
                 } else {
                     VerifyStepStatus::Failed
                 };
-                state.broadcast(WsMessage::VerifyStatus {
+                state.broadcast(PlatformEvent::VerifyStatus {
+                    tenant: input.tenant_name.clone(),
                     level: format!("{}", level_result.level),
                     status,
                     summary: level_result.summary.clone(),
@@ -164,19 +182,16 @@ impl DeployPipeline {
             entity_span.end();
 
             entity_results.push(EntityDeployResult {
-                entity_name: entity.name.clone(),
+                entity_name: entity.entity_type.clone(),
                 verified,
-                ioa_source,
+                ioa_source: entity.ioa_source.clone(),
                 cascade: Some(result),
             });
         }
 
-        // Step 4-5: If all verified, generate CSDL and register tenant
-        if all_passed && !entities.is_empty() {
-            let csdl_xml = generate_csdl_xml(entities, namespace);
-
-            // Parse CSDL to validate
-            match parse_csdl(&csdl_xml) {
+        // Step 3-4: If all verified, parse CSDL and register tenant
+        if all_passed && !input.entities.is_empty() {
+            match parse_csdl(&input.csdl_xml) {
                 Ok(csdl) => {
                     // Collect IOA sources for registration
                     let ioa_pairs: Vec<(&str, &str)> = entity_results
@@ -188,21 +203,26 @@ impl DeployPipeline {
                     {
                         let mut registry = state.registry.write().unwrap();
                         registry.register_tenant(
-                            TenantId::new(tenant_name),
+                            TenantId::new(&input.tenant_name),
                             csdl,
-                            csdl_xml,
+                            input.csdl_xml.clone(),
                             &ioa_pairs,
                         );
                     }
 
-                    state.broadcast(WsMessage::DeployStatus {
-                        tenant: tenant_name.to_string(),
+                    state.broadcast(PlatformEvent::DeployStatus {
+                        tenant: input.tenant_name.clone(),
                         success: true,
                         summary: format!(
                             "Deployed {} entities for tenant '{}'",
-                            entities.len(),
-                            tenant_name,
+                            input.entities.len(),
+                            input.tenant_name,
                         ),
+                    });
+
+                    state.broadcast(PlatformEvent::TenantRegistered {
+                        tenant: input.tenant_name.clone(),
+                        entity_count: input.entities.len(),
                     });
                 }
                 Err(e) => {
@@ -210,10 +230,10 @@ impl DeployPipeline {
                     deploy_span.set_status(Status::Error {
                         description: format!("CSDL failed: {e}").into(),
                     });
-                    state.broadcast(WsMessage::DeployStatus {
-                        tenant: tenant_name.to_string(),
+                    state.broadcast(PlatformEvent::DeployStatus {
+                        tenant: input.tenant_name.clone(),
                         success: false,
-                        summary: format!("CSDL generation failed: {e}"),
+                        summary: format!("CSDL parsing failed: {e}"),
                     });
                 }
             }
@@ -221,8 +241,8 @@ impl DeployPipeline {
             deploy_span.set_status(Status::Error {
                 description: "verification failed".into(),
             });
-            state.broadcast(WsMessage::DeployStatus {
-                tenant: tenant_name.to_string(),
+            state.broadcast(PlatformEvent::DeployStatus {
+                tenant: input.tenant_name.clone(),
                 success: false,
                 summary: "Deployment aborted: verification failed".into(),
             });
@@ -233,8 +253,9 @@ impl DeployPipeline {
 
         let summary = if all_passed {
             format!(
-                "Successfully deployed {} entities for tenant '{tenant_name}'",
-                entities.len(),
+                "Successfully deployed {} entities for tenant '{}'",
+                input.entities.len(),
+                input.tenant_name,
             )
         } else {
             let failed: Vec<&str> = entity_results
@@ -247,7 +268,7 @@ impl DeployPipeline {
 
         DeployResult {
             success: all_passed,
-            tenant: tenant_name.to_string(),
+            tenant: input.tenant_name.clone(),
             entity_results,
             summary,
         }
@@ -257,65 +278,67 @@ impl DeployPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interview::{StateDefinition, ActionDefinition, ActionKind, StateVariable, InvariantDefinition};
 
-    fn sample_task_entity() -> EntityModel {
-        EntityModel {
-            name: "Task".into(),
-            description: "A simple task tracker".into(),
-            states: vec![
-                StateDefinition {
-                    name: "Open".into(),
-                    description: "Task is open".into(),
-                    is_terminal: false,
-                },
-                StateDefinition {
-                    name: "InProgress".into(),
-                    description: "Task is being worked on".into(),
-                    is_terminal: false,
-                },
-                StateDefinition {
-                    name: "Done".into(),
-                    description: "Task is completed".into(),
-                    is_terminal: true,
-                },
-            ],
-            actions: vec![
-                ActionDefinition {
-                    name: "StartWork".into(),
-                    from_states: vec!["Open".into()],
-                    to_state: Some("InProgress".into()),
-                    guard: None,
-                    params: vec![],
-                    hint: Some("Begin working on the task".into()),
-                    kind: ActionKind::Internal,
-                },
-                ActionDefinition {
-                    name: "Complete".into(),
-                    from_states: vec!["InProgress".into()],
-                    to_state: Some("Done".into()),
-                    guard: None,
-                    params: vec![],
-                    hint: Some("Mark task as done".into()),
-                    kind: ActionKind::Internal,
-                },
-            ],
-            invariants: vec![],
-            state_variables: vec![],
+    const TASK_IOA: &str = r#"
+[automaton]
+name = "Task"
+initial = "Open"
+states = ["Open", "InProgress", "Done"]
+
+[[action]]
+name = "StartWork"
+from = ["Open"]
+to = "InProgress"
+kind = "internal"
+
+[[action]]
+name = "Complete"
+from = ["InProgress"]
+to = "Done"
+kind = "internal"
+"#;
+
+    const TASK_CSDL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Test.TaskTracker" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Task">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+      </EntityType>
+      <Action Name="StartWork" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Test.TaskTracker.Task" />
+      </Action>
+      <Action Name="Complete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Test.TaskTracker.Task" />
+      </Action>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Tasks" EntityType="Test.TaskTracker.Task" />
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+
+    fn sample_deploy_input() -> DeployInput {
+        DeployInput {
+            tenant_name: "test-tenant".into(),
+            csdl_xml: TASK_CSDL.into(),
+            entities: vec![EntitySpecSource {
+                entity_type: "Task".into(),
+                ioa_source: TASK_IOA.into(),
+            }],
         }
     }
 
     #[test]
     fn test_deploy_pipeline_success() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
         let mut rx = state.subscribe();
 
-        let result = DeployPipeline::verify_and_deploy(
-            &state,
-            "test-tenant",
-            &[sample_task_entity()],
-            "Test.TaskTracker",
-        );
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
 
         assert!(result.success, "Pipeline should succeed: {}", result.summary);
         assert_eq!(result.tenant, "test-tenant");
@@ -332,34 +355,29 @@ mod tests {
 
     #[test]
     fn test_deploy_pipeline_registers_tenant() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
 
-        let result = DeployPipeline::verify_and_deploy(
-            &state,
-            "registered-tenant",
-            &[sample_task_entity()],
-            "Test.TaskTracker",
-        );
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
 
         assert!(result.success);
 
         // Verify tenant was registered
         let registry = state.registry.read().unwrap();
-        let tenant = TenantId::new("registered-tenant");
+        let tenant = TenantId::new("test-tenant");
         assert!(registry.get_tenant(&tenant).is_some());
         assert!(registry.get_table(&tenant, "Task").is_some());
     }
 
     #[test]
     fn test_deploy_pipeline_empty_entities() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
 
-        let result = DeployPipeline::verify_and_deploy(
-            &state,
-            "empty-tenant",
-            &[],
-            "Test.Empty",
-        );
+        let input = DeployInput {
+            tenant_name: "empty-tenant".into(),
+            csdl_xml: TASK_CSDL.into(),
+            entities: vec![],
+        };
+        let result = DeployPipeline::verify_and_deploy(&state, &input);
 
         // Empty entities should succeed vacuously
         assert!(result.success);
@@ -368,14 +386,9 @@ mod tests {
 
     #[test]
     fn test_deploy_pipeline_verification_results() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
 
-        let result = DeployPipeline::verify_and_deploy(
-            &state,
-            "verify-tenant",
-            &[sample_task_entity()],
-            "Test.TaskTracker",
-        );
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
 
         assert!(result.success);
         let entity_result = &result.entity_results[0];
@@ -386,22 +399,17 @@ mod tests {
 
     #[test]
     fn test_deploy_pipeline_broadcasts_verify_status() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
         let mut rx = state.subscribe();
 
-        let _result = DeployPipeline::verify_and_deploy(
-            &state,
-            "broadcast-tenant",
-            &[sample_task_entity()],
-            "Test.TaskTracker",
-        );
+        let _result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
 
         let mut verify_msgs = Vec::new();
         let mut deploy_msgs = Vec::new();
         while let Ok(msg) = rx.try_recv() {
             match &msg {
-                WsMessage::VerifyStatus { .. } => verify_msgs.push(msg),
-                WsMessage::DeployStatus { .. } => deploy_msgs.push(msg),
+                PlatformEvent::VerifyStatus { .. } => verify_msgs.push(msg),
+                PlatformEvent::DeployStatus { .. } => deploy_msgs.push(msg),
                 _ => {}
             }
         }
@@ -412,47 +420,42 @@ mod tests {
 
     #[test]
     fn test_deploy_result_summary() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
 
-        let result = DeployPipeline::verify_and_deploy(
-            &state,
-            "summary-tenant",
-            &[sample_task_entity()],
-            "Test.TaskTracker",
-        );
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
 
         assert!(result.summary.contains("Successfully deployed"));
-        assert!(result.summary.contains("summary-tenant"));
+        assert!(result.summary.contains("test-tenant"));
     }
 
     #[test]
     fn test_deploy_pipeline_span_noop() {
-        // Verifies that OTEL span instrumentation in verify_and_deploy
-        // doesn't panic when no OTEL provider is initialized (no-op tracer).
-        let state = PlatformState::new_dev(None);
-        let result = DeployPipeline::verify_and_deploy(
-            &state,
-            "noop-tenant",
-            &[sample_task_entity()],
-            "Test.Noop",
-        );
+        // Verifies that OTEL span instrumentation doesn't panic with no-op tracer.
+        let state = PlatformState::new(None);
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
         assert!(result.success, "Pipeline should succeed with no-op OTEL: {}", result.summary);
     }
 
     #[test]
     fn test_deploy_multiple_entities() {
-        let state = PlatformState::new_dev(None);
+        let state = PlatformState::new(None);
 
-        let mut bug_entity = sample_task_entity();
-        bug_entity.name = "Bug".into();
-        bug_entity.description = "A bug report".into();
+        let input = DeployInput {
+            tenant_name: "multi-tenant".into(),
+            csdl_xml: TASK_CSDL.into(),
+            entities: vec![
+                EntitySpecSource {
+                    entity_type: "Task".into(),
+                    ioa_source: TASK_IOA.into(),
+                },
+                EntitySpecSource {
+                    entity_type: "Bug".into(),
+                    ioa_source: TASK_IOA.replace("Task", "Bug"),
+                },
+            ],
+        };
 
-        let result = DeployPipeline::verify_and_deploy(
-            &state,
-            "multi-tenant",
-            &[sample_task_entity(), bug_entity],
-            "Test.ProjectMgmt",
-        );
+        let result = DeployPipeline::verify_and_deploy(&state, &input);
 
         assert!(result.success, "Pipeline should succeed: {}", result.summary);
         assert_eq!(result.entity_results.len(), 2);
@@ -461,5 +464,23 @@ mod tests {
         let tenant = TenantId::new("multi-tenant");
         assert!(registry.get_table(&tenant, "Task").is_some());
         assert!(registry.get_table(&tenant, "Bug").is_some());
+    }
+
+    #[test]
+    fn test_deploy_bad_ioa_fails() {
+        let state = PlatformState::new(None);
+
+        let input = DeployInput {
+            tenant_name: "bad-tenant".into(),
+            csdl_xml: TASK_CSDL.into(),
+            entities: vec![EntitySpecSource {
+                entity_type: "Bad".into(),
+                ioa_source: "this is not valid TOML".into(),
+            }],
+        };
+
+        let result = DeployPipeline::verify_and_deploy(&state, &input);
+        assert!(!result.success);
+        assert!(!result.entity_results[0].verified);
     }
 }

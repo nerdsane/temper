@@ -1,0 +1,27 @@
+[automaton]
+name = "Collaborator"
+initial = "Invited"
+states = ["Invited", "Active", "Removed"]
+
+[[action]]
+name = "Invite"
+from = []
+to = "Invited"
+kind = "input"
+
+[[action]]
+name = "Accept"
+from = ["Invited"]
+to = "Active"
+kind = "input"
+
+[[action]]
+name = "Remove"
+from = ["Invited", "Active"]
+to = "Removed"
+kind = "input"
+
+[[action]]
+name = "ChangeRole"
+from = ["Active"]
+kind = "input"

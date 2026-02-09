@@ -19,12 +19,14 @@
 //! - [`safety`] -- Safety invariant checker: validates recommendations.
 
 pub mod cache;
+pub mod placement;
 pub mod query;
 pub mod safety;
 pub mod types;
 
 // Re-export the most commonly used types at the crate root.
 pub use cache::CacheOptimizer;
+pub use placement::PlacementOptimizer;
 pub use query::QueryOptimizer;
 pub use safety::{SafetyChecker, SafetyResult};
 pub use types::{OptAction, OptCategory, OptimizationRecommendation, Risk};

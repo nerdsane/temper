@@ -1,0 +1,72 @@
+# Payment Entity — I/O Automaton Specification
+#
+# Models the payment lifecycle for an e-commerce order.
+# 6 states, 5 transition actions + 2 output events.
+# Failed is terminal (no retry — create a new payment instead).
+
+[automaton]
+name = "Payment"
+states = ["Pending", "Authorized", "Captured", "Failed", "Refunded", "PartiallyRefunded"]
+initial = "Pending"
+
+# --- Actions: Payment Lifecycle ---
+
+[[action]]
+name = "AuthorizePayment"
+kind = "internal"
+from = ["Pending"]
+to = "Authorized"
+
+[[action]]
+name = "CapturePayment"
+kind = "internal"
+from = ["Authorized"]
+to = "Captured"
+
+[[action]]
+name = "FailPayment"
+kind = "internal"
+from = ["Pending", "Authorized"]
+to = "Failed"
+params = ["Reason"]
+
+[[action]]
+name = "RefundPayment"
+kind = "internal"
+from = ["Captured"]
+to = "Refunded"
+params = ["Amount"]
+
+[[action]]
+name = "PartialRefund"
+kind = "internal"
+from = ["Captured"]
+to = "PartiallyRefunded"
+params = ["Amount"]
+
+# --- Output Actions ---
+
+[[action]]
+name = "PaymentAuthorizedEvent"
+kind = "output"
+
+[[action]]
+name = "PaymentCapturedEvent"
+kind = "output"
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "FailedIsFinal"
+when = ["Failed"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "RefundedIsFinal"
+when = ["Refunded"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "PartiallyRefundedIsFinal"
+when = ["PartiallyRefunded"]
+assert = "no_further_transitions"

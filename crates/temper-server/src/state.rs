@@ -36,8 +36,8 @@ pub struct ServerState {
     pub agent_hints: Arc<RwLock<HashMap<String, String>>>,
     /// Cedar ABAC authorization engine.
     pub authz: Arc<AuthzEngine>,
-    /// Multi-tenant specification registry.
-    pub registry: Arc<SpecRegistry>,
+    /// Multi-tenant specification registry (shared, mutable for live registration).
+    pub registry: Arc<RwLock<SpecRegistry>>,
 }
 
 impl ServerState {
@@ -67,7 +67,7 @@ impl ServerState {
             event_store: None,
             agent_hints: Arc::new(RwLock::new(HashMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
-            registry: Arc::new(SpecRegistry::new()),
+            registry: Arc::new(RwLock::new(SpecRegistry::new())),
         }
     }
 
@@ -98,6 +98,17 @@ impl ServerState {
 
     /// Create ServerState from a multi-tenant [`SpecRegistry`].
     pub fn from_registry(system: ActorSystem, registry: SpecRegistry) -> Self {
+        Self::from_registry_shared(system, Arc::new(RwLock::new(registry)))
+    }
+
+    /// Create ServerState from a shared, mutable [`SpecRegistry`].
+    ///
+    /// Use this when the registry must be shared with another component
+    /// (e.g. `PlatformState`) so that writes are visible to dispatch.
+    pub fn from_registry_shared(
+        system: ActorSystem,
+        registry: Arc<RwLock<SpecRegistry>>,
+    ) -> Self {
         Self {
             actor_system: Arc::new(system),
             csdl: Arc::new(CsdlDocument { version: "4.0".into(), schemas: vec![] }),
@@ -108,7 +119,7 @@ impl ServerState {
             event_store: None,
             agent_hints: Arc::new(RwLock::new(HashMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
-            registry: Arc::new(registry),
+            registry,
         }
     }
 
@@ -141,6 +152,8 @@ impl ServerState {
         // Look up transition table: try SpecRegistry first, fall back to legacy map
         let table = self
             .registry
+            .read()
+            .unwrap()
             .get_table(tenant, entity_type)
             .or_else(|| self.transition_tables.get(entity_type).cloned())?;
 

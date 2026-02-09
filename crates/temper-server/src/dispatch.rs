@@ -1,16 +1,40 @@
-//! OData request → actor message dispatch.
+//! Temper Data API request dispatch.
 //!
-//! Translates parsed OData paths into actor messages, dispatches them
-//! to entity actors, and returns real state machine responses.
+//! Translates parsed OData paths into entity actor messages via the
+//! multi-tenant [`SpecRegistry`]. Tenant is extracted from the
+//! `X-Tenant-Id` header (default: first registered tenant, or "default").
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use temper_odata::path::{KeyValue, ODataPath, parse_path};
 use temper_odata::query::parse_query_options;
+use temper_runtime::tenant::TenantId;
 
 use crate::response::{odata_error, ODataResponse, ODataXmlResponse};
 use crate::state::ServerState;
+
+/// Extract the tenant ID from request headers.
+///
+/// Checks `X-Tenant-Id` header first. Falls back to the first registered
+/// tenant in the SpecRegistry, or `TenantId::default()` if empty.
+fn extract_tenant(headers: &HeaderMap, state: &ServerState) -> TenantId {
+    if let Some(val) = headers.get("x-tenant-id") {
+        if let Ok(s) = val.to_str() {
+            if !s.is_empty() {
+                return TenantId::new(s);
+            }
+        }
+    }
+
+    // Fall back to the first registered tenant
+    let tenant_ids = state.registry.read().unwrap().tenant_ids().into_iter().cloned().collect::<Vec<_>>();
+    if let Some(first) = tenant_ids.first() {
+        return first.clone();
+    }
+
+    TenantId::default()
+}
 
 fn extract_key(key: &KeyValue) -> String {
     match key {
@@ -19,12 +43,44 @@ fn extract_key(key: &KeyValue) -> String {
     }
 }
 
+/// Resolve an entity set name to an entity type for a tenant.
+///
+/// Tries SpecRegistry first, then legacy entity_set_map.
+fn resolve_entity_type(state: &ServerState, tenant: &TenantId, entity_set: &str) -> Option<String> {
+    state.registry.read().unwrap().resolve_entity_type(tenant, entity_set)
+        .or_else(|| state.entity_set_map.get(entity_set).cloned())
+}
+
+/// Get the CSDL XML for a tenant.
+///
+/// Tries SpecRegistry first, then legacy csdl_xml.
+fn tenant_csdl_xml(state: &ServerState, tenant: &TenantId) -> String {
+    state.registry.read().unwrap().get_tenant(tenant)
+        .map(|tc| tc.csdl_xml.as_ref().clone())
+        .unwrap_or_else(|| state.csdl_xml.as_ref().clone())
+}
+
+/// List entity sets for a tenant.
+///
+/// Tries SpecRegistry first, then legacy entity_set_map.
+fn tenant_entity_sets(state: &ServerState, tenant: &TenantId) -> Vec<String> {
+    let registry = state.registry.read().unwrap();
+    if let Some(tc) = registry.get_tenant(tenant) {
+        tc.entity_set_map.keys().cloned().collect()
+    } else {
+        state.entity_set_map.keys().cloned().collect()
+    }
+}
+
 /// Handle GET requests.
 pub async fn handle_odata_get(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
     Query(query_params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let tenant = extract_tenant(&headers, &state);
+
     let odata_path = match parse_path(&format!("/{path}")) {
         Ok(p) => p,
         Err(e) => return odata_error(StatusCode::BAD_REQUEST, "InvalidPath", &e.to_string()).into_response(),
@@ -38,11 +94,12 @@ pub async fn handle_odata_get(
 
     match odata_path {
         ODataPath::Metadata => {
-            ODataXmlResponse { body: state.csdl_xml.as_ref().clone() }.into_response()
+            ODataXmlResponse { body: tenant_csdl_xml(&state, &tenant) }.into_response()
         }
 
         ODataPath::ServiceDocument => {
-            let entity_sets: Vec<serde_json::Value> = state.entity_set_map.keys()
+            let entity_sets: Vec<serde_json::Value> = tenant_entity_sets(&state, &tenant)
+                .iter()
                 .map(|name| serde_json::json!({"name": name, "kind": "EntitySet", "url": name}))
                 .collect();
             ODataResponse {
@@ -52,7 +109,7 @@ pub async fn handle_odata_get(
         }
 
         ODataPath::EntitySet(name) => {
-            if !state.entity_set_map.contains_key(&name) {
+            if resolve_entity_type(&state, &tenant, &name).is_none() {
                 return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{name}' not found")).into_response();
             }
             ODataResponse {
@@ -62,14 +119,13 @@ pub async fn handle_odata_get(
         }
 
         ODataPath::Entity(set_name, key) => {
-            let entity_type = match state.entity_set_map.get(&set_name) {
-                Some(t) => t.clone(),
+            let entity_type = match resolve_entity_type(&state, &tenant, &set_name) {
+                Some(t) => t,
                 None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{set_name}' not found")).into_response(),
             };
             let key_str = extract_key(&key);
 
-            // REAL DISPATCH: get or spawn entity actor, query its state
-            match state.get_entity_state(&entity_type, &key_str).await {
+            match state.get_tenant_entity_state(&tenant, &entity_type, &key_str).await {
                 Ok(response) => {
                     let mut body = serde_json::to_value(&response.state).unwrap_or_default();
                     if let Some(obj) = body.as_object_mut() {
@@ -78,8 +134,7 @@ pub async fn handle_odata_get(
                     }
                     ODataResponse { status: StatusCode::OK, body }.into_response()
                 }
-                Err(e) => {
-                    // No transition table for this entity type — return basic response
+                Err(_) => {
                     ODataResponse {
                         status: StatusCode::OK,
                         body: serde_json::json!({
@@ -91,23 +146,26 @@ pub async fn handle_odata_get(
             }
         }
 
-        ODataPath::BoundFunction { parent, function } => {
+        ODataPath::BoundFunction { parent: _, function } => {
             ODataResponse {
                 status: StatusCode::OK,
                 body: serde_json::json!({"@odata.context": "$metadata#Edm.Untyped", "function": function}),
             }.into_response()
         }
 
-        _ => odata_error(StatusCode::NOT_IMPLEMENTED, "NotImplemented", "This OData path pattern is not yet supported").into_response(),
+        _ => odata_error(StatusCode::NOT_IMPLEMENTED, "NotImplemented", "This path pattern is not yet supported").into_response(),
     }
 }
 
 /// Handle POST requests — entity creation and bound actions.
 pub async fn handle_odata_post(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let tenant = extract_tenant(&headers, &state);
+
     let odata_path = match parse_path(&format!("/{path}")) {
         Ok(p) => p,
         Err(e) => return odata_error(StatusCode::BAD_REQUEST, "InvalidPath", &e.to_string()).into_response(),
@@ -115,21 +173,19 @@ pub async fn handle_odata_post(
 
     match odata_path {
         ODataPath::EntitySet(name) => {
-            let entity_type = match state.entity_set_map.get(&name) {
-                Some(t) => t.clone(),
+            let entity_type = match resolve_entity_type(&state, &tenant, &name) {
+                Some(t) => t,
                 None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{name}' not found")).into_response(),
             };
 
-            let body_json: serde_json::Value = match serde_json::from_slice(&body) {
+            let _body_json: serde_json::Value = match serde_json::from_slice(&body) {
                 Ok(v) => v,
                 Err(e) => return odata_error(StatusCode::BAD_REQUEST, "InvalidBody", &format!("Invalid JSON body: {e}")).into_response(),
             };
 
-            // Create entity: spawn actor with a new ID
             let entity_id = uuid::Uuid::now_v7().to_string();
 
-            // Dispatch a GetState to initialize the actor and return its state
-            match state.get_entity_state(&entity_type, &entity_id).await {
+            match state.get_tenant_entity_state(&tenant, &entity_type, &entity_id).await {
                 Ok(response) => {
                     let mut body = serde_json::to_value(&response.state).unwrap_or_default();
                     if let Some(obj) = body.as_object_mut() {
@@ -153,25 +209,23 @@ pub async fn handle_odata_post(
         ODataPath::BoundAction { parent, action } => {
             let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
 
-            // Extract entity type and key from parent
             let (set_name, key_str) = match *parent {
                 ODataPath::Entity(ref set, ref key) => (set.clone(), extract_key(key)),
                 _ => return odata_error(StatusCode::BAD_REQUEST, "InvalidPath", "Action must be bound to an entity").into_response(),
             };
 
-            let entity_type = match state.entity_set_map.get(&set_name) {
-                Some(t) => t.clone(),
+            let entity_type = match resolve_entity_type(&state, &tenant, &set_name) {
+                Some(t) => t,
                 None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{set_name}' not found")).into_response(),
             };
 
-            // Cedar AuthZ check: verify the caller is authorized for this action
+            // Cedar AuthZ check
             let authz_result = state.authorize(&[], &action, &entity_type, &std::collections::HashMap::new());
             if let Err(reason) = authz_result {
                 return odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason).into_response();
             }
 
-            // REAL DISPATCH: send action to entity actor
-            match state.dispatch_action(&entity_type, &key_str, &action, body_json).await {
+            match state.dispatch_tenant_action(&tenant, &entity_type, &key_str, &action, body_json).await {
                 Ok(response) => {
                     if response.success {
                         let mut body = serde_json::to_value(&response.state).unwrap_or_default();
@@ -197,9 +251,14 @@ pub async fn handle_odata_post(
     }
 }
 
-/// Handle the OData service document request at the root endpoint.
-pub async fn handle_service_document(State(state): State<ServerState>) -> impl IntoResponse {
-    let entity_sets: Vec<serde_json::Value> = state.entity_set_map.keys()
+/// Handle the service document request at the root endpoint.
+pub async fn handle_service_document(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let tenant = extract_tenant(&headers, &state);
+    let entity_sets: Vec<serde_json::Value> = tenant_entity_sets(&state, &tenant)
+        .iter()
         .map(|name| serde_json::json!({"name": name, "kind": "EntitySet", "url": name}))
         .collect();
     ODataResponse {
@@ -208,9 +267,13 @@ pub async fn handle_service_document(State(state): State<ServerState>) -> impl I
     }
 }
 
-/// Handle the OData `$metadata` request, returning the CSDL XML document.
-pub async fn handle_metadata(State(state): State<ServerState>) -> impl IntoResponse {
-    ODataXmlResponse { body: state.csdl_xml.as_ref().clone() }
+/// Handle the `$metadata` request, returning the CSDL XML document.
+pub async fn handle_metadata(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let tenant = extract_tenant(&headers, &state);
+    ODataXmlResponse { body: tenant_csdl_xml(&state, &tenant) }
 }
 
 /// Handle the $hints endpoint, returning trajectory-learned agent hints as JSON.

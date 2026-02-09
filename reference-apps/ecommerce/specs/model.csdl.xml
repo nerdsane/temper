@@ -1,0 +1,595 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Temper Reference E-Commerce Application
+
+  This CSDL defines a complete OData v4 data model for the reference
+  e-commerce application. Entity types exercise state machines,
+  navigation properties, actions, functions, and vocabulary annotations.
+
+  Entities: Order, Payment, Shipment, Customer, Product
+-->
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+
+    <!-- ================================================================== -->
+    <!-- Custom Vocabulary: Temper Extensions                                -->
+    <!-- ================================================================== -->
+    <Schema Namespace="Temper.Vocab" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <!-- State machine metadata -->
+      <Term Name="StateMachine.States" Type="Collection(Edm.String)"
+            AppliesTo="EntityType"
+            Description="Valid states for this entity's state machine"/>
+      <Term Name="StateMachine.InitialState" Type="Edm.String"
+            AppliesTo="EntityType"
+            Description="The initial state when an entity is created"/>
+      <Term Name="StateMachine.ValidFromStates" Type="Collection(Edm.String)"
+            AppliesTo="Action"
+            Description="States from which this action can be invoked"/>
+      <Term Name="StateMachine.TargetState" Type="Edm.String"
+            AppliesTo="Action"
+            Description="State the entity transitions to after this action"/>
+      <Term Name="StateMachine.TlaSpec" Type="Edm.String"
+            AppliesTo="EntityType"
+            Description="Path to the TLA+ spec file for this entity"/>
+
+      <!-- Agent hints (populated from trajectory analysis) -->
+      <Term Name="Agent.Hint" Type="Edm.String"
+            AppliesTo="Action Function EntityType"
+            Description="Usage hint for LLM agents, learned from trajectory analysis"/>
+      <Term Name="Agent.CommonPattern" Type="Edm.String"
+            AppliesTo="Action Function"
+            Description="Common successful trajectory pattern involving this operation"/>
+      <Term Name="Agent.SuccessRate" Type="Edm.Double"
+            AppliesTo="Action"
+            Description="Historical success rate of this action (from trajectory data)"/>
+
+      <!-- Sharding -->
+      <Term Name="ShardKey" Type="Edm.String"
+            AppliesTo="EntityType"
+            Description="Comma-separated property names used as shard key"/>
+
+      <!-- ABAC -->
+      <Term Name="AuthZ.CedarPolicy" Type="Edm.String"
+            AppliesTo="EntityType Action Function"
+            Description="Path to Cedar policy file governing this resource"/>
+    </Schema>
+
+    <!-- ================================================================== -->
+    <!-- Core Domain Model                                                   -->
+    <!-- ================================================================== -->
+    <Schema Namespace="Temper.Example" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <!-- ============ Enums ============ -->
+
+      <EnumType Name="OrderStatus">
+        <Member Name="Draft" Value="0"/>
+        <Member Name="Submitted" Value="1"/>
+        <Member Name="Confirmed" Value="2"/>
+        <Member Name="Processing" Value="3"/>
+        <Member Name="Shipped" Value="4"/>
+        <Member Name="Delivered" Value="5"/>
+        <Member Name="Cancelled" Value="6"/>
+        <Member Name="ReturnRequested" Value="7"/>
+        <Member Name="Returned" Value="8"/>
+        <Member Name="Refunded" Value="9"/>
+      </EnumType>
+
+      <EnumType Name="PaymentStatus">
+        <Member Name="Pending" Value="0"/>
+        <Member Name="Authorized" Value="1"/>
+        <Member Name="Captured" Value="2"/>
+        <Member Name="Failed" Value="3"/>
+        <Member Name="Refunded" Value="4"/>
+        <Member Name="PartiallyRefunded" Value="5"/>
+      </EnumType>
+
+      <EnumType Name="ShipmentStatus">
+        <Member Name="Created" Value="0"/>
+        <Member Name="PickedUp" Value="1"/>
+        <Member Name="InTransit" Value="2"/>
+        <Member Name="OutForDelivery" Value="3"/>
+        <Member Name="Delivered" Value="4"/>
+        <Member Name="Failed" Value="5"/>
+        <Member Name="Returned" Value="6"/>
+      </EnumType>
+
+      <!-- ============ Entity Types ============ -->
+
+      <!-- Customer -->
+      <EntityType Name="Customer">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Email" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="Phone" Type="Edm.String"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="Tier" Type="Edm.String" DefaultValue="standard"/>
+        <Property Name="TotalSpent" Type="Edm.Decimal" Precision="19" Scale="4" DefaultValue="0"/>
+        <NavigationProperty Name="Addresses" Type="Collection(Temper.Example.Address)"
+                            ContainsTarget="true"/>
+        <NavigationProperty Name="Orders" Type="Collection(Temper.Example.Order)"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/customer.cedar"/>
+      </EntityType>
+
+      <!-- Address (contained within Customer) -->
+      <EntityType Name="Address">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Label" Type="Edm.String"/>
+        <Property Name="Street" Type="Edm.String" Nullable="false"/>
+        <Property Name="City" Type="Edm.String" Nullable="false"/>
+        <Property Name="State" Type="Edm.String" Nullable="false"/>
+        <Property Name="PostalCode" Type="Edm.String" Nullable="false"/>
+        <Property Name="Country" Type="Edm.String" Nullable="false"/>
+        <Property Name="IsDefault" Type="Edm.Boolean" DefaultValue="false"/>
+      </EntityType>
+
+      <!-- Product -->
+      <EntityType Name="Product">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Sku" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="Description" Type="Edm.String"/>
+        <Property Name="Price" Type="Edm.Decimal" Precision="19" Scale="4" Nullable="false"/>
+        <Property Name="Currency" Type="Edm.String" Nullable="false" DefaultValue="USD"/>
+        <Property Name="StockQuantity" Type="Edm.Int32" Nullable="false" DefaultValue="0"/>
+        <Property Name="Category" Type="Edm.String"/>
+        <Property Name="IsActive" Type="Edm.Boolean" DefaultValue="true"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+      </EntityType>
+
+      <!-- Order (the core entity — rich state machine) -->
+      <EntityType Name="Order">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="OrderNumber" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Temper.Example.OrderStatus" Nullable="false"/>
+        <Property Name="CustomerId" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="ShippingAddressId" Type="Edm.Guid"/>
+        <Property Name="Subtotal" Type="Edm.Decimal" Precision="19" Scale="4" DefaultValue="0"/>
+        <Property Name="Tax" Type="Edm.Decimal" Precision="19" Scale="4" DefaultValue="0"/>
+        <Property Name="ShippingCost" Type="Edm.Decimal" Precision="19" Scale="4" DefaultValue="0"/>
+        <Property Name="Total" Type="Edm.Decimal" Precision="19" Scale="4" DefaultValue="0"/>
+        <Property Name="Currency" Type="Edm.String" Nullable="false" DefaultValue="USD"/>
+        <Property Name="Notes" Type="Edm.String"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="SubmittedAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="ShippedAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="DeliveredAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="CancelledAt" Type="Edm.DateTimeOffset"/>
+        <NavigationProperty Name="Customer" Type="Temper.Example.Customer"
+                            Nullable="false">
+          <ReferentialConstraint Property="CustomerId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Items" Type="Collection(Temper.Example.OrderItem)"
+                            ContainsTarget="true"/>
+        <NavigationProperty Name="Payment" Type="Temper.Example.Payment"/>
+        <NavigationProperty Name="Shipment" Type="Temper.Example.Shipment"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Draft</String>
+            <String>Submitted</String>
+            <String>Confirmed</String>
+            <String>Processing</String>
+            <String>Shipped</String>
+            <String>Delivered</String>
+            <String>Cancelled</String>
+            <String>ReturnRequested</String>
+            <String>Returned</String>
+            <String>Refunded</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Draft"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/order.cedar"/>
+      </EntityType>
+
+      <!-- OrderItem (contained within Order) -->
+      <EntityType Name="OrderItem">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="ProductId" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="ProductName" Type="Edm.String" Nullable="false"/>
+        <Property Name="Quantity" Type="Edm.Int32" Nullable="false"/>
+        <Property Name="UnitPrice" Type="Edm.Decimal" Precision="19" Scale="4" Nullable="false"/>
+        <Property Name="LineTotal" Type="Edm.Decimal" Precision="19" Scale="4" Nullable="false"/>
+        <NavigationProperty Name="Product" Type="Temper.Example.Product" Nullable="false">
+          <ReferentialConstraint Property="ProductId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+      </EntityType>
+
+      <!-- Payment -->
+      <EntityType Name="Payment">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="OrderId" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Status" Type="Temper.Example.PaymentStatus" Nullable="false"/>
+        <Property Name="Method" Type="Edm.String" Nullable="false"/>
+        <Property Name="Amount" Type="Edm.Decimal" Precision="19" Scale="4" Nullable="false"/>
+        <Property Name="Currency" Type="Edm.String" Nullable="false"/>
+        <Property Name="TransactionRef" Type="Edm.String"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Order" Type="Temper.Example.Order" Nullable="false">
+          <ReferentialConstraint Property="OrderId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Pending</String>
+            <String>Authorized</String>
+            <String>Captured</String>
+            <String>Failed</String>
+            <String>Refunded</String>
+            <String>PartiallyRefunded</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Pending"/>
+      </EntityType>
+
+      <!-- Shipment -->
+      <EntityType Name="Shipment">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="OrderId" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Status" Type="Temper.Example.ShipmentStatus" Nullable="false"/>
+        <Property Name="Carrier" Type="Edm.String"/>
+        <Property Name="TrackingNumber" Type="Edm.String"/>
+        <Property Name="TrackingUrl" Type="Edm.String"/>
+        <Property Name="EstimatedDelivery" Type="Edm.DateTimeOffset"/>
+        <Property Name="ShippedAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="DeliveredAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Order" Type="Temper.Example.Order" Nullable="false">
+          <ReferentialConstraint Property="OrderId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Created</String>
+            <String>PickedUp</String>
+            <String>InTransit</String>
+            <String>OutForDelivery</String>
+            <String>Delivered</String>
+            <String>Failed</String>
+            <String>Returned</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Created"/>
+      </EntityType>
+
+      <!-- ============ Actions (side-effecting, bound to entities) ============ -->
+
+      <!-- Order Actions -->
+      <Action Name="AddItem" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <Parameter Name="ProductId" Type="Edm.Guid" Nullable="false"/>
+        <Parameter Name="Quantity" Type="Edm.Int32" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Order"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Draft</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Add a product to a draft order. Verify the order is in Draft status first. Use the Product entity to look up valid ProductIds."/>
+      </Action>
+
+      <Action Name="RemoveItem" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <Parameter Name="ItemId" Type="Edm.Guid" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Order"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Draft</String></Collection>
+        </Annotation>
+      </Action>
+
+      <Action Name="SubmitOrder" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <Parameter Name="ShippingAddressId" Type="Edm.Guid" Nullable="false"/>
+        <Parameter Name="PaymentMethod" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Order"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Draft</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Submitted"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Submit a draft order for processing. Requires at least one item, a valid shipping address (from Customer's Addresses), and a payment method string. The order must be in Draft status."/>
+        <Annotation Term="Temper.Vocab.Agent.CommonPattern"
+                    String="1. GET Customer?$expand=Addresses to find shipping address. 2. Verify order has items via GET Order?$expand=Items. 3. POST SubmitOrder with addressId and payment method."/>
+      </Action>
+
+      <Action Name="ConfirmOrder" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <ReturnType Type="Temper.Example.Order"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Submitted</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Confirmed"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="System/operations action: confirms a submitted order after payment authorization succeeds. Not typically called by customer-facing agents."/>
+      </Action>
+
+      <Action Name="ProcessOrder" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <ReturnType Type="Temper.Example.Order"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Confirmed</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Processing"/>
+      </Action>
+
+      <Action Name="ShipOrder" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <Parameter Name="Carrier" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="TrackingNumber" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Order"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Processing</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Shipped"/>
+      </Action>
+
+      <Action Name="DeliverOrder" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <ReturnType Type="Temper.Example.Order"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Shipped</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Delivered"/>
+      </Action>
+
+      <Action Name="CancelOrder" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <Parameter Name="Reason" Type="Edm.String"/>
+        <ReturnType Type="Temper.Example.Order"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Draft</String>
+            <String>Submitted</String>
+            <String>Confirmed</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Cancelled"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Cancel an order. Only possible from Draft, Submitted, or Confirmed states. Cannot cancel once Processing/Shipped. For shipped orders, use InitiateReturn instead."/>
+        <Annotation Term="Temper.Vocab.Agent.SuccessRate" Float="0.73"/>
+      </Action>
+
+      <Action Name="InitiateReturn" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ItemIds" Type="Collection(Edm.Guid)"/>
+        <ReturnType Type="Temper.Example.Order"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Shipped</String>
+            <String>Delivered</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="ReturnRequested"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Initiate a return for a shipped or delivered order. Optionally specify ItemIds for partial return. If ItemIds is empty/null, full order return is assumed."/>
+      </Action>
+
+      <Action Name="CompleteReturn" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <ReturnType Type="Temper.Example.Order"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>ReturnRequested</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Returned"/>
+      </Action>
+
+      <Action Name="RefundOrder" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <ReturnType Type="Temper.Example.Order"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Returned</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Refunded"/>
+      </Action>
+
+      <!-- Payment Actions -->
+      <Action Name="AuthorizePayment" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Payment"/>
+        <ReturnType Type="Temper.Example.Payment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Pending</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Authorized"/>
+      </Action>
+
+      <Action Name="CapturePayment" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Payment"/>
+        <ReturnType Type="Temper.Example.Payment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Authorized</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Captured"/>
+      </Action>
+
+      <Action Name="FailPayment" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Payment"/>
+        <Parameter Name="Reason" Type="Edm.String"/>
+        <ReturnType Type="Temper.Example.Payment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Pending</String>
+            <String>Authorized</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Failed"/>
+      </Action>
+
+      <Action Name="RefundPayment" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Payment"/>
+        <Parameter Name="Amount" Type="Edm.Decimal" Precision="19" Scale="4"/>
+        <ReturnType Type="Temper.Example.Payment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Captured</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Refunded"/>
+      </Action>
+
+      <Action Name="PartialRefund" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Payment"/>
+        <Parameter Name="Amount" Type="Edm.Decimal" Precision="19" Scale="4" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Payment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Captured</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="PartiallyRefunded"/>
+      </Action>
+
+      <!-- Shipment Actions -->
+      <Action Name="ShipOrderShipment" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Shipment"/>
+        <Parameter Name="Carrier" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="TrackingNumber" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Shipment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Created</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="PickedUp"/>
+      </Action>
+
+      <Action Name="MarkInTransit" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Shipment"/>
+        <ReturnType Type="Temper.Example.Shipment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>PickedUp</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="InTransit"/>
+      </Action>
+
+      <Action Name="MarkOutForDelivery" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Shipment"/>
+        <ReturnType Type="Temper.Example.Shipment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>InTransit</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="OutForDelivery"/>
+      </Action>
+
+      <Action Name="DeliverShipment" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Shipment"/>
+        <ReturnType Type="Temper.Example.Shipment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>OutForDelivery</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Delivered"/>
+      </Action>
+
+      <Action Name="FailDelivery" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Shipment"/>
+        <Parameter Name="Reason" Type="Edm.String"/>
+        <ReturnType Type="Temper.Example.Shipment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>InTransit</String>
+            <String>OutForDelivery</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Failed"/>
+      </Action>
+
+      <Action Name="ReturnShipment" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Shipment"/>
+        <Parameter Name="Reason" Type="Edm.String"/>
+        <ReturnType Type="Temper.Example.Shipment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Delivered</String>
+            <String>Failed</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Returned"/>
+      </Action>
+
+      <!-- Trajectory Feedback Action (unbound) -->
+      <Action Name="SubmitFeedback">
+        <Parameter Name="TraceId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Score" Type="Edm.Double" Nullable="false"/>
+        <Parameter Name="Signal" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Comment" Type="Edm.String"/>
+        <ReturnType Type="Edm.Boolean"/>
+      </Action>
+
+      <!-- ============ Functions (read-only, no side effects) ============ -->
+
+      <Function Name="GetOrderTotal" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <ReturnType Type="Edm.Decimal" Precision="19" Scale="4"/>
+      </Function>
+
+      <Function Name="GetOrderHistory" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Customer"/>
+        <Parameter Name="Status" Type="Temper.Example.OrderStatus"/>
+        <Parameter Name="Since" Type="Edm.DateTimeOffset"/>
+        <ReturnType Type="Collection(Temper.Example.Order)"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Get a customer's order history, optionally filtered by status and date. More efficient than filtering the Orders collection directly."/>
+      </Function>
+
+      <Function Name="SearchProducts">
+        <Parameter Name="Query" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Category" Type="Edm.String"/>
+        <Parameter Name="MinPrice" Type="Edm.Decimal"/>
+        <Parameter Name="MaxPrice" Type="Edm.Decimal"/>
+        <Parameter Name="Limit" Type="Edm.Int32" DefaultValue="20"/>
+        <ReturnType Type="Collection(Temper.Example.Product)"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Search for products by text query. Prefer this over $filter on Products collection for natural language queries from users."/>
+      </Function>
+
+      <Function Name="TrackShipment" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Shipment"/>
+        <ReturnType Type="Edm.String"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Get human-readable tracking status for a shipment. Returns a formatted string with current location and estimated delivery."/>
+      </Function>
+
+      <!-- ============ Entity Container ============ -->
+
+      <EntityContainer Name="ExampleService">
+        <EntitySet Name="Customers" EntityType="Temper.Example.Customer">
+          <NavigationPropertyBinding Path="Orders" Target="Orders"/>
+        </EntitySet>
+        <EntitySet Name="Orders" EntityType="Temper.Example.Order">
+          <NavigationPropertyBinding Path="Customer" Target="Customers"/>
+          <NavigationPropertyBinding Path="Payment" Target="Payments"/>
+          <NavigationPropertyBinding Path="Shipment" Target="Shipments"/>
+        </EntitySet>
+        <EntitySet Name="Products" EntityType="Temper.Example.Product"/>
+        <EntitySet Name="Payments" EntityType="Temper.Example.Payment">
+          <NavigationPropertyBinding Path="Order" Target="Orders"/>
+        </EntitySet>
+        <EntitySet Name="Shipments" EntityType="Temper.Example.Shipment">
+          <NavigationPropertyBinding Path="Order" Target="Orders"/>
+        </EntitySet>
+        <ActionImport Name="SubmitFeedback" Action="Temper.Example.SubmitFeedback"/>
+        <FunctionImport Name="SearchProducts" Function="Temper.Example.SearchProducts"/>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

@@ -393,7 +393,7 @@ or a dedicated `tests/` directory.
 ### 7.3 Test Fixtures
 
 Test fixtures (sample CSDL, I/O Automaton specs) live in `test-fixtures/` at the
-workspace root. Framework crates MUST NOT reference `reference/` directories.
+workspace root. Test fixtures must be generic — no domain-specific application names.
 
 ### 7.4 Test Naming
 
@@ -401,7 +401,7 @@ workspace root. Framework crates MUST NOT reference `reference/` directories.
 #[test]
 fn test_submit_order_requires_items() { ... }     // What it tests
 fn dst_cannot_cancel_shipped_order() { ... }       // DST prefix for simulation tests
-fn test_parse_reference_ecommerce_csdl() { ... }   // Concrete fixture name
+fn test_parse_example_csdl() { ... }                 // Concrete fixture name
 ```
 
 ---

@@ -1,7 +1,8 @@
 //! Development server command for `temper serve`.
 //!
-//! Delegates to `temper-platform` for the full conversational development
-//! experience: developer chat, production chat, and OData API.
+//! Delegates to `temper-platform` for the hosting platform:
+//! OData API for all entities (system + user), evolution engine,
+//! and verify-and-deploy pipeline.
 
 use std::collections::HashMap;
 use std::fs;
@@ -14,61 +15,47 @@ use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
 use temper_server::registry::SpecRegistry;
 use temper_spec::csdl::parse_csdl;
+use temper_verify::cascade::VerificationCascade;
 
 /// Run the `temper serve` command.
 ///
-/// Starts the Temper platform server with developer and/or production modes.
+/// Starts the Temper platform server. Both build mode (accepting new specs)
+/// and use mode (serving deployed entities) can be active simultaneously.
 pub async fn run(
     port: u16,
-    dev: bool,
-    production: bool,
     specs_dir: Option<String>,
     tenant: String,
 ) -> Result<()> {
     // Initialize OTEL tracing if OTLP_ENDPOINT is set.
     // The guard must be held alive for the server's lifetime.
     let _otel_guard = std::env::var("OTLP_ENDPOINT").ok().map(|endpoint| {
-        let service = if production {
-            "temper-platform-prod"
-        } else {
-            "temper-platform-dev"
-        };
-        init_tracing(&endpoint, service).expect("Failed to initialize OTEL tracing")
+        init_tracing(&endpoint, "temper-platform").expect("Failed to initialize OTEL tracing")
     });
 
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
-    let state = if production {
-        // Production mode: load specs from directory
-        let specs_path = specs_dir
-            .as_deref()
-            .unwrap_or("specs");
+    let state = if let Some(ref specs_path) = specs_dir {
+        // Load user specs from directory
         let registry = load_registry(specs_path, &tenant)?;
-        PlatformState::new_production(registry, api_key)
+        PlatformState::with_registry(registry, api_key)
     } else {
-        // Dev mode (default): empty registry, start interview
-        PlatformState::new_dev(api_key)
+        // Empty registry — system tenant will be bootstrapped, user deploys via API
+        PlatformState::new(api_key)
     };
 
-    let mode_str = if production { "production" } else { "developer" };
-
-    println!("Starting Temper platform server ({mode_str} mode)...");
+    println!("Starting Temper platform server...");
     println!();
-    println!("  Developer Studio: http://localhost:{port}/dev");
-    println!("  Production Chat:  http://localhost:{port}/prod");
-    println!("  OData API:        http://localhost:{port}/odata");
+    println!("  Temper Data API: http://localhost:{port}/tdata");
     println!();
 
-    if dev || !production {
-        println!("  Open the Developer Studio to start designing your application.");
-    }
-    if production {
+    if let Some(ref dir) = specs_dir {
         println!("  Tenant: {tenant}");
-        if let Some(ref dir) = specs_dir {
-            println!("  Specs:  {dir}");
-        }
+        println!("  Specs:  {dir}");
+        println!();
     }
-    println!();
+
+    // Bootstrap the system tenant (Project, Tenant, CatalogEntry, etc.)
+    temper_platform::bootstrap_system_tenant(&state);
 
     let router = build_platform_router(state);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
@@ -107,6 +94,22 @@ fn load_registry(specs_dir: &str, tenant: &str) -> Result<SpecRegistry> {
 
     // Read IOA TOML specs
     let ioa_sources = read_ioa_sources(specs_path)?;
+
+    // Verify each IOA spec before registration
+    for (entity_name, ioa_source) in &ioa_sources {
+        println!("  Verifying {entity_name}...");
+        let cascade = VerificationCascade::from_ioa(ioa_source)
+            .with_sim_seeds(5)
+            .with_prop_test_cases(100);
+        let result = cascade.run();
+        for level in &result.levels {
+            let status = if level.passed { "PASS" } else { "FAIL" };
+            println!("    [{status}] {}", level.summary);
+        }
+        if !result.all_passed {
+            anyhow::bail!("Verification failed for entity '{entity_name}'");
+        }
+    }
 
     let mut registry = SpecRegistry::new();
     let ioa_pairs: Vec<(&str, &str)> = ioa_sources

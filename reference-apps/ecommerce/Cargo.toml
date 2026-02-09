@@ -1,0 +1,15 @@
+[package]
+name = "ecommerce-reference"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Reference e-commerce application demonstrating the full Temper development flow"
+
+[dev-dependencies]
+temper-jit = { path = "../../crates/temper-jit" }
+temper-runtime = { path = "../../crates/temper-runtime" }
+temper-server = { path = "../../crates/temper-server" }
+temper-verify = { path = "../../crates/temper-verify" }
+temper-spec = { path = "../../crates/temper-spec" }
+serde_json = { workspace = true }

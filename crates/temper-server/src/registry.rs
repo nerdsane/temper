@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::{self, Automaton};
@@ -27,14 +28,47 @@ pub struct TenantConfig {
 }
 
 /// A registered entity type's spec and transition table.
-#[derive(Debug, Clone)]
+///
+/// The table is wrapped in a [`SwapController`] to enable atomic hot-swap
+/// without restarting actors. Use [`swap_controller()`] to access the
+/// controller for hot-swap operations.
+#[derive(Clone)]
 pub struct EntitySpec {
     /// The parsed I/O Automaton specification.
     pub automaton: Automaton,
-    /// The compiled transition table (ready for evaluation).
-    pub table: Arc<TransitionTable>,
+    /// Hot-swappable transition table controller.
+    swap: Arc<SwapController>,
     /// Raw IOA TOML source (for invariant parsing, display, etc.).
     pub ioa_source: String,
+}
+
+impl std::fmt::Debug for EntitySpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EntitySpec")
+            .field("automaton", &self.automaton)
+            .field("version", &self.swap.version())
+            .field("ioa_source_len", &self.ioa_source.len())
+            .finish()
+    }
+}
+
+impl EntitySpec {
+    /// Get a snapshot of the current transition table.
+    ///
+    /// This reads through the [`SwapController`] — if a hot-swap happened,
+    /// subsequent calls return the new table.
+    pub fn table(&self) -> Arc<TransitionTable> {
+        let lock = self.swap.current();
+        let table = lock.read().expect("SwapController lock poisoned");
+        // Clone the table out of the RwLock into an Arc for the caller.
+        // This is cheap — TransitionTable is small (a few Vecs of strings).
+        Arc::new(table.clone())
+    }
+
+    /// Get the [`SwapController`] for hot-swap operations.
+    pub fn swap_controller(&self) -> &Arc<SwapController> {
+        &self.swap
+    }
 }
 
 /// Multi-tenant specification registry.
@@ -93,7 +127,7 @@ impl SpecRegistry {
                 entity_type.to_string(),
                 EntitySpec {
                     automaton,
-                    table: Arc::new(table),
+                    swap: Arc::new(SwapController::new(table)),
                     ioa_source: ioa_source.to_string(),
                 },
             );
@@ -116,6 +150,9 @@ impl SpecRegistry {
     }
 
     /// Look up a transition table for a specific tenant and entity type.
+    ///
+    /// Returns a snapshot of the current table. If a hot-swap has occurred
+    /// since the last call, this returns the new table.
     pub fn get_table(
         &self,
         tenant: &TenantId,
@@ -124,7 +161,7 @@ impl SpecRegistry {
         self.tenants
             .get(tenant)
             .and_then(|tc| tc.entities.get(entity_type))
-            .map(|es| es.table.clone())
+            .map(|es| es.table())
     }
 
     /// Look up the entity type name for an entity set in a tenant.
@@ -147,6 +184,13 @@ impl SpecRegistry {
         self.tenants
             .get(tenant)
             .and_then(|tc| tc.entities.get(entity_type))
+    }
+
+    /// Remove a tenant and all its specs from the registry.
+    ///
+    /// Returns `true` if the tenant was found and removed, `false` otherwise.
+    pub fn remove_tenant(&mut self, tenant: &TenantId) -> bool {
+        self.tenants.remove(tenant).is_some()
     }
 
     /// List all registered tenant IDs.
@@ -181,9 +225,9 @@ mod tests {
         let mut registry = SpecRegistry::new();
         let (csdl, csdl_xml) = minimal_csdl();
 
-        registry.register_tenant("ecommerce", csdl, csdl_xml, &[("Order", ORDER_IOA)]);
+        registry.register_tenant("alpha", csdl, csdl_xml, &[("Order", ORDER_IOA)]);
 
-        let tenant = TenantId::new("ecommerce");
+        let tenant = TenantId::new("alpha");
         assert!(registry.get_tenant(&tenant).is_some());
         assert!(registry.get_table(&tenant, "Order").is_some());
         assert!(registry.get_table(&tenant, "NonExistent").is_none());
@@ -203,17 +247,17 @@ mod tests {
         let (csdl1, csdl_xml1) = minimal_csdl();
         let (csdl2, csdl_xml2) = minimal_csdl();
 
-        registry.register_tenant("ecommerce", csdl1, csdl_xml1, &[("Order", ORDER_IOA)]);
-        registry.register_tenant("linear", csdl2, csdl_xml2, &[("Issue", ORDER_IOA)]);
+        registry.register_tenant("alpha", csdl1, csdl_xml1, &[("Order", ORDER_IOA)]);
+        registry.register_tenant("beta", csdl2, csdl_xml2, &[("Task", ORDER_IOA)]);
 
-        let ecom = TenantId::new("ecommerce");
-        let linear = TenantId::new("linear");
+        let a = TenantId::new("alpha");
+        let b = TenantId::new("beta");
 
         // Each tenant sees only its own entities
-        assert!(registry.get_table(&ecom, "Order").is_some());
-        assert!(registry.get_table(&ecom, "Issue").is_none());
-        assert!(registry.get_table(&linear, "Issue").is_some());
-        assert!(registry.get_table(&linear, "Order").is_none());
+        assert!(registry.get_table(&a, "Order").is_some());
+        assert!(registry.get_table(&a, "Task").is_none());
+        assert!(registry.get_table(&b, "Task").is_some());
+        assert!(registry.get_table(&b, "Order").is_none());
     }
 
     #[test]
@@ -235,9 +279,9 @@ mod tests {
         let mut registry = SpecRegistry::new();
         let (csdl, xml) = minimal_csdl();
 
-        registry.register_tenant("ecommerce", csdl, xml, &[("Order", ORDER_IOA)]);
+        registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
 
-        let types = registry.entity_types(&TenantId::new("ecommerce"));
+        let types = registry.entity_types(&TenantId::new("alpha"));
         assert_eq!(types, vec!["Order"]);
     }
 
@@ -246,10 +290,10 @@ mod tests {
         let mut registry = SpecRegistry::new();
         let (csdl, xml) = minimal_csdl();
 
-        registry.register_tenant("ecommerce", csdl, xml, &[("Order", ORDER_IOA)]);
+        registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
 
         let table = registry
-            .get_table(&TenantId::new("ecommerce"), "Order")
+            .get_table(&TenantId::new("alpha"), "Order")
             .unwrap();
         assert_eq!(table.entity_name, "Order");
         assert_eq!(table.initial_state, "Draft");
@@ -262,14 +306,35 @@ mod tests {
     }
 
     #[test]
+    fn remove_tenant_succeeds() {
+        let mut registry = SpecRegistry::new();
+        let (csdl, xml) = minimal_csdl();
+
+        registry.register_tenant("doomed", csdl, xml, &[("Order", ORDER_IOA)]);
+        let tenant = TenantId::new("doomed");
+        assert!(registry.get_tenant(&tenant).is_some());
+
+        assert!(registry.remove_tenant(&tenant));
+        assert!(registry.get_tenant(&tenant).is_none());
+        assert!(registry.get_table(&tenant, "Order").is_none());
+    }
+
+    #[test]
+    fn remove_nonexistent_tenant_returns_false() {
+        let mut registry = SpecRegistry::new();
+        let tenant = TenantId::new("nonexistent");
+        assert!(!registry.remove_tenant(&tenant));
+    }
+
+    #[test]
     fn spec_metadata_accessible() {
         let mut registry = SpecRegistry::new();
         let (csdl, xml) = minimal_csdl();
 
-        registry.register_tenant("ecommerce", csdl, xml, &[("Order", ORDER_IOA)]);
+        registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
 
         let spec = registry
-            .get_spec(&TenantId::new("ecommerce"), "Order")
+            .get_spec(&TenantId::new("alpha"), "Order")
             .unwrap();
         assert_eq!(spec.automaton.automaton.name, "Order");
         assert!(!spec.ioa_source.is_empty());

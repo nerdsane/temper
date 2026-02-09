@@ -524,7 +524,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_reference_ecommerce_csdl() {
+    fn test_parse_reference_example_csdl() {
         let xml = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
         let doc = parse_csdl(xml).expect("should parse without error");
 
@@ -532,8 +532,8 @@ mod tests {
         assert_eq!(doc.schemas.len(), 2);
 
         let schema = doc.schemas.iter()
-            .find(|s| s.namespace == "Temper.Ecommerce")
-            .expect("should have Temper.Ecommerce schema");
+            .find(|s| s.namespace == "Temper.Example")
+            .expect("should have Temper.Example schema");
 
         // Entity types
         assert_eq!(schema.entity_types.len(), 7);
@@ -584,11 +584,11 @@ mod tests {
 
         // Entity container
         let container = &schema.entity_containers[0];
-        assert_eq!(container.name, "EcommerceService");
+        assert_eq!(container.name, "ExampleService");
         assert_eq!(container.entity_sets.len(), 5);
 
         let orders_set = container.entity_sets.iter().find(|s| s.name == "Orders").unwrap();
-        assert_eq!(orders_set.entity_type, "Temper.Ecommerce.Order");
+        assert_eq!(orders_set.entity_type, "Temper.Example.Order");
         assert_eq!(orders_set.navigation_bindings.len(), 3);
     }
 

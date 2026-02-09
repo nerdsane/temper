@@ -1,0 +1,135 @@
+# Order Entity — I/O Automaton Specification
+#
+# Based on Lynch-Tuttle I/O Automata (1987).
+# Each action has a precondition (from + guard) and effect (to + effect).
+# This compiles to both TransitionTable (runtime) and TemperModel (verification).
+
+[automaton]
+name = "Order"
+states = ["Draft", "Submitted", "Confirmed", "Processing", "Shipped", "Delivered", "Cancelled", "ReturnRequested", "Returned", "Refunded"]
+initial = "Draft"
+
+# --- State Variables ---
+
+[[state]]
+name = "items"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "has_address"
+type = "bool"
+initial = "false"
+
+# --- Actions: Order Lifecycle ---
+
+[[action]]
+name = "AddItem"
+kind = "input"
+from = ["Draft"]
+params = ["ProductId", "Quantity"]
+hint = "Add a product to a draft order. Only works in Draft status."
+
+[[action]]
+name = "RemoveItem"
+kind = "input"
+from = ["Draft"]
+guard = "items > 0"
+params = ["ItemId"]
+
+[[action]]
+name = "SubmitOrder"
+kind = "internal"
+from = ["Draft"]
+to = "Submitted"
+guard = "items > 0"
+params = ["ShippingAddressId", "PaymentMethod"]
+hint = "Submit a draft order. Requires at least one item."
+
+[[action]]
+name = "ConfirmOrder"
+kind = "internal"
+from = ["Submitted"]
+to = "Confirmed"
+hint = "System action: confirms after payment authorization."
+
+[[action]]
+name = "ProcessOrder"
+kind = "internal"
+from = ["Confirmed"]
+to = "Processing"
+
+[[action]]
+name = "ShipOrder"
+kind = "internal"
+from = ["Processing"]
+to = "Shipped"
+params = ["Carrier", "TrackingNumber"]
+
+[[action]]
+name = "DeliverOrder"
+kind = "internal"
+from = ["Shipped"]
+to = "Delivered"
+
+[[action]]
+name = "CancelOrder"
+kind = "input"
+from = ["Draft", "Submitted", "Confirmed"]
+to = "Cancelled"
+params = ["Reason"]
+hint = "Cancel an order. Only from Draft, Submitted, or Confirmed. For shipped orders, use InitiateReturn."
+
+[[action]]
+name = "InitiateReturn"
+kind = "input"
+from = ["Shipped", "Delivered"]
+to = "ReturnRequested"
+params = ["Reason", "ItemIds"]
+hint = "Initiate a return. For shipped or delivered orders only."
+
+[[action]]
+name = "CompleteReturn"
+kind = "internal"
+from = ["ReturnRequested"]
+to = "Returned"
+
+[[action]]
+name = "RefundOrder"
+kind = "internal"
+from = ["Returned"]
+to = "Refunded"
+
+# --- Output Actions (events emitted to environment) ---
+
+[[action]]
+name = "OrderSubmittedEvent"
+kind = "output"
+hint = "Emitted when order transitions to Submitted."
+
+[[action]]
+name = "OrderCancelledEvent"
+kind = "output"
+hint = "Emitted when order is cancelled."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "SubmitRequiresItems"
+when = ["Submitted", "Confirmed", "Processing", "Shipped", "Delivered"]
+assert = "items > 0"
+
+[[invariant]]
+name = "ShipRequiresPayment"
+when = ["Shipped"]
+assert = "payment_captured"
+
+[[invariant]]
+name = "CancelledIsFinal"
+when = ["Cancelled"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "RefundedIsFinal"
+when = ["Refunded"]
+assert = "no_further_transitions"

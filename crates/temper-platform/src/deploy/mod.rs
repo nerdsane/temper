@@ -1,8 +1,8 @@
 //! Verify-and-deploy pipeline for the platform.
 //!
-//! Orchestrates spec generation, verification cascade, tenant registration,
+//! Orchestrates spec parsing, verification cascade, tenant registration,
 //! and hot-swap deployment as a single atomic pipeline.
 
 pub mod pipeline;
 
-pub use pipeline::{DeployPipeline, DeployResult};
+pub use pipeline::{DeployInput, DeployPipeline, DeployResult, EntitySpecSource};

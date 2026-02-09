@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_codegen_from_reference_specs() {
-        // Use the reference ecommerce specs that ship with the project
+        // Use the example specs that ship with the project
         let specs_dir = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../test-fixtures/specs"

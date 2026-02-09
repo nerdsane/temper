@@ -17,6 +17,7 @@ members = [
     "crates/temper-jit",
     "crates/temper-optimize",
     "crates/temper-platform",
+    "reference-apps/ecommerce",
 ]
 
 [workspace.package]

@@ -74,6 +74,12 @@ pub enum Effect {
     SetBool { var: String, value: bool },
     /// Emit a named event.
     EmitEvent(String),
+    /// Domain-specific custom effect (e.g., "DeploySpecs", "NotifyAdmin").
+    ///
+    /// Dispatched by post-transition hooks registered at startup.
+    /// The actor runtime ignores unknown custom effects — they are only
+    /// meaningful to the hook that registered for them.
+    Custom(String),
 }
 
 /// The result of evaluating a transition.

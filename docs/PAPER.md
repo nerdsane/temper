@@ -25,15 +25,23 @@ diffs, and gates destructive changes on human approval.  Trajectory intelligence
 extracts product signal from agent execution traces.  A three-tier JIT execution
 model allows state machine transition logic to be hot-swapped at runtime without
 process restarts.  The framework is implemented as a 16-crate Rust workspace with
-259 tests across 97 source files (16,604 lines of Rust), backed by PostgreSQL for
+411 tests across the core crates and a reference application, backed by PostgreSQL for
 event sourcing, Redis for actor mailboxes, and an OTLP-based observability pipeline
-that exports to any OpenTelemetry-compatible backend.  A live Claude-powered LLM
+that exports to any OpenTelemetry-compatible backend.  Two deployment paths are
+supported: a self-hosted path where a coding agent produces specs plus a Cargo crate
+with full verification tests and infrastructure, and a platform-hosted path where
+`temper serve --specs-dir` runs the verification cascade at startup and provides
+multi-tenant OData hosting.  Multi-tenancy allows
+multiple application tenants to coexist on a single server, each with independently
+verified specs dispatched through a shared `SpecRegistry`.  A live Claude-powered LLM
 agent demonstrates the full feedback loop: natural language requests are interpreted
 into OData operations, state machine transitions are persisted to PostgreSQL,
 telemetry is exported via OTLP to an OpenTelemetry Collector (which forwards to
 ClickHouse or any other backend), and the Evolution Engine generates product
-intelligence records identifying unmet user intents.  We evaluate against a reference agentic e-commerce application with 7
-entity types and a 10-state order lifecycle.
+intelligence records identifying unmet user intents.  We evaluate against a reference
+e-commerce application with three verified state machines (Order: 10 states, 14
+actions; Payment: 6 states, 7 actions; Shipment: 7 states, 7 actions), 22 DST tests
+including determinism proofs, and a full O-P-A-D-I evolution chain.
 
 ---
 
@@ -113,6 +121,8 @@ temper-evolution     Evolution Engine: records, chain validation, insights
 temper-jit           JIT transition tables, hot-swap, shadow testing
 temper-optimize      Self-driving optimizer actors, safety checker
 temper-platform      Conversational dev platform: interview, deploy, prod chat
+
+ecommerce-reference  Reference e-commerce app: 3 entity specs, 22 DST tests, cascade
 ```
 
 ### 2.2 Three-Tier Architecture
@@ -142,9 +152,9 @@ temper-platform      Conversational dev platform: interview, deploy, prod chat
 |                      HTTP SURFACE                                   |
 |  temper-server (Axum)    temper-odata (query/path parsing)          |
 |                                                                     |
-|  GET /odata/Orders('{id}')?$expand=Items                            |
-|  POST /odata/Orders('{id}')/SubmitOrder                             |
-|  GET /odata/$metadata                                               |
+|  GET /tdata/Orders('{id}')?$expand=Items                            |
+|  POST /tdata/Orders('{id}')/SubmitOrder                             |
+|  GET /tdata/$metadata                                               |
 +---------------------------------------------------------------------+
           |                  |                  |
           v                  v                  v
@@ -396,7 +406,7 @@ parameters (number of simulation seeds, property test cases, max items), then
 runs all three levels and produces a `CascadeResult`:
 
 ```rust
-let cascade = VerificationCascade::from_tla(ORDER_TLA)
+let cascade = VerificationCascade::from_ioa(ORDER_IOA)
     .with_sim_seeds(10)
     .with_prop_test_cases(1000);
 let result = cascade.run();
@@ -722,38 +732,126 @@ observability data, with a safety checker ensuring correctness.
 
 ### 11.1 Test Coverage
 
-The Temper workspace contains 259 tests across 16 crates. Key categories:
+The Temper workspace contains 411 tests across 16 crates and one reference
+application. Key categories:
 
 | Category                       | Count | Crates                                     |
 |--------------------------------|------:|--------------------------------------------|
 | Actor runtime and scheduler    |    19 | temper-runtime                             |
-| Specification parsing          |     6 | temper-spec                                |
+| Specification parsing          |    20 | temper-spec                                |
 | OData query/path parsing       |    35 | temper-odata                               |
 | Code generation                |     6 | temper-codegen                             |
-| Verification (model+sim+prop)  |    27 | temper-verify                              |
+| Verification (model+sim+prop)  |    28 | temper-verify                              |
 | Entity actor DST tests         |     7 | temper-server                              |
-| HTTP integration tests         |     8 | temper-server                              |
-| Evolution records and chains   |    19 | temper-evolution                           |
+| HTTP + multi-tenant tests      |    33 | temper-server                              |
+| Evolution records and chains   |    23 | temper-evolution                           |
 | JIT tables and hot-swap        |    15 | temper-jit                                 |
 | Authorization engine           |    10 | temper-authz                               |
-| Observability and trajectory   |    28 | temper-observe                             |
+| Observability and trajectory   |    29 | temper-observe                             |
 | Optimizer actors and safety    |    15 | temper-optimize                            |
-| Storage (Postgres, Redis)      |    33 | temper-store-postgres, temper-store-redis   |
-| CLI subcommands                |    14 | temper-cli                                 |
+| Storage (Postgres, Redis)      |    25 | temper-store-postgres, temper-store-redis   |
+| CLI subcommands                |    15 | temper-cli                                 |
+| Platform (deploy + bootstrap)  |    53 | temper-platform                            |
+| Compile-first E2E              |     3 | temper-platform                            |
+| Platform E2E shared registry   |     6 | temper-platform                            |
+| Reference app DST tests        |    19 | ecommerce-reference                        |
+| Reference app cascade tests    |     3 | ecommerce-reference                        |
 
-### 11.2 Conversational Platform
+### 11.2 Reference E-Commerce Application
 
-The `temper-platform` crate implements the full conversational development
-experience.  Developers describe their application through a structured
-interview (entities, states, actions, guards, invariants), the system generates
-IOA TOML specs + CSDL + Cedar policies, runs the verification cascade, and
-hot-deploys entity actors.  Production users interact through a separate chat
-context; unmet intents feed back through the Evolution Engine for developer
+The reference e-commerce application (`reference-apps/ecommerce/`) demonstrates the
+complete self-hosted development flow: specs, verification cascade, deterministic
+simulation, infrastructure, and evolution loop.
+
+**Three verified state machines.**  The application defines three entity types, each
+with an I/O Automaton specification:
+
+| Entity   | States | Transition Actions | Output Events | Invariants |
+|----------|-------:|-------------------:|--------------:|-----------:|
+| Order    |     10 |                 12 |             2 |          4 |
+| Payment  |      6 |                  5 |             2 |          3 |
+| Shipment |      7 |                  6 |             1 |          1 |
+
+The Order spec carries the richest state machine: a 10-state lifecycle from `Draft`
+through `Submitted`, `Confirmed`, `Processing`, `Shipped`, and `Delivered`, with
+branching paths to `Cancelled` (from pre-shipment states), `ReturnRequested` →
+`Returned` → `Refunded` (post-delivery), and guards (`items > 0` for `SubmitOrder`).
+Payment models a 6-state authorization/capture lifecycle with three terminal states
+(`Failed`, `Refunded`, `PartiallyRefunded`).  Shipment models a 7-state delivery
+pipeline where `Delivered` is non-terminal (returns happen).
+
+**22 DST tests.**  The `ecommerce_dst.rs` test file exercises all three entities
+through the SimActorSystem:
+
+| Category                    | Count | Coverage |
+|-----------------------------|------:|----------|
+| Scripted Order scenarios    |     7 | Lifecycle, cancellation, empty-submit guard, return flow |
+| Scripted Payment scenarios  |     3 | Authorize+capture, failure terminal, refund |
+| Scripted Shipment scenarios |     2 | Full delivery, failure+return |
+| Multi-entity scenario       |     1 | Order + Payment + Shipment together |
+| Random exploration          |     3 | No-fault, light faults, heavy faults |
+| Determinism proofs          |     2 | Bit-exact replay across 10 runs (seeds 42, 1337) |
+| Multi-seed sweep            |     1 | 20 seeds with light faults, all entities |
+
+**3 cascade tests.**  The `ecommerce_cascade.rs` test file runs the full three-level
+`VerificationCascade` on each entity spec independently, confirming that Stateright
+model checking, deterministic simulation, and property-based testing all pass.
+
+**Evolution chain.**  The `evolution/` directory contains a complete O-P-A-D-I chain
+demonstrating the Evolution Engine's institutional memory:
+
+1. **O-001**: CancelOrder success rate is 73% (sentinel observation)
+2. **P-001**: Agents need better guidance about valid cancellation states
+3. **A-001**: Add enhanced `Agent.Hint` annotation to CancelOrder in CSDL
+4. **D-001**: Approved (low risk, purely additive metadata change)
+5. **I-001**: Cancel vs Return is a general intent-to-action mapping pattern
+
+This chain demonstrates the full feedback loop: production telemetry surfaces an
+anomaly, the system formalizes the problem, proposes a solution as a spec diff, and
+the developer approves the change.
+
+### 11.3 Deployment Paths
+
+All Temper projects follow the same development loop: converse, generate specs,
+verify, review, iterate, deploy.  The deployment step offers two paths.
+
+**Self-hosted (production-ready).**  The coding agent produces a Cargo crate with
+specs, full verification tests (cascade + DST), and infrastructure (Docker Compose).
+The developer builds and deploys the binary.  The reference e-commerce application is
+the canonical example.  This path gives the developer full control over the build,
+deployment, and infrastructure.
+
+**Platform-hosted (production-ready).**  `temper serve --specs-dir ./specs --tenant
+my-app` starts the server.  The serve command runs `VerificationCascade::from_ioa()`
+on every IOA spec before loading it into the SpecRegistry; invalid specs are rejected
+at startup, never loaded into the runtime.  Once loaded, the full OData API is live.
+Multiple application tenants coexist on a single server, each with independently
+verified specs dispatched through a shared `SpecRegistry`.
+
+**Multi-tenancy.**  Both paths support multi-tenancy.  A system tenant provides
+shared infrastructure.  All tenants dispatch through a shared `SpecRegistry` that
+maps `(TenantId, EntityType)` to the verified `TransitionTable` and spec metadata.
+Postgres events and Redis keys are tenant-scoped.
+
+**E2E proof.**  The `compile_first_e2e` tests prove the full HTTP lifecycle through
+the platform-hosted path: entity creation, action dispatch, entity read, `$metadata`
+retrieval, and service document discovery.  The `platform_e2e_dst` tests prove
+multi-tenant isolation: two tenants with different entity types coexist on the same
+server, each seeing only their own entities and actions.
+
+**Conversational development (vision, partially implemented).**  The full Developer
+Chat pipeline--structured interview, spec generation, verification, hot-deploy--is
+implemented at the agent layer.  Developers describe their application through
+conversation; the system generates IOA TOML + CSDL + Cedar, runs the verification
+cascade, and hot-deploys entity actors.  Production users interact through a separate
+chat context; unmet intents feed back through the Evolution Engine for developer
 approval.
 
-### 11.3 Verification Results
+### 11.4 Verification Results
 
-Running the full verification cascade on the Order specification:
+Running the full verification cascade on each entity specification:
+
+**Order** (10 states, 14 actions, 4 invariants):
 
 | Level | Method                    | Result  | Detail                                    |
 |-------|---------------------------|---------|-------------------------------------------|
@@ -761,27 +859,45 @@ Running the full verification cascade on the Order specification:
 | L2    | Deterministic simulation  | PASSED  | 10 seeds, 847 transitions, 23 dropped msgs |
 | L3    | Property-based tests      | PASSED  | 1,000 cases, 30 max steps per case         |
 
-The simulation is reproducible: re-running with the same seed produces identical
-transition counts, message counts, and final actor states.  Heavy fault injection
-(5% message drop, 2% actor crash) does not cause invariant violations because
-faults affect message delivery, not state machine transition logic--the transition
-table enforces guards regardless of the delivery path.
+**Payment** (6 states, 7 actions, 3 invariants):
 
-### 11.4 End-to-End Functional Validation
+| Level | Method                    | Result  | Detail                                    |
+|-------|---------------------------|---------|-------------------------------------------|
+| L1    | Stateright model check    | PASSED  | All properties hold (3 terminal-state invariants verified) |
+| L2    | Deterministic simulation  | PASSED  | 10 seeds, all invariants held              |
+| L3    | Property-based tests      | PASSED  | 1,000 cases, 30 max steps per case         |
+
+**Shipment** (7 states, 7 actions, 1 invariant):
+
+| Level | Method                    | Result  | Detail                                    |
+|-------|---------------------------|---------|-------------------------------------------|
+| L1    | Stateright model check    | PASSED  | All properties hold (ReturnedIsFinal verified) |
+| L2    | Deterministic simulation  | PASSED  | 10 seeds, all invariants held              |
+| L3    | Property-based tests      | PASSED  | 1,000 cases, 30 max steps per case         |
+
+All three entity specs pass the full cascade.  The simulation is reproducible:
+re-running with the same seed produces identical transition counts, message counts,
+and final actor states.  The determinism proofs in the DST tests verify this
+property across 10 runs for two distinct seeds.  Heavy fault injection (5% message
+drop, 2% actor crash) does not cause invariant violations because faults affect
+message delivery, not state machine transition logic--the transition table enforces
+guards regardless of the delivery path.
+
+### 11.5 End-to-End Functional Validation
 
 The reference application serves real state machine transitions through HTTP.
 Entity actors process OData actions through JIT TransitionTables built from the
 same I/O Automaton specs verified by the cascade.  A representative interaction sequence:
 
 ```
-POST /odata/Orders         → 201, spawns actor in "Draft", item_count=0
+POST /tdata/Orders         → 201, spawns actor in "Draft", item_count=0
 POST .../AddItem           → 200, status="Draft", item_count=1, events=[AddItem]
 POST .../SubmitOrder       → 200, status="Submitted", events=[AddItem, SubmitOrder]
 POST .../SubmitOrder       → 409, "Action 'SubmitOrder' not valid from state 'Submitted'"
 POST .../CancelOrder       → 200, status="Cancelled", events=[..., CancelOrder]
 ```
 
-### 11.5 Bugs Found by DST-First Development
+### 11.6 Bugs Found by DST-First Development
 
 TigerStyle [18] mandates that deterministic simulation testing is not an
 optional hardening step applied after integration testing--it is the *primary*
@@ -812,7 +928,7 @@ enforced at runtime.  This establishes a critical invariant:
 > **The transition table in the HTTP-serving entity actor is identical to the
 > one verified by the three-level cascade.**
 
-### 11.6 Live Infrastructure Validation
+### 11.7 Live Infrastructure Validation
 
 The system runs end-to-end against real infrastructure: PostgreSQL 18 for event
 sourcing, Redis 8 for actor mailboxes, an OpenTelemetry Collector for telemetry
@@ -896,18 +1012,38 @@ Temper makes the following contributions:
    where simulation testing is the primary--not supplementary--testing
    strategy.
 
-### 12.2 Conversational Development: The Full Vision
+9. A reference e-commerce application that demonstrates the full self-hosted
+   development flow: three verified entity state machines (Order, Payment,
+   Shipment), 22 DST tests with determinism proofs, three cascade tests,
+   infrastructure as code, and a complete O-P-A-D-I evolution chain showing
+   how production observations lead to spec improvements.
 
-The specification-first architecture described above still assumes that a
-developer writes CSDL, I/O Automaton, and Cedar specifications by hand.
-The full vision eliminates this assumption: **specifications are generated
-from conversation, code is generated from specifications, and the system
-self-evolves from production trajectories.**
+### 12.2 Development Flow and Deployment Paths
 
-The developer interacts with Temper through a conversational interface — the
-**Developer Chat** — which interviews them about their domain, generates
-specifications from the conversation, runs the verification cascade, and
-hot-deploys entity actors in real time.  A representative session:
+All Temper projects follow the same development loop: a developer and coding agent
+converse about the domain; the agent generates IOA specs, CSDL, and Cedar policies;
+the system runs the verification cascade; the developer reviews results and iterates
+until specs are locked in; then the developer chooses a deployment path.
+
+**Self-hosted (production-ready).**  The coding agent produces a Cargo crate
+containing specs, full verification tests (cascade + DST), and infrastructure
+(Docker Compose for Postgres, Redis, ClickHouse, OTEL Collector).  The developer
+builds and deploys the binary.  The reference e-commerce application
+(`reference-apps/ecommerce/`) is the canonical example: 3 entity specs, 22 DST
+tests (scripted, random, fault-injected, determinism proofs), 3 cascade tests, and
+a complete O-P-A-D-I evolution chain.
+
+**Platform-hosted (production-ready).**  `temper serve --specs-dir ./specs --tenant
+my-app` starts a multi-tenant server.  The serve command runs
+`VerificationCascade::from_ioa()` on every IOA spec before loading it into the
+SpecRegistry; invalid specs are rejected at startup.  Multiple tenants coexist on
+a single server with tenant-scoped persistence.
+
+**Conversational development (vision, partially implemented).**  The developer
+interacts with Temper through a conversational interface--the **Developer Chat**--
+which interviews them about their domain, generates specifications from the
+conversation, runs the verification cascade, and hot-deploys entity actors in real
+time.  A representative session:
 
 ```
 Developer: "I want a project management tool like Linear"
@@ -987,6 +1123,11 @@ specification, and the result is testable within seconds.
 ### 12.3 Remaining Future Work
 
 Several additional directions remain open:
+
+- **Runtime deploy endpoint.**  An HTTP API for submitting specs at runtime
+  would enable hot-reload without server restart.  The verification cascade
+  would run server-side before registration, bridging the gap between the
+  self-hosted path and the full conversational pipeline.
 
 - **Distributed clustering.**  The current actor system is single-node.
   Extending `temper-runtime` with a cluster membership protocol and remote

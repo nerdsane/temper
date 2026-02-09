@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.System" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Project">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Name" Type="Edm.String" />
+        <Property Name="Description" Type="Edm.String" />
+        <Property Name="SpecCount" Type="Edm.Int32" />
+        <Property Name="Verified" Type="Edm.Boolean" />
+      </EntityType>
+      <Action Name="UpdateSpecs" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Project" />
+      </Action>
+      <Action Name="Verify" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Project" />
+      </Action>
+      <Action Name="Archive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Project" />
+      </Action>
+
+      <EntityType Name="Tenant">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Name" Type="Edm.String" />
+        <Property Name="ProjectId" Type="Edm.String" />
+      </EntityType>
+      <Action Name="Deploy" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Tenant" />
+      </Action>
+      <Action Name="Suspend" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Tenant" />
+      </Action>
+      <Action Name="Reactivate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Tenant" />
+      </Action>
+
+      <EntityType Name="CatalogEntry">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Name" Type="Edm.String" />
+        <Property Name="Description" Type="Edm.String" />
+        <Property Name="Tags" Type="Edm.String" />
+        <Property Name="ProjectId" Type="Edm.String" />
+      </EntityType>
+      <Action Name="Publish" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.CatalogEntry" />
+      </Action>
+      <Action Name="Deprecate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.CatalogEntry" />
+      </Action>
+      <Action Name="Fork" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.CatalogEntry" />
+      </Action>
+
+      <EntityType Name="Collaborator">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="ProjectId" Type="Edm.String" />
+        <Property Name="UserId" Type="Edm.String" />
+        <Property Name="Role" Type="Edm.String" />
+      </EntityType>
+      <Action Name="Accept" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Collaborator" />
+      </Action>
+      <Action Name="Remove" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Collaborator" />
+      </Action>
+      <Action Name="ChangeRole" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Collaborator" />
+      </Action>
+
+      <EntityType Name="Version">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="ProjectId" Type="Edm.String" />
+        <Property Name="VersionNumber" Type="Edm.Int32" />
+      </EntityType>
+      <Action Name="MarkDeployed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Version" />
+      </Action>
+      <Action Name="Supersede" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Version" />
+      </Action>
+
+      <EntityContainer Name="Container">
+        <EntitySet Name="Projects" EntityType="Temper.System.Project" />
+        <EntitySet Name="Tenants" EntityType="Temper.System.Tenant" />
+        <EntitySet Name="CatalogEntries" EntityType="Temper.System.CatalogEntry" />
+        <EntitySet Name="Collaborators" EntityType="Temper.System.Collaborator" />
+        <EntitySet Name="Versions" EntityType="Temper.System.Version" />
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

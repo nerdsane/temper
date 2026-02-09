@@ -1,5 +1,5 @@
-//! WebSocket protocol types for platform communication.
+//! Platform event protocol types.
 
 pub mod messages;
 
-pub use messages::{WsMessage, SpecType, VerifyStepStatus};
+pub use messages::{PlatformEvent, VerifyStepStatus};

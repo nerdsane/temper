@@ -1,6 +1,6 @@
 ---- MODULE Order ----
 \* TLA+ Specification for Order Entity State Machine
-\* Temper Reference App: Agentic E-Commerce
+\* Temper Example: Order State Machine (test fixture)
 \*
 \* This spec defines the complete lifecycle of an Order entity.
 \* The Temper codegen reads this to produce:

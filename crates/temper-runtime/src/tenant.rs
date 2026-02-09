@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// A tenant identifier scoping all platform resources.
 ///
-/// Convention: lowercase, alphanumeric + hyphens (e.g., `"ecommerce"`, `"linear"`, `"acme-corp"`).
+/// Convention: lowercase, alphanumeric + hyphens (e.g., `"alpha"`, `"beta"`, `"my-app"`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TenantId(String);
 
@@ -72,12 +72,12 @@ impl From<String> for TenantId {
 
 /// The globally unique identity of an entity in the platform.
 ///
-/// Format: `tenant:entity_type:entity_id` (e.g., `"ecommerce:Order:abc-123"`).
+/// Format: `tenant:entity_type:entity_id` (e.g., `"my-app:Order:abc-123"`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct QualifiedEntityId {
     /// The tenant this entity belongs to.
     pub tenant: TenantId,
-    /// The entity type (e.g., "Order", "Issue").
+    /// The entity type (e.g., "Order", "Task").
     pub entity_type: String,
     /// The entity ID within the type (e.g., "abc-123").
     pub entity_id: String,
@@ -178,9 +178,9 @@ mod tests {
 
     #[test]
     fn tenant_id_custom() {
-        let t = TenantId::new("ecommerce");
-        assert_eq!(t.as_str(), "ecommerce");
-        assert_eq!(t.to_string(), "ecommerce");
+        let t = TenantId::new("alpha");
+        assert_eq!(t.as_str(), "alpha");
+        assert_eq!(t.to_string(), "alpha");
     }
 
     #[test]
@@ -197,14 +197,14 @@ mod tests {
 
     #[test]
     fn tenant_id_from_str() {
-        let t: TenantId = "linear".into();
-        assert_eq!(t.as_str(), "linear");
+        let t: TenantId = "beta".into();
+        assert_eq!(t.as_str(), "beta");
     }
 
     #[test]
     fn qualified_entity_id_persistence_id() {
-        let qid = QualifiedEntityId::new("ecommerce", "Order", "abc-123");
-        assert_eq!(qid.persistence_id(), "ecommerce:Order:abc-123");
+        let qid = QualifiedEntityId::new("alpha", "Order", "abc-123");
+        assert_eq!(qid.persistence_id(), "alpha:Order:abc-123");
     }
 
     #[test]
@@ -216,8 +216,8 @@ mod tests {
 
     #[test]
     fn parse_3_segment_persistence_id() {
-        let qid = QualifiedEntityId::parse("ecommerce:Order:abc-123").unwrap();
-        assert_eq!(qid.tenant.as_str(), "ecommerce");
+        let qid = QualifiedEntityId::parse("alpha:Order:abc-123").unwrap();
+        assert_eq!(qid.tenant.as_str(), "alpha");
         assert_eq!(qid.entity_type, "Order");
         assert_eq!(qid.entity_id, "abc-123");
     }
@@ -233,10 +233,10 @@ mod tests {
     #[test]
     fn parse_3_segment_with_colons_in_id() {
         // entity_id can contain colons (UUIDs, compound keys)
-        let qid = QualifiedEntityId::parse("linear:Issue:ISS-1:sub").unwrap();
-        assert_eq!(qid.tenant.as_str(), "linear");
-        assert_eq!(qid.entity_type, "Issue");
-        assert_eq!(qid.entity_id, "ISS-1:sub");
+        let qid = QualifiedEntityId::parse("beta:Task:T-1:sub").unwrap();
+        assert_eq!(qid.tenant.as_str(), "beta");
+        assert_eq!(qid.entity_type, "Task");
+        assert_eq!(qid.entity_id, "T-1:sub");
     }
 
     #[test]
@@ -253,14 +253,14 @@ mod tests {
 
     #[test]
     fn actor_key_matches_persistence_id() {
-        let qid = QualifiedEntityId::new("ecommerce", "Order", "abc-123");
+        let qid = QualifiedEntityId::new("alpha", "Order", "abc-123");
         assert_eq!(qid.actor_key(), qid.persistence_id());
     }
 
     #[test]
     fn display_format() {
-        let qid = QualifiedEntityId::new("linear", "Issue", "ISS-42");
-        assert_eq!(format!("{qid}"), "linear:Issue:ISS-42");
+        let qid = QualifiedEntityId::new("beta", "Task", "T-42");
+        assert_eq!(format!("{qid}"), "beta:Task:T-42");
     }
 
     #[test]

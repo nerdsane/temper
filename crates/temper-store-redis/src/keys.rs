@@ -129,39 +129,39 @@ mod tests {
     #[test]
     fn test_tenant_mailbox_key() {
         assert_eq!(
-            tenant_mailbox_key("ecommerce", "order-123"),
-            "temper:mailbox:ecommerce:order-123"
+            tenant_mailbox_key("alpha", "order-123"),
+            "temper:mailbox:alpha:order-123"
         );
     }
 
     #[test]
     fn test_tenant_placement_key() {
         assert_eq!(
-            tenant_placement_key("linear", "Issue", "ISS-1"),
-            "temper:placement:linear:Issue:ISS-1"
+            tenant_placement_key("beta", "Task", "T-1"),
+            "temper:placement:beta:Task:T-1"
         );
     }
 
     #[test]
     fn test_tenant_entity_cache_key() {
         assert_eq!(
-            tenant_entity_cache_key("ecommerce", "Order", "abc"),
-            "temper:cache:entity:ecommerce:Order:abc"
+            tenant_entity_cache_key("alpha", "Order", "abc"),
+            "temper:cache:entity:alpha:Order:abc"
         );
     }
 
     #[test]
     fn test_tenant_function_cache_key() {
         assert_eq!(
-            tenant_function_cache_key("linear", "GetIssueCount", "sprint-1"),
-            "temper:cache:fn:linear:GetIssueCount:sprint-1"
+            tenant_function_cache_key("beta", "GetTaskCount", "sprint-1"),
+            "temper:cache:fn:beta:GetTaskCount:sprint-1"
         );
     }
 
     #[test]
     fn test_tenant_keys_isolate_tenants() {
-        let ecom = tenant_entity_cache_key("ecommerce", "Order", "1");
-        let linear = tenant_entity_cache_key("linear", "Order", "1");
-        assert_ne!(ecom, linear, "different tenants must produce different keys");
+        let a = tenant_entity_cache_key("alpha", "Order", "1");
+        let b = tenant_entity_cache_key("beta", "Order", "1");
+        assert_ne!(a, b, "different tenants must produce different keys");
     }
 }

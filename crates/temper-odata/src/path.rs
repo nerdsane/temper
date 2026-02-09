@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn parse_bound_action() {
-        let result = parse_path("/Orders('abc-123')/Temper.Ecommerce.CancelOrder").unwrap();
+        let result = parse_path("/Orders('abc-123')/Temper.Example.CancelOrder").unwrap();
         assert_eq!(
             result,
             ODataPath::BoundAction {
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn parse_bound_function() {
         let result =
-            parse_path("/Orders('abc-123')/Temper.Ecommerce.GetOrderTotal()").unwrap();
+            parse_path("/Orders('abc-123')/Temper.Example.GetOrderTotal()").unwrap();
         assert_eq!(
             result,
             ODataPath::BoundFunction {

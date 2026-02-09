@@ -265,6 +265,14 @@ impl Actor for EntityActor {
                                         "event emitted"
                                     );
                                 }
+                                temper_jit::table::Effect::Custom(name) => {
+                                    tracing::info!(
+                                        entity_type = %state.entity_type,
+                                        entity_id = %state.entity_id,
+                                        effect = %name,
+                                        "custom effect (dispatched by post-transition hook)"
+                                    );
+                                }
                             }
                         }
 

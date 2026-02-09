@@ -67,8 +67,8 @@ Two separated contexts: Developer Chat (design-time, can modify specs) and Produ
 
 ## Testing
 ```bash
-cargo test --workspace              # Full workspace (370+ tests)
+cargo test --workspace              # Full workspace (430+ tests)
 cargo test -p temper-server         # Including multi-tenant integration
-cargo test -p ecommerce --test sim_e2e
-cargo test -p linear --test determinism_proof
+cargo test -p temper-platform       # Platform unit + deploy pipeline
+cargo test -p temper-platform --test platform_e2e_dst  # E2E shared registry proof
 ```

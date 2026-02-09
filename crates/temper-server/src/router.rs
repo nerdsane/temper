@@ -1,4 +1,4 @@
-//! Axum router construction for OData endpoints.
+//! Axum router construction for the Temper Data API.
 
 use axum::routing::get;
 use axum::Router;
@@ -7,24 +7,26 @@ use tower_http::trace::TraceLayer;
 use crate::dispatch;
 use crate::state::ServerState;
 
-
-/// Build the axum router with all OData routes.
+/// Build the axum router with all Temper Data API routes.
 ///
 /// Route structure:
-/// - GET  /odata                      → service document
-/// - GET  /odata/$metadata            → CSDL XML
-/// - GET  /odata/$hints               → agent hints JSON
-/// - GET  /odata/{*path}              → entity set / entity / navigation / function
-/// - POST /odata/{*path}              → create entity / bound action
+/// - GET  /tdata                      → service document
+/// - GET  /tdata/$metadata            → CSDL XML (tenant-scoped)
+/// - GET  /tdata/$hints               → agent hints JSON
+/// - GET  /tdata/{*path}              → entity set / entity / navigation / function
+/// - POST /tdata/{*path}              → create entity / bound action
+///
+/// Tenant is extracted from the `X-Tenant-Id` header. Falls back to the
+/// first registered tenant in the SpecRegistry.
 pub fn build_router(state: ServerState) -> Router {
-    let odata = Router::new()
+    let tdata = Router::new()
         .route("/", get(dispatch::handle_service_document))
         .route("/$metadata", get(dispatch::handle_metadata))
         .route("/$hints", get(dispatch::handle_hints))
         .route("/{*path}", get(dispatch::handle_odata_get).post(dispatch::handle_odata_post));
 
     Router::new()
-        .nest("/odata", odata)
+        .nest("/tdata", tdata)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -45,7 +47,7 @@ mod tests {
         ServerState::new(system, csdl, csdl_xml.to_string())
     }
 
-    fn test_state_with_tla() -> ServerState {
+    fn test_state_with_ioa() -> ServerState {
         let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
         let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
         let csdl = parse_csdl(csdl_xml).unwrap();
@@ -59,7 +61,7 @@ mod tests {
     async fn test_service_document() {
         let app = build_router(test_state());
         let response = app
-            .oneshot(Request::get("/odata").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/tdata").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -75,7 +77,7 @@ mod tests {
         let app = build_router(test_state());
         let response = app
             .oneshot(
-                Request::get("/odata/$metadata")
+                Request::get("/tdata/$metadata")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -88,14 +90,14 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body_str = std::str::from_utf8(&body).unwrap();
         assert!(body_str.contains("edmx:Edmx"));
-        assert!(body_str.contains("Temper.Ecommerce"));
+        assert!(body_str.contains("Temper.Example"));
     }
 
     #[tokio::test]
     async fn test_entity_set_listing() {
         let app = build_router(test_state());
         let response = app
-            .oneshot(Request::get("/odata/Orders").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/tdata/Orders").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -110,7 +112,7 @@ mod tests {
         let app = build_router(test_state());
         let response = app
             .oneshot(
-                Request::get("/odata/Orders('abc-123')")
+                Request::get("/tdata/Orders('abc-123')")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -128,7 +130,7 @@ mod tests {
         let app = build_router(test_state());
         let response = app
             .oneshot(
-                Request::get("/odata/NonExistent")
+                Request::get("/tdata/NonExistent")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -143,7 +145,7 @@ mod tests {
         let app = build_router(test_state());
         let response = app
             .oneshot(
-                Request::post("/odata/Orders")
+                Request::post("/tdata/Orders")
                     .header("Content-Type", "application/json")
                     .body(Body::from(r#"{"status": "Draft"}"#))
                     .unwrap(),
@@ -156,10 +158,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_bound_action() {
-        let app = build_router(test_state_with_tla());
+        let app = build_router(test_state_with_ioa());
         let response = app
             .oneshot(
-                Request::post("/odata/Orders('abc-123')/Temper.Ecommerce.CancelOrder")
+                Request::post("/tdata/Orders('abc-123')/Temper.Example.CancelOrder")
                     .header("Content-Type", "application/json")
                     .body(Body::from(r#"{"Reason": "changed mind"}"#))
                     .unwrap(),
@@ -167,7 +169,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Real dispatch: CancelOrder from Draft → Cancelled (200 OK)
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -178,11 +179,22 @@ mod tests {
     async fn test_odata_version_header() {
         let app = build_router(test_state());
         let response = app
-            .oneshot(Request::get("/odata/Orders").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/tdata/Orders").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
         let odata_version = response.headers().get("OData-Version").unwrap();
         assert_eq!(odata_version, "4.0");
+    }
+
+    #[tokio::test]
+    async fn test_old_odata_path_returns_404() {
+        let app = build_router(test_state());
+        let response = app
+            .oneshot(Request::get("/odata").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

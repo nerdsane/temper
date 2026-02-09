@@ -1,22 +1,26 @@
-//! temper-platform: Conversational development platform.
+//! temper-platform: Dogfooded hosting platform for Temper.
 //!
-//! Provides the full developer experience for Temper:
-//! - **Developer Chat**: Interview agent that guides developers through entity design,
-//!   generates IOA specs + CSDL + Cedar, runs verification cascade, and hot-deploys.
-//! - **Production Chat**: Operates within deployed specs, captures unmet intents,
-//!   feeds the Evolution Engine for developer approval.
-//! - **Web UI**: Replit-like split-pane interface (dev) and clean chat (prod).
-//! - **Evolution Pipeline**: Unmet intent → O-Record → I-Record → approval → spec change.
+//! Provides the platform infrastructure:
+//! - **Verify-and-deploy pipeline**: Accepts pre-authored IOA TOML + CSDL specs,
+//!   runs the verification cascade, and registers tenants with hot-deployed actors.
+//! - **Evolution Engine**: Captures unmet intents from production usage, creates
+//!   O-Records and I-Records, and routes approval requests to developers.
+//! - **Agentic Evolution**: Claude-powered agents formalize observations into
+//!   problem statements (O→P) and propose spec changes (P→A).
+//! - **OData API**: All entities (system and user) are accessible via the
+//!   Temper Data API (`/tdata`), following OData v4 standard.
 
 pub mod protocol;
 pub mod state;
-pub mod interview;
 pub mod agent;
+pub mod bootstrap;
 pub mod deploy;
 pub mod evolution;
-pub mod ws;
+pub mod hooks;
+pub mod optimization;
 pub mod router;
 
 // Re-export primary types at crate root.
-pub use protocol::{WsMessage, SpecType, VerifyStepStatus};
-pub use state::{PlatformState, PlatformMode};
+pub use bootstrap::bootstrap_system_tenant;
+pub use protocol::{PlatformEvent, VerifyStepStatus};
+pub use state::PlatformState;

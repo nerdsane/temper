@@ -181,6 +181,9 @@ impl SimActorHandler for EntityActorHandler {
                         temper_jit::table::Effect::EmitEvent(_) => {
                             // No telemetry in simulation
                         }
+                        temper_jit::table::Effect::Custom(_) => {
+                            // Custom effects are handled by post-transition hooks
+                        }
                     }
                 }
 

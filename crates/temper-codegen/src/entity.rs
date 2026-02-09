@@ -79,7 +79,7 @@ fn property_default(prop: &Property, initial_state: &str) -> String {
 }
 
 fn extract_enum_prefix(type_name: &str) -> &str {
-    // "Temper.Ecommerce.OrderStatus" -> "Order"
+    // "Temper.Example.OrderStatus" → "Order"
     let name = type_name.rsplit('.').next().unwrap_or(type_name);
     name.strip_suffix("Status").unwrap_or(name)
 }
@@ -161,7 +161,7 @@ mod tests {
             "Vec<Uuid>"
         );
         assert_eq!(
-            csdl_type_to_rust("Temper.Ecommerce.OrderStatus", false, "Temper.Ecommerce"),
+            csdl_type_to_rust("Temper.Example.OrderStatus", false, "Temper.Example"),
             "OrderStatus"
         );
     }
