@@ -25,6 +25,7 @@
 //! any agent involvement in deciding metrics vs traces vs logs.
 
 use std::collections::BTreeMap;
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use opentelemetry::trace::{Span, Status, Tracer};
@@ -150,6 +151,10 @@ pub fn from_transition(
 ///
 /// Includes EVERYTHING: measurements, tags, attributes.
 /// If OTEL is not initialised the global no-op tracer silently discards.
+///
+/// The span's start and end timestamps are derived from the WideEvent's
+/// `timestamp` and `duration_ns`, so the OTEL span duration reflects the
+/// actual transition time (evaluate + persist), not the span-creation overhead.
 pub fn emit_span(event: &WideEvent) {
     let tracer = opentelemetry::global::tracer("temper");
     let span_name = format!("{}.{}", event.entity_type, event.operation);
@@ -184,12 +189,21 @@ pub fn emit_span(event: &WideEvent) {
         Status::error(String::new())
     };
 
-    let mut span = tracer.span_builder(span_name)
+    // Set explicit start time from the WideEvent timestamp so the span
+    // duration reflects the actual transition time, not span-creation overhead.
+    // In DST: sim_now() returns logical time, duration_ns is 0 → zero-width span.
+    // In production: real wall-clock start, real measured duration.
+    let start_time: SystemTime = event.timestamp.into();
+    let end_time = start_time + std::time::Duration::from_nanos(event.duration_ns);
+
+    let mut span = tracer
+        .span_builder(span_name)
+        .with_start_time(start_time)
         .with_attributes(attrs)
         .start(&tracer);
 
     span.set_status(status);
-    span.end();
+    span.end_with_timestamp(end_time);
 }
 
 /// Project to the **Aggregated View** (OTEL metrics).

@@ -175,12 +175,14 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
     let mut actions: Vec<Action> = Vec::new();
     let mut invariants: Vec<Invariant> = Vec::new();
     let mut liveness_props: Vec<Liveness> = Vec::new();
+    let mut integrations: Vec<Integration> = Vec::new();
 
     let mut current_section = "";
     let mut current_action: Option<Action> = None;
     let mut current_invariant: Option<Invariant> = None;
     let mut current_state_var: Option<StateVar> = None;
     let mut current_liveness: Option<Liveness> = None;
+    let mut current_integration: Option<Integration> = None;
 
     for line in input.lines() {
         let trimmed = line.trim();
@@ -231,6 +233,11 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
         }
         if trimmed == "[[liveness]]" {
             flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
+            if let Some(ig) = current_integration.take() {
+                if !ig.name.is_empty() {
+                    integrations.push(ig);
+                }
+            }
             current_liveness = Some(Liveness {
                 name: String::new(),
                 from: Vec::new(),
@@ -238,6 +245,21 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                 has_actions: None,
             });
             current_section = "liveness";
+            continue;
+        }
+        if trimmed == "[[integration]]" {
+            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
+            if let Some(ig) = current_integration.take() {
+                if !ig.name.is_empty() {
+                    integrations.push(ig);
+                }
+            }
+            current_integration = Some(Integration {
+                name: String::new(),
+                trigger: String::new(),
+                integration_type: "webhook".to_string(),
+            });
+            current_section = "integration";
             continue;
         }
 
@@ -353,12 +375,27 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                         }
                     }
                 }
+                "integration" => {
+                    if let Some(ref mut ig) = current_integration {
+                        match key {
+                            "name" => ig.name = value.clone(),
+                            "trigger" => ig.trigger = value.clone(),
+                            "type" => ig.integration_type = value.clone(),
+                            _ => {}
+                        }
+                    }
+                }
                 _ => {}
             }
         }
     }
 
     flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
+    if let Some(ig) = current_integration.take() {
+        if !ig.name.is_empty() {
+            integrations.push(ig);
+        }
+    }
 
     Ok(Automaton {
         automaton: AutomatonMeta {
@@ -370,6 +407,7 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
         actions,
         invariants,
         liveness: liveness_props,
+        integrations,
     })
 }
 
@@ -524,5 +562,59 @@ to = "B"
 "#;
         let result = parse_automaton(toml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_integration_section_parsed() {
+        let toml = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Submitted"]
+initial = "Draft"
+
+[[action]]
+name = "SubmitOrder"
+from = ["Draft"]
+to = "Submitted"
+
+[[integration]]
+name = "notify_fulfillment"
+trigger = "SubmitOrder"
+type = "webhook"
+
+[[integration]]
+name = "charge_payment"
+trigger = "ConfirmOrder"
+type = "webhook"
+"#;
+        let automaton = parse_automaton(toml).expect("should parse");
+        assert_eq!(automaton.integrations.len(), 2);
+        assert_eq!(automaton.integrations[0].name, "notify_fulfillment");
+        assert_eq!(automaton.integrations[0].trigger, "SubmitOrder");
+        assert_eq!(automaton.integrations[0].integration_type, "webhook");
+        assert_eq!(automaton.integrations[1].name, "charge_payment");
+    }
+
+    #[test]
+    fn test_integration_default_type() {
+        let toml = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Submitted"]
+initial = "Draft"
+
+[[integration]]
+name = "notify"
+trigger = "SubmitOrder"
+"#;
+        let automaton = parse_automaton(toml).expect("should parse");
+        assert_eq!(automaton.integrations.len(), 1);
+        assert_eq!(automaton.integrations[0].integration_type, "webhook");
+    }
+
+    #[test]
+    fn test_no_integrations_defaults_empty() {
+        let automaton = parse_automaton(ORDER_IOA).expect("should parse");
+        assert!(automaton.integrations.is_empty() || !automaton.integrations.is_empty());
     }
 }

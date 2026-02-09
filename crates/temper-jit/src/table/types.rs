@@ -23,6 +23,12 @@ pub struct TransitionTable {
     pub initial_state: String,
     /// Ordered list of transition rules.
     pub rules: Vec<TransitionRule>,
+    /// Pre-built index: action name → indices into `rules`.
+    ///
+    /// Eliminates the O(N) linear scan + Vec allocation in [`evaluate_ctx()`].
+    /// Rebuilt automatically during construction; skipped during (de)serialization.
+    #[serde(skip, default)]
+    pub(crate) rule_index: BTreeMap<String, Vec<usize>>,
 }
 
 /// A single transition rule.
@@ -103,6 +109,22 @@ pub struct EvalContext {
     pub counters: BTreeMap<String, usize>,
     /// Named boolean values (e.g., "assignee_set" -> true).
     pub booleans: BTreeMap<String, bool>,
+}
+
+impl TransitionTable {
+    /// Rebuild the rule index from the current rules vec.
+    ///
+    /// Called automatically during construction. Must be called explicitly
+    /// after deserialization (since `rule_index` is `#[serde(skip)]`).
+    pub fn rebuild_index(&mut self) {
+        self.rule_index.clear();
+        for (i, rule) in self.rules.iter().enumerate() {
+            self.rule_index
+                .entry(rule.name.clone())
+                .or_default()
+                .push(i);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

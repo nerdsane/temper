@@ -20,29 +20,34 @@ deterministic simulation.  A four-level verification cascade--Z3 SMT symbolic ve
 exhaustive model checking via Stateright with multi-variable state and liveness
 properties, deterministic simulation with seed-based fault injection,
 and property-based testing with automatic shrinking--establishes correctness before
-deployment.  A production feedback loop, the Evolution Engine, captures observations,
-formalizes problems in the style of Lamport, proposes solutions as specification
-diffs, and gates destructive changes on human approval.  Trajectory intelligence
-extracts product signal from agent execution traces.  A three-tier JIT execution
-model allows state machine transition logic to be hot-swapped at runtime without
-process restarts.  The framework is implemented as a 16-crate Rust workspace with
-450 tests across the core crates and a reference application, backed by PostgreSQL for
-event sourcing and an OTLP-based observability pipeline
-that exports to any OpenTelemetry-compatible backend.  Two deployment paths are
-supported: a self-hosted path where a coding agent produces specs plus a Cargo crate
-with full verification tests and infrastructure, and a platform-hosted path where
-`temper serve --specs-dir` runs the verification cascade at startup and provides
-multi-tenant OData hosting.  Multi-tenancy allows
-multiple application tenants to coexist on a single server, each with independently
-verified specs dispatched through a shared `SpecRegistry`.  A live Claude-powered LLM
-agent demonstrates the full feedback loop: natural language requests are interpreted
-into OData operations, state machine transitions are persisted to PostgreSQL,
-telemetry is exported via OTLP to an OpenTelemetry Collector (which forwards to
-ClickHouse or any other backend), and the Evolution Engine generates product
-intelligence records identifying unmet user intents.  We evaluate against a reference
-e-commerce application with three verified state machines (Order: 10 states, 14
-actions; Payment: 6 states, 7 actions; Shipment: 7 states, 7 actions), 22 DST tests
-including determinism proofs, and a full O-P-A-D-I evolution chain.
+deployment.  An outbox-pattern integration engine dispatches webhooks asynchronously
+after state transitions, keeping the state machine pure and deterministically
+verifiable while enabling external system integrations.  A production feedback loop,
+the Evolution Engine, captures observations, formalizes problems in the style of
+Lamport, proposes solutions as specification diffs, and gates destructive changes on
+human approval.  Trajectory intelligence extracts product signal from agent execution
+traces.  A three-tier JIT execution model allows state machine transition logic to be
+hot-swapped at runtime without process restarts; a pre-built rule index provides
+sub-30-nanosecond action evaluation on the hot path.  The framework is implemented as
+a 16-crate Rust workspace with 440+ tests across the core crates and a reference
+application, backed by PostgreSQL for event sourcing and an OTLP-based observability
+pipeline that exports to any OpenTelemetry-compatible backend.  Two deployment paths
+are supported: a self-hosted path where a coding agent produces specs plus a Cargo
+crate with full verification tests and infrastructure, and a platform-hosted path
+where `temper serve --specs-dir` runs the verification cascade at startup and provides
+multi-tenant OData hosting.  Multi-tenancy allows multiple application tenants to
+coexist on a single server, each with independently verified specs dispatched through
+a shared `SpecRegistry`.  A live Claude-powered LLM agent demonstrates the full
+feedback loop: natural language requests are interpreted into OData operations, state
+machine transitions are persisted to PostgreSQL, telemetry is exported via OTLP to an
+OpenTelemetry Collector (which forwards to ClickHouse or any other backend), and the
+Evolution Engine generates product intelligence records identifying unmet user intents.
+We evaluate against a reference e-commerce application with three verified state
+machines (Order: 10 states, 14 actions; Payment: 6 states, 7 actions; Shipment: 7
+states, 7 actions), 22 DST tests including determinism proofs, a full O-P-A-D-I
+evolution chain, and a pattern library of four additional verified specifications
+(support ticket, approval workflow, subscription management, issue tracker) that
+demonstrate the generality of the IOA approach across common enterprise SaaS domains.
 
 ---
 
@@ -226,6 +231,9 @@ The reference Order automaton (`order.ioa.toml`) defines:
   `Decrement`, `Emit`).
 - **Safety invariants:** `SubmitRequiresItems`, `ShipRequiresPayment`,
   `CancelledIsFinal`, `RefundedIsFinal`.
+- **Integration declarations:** `[[integration]]` sections declare external
+  side effects (webhooks, notifications) as metadata, dispatched asynchronously
+  after transitions (see Section 4.3.1).
 
 The TOML serialization is parsed into an `Automaton` struct that feeds
 both the verification cascade (directly to `TemperModel` for Stateright model
@@ -296,6 +304,23 @@ crate defines traits for mailbox streams, shard placement, and TTL-based caching
 with in-memory stub implementations.  Actor mailboxes currently use local
 `tokio::sync::mpsc` channels; Redis-backed implementations are planned for
 distributed deployment.
+
+### 4.3.1 Integration Engine and Outbox Pattern
+
+External integrations are declared as metadata in the IOA specification
+(`[[integration]]` sections) and dispatched asynchronously after state transitions
+via the `IntegrationEngine`.  The state machine itself remains pure and
+deterministically verifiable: the verification cascade operates on transition
+rules only and ignores integration metadata.  This separation is deliberate--
+the outbox pattern ensures that side effects cannot violate state machine
+invariants because they execute *after* the transition is persisted, not
+during guard evaluation or effect application.
+
+The dispatch flow is: `EntityActor` applies a transition, emits
+`Effect::EmitEvent`, the event is persisted to the Postgres journal, and the
+`IntegrationEngine` asynchronously dispatches to registered webhook endpoints.
+Delivery follows at-least-once semantics with configurable exponential backoff
+retry, matching the actor runtime's existing supervision backoff strategy.
 
 ### 4.4 Bounded Execution (TigerStyle)
 
@@ -504,6 +529,11 @@ L3 Property Tests PASSED: 1000 cases, 30 max steps
   initial state (BFS still needed for base case).
 - The guard/effect language restricts what Z3 can reason about: only
   integer counters and booleans, no arithmetic expressions or set operations.
+
+**Integration engine limitations:**
+- Webhook is the only supported transport; gRPC and message queue transports
+  are planned.
+- Delivery is at-least-once; exactly-once semantics require idempotent receivers.
 
 **Future work:** composition calculus for multi-entity verification,
 fairness-aware liveness checker, richer guard language with arithmetic.
@@ -1043,7 +1073,59 @@ used by the verification model.  This establishes a critical invariant:
 > **The transition table in the HTTP-serving entity actor derives from the
 > same `Automaton` verified by the four-level cascade.**
 
-### 11.7 Live Infrastructure Validation
+### 11.7 Performance Benchmarks
+
+All benchmarks use Criterion 0.5 with 100 samples.  The e-commerce agent checkout
+benchmark exercises the full stack an agent hits: HTTP request → axum routing →
+OData path parsing → Cedar authorization → actor dispatch → TransitionTable
+evaluation → Postgres event persistence → JSON response serialization.
+
+**Transition table hot path.**  The `evaluate_ctx()` method uses a pre-built
+`BTreeMap<String, Vec<usize>>` index for O(log K) action lookup by name,
+eliminating the O(N) linear scan and `Vec` allocation on every call.
+
+| Benchmark | Latency |
+|-----------|---------|
+| `evaluate_ctx` — successful transition | 28 ns |
+| `evaluate_ctx` — guard failure | 30 ns |
+| `evaluate_ctx` — wrong state (no match) | 25 ns |
+| `evaluate_ctx` — unknown action | 14 ns |
+| `TransitionTable::from_ioa_source()` (parse + compile + index) | 16 μs |
+| `EvalContext` construction (2 counters, 1 boolean) | 149 ns |
+| `rebuild_index()` | 669 ns |
+
+**End-to-end agent checkout — in-memory (no persistence).**  Each checkout
+executes 13 OData HTTP POST requests across 3 entity types (Order, Payment,
+Shipment), driving the full order lifecycle from Draft through Delivered.
+
+| Scenario | Latency |
+|----------|---------|
+| 1 agent checkout (13 actions, 3 entities) | 461 μs |
+| 10 concurrent checkouts | 999 μs |
+| 100 concurrent checkouts (1,300 requests, 300 actors) | 9.5 ms |
+
+**End-to-end agent checkout — with PostgreSQL persistence.**  Same workload
+with every event persisted to PostgreSQL 18 via `sqlx`.
+
+| Scenario | Latency | Throughput |
+|----------|---------|------------|
+| 1 agent checkout (13 actions, 3 entities) | 17.7 ms | ~55 checkouts/sec |
+| 10 concurrent checkouts | 62 ms | ~160 checkouts/sec |
+| 100 concurrent checkouts (1,300 requests, 300 actors) | 591 ms | ~170 checkouts/sec |
+
+The 100-concurrent result represents 1,300 persisted OData actions completing in
+under 600 ms — approximately **2,200 persisted actions per second** through the
+full HTTP stack on a single node.
+
+**Bottleneck analysis.**  Postgres event append dominates at ~1.4 ms per action,
+roughly 50× the in-memory actor dispatch path (~28 μs).  The `evaluate_ctx()` hot
+path at 28 ns is effectively free relative to I/O.  OTEL trace export is
+asynchronous (batch processor) and does not appear on the critical path.
+Optimization priorities for higher throughput: write batching (multiple events per
+round-trip), connection pool tuning, and snapshot-based recovery to reduce journal
+replay on actor restart.
+
+### 11.8 Live Infrastructure Validation
 
 The system runs end-to-end against real infrastructure: PostgreSQL 18 for event
 sourcing, an OpenTelemetry Collector for telemetry

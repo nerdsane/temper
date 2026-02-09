@@ -17,6 +17,7 @@ pub mod bootstrap;
 pub mod deploy;
 pub mod evolution;
 pub mod hooks;
+pub mod integration;
 pub mod optimization;
 pub mod router;
 

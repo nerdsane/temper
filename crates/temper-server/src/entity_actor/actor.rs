@@ -270,6 +270,10 @@ impl Actor for EntityActor {
     ) -> Result<(), ActorError> {
         match msg {
             EntityMsg::Action { name, params } => {
+                // Capture start time for span duration (DST-safe: sim_now()
+                // returns logical clock in simulation, wall clock in production).
+                let action_start = sim_now();
+
                 // TigerStyle: Assert preconditions before every transition.
                 // These run in production, not just tests.
                 debug_assert!(
@@ -379,10 +383,18 @@ impl Actor for EntityActor {
                             Self::persist_event(store, &self.persistence_id(), state, &event).await;
                         }
 
-                        // Telemetry as Views: emit wide event → OTEL span + metrics
+                        // Telemetry as Views: emit wide event → OTEL span + metrics.
+                        // Duration covers evaluate + effects + persist (the full
+                        // actor-side work). DST-safe: sim_now() diff is 0 in
+                        // simulation (same logical tick), real wall-clock in production.
+                        let action_end = sim_now();
+                        let duration_ns = (action_end - action_start)
+                            .num_nanoseconds()
+                            .unwrap_or(0)
+                            .max(0) as u64;
                         let wide = wide_event::from_transition(
                             &state.entity_type, &state.entity_id, &name,
-                            &event.from_status, &state.status, true, 0,
+                            &event.from_status, &state.status, true, duration_ns,
                             &event.params, state.item_count, &self.trace_id,
                         );
                         wide_event::emit_span(&wide);
@@ -421,7 +433,20 @@ impl Actor for EntityActor {
                         });
                     }
                     Some(_) => {
-                        // Transition failed (guard not met)
+                        // Transition failed (guard not met) — emit telemetry
+                        let action_end = sim_now();
+                        let duration_ns = (action_end - action_start)
+                            .num_nanoseconds()
+                            .unwrap_or(0)
+                            .max(0) as u64;
+                        let wide = wide_event::from_transition(
+                            &state.entity_type, &state.entity_id, &name,
+                            &state.status, &state.status, false, duration_ns,
+                            &params, state.item_count, &self.trace_id,
+                        );
+                        wide_event::emit_span(&wide);
+                        wide_event::emit_metrics(&wide);
+
                         ctx.reply(EntityResponse {
                             success: false,
                             state: state.clone(),
@@ -432,6 +457,20 @@ impl Actor for EntityActor {
                         });
                     }
                     None => {
+                        // Unknown action — emit telemetry
+                        let action_end = sim_now();
+                        let duration_ns = (action_end - action_start)
+                            .num_nanoseconds()
+                            .unwrap_or(0)
+                            .max(0) as u64;
+                        let wide = wide_event::from_transition(
+                            &state.entity_type, &state.entity_id, &name,
+                            &state.status, &state.status, false, duration_ns,
+                            &params, state.item_count, &self.trace_id,
+                        );
+                        wide_event::emit_span(&wide);
+                        wide_event::emit_metrics(&wide);
+
                         ctx.reply(EntityResponse {
                             success: false,
                             state: state.clone(),

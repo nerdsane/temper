@@ -133,3 +133,22 @@ assert = "no_further_transitions"
 name = "RefundedIsFinal"
 when = ["Refunded"]
 assert = "no_further_transitions"
+
+# ---------------------------------------------------------------------------
+# Integrations — external system triggers (metadata only, no state change)
+# ---------------------------------------------------------------------------
+
+[[integration]]
+name = "notify_fulfillment"
+trigger = "SubmitOrder"
+type = "webhook"
+
+[[integration]]
+name = "charge_payment"
+trigger = "ConfirmOrder"
+type = "webhook"
+
+[[integration]]
+name = "notify_shipping"
+trigger = "ShipOrder"
+type = "webhook"

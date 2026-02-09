@@ -27,19 +27,23 @@ impl TransitionTable {
     /// is found and its guard passes, or `Some(TransitionResult)` with
     /// `success: false` if a rule matches by name but its guard fails.
     /// Returns `None` if no rule with the given `action` name exists.
+    ///
+    /// Uses a pre-built index for O(log K) action lookup instead of a linear
+    /// scan, eliminating the Vec allocation on the hot path.
     pub fn evaluate_ctx(
         &self,
         current_state: &str,
         ctx: &EvalContext,
         action: &str,
     ) -> Option<TransitionResult> {
-        let matching: Vec<_> = self.rules.iter().filter(|r| r.name == action).collect();
+        let indices = match self.rule_index.get(action) {
+            Some(idx) => idx,
+            None => return None,
+        };
 
-        if matching.is_empty() {
-            return None;
-        }
+        for &i in indices {
+            let rule = &self.rules[i];
 
-        for rule in &matching {
             let state_ok = rule.from_states.is_empty()
                 || rule.from_states.iter().any(|s| s == current_state);
 

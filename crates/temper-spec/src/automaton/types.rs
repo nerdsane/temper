@@ -23,6 +23,9 @@ pub struct Automaton {
     /// Liveness properties (something eventually happens).
     #[serde(default, rename = "liveness")]
     pub liveness: Vec<Liveness>,
+    /// Integration declarations (external triggers).
+    #[serde(default, rename = "integration")]
+    pub integrations: Vec<Integration>,
 }
 
 /// Automaton metadata.
@@ -151,4 +154,24 @@ pub struct Liveness {
     /// If true, asserts that actions are always available (no deadlock).
     #[serde(default)]
     pub has_actions: Option<bool>,
+}
+
+/// An integration declaration (external system trigger).
+///
+/// Integrations declare that a state machine event should trigger an external
+/// action (e.g., a webhook call). They are metadata only — they do not affect
+/// state transitions or verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Integration {
+    /// Integration name (e.g., "notify_fulfillment").
+    pub name: String,
+    /// The event that triggers this integration (action name from EmitEvent).
+    pub trigger: String,
+    /// Integration type: "webhook" (extensible to other types later).
+    #[serde(rename = "type", default = "default_webhook")]
+    pub integration_type: String,
+}
+
+fn default_webhook() -> String {
+    "webhook".to_string()
 }

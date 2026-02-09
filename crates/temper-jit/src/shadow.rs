@@ -97,7 +97,7 @@ mod tests {
     use crate::table::{Effect, Guard, TransitionRule, TransitionTable};
 
     fn base_table() -> TransitionTable {
-        TransitionTable {
+        let mut table = TransitionTable {
             entity_name: "Order".into(),
             states: vec!["Draft".into(), "Submitted".into(), "Cancelled".into()],
             initial_state: "Draft".into(),
@@ -123,7 +123,10 @@ mod tests {
                     ],
                 },
             ],
-        }
+            rule_index: Default::default(),
+        };
+        table.rebuild_index();
+        table
     }
 
     fn test_cases() -> Vec<TestCase> {
@@ -180,6 +183,7 @@ mod tests {
             Effect::SetState("Confirmed".into()),
             Effect::EmitEvent("SubmitOrder".into()),
         ];
+        // No rebuild needed — rule names unchanged, just to_state/effects differ.
 
         let result = shadow_test(&old, &new, &test_cases());
 
@@ -215,6 +219,7 @@ mod tests {
             guard: Guard::StateIn(vec!["Submitted".into()]),
             effects: vec![Effect::EmitEvent("ExpediteOrder".into())],
         });
+        new.rebuild_index();
 
         let cases = vec![TestCase {
             state: "Submitted".into(),

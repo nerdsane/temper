@@ -1,0 +1,25 @@
+# Integration deployment configuration for the e-commerce reference app.
+#
+# Maps IOA [[integration]] declarations to actual webhook endpoints.
+# This file is deployment-specific — not part of the spec itself.
+
+[[webhook]]
+name = "notify_fulfillment"
+url = "https://fulfillment.example.com/orders"
+method = "POST"
+timeout_ms = 5000
+max_retries = 3
+
+[[webhook]]
+name = "charge_payment"
+url = "https://payments.example.com/charge"
+method = "POST"
+timeout_ms = 10000
+max_retries = 5
+
+[[webhook]]
+name = "notify_shipping"
+url = "https://shipping.example.com/notify"
+method = "POST"
+timeout_ms = 5000
+max_retries = 3

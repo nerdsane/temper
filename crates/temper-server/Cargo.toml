@@ -24,6 +24,13 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+opentelemetry = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+criterion = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[[bench]]
+name = "actor_throughput"
+harness = false

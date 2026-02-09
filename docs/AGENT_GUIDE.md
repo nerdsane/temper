@@ -14,13 +14,15 @@ This document is the primary reference for LLM agents building applications with
 6. [Running the Server](#6-running-the-server)
 7. [Authorization (Cedar ABAC)](#7-authorization)
 8. [Observability — Telemetry as Views](#8-observability--telemetry-as-views)
-9. [Evolution Engine (How the System Improves)](#9-evolution-engine)
-10. [Trajectory Intelligence (How You Optimize Agents)](#10-trajectory-intelligence)
-11. [JIT Optimization (Hot-Swap Without Redeploy)](#11-jit-optimization)
-12. [API Reference Quick Guide](#12-api-reference)
-13. [Common Workflows](#13-common-workflows)
-14. [Anti-Patterns to Avoid](#14-anti-patterns)
-15. [Conversational Vision: How to Represent Temper to Users](#15-conversational-vision)
+9. [Integration Engine (External System Webhooks)](#9-integration-engine)
+10. [Evolution Engine (How the System Improves)](#10-evolution-engine)
+11. [Trajectory Intelligence (How You Optimize Agents)](#11-trajectory-intelligence)
+12. [JIT Optimization (Hot-Swap Without Redeploy)](#12-jit-optimization)
+13. [Performance Characteristics](#13-performance-characteristics)
+14. [API Reference Quick Guide](#14-api-reference)
+15. [Common Workflows](#15-common-workflows)
+16. [Anti-Patterns to Avoid](#16-anti-patterns)
+17. [Conversational Vision: How to Represent Temper to Users](#17-conversational-vision)
 
 ---
 
@@ -345,7 +347,7 @@ with a full `EvalContext` containing counters and booleans:
 1. Find matching rule by action name
 2. Check `from_states` guard (is current status valid for this action?)
 3. Check additional guards (`CounterMin`, `BoolTrue`, compound `And`)
-4. If guards pass: apply effects (`SetState`, `IncrementCounter`, `SetBool`, `EmitEvent`), record event
+4. If guards pass: apply effects (`SetState`, `IncrementCounter`, `SetBool`, `EmitEvent`, `Custom`), record event. `EmitEvent` feeds the Integration Engine for external webhooks (see [Section 9](#9-integration-engine)).
 5. If guards fail: return 409 Conflict with error message
 
 **Critical**: `TransitionTable::from_ioa_source(ioa_toml)` is the sole production constructor. The TLA+ code path has been fully removed.
@@ -577,7 +579,63 @@ Evolution records reference these as portable SQL. Swapping providers doesn't br
 
 ---
 
-## 9. Evolution Engine
+## 9. Integration Engine
+
+Integrations follow the **Outbox Pattern**: the state machine stays pure and deterministically verifiable; external calls happen out-of-band. `[[integration]]` declarations in IOA TOML are metadata — they don't affect state transitions or verification.
+
+### Spec Syntax
+
+Declare integrations alongside your automaton:
+
+```toml
+[[integration]]
+name = "notify_fulfillment"
+trigger = "SubmitOrder"
+type = "webhook"
+```
+
+The `trigger` names an action. When that action fires, the integration engine picks it up asynchronously.
+
+### Runtime Architecture
+
+```
+Entity Actor transition
+  → Effect::EmitEvent("SubmitOrder")
+  → mpsc channel
+  → IntegrationEngine (background tokio task)
+  → IntegrationRegistry.lookup("SubmitOrder")
+  → WebhookDispatcher.dispatch(config, event)
+```
+
+- **`IntegrationRegistry`** maps trigger event names to `IntegrationConfig` entries (built once at tenant registration from specs + deployment config).
+- **`WebhookDispatcher`** handles HTTP dispatch with configurable timeout and retry with exponential backoff.
+- **`IntegrationEngine`** runs as a background tokio task, receives `IntegrationEvent` messages via an `mpsc` channel, and dispatches to all registered webhooks for each trigger concurrently.
+
+### Deployment Configuration
+
+Webhook URLs are deployment-specific and live outside the IOA spec. See `reference-apps/ecommerce/integration.toml`:
+
+```toml
+[[webhook]]
+name = "notify_fulfillment"
+url = "https://fulfillment.example.com/orders"
+method = "POST"
+timeout_ms = 5000
+max_retries = 3
+```
+
+Each entry specifies the HTTP endpoint, method, timeout, and retry policy.
+
+### Key Design Decisions
+
+- **Not inline in the state machine.** Integrations are side effects, not transitions. The verification cascade (L0-L3) works on the pure state machine unchanged.
+- **At-least-once delivery.** Trigger events originate from the Postgres event journal, so they survive crashes.
+- **Retry with exponential backoff.** Configurable per integration via `RetryPolicy`.
+- **DST-safe.** Deterministic simulation ignores `EmitEvent` effects — no HTTP calls during testing.
+
+---
+
+## 10. Evolution Engine
 
 The Evolution Engine is how the system improves from production feedback. It produces an immutable chain of records:
 
@@ -645,7 +703,7 @@ rationale = "Low risk, addresses root cause"
 
 ---
 
-## 10. Trajectory Intelligence
+## 11. Trajectory Intelligence
 
 When agents use the OData API, their interaction sequences (trajectories) are captured as structured traces.
 
@@ -687,7 +745,7 @@ POST /tdata/$feedback
 
 ---
 
-## 11. JIT Optimization
+## 12. JIT Optimization
 
 Three tiers of execution, from most to least rigid:
 
@@ -709,7 +767,70 @@ Three tiers of execution, from most to least rigid:
 
 ---
 
-## 12. API Reference Quick Guide
+## 13. Performance Characteristics
+
+Benchmarks run through the full OData HTTP API stack: HTTP request → axum routing → OData path parsing → Cedar authz → actor dispatch → TransitionTable evaluation → Postgres event persistence → JSON response serialization.
+
+### Latency by Layer
+
+| Layer | Latency | Notes |
+|-------|---------|-------|
+| `evaluate_ctx()` (rule index lookup) | **~28ns** | BTreeMap O(log K), zero allocation |
+| EvalContext construction | ~150ns | BTreeMap inserts for counters + booleans |
+| TransitionTable compilation | ~16μs | `from_ioa_source()` — parse + build + index |
+| Actor dispatch (in-memory) | ~28μs | Spawn actor + send message + evaluate + respond |
+| Actor dispatch (with Postgres) | ~1.7ms | Dominated by Postgres event append |
+| Full agent checkout (13 actions, in-memory) | ~340μs | Order + Payment + Shipment lifecycle |
+| Full agent checkout (13 actions, Postgres) | **~18ms** | The realistic end-to-end number |
+
+### Concurrency — Full OData HTTP Stack + Postgres
+
+| Scenario | Latency | Throughput |
+|----------|---------|------------|
+| 1 agent checkout (13 actions) | ~18ms | ~55 checkouts/sec |
+| 10 concurrent checkouts | ~62ms | ~160 checkouts/sec |
+| 100 concurrent checkouts | ~591ms | ~170 checkouts/sec |
+
+100 concurrent checkouts = 1,300 OData HTTP requests across 300 entity actors, all persisted to Postgres. Throughput: **~2,200 persisted actions/sec** through the full stack.
+
+### Bottleneck Hierarchy
+
+Postgres I/O dominates at ~1.4ms per persisted action write — **50x slower** than the in-memory compute path (~28μs). The `evaluate_ctx()` hot path at 28ns is effectively free. Optimization priorities:
+
+1. **Postgres write batching** — batch multiple events per round-trip
+2. **Connection pooling** — already uses sqlx pool (max_connections=10)
+3. **Read path caching** — actors rebuild state from journal; snapshots reduce replay cost
+
+### Running Benchmarks
+
+```bash
+# TransitionTable micro-benchmarks (always works)
+cargo bench -p temper-jit --bench table_eval
+
+# Server actor dispatch overhead
+cargo bench -p temper-server --bench actor_throughput
+
+# Realistic e-commerce agent checkout (through full OData HTTP stack)
+cargo bench -p ecommerce-reference --bench agent_checkout
+
+# With Postgres persistence (requires running Postgres)
+DATABASE_URL=postgres://user:pass@localhost/db cargo bench -p ecommerce-reference --bench agent_checkout
+```
+
+### Telemetry Verification
+
+All actions emit OTEL traces to ClickHouse via the OTLP collector. Verify with:
+
+```sql
+SELECT SpanName, Duration / 1000000 as duration_ms
+FROM otel_traces
+WHERE Timestamp > now() - INTERVAL 5 MINUTE
+ORDER BY Timestamp
+```
+
+---
+
+## 14. API Reference Quick Guide
 
 ### OData Type Mapping
 
@@ -738,7 +859,7 @@ Three tiers of execution, from most to least rigid:
 
 ---
 
-## 13. Common Workflows
+## 15. Common Workflows
 
 ### Compile-First Onboarding (Coding Agent Path)
 
@@ -793,6 +914,7 @@ any of these causes silent failures that are hard to diagnose after the fact.
 - [ ] `model.csdl.xml` entity types match IOA spec names and states
 - [ ] Cedar policies exist for each entity type in `specs/policies/`
 - [ ] No warnings from L0 SMT (dead guards, unreachable states)
+- [ ] If specs contain `[[integration]]` sections, `integration.toml` exists with webhook URLs and retry config
 
 **Persistence (events survive restart):**
 - [ ] `DATABASE_URL` is set and points to a running Postgres instance
@@ -837,7 +959,7 @@ any of these causes silent failures that are hard to diagnose after the fact.
 
 ---
 
-## 14. Anti-Patterns to Avoid
+## 16. Anti-Patterns to Avoid
 
 | Anti-Pattern | Why It's Wrong | Do This Instead |
 |-------------|---------------|-----------------|
@@ -854,10 +976,11 @@ any of these causes silent failures that are hard to diagnose after the fact.
 | Putting guards inline in action params | Guards are separate from action parameters | Use `guard = "items > 0"` for preconditions, `params = [...]` for action inputs |
 | Deploying without `DATABASE_URL` | Server runs fine but events are lost on restart — silent data loss | Always set `DATABASE_URL`, verify "Postgres connected" in startup log |
 | Not querying Postgres after first deploy | No way to know if persistence is actually working | Run `SELECT COUNT(*) FROM events` after dispatching actions |
+| Putting webhook calls inside state machine guards or effects | Breaks deterministic verification, introduces network into the transition | Use `[[integration]]` declarations — external calls happen out-of-band via the Integration Engine |
 
 ---
 
-## 15. Conversational Vision: How to Represent Temper to Users
+## 17. Conversational Vision: How to Represent Temper to Users
 
 When a coding agent (you) uses Temper to build applications for a developer, PM,
 or founder, follow these principles for how you communicate.
@@ -923,7 +1046,7 @@ Always maintain this separation when building for users:
 
 ---
 
-## 16. TigerStyle Engineering Philosophy (Internal)
+## 17. TigerStyle Engineering Philosophy (Internal)
 
 Temper follows [TigerStyle](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md), TigerBeetle's engineering discipline. Key principles applied:
 
@@ -964,7 +1087,7 @@ If a spec change passes the 4-level verification cascade, it ships. If it doesn'
 
 ---
 
-## 17. DST-First Development Methodology (Internal)
+## 18. DST-First Development Methodology (Internal)
 
 When adding new features or changing state machines, follow the **DST-first** approach:
 

@@ -33,3 +33,4 @@ temper-codegen = { workspace = true }
 tokio-test = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }
+wiremock = { workspace = true }

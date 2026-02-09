@@ -85,7 +85,7 @@ mod tests {
     use crate::table::{Guard, TransitionRule, TransitionTable};
 
     fn dummy_table(name: &str) -> TransitionTable {
-        TransitionTable {
+        let mut table = TransitionTable {
             entity_name: name.to_string(),
             states: vec!["A".into(), "B".into()],
             initial_state: "A".into(),
@@ -96,7 +96,10 @@ mod tests {
                 guard: Guard::Always,
                 effects: vec![],
             }],
-        }
+            rule_index: Default::default(),
+        };
+        table.rebuild_index();
+        table
     }
 
     #[test]

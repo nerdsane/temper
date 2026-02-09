@@ -11,7 +11,7 @@ use std::sync::Arc;
 use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
-use temper_spec::automaton::{self, Automaton};
+use temper_spec::automaton::{self, Automaton, Integration};
 use temper_spec::csdl::CsdlDocument;
 
 /// A registered tenant with its specs and entity configuration.
@@ -36,6 +36,8 @@ pub struct TenantConfig {
 pub struct EntitySpec {
     /// The parsed I/O Automaton specification.
     pub automaton: Automaton,
+    /// Integration declarations from the IOA spec.
+    pub integrations: Vec<Integration>,
     /// Hot-swappable transition table controller.
     swap: Arc<SwapController>,
     /// Raw IOA TOML source (for invariant parsing, display, etc.).
@@ -123,10 +125,12 @@ impl SpecRegistry {
                 .unwrap_or_else(|e| panic!("failed to parse IOA for {entity_type}: {e}"));
             let table = TransitionTable::from_automaton(&automaton);
 
+            let integrations = automaton.integrations.clone();
             entities.insert(
                 entity_type.to_string(),
                 EntitySpec {
                     automaton,
+                    integrations,
                     swap: Arc::new(SwapController::new(table)),
                     ioa_source: ioa_source.to_string(),
                 },

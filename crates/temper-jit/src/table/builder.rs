@@ -32,7 +32,7 @@ impl TransitionTable {
             .map(|s| s.name.clone())
             .collect();
 
-        let rules = automaton
+        let rules: Vec<TransitionRule> = automaton
             .actions
             .iter()
             .filter(|a| a.kind != "output")
@@ -124,11 +124,18 @@ impl TransitionTable {
             })
             .collect();
 
+        // Build action-name → rule-indices index for O(log K) lookup.
+        let mut rule_index = std::collections::BTreeMap::new();
+        for (i, rule) in rules.iter().enumerate() {
+            rule_index.entry(rule.name.clone()).or_insert_with(Vec::new).push(i);
+        }
+
         TransitionTable {
             entity_name: automaton.automaton.name.clone(),
             states: automaton.automaton.states.clone(),
             initial_state: automaton.automaton.initial.clone(),
             rules,
+            rule_index,
         }
     }
 }

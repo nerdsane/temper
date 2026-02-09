@@ -87,6 +87,8 @@ reqwest = { version = "0.12", features = ["json"] }
 
 # Testing
 tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+wiremock = "0.6"
 
 # Internal crates
 temper-macros = { path = "crates/temper-macros" }

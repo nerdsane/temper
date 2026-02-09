@@ -1,0 +1,82 @@
+# Approval Workflow Entity — I/O Automaton Specification
+#
+# Models a document/change approval workflow.
+# 5 states, 6 transition actions.
+# Tracks approval count and reviewer assignment.
+
+[automaton]
+name = "Approval"
+states = ["Drafted", "PendingApproval", "Approved", "Rejected", "Withdrawn"]
+initial = "Drafted"
+
+# --- State Variables ---
+
+[[state]]
+name = "approvals"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "has_reviewer"
+type = "bool"
+initial = "false"
+
+# --- Actions: Approval Lifecycle ---
+
+[[action]]
+name = "AssignReviewer"
+kind = "input"
+from = ["Drafted"]
+to = "Drafted"
+effect = "set has_reviewer true"
+hint = "Assign a reviewer before submission."
+
+[[action]]
+name = "SubmitForApproval"
+kind = "internal"
+from = ["Drafted"]
+to = "PendingApproval"
+guard = "is_true has_reviewer"
+hint = "Submit document for review. Requires an assigned reviewer."
+
+[[action]]
+name = "Approve"
+kind = "internal"
+from = ["PendingApproval"]
+to = "Approved"
+effect = "increment approvals"
+hint = "Reviewer approves the document."
+
+[[action]]
+name = "Reject"
+kind = "internal"
+from = ["PendingApproval"]
+to = "Rejected"
+hint = "Reviewer rejects the document."
+
+[[action]]
+name = "Withdraw"
+kind = "input"
+from = ["Drafted", "PendingApproval"]
+to = "Withdrawn"
+hint = "Author withdraws the document from the process."
+
+[[action]]
+name = "Revise"
+kind = "input"
+from = ["Rejected"]
+to = "Drafted"
+effect = "set has_reviewer false"
+hint = "Author revises after rejection. Must reassign reviewer."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ApprovedHasApproval"
+when = ["Approved"]
+assert = "approvals > 0"
+
+[[invariant]]
+name = "WithdrawnIsFinal"
+when = ["Withdrawn"]
+assert = "no_further_transitions"

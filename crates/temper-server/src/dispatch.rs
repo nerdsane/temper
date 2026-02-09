@@ -7,8 +7,11 @@
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use opentelemetry::trace::{Span, Status, Tracer};
+use opentelemetry::KeyValue as OtelKeyValue;
 use temper_odata::path::{KeyValue, ODataPath, parse_path};
 use temper_odata::query::parse_query_options;
+use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
 use crate::response::{odata_error, ODataResponse, ODataXmlResponse};
@@ -219,21 +222,49 @@ pub async fn handle_odata_post(
                 None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{set_name}' not found")).into_response(),
             };
 
+            // HTTP-level span: covers authz + actor dispatch + response serialization.
+            // DST-safe: sim_now() for timestamps, no Instant::now().
+            let http_start = sim_now();
+            let tracer = opentelemetry::global::tracer("temper");
+            let http_start_time: std::time::SystemTime = http_start.into();
+            let span_name = format!("HTTP POST {set_name}.{action}");
+            let mut http_span = tracer
+                .span_builder(span_name)
+                .with_start_time(http_start_time)
+                .with_attributes(vec![
+                    OtelKeyValue::new("http.method", "POST"),
+                    OtelKeyValue::new("odata.entity_set", set_name.clone()),
+                    OtelKeyValue::new("odata.entity_id", key_str.clone()),
+                    OtelKeyValue::new("odata.action", action.clone()),
+                    OtelKeyValue::new("tenant", tenant.as_str().to_string()),
+                ])
+                .start(&tracer);
+
             // Cedar AuthZ check
             let authz_result = state.authorize(&[], &action, &entity_type, &std::collections::HashMap::new());
             if let Err(reason) = authz_result {
+                http_span.set_status(Status::error(reason.clone()));
+                let end_time: std::time::SystemTime = sim_now().into();
+                http_span.end_with_timestamp(end_time);
                 return odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason).into_response();
             }
 
-            match state.dispatch_tenant_action(&tenant, &entity_type, &key_str, &action, body_json).await {
+            let result = state.dispatch_tenant_action(&tenant, &entity_type, &key_str, &action, body_json).await;
+
+            let http_end: std::time::SystemTime = sim_now().into();
+            let response = match result {
                 Ok(response) => {
                     if response.success {
+                        http_span.set_status(Status::Ok);
+                        http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
                         let mut body = serde_json::to_value(&response.state).unwrap_or_default();
                         if let Some(obj) = body.as_object_mut() {
                             obj.insert("@odata.context".into(), serde_json::json!(format!("$metadata#{set_name}/$entity")));
                         }
                         ODataResponse { status: StatusCode::OK, body }.into_response()
                     } else {
+                        http_span.set_status(Status::error(response.error.clone().unwrap_or_default()));
+                        http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
                         odata_error(
                             StatusCode::CONFLICT,
                             "ActionFailed",
@@ -242,9 +273,14 @@ pub async fn handle_odata_post(
                     }
                 }
                 Err(e) => {
+                    http_span.set_status(Status::error(e.clone()));
+                    http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
                     odata_error(StatusCode::INTERNAL_SERVER_ERROR, "DispatchError", &e).into_response()
                 }
-            }
+            };
+
+            http_span.end_with_timestamp(http_end);
+            response
         }
 
         _ => odata_error(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed", "POST not supported for this path").into_response(),
