@@ -36,20 +36,48 @@ Temper operates through two separated conversational contexts:
 | **Developer Chat** | Developer / builder | Interview → generate specs → verify → deploy |
 | **Production Chat** | End users | Operate the app → unmet intents → evolution pipeline |
 
+### Development Flow (All Projects)
+
+All Temper projects follow the same development loop:
+
+```
+1. CONVERSE  → Developer + coding agent discuss the domain
+2. GENERATE  → Agent produces IOA specs + CSDL + Cedar
+3. VERIFY    → System generates DST scenarios, model checks, property tests
+4. REVIEW    → Developer reviews cascade results, counterexamples, coverage
+5. ITERATE   → Adjust specs until intent + verification are locked in
+6. DEPLOY    → Choose self-host or platform-host (see below)
+```
+
 The developer never writes specs by hand. They describe their domain through conversation.
-The system generates I/O Automaton specs, CSDL data models, and Cedar policies, runs the
-verification cascade, and deploys entity actors — all within the chat.
+The coding agent generates I/O Automaton specs, CSDL data models, and Cedar policies, runs the
+verification cascade, and iterates until all levels pass.
 
 When end users hit capabilities that don't exist, their unmet intents flow through the
 Evolution Engine. The developer reviews and approves changes via the Developer Chat.
 
-### The Lifecycle
+### Deployment Options
+
+| Option | How | What the agent produces | Status |
+|--------|-----|------------------------|--------|
+| **Self-host** | `temper codegen` → `cargo build` → deploy binary | Specs + Rust crate with DST tests + infrastructure | Production-ready |
+| **Platform-host** | `temper serve --specs-dir --tenant` | Specs only | Multi-tenant, future: hot-swap transitions |
+
+**Self-host path:** The coding agent produces a Cargo crate with specs, full verification cascade
+(Stateright + DST + property tests), and infrastructure (Docker Compose). The developer builds
+and deploys the binary. See `reference-apps/ecommerce/` for the canonical example.
+
+**Platform-host path:** The developer provides specs to `temper serve --specs-dir`, which runs
+the VerificationCascade at startup and rejects invalid specs. Multi-tenant hosting with
+domain-specific servers per tenant. Future: hot-swappable TransitionTables without build/deploy.
+
+### The Full Lifecycle
 
 ```
 1. CONVERSE → Developer describes domain in Developer Chat
 2. GENERATE → System produces IOA specs + CSDL + Cedar from conversation
 3. VERIFY   → 3-level cascade (model check + simulation + property tests)
-4. DEPLOY   → Hot-swap: entity actors live, OData API serving
+4. DEPLOY   → Self-host binary or platform-host via temper serve
 5. USE      → End users operate the app via Production Chat
 6. OBSERVE  → Trajectory intelligence captures unmet intents
 7. EVOLVE   → Evolution Engine proposes spec changes → developer approves
@@ -283,7 +311,7 @@ This produces for each entity:
 
 ### How Entity Actors Work at Runtime
 
-At runtime, entities are NOT served by the generated Rust code directly. Instead, the server builds a **JIT TransitionTable** from the I/O Automaton specification using `TransitionTable::from_tla_source()`. This table is the same verified artifact that passes the 3-level cascade. Each entity gets its own actor:
+At runtime, entities are NOT served by the generated Rust code directly. Instead, the server builds a **JIT TransitionTable** from the I/O Automaton specification using `TransitionTable::from_ioa_source()`. This table is the same verified artifact that passes the 3-level cascade. Each entity gets its own actor:
 
 ```
 HTTP Request → OData Parse → Actor Registry (get or spawn) → Entity Actor → TransitionTable.evaluate() → Response
@@ -302,7 +330,7 @@ When an action is dispatched, the actor evaluates it through the TransitionTable
 4. If guards pass: apply effects (SetState, IncrementItems, EmitEvent), record event
 5. If guards fail: return 409 Conflict with error message
 
-**Critical**: Always use `TransitionTable::from_tla_source(spec_source)` in production, NOT `from_state_machine(sm)`. The `from_tla_source` variant resolves guard predicates from the specification source, producing correct guard constraints. The `from_state_machine` variant may miss guards that reference predicates.
+**Critical**: Always use `TransitionTable::from_ioa_source(ioa_toml)` in production, NOT `from_state_machine(sm)`. The `from_ioa_source` variant resolves guard predicates from the specification source, producing correct guard constraints. The `from_state_machine` variant may miss guards that reference predicates.
 
 ---
 
@@ -336,27 +364,38 @@ temper verify --specs-dir specs
 
 ## 6. Running the Server
 
+### Compile-First Path (Recommended for Coding Agents)
+
+The safest onboarding path: write specs to disk, verify, then serve.
+
 ```bash
-temper serve --port 3000
-# Or directly:
-cargo run -p your-app
+# 1. Verify specs pass the 3-level cascade
+temper verify --specs-dir specs
+
+# 2. Start server with verified specs
+temper serve --specs-dir specs --tenant my-app --port 3000
 ```
+
+`temper serve --specs-dir` runs the verification cascade on every IOA spec before loading them.
+Invalid specs are rejected at startup — the server will not serve unverified entities.
 
 The server exposes OData v4 endpoints:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/odata` | Service document (lists entity sets) |
-| GET | `/odata/$metadata` | CSDL XML (full data model) |
-| GET | `/odata/Orders` | List orders (with $filter, $select, $expand, $orderby, $top, $skip) |
-| GET | `/odata/Orders('id')` | Get single order |
-| POST | `/odata/Orders` | Create order |
-| POST | `/odata/Orders('id')/Ns.SubmitOrder` | Invoke bound action |
-| GET | `/odata/Orders('id')/Ns.GetOrderTotal()` | Invoke bound function |
+| GET | `/tdata` | Service document (lists entity sets) |
+| GET | `/tdata/$metadata` | CSDL XML (full data model) |
+| GET | `/tdata/Orders` | List orders (with $filter, $select, $expand, $orderby, $top, $skip) |
+| GET | `/tdata/Orders('id')` | Get single order |
+| POST | `/tdata/Orders` | Create order |
+| POST | `/tdata/Orders('id')/Ns.SubmitOrder` | Invoke bound action |
+| GET | `/tdata/Orders('id')/Ns.GetOrderTotal()` | Invoke bound function |
+
+Use the `X-Tenant-Id` header for multi-tenant dispatch. If omitted, the server falls back to the first registered tenant.
 
 ### What Responses Look Like
 
-**POST /odata/Orders** (create — spawns actor in Draft):
+**POST /tdata/Orders** (create — spawns actor in Draft):
 ```json
 {
     "@odata.context": "$metadata#Orders/$entity",
@@ -369,7 +408,7 @@ The server exposes OData v4 endpoints:
 }
 ```
 
-**POST /odata/Orders('id')/Ns.AddItem** (action — real transition):
+**POST /tdata/Orders('id')/Ns.AddItem** (action — real transition):
 ```json
 {
     "@odata.context": "$metadata#Orders/$entity",
@@ -381,7 +420,7 @@ The server exposes OData v4 endpoints:
 }
 ```
 
-**POST /odata/Orders('id')/Ns.SubmitOrder** (guard enforced):
+**POST /tdata/Orders('id')/Ns.SubmitOrder** (guard enforced):
 ```json
 {
     "status": "Submitted",
@@ -408,10 +447,10 @@ The `events` array is the entity's full audit trail — every state transition w
 ### OData Query Examples
 
 ```
-GET /odata/Orders?$filter=Status eq 'Draft' and Total gt 100.0
-GET /odata/Orders?$select=Id,Status,Total&$orderby=CreatedAt desc&$top=10
-GET /odata/Orders('abc')?$expand=Items($select=ProductName,Quantity)
-GET /odata/Customers('xyz')?$expand=Orders($filter=Status ne 'Cancelled')
+GET /tdata/Orders?$filter=Status eq 'Draft' and Total gt 100.0
+GET /tdata/Orders?$select=Id,Status,Total&$orderby=CreatedAt desc&$top=10
+GET /tdata/Orders('abc')?$expand=Items($select=ProductName,Quantity)
+GET /tdata/Customers('xyz')?$expand=Orders($filter=Status ne 'Cancelled')
 ```
 
 ### Headers for Agent Authentication
@@ -608,7 +647,7 @@ The `$metadata` endpoint is dynamically enriched with learned patterns:
 
 After completing a trajectory, submit feedback:
 ```
-POST /odata/$feedback
+POST /tdata/$feedback
 {
     "TraceId": "abc-123",
     "Score": 0.8,
@@ -672,6 +711,17 @@ Three tiers of execution, from most to least rigid:
 
 ## 13. Common Workflows
 
+### Compile-First Onboarding (Coding Agent Path)
+
+The recommended path for coding agents that generate specs:
+
+1. Write `model.csdl.xml` with entity types, entity sets, and actions
+2. Write `*.ioa.toml` for each entity with states, actions, guards, invariants
+3. Run `temper verify --specs-dir specs` — all 3 cascade levels must pass
+4. Run `temper serve --specs-dir specs --tenant my-app`
+5. The OData API is now live at `/tdata`
+6. Use `X-Tenant-Id: my-app` header to target your tenant
+
 ### Adding a New Entity Type
 
 1. Add `<EntityType>` to `model.csdl.xml` with properties, key, and navigation
@@ -711,11 +761,12 @@ Three tiers of execution, from most to least rigid:
 | Anti-Pattern | Why It's Wrong | Do This Instead |
 |-------------|---------------|-----------------|
 | Hand-editing generated code | Will be overwritten on next codegen | Modify the CSDL/automaton specs |
-| Using `from_state_machine()` in production | Misses `CanXxx` guard resolution | Use `TransitionTable::from_tla_source()` |
+| Using `from_state_machine()` in production | Misses `CanXxx` guard resolution | Use `TransitionTable::from_ioa_source()` |
 | Skipping verification | Deploys unverified state machines | Always run `temper verify` |
+| Skipping `temper verify` before `temper serve --specs-dir` | Server now runs cascade at startup, but pre-verifying catches errors earlier | Always run `temper verify` first |
 | Calling actions without checking status | Will get 409 Conflict | GET entity first, check `status` field |
 | Calling actions without reading $metadata | May attempt invalid transitions | Read Agent.Hint annotations first |
-| Hard-coding entity URLs | Breaks if entity set names change | Read service document at `/odata` first |
+| Hard-coding entity URLs | Breaks if entity set names change | Read service document at `/tdata` first |
 | Writing provider-specific observability queries | Breaks when swapping Logfire↔Datadog | Use canonical SQL schema (spans, logs, metrics) |
 | Modifying Cedar policies without human approval | Security change requires human gate | Submit as evolution A-Record for review |
 | Creating evolution records without evidence | Unverifiable claims | Include SQL evidence queries in O-Records |
@@ -774,7 +825,7 @@ When adding new features or changing state machines, follow the **DST-first** ap
    #[tokio::test]
    async fn dst_new_feature() {
        let system = ActorSystem::new("dst");
-       let table = Arc::new(TransitionTable::from_tla_source(MY_TLA));
+       let table = Arc::new(TransitionTable::from_ioa_source(MY_IOA));
        let actor = EntityActor::new("Order", "test-1", table, json!({}));
        let actor_ref = system.spawn(actor, "test-1");
        // Exercise the new transition...
@@ -796,30 +847,133 @@ All three were found by DST tests before any HTTP request was made.
 
 ## Appendix A: Infrastructure Setup
 
+The canonical example is `reference-apps/ecommerce/` — start there for a working setup.
+
+### Quick Start
+
 ```bash
 # Start Postgres, Redis, ClickHouse, OTEL Collector
 docker compose up -d
-
-# Copy environment template
-cp .env.example .env
 
 # Start server with persistence + OTEL telemetry
 DATABASE_URL=postgres://temper:temper_dev@localhost:5432/temper \
 OTLP_ENDPOINT=http://localhost:4318 \
 cargo run -p ecommerce
 
-# Run the conversational agent (needs ANTHROPIC_API_KEY)
-OTLP_ENDPOINT=http://localhost:4318 cargo run -p ecommerce -- agent
-
-# Run a single agent command
 # Start the conversational developer platform
 temper serve --dev
 
 # Start in production mode with pre-built specs
 temper serve --production --specs-dir specs --tenant my-app
+```
 
-# With OTEL tracing enabled
-OTLP_ENDPOINT=http://localhost:4318 temper serve --dev
+### Docker Compose Template
+
+When creating a new `docker-compose.yml`, use these settings:
+
+```yaml
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: myapp
+      POSTGRES_USER: myapp
+      POSTGRES_PASSWORD: myapp_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      # IMPORTANT: Postgres 18 changed its data directory layout.
+      # Mount at /var/lib/postgresql (NOT /var/lib/postgresql/data).
+      - pg_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myapp"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      # IMPORTANT: Set both USER and PASSWORD, even if empty.
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ch_data:/var/lib/clickhouse
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      # IMPORTANT: The contrib image reads from /etc/otelcol-contrib/,
+      # NOT /etc/otelcol/. Using the wrong path silently ignores your config.
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+volumes:
+  pg_data:
+  ch_data:
+```
+
+### OTEL Collector Config Template
+
+The collector receives OTLP/HTTP from Temper and exports to ClickHouse via native TCP. Key settings:
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: "0.0.0.0:4318"
+
+exporters:
+  clickhouse:
+    # IMPORTANT: Use tcp:// (native protocol on port 9000), NOT http://
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s&compress=lz4
+    database: default
+    username: default
+    password: ""
+    traces_table_name: otel_traces
+    metrics_table_name: otel_metrics
+    logs_table_name: otel_logs
+    ttl: 72h
+    # IMPORTANT: Let the exporter create tables automatically.
+    create_schema: true
+```
+
+See `scripts/otel-collector.yaml` or `reference-apps/ecommerce/otel-collector-config.yml` for complete configs.
+
+### .env Template
+
+```bash
+DATABASE_URL=postgres://myapp:myapp_dev@localhost:5432/myapp
+REDIS_URL=redis://localhost:6379
+OTLP_ENDPOINT=http://localhost:4318
+CLICKHOUSE_URL=http://localhost:8123
+ANTHROPIC_API_KEY=sk-ant-...
+RUST_LOG=info,temper=debug
+```
+
+### Running Under Claude Code or Other OTEL-Injecting Tools
+
+Claude Code, Datadog agents, and similar tools inject `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and related env vars. These signal-specific vars take precedence over the generic `OTEL_EXPORTER_OTLP_ENDPOINT` in the OTEL SDK, silently routing telemetry to the wrong backend.
+
+**`init_tracing()` handles this automatically** — it clears all signal-specific OTEL env vars before setting the generic endpoint. If you're running outside Temper's `init_tracing()`:
+
+```bash
+env -u OTEL_EXPORTER_OTLP_TRACES_ENDPOINT \
+    -u OTEL_EXPORTER_OTLP_METRICS_ENDPOINT \
+    -u OTEL_EXPORTER_OTLP_LOGS_ENDPOINT \
+    -u OTEL_EXPORTER_OTLP_PROTOCOL \
+    OTLP_ENDPOINT=http://localhost:4318 \
+    cargo run -p my-app
 ```
 
 ## Appendix B: CLI Reference
@@ -829,7 +983,10 @@ temper init <name>              Create a new Temper project
 temper codegen [--specs-dir DIR] [--output-dir DIR]
                                 Generate Rust code from specs
 temper verify [--specs-dir DIR] Run 3-level verification cascade
-temper serve [--port PORT]      Start development server (default: 3000)
+temper serve [--port PORT] [--specs-dir DIR] [--tenant NAME]
+                                Start platform server
+                                With --specs-dir: runs verification cascade, loads specs, serves tenant
+                                Without --specs-dir: empty registry, system tenant only
 ```
 
 ## Appendix C: Environment Variables
@@ -842,3 +999,41 @@ temper serve [--port PORT]      Start development server (default: 3000)
 | `CLICKHOUSE_URL` | For analysis queries | ClickHouse HTTP endpoint (read path for trajectory analysis) |
 | `ANTHROPIC_API_KEY` | For agent mode | Claude API key |
 | `RUST_LOG` | No | Log level (default: `info,temper=debug`) |
+
+**OTEL env var precedence:** The OTEL SDK reads signal-specific env vars (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`) *before* the generic `OTEL_EXPORTER_OTLP_ENDPOINT`. If any signal-specific var is set — even by an unrelated tool — it silently overrides Temper's configured endpoint for that signal. `init_tracing()` clears these vars automatically. See Appendix D for details.
+
+## Appendix D: Infrastructure Pitfalls
+
+Known issues that cause silent failures. All are fixed in the framework, but documented here for awareness.
+
+### 1. OTEL Env Var Collision
+
+**Symptom:** Telemetry silently goes to the wrong endpoint. No errors in logs.
+
+**Root cause:** Tools like Claude Code and Datadog agents set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. The OTEL SDK reads signal-specific vars before the generic `OTEL_EXPORTER_OTLP_ENDPOINT`, so the tool's endpoint wins.
+
+**Fix:** `init_tracing()` in `temper-observe` clears all signal-specific OTEL env vars before setting the generic endpoint. For manual runs, use `env -u OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ...` (see Appendix A).
+
+### 2. OTEL Collector Config Mount Path
+
+**Symptom:** Collector starts but ignores your config. Uses built-in defaults (no ClickHouse exporter).
+
+**Root cause:** `otel/opentelemetry-collector-contrib` reads from `/etc/otelcol-contrib/config.yaml`, NOT `/etc/otelcol/config.yaml`. The base image (`otel/opentelemetry-collector`) uses `/etc/otelcol/`. Mounting to the wrong path is silently ignored.
+
+**Fix:** Always mount to `/etc/otelcol-contrib/config.yaml` when using the `-contrib` image.
+
+### 3. Postgres 18 Volume Path
+
+**Symptom:** Postgres container crashes on first start with fresh volumes. Errors about `initdb` or data directory permissions.
+
+**Root cause:** Postgres 18 changed its data directory layout. The traditional mount at `/var/lib/postgresql/data` fails on fresh volumes because Postgres 18 expects to create its own `data` subdirectory.
+
+**Fix:** Mount volumes at `/var/lib/postgresql` (not `/var/lib/postgresql/data`).
+
+### 4. ClickHouse Exporter Protocol
+
+**Symptom:** OTEL Collector logs connection errors to ClickHouse. Traces never appear.
+
+**Root cause:** The ClickHouse exporter uses the native TCP protocol (port 9000), not HTTP (port 8123). Using `http://clickhouse:8123` fails with protocol errors.
+
+**Fix:** Use `tcp://clickhouse:9000?dial_timeout=10s&compress=lz4` in the collector config. Set `create_schema: true` to let the exporter create tables automatically.

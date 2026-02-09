@@ -42,11 +42,23 @@ impl OtelGuard {
 /// Returns an [`OtelGuard`] that **must** be kept alive for the
 /// duration of the process and shut down before exit.
 pub fn init_tracing(endpoint: &str, service_name: &str) -> Result<OtelGuard, Box<dyn std::error::Error>> {
+    // Clear signal-specific OTEL env vars that take precedence over the
+    // generic endpoint.  Tools like Claude Code, Datadog agents, etc.
+    // may inject these, causing telemetry to silently route to the wrong
+    // backend.  We honour the developer's explicit `OTLP_ENDPOINT` by
+    // clearing the overrides before setting the generic var.
+    // SAFETY: called once at startup before any other threads read these vars.
+    for var in [
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_PROTOCOL",
+    ] {
+        unsafe { std::env::remove_var(var); }
+    }
+
     // Set the generic OTLP endpoint env var so the SDK appends the
-    // per-signal path (/v1/traces, /v1/metrics).  `with_endpoint()`
-    // expects the full URL including the signal path, but the env var
-    // approach handles it correctly.
-    // SAFETY: called once at startup before any other threads read this var.
+    // per-signal path (/v1/traces, /v1/metrics).
     unsafe { std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint); }
 
     let resource = Resource::builder_empty()
