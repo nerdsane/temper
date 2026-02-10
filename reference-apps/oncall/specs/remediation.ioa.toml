@@ -1,0 +1,113 @@
+# Remediation Entity — I/O Automaton Specification
+#
+# An action the agent takes to fix the issue. Safe actions can be
+# auto-approved; destructive remediations require human approval.
+# The approval gate ensures humans remain in control of risky operations.
+
+[automaton]
+name = "Remediation"
+states = ["Proposed", "Approved", "Executing", "Succeeded", "Failed", "Rejected"]
+initial = "Proposed"
+
+# --- State Variables ---
+
+[[state]]
+name = "human_approved"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "attempts"
+type = "counter"
+initial = "0"
+
+# --- Actions: Remediation Lifecycle ---
+
+[[action]]
+name = "Approve"
+kind = "input"
+from = ["Proposed"]
+to = "Approved"
+effect = "set human_approved true"
+params = ["ApproverId"]
+hint = "Human approves the proposed remediation."
+
+[[action]]
+name = "Reject"
+kind = "input"
+from = ["Proposed"]
+to = "Rejected"
+params = ["Reason"]
+hint = "Human rejects the proposed remediation."
+
+[[action]]
+name = "AutoApprove"
+kind = "input"
+from = ["Proposed"]
+to = "Approved"
+effect = "set human_approved true"
+hint = "Auto-approve safe remediation actions (e.g., restart pod, scale up)."
+
+[[action]]
+name = "Execute"
+kind = "internal"
+from = ["Approved"]
+to = "Executing"
+effect = "increment attempts"
+hint = "Begin executing the approved remediation."
+
+[[action]]
+name = "Succeed"
+kind = "internal"
+from = ["Executing"]
+to = "Succeeded"
+hint = "Remediation completed successfully."
+
+[[action]]
+name = "Fail"
+kind = "internal"
+from = ["Executing"]
+to = "Failed"
+params = ["ErrorMessage"]
+hint = "Remediation failed during execution."
+
+[[action]]
+name = "Retry"
+kind = "internal"
+from = ["Failed"]
+to = "Approved"
+hint = "Retry a failed remediation. Preserves approval state."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "SucceededIsFinal"
+when = ["Succeeded"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "RejectedIsFinal"
+when = ["Rejected"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "ExecutionTracked"
+when = ["Executing", "Succeeded", "Failed"]
+assert = "attempts > 0"
+
+[[invariant]]
+name = "ApprovalRequired"
+when = ["Approved", "Executing", "Succeeded", "Failed"]
+assert = "human_approved"
+
+# --- Integrations ---
+
+[[integration]]
+name = "request_approval"
+trigger = "Approve"
+type = "webhook"
+
+[[integration]]
+name = "notify_execution"
+trigger = "Execute"
+type = "webhook"

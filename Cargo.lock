@@ -2235,6 +2235,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncall-reference"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "criterion",
+ "hyper",
+ "serde_json",
+ "sqlx",
+ "temper-jit",
+ "temper-runtime",
+ "temper-server",
+ "temper-spec",
+ "temper-store-postgres",
+ "temper-verify",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

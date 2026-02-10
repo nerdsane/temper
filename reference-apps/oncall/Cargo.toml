@@ -1,0 +1,26 @@
+[package]
+name = "oncall-reference"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Reference on-call application demonstrating agent-driven incident response"
+
+[dev-dependencies]
+temper-jit = { path = "../../crates/temper-jit" }
+temper-runtime = { path = "../../crates/temper-runtime" }
+temper-server = { path = "../../crates/temper-server" }
+temper-store-postgres = { path = "../../crates/temper-store-postgres" }
+temper-verify = { path = "../../crates/temper-verify" }
+temper-spec = { path = "../../crates/temper-spec" }
+serde_json = { workspace = true }
+criterion = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+axum = { workspace = true }
+hyper = { workspace = true }
+tower = { workspace = true }
+
+[[bench]]
+name = "agent_triage"
+harness = false

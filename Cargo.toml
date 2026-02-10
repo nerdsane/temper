@@ -18,6 +18,7 @@ members = [
     "crates/temper-optimize",
     "crates/temper-platform",
     "reference-apps/ecommerce",
+    "reference-apps/oncall",
 ]
 
 [workspace.package]

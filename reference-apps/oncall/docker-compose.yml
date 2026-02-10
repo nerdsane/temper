@@ -1,0 +1,69 @@
+# Reference On-Call Infrastructure
+#
+# Provides the full Temper infrastructure stack:
+# - Postgres: event sourcing (events + snapshots)
+# - Redis: actor mailboxes and placement cache
+# - ClickHouse: observability read path (traces, metrics, evolution records)
+# - OTEL Collector: receives OTLP/HTTP, forwards to ClickHouse
+#
+# Usage:
+#   docker compose up -d        # Start all services
+#   docker compose down -v      # Stop and remove volumes
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: oncall
+      POSTGRES_PASSWORD: oncall_dev
+      POSTGRES_DB: oncall
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oncall"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:8
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ch_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    volumes:
+      - ./otel-collector-config.yml:/etc/otelcol-contrib/config.yaml
+    ports:
+      - "4318:4318"   # OTLP HTTP receiver
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+volumes:
+  pg_data:
+  ch_data:
