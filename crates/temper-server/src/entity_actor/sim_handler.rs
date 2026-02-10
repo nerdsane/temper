@@ -192,12 +192,26 @@ impl SimActorHandler for EntityActorHandler {
                     self.state.status = to_status;
                 }
 
-                // Update fields
+                // Update fields: status + action params + counters + booleans
                 if let Some(obj) = self.state.fields.as_object_mut() {
                     obj.insert(
                         "Status".to_string(),
                         serde_json::Value::String(self.state.status.clone()),
                     );
+                    // Project action params into fields
+                    if let Some(p) = params_value.as_object() {
+                        for (k, v) in p {
+                            obj.insert(k.clone(), v.clone());
+                        }
+                    }
+                    // Sync counters into fields
+                    for (k, v) in &self.state.counters {
+                        obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
+                    }
+                    // Sync booleans into fields
+                    for (k, v) in &self.state.booleans {
+                        obj.insert(k.clone(), serde_json::Value::Bool(*v));
+                    }
                 }
 
                 // Record event with sim_now() timestamp (deterministic)

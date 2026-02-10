@@ -195,6 +195,15 @@ impl EntityActor {
                             state.status = event.to_status.clone();
                         }
 
+                        // Project replayed event params into fields
+                        if let Some(obj) = state.fields.as_object_mut() {
+                            if let Some(p) = event.params.as_object() {
+                                for (k, v) in p {
+                                    obj.insert(k.clone(), v.clone());
+                                }
+                            }
+                        }
+
                         state.events.push(event);
                     }
                     state.sequence_nr = env.sequence_nr;
@@ -205,6 +214,13 @@ impl EntityActor {
                             "Status".into(),
                             serde_json::Value::String(state.status.clone()),
                         );
+                        // Sync final counter/boolean state into fields
+                        for (k, v) in &state.counters {
+                            obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
+                        }
+                        for (k, v) in &state.booleans {
+                            obj.insert(k.clone(), serde_json::Value::Bool(*v));
+                        }
                     }
                     tracing::info!(
                         entity = %state.entity_id,
@@ -364,9 +380,23 @@ impl Actor for EntityActor {
                             state.status = to_status.clone();
                         }
 
-                        // Update fields
+                        // Update fields: status + action params + counters + booleans
                         if let Some(obj) = state.fields.as_object_mut() {
                             obj.insert("Status".to_string(), serde_json::Value::String(state.status.clone()));
+                            // Project action params into fields
+                            if let Some(p) = params.as_object() {
+                                for (k, v) in p {
+                                    obj.insert(k.clone(), v.clone());
+                                }
+                            }
+                            // Sync counters into fields
+                            for (k, v) in &state.counters {
+                                obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
+                            }
+                            // Sync booleans into fields
+                            for (k, v) in &state.booleans {
+                                obj.insert(k.clone(), serde_json::Value::Bool(*v));
+                            }
                         }
 
                         // Record event
