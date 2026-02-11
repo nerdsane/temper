@@ -5,10 +5,11 @@ PAYLOAD="$(cat)"
 if command -v jq >/dev/null 2>&1; then
     CMD="$(echo "$PAYLOAD" | jq -r '.tool_input.command // empty')"
 else
-    CMD="$(echo "$PAYLOAD" | grep -o '"command"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"command"\s*:\s*"\([^"]*\)".*/\1/')"
+    # Fallback: extract command field. Use -m1 to avoid hanging on empty input.
+    CMD="$(echo "$PAYLOAD" | grep -o -m1 '"command"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || true)"
 fi
 # Only run verification after git push
-case "$CMD" in
+case "${CMD:-}" in
     *"git push"*)
         WORKSPACE_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
         echo "Running post-push verification..." >&2

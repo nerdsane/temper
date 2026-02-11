@@ -116,13 +116,13 @@ export default function SpecViewer() {
                       {action.kind}
                     </span>
                   </td>
-                  <td className="px-4 py-2.5 font-mono text-gray-300">{action.from}</td>
-                  <td className="px-4 py-2.5 font-mono text-gray-300">{action.to}</td>
+                  <td className="px-4 py-2.5 font-mono text-gray-300">{action.from.join(", ")}</td>
+                  <td className="px-4 py-2.5 font-mono text-gray-300">{action.to ?? <span className="text-gray-600">--</span>}</td>
                   <td className="px-4 py-2.5 font-mono text-yellow-400/80 text-xs">
-                    {action.guard || <span className="text-gray-600">--</span>}
+                    {action.guards.length > 0 ? action.guards.join("; ") : <span className="text-gray-600">--</span>}
                   </td>
                   <td className="px-4 py-2.5 font-mono text-gray-400 text-xs">
-                    {action.effect || <span className="text-gray-600">--</span>}
+                    {action.effects.length > 0 ? action.effects.join("; ") : <span className="text-gray-600">--</span>}
                   </td>
                 </tr>
               ))}
@@ -146,7 +146,7 @@ export default function SpecViewer() {
               <div className="text-sm space-y-1">
                 <div className="flex gap-2">
                   <span className="text-gray-500 w-16 flex-shrink-0">when</span>
-                  <code className="font-mono text-yellow-400/80 text-xs">{inv.when}</code>
+                  <code className="font-mono text-yellow-400/80 text-xs">{inv.when.length > 0 ? inv.when.join(", ") : "always"}</code>
                 </div>
                 <div className="flex gap-2">
                   <span className="text-gray-500 w-16 flex-shrink-0">assert</span>

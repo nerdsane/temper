@@ -106,7 +106,7 @@ export default function Dashboard() {
                     {entity.entity_id}
                   </td>
                   <td className="px-4 py-3">
-                    <StatusBadge status={entity.status} />
+                    <StatusBadge status={entity.current_state ?? entity.actor_status} />
                   </td>
                   <td className="px-4 py-3 text-right">
                     <Link

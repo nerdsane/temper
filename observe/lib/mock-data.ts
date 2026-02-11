@@ -2,6 +2,7 @@
 // Used as fallback when the backend is unavailable.
 
 export interface SpecSummary {
+  tenant?: string;
   entity_type: string;
   states: string[];
   actions: string[];
@@ -11,15 +12,15 @@ export interface SpecSummary {
 export interface SpecAction {
   name: string;
   kind: string;
-  from: string;
-  to: string;
-  guard: string | null;
-  effect: string | null;
+  from: string[];
+  to: string | null;
+  guards: string[];
+  effects: string[];
 }
 
 export interface SpecInvariant {
   name: string;
-  when: string;
+  when: string[];
   assertion: string;
 }
 
@@ -41,7 +42,8 @@ export interface SpecDetail {
 export interface EntitySummary {
   entity_type: string;
   entity_id: string;
-  status: string;
+  actor_status: string;
+  current_state?: string;
 }
 
 export interface VerificationLevel {
@@ -101,19 +103,18 @@ export const MOCK_SPEC_DETAILS: Record<string, SpecDetail> = {
     states: ["Open", "InProgress", "Review", "Closed", "Cancelled"],
     initial_state: "Open",
     actions: [
-      { name: "assign", kind: "input", from: "Open", to: "Open", guard: "assignee != null", effect: "set assignee" },
-      { name: "start_work", kind: "input", from: "Open", to: "InProgress", guard: "assignee != null", effect: null },
-      { name: "submit_review", kind: "input", from: "InProgress", to: "Review", guard: null, effect: "set review_requested_at" },
-      { name: "approve", kind: "input", from: "Review", to: "Closed", guard: "reviewer != assignee", effect: "set closed_at" },
-      { name: "reject", kind: "input", from: "Review", to: "InProgress", guard: null, effect: "increment rejection_count" },
-      { name: "cancel", kind: "input", from: "Open", to: "Cancelled", guard: null, effect: "set cancelled_at" },
-      { name: "cancel", kind: "input", from: "InProgress", to: "Cancelled", guard: null, effect: "set cancelled_at" },
-      { name: "reopen", kind: "input", from: "Closed", to: "Open", guard: "days_since_closed < 30", effect: "clear closed_at" },
+      { name: "assign", kind: "input", from: ["Open"], to: "Open", guards: ["assignee != null"], effects: ["set assignee"] },
+      { name: "start_work", kind: "input", from: ["Open"], to: "InProgress", guards: ["assignee != null"], effects: [] },
+      { name: "submit_review", kind: "input", from: ["InProgress"], to: "Review", guards: [], effects: ["set review_requested_at"] },
+      { name: "approve", kind: "input", from: ["Review"], to: "Closed", guards: ["reviewer != assignee"], effects: ["set closed_at"] },
+      { name: "reject", kind: "input", from: ["Review"], to: "InProgress", guards: [], effects: ["increment rejection_count"] },
+      { name: "cancel", kind: "input", from: ["Open", "InProgress"], to: "Cancelled", guards: [], effects: ["set cancelled_at"] },
+      { name: "reopen", kind: "input", from: ["Closed"], to: "Open", guards: ["days_since_closed < 30"], effects: ["clear closed_at"] },
     ],
     invariants: [
-      { name: "assigned_before_progress", when: "state == InProgress", assertion: "assignee != null" },
-      { name: "review_needs_reviewer", when: "state == Review", assertion: "reviewer != null" },
-      { name: "no_further_transitions", when: "state == Cancelled", assertion: "no outgoing transitions except reopen" },
+      { name: "assigned_before_progress", when: ["InProgress"], assertion: "assignee != null" },
+      { name: "review_needs_reviewer", when: ["Review"], assertion: "reviewer != null" },
+      { name: "no_further_transitions", when: ["Cancelled"], assertion: "no outgoing transitions except reopen" },
     ],
     state_variables: [
       { name: "assignee", var_type: "Option<UserId>", initial: "null" },
@@ -129,19 +130,17 @@ export const MOCK_SPEC_DETAILS: Record<string, SpecDetail> = {
     states: ["Draft", "Sent", "Paid", "Overdue", "Voided"],
     initial_state: "Draft",
     actions: [
-      { name: "finalize", kind: "input", from: "Draft", to: "Draft", guard: "line_items.len() > 0", effect: "compute total" },
-      { name: "send", kind: "input", from: "Draft", to: "Sent", guard: "total > 0", effect: "set sent_at" },
-      { name: "record_payment", kind: "input", from: "Sent", to: "Paid", guard: "amount == total", effect: "set paid_at" },
-      { name: "record_payment", kind: "input", from: "Overdue", to: "Paid", guard: "amount == total", effect: "set paid_at" },
-      { name: "mark_overdue", kind: "internal", from: "Sent", to: "Overdue", guard: "days_since_sent > 30", effect: "set overdue_at" },
-      { name: "void", kind: "input", from: "Draft", to: "Voided", guard: null, effect: "set voided_at" },
-      { name: "void", kind: "input", from: "Sent", to: "Voided", guard: null, effect: "set voided_at" },
-      { name: "resend", kind: "input", from: "Sent", to: "Sent", guard: null, effect: "update sent_at" },
+      { name: "finalize", kind: "input", from: ["Draft"], to: "Draft", guards: ["line_items.len() > 0"], effects: ["compute total"] },
+      { name: "send", kind: "input", from: ["Draft"], to: "Sent", guards: ["total > 0"], effects: ["set sent_at"] },
+      { name: "record_payment", kind: "input", from: ["Sent", "Overdue"], to: "Paid", guards: ["amount == total"], effects: ["set paid_at"] },
+      { name: "mark_overdue", kind: "internal", from: ["Sent"], to: "Overdue", guards: ["days_since_sent > 30"], effects: ["set overdue_at"] },
+      { name: "void", kind: "input", from: ["Draft", "Sent"], to: "Voided", guards: [], effects: ["set voided_at"] },
+      { name: "resend", kind: "input", from: ["Sent"], to: "Sent", guards: [], effects: ["update sent_at"] },
     ],
     invariants: [
-      { name: "paid_has_amount", when: "state == Paid", assertion: "paid_amount == total" },
-      { name: "no_further_transitions", when: "state == Voided", assertion: "no outgoing transitions" },
-      { name: "sent_has_total", when: "state == Sent", assertion: "total > 0" },
+      { name: "paid_has_amount", when: ["Paid"], assertion: "paid_amount == total" },
+      { name: "no_further_transitions", when: ["Voided"], assertion: "no outgoing transitions" },
+      { name: "sent_has_total", when: ["Sent"], assertion: "total > 0" },
     ],
     state_variables: [
       { name: "total", var_type: "Decimal", initial: "0" },
@@ -157,15 +156,15 @@ export const MOCK_SPEC_DETAILS: Record<string, SpecDetail> = {
     states: ["Pending", "Confirmed", "Shipped", "Delivered", "Returned"],
     initial_state: "Pending",
     actions: [
-      { name: "confirm", kind: "input", from: "Pending", to: "Confirmed", guard: "items.len() > 0", effect: "set confirmed_at" },
-      { name: "ship", kind: "input", from: "Confirmed", to: "Shipped", guard: "shipping_address != null", effect: "set shipped_at, generate tracking_id" },
-      { name: "deliver", kind: "input", from: "Shipped", to: "Delivered", guard: null, effect: "set delivered_at" },
-      { name: "return_order", kind: "input", from: "Delivered", to: "Returned", guard: "days_since_delivered < 14", effect: "set returned_at" },
-      { name: "cancel", kind: "input", from: "Pending", to: "Pending", guard: null, effect: "set cancelled_at" },
+      { name: "confirm", kind: "input", from: ["Pending"], to: "Confirmed", guards: ["items.len() > 0"], effects: ["set confirmed_at"] },
+      { name: "ship", kind: "input", from: ["Confirmed"], to: "Shipped", guards: ["shipping_address != null"], effects: ["set shipped_at", "generate tracking_id"] },
+      { name: "deliver", kind: "input", from: ["Shipped"], to: "Delivered", guards: [], effects: ["set delivered_at"] },
+      { name: "return_order", kind: "input", from: ["Delivered"], to: "Returned", guards: ["days_since_delivered < 14"], effects: ["set returned_at"] },
+      { name: "cancel", kind: "input", from: ["Pending"], to: "Pending", guards: [], effects: ["set cancelled_at"] },
     ],
     invariants: [
-      { name: "shipped_has_tracking", when: "state == Shipped", assertion: "tracking_id != null" },
-      { name: "no_further_transitions", when: "state == Returned", assertion: "no outgoing transitions" },
+      { name: "shipped_has_tracking", when: ["Shipped"], assertion: "tracking_id != null" },
+      { name: "no_further_transitions", when: ["Returned"], assertion: "no outgoing transitions" },
     ],
     state_variables: [
       { name: "shipping_address", var_type: "Option<Address>", initial: "null" },
@@ -181,15 +180,15 @@ export const MOCK_SPEC_DETAILS: Record<string, SpecDetail> = {
 // --- Mock Entities ---
 
 export const MOCK_ENTITIES: EntitySummary[] = [
-  { entity_type: "Ticket", entity_id: "TKT-001", status: "InProgress" },
-  { entity_type: "Ticket", entity_id: "TKT-002", status: "Open" },
-  { entity_type: "Ticket", entity_id: "TKT-003", status: "Review" },
-  { entity_type: "Ticket", entity_id: "TKT-004", status: "Closed" },
-  { entity_type: "Invoice", entity_id: "INV-001", status: "Sent" },
-  { entity_type: "Invoice", entity_id: "INV-002", status: "Paid" },
-  { entity_type: "Invoice", entity_id: "INV-003", status: "Draft" },
-  { entity_type: "Order", entity_id: "ORD-001", status: "Shipped" },
-  { entity_type: "Order", entity_id: "ORD-002", status: "Pending" },
+  { entity_type: "Ticket", entity_id: "TKT-001", actor_status: "active", current_state: "InProgress" },
+  { entity_type: "Ticket", entity_id: "TKT-002", actor_status: "active", current_state: "Open" },
+  { entity_type: "Ticket", entity_id: "TKT-003", actor_status: "active", current_state: "Review" },
+  { entity_type: "Ticket", entity_id: "TKT-004", actor_status: "active", current_state: "Closed" },
+  { entity_type: "Invoice", entity_id: "INV-001", actor_status: "active", current_state: "Sent" },
+  { entity_type: "Invoice", entity_id: "INV-002", actor_status: "active", current_state: "Paid" },
+  { entity_type: "Invoice", entity_id: "INV-003", actor_status: "active", current_state: "Draft" },
+  { entity_type: "Order", entity_id: "ORD-001", actor_status: "active", current_state: "Shipped" },
+  { entity_type: "Order", entity_id: "ORD-002", actor_status: "active", current_state: "Pending" },
 ];
 
 // --- Mock Verification Results ---

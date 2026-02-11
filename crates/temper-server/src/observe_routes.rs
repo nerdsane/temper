@@ -3,10 +3,10 @@
 //! These endpoints expose internal Temper state for the observability frontend.
 //! They are only available when the `observe` feature is enabled.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
 
@@ -90,8 +90,17 @@ pub struct EntityInstanceSummary {
     pub entity_type: String,
     /// Entity ID.
     pub entity_id: String,
-    /// Current status.
-    pub status: String,
+    /// Actor liveness status (e.g. "active", "stopped").
+    pub actor_status: String,
+}
+
+/// Query parameters for the simulation endpoint.
+#[derive(Deserialize)]
+pub struct SimQueryParams {
+    /// PRNG seed (default: 42).
+    pub seed: Option<u64>,
+    /// Max simulation ticks (default: 200).
+    pub ticks: Option<u64>,
 }
 
 /// Build the observe router (mounted at /observe).
@@ -100,6 +109,9 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/specs", get(list_specs))
         .route("/specs/{entity}", get(get_spec_detail))
         .route("/entities", get(list_entities))
+        .route("/verify/{entity}", post(run_verification))
+        .route("/simulation/{entity}", get(run_simulation))
+        .route("/entities/{entity_type}/{entity_id}/history", get(get_entity_history))
 }
 
 /// GET /observe/specs -- list all loaded specs across all tenants.
@@ -190,11 +202,109 @@ async fn list_entities(State(state): State<ServerState>) -> Json<Vec<EntityInsta
             EntityInstanceSummary {
                 entity_type: parts.get(1).unwrap_or(&"unknown").to_string(),
                 entity_id: parts.get(2).unwrap_or(&"unknown").to_string(),
-                status: "active".to_string(),
+                actor_status: "active".to_string(),
             }
         })
         .collect();
     Json(entities)
+}
+
+/// POST /observe/verify/{entity} -- run verification cascade on a spec.
+///
+/// Runs all levels (L0 SMT, L1 Model Check, L2 DST, L3 PropTest) and returns results.
+async fn run_verification(
+    State(state): State<ServerState>,
+    Path(entity): Path<String>,
+) -> Result<Json<temper_verify::CascadeResult>, StatusCode> {
+    let ioa_source = {
+        let registry = state.registry.read().unwrap();
+        let mut found = None;
+        for tenant_id in registry.tenant_ids() {
+            if let Some(entity_spec) = registry.get_spec(tenant_id, &entity) {
+                found = Some(entity_spec.ioa_source.clone());
+                break;
+            }
+        }
+        found
+    };
+
+    let Some(ioa_source) = ioa_source else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    // Run the cascade in a blocking task since verification is CPU-intensive.
+    let result = tokio::task::spawn_blocking(move || {
+        temper_verify::VerificationCascade::from_ioa(&ioa_source)
+            .with_sim_seeds(5)
+            .with_prop_test_cases(100)
+            .run()
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(result))
+}
+
+/// GET /observe/simulation/{entity}?seed=N&ticks=M -- run deterministic simulation.
+///
+/// Runs a single-seed simulation with light fault injection and returns the result.
+async fn run_simulation(
+    State(state): State<ServerState>,
+    Path(entity): Path<String>,
+    Query(params): Query<SimQueryParams>,
+) -> Result<Json<temper_verify::SimulationResult>, StatusCode> {
+    let ioa_source = {
+        let registry = state.registry.read().unwrap();
+        let mut found = None;
+        for tenant_id in registry.tenant_ids() {
+            if let Some(entity_spec) = registry.get_spec(tenant_id, &entity) {
+                found = Some(entity_spec.ioa_source.clone());
+                break;
+            }
+        }
+        found
+    };
+
+    let Some(ioa_source) = ioa_source else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    let seed = params.seed.unwrap_or(42);
+    let ticks = params.ticks.unwrap_or(200);
+
+    let result = tokio::task::spawn_blocking(move || {
+        let config = temper_verify::SimConfig {
+            seed,
+            max_ticks: ticks,
+            num_actors: 3,
+            max_actions_per_actor: 20,
+            max_counter: 2,
+            faults: temper_runtime::scheduler::FaultConfig::light(),
+        };
+        temper_verify::run_simulation_from_ioa(&ioa_source, &config)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(result))
+}
+
+/// GET /observe/entities/{entity_type}/{entity_id}/history -- entity event history.
+///
+/// Returns a stub response. Full history requires event-sourcing integration
+/// with temper-store-postgres, which is not yet wired into the observe layer.
+async fn get_entity_history(
+    Path((entity_type, entity_id)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    // Stub: event sourcing persistence is not yet wired into observe routes.
+    // When temper-store-postgres is integrated, this will query the event log.
+    Json(serde_json::json!({
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "current_state": null,
+        "events": [],
+        "note": "Event history requires temper-store-postgres integration (not yet wired)"
+    }))
 }
 
 #[cfg(test)]

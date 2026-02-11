@@ -29,9 +29,9 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
     const terminalStates = new Set<string>();
     for (const inv of spec.invariants) {
       if (inv.name === "no_further_transitions" || inv.assertion.includes("no outgoing")) {
-        // Extract state from "when" clause
-        const match = inv.when.match(/state\s*==\s*(\w+)/);
-        if (match) terminalStates.add(match[1]);
+        for (const state of inv.when) {
+          terminalStates.add(state);
+        }
       }
     }
 
@@ -62,9 +62,13 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
     // Deduplicate edges: group actions between same state pairs
     const edgeMap = new Map<string, string[]>();
     for (const action of spec.actions) {
-      const key = `${action.from}->${action.to}`;
-      if (!edgeMap.has(key)) edgeMap.set(key, []);
-      edgeMap.get(key)!.push(action.name);
+      const to = action.to ?? action.from[0];
+      for (const from of action.from) {
+        const key = `${from}->${to}`;
+        if (!edgeMap.has(key)) edgeMap.set(key, []);
+        const labels = edgeMap.get(key)!;
+        if (!labels.includes(action.name)) labels.push(action.name);
+      }
     }
 
     const transitionEdges: TransitionEdge[] = [];
