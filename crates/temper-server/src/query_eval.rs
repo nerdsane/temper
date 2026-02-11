@@ -97,7 +97,7 @@ fn evaluate_filter(entity: &serde_json::Value, expr: &FilterExpr) -> Option<bool
         }
         // A bare property or literal used as boolean
         FilterExpr::Property(prop) => {
-            entity.get(prop).and_then(|v| v.as_bool())
+            resolve_property(entity, prop).and_then(|v| v.as_bool())
         }
         FilterExpr::Literal(ODataValue::Boolean(b)) => Some(*b),
         _ => None,
@@ -107,10 +107,17 @@ fn evaluate_filter(entity: &serde_json::Value, expr: &FilterExpr) -> Option<bool
 /// Evaluate a filter expression to a JSON value (for comparison).
 fn evaluate_value(entity: &serde_json::Value, expr: &FilterExpr) -> Option<serde_json::Value> {
     match expr {
-        FilterExpr::Property(prop) => entity.get(prop).cloned(),
+        FilterExpr::Property(prop) => resolve_property(entity, prop),
         FilterExpr::Literal(val) => Some(odata_value_to_json(val)),
         _ => None,
     }
+}
+
+/// Resolve a property name against an entity, checking top-level first,
+/// then falling back to the `fields` sub-object.
+fn resolve_property(entity: &serde_json::Value, prop: &str) -> Option<serde_json::Value> {
+    entity.get(prop).cloned()
+        .or_else(|| entity.get("fields").and_then(|f| f.get(prop)).cloned())
 }
 
 /// Convert an OData literal to a serde_json::Value.
@@ -191,9 +198,9 @@ fn evaluate_function(entity: &serde_json::Value, name: &str, args: &[FilterExpr]
 fn sort_entities(entities: &mut [serde_json::Value], orderby: &[OrderByClause]) {
     entities.sort_by(|a, b| {
         for clause in orderby {
-            let a_val = a.get(&clause.property);
-            let b_val = b.get(&clause.property);
-            let ordering = match (a_val, b_val) {
+            let a_val = resolve_property(a, &clause.property);
+            let b_val = resolve_property(b, &clause.property);
+            let ordering = match (&a_val, &b_val) {
                 (Some(av), Some(bv)) => json_cmp(av, bv).unwrap_or(std::cmp::Ordering::Equal),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -216,23 +223,21 @@ fn select_fields(entities: Vec<serde_json::Value>, select: &[String]) -> Vec<ser
     entities
         .into_iter()
         .map(|entity| {
-            if let Some(obj) = entity.as_object() {
-                let mut selected = serde_json::Map::new();
-                for prop in select {
-                    if let Some(val) = obj.get(prop) {
-                        selected.insert(prop.clone(), val.clone());
-                    }
+            let mut selected = serde_json::Map::new();
+            for prop in select {
+                if let Some(val) = resolve_property(&entity, prop) {
+                    selected.insert(prop.clone(), val);
                 }
-                // Always include OData annotations
+            }
+            // Always include OData annotations
+            if let Some(obj) = entity.as_object() {
                 for (k, v) in obj {
                     if k.starts_with('@') {
                         selected.insert(k.clone(), v.clone());
                     }
                 }
-                serde_json::Value::Object(selected)
-            } else {
-                entity
             }
+            serde_json::Value::Object(selected)
         })
         .collect()
 }
