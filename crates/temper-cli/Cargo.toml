@@ -15,7 +15,7 @@ temper-spec = { workspace = true }
 temper-codegen = { workspace = true }
 temper-verify = { workspace = true }
 temper-platform = { workspace = true }
-temper-server = { workspace = true }
+temper-server = { workspace = true, features = ["observe"] }
 temper-runtime = { workspace = true }
 temper-jit = { workspace = true }
 temper-observe = { workspace = true }

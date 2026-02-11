@@ -73,13 +73,23 @@ cargo test -p temper-platform       # Platform unit + deploy pipeline
 cargo test -p temper-platform --test platform_e2e_dst  # E2E shared registry proof
 ```
 
-## Post-Task Verification Checklist
-Before completing any task:
-1. `cargo test --workspace` — all 430+ tests pass
-2. `cargo check --workspace` — no compilation errors
-3. `scripts/audit-deps.sh` — temper-jit clean of verification deps
-4. `scripts/check-dst-coverage.sh` — every spec has DST tests
-5. No `stateright` or `proptest` in production binary deps
+## Development Harness
+
+See `docs/HARNESS.md` for the full harness reference with diagrams.
+
+### Automated Enforcement (Claude Code Hooks)
+- **Plan Reminder** (advisory): Reminds to create `.progress/` plan before edits
+- **Spec Verification** (BLOCKING): L0-L3 cascade on every `.ioa.toml` edit
+- **Dependency Isolation** (BLOCKING): Prevents temper-jit from pulling verify deps
+- **Determinism Guard** (advisory): Warns about HashMap/SystemTime in simulation code
+- **Post-Push Verify** (advisory): Runs tests after push, writes markers
+- **Session Exit Gate** (BLOCKING): Blocks exit if unverified pushes or compile errors
+
+### Git Hooks (installed via `scripts/setup-hooks.sh`)
+- **Pre-commit**: Integrity check (no TODO/unwrap), spec syntax, dep audit
+- **Pre-push**: 3-gate pipeline — integrity check, determinism audit, full test suite
+
+Everything is automated. The harness runs on edit, commit, push, and session exit. No manual scripts to remember.
 
 ## Error Handling Standards (TigerStyle)
 - **Bounded mailboxes**: Every actor mailbox has a capacity limit

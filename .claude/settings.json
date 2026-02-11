@@ -20,6 +20,16 @@
             "type": "command",
             "command": ".claude/hooks/verify-specs.sh",
             "timeout": 120
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/check-deps.sh",
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/check-determinism.sh",
+            "timeout": 10
           }
         ]
       },

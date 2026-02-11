@@ -26,3 +26,6 @@ credentials.json
 # Logs
 *.log
 .z3-trace
+
+# Harness
+.cascade-results/
