@@ -4,22 +4,15 @@
 
 This skill guides you through the interview, spec generation, verification, and deployment workflow.
 
-## Prerequisites
+## WORKFLOW ORDER — READ THIS FIRST
 
-Before starting, ensure the `temper` CLI is available:
+**Interview FIRST, CLI LATER.** When the user says "build me a X":
 
-```bash
-# Option 1: Build from the temper repo and add to PATH
-cd /path/to/temper && cargo build --release
-export PATH="$PWD/target/release:$PATH"
+1. Run the **Interview Protocol** (Steps 1–6) to understand what they want
+2. Only AFTER the interview is complete, check CLI prerequisites and run `temper init`
+3. Generate specs, verify, deploy
 
-# Option 2: Run directly from the temper repo
-cargo run --manifest-path /path/to/temper/Cargo.toml -- init my-app
-```
-
-If `temper` is not in PATH, prefix all CLI commands with `cargo run --manifest-path /path/to/temper/Cargo.toml --`.
-
-**Check**: Run `temper --help` (or the cargo equivalent) to verify the CLI is available before proceeding.
+Do NOT build binaries, scaffold projects, or run any CLI commands until the interview is done.
 
 ## Interview Protocol
 
@@ -60,13 +53,33 @@ Ask: "What rules must ALWAYS be true, regardless of how we got to a state?"
 - Common assertions: `"items > 0"`, `"no_further_transitions"` (terminal state)
 
 ### Step 7: Generate and Verify
+
+**Prerequisites** — ensure the `temper` CLI is available before running commands:
+
+```bash
+# Option 1: If `temper` is in PATH
+temper --help
+
+# Option 2: Build from the temper repo and add to PATH
+cd /path/to/temper && cargo build --release
+export PATH="$PWD/target/release:$PATH"
+
+# Option 3: Run directly from the temper repo
+cargo run --manifest-path /path/to/temper/Cargo.toml -- --help
+```
+
+If `temper` is not in PATH, prefix all CLI commands with `cargo run --manifest-path /path/to/temper/Cargo.toml --`.
+
+**Project directory** — create the project in the **user's current working directory**, NOT inside the temper source repo. For example, if the user is in `~/projects/`, then `temper init linear-clone` creates `~/projects/linear-clone/`.
+
 1. Run `temper init <project-name>` to scaffold the project (if starting fresh)
-2. Generate the `.ioa.toml` spec files **directly in `specs/`** — all specs must be flat at the top level, **no subdirectories** (the CLI does not recurse)
-3. Generate matching CSDL in `specs/model.csdl.xml` — **CSDL must exactly match IOA** (see Mapping Rules below)
-4. Run `temper verify --specs-dir specs/` to check all specs
-5. Translate any verification failures to developer-friendly language
-6. Iterate until all cascade levels pass
-7. Run `temper serve --specs-dir specs/ --tenant <name>` to deploy
+2. `cd` into the new project directory
+3. Generate the `.ioa.toml` spec files **directly in `specs/`** — all specs must be flat at the top level, **no subdirectories** (the CLI does not recurse)
+4. Generate matching CSDL in `specs/model.csdl.xml` — **CSDL must exactly match IOA** (see Mapping Rules below)
+5. Run `temper verify --specs-dir specs/` to check all specs
+6. Translate any verification failures to developer-friendly language
+7. Iterate until all cascade levels pass
+8. Run `temper serve --specs-dir specs/ --tenant <name>` to deploy
 
 **Critical**: The CLI discovers specs via non-recursive `read_dir()`. Files like `specs/orders/order.ioa.toml` are **silently ignored**. Always use a flat layout:
 ```
