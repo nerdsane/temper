@@ -60,7 +60,13 @@ Ask: "What rules must ALWAYS be true, regardless of how we got to a state?"
 temper --help
 ```
 
-If this fails, tell the user: "The `temper` CLI is not installed. Run `cargo install --path crates/temper-cli` from the Temper repo, or add the built binary to your PATH." Do NOT search for or guess the repo location — ask the user where it is.
+If this fails, install it from GitHub (requires Rust toolchain):
+
+```bash
+cargo install --git https://github.com/nerdsane/temper temper-cli
+```
+
+Then retry `temper --help`. Do NOT search the filesystem for a local temper repo.
 
 **Project directory** — create the project in the **user's current working directory**, NOT inside the temper source repo. For example, if the user is in `~/projects/`, then `temper init linear-clone` creates `~/projects/linear-clone/`.
 
