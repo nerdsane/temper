@@ -1,10 +1,31 @@
 # WS6: Fix P0 Gaps — OData Dispatch + Codegen
 
-## Status: COMPLETE
+## Status: COMPLETE + E2E VERIFIED
 
 ## Results
 
 All 7 P0 gaps fixed. 515 workspace tests pass (0 failures).
+
+### E2E Verification (Live Server)
+
+All 10 E2E tests passed against running server on port 3333:
+
+| # | Test | Result |
+|---|------|--------|
+| 1 | GET /tdata/Orders (empty set) | PASS — returns `{"value":[]}` |
+| 2 | POST /tdata/Orders with body | PASS — entity created with customer=Alice |
+| 3 | GET /tdata/Orders('o1') | PASS — returns entity with customer field |
+| 4 | GET /tdata/Orders('nonexistent') | PASS — returns 404 |
+| 5 | PATCH /tdata/Orders('o1') | PASS — customer updated to Bob |
+| 5b | GET confirms PATCH | PASS — returns Bob |
+| 6 | GET with $filter=customer eq 'Alice' | PASS — returns only Alice's orders |
+| 7 | DELETE /tdata/Orders('o1') | PASS — returns 204 |
+| 7b | GET deleted entity | PASS — returns 404 |
+| 8 | GET /tdata/Orders after ops | PASS — only o2 remains |
+| 9 | temper codegen --specs-dir | PASS — 7 modules generated from 5 IOA + 1 TLA+ |
+
+### Post-E2E Fix
+- `resolve_property()` added to `query_eval.rs` — filter/sort/select now resolve properties from `fields` sub-object when not found at top level.
 
 ### Phase 1: Entity GET 404 (Gap #6) — DONE
 - Fixed `dispatch.rs`: returns 404 with OData error body on entity not found

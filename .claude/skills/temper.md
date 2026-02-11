@@ -41,11 +41,13 @@ Ask: "What rules must ALWAYS be true, regardless of how we got to a state?"
 - Common assertions: `"items > 0"`, `"no_further_transitions"` (terminal state)
 
 ### Step 7: Generate and Verify
-1. Generate the `.ioa.toml` spec from the conversation
-2. Generate matching CSDL EntityType in `model.csdl.xml`
-3. Run `temper verify --specs-dir specs/` to check the spec
-4. Translate any verification failures to developer-friendly language
-5. Iterate until all cascade levels pass
+1. Run `temper init <project-name>` to scaffold the project (if starting fresh)
+2. Generate the `.ioa.toml` spec files in the `specs/` directory
+3. Generate matching CSDL in `specs/model.csdl.xml` — **CSDL must exactly match IOA** (see Mapping Rules below)
+4. Run `temper verify --specs-dir specs/` to check all specs
+5. Translate any verification failures to developer-friendly language
+6. Iterate until all cascade levels pass
+7. Run `temper serve --specs-dir specs/ --tenant <name>` to deploy
 
 ---
 
@@ -795,6 +797,230 @@ Each entity type needs a corresponding entry in `specs/model.csdl.xml`. The CSDL
 </Action>
 ```
 
+### IOA ↔ CSDL Mapping Rules
+
+**Every IOA spec file MUST have a matching CSDL EntityType, and vice versa.** Mismatches cause verification failures or runtime dispatch errors. Follow these rules exactly:
+
+#### Entity-Level Mapping
+
+| IOA Field | CSDL Annotation | Rule |
+|---|---|---|
+| `[automaton].name` | `<EntityType Name="...">` | Must be identical |
+| `[automaton].states` | `Temper.Vocab.StateMachine.States` | Every IOA state must appear in CSDL Collection, same order |
+| `[automaton].initial` | `Temper.Vocab.StateMachine.InitialState` | Must match exactly |
+| (filename) | `Temper.Vocab.StateMachine.Spec` | Must point to the `.ioa.toml` file (e.g., `"task.ioa.toml"`) |
+
+#### Action-Level Mapping
+
+| IOA Field | CSDL Element/Annotation | Rule |
+|---|---|---|
+| `[[action]].name` | `<Action Name="...">` | Must be identical |
+| `[[action]].from` | `Temper.Vocab.StateMachine.ValidFromStates` | Every state in `from` array must appear in CSDL Collection |
+| `[[action]].to` | `Temper.Vocab.StateMachine.TargetState` | Must match exactly (omit both if self-loop) |
+| `[[action]].params` | `<Parameter Name="..." Type="..."/>` | Each IOA param becomes a CSDL Parameter (after `bindingParameter`) |
+| `[[action]].hint` | `Temper.Vocab.Agent.Hint` | Copy hint text verbatim |
+
+#### Rules
+
+1. **Only `kind = "input"` and `kind = "internal"` actions get CSDL `<Action>` entries.** Output actions (`kind = "output"`) are events and do NOT appear as CSDL actions.
+2. **Self-loop actions** (no `to` field, or `to` equals a `from` state) still need CSDL actions with `ValidFromStates` but no `TargetState`.
+3. **Every CSDL `<Action>` must have `IsBound="true"`** with the first parameter being `bindingParameter` of the entity type.
+4. **CSDL namespace** must be consistent (e.g., `Temper.MyApp`) across all EntityTypes and Actions.
+5. **Property types**: Map IOA `[[state]]` variables to CSDL Properties — `type = "counter"` → `Edm.Int32`, `type = "bool"` → `Edm.Boolean`.
+6. **The `Spec` annotation** must use `Temper.Vocab.StateMachine.Spec` and point to the IOA file (not TLA+).
+
+### Complete Worked Example: Task Entity
+
+This shows **both files together** for a simple Task entity with Draft → InProgress → Done lifecycle.
+
+#### `specs/task.ioa.toml`
+
+```toml
+# Task entity with draft/progress/done lifecycle
+[automaton]
+name = "Task"
+states = ["Draft", "InProgress", "Done", "Cancelled"]
+initial = "Draft"
+
+[[state]]
+name = "edits"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "StartWork"
+kind = "input"
+from = ["Draft"]
+to = "InProgress"
+hint = "Begin working on the task."
+
+[[action]]
+name = "EditTask"
+kind = "input"
+from = ["Draft", "InProgress"]
+effect = "increment edits"
+hint = "Edit task details. Does not change state."
+
+[[action]]
+name = "CompleteTask"
+kind = "internal"
+from = ["InProgress"]
+to = "Done"
+hint = "Mark the task as completed."
+
+[[action]]
+name = "CancelTask"
+kind = "input"
+from = ["Draft", "InProgress"]
+to = "Cancelled"
+params = ["Reason"]
+hint = "Cancel the task with a reason."
+
+[[action]]
+name = "ReopenTask"
+kind = "input"
+from = ["Done"]
+to = "InProgress"
+hint = "Reopen a completed task."
+
+[[invariant]]
+name = "CancelledIsFinal"
+when = ["Cancelled"]
+assert = "no_further_transitions"
+
+[[liveness]]
+name = "EventuallyCompleted"
+from = ["Draft"]
+reaches = ["Done", "Cancelled"]
+```
+
+#### `specs/model.csdl.xml` (matching CSDL)
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+
+    <!-- Temper vocabulary terms -->
+    <Schema Namespace="Temper.Vocab" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <Term Name="StateMachine.States" Type="Collection(Edm.String)" AppliesTo="EntityType"/>
+      <Term Name="StateMachine.InitialState" Type="Edm.String" AppliesTo="EntityType"/>
+      <Term Name="StateMachine.Spec" Type="Edm.String" AppliesTo="EntityType"/>
+      <Term Name="StateMachine.ValidFromStates" Type="Collection(Edm.String)" AppliesTo="Action"/>
+      <Term Name="StateMachine.TargetState" Type="Edm.String" AppliesTo="Action"/>
+      <Term Name="Agent.Hint" Type="Edm.String" AppliesTo="Action EntityType"/>
+    </Schema>
+
+    <!-- Application schema -->
+    <Schema Namespace="Temper.TaskApp" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <!-- Entity Type: matches task.ioa.toml exactly -->
+      <EntityType Name="Task">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="Edits" Type="Edm.Int32" Nullable="false" DefaultValue="0"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+
+        <!-- States must match [automaton].states exactly -->
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Draft</String>
+            <String>InProgress</String>
+            <String>Done</String>
+            <String>Cancelled</String>
+          </Collection>
+        </Annotation>
+        <!-- Initial must match [automaton].initial -->
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Draft"/>
+        <!-- Points to the IOA spec file -->
+        <Annotation Term="Temper.Vocab.StateMachine.Spec" String="task.ioa.toml"/>
+      </EntityType>
+
+      <!-- Action: StartWork — from=["Draft"] to="InProgress" -->
+      <Action Name="StartWork" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TaskApp.Task"/>
+        <ReturnType Type="Temper.TaskApp.Task"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Draft</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="InProgress"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Begin working on the task."/>
+      </Action>
+
+      <!-- Action: EditTask — self-loop from=["Draft","InProgress"], no TargetState -->
+      <Action Name="EditTask" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TaskApp.Task"/>
+        <ReturnType Type="Temper.TaskApp.Task"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Draft</String>
+            <String>InProgress</String>
+          </Collection>
+        </Annotation>
+        <!-- No TargetState — this is a self-loop (effect only, no state change) -->
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Edit task details. Does not change state."/>
+      </Action>
+
+      <!-- Action: CompleteTask — from=["InProgress"] to="Done" -->
+      <Action Name="CompleteTask" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TaskApp.Task"/>
+        <ReturnType Type="Temper.TaskApp.Task"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>InProgress</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Done"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Mark the task as completed."/>
+      </Action>
+
+      <!-- Action: CancelTask — from=["Draft","InProgress"] to="Cancelled", has params -->
+      <Action Name="CancelTask" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TaskApp.Task"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.TaskApp.Task"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Draft</String>
+            <String>InProgress</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Cancelled"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Cancel the task with a reason."/>
+      </Action>
+
+      <!-- Action: ReopenTask — from=["Done"] to="InProgress" -->
+      <Action Name="ReopenTask" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TaskApp.Task"/>
+        <ReturnType Type="Temper.TaskApp.Task"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Done</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="InProgress"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Reopen a completed task."/>
+      </Action>
+
+      <!-- Entity Container -->
+      <EntityContainer Name="Default">
+        <EntitySet Name="Tasks" EntityType="Temper.TaskApp.Task"/>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>
+```
+
+**Checklist**: Before generating, verify:
+- [ ] Every state in `[automaton].states` appears in `StateMachine.States` Collection
+- [ ] `[automaton].initial` matches `StateMachine.InitialState`
+- [ ] `Spec` annotation points to the `.ioa.toml` filename
+- [ ] Every `kind = "input"` or `kind = "internal"` action has a matching `<Action>`
+- [ ] Every action's `from` array matches its `ValidFromStates` Collection
+- [ ] Every action's `to` matches its `TargetState` (omit for self-loops)
+- [ ] Every action's `params` match `<Parameter>` elements (after `bindingParameter`)
+- [ ] `kind = "output"` actions are NOT in CSDL
+- [ ] All `<Action>` entries have `IsBound="true"` with correct `bindingParameter` type
+- [ ] EntityContainer has an `<EntitySet>` for each EntityType
+
 ---
 
 ## Cedar Authorization
@@ -853,3 +1079,5 @@ forbid(
 | Deploying without DATABASE_URL | Events are lost on restart (silent data loss) | Always set DATABASE_URL for any real deployment |
 | Putting webhook logic in guards or effects | Breaks deterministic verification | Use `[[integration]]` declarations for external calls |
 | Using `/odata` as the API path | The actual endpoint is `/tdata` | Always use `/tdata` |
+| CSDL states don't match IOA states | Runtime dispatch will fail or actions silently rejected | Use the Mapping Rules checklist above — every IOA state and action must appear in CSDL |
+| Missing `Spec` annotation or pointing to `.tla` | Server won't find the IOA spec at runtime | Use `Temper.Vocab.StateMachine.Spec` pointing to `entity.ioa.toml` |
