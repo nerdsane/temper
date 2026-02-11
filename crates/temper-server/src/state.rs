@@ -1,6 +1,6 @@
 //! Server state shared across all request handlers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -38,6 +38,8 @@ pub struct ServerState {
     pub authz: Arc<AuthzEngine>,
     /// Multi-tenant specification registry (shared, mutable for live registration).
     pub registry: Arc<RwLock<SpecRegistry>>,
+    /// Index of entity IDs per (tenant:entity_type) for collection queries.
+    pub entity_index: Arc<RwLock<HashMap<String, HashSet<String>>>>,
 }
 
 impl ServerState {
@@ -68,6 +70,7 @@ impl ServerState {
             agent_hints: Arc::new(RwLock::new(HashMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
             registry: Arc::new(RwLock::new(SpecRegistry::new())),
+            entity_index: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -120,6 +123,7 @@ impl ServerState {
             agent_hints: Arc::new(RwLock::new(HashMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
             registry,
+            entity_index: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -138,6 +142,17 @@ impl ServerState {
         tenant: &TenantId,
         entity_type: &str,
         entity_id: &str,
+    ) -> Option<ActorRef<EntityMsg>> {
+        self.get_or_spawn_tenant_actor_with_fields(tenant, entity_type, entity_id, serde_json::json!({}))
+    }
+
+    /// Get or spawn an entity actor with initial fields for a specific tenant.
+    pub fn get_or_spawn_tenant_actor_with_fields(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
     ) -> Option<ActorRef<EntityMsg>> {
         let key = format!("{tenant}:{entity_type}:{entity_id}");
 
@@ -160,21 +175,57 @@ impl ServerState {
         // Spawn new actor
         let actor = match &self.event_store {
             Some(pg) => EntityActor::with_persistence(
-                entity_type, entity_id, table.clone(), serde_json::json!({}), pg.clone(),
+                entity_type, entity_id, table.clone(), initial_fields, pg.clone(),
             ),
             None => EntityActor::new(
-                entity_type, entity_id, table.clone(), serde_json::json!({}),
+                entity_type, entity_id, table.clone(), initial_fields,
             ),
         };
         let actor_ref = self.actor_system.spawn(actor, &key);
 
-        // Register
+        // Register in actor registry
         {
             let mut registry = self.actor_registry.write().unwrap();
             registry.insert(key, actor_ref.clone());
         }
 
+        // Track in entity index for collection queries
+        {
+            let index_key = format!("{tenant}:{entity_type}");
+            let mut index = self.entity_index.write().unwrap();
+            index.entry(index_key).or_default().insert(entity_id.to_string());
+        }
+
         Some(actor_ref)
+    }
+
+    /// Remove an entity from the index and actor registry.
+    pub fn remove_entity(&self, tenant: &TenantId, entity_type: &str, entity_id: &str) {
+        let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
+
+        // Remove from actor registry
+        {
+            let mut registry = self.actor_registry.write().unwrap();
+            registry.remove(&actor_key);
+        }
+
+        // Remove from entity index
+        {
+            let index_key = format!("{tenant}:{entity_type}");
+            let mut index = self.entity_index.write().unwrap();
+            if let Some(ids) = index.get_mut(&index_key) {
+                ids.remove(entity_id);
+            }
+        }
+    }
+
+    /// List all entity IDs for a (tenant, entity_type) pair.
+    pub fn list_entity_ids(&self, tenant: &TenantId, entity_type: &str) -> Vec<String> {
+        let index_key = format!("{tenant}:{entity_type}");
+        let index = self.entity_index.read().unwrap();
+        index.get(&index_key)
+            .map(|ids| ids.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Check authorization for an action using the Cedar ABAC engine.
@@ -249,6 +300,75 @@ impl ServerState {
             .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(5))
             .await
             .map_err(|e| format!("Actor query failed: {e}"))
+    }
+
+    /// Create a new entity with initial fields and return its state.
+    pub async fn get_or_create_tenant_entity(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+    ) -> Result<EntityResponse, String> {
+        let actor_ref = self
+            .get_or_spawn_tenant_actor_with_fields(tenant, entity_type, entity_id, initial_fields)
+            .ok_or_else(|| format!("No transition table for tenant '{tenant}', entity type '{entity_type}'"))?;
+
+        actor_ref
+            .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(5))
+            .await
+            .map_err(|e| format!("Actor query failed: {e}"))
+    }
+
+    /// Update fields on an existing entity.
+    pub async fn update_tenant_entity_fields(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        fields: serde_json::Value,
+        replace: bool,
+    ) -> Result<EntityResponse, String> {
+        let actor_ref = self
+            .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
+            .ok_or_else(|| format!("No transition table for tenant '{tenant}', entity type '{entity_type}'"))?;
+
+        actor_ref
+            .ask::<EntityResponse>(
+                EntityMsg::UpdateFields { fields, replace },
+                Duration::from_secs(5),
+            )
+            .await
+            .map_err(|e| format!("Actor update failed: {e}"))
+    }
+
+    /// Delete an entity.
+    pub async fn delete_tenant_entity(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<EntityResponse, String> {
+        let actor_ref = self
+            .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
+            .ok_or_else(|| format!("No transition table for tenant '{tenant}', entity type '{entity_type}'"))?;
+
+        let response = actor_ref
+            .ask::<EntityResponse>(EntityMsg::Delete, Duration::from_secs(5))
+            .await
+            .map_err(|e| format!("Actor delete failed: {e}"))?;
+
+        // Remove from index and registry
+        self.remove_entity(tenant, entity_type, entity_id);
+
+        Ok(response)
+    }
+
+    /// Check if an entity exists in the index.
+    pub fn entity_exists(&self, tenant: &TenantId, entity_type: &str, entity_id: &str) -> bool {
+        let index_key = format!("{tenant}:{entity_type}");
+        let index = self.entity_index.read().unwrap();
+        index.get(&index_key).is_some_and(|ids| ids.contains(entity_id))
     }
 
     /// Update Agent.Hint annotations based on trajectory analysis.

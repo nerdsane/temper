@@ -520,6 +520,37 @@ impl Actor for EntityActor {
                 let value = state.fields.get(&field).cloned().unwrap_or(serde_json::Value::Null);
                 ctx.reply(value);
             }
+            EntityMsg::UpdateFields { fields, replace } => {
+                if replace {
+                    // PUT: replace all fields (preserve Id and Status)
+                    let id = state.entity_id.clone();
+                    let status = state.status.clone();
+                    state.fields = fields;
+                    if let Some(obj) = state.fields.as_object_mut() {
+                        obj.insert("Id".to_string(), serde_json::Value::String(id));
+                        obj.insert("Status".to_string(), serde_json::Value::String(status));
+                    }
+                } else {
+                    // PATCH: merge fields into existing
+                    if let (Some(existing), Some(updates)) = (state.fields.as_object_mut(), fields.as_object()) {
+                        for (k, v) in updates {
+                            existing.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                ctx.reply(EntityResponse {
+                    success: true,
+                    state: state.clone(),
+                    error: None,
+                });
+            }
+            EntityMsg::Delete => {
+                ctx.reply(EntityResponse {
+                    success: true,
+                    state: state.clone(),
+                    error: None,
+                });
+            }
         }
         Ok(())
     }

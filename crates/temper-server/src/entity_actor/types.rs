@@ -25,6 +25,13 @@ pub enum EntityMsg {
     GetState,
     /// Get a specific field value.
     GetField { field: String },
+    /// Update entity fields (PATCH: merge, PUT: replace).
+    UpdateFields {
+        fields: serde_json::Value,
+        replace: bool,
+    },
+    /// Delete this entity.
+    Delete,
 }
 
 impl Message for EntityMsg {}

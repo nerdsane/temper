@@ -14,6 +14,7 @@ use temper_odata::query::parse_query_options;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
+use crate::query_eval::{apply_query_options, expand_entity};
 use crate::response::{odata_error, ODataResponse, ODataXmlResponse};
 use crate::state::ServerState;
 
@@ -90,7 +91,7 @@ pub async fn handle_odata_get(
     };
 
     let query_string: String = query_params.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
-    let _query_options = match parse_query_options(&query_string) {
+    let query_options = match parse_query_options(&query_string) {
         Ok(q) => q,
         Err(e) => return odata_error(StatusCode::BAD_REQUEST, "InvalidQuery", &e.to_string()).into_response(),
     };
@@ -112,13 +113,42 @@ pub async fn handle_odata_get(
         }
 
         ODataPath::EntitySet(name) => {
-            if resolve_entity_type(&state, &tenant, &name).is_none() {
-                return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{name}' not found")).into_response();
+            let entity_type = match resolve_entity_type(&state, &tenant, &name) {
+                Some(t) => t,
+                None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{name}' not found")).into_response(),
+            };
+
+            // Enumerate all entities of this type
+            let entity_ids = state.list_entity_ids(&tenant, &entity_type);
+            let mut entities = Vec::new();
+            for id in &entity_ids {
+                if let Ok(response) = state.get_tenant_entity_state(&tenant, &entity_type, id).await {
+                    let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
+                    if let Some(obj) = entity.as_object_mut() {
+                        obj.insert("@odata.id".into(), serde_json::json!(format!("{name}('{id}')")));
+                    }
+                    entities.push(entity);
+                }
             }
-            ODataResponse {
-                status: StatusCode::OK,
-                body: serde_json::json!({"@odata.context": format!("$metadata#{name}"), "value": []}),
-            }.into_response()
+
+            // Apply query options ($filter, $orderby, $top, $skip, $select)
+            let (mut result, count) = apply_query_options(entities, &query_options);
+
+            // Apply $expand to each entity in the result
+            if let Some(ref expand_items) = query_options.expand {
+                for entity in &mut result {
+                    expand_entity(entity, expand_items, &entity_type, &state, &tenant).await;
+                }
+            }
+
+            let mut body = serde_json::json!({
+                "@odata.context": format!("$metadata#{name}"),
+                "value": result,
+            });
+            if let Some(c) = count {
+                body["@odata.count"] = serde_json::json!(c);
+            }
+            ODataResponse { status: StatusCode::OK, body }.into_response()
         }
 
         ODataPath::Entity(set_name, key) => {
@@ -128,6 +158,15 @@ pub async fn handle_odata_get(
             };
             let key_str = extract_key(&key);
 
+            // Only return entities that exist in the index (not auto-spawned)
+            if !state.entity_exists(&tenant, &entity_type, &key_str) {
+                return odata_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFound",
+                    &format!("Entity '{set_name}' with key '{key_str}' not found"),
+                ).into_response();
+            }
+
             match state.get_tenant_entity_state(&tenant, &entity_type, &key_str).await {
                 Ok(response) => {
                     let mut body = serde_json::to_value(&response.state).unwrap_or_default();
@@ -135,16 +174,38 @@ pub async fn handle_odata_get(
                         obj.insert("@odata.context".into(), serde_json::json!(format!("$metadata#{set_name}/$entity")));
                         obj.insert("@odata.id".into(), serde_json::json!(format!("{set_name}('{key_str}')")));
                     }
+
+                    // Apply $expand to the single entity
+                    if let Some(ref expand_items) = query_options.expand {
+                        expand_entity(&mut body, expand_items, &entity_type, &state, &tenant).await;
+                    }
+
+                    // Apply $select to the single entity
+                    if let Some(ref select) = query_options.select {
+                        if let Some(obj) = body.as_object() {
+                            let mut selected = serde_json::Map::new();
+                            for prop in select {
+                                if let Some(val) = obj.get(prop) {
+                                    selected.insert(prop.clone(), val.clone());
+                                }
+                            }
+                            for (k, v) in obj {
+                                if k.starts_with('@') {
+                                    selected.insert(k.clone(), v.clone());
+                                }
+                            }
+                            body = serde_json::Value::Object(selected);
+                        }
+                    }
+
                     ODataResponse { status: StatusCode::OK, body }.into_response()
                 }
                 Err(_) => {
-                    ODataResponse {
-                        status: StatusCode::OK,
-                        body: serde_json::json!({
-                            "@odata.context": format!("$metadata#{set_name}/$entity"),
-                            "@odata.id": format!("{set_name}('{key_str}')"),
-                        }),
-                    }.into_response()
+                    odata_error(
+                        StatusCode::NOT_FOUND,
+                        "ResourceNotFound",
+                        &format!("Entity '{set_name}' with key '{key_str}' not found"),
+                    ).into_response()
                 }
             }
         }
@@ -181,14 +242,21 @@ pub async fn handle_odata_post(
                 None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{name}' not found")).into_response(),
             };
 
-            let _body_json: serde_json::Value = match serde_json::from_slice(&body) {
+            let body_json: serde_json::Value = match serde_json::from_slice(&body) {
                 Ok(v) => v,
                 Err(e) => return odata_error(StatusCode::BAD_REQUEST, "InvalidBody", &format!("Invalid JSON body: {e}")).into_response(),
             };
 
-            let entity_id = uuid::Uuid::now_v7().to_string();
+            // Use "id" from body if provided, otherwise generate a UUID
+            let entity_id = body_json.get("id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
 
-            match state.get_tenant_entity_state(&tenant, &entity_type, &entity_id).await {
+            // Pass body fields as initial_fields for the entity actor
+            let initial_fields = body_json.clone();
+
+            match state.get_or_create_tenant_entity(&tenant, &entity_type, &entity_id, initial_fields).await {
                 Ok(response) => {
                     let mut body = serde_json::to_value(&response.state).unwrap_or_default();
                     if let Some(obj) = body.as_object_mut() {
@@ -284,6 +352,142 @@ pub async fn handle_odata_post(
         }
 
         _ => odata_error(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed", "POST not supported for this path").into_response(),
+    }
+}
+
+/// Handle PATCH requests — partial entity update.
+pub async fn handle_odata_patch(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    axum::extract::Path(path): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let tenant = extract_tenant(&headers, &state);
+
+    let odata_path = match parse_path(&format!("/{path}")) {
+        Ok(p) => p,
+        Err(e) => return odata_error(StatusCode::BAD_REQUEST, "InvalidPath", &e.to_string()).into_response(),
+    };
+
+    match odata_path {
+        ODataPath::Entity(set_name, key) => {
+            let entity_type = match resolve_entity_type(&state, &tenant, &set_name) {
+                Some(t) => t,
+                None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{set_name}' not found")).into_response(),
+            };
+            let key_str = extract_key(&key);
+
+            if !state.entity_exists(&tenant, &entity_type, &key_str) {
+                return odata_error(StatusCode::NOT_FOUND, "ResourceNotFound", &format!("Entity '{set_name}' with key '{key_str}' not found")).into_response();
+            }
+
+            let body_json: serde_json::Value = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => return odata_error(StatusCode::BAD_REQUEST, "InvalidBody", &format!("Invalid JSON body: {e}")).into_response(),
+            };
+
+            match state.update_tenant_entity_fields(&tenant, &entity_type, &key_str, body_json, false).await {
+                Ok(response) => {
+                    let mut body = serde_json::to_value(&response.state).unwrap_or_default();
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.insert("@odata.context".into(), serde_json::json!(format!("$metadata#{set_name}/$entity")));
+                        obj.insert("@odata.id".into(), serde_json::json!(format!("{set_name}('{key_str}')")));
+                    }
+                    ODataResponse { status: StatusCode::OK, body }.into_response()
+                }
+                Err(e) => {
+                    odata_error(StatusCode::INTERNAL_SERVER_ERROR, "UpdateError", &e).into_response()
+                }
+            }
+        }
+        _ => odata_error(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed", "PATCH only supported on entity instances").into_response(),
+    }
+}
+
+/// Handle PUT requests — full entity replacement.
+pub async fn handle_odata_put(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    axum::extract::Path(path): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let tenant = extract_tenant(&headers, &state);
+
+    let odata_path = match parse_path(&format!("/{path}")) {
+        Ok(p) => p,
+        Err(e) => return odata_error(StatusCode::BAD_REQUEST, "InvalidPath", &e.to_string()).into_response(),
+    };
+
+    match odata_path {
+        ODataPath::Entity(set_name, key) => {
+            let entity_type = match resolve_entity_type(&state, &tenant, &set_name) {
+                Some(t) => t,
+                None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{set_name}' not found")).into_response(),
+            };
+            let key_str = extract_key(&key);
+
+            if !state.entity_exists(&tenant, &entity_type, &key_str) {
+                return odata_error(StatusCode::NOT_FOUND, "ResourceNotFound", &format!("Entity '{set_name}' with key '{key_str}' not found")).into_response();
+            }
+
+            let body_json: serde_json::Value = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => return odata_error(StatusCode::BAD_REQUEST, "InvalidBody", &format!("Invalid JSON body: {e}")).into_response(),
+            };
+
+            match state.update_tenant_entity_fields(&tenant, &entity_type, &key_str, body_json, true).await {
+                Ok(response) => {
+                    let mut body = serde_json::to_value(&response.state).unwrap_or_default();
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.insert("@odata.context".into(), serde_json::json!(format!("$metadata#{set_name}/$entity")));
+                        obj.insert("@odata.id".into(), serde_json::json!(format!("{set_name}('{key_str}')")));
+                    }
+                    ODataResponse { status: StatusCode::OK, body }.into_response()
+                }
+                Err(e) => {
+                    odata_error(StatusCode::INTERNAL_SERVER_ERROR, "UpdateError", &e).into_response()
+                }
+            }
+        }
+        _ => odata_error(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed", "PUT only supported on entity instances").into_response(),
+    }
+}
+
+/// Handle DELETE requests — entity deletion.
+pub async fn handle_odata_delete(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let tenant = extract_tenant(&headers, &state);
+
+    let odata_path = match parse_path(&format!("/{path}")) {
+        Ok(p) => p,
+        Err(e) => return odata_error(StatusCode::BAD_REQUEST, "InvalidPath", &e.to_string()).into_response(),
+    };
+
+    match odata_path {
+        ODataPath::Entity(set_name, key) => {
+            let entity_type = match resolve_entity_type(&state, &tenant, &set_name) {
+                Some(t) => t,
+                None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{set_name}' not found")).into_response(),
+            };
+            let key_str = extract_key(&key);
+
+            if !state.entity_exists(&tenant, &entity_type, &key_str) {
+                return odata_error(StatusCode::NOT_FOUND, "ResourceNotFound", &format!("Entity '{set_name}' with key '{key_str}' not found")).into_response();
+            }
+
+            match state.delete_tenant_entity(&tenant, &entity_type, &key_str).await {
+                Ok(_) => {
+                    (StatusCode::NO_CONTENT, "").into_response()
+                }
+                Err(e) => {
+                    odata_error(StatusCode::INTERNAL_SERVER_ERROR, "DeleteError", &e).into_response()
+                }
+            }
+        }
+        _ => odata_error(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed", "DELETE only supported on entity instances").into_response(),
     }
 }
 

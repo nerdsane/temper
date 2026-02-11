@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use temper_codegen::generate_entity_module;
 use temper_spec::csdl::parse_csdl;
-use temper_spec::model::build_spec_model;
+use temper_spec::model::{build_spec_model_mixed, SpecSource};
 
 
 /// Run the `temper codegen` command.
@@ -45,16 +45,33 @@ pub fn run(specs_dir: &str, output_dir: &str) -> Result<()> {
         csdl.schemas.len()
     );
 
-    // Read TLA+ spec files
+    // Read IOA spec files (primary format)
+    let ioa_sources = read_ioa_sources(specs_path)?;
+    if !ioa_sources.is_empty() {
+        println!("  Found {} IOA spec file(s)", ioa_sources.len());
+    }
+
+    // Read TLA+ spec files (legacy format)
     let tla_sources = read_tla_sources(specs_path)?;
-    if tla_sources.is_empty() {
-        println!("  No TLA+ spec files found (state machines will be skipped)");
-    } else {
+    if !tla_sources.is_empty() {
         println!("  Found {} TLA+ spec file(s)", tla_sources.len());
     }
 
+    if ioa_sources.is_empty() && tla_sources.is_empty() {
+        println!("  No spec files found (state machines will be skipped)");
+    }
+
+    // Merge sources: IOA takes precedence over TLA+ for the same entity name
+    let mut sources: HashMap<String, SpecSource> = tla_sources
+        .into_iter()
+        .map(|(k, v)| (k, SpecSource::Tla(v)))
+        .collect();
+    for (name, ioa_text) in ioa_sources {
+        sources.insert(name, SpecSource::Ioa(ioa_text));
+    }
+
     // Build the unified spec model
-    let spec = build_spec_model(csdl, tla_sources);
+    let spec = build_spec_model_mixed(csdl, sources);
 
     // Report validation results
     if !spec.validation.errors.is_empty() {
@@ -135,6 +152,37 @@ pub fn run(specs_dir: &str, output_dir: &str) -> Result<()> {
 
     println!("\nCode generation complete: {generated_count} module(s) generated.");
     Ok(())
+}
+
+/// Read all `.ioa.toml` files from the specs directory and return a map of
+/// entity name (derived from file stem, PascalCase) to IOA TOML source text.
+fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
+    let mut sources = HashMap::new();
+
+    if !specs_dir.is_dir() {
+        return Ok(sources);
+    }
+
+    for entry in fs::read_dir(specs_dir)
+        .with_context(|| format!("Failed to read specs directory: {}", specs_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+
+        if file_name.ends_with(".ioa.toml") {
+            // Strip the ".ioa.toml" extension to get the stem
+            let stem = &file_name[..file_name.len() - ".ioa.toml".len()];
+            let entity_name = to_pascal_case(stem);
+            let source = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read IOA file: {}", path.display()))?;
+
+            println!("  Read IOA spec: {} -> entity '{}'", path.display(), entity_name);
+            sources.insert(entity_name, source);
+        }
+    }
+
+    Ok(sources)
 }
 
 /// Read all `.tla` files from the specs directory and return a map of

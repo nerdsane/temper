@@ -7,6 +7,7 @@
 mod router;
 mod dispatch;
 mod response;
+mod query_eval;
 mod state;
 pub mod entity_actor;
 pub mod registry;

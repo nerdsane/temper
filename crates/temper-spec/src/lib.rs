@@ -17,6 +17,6 @@ pub mod tlaplus;
 
 // Re-export primary public API at crate root.
 pub use csdl::{parse_csdl, CsdlDocument, CsdlParseError};
-pub use automaton::{parse_automaton, Automaton};
+pub use automaton::{parse_automaton, to_state_machine, Automaton};
 pub use tlaplus::{extract_state_machine, StateMachine, Transition, Invariant};
-pub use model::{build_spec_model, SpecModel};
+pub use model::{build_spec_model, build_spec_model_mixed, SpecModel, SpecSource};
