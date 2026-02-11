@@ -20,7 +20,7 @@ use crate::model::{
 // ---------------------------------------------------------------------------
 
 /// Result of running property-based tests on a state machine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PropTestResult {
     /// Total number of test cases executed.
     pub total_cases: u64,
@@ -31,7 +31,7 @@ pub struct PropTestResult {
 }
 
 /// Details of a property-test failure.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PropTestFailure {
     /// Name of the invariant that was violated.
     pub invariant: String,

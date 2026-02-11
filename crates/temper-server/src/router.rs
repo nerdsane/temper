@@ -25,8 +25,13 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/$hints", get(dispatch::handle_hints))
         .route("/{*path}", get(dispatch::handle_odata_get).post(dispatch::handle_odata_post));
 
-    Router::new()
-        .nest("/tdata", tdata)
+    let router = Router::new()
+        .nest("/tdata", tdata);
+
+    #[cfg(feature = "observe")]
+    let router = router.nest("/observe", crate::observe_routes::build_observe_router());
+
+    router
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

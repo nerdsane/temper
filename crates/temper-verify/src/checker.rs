@@ -8,7 +8,7 @@ use stateright::{Checker, Model};
 use crate::model::{TemperModel, TemperModelAction, TemperModelState};
 
 /// A counterexample discovered during model checking.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Counterexample {
     /// The property name that was violated.
     pub property: String,
@@ -17,7 +17,7 @@ pub struct Counterexample {
 }
 
 /// The result of running exhaustive model checking.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct VerificationResult {
     /// Total number of unique states explored.
     pub states_explored: usize,

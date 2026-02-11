@@ -10,6 +10,8 @@ mod response;
 mod state;
 pub mod entity_actor;
 pub mod registry;
+#[cfg(feature = "observe")]
+pub mod observe_routes;
 
 pub use router::build_router;
 pub use state::ServerState;

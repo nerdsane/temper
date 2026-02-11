@@ -3929,6 +3929,7 @@ dependencies = [
  "temper-runtime",
  "temper-spec",
  "temper-store-postgres",
+ "temper-verify",
  "tokio",
  "tokio-test",
  "tower",

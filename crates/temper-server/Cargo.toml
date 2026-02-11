@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 description = "HTTP server assembly for Temper entity services"
 
+[features]
+default = []
+observe = ["temper-verify"]
+
 [dependencies]
 temper-runtime = { workspace = true }
 temper-odata = { workspace = true }
@@ -14,6 +18,7 @@ temper-jit = { workspace = true }
 temper-store-postgres = { workspace = true }
 temper-observe = { workspace = true }
 temper-authz = { workspace = true }
+temper-verify = { workspace = true, optional = true }
 axum = { workspace = true }
 hyper = { workspace = true }
 tower = { workspace = true }

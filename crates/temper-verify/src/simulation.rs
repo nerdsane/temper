@@ -16,7 +16,7 @@ use stateright::Model;
 use crate::model::{build_model_from_ioa, InvariantKind, TemperModel, TemperModelAction, TemperModelState};
 
 /// Configuration for a simulation run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SimConfig {
     /// Seed for the PRNG (determines all non-determinism).
     pub seed: u64,
@@ -66,7 +66,7 @@ impl SimConfig {
 }
 
 /// Result of a simulation run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SimulationResult {
     /// Whether all invariants held throughout the simulation.
     pub all_invariants_held: bool,
@@ -87,7 +87,7 @@ pub struct SimulationResult {
 }
 
 /// An invariant violation found during simulation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct InvariantViolation {
     /// Which actor.
     pub actor_id: String,

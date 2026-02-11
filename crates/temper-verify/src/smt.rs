@@ -24,7 +24,7 @@ use crate::model::builder::build_model_from_ioa;
 use crate::model::types::{InvariantKind, ModelEffect, ModelGuard, TemperModel};
 
 /// Result of symbolic verification.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SmtResult {
     /// For each action, whether its guard is satisfiable (can ever fire).
     pub guard_satisfiability: Vec<(String, bool)>,
