@@ -14,7 +14,7 @@ use temper_odata::query::parse_query_options;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
-use crate::query_eval::{apply_query_options, expand_entity};
+use crate::query_eval::{apply_query_options, expand_entity, select_fields};
 use crate::response::{odata_error, ODataResponse, ODataXmlResponse};
 use crate::state::ServerState;
 
@@ -182,20 +182,7 @@ pub async fn handle_odata_get(
 
                     // Apply $select to the single entity
                     if let Some(ref select) = query_options.select {
-                        if let Some(obj) = body.as_object() {
-                            let mut selected = serde_json::Map::new();
-                            for prop in select {
-                                if let Some(val) = obj.get(prop) {
-                                    selected.insert(prop.clone(), val.clone());
-                                }
-                            }
-                            for (k, v) in obj {
-                                if k.starts_with('@') {
-                                    selected.insert(k.clone(), v.clone());
-                                }
-                            }
-                            body = serde_json::Value::Object(selected);
-                        }
+                        body = select_fields(vec![body], select).pop().unwrap_or_default();
                     }
 
                     ODataResponse { status: StatusCode::OK, body }.into_response()

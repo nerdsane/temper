@@ -219,7 +219,9 @@ fn sort_entities(entities: &mut [serde_json::Value], orderby: &[OrderByClause]) 
 }
 
 /// Prune each entity to only include the selected properties.
-fn select_fields(entities: Vec<serde_json::Value>, select: &[String]) -> Vec<serde_json::Value> {
+///
+/// Resolves properties from both top-level and the `fields` sub-object.
+pub fn select_fields(entities: Vec<serde_json::Value>, select: &[String]) -> Vec<serde_json::Value> {
     entities
         .into_iter()
         .map(|entity| {

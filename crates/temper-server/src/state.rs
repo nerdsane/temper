@@ -356,6 +356,9 @@ impl ServerState {
             .await
             .map_err(|e| format!("Actor delete failed: {e}"))?;
 
+        // Stop the actor to release resources
+        let _ = actor_ref.stop();
+
         // Remove from index and registry
         self.remove_entity(tenant, entity_type, entity_id);
 
