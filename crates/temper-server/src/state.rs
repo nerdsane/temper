@@ -165,12 +165,10 @@ impl ServerState {
         }
 
         // Look up transition table: try SpecRegistry first, fall back to legacy map
-        let table = self
-            .registry
-            .read()
-            .unwrap()
-            .get_table(tenant, entity_type)
-            .or_else(|| self.transition_tables.get(entity_type).cloned())?;
+        let table = {
+            let reg = self.registry.read().unwrap();
+            reg.get_table(tenant, entity_type)
+        }.or_else(|| self.transition_tables.get(entity_type).cloned())?;
 
         // Spawn new actor
         let actor = match &self.event_store {
