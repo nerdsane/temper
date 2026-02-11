@@ -54,21 +54,13 @@ Ask: "What rules must ALWAYS be true, regardless of how we got to a state?"
 
 ### Step 7: Generate and Verify
 
-**Prerequisites** — ensure the `temper` CLI is available before running commands:
+**Prerequisites** — verify the `temper` CLI is in PATH:
 
 ```bash
-# Option 1: If `temper` is in PATH
 temper --help
-
-# Option 2: Build from the temper repo and add to PATH
-cd /path/to/temper && cargo build --release
-export PATH="$PWD/target/release:$PATH"
-
-# Option 3: Run directly from the temper repo
-cargo run --manifest-path /path/to/temper/Cargo.toml -- --help
 ```
 
-If `temper` is not in PATH, prefix all CLI commands with `cargo run --manifest-path /path/to/temper/Cargo.toml --`.
+If this fails, tell the user: "The `temper` CLI is not installed. Run `cargo install --path crates/temper-cli` from the Temper repo, or add the built binary to your PATH." Do NOT search for or guess the repo location — ask the user where it is.
 
 **Project directory** — create the project in the **user's current working directory**, NOT inside the temper source repo. For example, if the user is in `~/projects/`, then `temper init linear-clone` creates `~/projects/linear-clone/`.
 
