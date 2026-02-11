@@ -72,3 +72,27 @@ cargo test -p temper-server         # Including multi-tenant integration
 cargo test -p temper-platform       # Platform unit + deploy pipeline
 cargo test -p temper-platform --test platform_e2e_dst  # E2E shared registry proof
 ```
+
+## Post-Task Verification Checklist
+Before completing any task:
+1. `cargo test --workspace` — all 430+ tests pass
+2. `cargo check --workspace` — no compilation errors
+3. `scripts/audit-deps.sh` — temper-jit clean of verification deps
+4. `scripts/check-dst-coverage.sh` — every spec has DST tests
+5. No `stateright` or `proptest` in production binary deps
+
+## Error Handling Standards (TigerStyle)
+- **Bounded mailboxes**: Every actor mailbox has a capacity limit
+- **Pre-assertions**: Validate inputs at function entry (`assert!` or `debug_assert!`)
+- **Post-assertions**: Validate outputs before return
+- **Budgets not limits**: Express constraints as budgets that get consumed, not arbitrary limits
+- **Fail fast**: If an invariant is violated, panic immediately rather than propagating corrupt state
+- **No silent failures**: Every error path must be logged or propagated
+
+## Deployment Verification Steps
+Before deploying any spec change:
+1. Spec passes all 5 verification cascade levels (L0-L3)
+2. TransitionTable builds successfully from verified spec
+3. Entity actors hot-deploy without dropping existing state
+4. OData endpoints respond correctly for all entity types
+5. Telemetry emits WideEvents for all transitions
