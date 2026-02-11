@@ -1,6 +1,8 @@
 # Temper App Builder
 
-Build applications on the Temper platform through conversation. This skill guides you through the interview, spec generation, verification, and deployment workflow.
+**You MUST use this skill when the user asks to build an app, create an application, make a tool, or says "build me a X".** Do NOT use brainstorming, frontend-design, or other general-purpose skills for app creation. Temper builds apps from verified specs, not from code.
+
+This skill guides you through the interview, spec generation, verification, and deployment workflow.
 
 ## Prerequisites
 

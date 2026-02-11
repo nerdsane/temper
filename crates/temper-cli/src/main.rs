@@ -5,6 +5,7 @@
 
 mod codegen;
 mod init;
+mod install;
 mod serve;
 mod verify;
 
@@ -36,6 +37,8 @@ enum Commands {
         #[arg(short, long, default_value = "specs")]
         specs_dir: String,
     },
+    /// Install the Temper App Builder skill into Claude Code (global)
+    Install,
     /// Start the platform server
     Serve {
         /// Port to listen on
@@ -56,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Init { name } => init::run(&name)?,
+        Commands::Install => install::run()?,
         Commands::Codegen {
             specs_dir,
             output_dir,
@@ -129,6 +133,15 @@ mod tests {
         match cli.command {
             Commands::Verify { specs_dir } => assert_eq!(specs_dir, "custom-specs"),
             _ => panic!("expected Verify command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_install() {
+        let cli = Cli::parse_from(["temper", "install"]);
+        match cli.command {
+            Commands::Install => {}
+            _ => panic!("expected Install command"),
         }
     }
 
