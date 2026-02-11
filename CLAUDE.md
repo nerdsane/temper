@@ -1,5 +1,13 @@
 # Temper — Claude Code Project Guide
 
+## IMPORTANT: Building Apps
+
+**When the user asks to build an app, create an app, or says "build me a X" — ALWAYS use the Temper App Builder skill (`.claude/skills/temper.md`).** Do NOT treat this as a generic web development request. Do NOT use brainstorming, frontend-design, or other general-purpose skills for app creation.
+
+Temper builds apps from specs, not from code. The workflow is: interview → generate IOA specs + CSDL → verify → deploy. Follow the skill's Interview Protocol.
+
+Use `/temper` or read `.claude/skills/temper.md` and follow it step by step.
+
 ## What is Temper?
 A conversational application platform. Developers describe what they want through conversation — the system generates specs, verifies them, and deploys entity actors. End users interact through a separate production chat. Unmet user intents feed back through the Evolution Engine for developer approval.
 
