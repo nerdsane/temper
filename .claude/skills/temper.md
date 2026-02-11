@@ -2,6 +2,23 @@
 
 Build applications on the Temper platform through conversation. This skill guides you through the interview, spec generation, verification, and deployment workflow.
 
+## Prerequisites
+
+Before starting, ensure the `temper` CLI is available:
+
+```bash
+# Option 1: Build from the temper repo and add to PATH
+cd /path/to/temper && cargo build --release
+export PATH="$PWD/target/release:$PATH"
+
+# Option 2: Run directly from the temper repo
+cargo run --manifest-path /path/to/temper/Cargo.toml -- init my-app
+```
+
+If `temper` is not in PATH, prefix all CLI commands with `cargo run --manifest-path /path/to/temper/Cargo.toml --`.
+
+**Check**: Run `temper --help` (or the cargo equivalent) to verify the CLI is available before proceeding.
+
 ## Interview Protocol
 
 When the user says they want to build an app (or something like "build me a X"), follow this structured interview:
@@ -42,12 +59,22 @@ Ask: "What rules must ALWAYS be true, regardless of how we got to a state?"
 
 ### Step 7: Generate and Verify
 1. Run `temper init <project-name>` to scaffold the project (if starting fresh)
-2. Generate the `.ioa.toml` spec files in the `specs/` directory
+2. Generate the `.ioa.toml` spec files **directly in `specs/`** — all specs must be flat at the top level, **no subdirectories** (the CLI does not recurse)
 3. Generate matching CSDL in `specs/model.csdl.xml` — **CSDL must exactly match IOA** (see Mapping Rules below)
 4. Run `temper verify --specs-dir specs/` to check all specs
 5. Translate any verification failures to developer-friendly language
 6. Iterate until all cascade levels pass
 7. Run `temper serve --specs-dir specs/ --tenant <name>` to deploy
+
+**Critical**: The CLI discovers specs via non-recursive `read_dir()`. Files like `specs/orders/order.ioa.toml` are **silently ignored**. Always use a flat layout:
+```
+specs/
+  model.csdl.xml          ← exactly this name
+  order.ioa.toml           ← flat, not in subdirectories
+  payment.ioa.toml
+  shipment.ioa.toml
+  policies/                ← Cedar policies (separate, ok to nest)
+```
 
 ---
 
@@ -636,8 +663,10 @@ Creates the project scaffold:
 ```
 my-app/
   specs/
-    model.csdl.xml          # OData CSDL data model
-    policies/               # Cedar authorization policies
+    model.csdl.xml          # OData CSDL data model (must be this exact name)
+    order.ioa.toml           # IOA specs go here (FLAT — no subdirectories)
+    payment.ioa.toml
+    policies/               # Cedar authorization policies (can nest)
   generated/                # Generated Rust code (do not edit)
   evolution/                # Evolution records
     observations/
@@ -1081,3 +1110,4 @@ forbid(
 | Using `/odata` as the API path | The actual endpoint is `/tdata` | Always use `/tdata` |
 | CSDL states don't match IOA states | Runtime dispatch will fail or actions silently rejected | Use the Mapping Rules checklist above — every IOA state and action must appear in CSDL |
 | Missing `Spec` annotation or pointing to `.tla` | Server won't find the IOA spec at runtime | Use `Temper.Vocab.StateMachine.Spec` pointing to `entity.ioa.toml` |
+| Putting `.ioa.toml` files in subdirectories | CLI uses non-recursive `read_dir()` — nested specs are silently ignored | All `.ioa.toml` files must be flat in the top-level `specs/` directory |
