@@ -1,8 +1,45 @@
 # Temper Development Harness
 
-The Temper harness is a multi-layered enforcement system that catches problems at every stage of the development workflow — from editing to committing to pushing to session exit.
+The Temper harness is a multi-layered enforcement system that catches problems at every stage — from editing to committing to pushing to session exit. Nothing gets through without verification.
 
-**Key difference from typical CI-only approaches**: Most projects run checks in CI, after the code is already pushed. Temper's harness enforces locally and immediately, preventing broken code from ever entering the commit history.
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                                                                     │
+│   ╔═══════════╗     ╔═══════════╗     ╔═══════════╗     ╔════════╗ │
+│   ║  EDIT     ║────▶║  COMMIT   ║────▶║  PUSH     ║────▶║  EXIT  ║ │
+│   ╚═══════════╝     ╚═══════════╝     ╚═══════════╝     ╚════════╝ │
+│       │                  │                  │                 │      │
+│       ▼                  ▼                  ▼                 ▼      │
+│   ┌────────┐        ┌────────┐        ┌────────┐       ┌────────┐  │
+│   │Spec    │        │Review  │        │Post-   │       │Exit    │  │
+│   │Verify  │        │Gate    │        │Push    │       │Gate    │  │
+│   │Dep Iso │        │Tests   │        │Tests   │       │Reviews │  │
+│   │DST Scan│        │DST Rev │        │Markers │       │Compile │  │
+│   │Plan    │        │Code Rev│        │        │       │Markers │  │
+│   └────────┘        └────────┘        └────────┘       └────────┘  │
+│    BLOCKING          BLOCKING          advisory         BLOCKING    │
+│                                                                     │
+│                     Claude Code Hooks                               │
+│                                                                     │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  │
+│                                                                     │
+│   ┌─────────────────────┐     ┌─────────────────────┐              │
+│   │ Git Pre-Commit      │     │ Git Pre-Push         │              │
+│   │ • Integrity check   │     │ • Integrity check    │              │
+│   │ • Spec syntax       │     │ • Determinism audit  │              │
+│   │ • Dep audit         │     │ • Full test suite    │              │
+│   └─────────────────────┘     └─────────────────────┘              │
+│    BLOCKING (git hooks)        BLOCKING (git hooks)                 │
+│                                                                     │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  │
+│                                                                     │
+│   ┌─────────────────────────────────────────────────────────────┐  │
+│   │ CI (GitHub Actions) — cannot be bypassed                    │  │
+│   │ • temper verify    • cargo test    • DST pattern scan       │  │
+│   └─────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ## Two Enforcement Contexts
 
@@ -10,143 +47,322 @@ This harness enforces quality for **agents developing Temper itself** (the frame
 
 - `temper serve --specs-dir specs/` runs the full verification cascade at startup and rejects broken specs
 - The Temper skill file (`.claude/skills/temper.md`) guides agents to run `temper verify` after writing specs
+- `temper init` scaffolds hooks into new projects for local enforcement
 - Temper itself IS the enforcement layer for apps — no separate harness needed
 
 ---
 
-## Blocking vs Advisory Classification
+## All Components at a Glance
 
-![Blocking vs Advisory Classification](images/01-blocking-vs-advisory.png)
+```
+                        ┌──────────────┐
+                        │  BLOCKING?   │
+                        └──────┬───────┘
+                               │
+          ┌────────────────────┼────────────────────┐
+          │                    │                    │
+     ╔════╧═════╗        ╔════╧═════╗        ╔════╧═════╗
+     ║ BLOCKING ║        ║ ADVISORY ║        ║ AGENT    ║
+     ║ (exit 2) ║        ║ (exit 0) ║        ║ REVIEW   ║
+     ╚════╤═════╝        ╚════╤═════╝        ╚════╤═════╝
+          │                    │                    │
+    ┌─────┴──────┐      ┌─────┴──────┐      ┌─────┴──────┐
+    │Spec Verify │      │Plan Remind │      │DST Review  │
+    │Dep Isolate │      │Post-Push   │      │Code Review │
+    │DST Scan    │      │Verify      │      │            │
+    │Review Gate │      └────────────┘      └────────────┘
+    │Exit Gate   │       warns, you          mandatory,
+    │Integrity   │       decide              writes markers
+    │Spec Syntax │                           checked by
+    │Dep Audit   │                           Review Gate +
+    │Full Tests  │                           Exit Gate
+    └────────────┘
+     stops you,
+     must fix
+```
 
-Every harness component is either **blocking** (stops you, must be resolved) or **advisory** (warns you, developer decides).
-
-### Blocking Components
-
-| # | Component | Layer | Trigger | What it enforces |
-|---|-----------|-------|---------|------------------|
-| 2 | Spec Verification | Claude Code | PostToolUse (Write/Edit) | L0-L3 cascade on every spec edit |
-| 3 | Dependency Isolation | Claude Code | PostToolUse (Write/Edit) | temper-jit free of verify deps |
-| 6 | Session Exit Gate | Claude Code | Stop (session end) | No unverified pushes, no compile errors |
-| 7 | Integrity Check | Git | pre-commit | No TODO/unwrap/unimplemented in prod code |
-| 8 | Spec Syntax | Git | pre-commit | .ioa.toml files parse correctly |
-| 9 | Dep Audit | Git | pre-commit | Catches dep violations on direct commits |
-| 10 | Full Test Suite | Git | pre-push | All tests pass before push |
-
-### Advisory Components
-
-| # | Component | Layer | Trigger | What it warns about |
-|---|-----------|-------|---------|---------------------|
-| 1 | Plan Reminder | Claude Code | PreToolUse (Write/Edit) | No plan file found, or plan not finished |
-| 4 | Determinism Guard | Claude Code | PostToolUse (Write/Edit) | HashMap/SystemTime in simulation code |
-| 5 | Post-Push Verify | Claude Code | PostToolUse (Bash) | Shows test results after push (coordinates with Item 6) |
+| # | Component | Type | Layer | Trigger | Blocking |
+|---|-----------|------|-------|---------|----------|
+| 1 | Plan Reminder | Shell hook | Claude Code PreToolUse | Write/Edit | No |
+| 2 | Spec Verification | Shell hook | Claude Code PostToolUse | Write/Edit on spec files | **YES** |
+| 3 | Dependency Isolation | Shell hook | Claude Code PostToolUse | Write/Edit on Cargo.toml | **YES** |
+| 4 | Determinism Guard | Shell hook | Claude Code PostToolUse | Write/Edit on .rs in sim crates | **YES** |
+| 5 | Pre-Commit Review Gate | Shell hook | Claude Code PreToolUse | Bash `git commit` | **YES** |
+| 6 | Post-Push Verify | Shell hook | Claude Code PostToolUse | Bash `git push` | No (creates markers) |
+| 7 | Session Exit Gate | Shell hook | Claude Code Stop | Session end | **YES** |
+| 8 | DST Compliance Review | Agent | Claude Code (manual invoke) | Before commit (mandatory) | **YES** (via markers) |
+| 9 | Code Quality Review | Agent | Claude Code (manual invoke) | Before commit (mandatory) | **YES** (via markers) |
+| 10 | Integrity Check | Git hook | pre-commit | `git commit` | **YES** |
+| 11 | Spec Syntax | Git hook | pre-commit | `git commit` | **YES** |
+| 12 | Dep Audit | Git hook | pre-commit | `git commit` | **YES** |
+| 13 | Full Test Suite | Git hook | pre-push | `git push` | **YES** |
 
 ---
 
-## Architecture Overview
+## Tier 1: Claude Code Hooks (Design-Time)
 
-![Harness Architecture — 3-Tier Enforcement](images/02-harness-architecture.png)
+Configured in `.claude/settings.json`. Fire automatically during Claude Code sessions.
 
-The harness has three tiers, each catching problems at a different stage:
+### Component 1: Plan Reminder
 
-### Tier 1: Claude Code Hooks (Design-Time)
-Fire automatically during Claude Code sessions. Configured in `.claude/settings.json`.
+```
+File:      .claude/hooks/check-plan-reminder.sh
+Trigger:   PreToolUse — Write|Edit
+Blocking:  No
+```
 
-### Tier 2: Git Hooks (Commit-Time)
-Fire during `git commit` and `git push`. Installed via `scripts/setup-hooks.sh`. Affect anyone using git on this repo.
+Before any file edit, checks if a `.progress/` plan exists. Displays a reminder to create one if missing. Keeps planning discipline without hard-blocking.
 
-### Tier 2b: Pre-Push Pipeline
-The pre-push hook runs a 3-gate pipeline: integrity check, determinism audit, then full test suite. The full-codebase scripts are wired in automatically — nothing to run manually.
+### Component 2: Spec Verification Gate
 
----
+```
+File:      .claude/hooks/verify-specs.sh
+Trigger:   PostToolUse — Write|Edit (on .ioa.toml, .csdl.xml, .cedar files)
+Blocking:  YES (exit 2)
+```
 
-## Tier 1: Claude Code Hooks
+The core of Temper's value proposition. After editing any spec file, runs the full verification cascade:
 
-### Item 1: Plan Reminder (PreToolUse — Write|Edit)
+```
+  ┌──────────────────────────────────────────────────────────┐
+  │                 Spec Verification Flow                    │
+  │                                                          │
+  │   Edit .ioa.toml                                         │
+  │        │                                                 │
+  │        ▼                                                 │
+  │   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌────────┐│
+  │   │ L0 SMT  │──▶│ L1 Model│──▶│ L2 DST  │──▶│L3 Prop ││
+  │   │ Z3      │   │ Check   │   │ Sim     │   │Test    ││
+  │   │         │   │ BFS     │   │ Faults  │   │Random  ││
+  │   └────┬────┘   └────┬────┘   └────┬────┘   └───┬────┘│
+  │        │              │              │             │     │
+  │        ▼              ▼              ▼             ▼     │
+  │   Guard SAT?    All states    Fault-tolerant?  Random   │
+  │   Invariants    explored?     Messages OK?     sequences│
+  │   inductive?    Properties    Multi-actor?     hold?    │
+  │                 hold?                                    │
+  │                                                          │
+  │   ALL FOUR must pass ──▶ Edit allowed                    │
+  │   ANY failure ──▶ Edit BLOCKED                           │
+  └──────────────────────────────────────────────────────────┘
+```
 
-**File**: `.claude/hooks/check-plan-reminder.sh`
-**Blocking**: No
+**L0 — SMT/Z3**: Algebraic proof. Checks guard satisfiability (are any guards dead code?), invariant induction (does each invariant hold across transitions?), and unreachable state detection. No state exploration — pure logic.
 
-Before any file edit, checks if a `.progress/` plan exists. Displays a reminder to create one if missing. Planning discipline comes from CLAUDE.md instructions, not hard enforcement.
+**L1 — Model Checking (Stateright)**: Exhaustive BFS of every reachable state. Checks all `[[invariant]]` and `[[liveness]]` properties. If it's reachable and it breaks something, L1 finds it. Returns counterexample traces.
 
-### Item 2: Spec Verification Gate (PostToolUse — Write|Edit)
+**L2 — Deterministic Simulation**: Multi-actor simulation with fault injection (message delays, drops, crashes). 5 seeds, deterministic via `sim_now()`/`sim_uuid()`. Tests that the system works under distributed chaos.
 
-**File**: `.claude/hooks/verify-specs.sh`
-**Blocking**: YES (exit 2)
+**L3 — Property Tests**: Random action sequences (100 cases, 30 steps each) on the abstract model. Redundant with L1 for small specs — serves as a fast sanity check and fallback when L1's state space is too large to complete.
 
-![Spec Verification Flow](images/03-spec-verification-flow.png)
+### Component 3: Dependency Isolation Guard
 
-After editing any `.ioa.toml`, `.csdl.xml`, or `.cedar` file, runs the full `temper verify` cascade:
+```
+File:      .claude/hooks/check-deps.sh
+Trigger:   PostToolUse — Write|Edit (on Cargo.toml files)
+Blocking:  YES (exit 2)
+```
 
-- **L0 SMT**: Guard satisfiability via Z3 — checks for dead guards and unreachable states
-- **L1 Model Check**: Stateright exhaustive state exploration — verifies all invariants are inductive
-- **L2 DST**: Deterministic simulation with fault injection — proves correctness under failures
-- **L3 PropTest**: 1000 random action sequences and boundary values
+After editing any `Cargo.toml`, checks the real dependency graph via `cargo tree`:
 
-If any level fails, the edit is blocked. This is Temper's core value proposition.
+```
+  ┌─────────────────────────────────────────────────────────┐
+  │              Dependency Firewall                         │
+  │                                                         │
+  │   PRODUCTION                    VERIFICATION            │
+  │   ┌─────────────┐              ┌──────────────┐        │
+  │   │ temper-jit   │──── ✗ ────▶│ temper-verify │        │
+  │   │ temper-server│              │   stateright │        │
+  │   │ temper-       │              │   proptest   │        │
+  │   │   runtime    │              │   z3         │        │
+  │   └─────────────┘              └──────────────┘        │
+  │                                                         │
+  │   Production crates must NEVER depend on verification   │
+  │   crates. This keeps binaries small and fast.           │
+  └─────────────────────────────────────────────────────────┘
+```
 
-### Item 3: Dependency Isolation Guard (PostToolUse — Write|Edit)
+### Component 4: Determinism Guard (DST Pattern Scan)
 
-**File**: `.claude/hooks/check-deps.sh`
-**Blocking**: YES (exit 2)
+```
+File:      .claude/hooks/check-determinism.sh
+Trigger:   PostToolUse — Write|Edit (on .rs files in sim-visible crates)
+Blocking:  YES (exit 2)
+```
 
-![Dependency Isolation — temper-jit Firewall](images/05-dependency-isolation.png)
+After editing Rust files in `temper-runtime`, `temper-jit`, or `temper-server`, scans for 25 non-deterministic patterns based on FoundationDB, TigerBeetle, S2, and Polar Signals DST practices:
 
-After editing any `Cargo.toml`, checks that:
-1. `temper-jit` does not have `temper-verify` in production `[dependencies]`
-2. No production crate (`temper-jit`, `temper-server`, `temper-runtime`) pulls in `stateright` or `proptest`
+| Category | Banned Patterns | Use Instead |
+|----------|----------------|-------------|
+| **Collections** | `HashMap`, `HashSet`, `DashMap`, `FuturesUnordered`, `IndexMap` | `BTreeMap`, `BTreeSet`, deterministic ordering |
+| **Time** | `SystemTime::now`, `Instant::now`, `chrono::Utc::now`, `thread::sleep`, `tokio::time::sleep` | `sim_now()`, simulated time |
+| **Randomness** | `Uuid::new_v4`, `thread_rng`, `rand::random`, `OsRng`, `getrandom` | `sim_uuid()`, seeded PRNG |
+| **Threading** | `std::thread::spawn`, `rayon::*`, `tokio::spawn` | Actor model, message passing |
+| **I/O** | `std::fs::*`, `std::net::*`, `std::env::var`, `std::process::id` | Trait-abstracted I/O, simulation context |
+| **Global State** | `static mut`, `lazy_static!`, `thread_local!` | Actor context, explicit parameters |
+| **Serialization** | `sort_unstable` | `sort()` (stable) |
 
-Uses `cargo tree --no-dev` to check the real dependency graph. If temper-jit depends on temper-verify, every production binary includes Z3, Stateright, and proptest (~50MB of unnecessary deps).
+Suppress false positives with `// determinism-ok` on the line.
 
-### Item 4: Determinism Guard (PostToolUse — Write|Edit)
+**This is the fast gate.** It catches obvious violations instantly. The DST reviewer agent (Component 8) catches semantic violations that pattern matching cannot.
 
-**File**: `.claude/hooks/check-determinism.sh`
-**Blocking**: No (advisory)
+### Component 5: Pre-Commit Review Gate
 
-After editing `.rs` files in simulation-visible crates (`temper-runtime`, `temper-jit`, `temper-server`), scans for non-deterministic patterns:
+```
+File:      .claude/hooks/pre-commit-review-gate.sh
+Trigger:   PreToolUse — Bash (on commands containing `git commit`)
+Blocking:  YES (exit 2)
+```
 
-| Pattern | Replacement | Why |
-|---------|-------------|-----|
-| `HashMap` | `BTreeMap` | Deterministic iteration order |
-| `SystemTime::now()` | `sim_now()` | Simulation-safe time |
-| `Uuid::new_v4()` | `sim_uuid()` | Deterministic UUIDs |
-| `thread_rng()` | Seeded RNG | Reproducible randomness |
+Before any `git commit` command executes, checks three things:
 
-Add `// determinism-ok` comment to suppress false positives for legitimate uses.
+```
+  ┌───────────────────────────────────────────────────────────┐
+  │               Pre-Commit Review Gate                       │
+  │                                                           │
+  │   git commit                                              │
+  │       │                                                   │
+  │       ▼                                                   │
+  │   ┌──────────────────────┐                                │
+  │   │ Sim-visible code     │──── yes ───▶ DST review       │
+  │   │ changed?             │              marker exists?    │
+  │   └──────────────────────┘              │                 │
+  │                                    no ──┤                 │
+  │                                         ▼                 │
+  │                                    ╔═══════════╗          │
+  │                                    ║  BLOCKED  ║          │
+  │                                    ╚═══════════╝          │
+  │                                                           │
+  │   ┌──────────────────────┐                                │
+  │   │ Code review marker   │──── no ────▶ BLOCKED           │
+  │   │ exists?              │                                │
+  │   └──────────────────────┘                                │
+  │                                                           │
+  │   ┌──────────────────────┐                                │
+  │   │ cargo test           │──── fail ──▶ BLOCKED           │
+  │   │ --workspace          │                                │
+  │   └──────────────────────┘                                │
+  │                                                           │
+  │   All three pass ──▶ Commit proceeds                      │
+  └───────────────────────────────────────────────────────────┘
+```
 
-### Item 5: Post-Push Verification (PostToolUse — Bash)
+This is the **primary enforcement point** for mandatory reviews. The session exit gate (Component 7) is the safety net.
 
-**File**: `.claude/hooks/post-push-verify.sh`
-**Blocking**: No (but coordinates with Item 6)
+### Component 6: Post-Push Verification
 
-![Marker Coordination — Push Verification](images/06-marker-coordination.png)
+```
+File:      .claude/hooks/post-push-verify.sh
+Trigger:   PostToolUse — Bash (on commands containing `git push`)
+Blocking:  No (but creates markers for Component 7)
+```
 
 After any `git push`:
-1. Writes marker: `/tmp/temper-harness/{project_hash}/push-pending-{session}`
+1. Writes `push-pending-{session}` marker
 2. Runs `cargo test --workspace`
-3. If tests pass: writes `/tmp/temper-harness/{project_hash}/test-verified-{session}`
-4. If tests fail: marker remains unverified — Item 6 will block session exit
+3. On pass: writes `test-verified-{session}` marker
+4. On fail: marker remains unverified — Component 7 blocks session exit
 
-### Item 6: Session Exit Gate (Stop)
+```
+  push ──▶ push-pending marker ──▶ cargo test ──▶ test-verified marker
+                                        │
+                                   fail │
+                                        ▼
+                              Session exit BLOCKED
+                              (Component 7 catches this)
+```
 
-**File**: `.claude/hooks/stop-verify.sh`
-**Blocking**: YES (exit 2)
+### Component 7: Session Exit Gate
 
-Before Claude Code session ends, checks:
-1. If a `push-pending` marker exists, a `test-verified` marker must also exist
-2. `cargo check --workspace` compiles clean
+```
+File:      .claude/hooks/stop-verify.sh
+Trigger:   Stop (session end)
+Blocking:  YES (exit 2)
+```
 
-This is the last line of defense — you cannot end a session with unverified pushes or compilation errors.
+Before Claude Code session ends, checks four things:
+
+1. **Unverified pushes**: `push-pending` marker without `test-verified` marker?
+2. **Missing DST review**: Sim-visible code committed without `dst-reviewed` marker?
+3. **Missing code review**: Code committed without `code-reviewed` marker?
+4. **Compilation**: `cargo check --workspace` passes?
+
+This is the **safety net**. Even if the pre-commit gate somehow didn't catch a missing review, you cannot leave the session without resolving it.
 
 ---
 
-## Tier 2: Git Hooks
+## Tier 1b: Agent Reviews (Mandatory)
 
-Install with: `scripts/setup-hooks.sh`
+These are Claude Code sub-agents that perform semantic code review. They're mandatory — the pre-commit gate and session exit gate check for their markers.
 
-### Item 7: Pre-Commit — Integrity Check
+### Component 8: DST Compliance Review
 
-**File**: `.claude/hooks/pre-commit.sh` (installed to `.git/hooks/pre-commit`)
-**Blocking**: YES
+```
+File:      .claude/agents/dst-reviewer.md
+Trigger:   Manual invoke (mandatory before committing sim-visible code)
+Blocking:  YES (via marker — pre-commit gate + exit gate check for it)
+```
+
+A specialized review agent that performs **semantic analysis** of simulation-visible code changes. Goes beyond pattern matching:
+
+```
+  ┌──────────────────────────────────────────────────────────────┐
+  │              DST Compliance Review                            │
+  │                                                              │
+  │   Pattern matching          Semantic analysis                │
+  │   (Component 4)             (Component 8)                    │
+  │                                                              │
+  │   "HashMap found"           "BTreeMap is correct, but it's   │
+  │                              populated from a function that  │
+  │                              internally uses HashSet —       │
+  │                              non-deterministic data flow"    │
+  │                                                              │
+  │   "Instant::now found"      "sim_now() is used, but the     │
+  │                              closure captures a reference    │
+  │                              to a struct that caches real    │
+  │                              timestamps from its constructor"│
+  │                                                              │
+  │   Catches 25 patterns       Catches data flow, ordering     │
+  │   (~2ms)                    deps, hidden non-determinism     │
+  │                             (~30-60s)                        │
+  └──────────────────────────────────────────────────────────────┘
+```
+
+What it reviews:
+- **Data flow**: Where does each value come from? Is the source deterministic?
+- **Ordering**: Are sort keys total orders? Do iterators preserve deterministic order?
+- **Concurrency**: Are messages processed in FIFO order? Can async points race?
+- **Hidden state**: Do trait impls have non-deterministic defaults? Do closures capture non-deterministic references?
+- **Boundaries**: Where does sim-visible code call into non-sim code? Are boundaries clean?
+
+On PASS, writes `dst-reviewed-{session}` marker. On FAIL, lists findings that must be resolved.
+
+### Component 9: Code Quality Review
+
+```
+Trigger:   Manual invoke (mandatory before committing any code)
+Blocking:  YES (via marker — pre-commit gate + exit gate check for it)
+```
+
+General code quality review using the code-reviewer agent. Reviews against:
+- The current plan in `.progress/`
+- Coding standards (TigerStyle, Rust conventions)
+- Architectural alignment with Temper's vision
+
+On PASS, writes `code-reviewed-{session}` marker.
+
+---
+
+## Tier 2: Git Hooks (Commit-Time)
+
+Install with: `scripts/setup-hooks.sh`. Fire for anyone using git — humans, agents, CI.
+
+### Component 10: Pre-Commit — Integrity Check
+
+```
+File:      .claude/hooks/pre-commit.sh (installed to .git/hooks/pre-commit)
+Blocking:  YES
+```
 
 Scans staged `.rs` files (excluding tests) for:
 - `TODO`, `FIXME`, `XXX`, `HACK` comments
@@ -154,46 +370,162 @@ Scans staged `.rs` files (excluding tests) for:
 - `panic!("not implemented")`
 - `.unwrap()` calls
 
-### Item 8: Pre-Commit — Spec Syntax Validation
+### Component 11: Pre-Commit — Spec Syntax Validation
 
-**Blocking**: YES (part of pre-commit hook)
+```
+Blocking:  YES (part of pre-commit hook)
+```
 
-If any staged file is `*.ioa.toml`, runs `temper verify` to check syntax. This catches spec errors from edits made outside Claude Code.
+If any staged file is `*.ioa.toml`, runs `temper verify` to check syntax. Catches spec errors from edits made outside Claude Code.
 
-### Item 9: Pre-Commit — Dependency Audit
+### Component 12: Pre-Commit — Dependency Audit
 
-**Blocking**: YES (part of pre-commit hook)
+```
+Blocking:  YES (part of pre-commit hook)
+```
 
-If any `Cargo.toml` was staged, runs `scripts/audit-deps.sh`. Same check as Item 3, but catches direct git commits that bypass Claude Code hooks.
+If any `Cargo.toml` was staged, runs `scripts/audit-deps.sh`. Same check as Component 3, but catches direct git commits that bypass Claude Code hooks.
 
-### Item 10: Pre-Push — Full Verification Pipeline
+### Component 13: Pre-Push — Full Test Suite
 
-**File**: `.claude/hooks/pre-push.sh` (installed to `.git/hooks/pre-push`)
-**Blocking**: YES
+```
+File:      .claude/hooks/pre-push.sh (installed to .git/hooks/pre-push)
+Blocking:  YES
+```
 
-Runs a 3-gate pipeline before every push. All gates are automatic — nothing to run manually.
+Runs a 3-gate pipeline before every push:
 
-| Gate | Script | Blocking | What it checks |
-|------|--------|----------|----------------|
-| 1/3 | `scripts/integrity-check.sh` | YES | No TODO/unwrap/hacks in entire codebase |
-| 2/3 | `scripts/check-determinism.sh` | No (advisory) | HashMap/SystemTime in simulation code |
-| 3/3 | `cargo test --workspace` | YES | All tests pass |
+| Gate | What it checks | Blocking |
+|------|---------------|----------|
+| 1/3 | Integrity (no TODO/unwrap/hacks) | YES |
+| 2/3 | Determinism patterns in sim crates | YES |
+| 3/3 | `cargo test --workspace` | YES |
 
 Bypass with `git push --no-verify` for emergencies only.
 
 ---
 
-## Session Lifecycle
+## Tier 3: CI (GitHub Actions)
 
-![Session Lifecycle](images/04-session-lifecycle.png)
+The one layer that **cannot be bypassed**. Runs on every PR.
+
+- `temper verify --specs-dir specs/` — full L0-L3 cascade
+- `cargo test --workspace` — all tests
+- DST pattern scan — 25-pattern determinism check
+- Dependency isolation audit — no verify deps in production
+
+---
+
+## Marker System
+
+The harness uses temporary marker files in `/tmp/temper-harness/{project_hash}/` to coordinate between hooks:
+
+```
+  ┌──────────────────────────────────────────────────────────────┐
+  │                    Marker Flow                                │
+  │                                                              │
+  │   DST reviewer ────▶ dst-reviewed-{session}   ──┐           │
+  │                                                  │           │
+  │   Code reviewer ───▶ code-reviewed-{session}  ──┼──▶ Gate   │
+  │                                                  │   checks  │
+  │   git push ────────▶ push-pending-{session}   ──┤   these   │
+  │                                                  │           │
+  │   cargo test pass ─▶ test-verified-{session}  ──┘           │
+  │                                                              │
+  │   Checked by:                                                │
+  │   • Pre-commit gate (Component 5) — before commit            │
+  │   • Session exit gate (Component 7) — before session ends    │
+  │                                                              │
+  │   Cleaned up: on successful session exit                     │
+  └──────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Session Lifecycle
 
 A typical development session flows through all enforcement layers:
 
-1. **Session Start** — Plan reminder fires on first edit
-2. **Editing** — Spec verification, dep isolation, and determinism guards fire on each save
-3. **Committing** — Pre-commit hook runs integrity check, spec syntax, and dep audit
-4. **Pushing** — Pre-push runs 3-gate pipeline (integrity, determinism, tests); post-push creates verification markers
-5. **Session End** — Exit gate checks markers and compilation status
+```
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                                                                 │
+  │  1. SESSION START                                               │
+  │     │                                                           │
+  │     ▼                                                           │
+  │  2. EDIT CODE                                                   │
+  │     ├── .ioa.toml? ──▶ Spec Verification (L0-L3)  [BLOCKING]  │
+  │     ├── Cargo.toml? ──▶ Dep Isolation Guard        [BLOCKING]  │
+  │     ├── .rs in sim? ──▶ DST Pattern Scan (25 pat)  [BLOCKING]  │
+  │     └── any file? ────▶ Plan Reminder              [advisory]  │
+  │     │                                                           │
+  │     ▼                                                           │
+  │  3. REVIEW (mandatory before commit)                            │
+  │     ├── Sim code changed? ──▶ DST Reviewer Agent               │
+  │     │                         writes dst-reviewed marker        │
+  │     └── Any code changed? ──▶ Code Reviewer Agent              │
+  │                               writes code-reviewed marker      │
+  │     │                                                           │
+  │     ▼                                                           │
+  │  4. COMMIT                                                      │
+  │     ├── Claude Code: Pre-commit gate checks markers [BLOCKING] │
+  │     │   + runs cargo test --workspace               [BLOCKING] │
+  │     └── Git hook: integrity, spec syntax, dep audit [BLOCKING] │
+  │     │                                                           │
+  │     ▼                                                           │
+  │  5. PUSH                                                        │
+  │     ├── Git hook: 3-gate pipeline (integrity,       [BLOCKING] │
+  │     │   determinism, full tests)                                │
+  │     └── Claude Code: post-push writes markers,      [advisory] │
+  │         runs tests, coordinates with exit gate                  │
+  │     │                                                           │
+  │     ▼                                                           │
+  │  6. SESSION END                                                 │
+  │     └── Exit gate checks:                           [BLOCKING] │
+  │         • Unverified pushes?                                    │
+  │         • Missing DST review?                                   │
+  │         • Missing code review?                                  │
+  │         • Compilation errors?                                   │
+  │                                                                 │
+  └─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Who Catches What
+
+```
+  ┌───────────────────────────────────────────────────────────────┐
+  │                    Enforcement Matrix                          │
+  │                                                               │
+  │                      Claude Code    Git Hooks    CI           │
+  │                      ───────────    ─────────    ──           │
+  │  Broken spec         Spec Verify    Spec Syntax  temper verify│
+  │  Bad deps            Dep Isolate    Dep Audit    Dep audit    │
+  │  HashMap in sim      DST Scan       Pre-push     DST scan    │
+  │  Semantic DST bug    DST Reviewer   —            —            │
+  │  Code quality        Code Reviewer  —            —            │
+  │  Tests failing       Review Gate    Pre-push     cargo test   │
+  │  TODO/unwrap         —              Pre-commit   —            │
+  │  Unverified push     Exit Gate      —            —            │
+  │  Compile errors      Exit Gate      —            cargo check  │
+  │                                                               │
+  │  Can bypass?         NO             --no-verify  NO           │
+  └───────────────────────────────────────────────────────────────┘
+```
+
+**Claude Code hooks** catch agents. **Git hooks** catch humans. **CI** catches everything.
+
+---
+
+## DST Pattern Reference
+
+The determinism guard (Component 4) checks these patterns. Based on practices from:
+- **FoundationDB**: `g_network->now()`, `deterministicRandom()`, single-threaded cooperative multitasking, `Net2`/`Sim2` interface swapping
+- **TigerBeetle**: Zero external deps, static memory allocation, custom deterministic collections, `TimeSim` virtual time
+- **S2**: `getrandom`/`getentropy` interception, single-threaded Tokio with `RngSeed`, paused time mode, determinism canary
+- **Polar Signals**: `async` banned from state machine traits, synchronous state machines ticked by deterministic message bus
+
+See `.claude/agents/dst-reviewer.md` for the full semantic review ruleset.
 
 ---
 
@@ -204,16 +536,17 @@ A typical development session flows through all enforcement layers:
 scripts/setup-hooks.sh
 
 # Claude Code hooks are configured automatically via .claude/settings.json
+# No manual setup needed — hooks fire on edit, commit, push, and exit
 ```
 
 ## Bypassing (Emergencies Only)
 
 ```bash
-# Skip pre-commit checks
+# Skip git pre-commit checks
 git commit --no-verify
 
-# Skip pre-push test suite
+# Skip git pre-push test suite
 git push --no-verify
 ```
 
-Claude Code hooks cannot be bypassed — they're enforced by the tool itself. If a blocking hook fires, you must fix the issue.
+Claude Code hooks **cannot be bypassed** — they're enforced by the tool itself. If a blocking hook fires, you must fix the issue. The `// determinism-ok` comment is the only escape hatch for false positives in the DST pattern scan.

@@ -57,10 +57,18 @@ Two separated contexts: Developer Chat (design-time, can modify specs) and Produ
 - Postgres/Redis are tenant-scoped
 - Single-tenant uses TenantId::default() = "default"
 
-### Deterministic Simulation
+### Deterministic Simulation (FoundationDB/TigerBeetle Standards)
+In simulation-visible crates (temper-runtime, temper-jit, temper-server):
 - Use `sim_now()` / `sim_uuid()` instead of wall clock / random UUIDs
-- Use `BTreeMap` not `HashMap` in simulation-visible code
+- Use `BTreeMap`/`BTreeSet` not `HashMap`/`HashSet` — deterministic iteration order
+- No `std::thread::spawn`, `rayon`, or multi-threaded `tokio::spawn` — single-threaded actor model
+- No `std::fs`, `std::net`, `std::env::var` — abstract all I/O behind traits
+- No `static mut`, `lazy_static!`, `thread_local!` — pass state through actor context
+- No `chrono::Utc::now()`, `std::thread::sleep()` — use simulated time
+- No `OsRng`, `getrandom` — use seeded PRNG
 - `SimActorHandler::spec_invariants()` auto-checks [[invariant]] sections
+- Add `// determinism-ok` to suppress false positives in the determinism guard
+- See `.claude/agents/dst-reviewer.md` for the full DST compliance ruleset
 
 ### Dependency Discipline
 - `temper-jit` must NOT depend on `temper-verify` in `[dependencies]`
@@ -89,9 +97,25 @@ See `docs/HARNESS.md` for the full harness reference with diagrams.
 - **Plan Reminder** (advisory): Reminds to create `.progress/` plan before edits
 - **Spec Verification** (BLOCKING): L0-L3 cascade on every `.ioa.toml` edit
 - **Dependency Isolation** (BLOCKING): Prevents temper-jit from pulling verify deps
-- **Determinism Guard** (advisory): Warns about HashMap/SystemTime in simulation code
+- **Determinism Guard** (BLOCKING): 25-pattern DST scan based on FoundationDB/TigerBeetle practices
+- **Pre-Commit Review Gate** (BLOCKING): Blocks `git commit` without DST review + code review + passing tests
 - **Post-Push Verify** (advisory): Runs tests after push, writes markers
-- **Session Exit Gate** (BLOCKING): Blocks exit if unverified pushes or compile errors
+- **Session Exit Gate** (BLOCKING): Blocks exit if unverified pushes, missing reviews, or compile errors
+
+### Mandatory Reviews Before Commit
+**You MUST run both reviews before committing any code changes:**
+
+1. **DST Compliance Review** (for simulation-visible code in temper-runtime, temper-jit, temper-server):
+   - Invoke the DST reviewer agent (`.claude/agents/dst-reviewer.md`)
+   - Reviews code for determinism violations beyond pattern matching
+   - Writes a marker file on PASS — the pre-commit gate checks for it
+
+2. **Code Quality Review** (for all significant changes):
+   - Invoke the code-reviewer agent
+   - Reviews against plan, coding standards, TigerStyle
+   - Writes a marker file on PASS — the pre-commit gate checks for it
+
+The pre-commit gate BLOCKS `git commit` if either marker is missing. The session exit gate is a safety net that catches anything that slips through.
 
 ### Git Hooks (installed via `scripts/setup-hooks.sh`)
 - **Pre-commit**: Integrity check (no TODO/unwrap), spec syntax, dep audit

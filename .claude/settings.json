@@ -6,8 +6,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/check-plan-reminder.sh",
+            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/hooks/check-plan-reminder.sh\"",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/hooks/pre-commit-review-gate.sh\"",
+            "timeout": 300
           }
         ]
       }
@@ -18,17 +28,17 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/verify-specs.sh",
+            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/hooks/verify-specs.sh\"",
             "timeout": 120
           },
           {
             "type": "command",
-            "command": ".claude/hooks/check-deps.sh",
+            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/hooks/check-deps.sh\"",
             "timeout": 60
           },
           {
             "type": "command",
-            "command": ".claude/hooks/check-determinism.sh",
+            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/hooks/check-determinism.sh\"",
             "timeout": 10
           }
         ]
@@ -38,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/post-push-verify.sh",
+            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/hooks/post-push-verify.sh\"",
             "timeout": 300
           }
         ]
@@ -49,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/stop-verify.sh",
+            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/hooks/stop-verify.sh\"",
             "timeout": 120
           }
         ]

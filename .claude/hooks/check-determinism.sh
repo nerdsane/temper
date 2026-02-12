@@ -1,9 +1,14 @@
 #!/bin/bash
-# Item 4: Determinism Guard (PostToolUse — Write|Edit)
-# BLOCKING: No (advisory only, exit 0 always)
+# Determinism Guard (PostToolUse — Write|Edit)
+# BLOCKING: YES (exit 2 on violation)
 #
 # After editing .rs files in simulation-visible crates, scans for
 # non-deterministic patterns that break DST reproducibility.
+#
+# Based on FoundationDB, TigerBeetle, S2, and Polar Signals DST practices.
+# See docs/HARNESS.md for the full rationale.
+#
+# Suppress false positives with: // determinism-ok
 set -euo pipefail
 
 PAYLOAD="$(cat)"
@@ -32,29 +37,148 @@ case "${FILE_PATH:-}" in
     */tests/*|*_test.rs|*test_*.rs) exit 0 ;;
 esac
 
-# Check for non-deterministic patterns
-WARNINGS=""
+# Helper: check for a pattern, excluding lines with '// determinism-ok' or comment-only lines
+check_pattern() {
+    local pattern="$1"
+    local message="$2"
+    if grep -n "$pattern" "$FILE_PATH" 2>/dev/null \
+        | grep -v '// determinism-ok' \
+        | grep -qv '^[[:space:]]*//' ; then
+        VIOLATIONS="${VIOLATIONS}\n  BLOCKED: $message"
+        HAS_VIOLATION=true
+    fi
+}
 
-if grep -n 'HashMap' "$FILE_PATH" 2>/dev/null | grep -v '// determinism-ok' | grep -v 'BTreeMap' | grep -qv '^[[:space:]]*//' ; then
-    WARNINGS="${WARNINGS}\n  - HashMap found (use BTreeMap for deterministic iteration)"
-fi
+VIOLATIONS=""
+HAS_VIOLATION=false
 
-if grep -n 'SystemTime::now\|Instant::now' "$FILE_PATH" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
-    WARNINGS="${WARNINGS}\n  - SystemTime::now()/Instant::now() found (use sim_now())"
-fi
+# ═══════════════════════════════════════════════════════════════
+# CATEGORY 1: Collections — Non-deterministic iteration order
+# FoundationDB: "BTreeMap, not HashMap" (explicit rule)
+# TigerBeetle: Custom deterministic collections throughout
+# ═══════════════════════════════════════════════════════════════
 
-if grep -n 'Uuid::new_v4' "$FILE_PATH" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
-    WARNINGS="${WARNINGS}\n  - Uuid::new_v4() found (use sim_uuid())"
-fi
+check_pattern 'HashMap' \
+    "HashMap found — use BTreeMap for deterministic iteration order"
 
-if grep -n 'thread_rng\|rand::random' "$FILE_PATH" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
-    WARNINGS="${WARNINGS}\n  - thread_rng()/rand::random() found (use seeded RNG)"
-fi
+check_pattern 'HashSet' \
+    "HashSet found — use BTreeSet for deterministic iteration order"
 
-if [ -n "$WARNINGS" ]; then
-    echo "DETERMINISM WARNING in $(basename "$FILE_PATH"):" >&2
-    echo -e "$WARNINGS" >&2
-    echo "Add '// determinism-ok' comment to suppress false positives." >&2
+check_pattern 'DashMap' \
+    "DashMap found — concurrent hash map with non-deterministic ordering"
+
+check_pattern 'FuturesUnordered' \
+    "FuturesUnordered found — completion order is non-deterministic"
+
+check_pattern 'IndexMap\|IndexSet' \
+    "IndexMap/IndexSet found — uses random SipHash unless configured with fixed hasher"
+
+# ═══════════════════════════════════════════════════════════════
+# CATEGORY 2: Time and Clocks
+# FoundationDB: All code must use g_network->now()
+# TigerBeetle: TimeSim provides virtual time
+# ═══════════════════════════════════════════════════════════════
+
+check_pattern 'SystemTime::now\|Instant::now' \
+    "SystemTime::now()/Instant::now() found — use sim_now() for simulation-safe time"
+
+check_pattern 'chrono::Utc::now\|chrono::Local::now\|OffsetDateTime::now' \
+    "chrono/time real clock access found — use sim_now()"
+
+check_pattern 'std::thread::sleep\b' \
+    "std::thread::sleep() found — blocks thread, breaks simulation timing"
+
+check_pattern 'tokio::time::sleep\b' \
+    "tokio::time::sleep() found — use simulated time / sim_now()"
+
+# ═══════════════════════════════════════════════════════════════
+# CATEGORY 3: Randomness and Entropy
+# FoundationDB: Mandatory deterministicRandom() seeded PRNG
+# TigerBeetle: All std.Random replaced with stdx.PRNG
+# ═══════════════════════════════════════════════════════════════
+
+check_pattern 'Uuid::new_v4' \
+    "Uuid::new_v4() found — use sim_uuid() for deterministic UUIDs"
+
+check_pattern 'thread_rng\|rand::random\b\|OsRng' \
+    "Unseeded RNG found — use seeded PRNG for reproducibility"
+
+check_pattern 'getrandom' \
+    "getrandom found — system entropy source breaks determinism"
+
+# ═══════════════════════════════════════════════════════════════
+# CATEGORY 4: Threading and Concurrency
+# FoundationDB: Single-threaded, cooperative multitasking only
+# TigerBeetle: Single-threaded event loop, deterministic ticking
+# Polar Signals: async keyword banned from state machine traits
+# ═══════════════════════════════════════════════════════════════
+
+check_pattern 'std::thread::spawn' \
+    "std::thread::spawn() found — use actor model / message passing"
+
+check_pattern 'rayon::' \
+    "rayon parallel iteration found — use sequential iteration in simulation"
+
+check_pattern 'tokio::spawn\b' \
+    "tokio::spawn() found — task scheduling is non-deterministic on multi-threaded runtime"
+
+# ═══════════════════════════════════════════════════════════════
+# CATEGORY 5: I/O and System Calls
+# FoundationDB: Interface swapping via INetwork (Net2/Sim2)
+# TigerBeetle: All I/O mocked — network + storage simulators
+# ═══════════════════════════════════════════════════════════════
+
+check_pattern 'std::fs::' \
+    "std::fs found — real filesystem I/O breaks simulation determinism"
+
+check_pattern 'std::net::' \
+    "std::net found — real network I/O breaks simulation determinism"
+
+check_pattern 'std::env::var\b' \
+    "std::env::var() found — environment varies per machine/run"
+
+check_pattern 'std::process::id\b' \
+    "std::process::id() found — PID differs every run"
+
+# ═══════════════════════════════════════════════════════════════
+# CATEGORY 6: Global Mutable State
+# TigerBeetle: Static allocation only, no runtime allocation
+# FoundationDB: Controlled globals only (g_network, g_simulator)
+# ═══════════════════════════════════════════════════════════════
+
+check_pattern 'static mut ' \
+    "static mut found — unsound, initialization order undefined"
+
+check_pattern 'lazy_static!' \
+    "lazy_static! found — first-access initialization is order-dependent"
+
+check_pattern 'thread_local!' \
+    "thread_local! found — state isolated per thread, breaks simulation"
+
+# ═══════════════════════════════════════════════════════════════
+# CATEGORY 7: Serialization Hazards
+# TigerBeetle: Custom copy_disjoint, zero-padded buffers
+# ═══════════════════════════════════════════════════════════════
+
+check_pattern 'sort_unstable\b' \
+    "sort_unstable() found — relative order of equal elements is arbitrary, use sort()"
+
+# ═══════════════════════════════════════════════════════════════
+# Report results
+# ═══════════════════════════════════════════════════════════════
+
+if [ "$HAS_VIOLATION" = true ]; then
+    echo "" >&2
+    echo "══════════════════════════════════════════════════════════════" >&2
+    echo "  DETERMINISM VIOLATION in $(basename "$FILE_PATH")" >&2
+    echo "══════════════════════════════════════════════════════════════" >&2
+    echo -e "$VIOLATIONS" >&2
+    echo "" >&2
+    echo "  These patterns break deterministic simulation reproducibility." >&2
+    echo "  Ref: FoundationDB, TigerBeetle, S2 DST best practices." >&2
+    echo "  Add '// determinism-ok' on the line to suppress false positives." >&2
+    echo "══════════════════════════════════════════════════════════════" >&2
+    exit 2
 fi
 
 exit 0
