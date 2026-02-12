@@ -1,0 +1,224 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ─────────────────────────────────────────────────────
+  # Gate 1: Fast checks (seconds)
+  # ─────────────────────────────────────────────────────
+  check:
+    name: Compile & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: cargo check --workspace
+        run: cargo check --workspace
+
+      - name: cargo clippy --workspace
+        run: cargo clippy --workspace -- -D warnings
+
+  # ─────────────────────────────────────────────────────
+  # Gate 2: Integrity checks (seconds)
+  # ─────────────────────────────────────────────────────
+  integrity:
+    name: Integrity & DST Patterns
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No TODO/FIXME/HACK in production code
+        run: |
+          FOUND=false
+          for f in $(find crates/ -name '*.rs' -not -path '*/tests/*' -not -name '*_test.rs'); do
+            if grep -nE '(TODO|FIXME|XXX|HACK)\b' "$f" | grep -v '// ci-ok' | grep -qv '^[[:space:]]*//' 2>/dev/null; then
+              echo "FAIL: $f contains TODO/FIXME/HACK"
+              grep -nE '(TODO|FIXME|XXX|HACK)\b' "$f" | grep -v '// ci-ok' | grep -v '^[[:space:]]*//'
+              FOUND=true
+            fi
+          done
+          if [ "$FOUND" = true ]; then exit 1; fi
+          echo "Integrity check: OK"
+
+      - name: No unwrap() in production code
+        run: |
+          FOUND=false
+          for f in $(find crates/ -name '*.rs' -not -path '*/tests/*' -not -name '*_test.rs'); do
+            if grep -n '\.unwrap()' "$f" | grep -v '// ci-ok' | grep -qv '^[[:space:]]*//' 2>/dev/null; then
+              echo "FAIL: $f contains .unwrap()"
+              grep -n '\.unwrap()' "$f" | grep -v '// ci-ok' | grep -v '^[[:space:]]*//'
+              FOUND=true
+            fi
+          done
+          if [ "$FOUND" = true ]; then exit 1; fi
+          echo "No unwrap: OK"
+
+      - name: DST pattern scan (25 patterns)
+        run: |
+          FOUND=false
+          SIM_CRATES="temper-runtime temper-jit temper-server"
+          for crate in $SIM_CRATES; do
+            CRATE_DIR="crates/$crate/src"
+            [ -d "$CRATE_DIR" ] || continue
+            for f in $(find "$CRATE_DIR" -name '*.rs' -not -path '*/tests/*'); do
+              # Collections
+              for pat in 'HashMap' 'HashSet' 'DashMap' 'FuturesUnordered'; do
+                if grep -n "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
+                  echo "DST VIOLATION: $f — $pat found"
+                  FOUND=true
+                fi
+              done
+              # Time
+              for pat in 'SystemTime::now' 'Instant::now' 'chrono::Utc::now' 'std::thread::sleep'; do
+                if grep -n "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
+                  echo "DST VIOLATION: $f — $pat found"
+                  FOUND=true
+                fi
+              done
+              # Randomness
+              for pat in 'Uuid::new_v4' 'thread_rng' 'OsRng' 'getrandom'; do
+                if grep -n "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
+                  echo "DST VIOLATION: $f — $pat found"
+                  FOUND=true
+                fi
+              done
+              # Threading
+              for pat in 'std::thread::spawn' 'rayon::' 'tokio::spawn'; do
+                if grep -n "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
+                  echo "DST VIOLATION: $f — $pat found"
+                  FOUND=true
+                fi
+              done
+              # I/O
+              for pat in 'std::fs::' 'std::net::' 'std::env::var'; do
+                if grep -n "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
+                  echo "DST VIOLATION: $f — $pat found"
+                  FOUND=true
+                fi
+              done
+              # Global state
+              for pat in 'static mut ' 'lazy_static!' 'thread_local!'; do
+                if grep -n "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
+                  echo "DST VIOLATION: $f — $pat found"
+                  FOUND=true
+                fi
+              done
+            done
+          done
+          if [ "$FOUND" = true ]; then exit 1; fi
+          echo "DST pattern scan: OK"
+
+      - name: Dependency isolation
+        run: |
+          # Install Rust for cargo tree
+          rustup default nightly
+          # Check temper-jit has no production dep on temper-verify
+          if cargo tree --no-dev -p temper-jit 2>/dev/null | grep -q temper-verify; then
+            echo "FAIL: temper-jit has production dependency on temper-verify"
+            exit 1
+          fi
+          # Check no stateright/proptest in production crates
+          for crate in temper-jit temper-server temper-runtime; do
+            if cargo tree --no-dev -p "$crate" 2>/dev/null | grep -qE 'stateright|proptest'; then
+              echo "FAIL: $crate production binary includes stateright or proptest"
+              exit 1
+            fi
+          done
+          echo "Dependency isolation: OK"
+
+  # ─────────────────────────────────────────────────────
+  # Gate 3: Full test suite (minutes)
+  # ─────────────────────────────────────────────────────
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+  # ─────────────────────────────────────────────────────
+  # Gate 4: Spec verification (minutes)
+  # ─────────────────────────────────────────────────────
+  verify-specs:
+    name: Spec Verification (L0-L3)
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-verify-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-verify-
+
+      - name: Build temper-cli
+        run: cargo build -p temper-cli
+
+      - name: Verify all spec directories
+        run: |
+          # Find all directories containing .ioa.toml files
+          SPEC_DIRS=$(find . -name '*.ioa.toml' -exec dirname {} \; | sort -u)
+          if [ -z "$SPEC_DIRS" ]; then
+            echo "No spec directories found — skipping verification"
+            exit 0
+          fi
+          ALL_PASSED=true
+          for dir in $SPEC_DIRS; do
+            # Only verify dirs that also have a CSDL model
+            if [ -f "$dir/model.csdl.xml" ]; then
+              echo "Verifying specs in $dir..."
+              if ! cargo run -p temper-cli -- verify --specs-dir "$dir"; then
+                echo "FAIL: Spec verification failed for $dir"
+                ALL_PASSED=false
+              fi
+            fi
+          done
+          if [ "$ALL_PASSED" = false ]; then exit 1; fi
+          echo "All specs verified: OK"
