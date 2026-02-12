@@ -11,6 +11,7 @@
 
 pub mod records;
 pub mod store;
+pub mod pg_store;
 pub mod chain;
 pub mod insight;
 
@@ -21,5 +22,6 @@ pub use records::{
     Decision, InsightCategory, InsightSignal,
 };
 pub use store::RecordStore;
+pub use pg_store::{PostgresRecordStore, PgRecordStoreError};
 pub use chain::{validate_chain, ChainValidation};
 pub use insight::{compute_priority_score, classify_insight, generate_digest};

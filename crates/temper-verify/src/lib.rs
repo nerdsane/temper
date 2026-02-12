@@ -22,6 +22,7 @@ pub use model::{
 };
 pub use proptest_gen::{run_prop_tests_from_ioa, PropTestResult};
 pub use simulation::{
-    run_multi_seed_simulation_from_ioa, run_simulation_from_ioa, SimConfig, SimulationResult,
+    run_multi_seed_simulation_from_ioa, run_simulation_from_ioa, LivenessViolation, SimConfig,
+    SimulationResult,
 };
 pub use smt::{verify_symbolic, SmtResult};

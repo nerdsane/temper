@@ -5,7 +5,7 @@
 //!
 //! Run with: `cargo bench -p temper-server --bench actor_throughput`
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use temper_runtime::ActorSystem;
@@ -17,7 +17,7 @@ const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.tom
 
 fn build_state(name: &str) -> ServerState {
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
-    let mut ioa_sources = HashMap::new();
+    let mut ioa_sources = BTreeMap::new();
     ioa_sources.insert("Order".to_string(), ORDER_IOA.to_string());
     let system = ActorSystem::new(name);
     ServerState::with_specs(system, csdl, CSDL_XML.to_string(), ioa_sources)
@@ -58,7 +58,7 @@ fn bench_actor(c: &mut Criterion) {
                     for i in 0..count {
                         let s = state.clone();
                         let eid = format!("o-{batch}-{i}");
-                        handles.push(tokio::spawn(async move {
+                        handles.push(tokio::spawn(async move { // determinism-ok: benchmark concurrency, not simulation
                             s.dispatch_action("Order", &eid, "AddItem", serde_json::json!({"ProductId": "p1"}))
                                 .await
                                 .unwrap()

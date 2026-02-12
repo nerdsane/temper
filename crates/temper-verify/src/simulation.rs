@@ -13,7 +13,10 @@ use temper_runtime::scheduler::{DeterministicRng, FaultConfig, SimActorState, Si
 
 use stateright::Model;
 
-use crate::model::{build_model_from_ioa, InvariantKind, TemperModel, TemperModelAction, TemperModelState};
+use crate::model::{
+    build_model_from_ioa, InvariantKind, LivenessKind, TemperModel, TemperModelAction,
+    TemperModelState,
+};
 
 /// Configuration for a simulation run.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -80,10 +83,25 @@ pub struct SimulationResult {
     pub total_dropped: u64,
     /// Any invariant violations found.
     pub violations: Vec<InvariantViolation>,
+    /// Any liveness violations found.
+    pub liveness_violations: Vec<LivenessViolation>,
     /// The seed used (for replay).
     pub seed: u64,
     /// Per-actor final states.
     pub actor_final_states: Vec<(String, TemperModelState)>,
+}
+
+/// A liveness violation found during or after simulation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LivenessViolation {
+    /// Which actor.
+    pub actor_id: String,
+    /// Which liveness property was violated.
+    pub property: String,
+    /// Description of the violation.
+    pub description: String,
+    /// The actor's final state.
+    pub final_state: TemperModelState,
 }
 
 /// An invariant violation found during simulation.
@@ -214,6 +232,9 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         sched.tick();
     }
 
+    // Post-simulation liveness checks
+    let liveness_violations = check_liveness_post_simulation(model, &actor_states);
+
     SimulationResult {
         all_invariants_held: violations.is_empty(),
         ticks: config.max_ticks.min(sched.current_time()),
@@ -221,9 +242,67 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         total_messages,
         total_dropped: sched.total_dropped() as u64,
         violations,
+        liveness_violations,
         seed: config.seed,
         actor_final_states: actor_states,
     }
+}
+
+/// Post-simulation liveness checks.
+///
+/// - **NoDeadlock**: Each actor in a "from" state must have at least one valid action.
+/// - **ReachesState**: Each actor must have reached one of the target states by simulation end.
+///   (Weaker than Stateright's exhaustive BFS, but catches stuck actors.)
+fn check_liveness_post_simulation(
+    model: &TemperModel,
+    actor_states: &[(String, TemperModelState)],
+) -> Vec<LivenessViolation> {
+    let mut violations = Vec::new();
+
+    for (actor_id, final_state) in actor_states {
+        for live in &model.liveness {
+            match &live.kind {
+                LivenessKind::NoDeadlock { from } => {
+                    if from.contains(&final_state.status) {
+                        let mut actions = Vec::new();
+                        model.actions(final_state, &mut actions);
+                        if actions.is_empty() {
+                            violations.push(LivenessViolation {
+                                actor_id: actor_id.clone(),
+                                property: live.name.clone(),
+                                description: format!(
+                                    "deadlock: actor in state '{}' has no enabled actions",
+                                    final_state.status
+                                ),
+                                final_state: final_state.clone(),
+                            });
+                        }
+                    }
+                }
+                LivenessKind::ReachesState { from, targets } => {
+                    if targets.is_empty() {
+                        continue;
+                    }
+                    // If the actor started from a "from" state, it should have
+                    // reached a target state by the end of simulation.
+                    let started_from = from.is_empty() || from.contains(&model.initial_status);
+                    if started_from && !targets.contains(&final_state.status) {
+                        violations.push(LivenessViolation {
+                            actor_id: actor_id.clone(),
+                            property: live.name.clone(),
+                            description: format!(
+                                "actor did not reach target states {:?}, stuck at '{}'",
+                                targets, final_state.status
+                            ),
+                            final_state: final_state.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    violations
 }
 
 /// Check invariants on a state using the model's resolved invariants.

@@ -279,20 +279,32 @@ impl VerificationCascade {
             self.sim_seeds,
         );
 
-        let all_passed = results.iter().all(|r| r.all_invariants_held);
+        let invariants_ok = results.iter().all(|r| r.all_invariants_held);
+        let liveness_ok = results.iter().all(|r| r.liveness_violations.is_empty());
+        let all_passed = invariants_ok && liveness_ok;
         let total_transitions: u64 = results.iter().map(|r| r.total_transitions).sum();
         let total_dropped: u64 = results.iter().map(|r| r.total_dropped).sum();
         let violations: Vec<_> = results.iter().flat_map(|r| r.violations.clone()).collect();
+        let liveness_violations: Vec<_> = results
+            .iter()
+            .flat_map(|r| r.liveness_violations.clone())
+            .collect();
 
         let summary = if all_passed {
             format!(
                 "L2 Simulation PASSED: {} seeds, {} transitions, {} dropped msgs",
                 self.sim_seeds, total_transitions, total_dropped,
             )
+        } else if !invariants_ok {
+            format!(
+                "L2 Simulation FAILED: {} invariant violation(s) across {} seeds",
+                violations.len(),
+                self.sim_seeds,
+            )
         } else {
             format!(
-                "L2 Simulation FAILED: {} violation(s) across {} seeds",
-                violations.len(),
+                "L2 Simulation FAILED: {} liveness violation(s) across {} seeds",
+                liveness_violations.len(),
                 self.sim_seeds,
             )
         };

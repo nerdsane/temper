@@ -4,4 +4,4 @@
 
 pub mod claude;
 
-pub use claude::ClaudeClient;
+pub use claude::{ChatClient, ClaudeClient, MockClaudeClient};

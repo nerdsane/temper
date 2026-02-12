@@ -5,6 +5,7 @@ use axum::Router;
 use tower_http::trace::TraceLayer;
 
 use crate::dispatch;
+use crate::events;
 use crate::state::ServerState;
 
 /// Build the axum router with all Temper Data API routes.
@@ -13,6 +14,7 @@ use crate::state::ServerState;
 /// - GET  /tdata                      → service document
 /// - GET  /tdata/$metadata            → CSDL XML (tenant-scoped)
 /// - GET  /tdata/$hints               → agent hints JSON
+/// - GET  /tdata/$events              → SSE stream of entity state changes
 /// - GET  /tdata/{*path}              → entity set / entity / navigation / function
 /// - POST /tdata/{*path}              → create entity / bound action
 ///
@@ -23,6 +25,7 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/", get(dispatch::handle_service_document))
         .route("/$metadata", get(dispatch::handle_metadata))
         .route("/$hints", get(dispatch::handle_hints))
+        .route("/$events", get(events::handle_events))
         .route("/{*path}",
             get(dispatch::handle_odata_get)
             .post(dispatch::handle_odata_post)
@@ -62,7 +65,7 @@ mod tests {
         let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
         let csdl = parse_csdl(csdl_xml).unwrap();
         let system = ActorSystem::new("test-ioa");
-        let mut specs = std::collections::HashMap::new();
+        let mut specs = std::collections::BTreeMap::new();
         specs.insert("Order".to_string(), order_ioa.to_string());
         ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs)
     }

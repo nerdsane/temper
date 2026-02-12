@@ -104,6 +104,8 @@ fn format_guards(guards: &[Guard]) -> String {
             Guard::MinCount { var, min } => format!("Cardinality({var}) > {}", min.saturating_sub(1)),
             Guard::MaxCount { var, max } => format!("Cardinality({var}) < {max}"),
             Guard::IsTrue { var } => format!("{var} = TRUE"),
+            Guard::ListContains { var, value } => format!("\"{value}\" \\in {var}"),
+            Guard::ListLengthMin { var, min } => format!("Len({var}) >= {min}"),
         })
         .collect::<Vec<_>>()
         .join(" /\\ ")
@@ -117,6 +119,8 @@ fn format_effects(effects: &[Effect]) -> String {
             Effect::Decrement { var } => format!("{var}' = {var} - 1"),
             Effect::SetBool { var, value } => format!("{var}' = {value}"),
             Effect::Emit { event } => format!("emit({event})"),
+            Effect::ListAppend { var } => format!("{var}'.append(param)"),
+            Effect::ListRemoveAt { var } => format!("{var}'.remove_at(param)"),
         })
         .collect::<Vec<_>>()
         .join(" /\\ ")

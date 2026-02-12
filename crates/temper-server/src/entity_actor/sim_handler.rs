@@ -41,6 +41,7 @@ impl EntityActorHandler {
             item_count: 0,
             counters: std::collections::BTreeMap::new(),
             booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
             fields: serde_json::json!({}),
             events: Vec::new(),
             sequence_nr: 0,
@@ -62,6 +63,9 @@ impl EntityActorHandler {
         }
         for (k, v) in &self.state.booleans {
             ctx.booleans.insert(k.clone(), *v);
+        }
+        for (k, v) in &self.state.lists {
+            ctx.lists.insert(k.clone(), v.clone());
         }
         ctx
     }
@@ -119,6 +123,7 @@ impl SimActorHandler for EntityActorHandler {
         self.state.item_count = 0;
         self.state.counters.clear();
         self.state.booleans.clear();
+        self.state.lists.clear();
         self.state.events.clear();
         self.state.sequence_nr = 0;
         self.state.fields = serde_json::json!({
@@ -178,6 +183,21 @@ impl SimActorHandler for EntityActorHandler {
                         temper_jit::table::Effect::SetBool { var, value } => {
                             self.state.booleans.insert(var.clone(), *value);
                         }
+                        temper_jit::table::Effect::ListAppend(var) => {
+                            if let Some(val) = params_value.get(var).and_then(|v| v.as_str()) {
+                                self.state.lists.entry(var.clone()).or_default().push(val.to_string());
+                            }
+                        }
+                        temper_jit::table::Effect::ListRemoveAt(var) => {
+                            let index_key = format!("{var}_index");
+                            if let Some(idx) = params_value.get(&index_key).and_then(|v| v.as_u64()) {
+                                let list = self.state.lists.entry(var.clone()).or_default();
+                                let idx = idx as usize;
+                                if idx < list.len() {
+                                    list.remove(idx);
+                                }
+                            }
+                        }
                         temper_jit::table::Effect::EmitEvent(_) => {
                             // No telemetry in simulation
                         }
@@ -211,6 +231,11 @@ impl SimActorHandler for EntityActorHandler {
                     // Sync booleans into fields
                     for (k, v) in &self.state.booleans {
                         obj.insert(k.clone(), serde_json::Value::Bool(*v));
+                    }
+                    // Sync lists into fields
+                    for (k, v) in &self.state.lists {
+                        let arr: Vec<serde_json::Value> = v.iter().map(|s| serde_json::Value::String(s.clone())).collect();
+                        obj.insert(k.clone(), serde_json::Value::Array(arr));
                     }
                 }
 

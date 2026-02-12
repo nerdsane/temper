@@ -149,38 +149,28 @@ fn check_no_deadlock(model: &TemperModel, state: &TemperModelState) -> bool {
 }
 
 /// Check liveness: from the specified states, eventually reaches a target state.
-/// Uses Stateright's `Property::eventually` (acyclic paths only).
+///
+/// Returns `true` when the current state is in any ReachesState target set.
+/// Stateright's `eventually` verifies that on every acyclic path, this
+/// predicate becomes true at some point.
+///
+/// Note: Stateright requires `fn` pointers, so we combine all ReachesState
+/// properties. For specs with multiple ReachesState targets, "eventually
+/// reaches any target" is verified.
 fn check_reaches_state(model: &TemperModel, state: &TemperModelState) -> bool {
     for live in &model.liveness {
-        if let LivenessKind::ReachesState {
-            ref from,
-            ref targets,
-        } = live.kind
-        {
-            if targets.is_empty() {
-                continue; // No targets = trivially true
-            }
-            // The eventually check: if we're in a from-state OR a non-target state,
-            // this property hasn't been satisfied yet. It's satisfied when we reach
-            // a target state.
-            // Stateright's eventually semantics: the condition must become true at
-            // some point on every acyclic path.
-            if from.contains(&state.status) || !targets.contains(&state.status) {
-                // Not yet at target — Stateright handles the path analysis
-                // We return false to indicate "not yet satisfied"
-                // But we need to be careful: we return true if we ARE at a target
-            }
-            if targets.contains(&state.status) {
+        if let LivenessKind::ReachesState { targets, .. } = &live.kind {
+            if !targets.is_empty() && targets.contains(&state.status) {
                 return true;
             }
         }
     }
-    // If no liveness reaches apply, or we haven't reached target yet
-    // For eventually properties, Stateright needs: return true when the property
-    // is "satisfied at this state". For ReachesState, that means we're at a target.
-    // If no ReachesState liveness exists, return true (vacuously satisfied).
-    let has_reaches = model.liveness.iter().any(|l| matches!(l.kind, LivenessKind::ReachesState { .. }));
-    !has_reaches
+    // No target state reached yet.
+    // If there are no ReachesState properties, return true (vacuously satisfied).
+    !model
+        .liveness
+        .iter()
+        .any(|l| matches!(&l.kind, LivenessKind::ReachesState { targets, .. } if !targets.is_empty()))
 }
 
 // -- Model trait implementation ----------------------------------------------
@@ -351,7 +341,7 @@ impl Model for TemperModel {
         let has_reaches = self
             .liveness
             .iter()
-            .any(|l| matches!(l.kind, LivenessKind::ReachesState { .. }));
+            .any(|l| matches!(&l.kind, LivenessKind::ReachesState { targets, .. } if !targets.is_empty()));
         if has_reaches {
             props.push(Property::eventually(
                 "ReachesTerminal",

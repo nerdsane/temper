@@ -147,6 +147,9 @@ impl EntityActor {
                         for (k, v) in &state.booleans {
                             eval_ctx.booleans.insert(k.clone(), *v);
                         }
+                        for (k, v) in &state.lists {
+                            eval_ctx.lists.insert(k.clone(), v.clone());
+                        }
 
                         if let Some(result) =
                             table.evaluate_ctx(&state.status, &eval_ctx, &event.action)
@@ -175,6 +178,21 @@ impl EntityActor {
                                         }
                                         temper_jit::table::Effect::SetBool { var, value } => {
                                             state.booleans.insert(var.clone(), *value);
+                                        }
+                                        temper_jit::table::Effect::ListAppend(var) => {
+                                            if let Some(val) = event.params.get(var).and_then(|v| v.as_str()) {
+                                                state.lists.entry(var.clone()).or_default().push(val.to_string());
+                                            }
+                                        }
+                                        temper_jit::table::Effect::ListRemoveAt(var) => {
+                                            let index_key = format!("{var}_index");
+                                            if let Some(idx) = event.params.get(&index_key).and_then(|v| v.as_u64()) {
+                                                let list = state.lists.entry(var.clone()).or_default();
+                                                let idx = idx as usize;
+                                                if idx < list.len() {
+                                                    list.remove(idx);
+                                                }
+                                            }
                                         }
                                         temper_jit::table::Effect::EmitEvent(_)
                                         | temper_jit::table::Effect::Custom(_) => {}
@@ -214,12 +232,16 @@ impl EntityActor {
                             "Status".into(),
                             serde_json::Value::String(state.status.clone()),
                         );
-                        // Sync final counter/boolean state into fields
+                        // Sync final counter/boolean/list state into fields
                         for (k, v) in &state.counters {
                             obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
                         }
                         for (k, v) in &state.booleans {
                             obj.insert(k.clone(), serde_json::Value::Bool(*v));
+                        }
+                        for (k, v) in &state.lists {
+                            let arr: Vec<serde_json::Value> = v.iter().map(|s| serde_json::Value::String(s.clone())).collect();
+                            obj.insert(k.clone(), serde_json::Value::Array(arr));
                         }
                     }
                     tracing::info!(
@@ -263,6 +285,7 @@ impl Actor for EntityActor {
             item_count: 0,
             counters: BTreeMap::new(),
             booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
             fields,
             events: Vec::new(),
             sequence_nr: 0,
@@ -314,6 +337,7 @@ impl Actor for EntityActor {
                         success: false,
                         state: state.clone(),
                         error: Some(format!("Event budget exhausted ({MAX_EVENTS_PER_ENTITY} max)")),
+                        custom_effects: vec![],
                     });
                     return Ok(());
                 }
@@ -326,6 +350,9 @@ impl Actor for EntityActor {
                 for (k, v) in &state.booleans {
                     eval_ctx.booleans.insert(k.clone(), *v);
                 }
+                for (k, v) in &state.lists {
+                    eval_ctx.lists.insert(k.clone(), v.clone());
+                }
                 let result = self.table.evaluate_ctx(&state.status, &eval_ctx, &name);
                 let event_count_before = state.events.len();
 
@@ -333,6 +360,7 @@ impl Actor for EntityActor {
                     Some(transition_result) if transition_result.success => {
                         let from_status = state.status.clone();
                         let to_status = transition_result.new_state.clone();
+                        let mut custom_effects = Vec::new();
 
                         // Apply effects
                         for effect in &transition_result.effects {
@@ -356,6 +384,23 @@ impl Actor for EntityActor {
                                 temper_jit::table::Effect::SetBool { var, value } => {
                                     state.booleans.insert(var.clone(), *value);
                                 }
+                                temper_jit::table::Effect::ListAppend(var) => {
+                                    // Value comes from action params under the list var name
+                                    if let Some(val) = params.get(var).and_then(|v| v.as_str()) {
+                                        state.lists.entry(var.clone()).or_default().push(val.to_string());
+                                    }
+                                }
+                                temper_jit::table::Effect::ListRemoveAt(var) => {
+                                    // Index comes from action params as "{var}_index"
+                                    let index_key = format!("{var}_index");
+                                    if let Some(idx) = params.get(&index_key).and_then(|v| v.as_u64()) {
+                                        let list = state.lists.entry(var.clone()).or_default();
+                                        let idx = idx as usize;
+                                        if idx < list.len() {
+                                            list.remove(idx);
+                                        }
+                                    }
+                                }
                                 temper_jit::table::Effect::EmitEvent(evt) => {
                                     tracing::info!(
                                         entity_type = %state.entity_type,
@@ -364,11 +409,12 @@ impl Actor for EntityActor {
                                         "event emitted"
                                     );
                                 }
-                                temper_jit::table::Effect::Custom(name) => {
+                                temper_jit::table::Effect::Custom(effect_name) => {
+                                    custom_effects.push(effect_name.clone());
                                     tracing::info!(
                                         entity_type = %state.entity_type,
                                         entity_id = %state.entity_id,
-                                        effect = %name,
+                                        effect = %effect_name,
                                         "custom effect (dispatched by post-transition hook)"
                                     );
                                 }
@@ -396,6 +442,11 @@ impl Actor for EntityActor {
                             // Sync booleans into fields
                             for (k, v) in &state.booleans {
                                 obj.insert(k.clone(), serde_json::Value::Bool(*v));
+                            }
+                            // Sync lists into fields
+                            for (k, v) in &state.lists {
+                                let arr: Vec<serde_json::Value> = v.iter().map(|s| serde_json::Value::String(s.clone())).collect();
+                                obj.insert(k.clone(), serde_json::Value::Array(arr));
                             }
                         }
 
@@ -460,6 +511,7 @@ impl Actor for EntityActor {
                             success: true,
                             state: state.clone(),
                             error: None,
+                            custom_effects,
                         });
                     }
                     Some(_) => {
@@ -484,6 +536,7 @@ impl Actor for EntityActor {
                                 "Action '{}' not valid from state '{}'",
                                 name, state.status
                             )),
+                            custom_effects: vec![],
                         });
                     }
                     None => {
@@ -505,6 +558,7 @@ impl Actor for EntityActor {
                             success: false,
                             state: state.clone(),
                             error: Some(format!("Unknown action: {}", name)),
+                            custom_effects: vec![],
                         });
                     }
                 }
@@ -514,6 +568,7 @@ impl Actor for EntityActor {
                     success: true,
                     state: state.clone(),
                     error: None,
+                    custom_effects: vec![],
                 });
             }
             EntityMsg::GetField { field } => {
@@ -542,6 +597,7 @@ impl Actor for EntityActor {
                     success: true,
                     state: state.clone(),
                     error: None,
+                    custom_effects: vec![],
                 });
             }
             EntityMsg::Delete => {
@@ -549,6 +605,7 @@ impl Actor for EntityActor {
                     success: true,
                     state: state.clone(),
                     error: None,
+                    custom_effects: vec![],
                 });
             }
         }

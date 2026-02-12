@@ -83,6 +83,7 @@ fn interactive_full_pipeline() {
     let ctx_empty = EvalContext {
         counters: BTreeMap::from([("items".to_string(), 0)]),
         booleans: BTreeMap::new(),
+        lists: BTreeMap::new(),
     };
     let result = table.evaluate_ctx("Draft", &ctx_empty, "SubmitOrder");
     println!("  SubmitOrder from Draft, items=0:");
@@ -95,6 +96,7 @@ fn interactive_full_pipeline() {
     let ctx_items = EvalContext {
         counters: BTreeMap::from([("items".to_string(), 2)]),
         booleans: BTreeMap::new(),
+        lists: BTreeMap::new(),
     };
     let result = table.evaluate_ctx("Draft", &ctx_items, "SubmitOrder");
     println!("  SubmitOrder from Draft, items=2:");

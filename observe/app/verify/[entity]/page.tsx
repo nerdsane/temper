@@ -1,32 +1,32 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { runVerification } from "@/lib/api";
-import type { VerificationResult } from "@/lib/mock-data";
+import type { VerificationResult } from "@/lib/types";
 import CascadeResults from "@/components/CascadeResults";
+import ErrorDisplay from "@/components/ErrorDisplay";
 
 export default function VerificationPage() {
   const params = useParams();
   const entity = params.entity as string;
   const [result, setResult] = useState<VerificationResult | null>(null);
   const [loading, setLoading] = useState(false);
-  const [hasRun, setHasRun] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleRunVerification = async () => {
     setLoading(true);
-    const data = await runVerification(entity);
-    setResult(data);
-    setLoading(false);
-    setHasRun(true);
+    setError(null);
+    try {
+      const data = await runVerification(entity);
+      setResult(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Verification failed for "${entity}"`);
+    } finally {
+      setLoading(false);
+    }
   };
-
-  // Auto-run on mount to show mock data
-  useEffect(() => {
-    handleRunVerification();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entity]);
 
   return (
     <div>
@@ -65,7 +65,7 @@ export default function VerificationPage() {
       </div>
 
       {/* Loading state */}
-      {loading && !hasRun && (
+      {loading && (
         <div className="flex items-center justify-center h-64">
           <div className="text-center">
             <div className="text-gray-500 text-sm mb-2">Running verification cascade...</div>
@@ -82,15 +82,29 @@ export default function VerificationPage() {
         </div>
       )}
 
+      {/* Error state */}
+      {!loading && error && (
+        <ErrorDisplay
+          title="Verification error"
+          message={error}
+          retry={handleRunVerification}
+        />
+      )}
+
       {/* Results */}
-      {result && (
+      {!loading && result && (
         <CascadeResults levels={result.levels} allPassed={result.all_passed} />
       )}
 
-      {/* No result */}
-      {!loading && !result && (
-        <div className="text-center py-12 text-gray-500">
-          <div className="mb-4">No verification results available for {entity}</div>
+      {/* Initial prompt */}
+      {!loading && !result && !error && (
+        <div className="text-center py-12">
+          <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-gray-800 border border-gray-700 mb-4">
+            <svg className="w-6 h-6 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+          </div>
+          <p className="text-gray-400 mb-4">Click &quot;Run Verification&quot; to start the cascade</p>
           <button
             onClick={handleRunVerification}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-md transition-colors"

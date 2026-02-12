@@ -3963,6 +3963,7 @@ dependencies = [
  "serde",
  "serde_json",
  "temper-authz",
+ "temper-evolution",
  "temper-jit",
  "temper-observe",
  "temper-odata",
@@ -3971,6 +3972,7 @@ dependencies = [
  "temper-store-postgres",
  "temper-verify",
  "tokio",
+ "tokio-stream",
  "tokio-test",
  "tower",
  "tower-http",
@@ -4007,11 +4009,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "fred",
+ "futures-core",
  "serde",
  "serde_json",
  "temper-runtime",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "uuid",
 ]
 
@@ -4214,6 +4218,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

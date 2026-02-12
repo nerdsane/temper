@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import type { SpecDetail } from "@/lib/mock-data";
+import type { SpecDetail } from "@/lib/types";
 
 interface StateMachineGraphProps {
   spec: SpecDetail;
@@ -25,7 +25,6 @@ interface TransitionEdge {
 export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
   const { nodes, edges, width, height } = useMemo(() => {
     const stateCount = spec.states.length;
-    // Determine terminal states from invariants
     const terminalStates = new Set<string>();
     for (const inv of spec.invariants) {
       if (inv.name === "no_further_transitions" || inv.assertion.includes("no outgoing")) {
@@ -35,7 +34,6 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
       }
     }
 
-    // Layout: arrange states in a grid-like pattern
     const cols = Math.min(stateCount, 3);
     const rows = Math.ceil(stateCount / cols);
     const nodeWidth = 140;
@@ -59,7 +57,6 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
       };
     });
 
-    // Deduplicate edges: group actions between same state pairs
     const edgeMap = new Map<string, string[]>();
     for (const action of spec.actions) {
       const to = action.to ?? action.from[0];
@@ -130,7 +127,6 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
           if (!fromNode || !toNode) return null;
 
           if (edge.isSelfLoop) {
-            // Self-loop: draw an arc above the node
             const cx = fromNode.x;
             const cy = fromNode.y - 25;
             return (
@@ -154,24 +150,20 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
             );
           }
 
-          // Straight edge between nodes
           const dx = toNode.x - fromNode.x;
           const dy = toNode.y - fromNode.y;
           const dist = Math.sqrt(dx * dx + dy * dy);
           const nx = dx / dist;
           const ny = dy / dist;
 
-          // Start and end points offset from node center
           const startX = fromNode.x + nx * 70;
           const startY = fromNode.y + ny * 25;
           const endX = toNode.x - nx * 70;
           const endY = toNode.y - ny * 25;
 
-          // Midpoint for label, slightly offset perpendicular
           const midX = (startX + endX) / 2;
           const midY = (startY + endY) / 2;
 
-          // Check if there's a reverse edge to offset this one
           const hasReverse = edges.some(
             (e) => e.from === edge.to && e.to === edge.from && !e.isSelfLoop
           );
@@ -227,7 +219,6 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
         {/* Draw state nodes */}
         {nodes.map((node) => (
           <g key={node.name}>
-            {/* Outer border for terminal states */}
             {node.isTerminal && (
               <rect
                 x={node.x - 73}

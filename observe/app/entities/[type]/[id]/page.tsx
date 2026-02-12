@@ -1,11 +1,37 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { fetchEntityHistory } from "@/lib/api";
-import type { EntityHistory } from "@/lib/mock-data";
+import type { EntityHistory } from "@/lib/types";
 import EntityTimeline from "@/components/EntityTimeline";
+import ErrorDisplay from "@/components/ErrorDisplay";
+
+function EntitySkeleton() {
+  return (
+    <div className="animate-pulse">
+      <div className="h-4 bg-gray-800/60 rounded w-64 mb-2" />
+      <div className="h-7 bg-gray-800 rounded w-48 mb-6" />
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-6 mb-8">
+        <div className="grid grid-cols-3 gap-6">
+          {[0, 1, 2].map((i) => (
+            <div key={i}>
+              <div className="h-4 bg-gray-800 rounded w-20 mb-2" />
+              <div className="h-5 bg-gray-800 rounded w-28" />
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="h-5 bg-gray-800 rounded w-36 mb-4" />
+      <div className="space-y-3">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="h-20 bg-gray-900 border border-gray-800 rounded-lg" />
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function EntityInspector() {
   const params = useParams();
@@ -13,34 +39,43 @@ export default function EntityInspector() {
   const entityId = params.id as string;
   const [history, setHistory] = useState<EntityHistory | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function load() {
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
       const data = await fetchEntityHistory(entityType, entityId);
       setHistory(data);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : `Failed to load entity ${entityType}/${entityId}`,
+      );
+    } finally {
       setLoading(false);
     }
-    load();
   }, [entityType, entityId]);
 
-  if (loading) {
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (loading) return <EntitySkeleton />;
+  if (error) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-gray-500 text-sm">Loading entity...</div>
-      </div>
+      <ErrorDisplay
+        title={`Entity not found: ${entityType}/${entityId}`}
+        message={error}
+        retry={load}
+      />
     );
   }
-
   if (!history) {
     return (
-      <div className="text-center py-12">
-        <div className="text-gray-500 mb-4">
-          No history found for {entityType}/{entityId}
-        </div>
-        <Link href="/" className="text-blue-400 hover:text-blue-300 text-sm">
-          Back to Dashboard
-        </Link>
-      </div>
+      <ErrorDisplay
+        title="Entity not found"
+        message={`No history found for ${entityType}/${entityId}.`}
+      />
     );
   }
 

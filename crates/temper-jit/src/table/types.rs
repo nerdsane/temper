@@ -59,6 +59,10 @@ pub enum Guard {
     CounterMin { var: String, min: usize },
     /// A named boolean variable must be true.
     BoolTrue(String),
+    /// A named list variable must contain a specific value.
+    ListContains { var: String, value: String },
+    /// A named list variable must have at least N elements.
+    ListLengthMin { var: String, min: usize },
     /// All inner guards must pass.
     And(Vec<Guard>),
 }
@@ -80,6 +84,10 @@ pub enum Effect {
     SetBool { var: String, value: bool },
     /// Emit a named event.
     EmitEvent(String),
+    /// Append a value to a named list variable (value from action params).
+    ListAppend(String),
+    /// Remove a value from a named list variable by index (index from action params).
+    ListRemoveAt(String),
     /// Domain-specific custom effect (e.g., "DeploySpecs", "NotifyAdmin").
     ///
     /// Dispatched by post-transition hooks registered at startup.
@@ -109,6 +117,8 @@ pub struct EvalContext {
     pub counters: BTreeMap<String, usize>,
     /// Named boolean values (e.g., "assignee_set" -> true).
     pub booleans: BTreeMap<String, bool>,
+    /// Named list values (e.g., "tags" -> ["urgent", "review"]).
+    pub lists: BTreeMap<String, Vec<String>>,
 }
 
 impl TransitionTable {
@@ -155,6 +165,12 @@ impl Guard {
             }
             Guard::BoolTrue(var) => {
                 ctx.booleans.get(var).copied().unwrap_or(false)
+            }
+            Guard::ListContains { var, value } => {
+                ctx.lists.get(var).is_some_and(|list| list.contains(value))
+            }
+            Guard::ListLengthMin { var, min } => {
+                ctx.lists.get(var).map_or(0, |list| list.len()) >= *min
             }
             Guard::And(guards) => guards.iter().all(|g| g.check(current_state, ctx)),
         }

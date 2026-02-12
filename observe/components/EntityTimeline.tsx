@@ -1,10 +1,18 @@
-import type { EntityEvent } from "@/lib/mock-data";
+import type { EntityEvent } from "@/lib/types";
 
 interface EntityTimelineProps {
   events: EntityEvent[];
 }
 
 export default function EntityTimeline({ events }: EntityTimelineProps) {
+  if (events.length === 0) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
+        <p className="text-sm text-gray-400">No events recorded yet.</p>
+      </div>
+    );
+  }
+
   return (
     <div className="relative">
       {/* Timeline line */}

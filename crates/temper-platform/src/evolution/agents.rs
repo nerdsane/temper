@@ -9,15 +9,18 @@
 //! They are invoked by the evolution pipeline when high-priority insights
 //! are detected — the developer still holds the approval gate (D-Record).
 
-use crate::agent::claude::{ClaudeClient, ClaudeError, Message};
+use crate::agent::claude::{ChatClient, ClaudeClient, ClaudeError, Message};
 
 /// Formalizes observations into problem statements (O→P).
 ///
 /// Given a raw observation (unmet intent, anomaly, trajectory pattern),
 /// the ObservationAgent uses Claude to produce a structured problem
 /// statement following the OPADI record format.
-pub struct ObservationAgent {
-    client: ClaudeClient,
+///
+/// Generic over `C: ChatClient` to support both real API calls and mock
+/// clients in tests.
+pub struct ObservationAgent<C: ChatClient = ClaudeClient> {
+    client: C,
 }
 
 const OBSERVATION_SYSTEM_PROMPT: &str = r#"You are an observation analysis agent for the Temper platform.
@@ -44,11 +47,18 @@ Output format (Markdown):
 Be precise. Reference specific entity types, states, and actions from the observation context."#;
 
 impl ObservationAgent {
-    /// Create a new ObservationAgent.
+    /// Create a new ObservationAgent with the real Claude API client.
     pub fn new(api_key: String) -> Self {
         Self {
             client: ClaudeClient::new(api_key),
         }
+    }
+}
+
+impl<C: ChatClient> ObservationAgent<C> {
+    /// Create a new ObservationAgent with a custom chat client.
+    pub fn with_client(client: C) -> Self {
+        Self { client }
     }
 
     /// Formalize an observation into a problem statement.
@@ -78,8 +88,11 @@ impl ObservationAgent {
 /// Given a formalized problem statement (P-Record), the AnalysisAgent
 /// uses Claude to perform root cause analysis and propose IOA spec
 /// modifications that would resolve the issue.
-pub struct AnalysisAgent {
-    client: ClaudeClient,
+///
+/// Generic over `C: ChatClient` to support both real API calls and mock
+/// clients in tests.
+pub struct AnalysisAgent<C: ChatClient = ClaudeClient> {
+    client: C,
 }
 
 const ANALYSIS_SYSTEM_PROMPT: &str = r#"You are a root cause analysis agent for the Temper platform.
@@ -118,11 +131,18 @@ guard = "some_var > 0"
 Be specific about IOA TOML syntax. Only propose changes that are mechanically verifiable."#;
 
 impl AnalysisAgent {
-    /// Create a new AnalysisAgent.
+    /// Create a new AnalysisAgent with the real Claude API client.
     pub fn new(api_key: String) -> Self {
         Self {
             client: ClaudeClient::new(api_key),
         }
+    }
+}
+
+impl<C: ChatClient> AnalysisAgent<C> {
+    /// Create a new AnalysisAgent with a custom chat client.
+    pub fn with_client(client: C) -> Self {
+        Self { client }
     }
 
     /// Analyze a problem and propose spec changes.
@@ -154,6 +174,7 @@ impl AnalysisAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::claude::MockClaudeClient;
 
     #[test]
     fn test_observation_agent_creation() {
@@ -171,5 +192,34 @@ mod tests {
         assert!(!ANALYSIS_SYSTEM_PROMPT.is_empty());
         assert!(OBSERVATION_SYSTEM_PROMPT.contains("Problem Statement"));
         assert!(ANALYSIS_SYSTEM_PROMPT.contains("Root Cause"));
+    }
+
+    #[tokio::test]
+    async fn test_observation_agent_with_mock() {
+        let mock = MockClaudeClient::fixed(
+            "## Problem Statement\n**Title**: High p99 latency\n**Category**: Performance",
+        );
+        let agent = ObservationAgent::with_client(mock);
+        let result = agent
+            .formalize(r#"{"user_intent": "place order", "trace_id": "abc-123"}"#)
+            .await;
+        let text = result.expect("mock should return Ok");
+        assert!(text.contains("Problem Statement"));
+        assert!(text.contains("High p99 latency"));
+    }
+
+    #[tokio::test]
+    async fn test_analysis_agent_with_mock() {
+        let mock = MockClaudeClient::fixed(
+            "## Root Cause Analysis\nMissing guard on SubmitOrder action.\n\n## Risk Assessment\n**Risk**: Low",
+        );
+        let agent = AnalysisAgent::with_client(mock);
+        let specs = vec![("Order".to_string(), "# order spec".to_string())];
+        let result = agent
+            .analyze("High p99 latency in Order entity", &specs)
+            .await;
+        let text = result.expect("mock should return Ok");
+        assert!(text.contains("Root Cause"));
+        assert!(text.contains("Missing guard"));
     }
 }

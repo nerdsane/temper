@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::RwLock;
 
 use cedar_policy::{
     Authorizer, Context, Decision, Entities, EntityUid, PolicySet, Request,
@@ -32,9 +33,9 @@ impl AuthzDecision {
 }
 
 /// The authorization engine. Holds compiled Cedar policies and evaluates
-/// authorization requests.
+/// authorization requests. Supports hot-reload of policies via [`reload_policies`].
 pub struct AuthzEngine {
-    policy_set: PolicySet,
+    policy_set: RwLock<PolicySet>,
     authorizer: Authorizer,
 }
 
@@ -46,17 +47,37 @@ impl AuthzEngine {
             .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
 
         Ok(Self {
-            policy_set,
+            policy_set: RwLock::new(policy_set),
             authorizer: Authorizer::new(),
         })
     }
 
-    /// Create an AuthzEngine with no policies (allows everything by default).
+    /// Create an AuthzEngine with no policies (denies by default per Cedar semantics).
     pub fn permissive() -> Self {
         Self {
-            policy_set: PolicySet::new(),
+            policy_set: RwLock::new(PolicySet::new()),
             authorizer: Authorizer::new(),
         }
+    }
+
+    /// Hot-reload Cedar policies. Parses and validates the new policy text,
+    /// then atomically swaps the policy set. If parsing fails, the existing
+    /// policies remain in effect and an error is returned.
+    pub fn reload_policies(&self, policy_text: &str) -> Result<(), AuthzError> {
+        let new_policy_set = policy_text
+            .parse::<PolicySet>()
+            .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
+
+        let mut current = self.policy_set.write().map_err(|e| {
+            AuthzError::Engine(format!("policy lock poisoned: {e}"))
+        })?;
+        *current = new_policy_set;
+        Ok(())
+    }
+
+    /// Returns the number of policies currently loaded.
+    pub fn policy_count(&self) -> usize {
+        self.policy_set.read().map_or(0, |ps| ps.policies().count())
     }
 
     /// Evaluate an authorization request.
@@ -150,7 +171,11 @@ impl AuthzEngine {
 
         let entities = Entities::empty();
 
-        let response: CedarResponse = self.authorizer.is_authorized(&request, &self.policy_set, &entities);
+        let policy_set = match self.policy_set.read() {
+            Ok(ps) => ps,
+            Err(e) => return AuthzDecision::Deny(format!("policy lock poisoned: {e}")),
+        };
+        let response: CedarResponse = self.authorizer.is_authorized(&request, &policy_set, &entities);
 
         match response.decision() {
             Decision::Allow => AuthzDecision::Allow,
@@ -293,5 +318,85 @@ mod tests {
     fn test_decision_is_allowed() {
         assert!(AuthzDecision::Allow.is_allowed());
         assert!(!AuthzDecision::Deny("reason".into()).is_allowed());
+    }
+
+    #[test]
+    fn test_hot_reload_replaces_policies() {
+        // Start with admin-only policy
+        let admin_policy = r#"
+            permit(
+                principal is Admin,
+                action,
+                resource
+            );
+        "#;
+        let engine = AuthzEngine::new(admin_policy).expect("initial policy should parse");
+        assert_eq!(engine.policy_count(), 1);
+
+        // Customer is denied
+        let ctx = customer_context("cust-1");
+        let attrs = HashMap::new();
+        assert!(!engine.authorize(&ctx, "read", "Order", &attrs).is_allowed());
+
+        // Hot-reload to customer-permitting policy
+        let customer_policy = r#"
+            permit(
+                principal is Customer,
+                action,
+                resource
+            );
+        "#;
+        engine.reload_policies(customer_policy).expect("reload should succeed");
+        assert_eq!(engine.policy_count(), 1);
+
+        // Now customer is allowed
+        assert!(engine.authorize(&ctx, "read", "Order", &attrs).is_allowed());
+
+        // Admin is now denied (only customer policy active)
+        let admin_ctx = admin_context();
+        assert!(!engine.authorize(&admin_ctx, "read", "Order", &attrs).is_allowed());
+    }
+
+    #[test]
+    fn test_hot_reload_invalid_preserves_existing() {
+        let admin_policy = r#"
+            permit(
+                principal is Admin,
+                action,
+                resource
+            );
+        "#;
+        let engine = AuthzEngine::new(admin_policy).expect("initial policy should parse");
+
+        // Try to reload with invalid policy — should fail
+        let result = engine.reload_policies("not valid cedar at all");
+        assert!(result.is_err());
+
+        // Original policy still works
+        let ctx = admin_context();
+        let attrs = HashMap::new();
+        assert!(engine.authorize(&ctx, "read", "Order", &attrs).is_allowed());
+        assert_eq!(engine.policy_count(), 1);
+    }
+
+    #[test]
+    fn test_hot_reload_to_empty() {
+        let admin_policy = r#"
+            permit(
+                principal is Admin,
+                action,
+                resource
+            );
+        "#;
+        let engine = AuthzEngine::new(admin_policy).expect("initial policy should parse");
+
+        // Reload with empty policy set
+        engine.reload_policies("").expect("empty policy should parse");
+        assert_eq!(engine.policy_count(), 0);
+
+        // Admin is now denied (no policies)
+        let ctx = admin_context();
+        let attrs = HashMap::new();
+        assert!(!engine.authorize(&ctx, "read", "Order", &attrs).is_allowed());
     }
 }

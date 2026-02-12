@@ -53,6 +53,9 @@ pub struct EntityState {
     /// Named boolean variables (e.g., "assignee_set", "has_address").
     #[serde(default)]
     pub booleans: BTreeMap<String, bool>,
+    /// Named list variables (e.g., "tags", "approvers").
+    #[serde(default)]
+    pub lists: BTreeMap<String, Vec<String>>,
     /// All entity fields as a JSON object.
     pub fields: serde_json::Value,
     /// Event log (append-only history of all transitions).
@@ -86,4 +89,7 @@ pub struct EntityResponse {
     pub state: EntityState,
     /// Error message if the action failed.
     pub error: Option<String>,
+    /// Custom effects emitted during this transition (for hook dispatch).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_effects: Vec<String>,
 }

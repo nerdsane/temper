@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use fred::prelude::*;
+
 /// A cached value with TTL.
 #[derive(Debug, Clone)]
 struct CacheEntry {
@@ -42,6 +44,89 @@ pub trait CacheStore: Send + Sync + 'static {
         &self,
         prefix: &str,
     ) -> impl std::future::Future<Output = Result<u64, crate::error::RedisStoreError>> + Send;
+}
+
+/// Redis-backed cache store using SET with EX for TTL.
+///
+/// Keys are stored as-is (caller provides the fully-qualified key).
+/// TTL is enforced natively by Redis via the EX option.
+pub struct RedisCache {
+    client: Arc<fred::clients::Client>,
+}
+
+impl RedisCache {
+    /// Create a new Redis-backed cache store.
+    pub fn new(client: Arc<fred::clients::Client>) -> Self {
+        Self { client }
+    }
+}
+
+impl CacheStore for RedisCache {
+    async fn get(&self, key: &str) -> Result<Option<String>, crate::error::RedisStoreError> {
+        let value: Option<String> = self
+            .client
+            .get(key)
+            .await
+            .map_err(|e| crate::error::RedisStoreError::Command(e.to_string()))?;
+        Ok(value)
+    }
+
+    async fn set(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Duration,
+    ) -> Result<(), crate::error::RedisStoreError> {
+        let ttl_secs = ttl.as_secs().max(1); // Redis EX requires at least 1 second
+        let expiration = Some(Expiration::EX(ttl_secs as i64));
+        let _: () = self
+            .client
+            .set(key, value, expiration, None, false)
+            .await
+            .map_err(|e| crate::error::RedisStoreError::Command(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), crate::error::RedisStoreError> {
+        let _: i64 = self
+            .client
+            .del(key)
+            .await
+            .map_err(|e| crate::error::RedisStoreError::Command(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete_prefix(&self, prefix: &str) -> Result<u64, crate::error::RedisStoreError> {
+        let pattern = format!("{prefix}*");
+        let mut scanner = std::pin::pin!(self.client.scan_buffered(&pattern, None, None));
+        let mut total_deleted: u64 = 0;
+
+        loop {
+            let item: Option<Result<fred::types::Key, fred::error::Error>> =
+                std::future::poll_fn(|cx| {
+                    futures_core::Stream::poll_next(scanner.as_mut(), cx)
+                })
+                .await;
+            match item {
+                Some(Ok(key)) => {
+                    let deleted: i64 = self
+                        .client
+                        .del::<i64, _>(key)
+                        .await
+                        .map_err(|e: fred::error::Error| {
+                            crate::error::RedisStoreError::Command(e.to_string())
+                        })?;
+                    total_deleted += deleted as u64;
+                }
+                Some(Err(e)) => {
+                    return Err(crate::error::RedisStoreError::Command(e.to_string()));
+                }
+                None => break,
+            }
+        }
+
+        Ok(total_deleted)
+    }
 }
 
 /// In-memory cache for testing (no Redis needed).

@@ -104,6 +104,12 @@ pub enum Guard {
     /// A boolean variable must be true.
     #[serde(rename = "is_true")]
     IsTrue { var: String },
+    /// A list variable must contain a specific value.
+    #[serde(rename = "list_contains")]
+    ListContains { var: String, value: String },
+    /// A list variable must have at least N elements.
+    #[serde(rename = "list_length_min")]
+    ListLengthMin { var: String, min: usize },
 }
 
 /// An effect (state change in the post-state).
@@ -122,6 +128,12 @@ pub enum Effect {
     /// Emit a named event (output action).
     #[serde(rename = "emit")]
     Emit { event: String },
+    /// Append a value to a list variable (value comes from action params).
+    #[serde(rename = "list_append")]
+    ListAppend { var: String },
+    /// Remove a value from a list variable by index (index from action params).
+    #[serde(rename = "list_remove_at")]
+    ListRemoveAt { var: String },
 }
 
 /// A safety invariant.

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { VerificationLevel } from "@/lib/mock-data";
+import type { VerificationLevel } from "@/lib/types";
 
 interface CascadeResultsProps {
   levels: VerificationLevel[];

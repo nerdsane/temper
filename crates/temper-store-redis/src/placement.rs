@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use fred::prelude::*;
+
 /// Actor placement information.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Placement {
@@ -46,6 +48,121 @@ pub trait PlacementStore: Send + Sync + 'static {
         &self,
         shard_id: u32,
     ) -> impl std::future::Future<Output = Result<Vec<(String, Placement)>, crate::error::RedisStoreError>> + Send;
+}
+
+/// Redis-backed placement store.
+///
+/// Each entity actor's placement is stored as a JSON string at
+/// `temper:placement:{entity_type}:{entity_id}`. Shard queries use SCAN
+/// to iterate matching keys and filter by shard_id.
+pub struct RedisPlacement {
+    client: Arc<fred::clients::Client>,
+}
+
+impl RedisPlacement {
+    /// Create a new Redis-backed placement store.
+    pub fn new(client: Arc<fred::clients::Client>) -> Self {
+        Self { client }
+    }
+}
+
+impl PlacementStore for RedisPlacement {
+    async fn get_placement(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Option<Placement>, crate::error::RedisStoreError> {
+        let key = crate::keys::placement_key(entity_type, entity_id);
+        let value: Option<String> = self
+            .client
+            .get(&key)
+            .await
+            .map_err(|e| crate::error::RedisStoreError::Command(e.to_string()))?;
+
+        match value {
+            Some(json) => {
+                let placement: Placement = serde_json::from_str(&json)
+                    .map_err(|e| crate::error::RedisStoreError::Serialization(e.to_string()))?;
+                Ok(Some(placement))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn set_placement(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        placement: &Placement,
+    ) -> Result<(), crate::error::RedisStoreError> {
+        let key = crate::keys::placement_key(entity_type, entity_id);
+        let json = serde_json::to_string(placement)
+            .map_err(|e| crate::error::RedisStoreError::Serialization(e.to_string()))?;
+
+        let _: () = self
+            .client
+            .set(&key, json, None, None, false)
+            .await
+            .map_err(|e| crate::error::RedisStoreError::Command(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn remove_placement(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<(), crate::error::RedisStoreError> {
+        let key = crate::keys::placement_key(entity_type, entity_id);
+        let _: i64 = self
+            .client
+            .del(&key)
+            .await
+            .map_err(|e| crate::error::RedisStoreError::Command(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_shard_placements(
+        &self,
+        shard_id: u32,
+    ) -> Result<Vec<(String, Placement)>, crate::error::RedisStoreError> {
+        // SCAN for all placement keys, GET each, and filter by shard_id.
+        let pattern = format!("{}:placement:*", crate::keys::PREFIX);
+        let mut scanner = std::pin::pin!(self.client.scan_buffered(&pattern, None, None));
+        let mut result = Vec::new();
+
+        loop {
+            let item: Option<Result<fred::types::Key, fred::error::Error>> =
+                std::future::poll_fn(|cx| {
+                    futures_core::Stream::poll_next(scanner.as_mut(), cx)
+                })
+                .await;
+            match item {
+                Some(Ok(key)) => {
+                    let value: Option<String> = self
+                        .client
+                        .get::<Option<String>, _>(&key)
+                        .await
+                        .map_err(|e: fred::error::Error| {
+                            crate::error::RedisStoreError::Command(e.to_string())
+                        })?;
+                    if let Some(json) = value {
+                        if let Ok(placement) = serde_json::from_str::<Placement>(&json) {
+                            if placement.shard_id == shard_id {
+                                let key_str = key.into_string().unwrap_or_default();
+                                result.push((key_str, placement));
+                            }
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    return Err(crate::error::RedisStoreError::Command(e.to_string()));
+                }
+                None => break,
+            }
+        }
+
+        Ok(result)
+    }
 }
 
 /// In-memory placement store for testing.

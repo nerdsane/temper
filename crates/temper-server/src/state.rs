@@ -1,19 +1,127 @@
 //! Server state shared across all request handlers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::actor::ActorRef;
+use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use temper_runtime::ActorSystem;
 use temper_spec::csdl::CsdlDocument;
 use temper_authz::{AuthzEngine, AuthzDecision, SecurityContext};
+use temper_evolution::RecordStore;
 use temper_store_postgres::PostgresEventStore;
 
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
+use crate::events::EntityStateChange;
 use crate::registry::SpecRegistry;
+
+/// Lightweight metrics collector for the /observe endpoints.
+///
+/// Uses atomic counters for totals and a `RwLock<BTreeMap>` for per-label
+/// breakdowns. BTreeMap ensures deterministic iteration order (DST-safe).
+pub struct MetricsCollector {
+    /// Per-label transition counter: key = "entity_type:action:true|false".
+    pub transitions: RwLock<BTreeMap<String, u64>>,
+    /// Total successful + failed transitions.
+    pub transitions_total: AtomicU64,
+    /// Total failed transitions (guard not met, unknown action).
+    pub errors_total: AtomicU64,
+}
+
+impl MetricsCollector {
+    /// Create a new, empty collector.
+    pub fn new() -> Self {
+        Self {
+            transitions: RwLock::new(BTreeMap::new()),
+            transitions_total: AtomicU64::new(0),
+            errors_total: AtomicU64::new(0),
+        }
+    }
+
+    /// Record a transition result.
+    pub fn record_transition(&self, entity_type: &str, action: &str, success: bool) {
+        let label = if success {
+            format!("{entity_type}:{action}:true")
+        } else {
+            format!("{entity_type}:{action}:false")
+        };
+        if let Ok(mut map) = self.transitions.write() {
+            *map.entry(label).or_insert(0) += 1;
+        }
+        self.transitions_total.fetch_add(1, Ordering::Relaxed);
+        if !success {
+            self.errors_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Maximum number of trajectory entries retained in the bounded log.
+const TRAJECTORY_LOG_CAPACITY: usize = 10_000;
+
+/// A single trajectory entry recording the outcome of a dispatched action.
+///
+/// Captures both successful transitions and failed intents (guard rejection,
+/// unknown action, actor timeout) so the Evolution Engine can analyse gaps.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TrajectoryEntry {
+    /// ISO-8601 timestamp (DST-safe: uses sim_now()).
+    pub timestamp: String,
+    /// Tenant that owns the entity.
+    pub tenant: String,
+    /// Entity type targeted by the action.
+    pub entity_type: String,
+    /// Entity ID targeted by the action.
+    pub entity_id: String,
+    /// Action name that was dispatched.
+    pub action: String,
+    /// Whether the action succeeded.
+    pub success: bool,
+    /// Entity status before the action (if known).
+    pub from_status: Option<String>,
+    /// Entity status after the action (if known).
+    pub to_status: Option<String>,
+    /// Error description for failed intents.
+    pub error: Option<String>,
+}
+
+/// Bounded, append-only trajectory log.
+///
+/// Uses `VecDeque` with a fixed capacity. When the log is full, the oldest
+/// entry is evicted (ring-buffer semantics). Protected by `RwLock` for
+/// concurrent access from multiple request handlers.
+pub struct TrajectoryLog {
+    /// The bounded deque of trajectory entries.
+    entries: VecDeque<TrajectoryEntry>,
+    /// Maximum capacity.
+    capacity: usize,
+}
+
+impl TrajectoryLog {
+    /// Create a new trajectory log with the given capacity.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Append an entry, evicting the oldest if at capacity.
+    pub fn push(&mut self, entry: TrajectoryEntry) {
+        if self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(entry);
+    }
+
+    /// Read-only access to all entries (oldest first).
+    pub fn entries(&self) -> &VecDeque<TrajectoryEntry> {
+        &self.entries
+    }
+}
 
 /// Shared state for the Temper HTTP server.
 #[derive(Clone)]
@@ -25,27 +133,37 @@ pub struct ServerState {
     /// Raw CSDL XML string for serving via `$metadata` (legacy single-tenant).
     pub csdl_xml: Arc<String>,
     /// Maps entity set names to entity type names (legacy single-tenant).
-    pub entity_set_map: Arc<HashMap<String, String>>,
+    pub entity_set_map: Arc<BTreeMap<String, String>>,
     /// Transition table per entity type (legacy single-tenant).
-    pub transition_tables: Arc<HashMap<String, Arc<TransitionTable>>>,
-    /// Live actor registry: actor_key → ActorRef.
-    pub actor_registry: Arc<RwLock<HashMap<String, ActorRef<EntityMsg>>>>,
+    pub transition_tables: Arc<BTreeMap<String, Arc<TransitionTable>>>,
+    /// Live actor registry: actor_key -> ActorRef.
+    pub actor_registry: Arc<RwLock<BTreeMap<String, ActorRef<EntityMsg>>>>,
     /// Optional Postgres event store for persistence.
     pub event_store: Option<Arc<PostgresEventStore>>,
     /// Agent hints learned from trajectory analysis, keyed by action name.
-    pub agent_hints: Arc<RwLock<HashMap<String, String>>>,
+    pub agent_hints: Arc<RwLock<BTreeMap<String, String>>>,
     /// Cedar ABAC authorization engine.
     pub authz: Arc<AuthzEngine>,
     /// Multi-tenant specification registry (shared, mutable for live registration).
     pub registry: Arc<RwLock<SpecRegistry>>,
     /// Index of entity IDs per (tenant:entity_type) for collection queries.
-    pub entity_index: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    pub entity_index: Arc<RwLock<BTreeMap<String, BTreeSet<String>>>>,
+    /// Broadcast channel for entity state change events (SSE subscriptions).
+    pub event_tx: Arc<tokio::sync::broadcast::Sender<EntityStateChange>>,
+    /// Server start time (DST-safe: uses sim_now()).
+    pub start_time: chrono::DateTime<chrono::Utc>,
+    /// Metrics collector for the /observe endpoints.
+    pub metrics: Arc<MetricsCollector>,
+    /// Bounded trajectory log for failed intent analysis and Evolution Engine.
+    pub trajectory_log: Arc<RwLock<TrajectoryLog>>,
+    /// In-memory evolution record store (O/P/A/D/I records).
+    pub record_store: Arc<RecordStore>,
 }
 
 impl ServerState {
     /// Create ServerState from CSDL XML and optional specification sources.
     pub fn new(system: ActorSystem, csdl: CsdlDocument, csdl_xml: String) -> Self {
-        let mut entity_set_map = HashMap::new();
+        let mut entity_set_map = BTreeMap::new();
         for schema in &csdl.schemas {
             for container in &schema.entity_containers {
                 for entity_set in &container.entity_sets {
@@ -59,25 +177,31 @@ impl ServerState {
             }
         }
 
+        let (event_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             actor_system: Arc::new(system),
             csdl: Arc::new(csdl),
             csdl_xml: Arc::new(csdl_xml),
             entity_set_map: Arc::new(entity_set_map),
-            transition_tables: Arc::new(HashMap::new()),
-            actor_registry: Arc::new(RwLock::new(HashMap::new())),
+            transition_tables: Arc::new(BTreeMap::new()),
+            actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             event_store: None,
-            agent_hints: Arc::new(RwLock::new(HashMap::new())),
+            agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
             registry: Arc::new(RwLock::new(SpecRegistry::new())),
-            entity_index: Arc::new(RwLock::new(HashMap::new())),
+            entity_index: Arc::new(RwLock::new(BTreeMap::new())),
+            event_tx: Arc::new(event_tx),
+            start_time: sim_now(),
+            metrics: Arc::new(MetricsCollector::new()),
+            trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
+            record_store: Arc::new(RecordStore::new()),
         }
     }
 
     /// Create ServerState with I/O Automaton TOML specs for transition table resolution.
-    pub fn with_specs(system: ActorSystem, csdl: CsdlDocument, csdl_xml: String, ioa_sources: HashMap<String, String>) -> Self {
+    pub fn with_specs(system: ActorSystem, csdl: CsdlDocument, csdl_xml: String, ioa_sources: BTreeMap<String, String>) -> Self {
         let mut state = Self::new(system, csdl, csdl_xml);
-        let mut tables = HashMap::new();
+        let mut tables = BTreeMap::new();
         for (entity_type, ioa_source) in &ioa_sources {
             let table = TransitionTable::from_ioa_source(ioa_source);
             tables.insert(entity_type.clone(), Arc::new(table));
@@ -91,7 +215,7 @@ impl ServerState {
         system: ActorSystem,
         csdl: CsdlDocument,
         csdl_xml: String,
-        ioa_sources: HashMap<String, String>,
+        ioa_sources: BTreeMap<String, String>,
         store: PostgresEventStore,
     ) -> Self {
         let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources);
@@ -112,18 +236,24 @@ impl ServerState {
         system: ActorSystem,
         registry: Arc<RwLock<SpecRegistry>>,
     ) -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             actor_system: Arc::new(system),
             csdl: Arc::new(CsdlDocument { version: "4.0".into(), schemas: vec![] }),
             csdl_xml: Arc::new(String::new()),
-            entity_set_map: Arc::new(HashMap::new()),
-            transition_tables: Arc::new(HashMap::new()),
-            actor_registry: Arc::new(RwLock::new(HashMap::new())),
+            entity_set_map: Arc::new(BTreeMap::new()),
+            transition_tables: Arc::new(BTreeMap::new()),
+            actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             event_store: None,
-            agent_hints: Arc::new(RwLock::new(HashMap::new())),
+            agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
             registry,
-            entity_index: Arc::new(RwLock::new(HashMap::new())),
+            entity_index: Arc::new(RwLock::new(BTreeMap::new())),
+            event_tx: Arc::new(event_tx),
+            start_time: sim_now(),
+            metrics: Arc::new(MetricsCollector::new()),
+            trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
+            record_store: Arc::new(RecordStore::new()),
         }
     }
 
@@ -227,9 +357,12 @@ impl ServerState {
     }
 
     /// Check authorization for an action using the Cedar ABAC engine.
-    pub fn authorize(&self, headers: &[(String, String)], action: &str, resource_type: &str, resource_attrs: &std::collections::HashMap<String, serde_json::Value>) -> Result<(), String> {
+    ///
+    /// Accepts `BTreeMap` for DST compliance; converts at the authz boundary.
+    pub fn authorize(&self, headers: &[(String, String)], action: &str, resource_type: &str, resource_attrs: &BTreeMap<String, serde_json::Value>) -> Result<(), String> {
         let ctx = SecurityContext::from_headers(headers);
-        let decision = self.authz.authorize_or_bypass(&ctx, action, resource_type, resource_attrs);
+        let attrs: std::collections::HashMap<_, _> = resource_attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(); // determinism-ok
+        let decision = self.authz.authorize_or_bypass(&ctx, action, resource_type, &attrs);
         match decision {
             AuthzDecision::Allow => Ok(()),
             AuthzDecision::Deny(reason) => Err(format!("Authorization denied: {reason}")),
@@ -259,9 +392,26 @@ impl ServerState {
     ) -> Result<EntityResponse, String> {
         let actor_ref = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
-            .ok_or_else(|| format!("No transition table for tenant '{tenant}', entity type '{entity_type}'"))?;
+            .ok_or_else(|| {
+                // Record a trajectory entry for the "no transition table" failure.
+                let entry = TrajectoryEntry {
+                    timestamp: sim_now().to_rfc3339(),
+                    tenant: tenant.to_string(),
+                    entity_type: entity_type.to_string(),
+                    entity_id: entity_id.to_string(),
+                    action: action.to_string(),
+                    success: false,
+                    from_status: None,
+                    to_status: None,
+                    error: Some(format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")),
+                };
+                if let Ok(mut log) = self.trajectory_log.write() {
+                    log.push(entry);
+                }
+                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
+            })?;
 
-        actor_ref
+        let response = actor_ref
             .ask::<EntityResponse>(
                 EntityMsg::Action {
                     name: action.to_string(),
@@ -270,7 +420,62 @@ impl ServerState {
                 Duration::from_secs(5),
             )
             .await
-            .map_err(|e| format!("Actor dispatch failed: {e}"))
+            .map_err(|e| {
+                // Record a trajectory entry for actor dispatch failures.
+                let entry = TrajectoryEntry {
+                    timestamp: sim_now().to_rfc3339(),
+                    tenant: tenant.to_string(),
+                    entity_type: entity_type.to_string(),
+                    entity_id: entity_id.to_string(),
+                    action: action.to_string(),
+                    success: false,
+                    from_status: None,
+                    to_status: None,
+                    error: Some(format!("Actor dispatch failed: {e}")),
+                };
+                if let Ok(mut log) = self.trajectory_log.write() {
+                    log.push(entry);
+                }
+                format!("Actor dispatch failed: {e}")
+            })?;
+
+        // Record metrics for the /observe endpoints.
+        self.metrics.record_transition(entity_type, action, response.success);
+
+        // Record trajectory entry for every completed action (success or failure).
+        {
+            let entry = TrajectoryEntry {
+                timestamp: sim_now().to_rfc3339(),
+                tenant: tenant.to_string(),
+                entity_type: entity_type.to_string(),
+                entity_id: entity_id.to_string(),
+                action: action.to_string(),
+                success: response.success,
+                from_status: response.state.events.last().map(|e| e.from_status.clone()),
+                to_status: Some(response.state.status.clone()),
+                error: if response.success {
+                    None
+                } else {
+                    Some(response.error.clone().unwrap_or_else(|| "guard not met".to_string()))
+                },
+            };
+            if let Ok(mut log) = self.trajectory_log.write() {
+                log.push(entry);
+            }
+        }
+
+        // Broadcast state change for SSE subscribers (best-effort, ignore send errors)
+        if response.success {
+            let _ = self.event_tx.send(EntityStateChange {
+                entity_type: entity_type.to_string(),
+                entity_id: entity_id.to_string(),
+                action: action.to_string(),
+                status: response.state.status.clone(),
+                tenant: tenant.to_string(),
+            });
+        }
+
+        Ok(response)
     }
 
     /// Get the current state of an entity actor (legacy single-tenant).

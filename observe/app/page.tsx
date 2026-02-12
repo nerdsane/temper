@@ -1,38 +1,157 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { fetchSpecs, fetchEntities } from "@/lib/api";
-import type { SpecSummary, EntitySummary } from "@/lib/mock-data";
+import { usePolling, useRelativeTime } from "@/lib/hooks";
+import type { SpecSummary, EntitySummary } from "@/lib/types";
 import SpecCard from "@/components/SpecCard";
+import StatusBadge from "@/components/StatusBadge";
+import ErrorDisplay from "@/components/ErrorDisplay";
 import Link from "next/link";
+
+function DashboardSkeleton() {
+  return (
+    <div className="animate-pulse">
+      <div className="h-7 bg-gray-800 rounded w-40 mb-2" />
+      <div className="h-4 bg-gray-800/60 rounded w-72 mb-8" />
+
+      <div className="grid grid-cols-3 gap-4 mb-8">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div className="h-4 bg-gray-800 rounded w-24 mb-2" />
+            <div className="h-9 bg-gray-800 rounded w-12" />
+          </div>
+        ))}
+      </div>
+
+      <div className="h-5 bg-gray-800 rounded w-16 mb-4" />
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="bg-gray-900 border border-gray-800 rounded-lg p-5 h-48" />
+        ))}
+      </div>
+
+      <div className="h-5 bg-gray-800 rounded w-20 mb-4" />
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-3">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="h-10 bg-gray-800/50 rounded" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState() {
+  return (
+    <div className="flex items-center justify-center min-h-[256px]">
+      <div className="text-center max-w-md">
+        <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-gray-800 border border-gray-700 mb-4">
+          <svg className="w-6 h-6 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+          </svg>
+        </div>
+        <h3 className="text-lg font-semibold text-gray-200 mb-1">No specs loaded</h3>
+        <p className="text-sm text-gray-400">
+          Start the Temper server with{" "}
+          <code className="font-mono text-xs bg-gray-800 px-1.5 py-0.5 rounded">
+            temper serve --specs-dir &lt;path&gt;
+          </code>
+        </p>
+      </div>
+    </div>
+  );
+}
 
 export default function Dashboard() {
   const [specs, setSpecs] = useState<SpecSummary[]>([]);
-  const [entities, setEntities] = useState<EntitySummary[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [initialError, setInitialError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function load() {
-      const [specData, entityData] = await Promise.all([
-        fetchSpecs(),
-        fetchEntities(),
-      ]);
+  // Filters
+  const [typeFilter, setTypeFilter] = useState<string>("all");
+  const [stateFilter, setStateFilter] = useState<string>("all");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [tenantFilter, setTenantFilter] = useState<string>("all");
+
+  // Auto-refresh entities every 5s
+  const entityPoll = usePolling<EntitySummary[]>({
+    fetcher: fetchEntities,
+    interval: 5000,
+    enabled: !initialLoading && !initialError,
+  });
+  const entities = useMemo(() => entityPoll.data ?? [], [entityPoll.data]);
+  const lastUpdated = useRelativeTime(entityPoll.lastUpdated);
+
+  const loadInitial = useCallback(async () => {
+    setInitialLoading(true);
+    setInitialError(null);
+    try {
+      const specData = await fetchSpecs();
       setSpecs(specData);
-      setEntities(entityData);
-      setLoading(false);
+    } catch (err) {
+      setInitialError(err instanceof Error ? err.message : "Failed to load dashboard data");
+    } finally {
+      setInitialLoading(false);
     }
-    load();
   }, []);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-gray-500 text-sm">Loading...</div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    loadInitial();
+  }, [loadInitial]);
 
-  // Group entities by type
+  // Derive unique tenants/types/states for filter dropdowns
+  const tenants = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of specs) {
+      if (s.tenant) set.add(s.tenant);
+    }
+    return Array.from(set).sort();
+  }, [specs]);
+
+  const entityTypes = useMemo(() => {
+    const set = new Set<string>();
+    for (const e of entities) set.add(e.entity_type);
+    return Array.from(set).sort();
+  }, [entities]);
+
+  const entityStates = useMemo(() => {
+    const set = new Set<string>();
+    for (const e of entities) {
+      if (e.current_state) set.add(e.current_state);
+    }
+    return Array.from(set).sort();
+  }, [entities]);
+
+  // Filtered specs by tenant
+  const filteredSpecs = useMemo(() => {
+    if (tenantFilter === "all") return specs;
+    return specs.filter((s) => s.tenant === tenantFilter);
+  }, [specs, tenantFilter]);
+
+  // Filtered entities
+  const filteredEntities = useMemo(() => {
+    let result = entities;
+    if (typeFilter !== "all") {
+      result = result.filter((e) => e.entity_type === typeFilter);
+    }
+    if (stateFilter !== "all") {
+      result = result.filter((e) => (e.current_state ?? e.actor_status) === stateFilter);
+    }
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(
+        (e) =>
+          e.entity_id.toLowerCase().includes(q) ||
+          e.entity_type.toLowerCase().includes(q),
+      );
+    }
+    return result;
+  }, [entities, typeFilter, stateFilter, searchQuery]);
+
+  if (initialLoading) return <DashboardSkeleton />;
+  if (initialError) return <ErrorDisplay title="Cannot load dashboard" message={initialError} retry={loadInitial} />;
+  if (specs.length === 0 && entities.length === 0) return <EmptyState />;
+
   const entityCounts = entities.reduce<Record<string, number>>((acc, e) => {
     acc[e.entity_type] = (acc[e.entity_type] || 0) + 1;
     return acc;
@@ -41,11 +160,34 @@ export default function Dashboard() {
   return (
     <div>
       {/* Header */}
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-100">Dashboard</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          Overview of loaded specs and active entities
-        </p>
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-100">Dashboard</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Overview of loaded specs and active entities
+          </p>
+        </div>
+        <div className="flex items-center gap-4">
+          {/* Tenant selector */}
+          {tenants.length > 0 && (
+            <select
+              value={tenantFilter}
+              onChange={(e) => setTenantFilter(e.target.value)}
+              className="bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded-md px-2 py-1.5 focus:border-blue-500 focus:outline-none"
+            >
+              <option value="all">All tenants</option>
+              {tenants.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          )}
+          {/* Last updated indicator */}
+          {lastUpdated && (
+            <span className="text-xs text-gray-500">
+              Updated {lastUpdated}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Stats row */}
@@ -53,7 +195,7 @@ export default function Dashboard() {
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
           <div className="text-sm text-gray-500">Loaded Specs</div>
           <div className="text-3xl font-bold font-mono text-gray-100 mt-1">
-            {specs.length}
+            {filteredSpecs.length}
           </div>
         </div>
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -74,82 +216,118 @@ export default function Dashboard() {
       <div className="mb-8">
         <h2 className="text-lg font-semibold text-gray-200 mb-4">Specs</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {specs.map((spec) => (
-            <SpecCard key={spec.entity_type} spec={spec} />
+          {filteredSpecs.map((spec) => (
+            <SpecCard key={`${spec.tenant}-${spec.entity_type}`} spec={spec} />
           ))}
         </div>
       </div>
 
       {/* Entity list */}
       <div>
-        <h2 className="text-lg font-semibold text-gray-200 mb-4">Entities</h2>
-        <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-800">
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">Type</th>
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">ID</th>
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">Status</th>
-                <th className="text-right px-4 py-3 text-gray-500 font-medium"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {entities.map((entity) => (
-                <tr
-                  key={`${entity.entity_type}-${entity.entity_id}`}
-                  className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors"
-                >
-                  <td className="px-4 py-3 font-mono text-gray-300">
-                    {entity.entity_type}
-                  </td>
-                  <td className="px-4 py-3 font-mono text-gray-400">
-                    {entity.entity_id}
-                  </td>
-                  <td className="px-4 py-3">
-                    <StatusBadge status={entity.current_state ?? entity.actor_status} />
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <Link
-                      href={`/entities/${entity.entity_type}/${entity.entity_id}`}
-                      className="text-blue-400 hover:text-blue-300 text-xs"
-                    >
-                      Inspect
-                    </Link>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-gray-200">Entities</h2>
+          {entityPoll.error && (
+            <span className="text-xs text-red-400">Polling error</span>
+          )}
         </div>
+
+        {/* Filters */}
+        <div className="flex items-center gap-3 mb-4">
+          <input
+            type="text"
+            placeholder="Search by ID..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded-md px-3 py-1.5 w-48 focus:border-blue-500 focus:outline-none placeholder-gray-600"
+          />
+          <select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value)}
+            className="bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded-md px-2 py-1.5 focus:border-blue-500 focus:outline-none"
+          >
+            <option value="all">All types</option>
+            {entityTypes.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+          <select
+            value={stateFilter}
+            onChange={(e) => setStateFilter(e.target.value)}
+            className="bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded-md px-2 py-1.5 focus:border-blue-500 focus:outline-none"
+          >
+            <option value="all">All states</option>
+            {entityStates.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+          {(typeFilter !== "all" || stateFilter !== "all" || searchQuery) && (
+            <button
+              onClick={() => {
+                setTypeFilter("all");
+                setStateFilter("all");
+                setSearchQuery("");
+              }}
+              className="text-xs text-gray-500 hover:text-gray-300"
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
+
+        {entities.length === 0 ? (
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
+            <p className="text-sm text-gray-400">
+              No active entities. Create one with{" "}
+              <code className="font-mono text-xs bg-gray-800 px-1.5 py-0.5 rounded">
+                POST /tdata/&#123;EntitySet&#125;
+              </code>
+            </p>
+          </div>
+        ) : filteredEntities.length === 0 ? (
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
+            <p className="text-sm text-gray-400">No entities match the current filters.</p>
+          </div>
+        ) : (
+          <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-800">
+                  <th className="text-left px-4 py-3 text-gray-500 font-medium">Type</th>
+                  <th className="text-left px-4 py-3 text-gray-500 font-medium">ID</th>
+                  <th className="text-left px-4 py-3 text-gray-500 font-medium">Status</th>
+                  <th className="text-right px-4 py-3 text-gray-500 font-medium"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredEntities.map((entity) => (
+                  <tr
+                    key={`${entity.entity_type}-${entity.entity_id}`}
+                    className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors"
+                  >
+                    <td className="px-4 py-3 font-mono text-gray-300">
+                      {entity.entity_type}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-gray-400">
+                      {entity.entity_id}
+                    </td>
+                    <td className="px-4 py-3">
+                      <StatusBadge status={entity.current_state ?? entity.actor_status} />
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <Link
+                        href={`/entities/${entity.entity_type}/${entity.entity_id}`}
+                        className="text-blue-400 hover:text-blue-300 text-xs"
+                      >
+                        Inspect
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
-  );
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const colorMap: Record<string, string> = {
-    Open: "bg-blue-900/40 text-blue-400 border-blue-800",
-    InProgress: "bg-yellow-900/40 text-yellow-400 border-yellow-800",
-    Review: "bg-purple-900/40 text-purple-400 border-purple-800",
-    Closed: "bg-gray-800 text-gray-400 border-gray-700",
-    Cancelled: "bg-red-900/40 text-red-400 border-red-800",
-    Draft: "bg-gray-800 text-gray-400 border-gray-700",
-    Sent: "bg-blue-900/40 text-blue-400 border-blue-800",
-    Paid: "bg-green-900/40 text-green-400 border-green-800",
-    Overdue: "bg-red-900/40 text-red-400 border-red-800",
-    Voided: "bg-gray-800 text-gray-500 border-gray-700",
-    Pending: "bg-yellow-900/40 text-yellow-400 border-yellow-800",
-    Confirmed: "bg-blue-900/40 text-blue-400 border-blue-800",
-    Shipped: "bg-purple-900/40 text-purple-400 border-purple-800",
-    Delivered: "bg-green-900/40 text-green-400 border-green-800",
-    Returned: "bg-red-900/40 text-red-400 border-red-800",
-  };
-
-  const colors = colorMap[status] || "bg-gray-800 text-gray-400 border-gray-700";
-
-  return (
-    <span className={`text-xs font-mono px-2 py-0.5 rounded border ${colors}`}>
-      {status}
-    </span>
   );
 }

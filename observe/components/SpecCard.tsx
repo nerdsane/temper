@@ -1,5 +1,5 @@
 import Link from "next/link";
-import type { SpecSummary } from "@/lib/mock-data";
+import type { SpecSummary } from "@/lib/types";
 
 interface SpecCardProps {
   spec: SpecSummary;

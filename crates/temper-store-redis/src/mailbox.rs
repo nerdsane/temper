@@ -4,6 +4,9 @@
 //! Messages are appended with XADD and consumed with XREAD.
 //! This enables distributed actor messaging across nodes.
 
+use std::sync::Arc;
+
+use fred::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::keys;
@@ -44,6 +47,76 @@ pub trait MailboxStore: Send + Sync + 'static {
         &self,
         actor_id: &str,
     ) -> impl std::future::Future<Output = Result<u64, crate::error::RedisStoreError>> + Send;
+}
+
+/// Redis-backed mailbox using Redis Lists for FIFO delivery.
+///
+/// Each actor gets a dedicated Redis List keyed by `temper:mailbox:{actor_id}`.
+/// Messages are serialized to JSON and pushed with RPUSH, popped with LPOP.
+pub struct RedisMailbox {
+    client: Arc<fred::clients::Client>,
+}
+
+impl RedisMailbox {
+    /// Create a new Redis-backed mailbox store.
+    pub fn new(client: Arc<fred::clients::Client>) -> Self {
+        Self { client }
+    }
+}
+
+impl MailboxStore for RedisMailbox {
+    async fn send(
+        &self,
+        actor_id: &str,
+        entry: &MailboxEntry,
+    ) -> Result<String, crate::error::RedisStoreError> {
+        let key = keys::mailbox_key(actor_id);
+        let json = serde_json::to_string(entry)
+            .map_err(|e| crate::error::RedisStoreError::Serialization(e.to_string()))?;
+
+        let _: i64 = self
+            .client
+            .rpush(&key, json)
+            .await
+            .map_err(|e| crate::error::RedisStoreError::Command(e.to_string()))?;
+
+        // Return a synthetic message ID (Redis Lists don't have stream IDs).
+        Ok(uuid::Uuid::now_v7().to_string())
+    }
+
+    async fn receive(
+        &self,
+        actor_id: &str,
+    ) -> Result<Option<MailboxEntry>, crate::error::RedisStoreError> {
+        let key = keys::mailbox_key(actor_id);
+        let value: Option<String> = self
+            .client
+            .lpop(&key, None)
+            .await
+            .map_err(|e| crate::error::RedisStoreError::Command(e.to_string()))?;
+
+        match value {
+            Some(json) => {
+                let entry: MailboxEntry = serde_json::from_str(&json)
+                    .map_err(|e| crate::error::RedisStoreError::Serialization(e.to_string()))?;
+                Ok(Some(entry))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn depth(
+        &self,
+        actor_id: &str,
+    ) -> Result<u64, crate::error::RedisStoreError> {
+        let key = keys::mailbox_key(actor_id);
+        let len: i64 = self
+            .client
+            .llen(&key)
+            .await
+            .map_err(|e| crate::error::RedisStoreError::Command(e.to_string()))?;
+        Ok(len as u64)
+    }
 }
 
 /// In-memory mailbox for testing (no Redis needed).

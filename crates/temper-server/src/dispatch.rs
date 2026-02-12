@@ -22,7 +22,7 @@ use crate::state::ServerState;
 ///
 /// Checks `X-Tenant-Id` header first. Falls back to the first registered
 /// tenant in the SpecRegistry, or `TenantId::default()` if empty.
-fn extract_tenant(headers: &HeaderMap, state: &ServerState) -> TenantId {
+pub(crate) fn extract_tenant(headers: &HeaderMap, state: &ServerState) -> TenantId {
     if let Some(val) = headers.get("x-tenant-id") {
         if let Ok(s) = val.to_str() {
             if !s.is_empty() {
@@ -81,7 +81,7 @@ pub async fn handle_odata_get(
     State(state): State<ServerState>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
-    Query(query_params): Query<std::collections::HashMap<String, String>>,
+    Query(query_params): Query<std::collections::BTreeMap<String, String>>,
 ) -> impl IntoResponse {
     let tenant = extract_tenant(&headers, &state);
 
@@ -278,10 +278,10 @@ pub async fn handle_odata_post(
             };
 
             // HTTP-level span: covers authz + actor dispatch + response serialization.
-            // DST-safe: sim_now() for timestamps, no Instant::now().
+            // DST-safe: sim_now() for timestamps, wall clock avoided.
             let http_start = sim_now();
             let tracer = opentelemetry::global::tracer("temper");
-            let http_start_time: std::time::SystemTime = http_start.into();
+            let http_start_time: std::time::SystemTime = http_start.into(); // determinism-ok: converting sim_now() to OTEL SystemTime
             let span_name = format!("HTTP POST {set_name}.{action}");
             let mut http_span = tracer
                 .span_builder(span_name)
@@ -296,7 +296,7 @@ pub async fn handle_odata_post(
                 .start(&tracer);
 
             // Cedar AuthZ check
-            let authz_result = state.authorize(&[], &action, &entity_type, &std::collections::HashMap::new());
+            let authz_result = state.authorize(&[], &action, &entity_type, &std::collections::BTreeMap::new());
             if let Err(reason) = authz_result {
                 http_span.set_status(Status::error(reason.clone()));
                 let end_time: std::time::SystemTime = sim_now().into();

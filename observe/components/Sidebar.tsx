@@ -2,13 +2,10 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-
-const NAV_ITEMS = [
-  { href: "/", label: "Dashboard", icon: "grid" },
-  { href: "/specs/Ticket", label: "Specs", icon: "file-text" },
-  { href: "/verify/Ticket", label: "Verification", icon: "shield" },
-  { href: "/entities/Ticket/TKT-001", label: "Entities", icon: "box" },
-];
+import { useEffect, useState } from "react";
+import { fetchSpecs, fetchEntities } from "@/lib/api";
+import { useConnection } from "@/lib/connection";
+import type { SpecSummary } from "@/lib/types";
 
 function NavIcon({ icon }: { icon: string }) {
   switch (icon) {
@@ -47,11 +44,38 @@ function NavIcon({ icon }: { icon: string }) {
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const { connected, checking } = useConnection();
+  const [specs, setSpecs] = useState<SpecSummary[]>([]);
+  const [entityCounts, setEntityCounts] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    async function loadNav() {
+      try {
+        const [specData, entityData] = await Promise.all([
+          fetchSpecs(),
+          fetchEntities(),
+        ]);
+        setSpecs(specData);
+        const counts: Record<string, number> = {};
+        for (const e of entityData) {
+          counts[e.entity_type] = (counts[e.entity_type] || 0) + 1;
+        }
+        setEntityCounts(counts);
+      } catch {
+        // Sidebar nav gracefully falls back to static items
+      }
+    }
+    loadNav();
+  }, []);
 
   const isActive = (href: string) => {
     if (href === "/") return pathname === "/";
-    return pathname.startsWith(href.split("/").slice(0, 2).join("/"));
+    return pathname.startsWith(href.split("/").slice(0, 3).join("/"));
   };
+
+  const staticItems = [
+    { href: "/", label: "Dashboard", icon: "grid" },
+  ];
 
   return (
     <aside className="w-56 bg-gray-950 border-r border-gray-800 flex flex-col min-h-screen">
@@ -69,8 +93,9 @@ export default function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-3 space-y-1">
-        {NAV_ITEMS.map((item) => (
+      <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
+        {/* Static nav */}
+        {staticItems.map((item) => (
           <Link
             key={item.href}
             href={item.href}
@@ -84,13 +109,69 @@ export default function Sidebar() {
             {item.label}
           </Link>
         ))}
+
+        {/* Dynamic spec nav */}
+        {specs.length > 0 && (
+          <>
+            <div className="pt-3 pb-1 px-3 text-xs font-medium text-gray-600 uppercase tracking-wider">
+              Specs
+            </div>
+            {specs.map((spec) => (
+              <Link
+                key={spec.entity_type}
+                href={`/specs/${spec.entity_type}`}
+                className={`flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors ${
+                  isActive(`/specs/${spec.entity_type}`)
+                    ? "bg-gray-800 text-white"
+                    : "text-gray-400 hover:text-gray-200 hover:bg-gray-900"
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <NavIcon icon="file-text" />
+                  <span className="truncate">{spec.entity_type}</span>
+                </div>
+                {entityCounts[spec.entity_type] !== undefined && (
+                  <span className="text-xs font-mono bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded">
+                    {entityCounts[spec.entity_type]}
+                  </span>
+                )}
+              </Link>
+            ))}
+          </>
+        )}
+
+        {/* Static verify / entities links */}
+        <div className="pt-3 pb-1 px-3 text-xs font-medium text-gray-600 uppercase tracking-wider">
+          Tools
+        </div>
+        <Link
+          href={specs.length > 0 ? `/verify/${specs[0].entity_type}` : "/verify/Ticket"}
+          className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
+            pathname.startsWith("/verify")
+              ? "bg-gray-800 text-white"
+              : "text-gray-400 hover:text-gray-200 hover:bg-gray-900"
+          }`}
+        >
+          <NavIcon icon="shield" />
+          Verification
+        </Link>
       </nav>
 
-      {/* Footer */}
-      <div className="p-4 border-t border-gray-800">
-        <div className="text-xs text-gray-600">
-          v0.1.0 — mock data
-        </div>
+      {/* Connection Status + Footer */}
+      <div className="p-4 border-t border-gray-800 space-y-2">
+        {!checking && (
+          <div className="flex items-center gap-2">
+            <div
+              className={`w-2 h-2 rounded-full ${
+                connected ? "bg-green-500" : "bg-red-500"
+              }`}
+            />
+            <span className={`text-xs ${connected ? "text-gray-500" : "text-red-400"}`}>
+              {connected ? "Connected" : "Disconnected"}
+            </span>
+          </div>
+        )}
+        <div className="text-xs text-gray-600">v0.1.0</div>
       </div>
     </aside>
   );

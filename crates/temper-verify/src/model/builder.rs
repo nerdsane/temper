@@ -150,6 +150,8 @@ fn translate_effects(effects: &[automaton::Effect]) -> Vec<ModelEffect> {
                 value: *value,
             }),
             automaton::Effect::Emit { .. } => None, // Emit is runtime-only
+            automaton::Effect::ListAppend { .. }
+            | automaton::Effect::ListRemoveAt { .. } => None, // List effects are runtime-only
         })
         .collect()
 }

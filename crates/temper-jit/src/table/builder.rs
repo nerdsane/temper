@@ -53,6 +53,18 @@ impl TransitionTable {
                         automaton::Guard::IsTrue { var } => {
                             guards.push(Guard::BoolTrue(var.clone()));
                         }
+                        automaton::Guard::ListContains { var, value } => {
+                            guards.push(Guard::ListContains {
+                                var: var.clone(),
+                                value: value.clone(),
+                            });
+                        }
+                        automaton::Guard::ListLengthMin { var, min } => {
+                            guards.push(Guard::ListLengthMin {
+                                var: var.clone(),
+                                min: *min,
+                            });
+                        }
                         _ => {}
                     }
                 }
@@ -87,6 +99,12 @@ impl TransitionTable {
                             }
                             automaton::Effect::Emit { event } => {
                                 effects.push(Effect::EmitEvent(event.clone()));
+                            }
+                            automaton::Effect::ListAppend { var } => {
+                                effects.push(Effect::ListAppend(var.clone()));
+                            }
+                            automaton::Effect::ListRemoveAt { var } => {
+                                effects.push(Effect::ListRemoveAt(var.clone()));
                             }
                         }
                     }
