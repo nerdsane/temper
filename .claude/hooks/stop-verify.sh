@@ -22,6 +22,9 @@ SESSION_ID="${CLAUDE_SESSION_ID:-}"
 
 ANY_BLOCKED=false
 
+# Helper: check for marker (supports both old plain format and new TOML format)
+marker_exists() { [ -f "$MARKER_DIR/$1" ] || [ -f "$MARKER_DIR/$1.toml" ]; }
+
 # --- Check 1: Unverified pushes ---
 if [ -d "$MARKER_DIR" ]; then
     for pending in "$MARKER_DIR"/push-pending-*; do
@@ -44,16 +47,28 @@ if [ -d "$MARKER_DIR" ]; then
     if [ -f "$MARKER_DIR/commit-pending" ]; then
         # A commit was made — check for review markers
         if [ -f "$MARKER_DIR/sim-changed" ]; then
-            if [ ! -f "$MARKER_DIR/dst-reviewed" ]; then
+            if ! marker_exists "dst-reviewed"; then
                 echo "BLOCKED: Simulation-visible code was committed without DST review!" >&2
                 echo "Run the DST reviewer agent before exiting." >&2
                 ANY_BLOCKED=true
             fi
         fi
 
-        if [ ! -f "$MARKER_DIR/code-reviewed" ]; then
+        if ! marker_exists "code-reviewed"; then
             echo "BLOCKED: Code was committed without code review!" >&2
             echo "Run a code review before exiting." >&2
+            ANY_BLOCKED=true
+        fi
+
+        if ! marker_exists "pow-verified"; then
+            echo "BLOCKED: Proof of Work verification missing for committed code!" >&2
+            echo "Run pow-produce-claims.sh and pow-compare.sh before exiting." >&2
+            ANY_BLOCKED=true
+        fi
+
+        if ! marker_exists "alignment-reviewed"; then
+            echo "BLOCKED: Alignment review missing for committed code!" >&2
+            echo "Run the alignment reviewer agent before exiting." >&2
             ANY_BLOCKED=true
         fi
     fi
@@ -67,11 +82,29 @@ if ! (cd "$WORKSPACE_ROOT" && cargo check --workspace 2>&1 >&2); then
     ANY_BLOCKED=true
 fi
 
-# --- Clean up on success ---
+# --- Archive + Clean up on success ---
 if [ "$ANY_BLOCKED" = false ] && [ -d "$MARKER_DIR" ]; then
+    # Generate proof document BEFORE deleting anything
+    if [ -x "$WORKSPACE_ROOT/scripts/pow-generate-proof.sh" ]; then
+        bash "$WORKSPACE_ROOT/scripts/pow-generate-proof.sh" 2>/dev/null || true
+    fi
+
+    # Archive trace + claims to .proof/archive/
+    ARCHIVE_DIR="$WORKSPACE_ROOT/.proof/archive/$(date -u +%Y-%m-%d)"
+    mkdir -p "$ARCHIVE_DIR"
+    cp -f "$MARKER_DIR"/trace-*.jsonl "$ARCHIVE_DIR/" 2>/dev/null || true
+    cp -f "$MARKER_DIR"/claims-*.toml "$ARCHIVE_DIR/" 2>/dev/null || true
+    cp -f "$MARKER_DIR"/*.toml "$ARCHIVE_DIR/" 2>/dev/null || true
+
+    # Now clean up markers
     rm -f "$MARKER_DIR"/push-pending-* "$MARKER_DIR"/test-verified-* 2>/dev/null || true
     rm -f "$MARKER_DIR"/commit-pending "$MARKER_DIR"/sim-changed 2>/dev/null || true
     rm -f "$MARKER_DIR"/dst-reviewed "$MARKER_DIR"/code-reviewed 2>/dev/null || true
+    rm -f "$MARKER_DIR"/dst-reviewed.toml "$MARKER_DIR"/code-reviewed.toml 2>/dev/null || true
+    rm -f "$MARKER_DIR"/pow-verified "$MARKER_DIR"/pow-verified.toml 2>/dev/null || true
+    rm -f "$MARKER_DIR"/alignment-reviewed "$MARKER_DIR"/alignment-reviewed.toml 2>/dev/null || true
+    rm -f "$MARKER_DIR"/claims-*.toml "$MARKER_DIR"/trace-*.jsonl 2>/dev/null || true
+    rm -f "$MARKER_DIR"/trace-*.seq "$MARKER_DIR"/trace-*.prevhash 2>/dev/null || true
 fi
 
 if [ "$ANY_BLOCKED" = true ]; then
