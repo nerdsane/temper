@@ -161,6 +161,29 @@ mod tests {
     }
 
     #[test]
+    fn test_serde_roundtrip_preserves_rule_index() {
+        let table = order_table();
+
+        // Serialize → deserialize roundtrip
+        let json = serde_json::to_string(&table).expect("serialize");
+        let restored: TransitionTable =
+            serde_json::from_str(&json).expect("deserialize");
+
+        // rule_index must be rebuilt, not empty
+        assert!(
+            !restored.rule_index.is_empty(),
+            "rule_index should be non-empty after deserialization"
+        );
+
+        // Evaluate must still work on the deserialized table
+        let result = restored.evaluate("Draft", 2, "SubmitOrder");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.success, "SubmitOrder from Draft should succeed after roundtrip");
+        assert_eq!(r.new_state, "Submitted");
+    }
+
+    #[test]
     fn cancel_from_multiple_states() {
         let table = order_table();
 

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 /// A transition table: state machine transitions as DATA, not code.
 /// Can be hot-swapped per-actor without restart.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TransitionTable {
     /// The entity this table governs (e.g. "Order").
     pub entity_name: String,
@@ -26,9 +26,36 @@ pub struct TransitionTable {
     /// Pre-built index: action name → indices into `rules`.
     ///
     /// Eliminates the O(N) linear scan + Vec allocation in [`evaluate_ctx()`].
-    /// Rebuilt automatically during construction; skipped during (de)serialization.
-    #[serde(skip, default)]
+    /// Rebuilt automatically during construction and deserialization.
+    #[serde(skip)]
     pub(crate) rule_index: BTreeMap<String, Vec<usize>>,
+}
+
+impl<'de> Deserialize<'de> for TransitionTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Helper struct for deserializing the persistent fields only.
+        #[derive(Deserialize)]
+        struct TransitionTableRaw {
+            entity_name: String,
+            states: Vec<String>,
+            initial_state: String,
+            rules: Vec<TransitionRule>,
+        }
+
+        let raw = TransitionTableRaw::deserialize(deserializer)?;
+        let mut table = TransitionTable {
+            entity_name: raw.entity_name,
+            states: raw.states,
+            initial_state: raw.initial_state,
+            rules: raw.rules,
+            rule_index: BTreeMap::new(),
+        };
+        table.rebuild_index();
+        Ok(table)
+    }
 }
 
 /// A single transition rule.
