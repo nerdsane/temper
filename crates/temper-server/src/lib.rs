@@ -12,6 +12,7 @@ mod query_eval;
 mod state;
 pub mod entity_actor;
 pub mod registry;
+pub mod reaction;
 #[cfg(feature = "observe")]
 pub mod observe_routes;
 #[cfg(feature = "observe")]

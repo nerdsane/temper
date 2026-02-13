@@ -23,7 +23,7 @@
 |---|-----|-------|--------|------------|
 | 8 | `Custom(String)` effect not dispatched | temper-jit, temper-server | **RESOLVED** | `custom_effects: Vec<String>` field added to `EntityResponse`. Success path collects `Effect::Custom(name)` values during transition processing. Surfaced in HTTP response JSON for downstream hook dispatch. |
 | 9 | No event subscription mechanism | temper-server | **RESOLVED** | SSE endpoint at `GET /tdata/$events` with `tokio::sync::broadcast` channel. `EntityStateChange` notifications published after successful transitions. Also `GET /observe/events/stream` with entity_type/entity_id filtering. |
-| 10 | No cross-entity coordination | temper-runtime, temper-server | **OPEN** | Deferred — needs its own design phase. Saga/choreography mechanism for multi-entity workflows. |
+| 10 | No cross-entity coordination | temper-runtime, temper-server | **RESOLVED** | Choreography via reaction rules in `temper-server::reaction`. `ReactionRegistry` indexes rules per-tenant, `SimReactionSystem` for DST, `ReactionDispatcher` for async production. Bounded cascade (MAX_DEPTH=8). |
 | 11 | No append-only collections | temper-jit, temper-server | **RESOLVED** | Full stack: `Guard::ListContains`, `Guard::ListLengthMin`, `Effect::ListAppend`, `Effect::ListRemoveAt` across temper-spec, temper-jit, temper-server, temper-verify. `lists: BTreeMap<String, Vec<String>>` on EntityState. |
 | 12 | No persistent evolution record storage | temper-evolution | **RESOLVED** | `PostgresRecordStore` in `pg_store.rs` — `evolution_records` table with JSONB payload, indexes on `(record_type, status)` and `(derived_from)`. Full CRUD + `ranked_insights()` + `update_status()`. |
 | 13 | No real Redis adapter | temper-store-redis | **RESOLVED** | `RedisMailbox` (RPUSH/LPOP/LLEN), `RedisPlacement` (GET/SET/DEL + scan), `RedisCache` (SET with EX + scan) — all via fred v10. |
@@ -34,7 +34,7 @@
 | 18 | Claude API client has no mock | temper-platform | **RESOLVED** | `ChatClient` trait extracted. `MockClaudeClient` supports fixed and sequential canned responses. `ObservationAgent<C>` and `AnalysisAgent<C>` now generic with `with_client()` constructors. |
 | 19 | Query options not applied | temper-server, temper-odata | **RESOLVED** | Same as #1 — `query_eval.rs` applies all parsed options to entity data. |
 
-**11 of 12 P1 items resolved.** Only #10 (cross-entity coordination) remains open.
+**All 12 P1 items resolved.**
 
 ## Nice to Have (future improvements)
 
@@ -63,6 +63,6 @@
 | Priority | Total | Resolved | Open |
 |----------|-------|----------|------|
 | P0 | 7 | **7** | 0 |
-| P1 | 12 | **11** | 1 (#10) |
+| P1 | 12 | **12** | 0 |
 | P2 | 17 | **2** (#33 partial, #35) | 15 |
-| **Total** | **36** | **20** | **16** |
+| **Total** | **36** | **21** | **15** |

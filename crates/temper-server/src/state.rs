@@ -17,6 +17,7 @@ use temper_store_postgres::PostgresEventStore;
 
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 use crate::events::EntityStateChange;
+use crate::reaction::ReactionDispatcher;
 use crate::registry::SpecRegistry;
 
 /// Lightweight metrics collector for the /observe endpoints.
@@ -158,6 +159,8 @@ pub struct ServerState {
     pub trajectory_log: Arc<RwLock<TrajectoryLog>>,
     /// In-memory evolution record store (O/P/A/D/I records).
     pub record_store: Arc<RecordStore>,
+    /// Optional reaction dispatcher for cross-entity coordination.
+    pub reaction_dispatcher: Option<Arc<ReactionDispatcher>>,
 }
 
 impl ServerState {
@@ -195,6 +198,7 @@ impl ServerState {
             metrics: Arc::new(MetricsCollector::new()),
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
             record_store: Arc::new(RecordStore::new()),
+            reaction_dispatcher: None,
         }
     }
 
@@ -254,7 +258,14 @@ impl ServerState {
             metrics: Arc::new(MetricsCollector::new()),
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
             record_store: Arc::new(RecordStore::new()),
+            reaction_dispatcher: None,
         }
+    }
+
+    /// Attach a reaction dispatcher for cross-entity coordination.
+    pub fn with_reaction_dispatcher(mut self, dispatcher: Arc<ReactionDispatcher>) -> Self {
+        self.reaction_dispatcher = Some(dispatcher);
+        self
     }
 
     /// Get or spawn an entity actor (legacy single-tenant).
@@ -382,7 +393,45 @@ impl ServerState {
     }
 
     /// Dispatch an action to an entity actor for a specific tenant.
+    ///
+    /// After a successful action, also triggers any matching reaction rules
+    /// for cross-entity coordination.
     pub async fn dispatch_tenant_action(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<EntityResponse, String> {
+        let response = self.dispatch_tenant_action_core(
+            tenant, entity_type, entity_id, action, params,
+        ).await?;
+
+        // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)
+        if response.success {
+            if let Some(ref dispatcher) = self.reaction_dispatcher {
+                let fields = serde_json::to_value(&response.state.fields)
+                    .unwrap_or_default();
+                dispatcher.dispatch_reactions(
+                    self,
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    action,
+                    &response.state.status,
+                    &fields,
+                    0,
+                ).await;
+            }
+        }
+
+        Ok(response)
+    }
+
+    /// Core dispatch without reaction cascade (used by ReactionDispatcher to
+    /// avoid infinite async recursion).
+    pub(crate) async fn dispatch_tenant_action_core(
         &self,
         tenant: &TenantId,
         entity_type: &str,

@@ -1,7 +1,7 @@
 //! Per-tenant specification registry.
 //!
 //! The [`SpecRegistry`] maps `(TenantId, EntityType)` to parsed specifications
-//! and transition tables. It replaces the flat `HashMap<String, TransitionTable>`
+//! and transition tables. It replaces the flat `BTreeMap<String, TransitionTable>` // determinism-ok
 //! in `ServerState`, enabling multi-tenant deployments where each tenant has
 //! its own entity types and specs.
 
@@ -14,6 +14,9 @@ use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::{self, Automaton, Integration};
 use temper_spec::csdl::CsdlDocument;
 
+use crate::reaction::types::ReactionRule;
+use crate::reaction::ReactionRegistry;
+
 /// A registered tenant with its specs and entity configuration.
 #[derive(Debug, Clone)]
 pub struct TenantConfig {
@@ -25,6 +28,9 @@ pub struct TenantConfig {
     pub entity_set_map: BTreeMap<String, String>,
     /// Per-entity-type specs.
     pub entities: BTreeMap<String, EntitySpec>,
+    /// Reaction rules for cross-entity coordination.
+    #[allow(dead_code)]
+    pub reactions: Vec<ReactionRule>,
 }
 
 /// A registered entity type's spec and transition table.
@@ -144,8 +150,36 @@ impl SpecRegistry {
                 csdl_xml: Arc::new(csdl_xml),
                 entity_set_map,
                 entities,
+                reactions: Vec::new(),
             },
         );
+    }
+
+    /// Register a tenant with CSDL, IOA specs, and reaction rules.
+    pub fn register_tenant_with_reactions(
+        &mut self,
+        tenant: impl Into<TenantId>,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+        reactions: Vec<ReactionRule>,
+    ) {
+        let tenant_id: TenantId = tenant.into();
+        self.register_tenant(tenant_id.clone(), csdl, csdl_xml, ioa_sources);
+        if let Some(config) = self.tenants.get_mut(&tenant_id) {
+            config.reactions = reactions;
+        }
+    }
+
+    /// Build a [`ReactionRegistry`] from all tenants' reaction rules.
+    pub fn build_reaction_registry(&self) -> ReactionRegistry {
+        let mut registry = ReactionRegistry::new();
+        for (tenant, config) in &self.tenants {
+            if !config.reactions.is_empty() {
+                registry.register_tenant_rules(tenant.clone(), config.reactions.clone());
+            }
+        }
+        registry
     }
 
     /// Look up a tenant's configuration.
