@@ -45,7 +45,7 @@ if [ -n "$PLAN_FILE" ]; then
     if [ -f "$PLAN_PATH" ]; then
         PLAN_TITLE="$(head -1 "$PLAN_PATH" | sed 's/^#* *//')"
         # Extract phase headings as bullet points
-        PLAN_PHASES="$(grep '^### Phase' "$PLAN_PATH" | sed 's/^### /- **/' | sed 's/ — / — **/' | sed 's/$/**/' | sed 's/\*\*\*\*/\*\*/' 2>/dev/null || echo "")"
+        PLAN_PHASES="$(grep '^### Phase' "$PLAN_PATH" | sed 's/^### /- /' 2>/dev/null || echo "")"
     fi
 fi
 
