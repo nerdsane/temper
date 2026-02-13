@@ -1,6 +1,8 @@
 #!/bin/bash
 # pow-compare.sh — Mechanical comparison engine for Proof of Work
-# Reads trace + claims, cross-references, outputs verification table
+# Reads trace + agent-generated claims, cross-references against
+# ground truth (trace evidence + git diff), outputs verification table.
+# Claims are written by the agent via pow-agent-claims.sh (self-report).
 # Usage: pow-compare.sh [claims-file]
 set -euo pipefail
 
@@ -14,7 +16,7 @@ CLAIMS_FILE="${1:-$MARKER_DIR/claims-${SESSION_ID}.toml}"
 
 if [ ! -f "$CLAIMS_FILE" ]; then
     echo "ERROR: Claims file not found: $CLAIMS_FILE" >&2
-    echo "Run pow-produce-claims.sh first." >&2
+    echo "Run pow-agent-claims.sh to write agent claims first." >&2
     exit 1
 fi
 

@@ -36,6 +36,9 @@ MARKER_DIR="/tmp/temper-harness/${PROJECT_HASH}"
 
 BLOCKED=false
 
+# Helper: check for marker (supports both old plain format and new TOML format)
+marker_exists() { [ -f "$MARKER_DIR/$1" ] || [ -f "$MARKER_DIR/$1.toml" ]; }
+
 # --- Check 1: DST review marker (if sim-visible code changed) ---
 SIM_FILES_CHANGED=false
 if cd "$WORKSPACE_ROOT" 2>/dev/null; then
@@ -45,7 +48,7 @@ if cd "$WORKSPACE_ROOT" 2>/dev/null; then
 fi
 
 if [ "$SIM_FILES_CHANGED" = true ]; then
-    if [ ! -f "$MARKER_DIR/dst-reviewed" ]; then
+    if ! marker_exists "dst-reviewed"; then
         echo "" >&2
         echo "══════════════════════════════════════════════════════════════" >&2
         echo "  BLOCKED: DST review required before commit" >&2
@@ -60,7 +63,7 @@ if [ "$SIM_FILES_CHANGED" = true ]; then
 fi
 
 # --- Check 2: Code review marker ---
-if [ ! -f "$MARKER_DIR/code-reviewed" ]; then
+if ! marker_exists "code-reviewed"; then
     echo "" >&2
     echo "══════════════════════════════════════════════════════════════" >&2
     echo "  BLOCKED: Code review required before commit" >&2
@@ -79,6 +82,28 @@ if ! (cd "$WORKSPACE_ROOT" && cargo test --workspace 2>&1 | tail -5 >&2); then
     echo "  BLOCKED: Tests failed" >&2
     echo "══════════════════════════════════════════════════════════════" >&2
     echo "  All tests must pass before committing." >&2
+    echo "══════════════════════════════════════════════════════════════" >&2
+    BLOCKED=true
+fi
+
+# --- Check 4: PoW claims + comparison must pass ---
+if ! marker_exists "pow-verified"; then
+    echo "" >&2
+    echo "══════════════════════════════════════════════════════════════" >&2
+    echo "  BLOCKED: Proof of Work verification required before commit" >&2
+    echo "══════════════════════════════════════════════════════════════" >&2
+    echo "  Run pow-agent-claims.sh, then pow-compare.sh, then retry." >&2
+    echo "══════════════════════════════════════════════════════════════" >&2
+    BLOCKED=true
+fi
+
+# --- Check 5: Alignment review must pass ---
+if ! marker_exists "alignment-reviewed"; then
+    echo "" >&2
+    echo "══════════════════════════════════════════════════════════════" >&2
+    echo "  BLOCKED: Alignment review required before commit" >&2
+    echo "══════════════════════════════════════════════════════════════" >&2
+    echo "  Invoke the alignment reviewer agent, then retry the commit." >&2
     echo "══════════════════════════════════════════════════════════════" >&2
     BLOCKED=true
 fi

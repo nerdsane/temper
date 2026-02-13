@@ -21,7 +21,19 @@ if [ ! -f "$TRACE_FILE" ] || [ ! -s "$TRACE_FILE" ]; then
     rm -f "$PREV_HASH_FILE" "$SEQ_FILE"
 fi
 
-# Get sequence number
+# Acquire mkdir-based lock (atomic on all POSIX systems, unlike flock which is unavailable on macOS)
+LOCK_DIR="$MARKER_DIR/trace-${SESSION_ID}.lock"
+LOCK_ATTEMPTS=0
+while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    LOCK_ATTEMPTS=$((LOCK_ATTEMPTS + 1))
+    if [ "$LOCK_ATTEMPTS" -ge 200 ]; then
+        exit 0  # skip trace rather than block the agent (2s timeout)
+    fi
+    sleep 0.01
+done
+trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+
+# Get sequence number (inside lock — critical section)
 if [ -f "$SEQ_FILE" ]; then
     SEQ="$(cat "$SEQ_FILE")"
     SEQ=$((SEQ + 1))
@@ -113,5 +125,8 @@ if command -v jq >/dev/null 2>&1; then
 else
     echo "{\"seq\":$SEQ,\"timestamp\":\"$TIMESTAMP\",\"tool_name\":\"$TOOL_NAME\",\"category\":\"$CATEGORY\",\"prev_hash\":\"$PREV_HASH\",\"entry_hash\":\"$ENTRY_HASH\"}" >> "$TRACE_FILE"
 fi
+
+# Release lock explicitly (trap EXIT also handles cleanup)
+rmdir "$LOCK_DIR" 2>/dev/null
 
 exit 0

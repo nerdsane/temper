@@ -1,6 +1,12 @@
 #!/bin/bash
-# pow-produce-claims.sh — Generate claims skeleton from trace + git state
-# Usage: pow-produce-claims.sh [intent_summary] [plan_file]
+# pow-extract-evidence.sh — Extract ground truth evidence from trace + git state
+#
+# This script extracts mechanical evidence for reference/debugging purposes.
+# It is NOT the source of agent claims. Claims are written by the agent itself
+# via pow-agent-claims.sh (self-report). This script provides independent
+# ground truth that pow-compare.sh can cross-reference against agent claims.
+#
+# Usage: pow-extract-evidence.sh [intent_summary] [plan_file]
 set -euo pipefail
 
 WORKSPACE_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"

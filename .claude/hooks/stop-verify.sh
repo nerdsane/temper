@@ -62,7 +62,7 @@ if [ -d "$MARKER_DIR" ]; then
 
         if ! marker_exists "pow-verified"; then
             echo "BLOCKED: Proof of Work verification missing for committed code!" >&2
-            echo "Run pow-produce-claims.sh and pow-compare.sh before exiting." >&2
+            echo "Run pow-agent-claims.sh and pow-compare.sh before exiting." >&2
             ANY_BLOCKED=true
         fi
 
