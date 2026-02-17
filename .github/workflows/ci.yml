@@ -50,11 +50,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-integrity-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-integrity-
+
       - name: No TODO/FIXME/HACK in production code
         run: |
           FOUND=false
           for f in $(find crates/ -name '*.rs' -not -path '*/tests/*' -not -name '*_test.rs'); do
-            if grep -nE '(TODO|FIXME|XXX|HACK)\b' "$f" | grep -v '// ci-ok' | grep -qv '^[[:space:]]*//' 2>/dev/null; then
+            if grep -E '(TODO|FIXME|XXX|HACK)\b' "$f" | grep -v '// ci-ok' | grep -qv '^[[:space:]]*//' 2>/dev/null; then
               echo "FAIL: $f contains TODO/FIXME/HACK"
               grep -nE '(TODO|FIXME|XXX|HACK)\b' "$f" | grep -v '// ci-ok' | grep -v '^[[:space:]]*//'
               FOUND=true
@@ -67,7 +79,7 @@ jobs:
         run: |
           FOUND=false
           for f in $(find crates/ -name '*.rs' -not -path '*/tests/*' -not -name '*_test.rs'); do
-            if grep -n '\.unwrap()' "$f" | grep -v '// ci-ok' | grep -qv '^[[:space:]]*//' 2>/dev/null; then
+            if grep '\.unwrap()' "$f" | grep -v '// ci-ok' | grep -qv '^[[:space:]]*//' 2>/dev/null; then
               echo "FAIL: $f contains .unwrap()"
               grep -n '\.unwrap()' "$f" | grep -v '// ci-ok' | grep -v '^[[:space:]]*//'
               FOUND=true
@@ -76,7 +88,7 @@ jobs:
           if [ "$FOUND" = true ]; then exit 1; fi
           echo "No unwrap: OK"
 
-      - name: DST pattern scan (25 patterns)
+      - name: DST pattern scan (21 patterns)
         run: |
           FOUND=false
           SIM_CRATES="temper-runtime temper-jit temper-server"
@@ -86,43 +98,49 @@ jobs:
             for f in $(find "$CRATE_DIR" -name '*.rs' -not -path '*/tests/*'); do
               # Collections
               for pat in 'HashMap' 'HashSet' 'DashMap' 'FuturesUnordered'; do
-                if grep -n "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
+                if grep "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
                   echo "DST VIOLATION: $f — $pat found"
+                  grep -n "$pat" "$f" | grep -v '// determinism-ok' | grep -v '^[[:space:]]*//'
                   FOUND=true
                 fi
               done
               # Time
               for pat in 'SystemTime::now' 'Instant::now' 'chrono::Utc::now' 'std::thread::sleep'; do
-                if grep -n "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
+                if grep "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
                   echo "DST VIOLATION: $f — $pat found"
+                  grep -n "$pat" "$f" | grep -v '// determinism-ok' | grep -v '^[[:space:]]*//'
                   FOUND=true
                 fi
               done
               # Randomness
               for pat in 'Uuid::new_v4' 'thread_rng' 'OsRng' 'getrandom'; do
-                if grep -n "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
+                if grep "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
                   echo "DST VIOLATION: $f — $pat found"
+                  grep -n "$pat" "$f" | grep -v '// determinism-ok' | grep -v '^[[:space:]]*//'
                   FOUND=true
                 fi
               done
               # Threading
               for pat in 'std::thread::spawn' 'rayon::' 'tokio::spawn'; do
-                if grep -n "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
+                if grep "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
                   echo "DST VIOLATION: $f — $pat found"
+                  grep -n "$pat" "$f" | grep -v '// determinism-ok' | grep -v '^[[:space:]]*//'
                   FOUND=true
                 fi
               done
               # I/O
               for pat in 'std::fs::' 'std::net::' 'std::env::var'; do
-                if grep -n "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
+                if grep "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
                   echo "DST VIOLATION: $f — $pat found"
+                  grep -n "$pat" "$f" | grep -v '// determinism-ok' | grep -v '^[[:space:]]*//'
                   FOUND=true
                 fi
               done
               # Global state
               for pat in 'static mut ' 'lazy_static!' 'thread_local!'; do
-                if grep -n "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
+                if grep "$pat" "$f" 2>/dev/null | grep -v '// determinism-ok' | grep -qv '^[[:space:]]*//' ; then
                   echo "DST VIOLATION: $f — $pat found"
+                  grep -n "$pat" "$f" | grep -v '// determinism-ok' | grep -v '^[[:space:]]*//'
                   FOUND=true
                 fi
               done
@@ -133,8 +151,6 @@ jobs:
 
       - name: Dependency isolation
         run: |
-          # Install Rust for cargo tree
-          rustup default nightly
           # Check temper-jit has no production dep on temper-verify
           if cargo tree --no-dev -p temper-jit 2>/dev/null | grep -q temper-verify; then
             echo "FAIL: temper-jit has production dependency on temper-verify"
