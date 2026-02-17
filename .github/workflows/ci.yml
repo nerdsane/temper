@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -132,6 +135,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
 
@@ -157,6 +163,9 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly

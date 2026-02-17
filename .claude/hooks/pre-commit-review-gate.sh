@@ -108,6 +108,18 @@ if ! marker_exists "alignment-reviewed"; then
     BLOCKED=true
 fi
 
+# --- Check 6: Determinism canary must pass ---
+echo "Running determinism canary..." >&2
+if ! (cd "$WORKSPACE_ROOT" && cargo test -p temper-platform --test system_entity_dst determinism_canary 2>&1 | tail -5 >&2); then
+    echo "" >&2
+    echo "══════════════════════════════════════════════════════════════" >&2
+    echo "  BLOCKED: Determinism canary failed" >&2
+    echo "══════════════════════════════════════════════════════════════" >&2
+    echo "  Same seed must produce identical simulation output." >&2
+    echo "══════════════════════════════════════════════════════════════" >&2
+    BLOCKED=true
+fi
+
 if [ "$BLOCKED" = true ]; then
     exit 2
 fi

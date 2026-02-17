@@ -31,6 +31,29 @@ pub enum SpecAssert {
     CounterPositive { var: String },
     /// The entity is in a terminal state — no further transitions allowed.
     NoFurtherTransitions,
+    /// State A must have been visited before state B in event history.
+    /// Expressed as: `ordering(A, B)` — "A precedes B".
+    OrderingConstraint { before: String, after: String },
+    /// The entity should never be in this state.
+    /// Expressed as: `never(StateName)`.
+    NeverState { state: String },
+    /// A counter must satisfy a comparison (e.g., `items >= 1`, `retries < 5`).
+    CounterCompare { var: String, op: CompareOp, value: usize },
+}
+
+/// Comparison operators for counter invariants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompareOp {
+    /// Greater than.
+    Gt,
+    /// Greater than or equal.
+    Gte,
+    /// Less than.
+    Lt,
+    /// Less than or equal.
+    Lte,
+    /// Equal.
+    Eq,
 }
 
 /// A type-erased actor handler for simulation.

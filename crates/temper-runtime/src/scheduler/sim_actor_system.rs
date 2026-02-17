@@ -37,7 +37,7 @@ impl Default for SimActorSystemConfig {
         Self {
             seed: 42,
             max_ticks: 500,
-            faults: FaultConfig::none(),
+            faults: FaultConfig::light(),
             max_actions_per_actor: 50,
         }
     }
@@ -58,6 +58,25 @@ pub struct ActorInvariantViolation {
     pub description: String,
     /// At what tick.
     pub tick: u64,
+}
+
+/// Complete recording of a simulation run for determinism comparison.
+///
+/// Captures every state transition, every event, and every final state so that
+/// two runs with the same seed can be compared for byte-exact equality.
+/// This is the FoundationDB principle: same seed MUST produce identical output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRecord {
+    /// Seed used.
+    pub seed: u64,
+    /// Every state transition that occurred: (tick, actor_id, action, from_status, to_status).
+    pub transitions: Vec<(u64, String, String, String, String)>,
+    /// Every event recorded by each actor (actor_id -> [event JSON strings]).
+    pub events: BTreeMap<String, Vec<String>>,
+    /// Final states: (actor_id, status, item_count, event_count, counters_json).
+    pub final_states: Vec<(String, String, usize, usize, String)>,
+    /// All invariant check results: (actor_id, invariant_name, passed).
+    pub invariant_results: Vec<(String, String, bool)>,
 }
 
 /// Result of a simulation run.
@@ -100,6 +119,10 @@ pub struct SimActorSystem {
     violations: Vec<ActorInvariantViolation>,
     total_transitions: u64,
     total_messages: u64,
+    /// Recorded transitions for RunRecord: (tick, actor_id, action, from_status, to_status).
+    recorded_transitions: Vec<(u64, String, String, String, String)>,
+    /// Recorded invariant results for RunRecord: (actor_id, invariant_name, passed).
+    recorded_invariants: Vec<(String, String, bool)>,
 }
 
 impl SimActorSystem {
@@ -124,6 +147,8 @@ impl SimActorSystem {
             violations: Vec::new(),
             total_transitions: 0,
             total_messages: 0,
+            recorded_transitions: Vec::new(),
+            recorded_invariants: Vec::new(),
         }
     }
 
@@ -171,11 +196,21 @@ impl SimActorSystem {
             Ok(_) => {
                 let status_after = handler.current_status();
                 let item_count = handler.current_item_count();
+                let tick = self.clock.tick();
 
                 // Only count as transition if status or items actually changed
                 let count = self.action_counts.get_mut(actor_id).unwrap(); // ci-ok: actor always in action_counts
                 *count += 1;
                 self.total_transitions += 1;
+
+                // Record the transition
+                self.recorded_transitions.push((
+                    tick,
+                    actor_id.to_string(),
+                    action.to_string(),
+                    status_before.clone(),
+                    status_after.clone(),
+                ));
 
                 // Check invariants
                 self.check_invariants(
@@ -184,7 +219,7 @@ impl SimActorSystem {
                     &status_before,
                     &status_after,
                     item_count,
-                    self.clock.tick(),
+                    tick,
                 );
             }
             Err(_) => {
@@ -317,8 +352,18 @@ impl SimActorSystem {
                         Ok(_) => {
                             let status_after = handler.current_status();
                             let item_count = handler.current_item_count();
+                            let tick = self.clock.tick();
                             *self.action_counts.get_mut(&msg.to).unwrap() += 1; // ci-ok: actor always in action_counts
                             self.total_transitions += 1;
+
+                            // Record the transition
+                            self.recorded_transitions.push((
+                                tick,
+                                msg.to.clone(),
+                                msg.msg_type.clone(),
+                                status_before.clone(),
+                                status_after.clone(),
+                            ));
 
                             self.check_invariants(
                                 &msg.to,
@@ -326,7 +371,7 @@ impl SimActorSystem {
                                 &status_before,
                                 &status_after,
                                 item_count,
-                                self.clock.tick(),
+                                tick,
                             );
                         }
                         Err(_) => {
@@ -362,6 +407,59 @@ impl SimActorSystem {
             violations: self.violations.clone(),
             actor_states,
         }
+    }
+
+    /// Run random exploration and return a full [`RunRecord`] alongside the result.
+    ///
+    /// This is the recording variant of [`run_random()`]. The `RunRecord` captures
+    /// every transition, every event, and every final state for determinism
+    /// comparison. Two calls with the same seed MUST produce identical records.
+    pub fn run_random_recorded(&mut self) -> (SimActorResult, RunRecord) {
+        let result = self.run_random();
+
+        // Collect events from each actor
+        let events: BTreeMap<String, Vec<String>> = self
+            .actors
+            .iter()
+            .map(|(id, handler)| {
+                let events_val = handler.events_json();
+                let event_strings = match events_val {
+                    serde_json::Value::Array(arr) => arr
+                        .iter()
+                        .map(|v| serde_json::to_string(v).unwrap_or_default())
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                (id.clone(), event_strings)
+            })
+            .collect();
+
+        // Collect final states with counters serialized as JSON
+        let final_states: Vec<_> = self
+            .actors
+            .iter()
+            .map(|(id, handler)| {
+                let status = handler.current_status();
+                let item_count = handler.current_item_count();
+                let event_count = handler.event_count();
+                // Serialize the full events_json as a proxy for counters
+                // since SimActorHandler doesn't expose counters directly.
+                // The events contain all state change details.
+                let counters_json = serde_json::to_string(&handler.events_json())
+                    .unwrap_or_default();
+                (id.clone(), status, item_count, event_count, counters_json)
+            })
+            .collect();
+
+        let record = RunRecord {
+            seed: self.config.seed,
+            transitions: self.recorded_transitions.clone(),
+            events,
+            final_states,
+            invariant_results: self.recorded_invariants.clone(),
+        };
+
+        (result, record)
     }
 
     // ===================================================================
@@ -402,7 +500,52 @@ impl SimActorSystem {
                         // `when` states), a transition should not have fired.
                         inv.when.iter().any(|s| s == status_before)
                     }
+                    super::sim_handler::SpecAssert::OrderingConstraint { before, after } => {
+                        // If the entity is now in the "after" state, check
+                        // that "before" was visited in event history.
+                        if status_after == after.as_str() {
+                            let events = handler.events_json();
+                            if let Some(arr) = events.as_array() {
+                                let visited_before = arr.iter().any(|e| {
+                                    e.get("to_status").and_then(|s| s.as_str())
+                                        == Some(before.as_str())
+                                });
+                                !visited_before // violated if "before" was never visited
+                            } else {
+                                false
+                            }
+                        } else {
+                            false // Not in the "after" state, invariant doesn't apply
+                        }
+                    }
+                    super::sim_handler::SpecAssert::NeverState { state } => {
+                        // Violated if the entity is currently in the forbidden state.
+                        status_after == state.as_str()
+                    }
+                    super::sim_handler::SpecAssert::CounterCompare { var, op, value } => {
+                        // Only the "items" counter is passed to check_invariants.
+                        // Other counters require expanding the SimActorHandler trait.
+                        let counter_val = if var == "items" {
+                            item_count
+                        } else {
+                            0
+                        };
+                        let passed = match op {
+                            super::sim_handler::CompareOp::Gt => counter_val > *value,
+                            super::sim_handler::CompareOp::Gte => counter_val >= *value,
+                            super::sim_handler::CompareOp::Lt => counter_val < *value,
+                            super::sim_handler::CompareOp::Lte => counter_val <= *value,
+                            super::sim_handler::CompareOp::Eq => counter_val == *value,
+                        };
+                        !passed // violated if comparison fails
+                    }
                 };
+
+                self.recorded_invariants.push((
+                    actor_id.to_string(),
+                    inv.name.clone(),
+                    !violated,
+                ));
 
                 if violated {
                     self.violations.push(ActorInvariantViolation {

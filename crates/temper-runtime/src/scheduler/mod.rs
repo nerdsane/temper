@@ -28,8 +28,8 @@ pub mod sim_actor_system;
 pub use clock::{SimClock, WallClock, LogicalClock};
 pub use id_gen::{SimIdGen, RealIdGen, DeterministicIdGen};
 pub use context::{sim_now, sim_uuid, install_sim_context, install_deterministic_context, SimContextGuard};
-pub use sim_handler::{SimActorHandler, SpecInvariant, SpecAssert};
-pub use sim_actor_system::{SimActorSystem, SimActorSystemConfig, SimActorResult, ActorInvariantViolation};
+pub use sim_handler::{SimActorHandler, SpecInvariant, SpecAssert, CompareOp};
+pub use sim_actor_system::{SimActorSystem, SimActorSystemConfig, SimActorResult, ActorInvariantViolation, RunRecord};
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};

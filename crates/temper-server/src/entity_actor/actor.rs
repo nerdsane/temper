@@ -138,19 +138,7 @@ impl EntityActor {
                     if let Ok(event) = serde_json::from_value::<EntityEvent>(env.payload.clone()) {
                         // Re-evaluate through TransitionTable to get effects.
                         // Build the same EvalContext the handler would have used.
-                        let mut eval_ctx = temper_jit::table::EvalContext::default();
-                        eval_ctx
-                            .counters
-                            .insert("items".to_string(), state.item_count);
-                        for (k, v) in &state.counters {
-                            eval_ctx.counters.insert(k.clone(), *v);
-                        }
-                        for (k, v) in &state.booleans {
-                            eval_ctx.booleans.insert(k.clone(), *v);
-                        }
-                        for (k, v) in &state.lists {
-                            eval_ctx.lists.insert(k.clone(), v.clone());
-                        }
+                        let eval_ctx = super::effects::build_eval_context(state);
 
                         if let Some(result) =
                             table.evaluate_ctx(&state.status, &eval_ctx, &event.action)
@@ -280,150 +268,88 @@ impl Actor for EntityActor {
                     return Ok(());
                 }
 
-                let mut eval_ctx = temper_jit::table::EvalContext::default();
-                eval_ctx.counters.insert("items".to_string(), state.item_count);
-                for (k, v) in &state.counters {
-                    eval_ctx.counters.insert(k.clone(), *v);
-                }
-                for (k, v) in &state.booleans {
-                    eval_ctx.booleans.insert(k.clone(), *v);
-                }
-                for (k, v) in &state.lists {
-                    eval_ctx.lists.insert(k.clone(), v.clone());
-                }
-                let result = self.table.evaluate_ctx(&state.status, &eval_ctx, &name);
                 let event_count_before = state.events.len();
+                let result = super::effects::process_action(state, &self.table, &name, &params);
 
-                match result {
-                    Some(transition_result) if transition_result.success => {
-                        let from_status = state.status.clone();
-                        let to_status = transition_result.new_state.clone();
+                if result.success {
+                    // process_action returned a successful transition with event.
+                    let event = result.event.expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
 
-                        // Shared effect application — same code path as simulation.
-                        // FoundationDB DST principle: one function for all paths.
-                        let custom_effects = super::effects::apply_effects(
-                            state,
-                            &transition_result.effects,
-                            &params,
-                        );
-                        super::effects::apply_new_state_fallback(
-                            state,
-                            &from_status,
-                            &to_status,
-                        );
-                        super::effects::sync_fields(state, &params);
-
-                        // Record event
-                        let event = EntityEvent {
-                            action: name.clone(),
-                            from_status,
-                            to_status: state.status.clone(),
-                            timestamp: sim_now(),
-                            params: params.clone(),
-                        };
-
-                        // Persist to Postgres (if configured)
-                        if let Some(ref store) = self.event_store {
-                            Self::persist_event(store, &self.persistence_id(), state, &event).await;
-                        }
-
-                        // Telemetry as Views: emit wide event → OTEL span + metrics.
-                        // Duration covers evaluate + effects + persist (the full
-                        // actor-side work). DST-safe: sim_now() diff is 0 in
-                        // simulation (same logical tick), real wall-clock in production.
-                        let action_end = sim_now();
-                        let duration_ns = (action_end - action_start)
-                            .num_nanoseconds()
-                            .unwrap_or(0)
-                            .max(0) as u64;
-                        let wide = wide_event::from_transition(
-                            &state.entity_type, &state.entity_id, &name,
-                            &event.from_status, &state.status, true, duration_ns,
-                            &event.params, state.item_count, &self.trace_id,
-                        );
-                        wide_event::emit_span(&wide);
-                        wide_event::emit_metrics(&wide);
-
-                        state.events.push(event);
-
-                        // TigerStyle: Assert postconditions after every transition.
-                        debug_assert!(
-                            self.table.states.contains(&state.status),
-                            "POSTCONDITION: status '{}' not in valid states after {}",
-                            state.status, name
-                        );
-                        debug_assert!(
-                            state.events.len() == event_count_before + 1,
-                            "POSTCONDITION: event log must grow by exactly 1 (was {}, now {})",
-                            event_count_before, state.events.len()
-                        );
-                        debug_assert!(
-                            state.events.last().unwrap().action == name, // ci-ok: post-assertion, events.len() just checked
-                            "POSTCONDITION: last event must be the action that just fired"
-                        );
-
-                        tracing::info!(
-                            entity = %state.entity_id,
-                            action = %name,
-                            to = %state.status,
-                            events = state.events.len(),
-                            "transition applied"
-                        );
-
-                        ctx.reply(EntityResponse {
-                            success: true,
-                            state: state.clone(),
-                            error: None,
-                            custom_effects,
-                        });
+                    // Persist to Postgres (if configured)
+                    if let Some(ref store) = self.event_store {
+                        Self::persist_event(store, &self.persistence_id(), state, &event).await;
                     }
-                    Some(_) => {
-                        // Transition failed (guard not met) — emit telemetry
-                        let action_end = sim_now();
-                        let duration_ns = (action_end - action_start)
-                            .num_nanoseconds()
-                            .unwrap_or(0)
-                            .max(0) as u64;
-                        let wide = wide_event::from_transition(
-                            &state.entity_type, &state.entity_id, &name,
-                            &state.status, &state.status, false, duration_ns,
-                            &params, state.item_count, &self.trace_id,
-                        );
-                        wide_event::emit_span(&wide);
-                        wide_event::emit_metrics(&wide);
 
-                        ctx.reply(EntityResponse {
-                            success: false,
-                            state: state.clone(),
-                            error: Some(format!(
-                                "Action '{}' not valid from state '{}'",
-                                name, state.status
-                            )),
-                            custom_effects: vec![],
-                        });
-                    }
-                    None => {
-                        // Unknown action — emit telemetry
-                        let action_end = sim_now();
-                        let duration_ns = (action_end - action_start)
-                            .num_nanoseconds()
-                            .unwrap_or(0)
-                            .max(0) as u64;
-                        let wide = wide_event::from_transition(
-                            &state.entity_type, &state.entity_id, &name,
-                            &state.status, &state.status, false, duration_ns,
-                            &params, state.item_count, &self.trace_id,
-                        );
-                        wide_event::emit_span(&wide);
-                        wide_event::emit_metrics(&wide);
+                    // Telemetry as Views: emit wide event → OTEL span + metrics.
+                    // Duration covers evaluate + effects + persist (the full
+                    // actor-side work). DST-safe: sim_now() diff is 0 in
+                    // simulation (same logical tick), real wall-clock in production.
+                    let action_end = sim_now();
+                    let duration_ns = (action_end - action_start)
+                        .num_nanoseconds()
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let wide = wide_event::from_transition(
+                        &state.entity_type, &state.entity_id, &name,
+                        &event.from_status, &state.status, true, duration_ns,
+                        &event.params, state.item_count, &self.trace_id,
+                    );
+                    wide_event::emit_span(&wide);
+                    wide_event::emit_metrics(&wide);
 
-                        ctx.reply(EntityResponse {
-                            success: false,
-                            state: state.clone(),
-                            error: Some(format!("Unknown action: {}", name)),
-                            custom_effects: vec![],
-                        });
-                    }
+                    state.events.push(event);
+
+                    // TigerStyle: Assert postconditions after every transition.
+                    debug_assert!(
+                        self.table.states.contains(&state.status),
+                        "POSTCONDITION: status '{}' not in valid states after {}",
+                        state.status, name
+                    );
+                    debug_assert!(
+                        state.events.len() == event_count_before + 1,
+                        "POSTCONDITION: event log must grow by exactly 1 (was {}, now {})",
+                        event_count_before, state.events.len()
+                    );
+                    debug_assert!(
+                        state.events.last().expect("events non-empty after push").action == name, // ci-ok: post-assertion, events.len() just checked
+                        "POSTCONDITION: last event must be the action that just fired"
+                    );
+
+                    tracing::info!(
+                        entity = %state.entity_id,
+                        action = %name,
+                        to = %state.status,
+                        events = state.events.len(),
+                        "transition applied"
+                    );
+
+                    ctx.reply(EntityResponse {
+                        success: true,
+                        state: state.clone(),
+                        error: None,
+                        custom_effects: result.custom_effects,
+                    });
+                } else {
+                    // Transition failed — emit telemetry
+                    let action_end = sim_now();
+                    let duration_ns = (action_end - action_start)
+                        .num_nanoseconds()
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let wide = wide_event::from_transition(
+                        &state.entity_type, &state.entity_id, &name,
+                        &state.status, &state.status, false, duration_ns,
+                        &params, state.item_count, &self.trace_id,
+                    );
+                    wide_event::emit_span(&wide);
+                    wide_event::emit_metrics(&wide);
+
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: result.error,
+                        custom_effects: vec![],
+                    });
                 }
             }
             EntityMsg::GetState => {

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::scheduler::{
-    FaultConfig, SimActorSystem, SimActorSystemConfig,
+    FaultConfig, RunRecord, SimActorSystem, SimActorSystemConfig,
 };
 use temper_server::entity_actor::sim_handler::EntityActorHandler;
 
@@ -490,6 +490,217 @@ fn random_all_entities_heavy_faults() {
 }
 
 // =========================================================================
+// RANDOM EXPLORATION — Per-entity heavy fault variants
+// =========================================================================
+
+#[test]
+fn random_tenant_light_faults() {
+    let config = SimActorSystemConfig {
+        seed: 101,
+        max_ticks: 300,
+        faults: FaultConfig::light(),
+        max_actions_per_actor: 40,
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    for i in 0..3 {
+        let handler = EntityActorHandler::new("Tenant", &format!("t-{i}"), tenant_table());
+        sim.register_actor(&format!("t-{i}"), Box::new(handler));
+    }
+
+    let result = sim.run_random();
+    assert!(
+        result.all_invariants_held,
+        "Light faults should not break tenant invariants: {:?}",
+        result.violations
+    );
+}
+
+#[test]
+fn random_tenant_heavy_faults() {
+    let config = SimActorSystemConfig {
+        seed: 102,
+        max_ticks: 500,
+        faults: FaultConfig::heavy(),
+        max_actions_per_actor: 30,
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    for i in 0..3 {
+        let handler = EntityActorHandler::new("Tenant", &format!("t-{i}"), tenant_table());
+        sim.register_actor(&format!("t-{i}"), Box::new(handler));
+    }
+
+    let result = sim.run_random();
+    assert!(
+        result.all_invariants_held,
+        "Even heavy faults should not break tenant invariants: {:?}",
+        result.violations
+    );
+}
+
+#[test]
+fn random_project_heavy_faults() {
+    let config = SimActorSystemConfig {
+        seed: 103,
+        max_ticks: 500,
+        faults: FaultConfig::heavy(),
+        max_actions_per_actor: 30,
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    for i in 0..3 {
+        let handler = EntityActorHandler::new("Project", &format!("p-{i}"), project_table())
+            .with_ioa_invariants(PROJECT_IOA);
+        sim.register_actor(&format!("p-{i}"), Box::new(handler));
+    }
+
+    let result = sim.run_random();
+    assert!(
+        result.all_invariants_held,
+        "Heavy faults should not break project invariants: {:?}",
+        result.violations
+    );
+}
+
+#[test]
+fn random_catalog_heavy_faults() {
+    let config = SimActorSystemConfig {
+        seed: 104,
+        max_ticks: 500,
+        faults: FaultConfig::heavy(),
+        max_actions_per_actor: 30,
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    for i in 0..3 {
+        let handler = EntityActorHandler::new("CatalogEntry", &format!("cat-{i}"), catalog_table());
+        sim.register_actor(&format!("cat-{i}"), Box::new(handler));
+    }
+
+    let result = sim.run_random();
+    assert!(
+        result.all_invariants_held,
+        "Heavy faults should not break catalog invariants: {:?}",
+        result.violations
+    );
+}
+
+#[test]
+fn random_collaborator_heavy_faults() {
+    let config = SimActorSystemConfig {
+        seed: 105,
+        max_ticks: 500,
+        faults: FaultConfig::heavy(),
+        max_actions_per_actor: 30,
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    for i in 0..3 {
+        let handler = EntityActorHandler::new("Collaborator", &format!("col-{i}"), collaborator_table());
+        sim.register_actor(&format!("col-{i}"), Box::new(handler));
+    }
+
+    let result = sim.run_random();
+    assert!(
+        result.all_invariants_held,
+        "Heavy faults should not break collaborator invariants: {:?}",
+        result.violations
+    );
+}
+
+#[test]
+fn random_version_heavy_faults() {
+    let config = SimActorSystemConfig {
+        seed: 106,
+        max_ticks: 500,
+        faults: FaultConfig::heavy(),
+        max_actions_per_actor: 30,
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    for i in 0..3 {
+        let handler = EntityActorHandler::new("Version", &format!("v-{i}"), version_table());
+        sim.register_actor(&format!("v-{i}"), Box::new(handler));
+    }
+
+    let result = sim.run_random();
+    assert!(
+        result.all_invariants_held,
+        "Heavy faults should not break version invariants: {:?}",
+        result.violations
+    );
+}
+
+// =========================================================================
+// RANDOM EXPLORATION — Multi-entity heavy fault sweep
+// =========================================================================
+
+#[test]
+fn random_all_entities_heavy_faults_multi_seed() {
+    for seed in [200, 201, 202, 203, 204] {
+        let config = SimActorSystemConfig {
+            seed,
+            max_ticks: 500,
+            faults: FaultConfig::heavy(),
+            max_actions_per_actor: 30,
+        };
+        let mut sim = SimActorSystem::new(config);
+
+        sim.register_actor("p1", Box::new(
+            EntityActorHandler::new("Project", "p1", project_table())
+                .with_ioa_invariants(PROJECT_IOA)));
+        sim.register_actor("t1", Box::new(
+            EntityActorHandler::new("Tenant", "t1", tenant_table())));
+        sim.register_actor("cat1", Box::new(
+            EntityActorHandler::new("CatalogEntry", "cat1", catalog_table())));
+        sim.register_actor("col1", Box::new(
+            EntityActorHandler::new("Collaborator", "col1", collaborator_table())));
+        sim.register_actor("v1", Box::new(
+            EntityActorHandler::new("Version", "v1", version_table())));
+
+        let result = sim.run_random();
+        assert!(
+            result.all_invariants_held,
+            "Heavy faults seed {seed} found violations: {:?}",
+            result.violations
+        );
+    }
+}
+
+#[test]
+fn random_all_entities_light_faults_multi_seed() {
+    for seed in [300, 301, 302, 303, 304] {
+        let config = SimActorSystemConfig {
+            seed,
+            max_ticks: 300,
+            faults: FaultConfig::light(),
+            max_actions_per_actor: 30,
+        };
+        let mut sim = SimActorSystem::new(config);
+
+        sim.register_actor("p1", Box::new(
+            EntityActorHandler::new("Project", "p1", project_table())
+                .with_ioa_invariants(PROJECT_IOA)));
+        sim.register_actor("t1", Box::new(
+            EntityActorHandler::new("Tenant", "t1", tenant_table())));
+        sim.register_actor("cat1", Box::new(
+            EntityActorHandler::new("CatalogEntry", "cat1", catalog_table())));
+        sim.register_actor("col1", Box::new(
+            EntityActorHandler::new("Collaborator", "col1", collaborator_table())));
+        sim.register_actor("v1", Box::new(
+            EntityActorHandler::new("Version", "v1", version_table())));
+
+        let result = sim.run_random();
+        assert!(
+            result.all_invariants_held,
+            "Light faults seed {seed} found violations: {:?}",
+            result.violations
+        );
+    }
+}
+
+// =========================================================================
 // DETERMINISM PROOFS — same seed = bit-exact same outcome
 // =========================================================================
 
@@ -600,4 +811,74 @@ fn multi_seed_sweep_tenants() {
             result.violations
         );
     }
+}
+
+// =========================================================================
+// DETERMINISM CANARY — same seed MUST produce byte-exact same output
+// =========================================================================
+
+/// Run a full canary trial with all 5 system entity types and return the RunRecord.
+fn run_canary_trial(seed: u64, faults: FaultConfig) -> RunRecord {
+    let config = SimActorSystemConfig {
+        seed,
+        max_ticks: 300,
+        faults,
+        max_actions_per_actor: 30,
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    sim.register_actor("p1", Box::new(
+        EntityActorHandler::new("Project", "p1", project_table())
+            .with_ioa_invariants(PROJECT_IOA)));
+    sim.register_actor("t1", Box::new(
+        EntityActorHandler::new("Tenant", "t1", tenant_table())));
+    sim.register_actor("cat1", Box::new(
+        EntityActorHandler::new("CatalogEntry", "cat1", catalog_table())));
+    sim.register_actor("col1", Box::new(
+        EntityActorHandler::new("Collaborator", "col1", collaborator_table())));
+    sim.register_actor("v1", Box::new(
+        EntityActorHandler::new("Version", "v1", version_table())));
+
+    let (result, record) = sim.run_random_recorded();
+    assert!(result.all_invariants_held, "violations: {:?}", result.violations);
+    record
+}
+
+#[test]
+fn determinism_canary_comprehensive() {
+    let seeds = [42, 1337, 0, 999, 7777, 12345];
+    let fault_configs: Vec<(&str, FaultConfig)> = vec![
+        ("none", FaultConfig::none()),
+        ("light", FaultConfig::light()),
+        ("heavy", FaultConfig::heavy()),
+    ];
+
+    for &seed in &seeds {
+        for (fault_name, faults) in &fault_configs {
+            let record_a = run_canary_trial(seed, faults.clone());
+            let record_b = run_canary_trial(seed, faults.clone());
+
+            assert_eq!(
+                record_a, record_b,
+                "Determinism canary FAILED: seed={seed}, faults={fault_name} \
+                 produced different results on two runs"
+            );
+
+            assert!(
+                !record_a.transitions.is_empty(),
+                "Canary run was trivially empty: seed={seed}, faults={fault_name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn determinism_canary_different_seeds_differ() {
+    let record_42 = run_canary_trial(42, FaultConfig::none());
+    let record_43 = run_canary_trial(43, FaultConfig::none());
+
+    assert_ne!(
+        record_42, record_43,
+        "Different seeds (42 vs 43) should produce different run records"
+    );
 }

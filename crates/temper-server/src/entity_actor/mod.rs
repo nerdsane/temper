@@ -10,6 +10,6 @@ pub mod sim_handler;
 pub mod types;
 
 pub use actor::EntityActor;
-pub use effects::{apply_effects, apply_new_state_fallback, sync_fields};
+pub use effects::{apply_effects, apply_new_state_fallback, build_eval_context, process_action, sync_fields, ProcessResult};
 pub use sim_handler::EntityActorHandler;
 pub use types::{EntityEvent, EntityMsg, EntityResponse, EntityState};

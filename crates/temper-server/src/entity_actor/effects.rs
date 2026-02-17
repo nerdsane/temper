@@ -10,9 +10,101 @@
 //! production and simulation. Having a single `apply_effects()` function
 //! guarantees that simulation tests exercise the real production logic.
 
-use temper_jit::table::Effect;
+use temper_jit::table::{Effect, EvalContext, TransitionTable};
+use temper_runtime::scheduler::sim_now;
 
-use super::types::EntityState;
+use super::types::{EntityEvent, EntityState};
+
+/// Build an [`EvalContext`] from current entity state.
+///
+/// This is the single source of truth for context construction. All code paths
+/// that call `TransitionTable::evaluate_ctx()` MUST use this function.
+pub fn build_eval_context(state: &EntityState) -> EvalContext {
+    let mut ctx = EvalContext::default();
+    ctx.counters.insert("items".to_string(), state.item_count);
+    for (k, v) in &state.counters {
+        ctx.counters.insert(k.clone(), *v);
+    }
+    for (k, v) in &state.booleans {
+        ctx.booleans.insert(k.clone(), *v);
+    }
+    for (k, v) in &state.lists {
+        ctx.lists.insert(k.clone(), v.clone());
+    }
+    ctx
+}
+
+/// Result of processing an action through the transition table.
+#[derive(Debug, Clone)]
+pub struct ProcessResult {
+    /// Whether the action succeeded.
+    pub success: bool,
+    /// The event recording the transition (if successful).
+    pub event: Option<EntityEvent>,
+    /// Custom effects for post-transition hook dispatch.
+    pub custom_effects: Vec<String>,
+    /// Error message (if action failed).
+    pub error: Option<String>,
+}
+
+/// Process an action through the transition table.
+///
+/// This is the core business logic — evaluate guard, apply effects, construct event.
+/// Production adds persistence + telemetry around this.
+/// Simulation calls it directly.
+/// Replay uses `build_eval_context` but handles stored events specially.
+///
+/// **FoundationDB DST principle**: one function for all code paths.
+pub fn process_action(
+    state: &mut EntityState,
+    table: &TransitionTable,
+    action: &str,
+    params: &serde_json::Value,
+) -> ProcessResult {
+    let ctx = build_eval_context(state);
+    let result = table.evaluate_ctx(&state.status, &ctx, action);
+
+    match result {
+        Some(transition_result) if transition_result.success => {
+            let from_status = state.status.clone();
+            let to_status = transition_result.new_state.clone();
+
+            let custom_effects = apply_effects(state, &transition_result.effects, params);
+            apply_new_state_fallback(state, &from_status, &to_status);
+            sync_fields(state, params);
+
+            let event = EntityEvent {
+                action: action.to_string(),
+                from_status,
+                to_status: state.status.clone(),
+                timestamp: sim_now(),
+                params: params.clone(),
+            };
+
+            ProcessResult {
+                success: true,
+                event: Some(event),
+                custom_effects,
+                error: None,
+            }
+        }
+        Some(_) => ProcessResult {
+            success: false,
+            event: None,
+            custom_effects: vec![],
+            error: Some(format!(
+                "Action '{}' not valid from state '{}'",
+                action, state.status
+            )),
+        },
+        None => ProcessResult {
+            success: false,
+            event: None,
+            custom_effects: vec![],
+            error: Some(format!("Unknown action: {}", action)),
+        },
+    }
+}
 
 /// Apply a list of transition effects to entity state.
 ///

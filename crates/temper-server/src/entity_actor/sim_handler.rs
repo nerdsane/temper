@@ -9,9 +9,9 @@
 use std::sync::Arc;
 
 use temper_jit::table::{EvalContext, TransitionTable};
-use temper_runtime::scheduler::{sim_now, SimActorHandler, SpecAssert, SpecInvariant};
+use temper_runtime::scheduler::{CompareOp, SimActorHandler, SpecAssert, SpecInvariant};
 
-use super::types::{EntityEvent, EntityState};
+use super::types::EntityState;
 
 /// Simulation handler wrapping a real TransitionTable.
 ///
@@ -56,18 +56,7 @@ impl EntityActorHandler {
 
     /// Build an [`EvalContext`] from the current entity state.
     fn eval_context(&self) -> EvalContext {
-        let mut ctx = EvalContext::default();
-        ctx.counters.insert("items".to_string(), self.state.item_count);
-        for (k, v) in &self.state.counters {
-            ctx.counters.insert(k.clone(), *v);
-        }
-        for (k, v) in &self.state.booleans {
-            ctx.booleans.insert(k.clone(), *v);
-        }
-        for (k, v) in &self.state.lists {
-            ctx.lists.insert(k.clone(), v.clone());
-        }
-        ctx
+        super::effects::build_eval_context(&self.state)
     }
 
     /// Attach spec invariants parsed from I/O Automaton TOML source.
@@ -101,8 +90,8 @@ impl EntityActorHandler {
 fn parse_assert_expr(expr: &str) -> Option<SpecAssert> {
     let trimmed = expr.trim();
 
-    // Pattern: "items > 0" or "var > 0"
-    if trimmed.contains("> 0") {
+    // Pattern: "items > 0" or "var > 0" — shorthand for CounterPositive.
+    if trimmed.contains("> 0") && !trimmed.contains(">=") {
         let var = trimmed.split('>').next()?.trim().to_string();
         return Some(SpecAssert::CounterPositive { var });
     }
@@ -110,6 +99,51 @@ fn parse_assert_expr(expr: &str) -> Option<SpecAssert> {
     // Pattern: "no_further_transitions"
     if trimmed == "no_further_transitions" {
         return Some(SpecAssert::NoFurtherTransitions);
+    }
+
+    // Pattern: "ordering(StateA, StateB)" — StateA must precede StateB.
+    if trimmed.starts_with("ordering(") && trimmed.ends_with(')') {
+        let inner = &trimmed[9..trimmed.len() - 1];
+        let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+        if parts.len() == 2 {
+            return Some(SpecAssert::OrderingConstraint {
+                before: parts[0].to_string(),
+                after: parts[1].to_string(),
+            });
+        }
+    }
+
+    // Pattern: "never(StateName)" — entity should never be in this state.
+    if trimmed.starts_with("never(") && trimmed.ends_with(')') {
+        let state = trimmed[6..trimmed.len() - 1].trim().to_string();
+        return Some(SpecAssert::NeverState { state });
+    }
+
+    // Generalized counter comparison: "var >= N", "var <= N", "var == N",
+    // "var > N", "var < N". Order matters: check two-char ops before one-char.
+    let ops: &[(&str, CompareOp)] = &[
+        (">=", CompareOp::Gte),
+        ("<=", CompareOp::Lte),
+        ("==", CompareOp::Eq),
+        (">", CompareOp::Gt),
+        ("<", CompareOp::Lt),
+    ];
+    for (op_str, op) in ops {
+        if let Some(pos) = trimmed.find(op_str) {
+            let var = trimmed[..pos].trim().to_string();
+            let val_str = trimmed[pos + op_str.len()..].trim();
+            if let Ok(value) = val_str.parse::<usize>() {
+                // "var > 0" is already handled by CounterPositive above.
+                if *op_str == ">" && value == 0 {
+                    continue;
+                }
+                return Some(SpecAssert::CounterCompare {
+                    var,
+                    op: op.clone(),
+                    value,
+                });
+            }
+        }
     }
 
     // Unrecognized expression — caller needs a manual checker.
@@ -142,49 +176,17 @@ impl SimActorHandler for EntityActorHandler {
         let params_value: serde_json::Value =
             serde_json::from_str(params).unwrap_or(serde_json::json!({}));
 
-        // Same evaluate() call as production EntityActor::handle()
-        let ctx = self.eval_context();
-        let result = self.table.evaluate_ctx(&self.state.status, &ctx, action);
+        // Unified process_action — THE SAME CODE as production.
+        // FoundationDB DST principle: one function for all paths.
+        let result = super::effects::process_action(&mut self.state, &self.table, action, &params_value);
 
-        match result {
-            Some(transition_result) if transition_result.success => {
-                let from_status = self.state.status.clone();
-                let to_status = transition_result.new_state.clone();
-
-                // Shared effect application — THE SAME CODE as production.
-                // FoundationDB DST principle: one function for all paths.
-                super::effects::apply_effects(
-                    &mut self.state,
-                    &transition_result.effects,
-                    &params_value,
-                );
-                super::effects::apply_new_state_fallback(
-                    &mut self.state,
-                    &from_status,
-                    &to_status,
-                );
-                super::effects::sync_fields(&mut self.state, &params_value);
-
-                // Record event with sim_now() timestamp (deterministic)
-                let event = EntityEvent {
-                    action: action.to_string(),
-                    from_status,
-                    to_status: self.state.status.clone(),
-                    timestamp: sim_now(),
-                    params: params_value,
-                };
+        if result.success {
+            if let Some(event) = result.event {
                 self.state.events.push(event);
-
-                Ok(serde_json::to_value(&self.state).unwrap_or_default())
             }
-            Some(_) => {
-                // Guard failed
-                Err(format!(
-                    "Action '{}' not valid from state '{}'",
-                    action, self.state.status
-                ))
-            }
-            None => Err(format!("Unknown action: {}", action)),
+            Ok(serde_json::to_value(&self.state).unwrap_or_default())
+        } else {
+            Err(result.error.unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
