@@ -1,5 +1,7 @@
 # Temper
 
+[![CI](https://github.com/nerdsane/temper/actions/workflows/ci.yml/badge.svg)](https://github.com/nerdsane/temper/actions/workflows/ci.yml)
+
 **This is research, not a product.**
 
 Temper explores a hypothesis: most enterprise SaaS backends are state machines at their core -- an order moves through Draft, Submitted, Shipped, Delivered; a subscription cycles between Active, PastDue, Cancelled. If the state machine is the essential artifact, the surrounding infrastructure (persistence, API, authorization, webhooks, observability) follows mechanically from the specification.
