@@ -115,10 +115,21 @@ If verdict is FAIL, the commit must not proceed until findings are resolved.
 When the review passes (verdict: PASS), write a marker file to signal the pre-commit gate:
 
 ```bash
-PROJECT_HASH="$(echo "$(git rev-parse --show-toplevel)" | shasum -a 256 | cut -c1-12)"
+WORKSPACE_ROOT="$(git rev-parse --show-toplevel)"
+PROJECT_HASH="$(echo "$WORKSPACE_ROOT" | shasum -a 256 | cut -c1-12)"
 MARKER_DIR="/tmp/temper-harness/${PROJECT_HASH}"
-mkdir -p "$MARKER_DIR"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) dst-review-passed" > "$MARKER_DIR/dst-reviewed"
+
+# Use the shared TOML marker writer if available
+if [ -x "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" ]; then
+    bash "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" "dst-reviewed" "pass" \
+        "files_reviewed=<comma-separated list of reviewed files>" \
+        "findings_count=<number>" \
+        "architecture_assessment=<CLEAN or LEAKY>"
+else
+    # Fallback: write plain marker
+    mkdir -p "$MARKER_DIR"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) dst-review-passed" > "$MARKER_DIR/dst-reviewed"
+fi
 ```
 
 This marker is checked by the pre-commit gate hook and the session exit gate. It is cleaned up on successful session exit.

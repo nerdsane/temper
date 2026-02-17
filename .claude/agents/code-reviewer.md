@@ -78,10 +78,22 @@ Review ALL code changes before committing. This is mandatory — the pre-commit 
 When the review passes (verdict: PASS), write a marker file to signal the pre-commit gate:
 
 ```bash
-PROJECT_HASH="$(echo "$(git rev-parse --show-toplevel)" | shasum -a 256 | cut -c1-12)"
+WORKSPACE_ROOT="$(git rev-parse --show-toplevel)"
+PROJECT_HASH="$(echo "$WORKSPACE_ROOT" | shasum -a 256 | cut -c1-12)"
 MARKER_DIR="/tmp/temper-harness/${PROJECT_HASH}"
-mkdir -p "$MARKER_DIR"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) code-review-passed" > "$MARKER_DIR/code-reviewed"
+
+# Use the shared TOML marker writer if available
+if [ -x "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" ]; then
+    bash "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" "code-reviewed" "pass" \
+        "plan_file=<path to plan file>" \
+        "plan_alignment=<ALIGNED or DEVIATION>" \
+        "files_reviewed=<comma-separated list of reviewed files>" \
+        "findings_count=<number>"
+else
+    # Fallback: write plain marker
+    mkdir -p "$MARKER_DIR"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) code-review-passed" > "$MARKER_DIR/code-reviewed"
+fi
 ```
 
 This marker is checked by the pre-commit gate hook and the session exit gate. It is cleaned up on successful session exit.

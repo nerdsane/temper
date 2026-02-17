@@ -43,7 +43,7 @@
 | 20 | MaxCount guard never parsed | temper-spec | OPEN | |
 | 21 | Hand-rolled TOML parser is fragile | temper-spec | OPEN | |
 | 22 | Shadow testing uses legacy API only | temper-jit | OPEN | |
-| 23 | `rule_index` lost on deserialization | temper-jit | OPEN | |
+| 23 | `rule_index` lost on deserialization | temper-jit | **RESOLVED** | Custom `Deserialize` impl calls `rebuild_index()` after deserialization (commit 659c195). |
 | 24 | No batch request support | temper-odata, temper-server | OPEN | |
 | 25 | No `$search` support | temper-odata | OPEN | |
 | 26 | No `$apply` aggregation support | temper-odata | OPEN | |
@@ -55,7 +55,7 @@
 | 32 | Generated code not validated | temper-codegen | OPEN | |
 | 33 | No developer approval UI | temper-platform | **PARTIALLY RESOLVED** | Evolution API endpoints added: `GET /observe/evolution/records`, `GET /observe/evolution/records/{id}`, `POST /observe/evolution/records/{id}/decide`, `GET /observe/evolution/insights`. Dashboard page deferred. |
 | 34 | Proc macros limited to marker traits | temper-macros | OPEN | |
-| 35 | No Sentinel anomaly detection | temper-evolution, temper-observe | **RESOLVED** | `SentinelActor` with 4 default rules: error rate spike, slow transitions, stuck entities, guard rejection rate. Auto-generates O-Records via `RecordStore`. Uses `sim_now()`/`sim_uuid()`. |
+| 35 | No Sentinel anomaly detection | temper-evolution, temper-observe | **RESOLVED** | `SentinelActor` with 3 default rules: error rate spike, guard rejection rate, no activity. Auto-generates O-Records via `RecordStore`. Uses `sim_now()`/`sim_uuid()`. |
 | 36 | IncrementItems/DecrementItems legacy aliases | temper-jit | OPEN | |
 
 ## Summary
@@ -64,5 +64,5 @@
 |----------|-------|----------|------|
 | P0 | 7 | **7** | 0 |
 | P1 | 12 | **12** | 0 |
-| P2 | 17 | **2** (#33 partial, #35) | 15 |
-| **Total** | **36** | **21** | **15** |
+| P2 | 17 | **3** (#23, #33 partial, #35) | 14 |
+| **Total** | **36** | **22** | **14** |

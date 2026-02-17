@@ -34,7 +34,13 @@ case "${CMD:-}" in
         echo "Running post-push verification..." >&2
         if (cd "$WORKSPACE_ROOT" && cargo test --workspace 2>&1 | tail -20 >&2); then
             # Tests passed — write verified marker
-            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MARKER_DIR/test-verified-${SESSION_ID}"
+            TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "$TIMESTAMP" > "$MARKER_DIR/test-verified-${SESSION_ID}"
+            # Write TOML marker with test output summary
+            if [ -x "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" ]; then
+                bash "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" "test-verified-${SESSION_ID}" "pass" \
+                    "trigger=post-push"
+            fi
             echo "Post-push verification: ALL TESTS PASSED" >&2
         else
             echo "Post-push verification: TESTS FAILED" >&2

@@ -193,7 +193,7 @@ Trigger:   PostToolUse — Write|Edit (on .rs files in sim-visible crates)
 Blocking:  YES (exit 2)
 ```
 
-After editing Rust files in `temper-runtime`, `temper-jit`, or `temper-server`, scans for 25 non-deterministic patterns based on FoundationDB, TigerBeetle, S2, and Polar Signals DST practices:
+After editing Rust files in `temper-runtime`, `temper-jit`, or `temper-server`, scans for 24 non-deterministic patterns based on FoundationDB, TigerBeetle, S2, and Polar Signals DST practices:
 
 | Category | Banned Patterns | Use Instead |
 |----------|----------------|-------------|
@@ -325,7 +325,7 @@ A specialized review agent that performs **semantic analysis** of simulation-vis
   │                              to a struct that caches real    │
   │                              timestamps from its constructor"│
   │                                                              │
-  │   Catches 25 patterns       Catches data flow, ordering     │
+  │   Catches 24 patterns       Catches data flow, ordering     │
   │   (~2ms)                    deps, hidden non-determinism     │
   │                             (~30-60s)                        │
   └──────────────────────────────────────────────────────────────┘
