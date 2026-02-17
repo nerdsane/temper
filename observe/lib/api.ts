@@ -4,6 +4,9 @@ import type {
   EntitySummary,
   VerificationResult,
   EntityHistory,
+  AllVerificationStatus,
+  DesignTimeEvent,
+  WorkflowsResponse,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -81,6 +84,39 @@ export async function fetchEntityHistory(
       res.status,
     );
   return res.json();
+}
+
+/** Fetch all entity verification statuses */
+export async function fetchVerificationStatus(): Promise<AllVerificationStatus> {
+  const res = await fetchWithRetry(`${API_BASE}/observe/verification-status`, {
+    cache: "no-store",
+  });
+  if (!res.ok)
+    throw new ApiError(`Failed to fetch verification status: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Fetch workflow view for all apps */
+export async function fetchWorkflows(): Promise<WorkflowsResponse> {
+  const res = await fetchWithRetry(`${API_BASE}/observe/workflows`, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch workflows: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Subscribe to design-time SSE events. Returns a cleanup function. */
+export function subscribeDesignTimeEvents(
+  onEvent: (event: DesignTimeEvent) => void,
+): () => void {
+  const source = new EventSource(`${API_BASE}/observe/design-time/stream`);
+  source.addEventListener("design_time", (e) => {
+    try {
+      const data = JSON.parse((e as MessageEvent).data) as DesignTimeEvent;
+      onEvent(data);
+    } catch {
+      // Ignore parse errors
+    }
+  });
+  return () => source.close();
 }
 
 /** Check if the API server is reachable */

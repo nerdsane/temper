@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { fetchSpecs, fetchEntities } from "@/lib/api";
+import { fetchSpecs, fetchEntities, fetchVerificationStatus } from "@/lib/api";
 import { usePolling, useRelativeTime } from "@/lib/hooks";
-import type { SpecSummary, EntitySummary } from "@/lib/types";
+import type { SpecSummary, EntitySummary, AllVerificationStatus } from "@/lib/types";
 import SpecCard from "@/components/SpecCard";
 import StatusBadge from "@/components/StatusBadge";
 import ErrorDisplay from "@/components/ErrorDisplay";
@@ -62,8 +62,63 @@ function EmptyState() {
   );
 }
 
+function DesignTimeProgress({ verificationStatus }: { verificationStatus: AllVerificationStatus }) {
+  const total = verificationStatus.pending + verificationStatus.running +
+    verificationStatus.passed + verificationStatus.failed + verificationStatus.partial;
+
+  if (total === 0) return null;
+
+  const done = verificationStatus.passed + verificationStatus.failed + verificationStatus.partial;
+  const allDone = verificationStatus.pending === 0 && verificationStatus.running === 0;
+
+  // Collapse when all done
+  if (allDone) return null;
+
+  const progressPct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-6">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse" />
+          <span className="text-sm font-medium text-gray-200">Verification in progress</span>
+        </div>
+        <span className="text-xs text-gray-500">
+          {done} of {total} entities verified
+        </span>
+      </div>
+
+      {/* Progress bar */}
+      <div className="h-1.5 bg-gray-800 rounded-full mb-3 overflow-hidden">
+        <div
+          className="h-full bg-blue-500 rounded-full transition-all duration-500"
+          style={{ width: `${progressPct}%` }}
+        />
+      </div>
+
+      {/* Entity status dots */}
+      <div className="flex flex-wrap gap-2">
+        {verificationStatus.entities.map((entity) => {
+          const dotColor: Record<string, string> = {
+            pending: "bg-gray-500",
+            running: "bg-yellow-400 animate-pulse",
+            passed: "bg-green-400",
+            failed: "bg-red-400",
+            partial: "bg-amber-400",
+          };
+          return (
+            <div key={`${entity.tenant}-${entity.entity_type}`} className="flex items-center gap-1.5">
+              <div className={`w-2 h-2 rounded-full ${dotColor[entity.status] ?? "bg-gray-500"}`} />
+              <span className="text-xs text-gray-400">{entity.entity_type}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
-  const [specs, setSpecs] = useState<SpecSummary[]>([]);
   const [initialLoading, setInitialLoading] = useState(true);
   const [initialError, setInitialError] = useState<string | null>(null);
 
@@ -72,6 +127,14 @@ export default function Dashboard() {
   const [stateFilter, setStateFilter] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [tenantFilter, setTenantFilter] = useState<string>("all");
+
+  // Poll specs every 3s during build to pick up verification_status updates
+  const specPoll = usePolling<SpecSummary[]>({
+    fetcher: fetchSpecs,
+    interval: 3000,
+    enabled: !initialLoading && !initialError,
+  });
+  const specs = useMemo(() => specPoll.data ?? [], [specPoll.data]);
 
   // Auto-refresh entities every 5s
   const entityPoll = usePolling<EntitySummary[]>({
@@ -82,12 +145,25 @@ export default function Dashboard() {
   const entities = useMemo(() => entityPoll.data ?? [], [entityPoll.data]);
   const lastUpdated = useRelativeTime(entityPoll.lastUpdated);
 
+  // Poll verification status every 2s during build
+  const verifyPoll = usePolling<AllVerificationStatus>({
+    fetcher: fetchVerificationStatus,
+    interval: 2000,
+    enabled: !initialLoading && !initialError,
+  });
+  const verificationStatus = verifyPoll.data;
+
+  // Check if any entity is still pending/running (to show progress panel)
+  const buildInProgress = useMemo(() => {
+    if (!verificationStatus) return false;
+    return verificationStatus.pending > 0 || verificationStatus.running > 0;
+  }, [verificationStatus]);
+
   const loadInitial = useCallback(async () => {
     setInitialLoading(true);
     setInitialError(null);
     try {
-      const specData = await fetchSpecs();
-      setSpecs(specData);
+      await fetchSpecs();
     } catch (err) {
       setInitialError(err instanceof Error ? err.message : "Failed to load dashboard data");
     } finally {
@@ -190,6 +266,11 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Design-time progress panel */}
+      {buildInProgress && verificationStatus && (
+        <DesignTimeProgress verificationStatus={verificationStatus} />
+      )}
+
       {/* Stats row */}
       <div className="grid grid-cols-3 gap-4 mb-8">
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -212,14 +293,36 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Spec cards */}
+      {/* Spec cards grouped by tenant */}
       <div className="mb-8">
         <h2 className="text-lg font-semibold text-gray-200 mb-4">Specs</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filteredSpecs.map((spec) => (
-            <SpecCard key={`${spec.tenant}-${spec.entity_type}`} spec={spec} />
-          ))}
-        </div>
+        {(() => {
+          const grouped = new Map<string, SpecSummary[]>();
+          for (const spec of filteredSpecs) {
+            const key = spec.tenant ?? "default";
+            if (!grouped.has(key)) grouped.set(key, []);
+            grouped.get(key)!.push(spec);
+          }
+          const entries = Array.from(grouped.entries()).sort(([a], [b]) => a.localeCompare(b));
+          return entries.map(([tenant, tenantSpecs]) => (
+            <div key={tenant} className="mb-6">
+              <div className="flex items-center gap-2 mb-3">
+                <Link
+                  href={`/workflows/${tenant}`}
+                  className="text-sm font-semibold text-gray-300 uppercase tracking-wide hover:text-blue-400 transition-colors"
+                >
+                  {tenant}
+                </Link>
+                <span className="text-xs text-gray-600">{tenantSpecs.length} {tenantSpecs.length === 1 ? "entity" : "entities"}</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {tenantSpecs.map((spec) => (
+                  <SpecCard key={`${spec.tenant}-${spec.entity_type}`} spec={spec} />
+                ))}
+              </div>
+            </div>
+          ));
+        })()}
       </div>
 
       {/* Entity list */}

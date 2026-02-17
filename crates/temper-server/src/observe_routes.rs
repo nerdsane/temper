@@ -26,6 +26,7 @@ use temper_evolution::{
 
 use crate::dispatch::extract_tenant;
 use crate::entity_actor::{EntityEvent, EntityMsg, EntityResponse};
+use crate::registry::VerificationStatus;
 use crate::sentinel;
 use crate::state::{ServerState, TrajectoryEntry};
 
@@ -42,6 +43,12 @@ pub struct SpecSummary {
     pub actions: Vec<String>,
     /// Initial state.
     pub initial_state: String,
+    /// Verification status: "pending", "running", "passed", "failed", "partial".
+    pub verification_status: String,
+    /// Number of verification levels that passed (if completed).
+    pub levels_passed: Option<usize>,
+    /// Total number of verification levels (if completed).
+    pub levels_total: Option<usize>,
 }
 
 /// Full spec detail.
@@ -139,6 +146,9 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/simulation/{entity}", get(run_simulation))
         .route("/entities/{entity_type}/{entity_id}/history", get(get_entity_history))
         .route("/events/stream", get(handle_event_stream))
+        .route("/verification-status", get(handle_verification_status))
+        .route("/design-time/stream", get(handle_design_time_stream))
+        .route("/workflows", get(handle_workflows))
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
         .route("/trajectories", get(handle_trajectories))
@@ -158,12 +168,39 @@ async fn list_specs(State(state): State<ServerState>) -> Json<Vec<SpecSummary>> 
         for entity_type in registry.entity_types(tenant_id) {
             if let Some(entity_spec) = registry.get_spec(tenant_id, entity_type) {
                 let automaton = &entity_spec.automaton;
+
+                // Read verification status
+                let (verification_status, levels_passed, levels_total) =
+                    match registry.get_verification_status(tenant_id, entity_type) {
+                        Some(VerificationStatus::Pending) | None => {
+                            ("pending".to_string(), None, None)
+                        }
+                        Some(VerificationStatus::Running) => {
+                            ("running".to_string(), None, None)
+                        }
+                        Some(VerificationStatus::Completed(result)) => {
+                            let passed = result.levels.iter().filter(|l| l.passed).count();
+                            let total = result.levels.len();
+                            let status = if result.all_passed {
+                                "passed"
+                            } else if passed == 0 {
+                                "failed"
+                            } else {
+                                "partial"
+                            };
+                            (status.to_string(), Some(passed), Some(total))
+                        }
+                    };
+
                 specs.push(SpecSummary {
                     tenant: tenant_id.as_str().to_string(),
                     entity_type: entity_type.to_string(),
                     states: automaton.automaton.states.clone(),
                     actions: automaton.actions.iter().map(|a| a.name.clone()).collect(),
                     initial_state: automaton.automaton.initial.clone(),
+                    verification_status,
+                    levels_passed,
+                    levels_total,
                 });
             }
         }
@@ -461,6 +498,319 @@ async fn handle_event_stream(
     });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ---------------------------------------------------------------------------
+// Design-time observation: verification status & SSE stream
+// ---------------------------------------------------------------------------
+
+/// Response shape for GET /observe/verification-status.
+#[derive(Serialize)]
+struct AllVerificationStatus {
+    /// Aggregate counts.
+    pending: usize,
+    running: usize,
+    passed: usize,
+    failed: usize,
+    partial: usize,
+    /// Per-entity details.
+    entities: Vec<EntityVerificationStatusResponse>,
+}
+
+/// Per-entity verification status in the response.
+#[derive(Serialize)]
+struct EntityVerificationStatusResponse {
+    tenant: String,
+    entity_type: String,
+    status: String,
+    levels: Option<Vec<serde_json::Value>>,
+    verified_at: Option<String>,
+}
+
+/// GET /observe/verification-status -- all entity verification statuses.
+async fn handle_verification_status(
+    State(state): State<ServerState>,
+) -> Json<AllVerificationStatus> {
+    let registry = state.registry.read().unwrap();
+    let mut pending = 0usize;
+    let mut running = 0usize;
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    let mut partial = 0usize;
+    let mut entities = Vec::new();
+
+    for tenant_id in registry.tenant_ids() {
+        if let Some(statuses) = registry.verification_statuses(tenant_id) {
+            for (entity_type, status) in statuses {
+                let (status_str, levels, verified_at) = match status {
+                    VerificationStatus::Pending => {
+                        pending += 1;
+                        ("pending".to_string(), None, None)
+                    }
+                    VerificationStatus::Running => {
+                        running += 1;
+                        ("running".to_string(), None, None)
+                    }
+                    VerificationStatus::Completed(result) => {
+                        let passed_count =
+                            result.levels.iter().filter(|l| l.passed).count();
+                        let s = if result.all_passed {
+                            passed += 1;
+                            "passed"
+                        } else if passed_count == 0 {
+                            failed += 1;
+                            "failed"
+                        } else {
+                            partial += 1;
+                            "partial"
+                        };
+                        let lvls: Vec<serde_json::Value> = result
+                            .levels
+                            .iter()
+                            .map(|l| {
+                                serde_json::json!({
+                                    "level": l.level,
+                                    "passed": l.passed,
+                                    "summary": l.summary,
+                                })
+                            })
+                            .collect();
+                        (
+                            s.to_string(),
+                            Some(lvls),
+                            Some(result.verified_at.clone()),
+                        )
+                    }
+                };
+
+                entities.push(EntityVerificationStatusResponse {
+                    tenant: tenant_id.as_str().to_string(),
+                    entity_type: entity_type.clone(),
+                    status: status_str,
+                    levels,
+                    verified_at,
+                });
+            }
+        }
+    }
+
+    Json(AllVerificationStatus {
+        pending,
+        running,
+        passed,
+        failed,
+        partial,
+        entities,
+    })
+}
+
+/// GET /observe/design-time/stream -- SSE stream of design-time events.
+///
+/// Subscribes to the design-time broadcast channel and streams events
+/// as they happen (spec loaded, verification started/level/done).
+async fn handle_design_time_stream(
+    State(state): State<ServerState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.design_time_tx.subscribe();
+
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        match result {
+            Ok(event) => {
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                Some(Ok(Event::default().event("design_time").data(data)))
+            }
+            // Lagged receiver: skip missed events and continue.
+            Err(_) => None,
+        }
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ---------------------------------------------------------------------------
+// Phase: Workflow view (Temporal-like)
+// ---------------------------------------------------------------------------
+
+/// A single step in an entity's verification workflow.
+#[derive(Serialize)]
+struct WorkflowStep {
+    step: String,
+    status: String,
+    passed: Option<bool>,
+    timestamp: Option<String>,
+    summary: Option<String>,
+}
+
+/// Per-entity workflow detail.
+#[derive(Serialize)]
+struct EntityWorkflow {
+    entity_type: String,
+    steps: Vec<WorkflowStep>,
+}
+
+/// Per-app/tenant workflow summary.
+#[derive(Serialize)]
+struct AppWorkflow {
+    tenant: String,
+    status: String,
+    entities: Vec<EntityWorkflow>,
+    runtime_events_count: u64,
+}
+
+/// Response for GET /observe/workflows.
+#[derive(Serialize)]
+struct WorkflowsResponse {
+    workflows: Vec<AppWorkflow>,
+}
+
+/// GET /observe/workflows -- full workflow view per app/tenant.
+///
+/// Builds a Temporal-like workflow timeline from the design-time event log,
+/// verification statuses, and trajectory log.
+async fn handle_workflows(
+    State(state): State<ServerState>,
+) -> Json<WorkflowsResponse> {
+    let registry = state.registry.read().unwrap();
+    let event_log = state.design_time_log.read().unwrap();
+    let trajectory_log = state.trajectory_log.read().unwrap();
+
+    let mut workflows = Vec::new();
+
+    for tenant_id in registry.tenant_ids() {
+        let tenant_str = tenant_id.as_str().to_string();
+
+        // Skip system tenant in workflow view
+        if tenant_str == "system" {
+            continue;
+        }
+
+        let mut entity_workflows = Vec::new();
+        let mut tenant_status = "completed";
+
+        for entity_type in registry.entity_types(tenant_id) {
+            // Build steps from event log
+            let entity_events: Vec<_> = event_log
+                .iter()
+                .filter(|e| e.tenant == tenant_str && e.entity_type == entity_type)
+                .collect();
+
+            let mut steps: Vec<WorkflowStep> = Vec::new();
+
+            // Step 1: loaded
+            let loaded_event = entity_events.iter().find(|e| e.kind == "spec_loaded");
+            steps.push(WorkflowStep {
+                step: "loaded".to_string(),
+                status: if loaded_event.is_some() { "completed" } else { "pending" }.to_string(),
+                passed: None,
+                timestamp: loaded_event.map(|e| e.timestamp.clone()),
+                summary: loaded_event.map(|e| e.summary.clone()),
+            });
+
+            // Step 2: verify_started
+            let started_event = entity_events.iter().find(|e| e.kind == "verify_started");
+            steps.push(WorkflowStep {
+                step: "verify_started".to_string(),
+                status: if started_event.is_some() { "completed" } else { "pending" }.to_string(),
+                passed: None,
+                timestamp: started_event.map(|e| e.timestamp.clone()),
+                summary: started_event.map(|e| e.summary.clone()),
+            });
+
+            // Steps 3-6: L0-L3 from verify_level events
+            let level_events: Vec<_> = entity_events
+                .iter()
+                .filter(|e| e.kind == "verify_level")
+                .collect();
+
+            let level_labels = ["L0_symbolic", "L1_model_check", "L2_simulation", "L3_property_test"];
+            for (i, label) in level_labels.iter().enumerate() {
+                let level_event = level_events.get(i);
+                let status = match level_event {
+                    Some(_) => "completed",
+                    None => {
+                        // Check if verification is still running
+                        if let Some(VerificationStatus::Running) = registry.get_verification_status(tenant_id, entity_type) {
+                            if i == 0 && started_event.is_some() && level_events.is_empty() {
+                                "running"
+                            } else if level_events.len() == i {
+                                "running"
+                            } else {
+                                "pending"
+                            }
+                        } else {
+                            "pending"
+                        }
+                    }
+                };
+                steps.push(WorkflowStep {
+                    step: label.to_string(),
+                    status: status.to_string(),
+                    passed: level_event.and_then(|e| e.passed),
+                    timestamp: level_event.map(|e| e.timestamp.clone()),
+                    summary: level_event.map(|e| e.summary.clone()),
+                });
+            }
+
+            // Step 7: deployed
+            let done_event = entity_events.iter().find(|e| e.kind == "verify_done");
+            let deploy_status = match registry.get_verification_status(tenant_id, entity_type) {
+                Some(VerificationStatus::Completed(result)) => {
+                    if result.all_passed { "completed" } else { "failed" }
+                }
+                Some(VerificationStatus::Running) => {
+                    tenant_status = "verifying";
+                    "running"
+                }
+                Some(VerificationStatus::Pending) | None => {
+                    if tenant_status != "verifying" {
+                        tenant_status = "loading";
+                    }
+                    "pending"
+                }
+            };
+            steps.push(WorkflowStep {
+                step: "deployed".to_string(),
+                status: deploy_status.to_string(),
+                passed: done_event.and_then(|e| e.passed),
+                timestamp: done_event.map(|e| e.timestamp.clone()),
+                summary: done_event.map(|e| e.summary.clone()).or_else(|| {
+                    if deploy_status == "completed" {
+                        Some("Entity ready for runtime".to_string())
+                    } else if deploy_status == "failed" {
+                        Some("Verification failed".to_string())
+                    } else {
+                        None
+                    }
+                }),
+            });
+
+            // Update tenant status if any entity failed
+            if deploy_status == "failed" && tenant_status != "verifying" {
+                tenant_status = "failed";
+            }
+
+            entity_workflows.push(EntityWorkflow {
+                entity_type: entity_type.to_string(),
+                steps,
+            });
+        }
+
+        // Count runtime events for this tenant
+        let runtime_count = trajectory_log
+            .entries()
+            .iter()
+            .filter(|e| e.tenant == tenant_str)
+            .count() as u64;
+
+        workflows.push(AppWorkflow {
+            tenant: tenant_str,
+            status: tenant_status.to_string(),
+            entities: entity_workflows,
+            runtime_events_count: runtime_count,
+        });
+    }
+
+    Json(WorkflowsResponse { workflows })
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,6 +1407,10 @@ mod tests {
         assert_eq!(specs[0].entity_type, "Order");
         assert!(!specs[0].states.is_empty());
         assert!(!specs[0].actions.is_empty());
+        // New verification status fields should default to pending
+        assert_eq!(specs[0].verification_status, "pending");
+        assert!(specs[0].levels_passed.is_none());
+        assert!(specs[0].levels_total.is_none());
     }
 
     #[tokio::test]
@@ -1695,6 +2049,44 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -- Workflow endpoint tests --
+
+    #[tokio::test]
+    async fn test_workflows_returns_tenant_data() {
+        let app = build_test_app();
+        let response = app
+            .oneshot(
+                Request::get("/observe/workflows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let workflows = json["workflows"].as_array().unwrap();
+        // "default" tenant should appear (but "system" should be filtered out)
+        assert!(
+            workflows.iter().any(|w| w["tenant"] == "default"),
+            "should contain 'default' tenant workflow"
+        );
+        // Check entity workflow structure
+        let default_wf = workflows.iter().find(|w| w["tenant"] == "default").unwrap();
+        let entities = default_wf["entities"].as_array().unwrap();
+        assert!(!entities.is_empty());
+        // Each entity should have 7 steps
+        let order_wf = entities.iter().find(|e| e["entity_type"] == "Order");
+        assert!(order_wf.is_some(), "should have Order entity workflow");
+        let steps = order_wf.unwrap()["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 7, "should have 7 workflow steps");
+        assert_eq!(steps[0]["step"], "loaded");
+        assert_eq!(steps[6]["step"], "deployed");
     }
 
     #[tokio::test]

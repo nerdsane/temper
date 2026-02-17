@@ -20,6 +20,33 @@ use crate::events::EntityStateChange;
 use crate::reaction::ReactionDispatcher;
 use crate::registry::SpecRegistry;
 
+/// A design-time event emitted during spec loading and verification.
+///
+/// These events are broadcast via SSE so the observe UI can show
+/// verification progress in real time (design-time observation).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DesignTimeEvent {
+    /// Event kind: "spec_loaded", "verify_started", "verify_level", "verify_done".
+    pub kind: String,
+    /// Entity type this event relates to.
+    pub entity_type: String,
+    /// Tenant this event relates to.
+    pub tenant: String,
+    /// Human-readable summary.
+    pub summary: String,
+    /// Verification level name (for "verify_level" events).
+    pub level: Option<String>,
+    /// Whether this level/entity passed (for "verify_level" and "verify_done" events).
+    pub passed: Option<bool>,
+    /// ISO-8601 timestamp when the event was created.
+    pub timestamp: String,
+    /// Step number in the workflow (1=loaded, 2=verify_started, 3-6=L0-L3, 7=done).
+    pub step_number: Option<u8>,
+    /// Total steps in the workflow (always 7 for verification).
+    pub total_steps: Option<u8>,
+}
+
+
 /// Lightweight metrics collector for the /observe endpoints.
 ///
 /// Uses atomic counters for totals and a `RwLock<BTreeMap>` for per-label
@@ -161,6 +188,10 @@ pub struct ServerState {
     pub record_store: Arc<RecordStore>,
     /// Optional reaction dispatcher for cross-entity coordination.
     pub reaction_dispatcher: Option<Arc<ReactionDispatcher>>,
+    /// Broadcast channel for design-time events (spec loading, verification progress).
+    pub design_time_tx: Arc<tokio::sync::broadcast::Sender<DesignTimeEvent>>,
+    /// In-memory log of design-time events for workflow history (append-only, bounded).
+    pub design_time_log: Arc<RwLock<Vec<DesignTimeEvent>>>,
 }
 
 impl ServerState {
@@ -181,6 +212,7 @@ impl ServerState {
         }
 
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
+        let (design_time_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             actor_system: Arc::new(system),
             csdl: Arc::new(csdl),
@@ -199,6 +231,8 @@ impl ServerState {
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
             record_store: Arc::new(RecordStore::new()),
             reaction_dispatcher: None,
+            design_time_tx: Arc::new(design_time_tx),
+            design_time_log: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -241,6 +275,7 @@ impl ServerState {
         registry: Arc<RwLock<SpecRegistry>>,
     ) -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
+        let (design_time_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             actor_system: Arc::new(system),
             csdl: Arc::new(CsdlDocument { version: "4.0".into(), schemas: vec![] }),
@@ -259,6 +294,8 @@ impl ServerState {
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
             record_store: Arc::new(RecordStore::new()),
             reaction_dispatcher: None,
+            design_time_tx: Arc::new(design_time_tx),
+            design_time_log: Arc::new(RwLock::new(Vec::new())),
         }
     }
 

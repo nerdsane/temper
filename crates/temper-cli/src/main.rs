@@ -44,7 +44,10 @@ enum Commands {
         /// Port to listen on
         #[arg(short, long, default_value = "3000")]
         port: u16,
-        /// Directory containing IOA TOML and CSDL specs to load at startup
+        /// Load an app: --app name=specs-dir (repeatable)
+        #[arg(long)]
+        app: Vec<String>,
+        /// Directory containing IOA TOML and CSDL specs to load at startup (legacy, use --app)
         #[arg(long)]
         specs_dir: Option<String>,
         /// Tenant name (used with --specs-dir to load user specs)
@@ -67,9 +70,26 @@ async fn main() -> anyhow::Result<()> {
         Commands::Verify { specs_dir } => verify::run(&specs_dir)?,
         Commands::Serve {
             port,
+            app,
             specs_dir,
             tenant,
-        } => serve::run(port, specs_dir, tenant).await?,
+        } => {
+            // Build app list from --app flags, fall back to --specs-dir/--tenant
+            let mut apps: Vec<(String, String)> = Vec::new();
+            for entry in &app {
+                if let Some((name, path)) = entry.split_once('=') {
+                    apps.push((name.to_string(), path.to_string()));
+                } else {
+                    anyhow::bail!("Invalid --app format: '{entry}'. Expected name=specs-dir");
+                }
+            }
+            if apps.is_empty() {
+                if let Some(ref dir) = specs_dir {
+                    apps.push((tenant.clone(), dir.clone()));
+                }
+            }
+            serve::run(port, apps).await?
+        }
     }
 
     Ok(())
@@ -178,6 +198,23 @@ mod tests {
             } => {
                 assert_eq!(specs_dir, Some("my-specs".into()));
                 assert_eq!(tenant, "my-app");
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_with_app_flags() {
+        let cli = Cli::parse_from([
+            "temper", "serve",
+            "--app", "ecommerce=specs/ecommerce",
+            "--app", "linear=specs/linear",
+        ]);
+        match cli.command {
+            Commands::Serve { app, .. } => {
+                assert_eq!(app.len(), 2);
+                assert_eq!(app[0], "ecommerce=specs/ecommerce");
+                assert_eq!(app[1], "linear=specs/linear");
             }
             _ => panic!("expected Serve command"),
         }
