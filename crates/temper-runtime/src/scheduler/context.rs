@@ -33,7 +33,7 @@ impl Default for SimContext {
     }
 }
 
-thread_local! {
+thread_local! { // determinism-ok: deliberate FoundationDB pattern for sim context swap
     static SIM_CONTEXT: RefCell<SimContext> = RefCell::new(SimContext::default());
 }
 

@@ -43,7 +43,7 @@ impl<A: Actor> ActorCell<A> {
             id: id.clone(),
         };
 
-        tokio::spawn(self.run(rx));
+        tokio::spawn(self.run(rx)); // determinism-ok: production actor cell, not on simulation path
 
         actor_ref
     }

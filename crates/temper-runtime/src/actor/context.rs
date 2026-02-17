@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::HashMap; // determinism-ok: production actor context, not on simulation path
 
 use tokio::sync::oneshot;
 
