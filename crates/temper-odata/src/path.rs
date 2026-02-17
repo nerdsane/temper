@@ -335,7 +335,7 @@ fn validate_identifier(s: &str) -> Result<(), ODataError> {
     }
 
     // Must start with a letter or underscore
-    let first = s.chars().next().unwrap();
+    let first = s.chars().next().unwrap(); // ci-ok: empty string checked above
     if !first.is_ascii_alphabetic() && first != '_' {
         return Err(ODataError::InvalidPath {
             message: format!("invalid identifier '{s}': must start with a letter or underscore"),

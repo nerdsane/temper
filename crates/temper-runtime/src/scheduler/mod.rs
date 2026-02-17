@@ -285,7 +285,7 @@ impl SimScheduler {
         // Deliver all messages due at or before current time
         while let Some(msg) = self.pending.peek() {
             if msg.deliver_at <= self.current_time {
-                let msg = self.pending.pop().unwrap();
+                let msg = self.pending.pop().unwrap(); // ci-ok: guarded by peek() above
                 let to = msg.to.clone();
 
                 // Check if target actor is running

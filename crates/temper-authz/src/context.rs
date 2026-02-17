@@ -72,14 +72,14 @@ impl SecurityContext {
                 "x-temper-acting-for" => acting_for = Some(value.clone()),
                 "x-temper-correlation-id" => correlation_id = value.clone(),
                 k if k.starts_with("x-temper-attr-") => {
-                    let attr_name = k.strip_prefix("x-temper-attr-").unwrap();
+                    let attr_name = k.strip_prefix("x-temper-attr-").unwrap(); // ci-ok: guarded by starts_with
                     attributes.insert(
                         attr_name.to_string(),
                         serde_json::Value::String(value.clone()),
                     );
                 }
                 k if k.starts_with("x-temper-ctx-") => {
-                    let ctx_name = k.strip_prefix("x-temper-ctx-").unwrap();
+                    let ctx_name = k.strip_prefix("x-temper-ctx-").unwrap(); // ci-ok: guarded by starts_with
                     context_attrs.insert(
                         ctx_name.to_string(),
                         serde_json::Value::String(value.clone()),

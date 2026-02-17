@@ -173,7 +173,7 @@ impl SimActorSystem {
                 let item_count = handler.current_item_count();
 
                 // Only count as transition if status or items actually changed
-                let count = self.action_counts.get_mut(actor_id).unwrap();
+                let count = self.action_counts.get_mut(actor_id).unwrap(); // ci-ok: actor always in action_counts
                 *count += 1;
                 self.total_transitions += 1;
 
@@ -284,7 +284,7 @@ impl SimActorSystem {
 
             // Get valid actions
             let valid = {
-                let handler = self.actors.get(&actor_id).unwrap();
+                let handler = self.actors.get(&actor_id).unwrap(); // ci-ok: actor_id from self.actors.keys()
                 handler.valid_actions()
             };
 
@@ -317,7 +317,7 @@ impl SimActorSystem {
                         Ok(_) => {
                             let status_after = handler.current_status();
                             let item_count = handler.current_item_count();
-                            *self.action_counts.get_mut(&msg.to).unwrap() += 1;
+                            *self.action_counts.get_mut(&msg.to).unwrap() += 1; // ci-ok: actor always in action_counts
                             self.total_transitions += 1;
 
                             self.check_invariants(

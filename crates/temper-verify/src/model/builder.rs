@@ -129,7 +129,7 @@ fn translate_guards(guards: &[automaton::Guard]) -> ModelGuard {
 
     match model_guards.len() {
         0 => ModelGuard::Always,
-        1 => model_guards.into_iter().next().unwrap(),
+        1 => model_guards.into_iter().next().unwrap(), // ci-ok: len() == 1
         _ => ModelGuard::And(model_guards),
     }
 }

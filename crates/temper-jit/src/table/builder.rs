@@ -71,7 +71,7 @@ impl TransitionTable {
 
                 let guard = match guards.len() {
                     0 => Guard::Always,
-                    1 => guards.into_iter().next().unwrap(),
+                    1 => guards.into_iter().next().unwrap(), // ci-ok: len() == 1
                     _ => Guard::And(guards),
                 };
 

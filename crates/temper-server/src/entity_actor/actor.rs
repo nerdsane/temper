@@ -495,7 +495,7 @@ impl Actor for EntityActor {
                             event_count_before, state.events.len()
                         );
                         debug_assert!(
-                            state.events.last().unwrap().action == name,
+                            state.events.last().unwrap().action == name, // ci-ok: post-assertion, events.len() just checked
                             "POSTCONDITION: last event must be the action that just fired"
                         );
 
