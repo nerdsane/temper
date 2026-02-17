@@ -48,10 +48,10 @@ pub fn generate_entity_default(entity: &EntityType) -> String {
 
 fn property_default(prop: &Property, initial_state: &str) -> String {
     // If this is the Status field, use the initial state
-    if prop.name == "Status" || prop.name.ends_with("Status") {
-        if prop.type_name.contains("Status") {
-            return format!("{}Status::{}", extract_enum_prefix(&prop.type_name), initial_state);
-        }
+    if (prop.name == "Status" || prop.name.ends_with("Status"))
+        && prop.type_name.contains("Status")
+    {
+        return format!("{}Status::{}", extract_enum_prefix(&prop.type_name), initial_state);
     }
 
     if let Some(ref default) = prop.default_value {
@@ -59,8 +59,8 @@ fn property_default(prop: &Property, initial_state: &str) -> String {
             "Edm.String" => format!("\"{}\".to_string()", default),
             "Edm.Boolean" => default.to_string(),
             "Edm.Int32" | "Edm.Int64" => default.to_string(),
-            _ if prop.type_name.contains("Decimal") => format!("Decimal::ZERO"),
-            _ => format!("Default::default()"),
+            _ if prop.type_name.contains("Decimal") => "Decimal::ZERO".to_string(),
+            _ => "Default::default()".to_string(),
         }
     } else if prop.nullable {
         "None".to_string()

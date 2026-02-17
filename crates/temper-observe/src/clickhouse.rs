@@ -50,7 +50,7 @@ impl ClickHouseStore {
 
     async fn execute_query(&self, sql: &str, params: &[SqlParam]) -> Result<ResultSet, ObserveError> {
         let final_sql = Self::interpolate_params(sql, params);
-        let resp = self.client.post(&self.query_url())
+        let resp = self.client.post(self.query_url())
             .body(final_sql)
             .send().await
             .map_err(|e| ObserveError::ConnectionError(e.to_string()))?;

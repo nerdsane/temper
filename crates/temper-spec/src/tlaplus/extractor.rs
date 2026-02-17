@@ -201,7 +201,7 @@ fn is_action_definition(trimmed: &str) -> bool {
 fn extract_action_name(trimmed: &str) -> Option<String> {
     let name_part = trimmed.split("==").next().unwrap_or("").trim();
     let clean = name_part.split('(').next().unwrap_or(name_part).trim();
-    if !clean.is_empty() && clean.chars().next().map_or(false, |c| c.is_uppercase()) {
+    if !clean.is_empty() && clean.chars().next().is_some_and(|c| c.is_uppercase()) {
         Some(name_part.to_string())
     } else {
         None

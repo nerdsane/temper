@@ -105,9 +105,8 @@ fn parse_filter(sql: &str, params: &[SqlParam]) -> Result<Filter, ObserveError> 
         let column = parts[0].trim().to_string();
         let rhs = parts[1].trim();
 
-        let value = if rhs.starts_with('$') {
+        let value = if let Some(idx_str) = rhs.strip_prefix('$') {
             // Parameter binding: $1, $2, ...
-            let idx_str = &rhs[1..];
             let idx: usize = idx_str.parse().map_err(|_| {
                 ObserveError::InvalidQuery(format!("invalid parameter index: {rhs}"))
             })?;

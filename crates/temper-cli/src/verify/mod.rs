@@ -194,7 +194,7 @@ fn read_tla_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
 
 /// Convert a string to PascalCase.
 fn to_pascal_case(s: &str) -> String {
-    s.split(|c: char| c == '_' || c == '-')
+    s.split(['_', '-'])
         .map(|word| {
             let mut chars = word.chars();
             match chars.next() {

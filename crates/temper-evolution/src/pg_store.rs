@@ -22,6 +22,7 @@ pub enum PgRecordStoreError {
 
 /// A row from the `evolution_records` table.
 #[derive(Debug, sqlx::FromRow)]
+#[allow(dead_code)]
 struct EvolutionRow {
     id: String,
     record_type: String,

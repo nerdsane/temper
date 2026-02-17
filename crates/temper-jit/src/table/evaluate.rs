@@ -36,10 +36,7 @@ impl TransitionTable {
         ctx: &EvalContext,
         action: &str,
     ) -> Option<TransitionResult> {
-        let indices = match self.rule_index.get(action) {
-            Some(idx) => idx,
-            None => return None,
-        };
+        let indices = self.rule_index.get(action)?;
 
         for &i in indices {
             let rule = &self.rules[i];

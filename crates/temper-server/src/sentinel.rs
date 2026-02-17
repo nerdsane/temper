@@ -14,6 +14,9 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::state::ServerState;
 
+/// Check function type: given the server state, returns `Some(observed_value)` if triggered.
+type SentinelCheckFn = Box<dyn Fn(&ServerState) -> Option<f64> + Send + Sync>;
+
 /// A sentinel rule that can evaluate server state and detect anomalies.
 pub struct SentinelRule {
     /// Human-readable rule name (e.g., "error_rate_spike").
@@ -27,7 +30,7 @@ pub struct SentinelRule {
     /// The threshold value.
     pub threshold_value: f64,
     /// The check function: given the server state, returns `Some(observed_value)` if triggered.
-    pub check: Box<dyn Fn(&ServerState) -> Option<f64> + Send + Sync>,
+    pub check: SentinelCheckFn,
 }
 
 /// Result of a sentinel check: the rule that triggered and the O-Record it produced.
@@ -95,7 +98,7 @@ pub fn default_rules() -> Vec<SentinelRule> {
 
                 // Find the worst rejection rate.
                 let mut worst_rate = 0.0_f64;
-                for (_action, (total, failures)) in &per_action {
+                for (total, failures) in per_action.values() {
                     if *total >= 5 {
                         // Need minimum sample size.
                         let rate = *failures as f64 / *total as f64;

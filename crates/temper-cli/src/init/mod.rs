@@ -118,7 +118,7 @@ pub fn run(name: &str) -> Result<()> {
 /// Examples: "my-app" -> "Temper.MyApp", "hello_world" -> "Temper.HelloWorld"
 fn to_namespace(name: &str) -> String {
     let pascal: String = name
-        .split(|c: char| c == '-' || c == '_')
+        .split(['-', '_'])
         .map(|word| {
             let mut chars = word.chars();
             match chars.next() {

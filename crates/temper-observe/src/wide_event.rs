@@ -92,6 +92,7 @@ pub enum FieldClass {
 
 /// Build a WideEvent from an entity actor transition.
 /// This is called automatically by the actor — no agent or developer involvement.
+#[allow(clippy::too_many_arguments)]
 pub fn from_transition(
     entity_type: &str,
     entity_id: &str,

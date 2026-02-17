@@ -8,6 +8,7 @@
 //! - Stateright model checking (Level 1)
 //! - Deterministic simulation (Level 2)
 //! - Property-based tests (Level 3)
+//!
 //! So if it passes verification, it works correctly here.
 //!
 //! ## TigerStyle Principles Applied
@@ -155,57 +156,18 @@ impl EntityActor {
                             table.evaluate_ctx(&state.status, &eval_ctx, &event.action)
                         {
                             if result.success {
-                                // Apply effects — same logic as handle()
-                                for effect in &result.effects {
-                                    match effect {
-                                        temper_jit::table::Effect::SetState(s) => {
-                                            state.status = s.clone();
-                                        }
-                                        temper_jit::table::Effect::IncrementItems => {
-                                            state.item_count += 1;
-                                        }
-                                        temper_jit::table::Effect::DecrementItems => {
-                                            state.item_count =
-                                                state.item_count.saturating_sub(1);
-                                        }
-                                        temper_jit::table::Effect::IncrementCounter(var) => {
-                                            *state.counters.entry(var.clone()).or_insert(0) += 1;
-                                        }
-                                        temper_jit::table::Effect::DecrementCounter(var) => {
-                                            let val =
-                                                state.counters.entry(var.clone()).or_insert(0);
-                                            *val = val.saturating_sub(1);
-                                        }
-                                        temper_jit::table::Effect::SetBool { var, value } => {
-                                            state.booleans.insert(var.clone(), *value);
-                                        }
-                                        temper_jit::table::Effect::ListAppend(var) => {
-                                            if let Some(val) = event.params.get(var).and_then(|v| v.as_str()) {
-                                                state.lists.entry(var.clone()).or_default().push(val.to_string());
-                                            }
-                                        }
-                                        temper_jit::table::Effect::ListRemoveAt(var) => {
-                                            let index_key = format!("{var}_index");
-                                            if let Some(idx) = event.params.get(&index_key).and_then(|v| v.as_u64()) {
-                                                let list = state.lists.entry(var.clone()).or_default();
-                                                let idx = idx as usize;
-                                                if idx < list.len() {
-                                                    list.remove(idx);
-                                                }
-                                            }
-                                        }
-                                        temper_jit::table::Effect::EmitEvent(_)
-                                        | temper_jit::table::Effect::Custom(_) => {}
-                                    }
-                                }
-
-                                // If no SetState effect, use to_status from result
+                                // Shared effect application — same code as handle() and simulation.
                                 let from_status = event.from_status.clone();
-                                if state.status == from_status
-                                    && !result.new_state.is_empty()
-                                {
-                                    state.status = result.new_state;
-                                }
+                                super::effects::apply_effects(
+                                    state,
+                                    &result.effects,
+                                    &event.params,
+                                );
+                                super::effects::apply_new_state_fallback(
+                                    state,
+                                    &from_status,
+                                    &result.new_state,
+                                );
                             }
                         } else {
                             // TransitionTable doesn't know this action — fall back
@@ -213,37 +175,13 @@ impl EntityActor {
                             state.status = event.to_status.clone();
                         }
 
-                        // Project replayed event params into fields
-                        if let Some(obj) = state.fields.as_object_mut() {
-                            if let Some(p) = event.params.as_object() {
-                                for (k, v) in p {
-                                    obj.insert(k.clone(), v.clone());
-                                }
-                            }
-                        }
-
                         state.events.push(event);
                     }
                     state.sequence_nr = env.sequence_nr;
                 }
                 if !envelopes.is_empty() {
-                    if let Some(obj) = state.fields.as_object_mut() {
-                        obj.insert(
-                            "Status".into(),
-                            serde_json::Value::String(state.status.clone()),
-                        );
-                        // Sync final counter/boolean/list state into fields
-                        for (k, v) in &state.counters {
-                            obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
-                        }
-                        for (k, v) in &state.booleans {
-                            obj.insert(k.clone(), serde_json::Value::Bool(*v));
-                        }
-                        for (k, v) in &state.lists {
-                            let arr: Vec<serde_json::Value> = v.iter().map(|s| serde_json::Value::String(s.clone())).collect();
-                            obj.insert(k.clone(), serde_json::Value::Array(arr));
-                        }
-                    }
+                    // Sync all state into fields after full replay
+                    super::effects::sync_fields(state, &serde_json::json!({}));
                     tracing::info!(
                         entity = %state.entity_id,
                         replayed = envelopes.len(),
@@ -360,95 +298,20 @@ impl Actor for EntityActor {
                     Some(transition_result) if transition_result.success => {
                         let from_status = state.status.clone();
                         let to_status = transition_result.new_state.clone();
-                        let mut custom_effects = Vec::new();
 
-                        // Apply effects
-                        for effect in &transition_result.effects {
-                            match effect {
-                                temper_jit::table::Effect::SetState(s) => {
-                                    state.status = s.clone();
-                                }
-                                temper_jit::table::Effect::IncrementItems => {
-                                    state.item_count += 1;
-                                }
-                                temper_jit::table::Effect::DecrementItems => {
-                                    state.item_count = state.item_count.saturating_sub(1);
-                                }
-                                temper_jit::table::Effect::IncrementCounter(var) => {
-                                    *state.counters.entry(var.clone()).or_insert(0) += 1;
-                                }
-                                temper_jit::table::Effect::DecrementCounter(var) => {
-                                    let val = state.counters.entry(var.clone()).or_insert(0);
-                                    *val = val.saturating_sub(1);
-                                }
-                                temper_jit::table::Effect::SetBool { var, value } => {
-                                    state.booleans.insert(var.clone(), *value);
-                                }
-                                temper_jit::table::Effect::ListAppend(var) => {
-                                    // Value comes from action params under the list var name
-                                    if let Some(val) = params.get(var).and_then(|v| v.as_str()) {
-                                        state.lists.entry(var.clone()).or_default().push(val.to_string());
-                                    }
-                                }
-                                temper_jit::table::Effect::ListRemoveAt(var) => {
-                                    // Index comes from action params as "{var}_index"
-                                    let index_key = format!("{var}_index");
-                                    if let Some(idx) = params.get(&index_key).and_then(|v| v.as_u64()) {
-                                        let list = state.lists.entry(var.clone()).or_default();
-                                        let idx = idx as usize;
-                                        if idx < list.len() {
-                                            list.remove(idx);
-                                        }
-                                    }
-                                }
-                                temper_jit::table::Effect::EmitEvent(evt) => {
-                                    tracing::info!(
-                                        entity_type = %state.entity_type,
-                                        entity_id = %state.entity_id,
-                                        event = %evt,
-                                        "event emitted"
-                                    );
-                                }
-                                temper_jit::table::Effect::Custom(effect_name) => {
-                                    custom_effects.push(effect_name.clone());
-                                    tracing::info!(
-                                        entity_type = %state.entity_type,
-                                        entity_id = %state.entity_id,
-                                        effect = %effect_name,
-                                        "custom effect (dispatched by post-transition hook)"
-                                    );
-                                }
-                            }
-                        }
-
-                        // If no SetState effect, use the transition result's new_state
-                        if state.status == from_status && !to_status.is_empty() {
-                            state.status = to_status.clone();
-                        }
-
-                        // Update fields: status + action params + counters + booleans
-                        if let Some(obj) = state.fields.as_object_mut() {
-                            obj.insert("Status".to_string(), serde_json::Value::String(state.status.clone()));
-                            // Project action params into fields
-                            if let Some(p) = params.as_object() {
-                                for (k, v) in p {
-                                    obj.insert(k.clone(), v.clone());
-                                }
-                            }
-                            // Sync counters into fields
-                            for (k, v) in &state.counters {
-                                obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
-                            }
-                            // Sync booleans into fields
-                            for (k, v) in &state.booleans {
-                                obj.insert(k.clone(), serde_json::Value::Bool(*v));
-                            }
-                            // Sync lists into fields
-                            for (k, v) in &state.lists {
-                                let arr: Vec<serde_json::Value> = v.iter().map(|s| serde_json::Value::String(s.clone())).collect();
-                                obj.insert(k.clone(), serde_json::Value::Array(arr));
-                            }
-                        }
+                        // Shared effect application — same code path as simulation.
+                        // FoundationDB DST principle: one function for all paths.
+                        let custom_effects = super::effects::apply_effects(
+                            state,
+                            &transition_result.effects,
+                            &params,
+                        );
+                        super::effects::apply_new_state_fallback(
+                            state,
+                            &from_status,
+                            &to_status,
+                        );
+                        super::effects::sync_fields(state, &params);
 
                         // Record event
                         let event = EntityEvent {

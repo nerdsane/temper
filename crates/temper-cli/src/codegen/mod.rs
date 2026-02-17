@@ -170,9 +170,7 @@ fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
         let path = entry.path();
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
 
-        if file_name.ends_with(".ioa.toml") {
-            // Strip the ".ioa.toml" extension to get the stem
-            let stem = &file_name[..file_name.len() - ".ioa.toml".len()];
+        if let Some(stem) = file_name.strip_suffix(".ioa.toml") {
             let entity_name = to_pascal_case(stem);
             let source = fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read IOA file: {}", path.display()))?;
@@ -223,7 +221,7 @@ fn read_tla_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
 ///
 /// "order" -> "Order", "order_item" -> "OrderItem"
 fn to_pascal_case(s: &str) -> String {
-    s.split(|c: char| c == '_' || c == '-')
+    s.split(['_', '-'])
         .map(|word| {
             let mut chars = word.chars();
             match chars.next() {

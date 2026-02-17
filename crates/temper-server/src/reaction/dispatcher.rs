@@ -32,6 +32,7 @@ impl ReactionDispatcher {
     /// This is called after the source action has been committed and the SSE
     /// broadcast sent. Reactions are fire-and-forget: failures are logged but
     /// do not roll back the source transition.
+    #[allow(clippy::too_many_arguments)]
     pub async fn dispatch_reactions(
         &self,
         state: &crate::ServerState,

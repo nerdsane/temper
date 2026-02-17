@@ -51,6 +51,40 @@ You perform **semantic analysis**, not just pattern matching. The shell hook (`c
 - Does any "glue" code between the actor system and the HTTP layer leak non-determinism?
 - Are test utilities used in production accidentally? (`#[cfg(test)]` boundaries)
 
+### 6. Effect Application Consistency (CRITICAL)
+
+**From FoundationDB**: *"The same code path must be used in simulation and production."*
+
+The core DST principle is not just that simulation *exists*, but that it runs **the exact same code** as production. If production and simulation have separate implementations of the same logic, simulation tests prove nothing about production correctness.
+
+**What to check:**
+
+1. **Single Source of Truth**: Is there a shared function (e.g., `apply_effects()`) that ALL code paths call? Look for:
+   - Production message handling (`EntityActor::handle()`)
+   - Production event replay (`EntityActor::replay_events()`)
+   - Simulation handling (`EntityActorHandler::handle_message()`)
+   - All three MUST call the same shared function for state mutation.
+
+2. **Duplicated Match Arms**: If you see `match effect { ... }` or similar pattern matching on the same enum in multiple locations, this is a **BLOCKING** finding. Effect application logic must live in exactly one place.
+
+3. **Divergent Semantics**: Even if two implementations look similar, check for subtle differences:
+   - Does one path sync `item_count` to `counters["items"]` but the other doesn't?
+   - Does one path handle `Effect::Custom` differently?
+   - Does one path apply `sync_fields()` but the other skips it?
+   - Any semantic divergence between production and simulation is a **BLOCKING** finding.
+
+4. **New Code Paths**: When a new feature adds state mutation logic, verify it goes through the shared function. Watch for:
+   - New effect types added to the `Effect` enum — they must be handled in the shared `apply_effects()`, not in individual callers.
+   - New entity state fields — they must be synced in the shared `sync_fields()`.
+   - Custom post-transition hooks — they must not bypass the shared path.
+
+**Architecture Assessment addition:**
+```
+- Effect application consistency: [SHARED / DUPLICATED — details]
+```
+
+If effect application is DUPLICATED, the verdict MUST be FAIL.
+
 ## Reference: DST Principles
 
 From FoundationDB, TigerBeetle, S2, and Polar Signals:
@@ -90,6 +124,7 @@ After reviewing, output a structured report:
 - I/O boundary cleanliness: [CLEAN / LEAKY — details]
 - Actor system determinism: [DETERMINISTIC / NON-DETERMINISTIC — details]
 - Time/RNG/UUID handling: [CORRECT / VIOLATION — details]
+- Effect application consistency: [SHARED / DUPLICATED — details]
 
 ### Findings
 

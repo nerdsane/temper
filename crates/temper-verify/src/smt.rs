@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use z3::ast::{Ast, Bool, Int};
+use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
 use crate::model::builder::build_model_from_ioa;
@@ -209,9 +209,9 @@ fn check_counter_positive_induction_z3(
         let max_val = Int::from_i64(max_counter as i64);
 
         // Assume: invariant holds in pre-state (var > 0)
-        solver.assert(&counter_pre.gt(&zero));
+        solver.assert(counter_pre.gt(&zero));
         // Assume: counter is within bounds
-        solver.assert(&counter_pre.le(&max_val));
+        solver.assert(counter_pre.le(&max_val));
 
         // Compute post-state counter value based on effects
         let one = Int::from_i64(1);
@@ -229,7 +229,7 @@ fn check_counter_positive_induction_z3(
         }
 
         // Check: ¬(var' > 0) — if SAT, invariant is not preserved
-        solver.assert(&counter_post.le(&zero));
+        solver.assert(counter_post.le(&zero));
 
         if matches!(solver.check(), SatResult::Sat) {
             return false;
@@ -276,7 +276,7 @@ fn check_bool_required_induction_z3(
         }
 
         // Check: ¬var' — if SAT, invariant is not preserved
-        solver.assert(&bool_post.not());
+        solver.assert(bool_post.not());
 
         if matches!(solver.check(), SatResult::Sat) {
             return false;
@@ -303,8 +303,8 @@ fn make_counter_vars(
         .keys()
         .map(|name| {
             let var = Int::new_const(name.as_str());
-            solver.assert(&var.ge(&zero));
-            solver.assert(&var.le(&max_val));
+            solver.assert(var.ge(&zero));
+            solver.assert(var.le(&max_val));
             (name.clone(), var)
         })
         .collect()

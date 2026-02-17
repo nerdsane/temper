@@ -4,7 +4,7 @@
 //! 0. **Symbolic Verification** — SMT-based algebraic verification (Z3)
 //! 1. **Model Check** — exhaustive state-space exploration via Stateright
 //! 2. **Deterministic Simulation** — FoundationDB/TigerBeetle-style fault injection
-//! 2b. **Actor Simulation** — real TransitionTable::evaluate() through SimActorSystem
+//!    2b. **Actor Simulation** — real TransitionTable::evaluate() through SimActorSystem
 //! 3. **Property Tests** — random action sequences with invariant checking
 //!
 //! Each level produces a pass/fail result. All levels run independently.

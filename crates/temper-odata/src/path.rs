@@ -75,11 +75,7 @@ pub fn parse_path(path: &str) -> Result<ODataPath, ODataError> {
     }
 
     // Must start with /
-    let path = if path.starts_with('/') {
-        &path[1..]
-    } else {
-        path
-    };
+    let path = path.strip_prefix('/').unwrap_or(path);
 
     // $metadata
     if path == "$metadata" {
@@ -187,8 +183,7 @@ fn parse_continuation_segment(
     // Check if this is a qualified name (contains dot) — bound operation
     if segment.contains('.') {
         // Bound function: ends with ()
-        if segment.ends_with("()") {
-            let qualified_name = &segment[..segment.len() - 2];
+        if let Some(qualified_name) = segment.strip_suffix("()") {
             // Extract just the operation name (last part after final dot)
             let function_name = qualified_name
                 .rsplit('.')

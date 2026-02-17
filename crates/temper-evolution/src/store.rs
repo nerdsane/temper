@@ -134,7 +134,7 @@ impl RecordStore {
         for (id, record) in &inner.observations {
             let path = sub_dir.join(format!("{id}.json"));
             let json = serde_json::to_string_pretty(record)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
             fs::write(&path, json)?;
         }
 
@@ -143,7 +143,7 @@ impl RecordStore {
         for (id, record) in &inner.problems {
             let path = sub_dir.join(format!("{id}.json"));
             let json = serde_json::to_string_pretty(record)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
             fs::write(&path, json)?;
         }
 
@@ -152,7 +152,7 @@ impl RecordStore {
         for (id, record) in &inner.analyses {
             let path = sub_dir.join(format!("{id}.json"));
             let json = serde_json::to_string_pretty(record)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
             fs::write(&path, json)?;
         }
 
@@ -161,7 +161,7 @@ impl RecordStore {
         for (id, record) in &inner.decisions {
             let path = sub_dir.join(format!("{id}.json"));
             let json = serde_json::to_string_pretty(record)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
             fs::write(&path, json)?;
         }
 
@@ -170,7 +170,7 @@ impl RecordStore {
         for (id, record) in &inner.insights {
             let path = sub_dir.join(format!("{id}.json"));
             let json = serde_json::to_string_pretty(record)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
             fs::write(&path, json)?;
         }
 

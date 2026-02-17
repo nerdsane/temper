@@ -74,9 +74,8 @@ fn parse_schema(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Schema
                 }
             }
             Ok(Event::Empty(ref e)) => {
-                match local_name(e).as_str() {
-                    "Term" => schema.terms.push(parse_term(e)),
-                    _ => {}
+                if local_name(e).as_str() == "Term" {
+                    schema.terms.push(parse_term(e));
                 }
             }
             Ok(Event::End(ref e)) if local_name_end(e) == "Schema" => break,
@@ -314,7 +313,7 @@ fn parse_property(e: &BytesStart) -> Property {
     Property {
         name: attr_str(e, "Name").unwrap_or_default(),
         type_name: attr_str(e, "Type").unwrap_or_else(|| "Edm.String".to_string()),
-        nullable: attr_str(e, "Nullable").map_or(true, |v| v != "false"),
+        nullable: attr_str(e, "Nullable").is_none_or(|v| v != "false"),
         default_value: attr_str(e, "DefaultValue"),
         precision: attr_str(e, "Precision").and_then(|v| v.parse().ok()),
         scale: attr_str(e, "Scale").and_then(|v| v.parse().ok()),
@@ -325,7 +324,7 @@ fn parse_parameter(e: &BytesStart) -> Parameter {
     Parameter {
         name: attr_str(e, "Name").unwrap_or_default(),
         type_name: attr_str(e, "Type").unwrap_or_else(|| "Edm.String".to_string()),
-        nullable: attr_str(e, "Nullable").map_or(true, |v| v != "false"),
+        nullable: attr_str(e, "Nullable").is_none_or(|v| v != "false"),
         default_value: attr_str(e, "DefaultValue"),
     }
 }
@@ -333,7 +332,7 @@ fn parse_parameter(e: &BytesStart) -> Parameter {
 fn parse_return_type(e: &BytesStart) -> ReturnType {
     ReturnType {
         type_name: attr_str(e, "Type").unwrap_or_default(),
-        nullable: attr_str(e, "Nullable").map_or(true, |v| v != "false"),
+        nullable: attr_str(e, "Nullable").is_none_or(|v| v != "false"),
         precision: attr_str(e, "Precision").and_then(|v| v.parse().ok()),
         scale: attr_str(e, "Scale").and_then(|v| v.parse().ok()),
     }
@@ -352,7 +351,7 @@ fn nav_prop_from_attrs(e: &BytesStart) -> NavigationProperty {
     NavigationProperty {
         name: attr_str(e, "Name").unwrap_or_default(),
         type_name: attr_str(e, "Type").unwrap_or_default(),
-        nullable: attr_str(e, "Nullable").map_or(true, |v| v != "false"),
+        nullable: attr_str(e, "Nullable").is_none_or(|v| v != "false"),
         contains_target: attr_str(e, "ContainsTarget").is_some_and(|v| v == "true"),
         referential_constraints: Vec::new(),
     }

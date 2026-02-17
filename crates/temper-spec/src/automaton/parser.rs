@@ -415,6 +415,7 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn flush_all(
     action: &mut Option<Action>,
     actions: &mut Vec<Action>,

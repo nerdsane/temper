@@ -28,6 +28,9 @@ pub trait DeadLetterQueue: Send + Sync {
 
     /// Number of entries in the DLQ.
     fn len(&self) -> Pin<Box<dyn Future<Output = usize> + Send + '_>>;
+
+    /// Returns `true` if the DLQ contains no entries.
+    fn is_empty(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
 }
 
 /// In-memory dead-letter queue for testing and single-node deployments.
@@ -88,6 +91,15 @@ impl DeadLetterQueue for InMemoryDeadLetterQueue {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .len();
+        Box::pin(std::future::ready(result))
+    }
+
+    fn is_empty(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+        let result = self
+            .entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty();
         Box::pin(std::future::ready(result))
     }
 }

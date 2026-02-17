@@ -151,93 +151,19 @@ impl SimActorHandler for EntityActorHandler {
                 let from_status = self.state.status.clone();
                 let to_status = transition_result.new_state.clone();
 
-                // Apply effects — identical logic to production actor.rs
-                for effect in &transition_result.effects {
-                    match effect {
-                        temper_jit::table::Effect::SetState(s) => {
-                            self.state.status = s.clone();
-                        }
-                        temper_jit::table::Effect::IncrementItems => {
-                            self.state.item_count += 1;
-                            *self.state.counters.entry("items".to_string()).or_default() += 1;
-                        }
-                        temper_jit::table::Effect::DecrementItems => {
-                            self.state.item_count = self.state.item_count.saturating_sub(1);
-                            let c = self.state.counters.entry("items".to_string()).or_default();
-                            *c = c.saturating_sub(1);
-                        }
-                        temper_jit::table::Effect::IncrementCounter(var) => {
-                            *self.state.counters.entry(var.clone()).or_default() += 1;
-                            // Keep legacy item_count in sync.
-                            if var == "items" {
-                                self.state.item_count += 1;
-                            }
-                        }
-                        temper_jit::table::Effect::DecrementCounter(var) => {
-                            let c = self.state.counters.entry(var.clone()).or_default();
-                            *c = c.saturating_sub(1);
-                            if var == "items" {
-                                self.state.item_count = self.state.item_count.saturating_sub(1);
-                            }
-                        }
-                        temper_jit::table::Effect::SetBool { var, value } => {
-                            self.state.booleans.insert(var.clone(), *value);
-                        }
-                        temper_jit::table::Effect::ListAppend(var) => {
-                            if let Some(val) = params_value.get(var).and_then(|v| v.as_str()) {
-                                self.state.lists.entry(var.clone()).or_default().push(val.to_string());
-                            }
-                        }
-                        temper_jit::table::Effect::ListRemoveAt(var) => {
-                            let index_key = format!("{var}_index");
-                            if let Some(idx) = params_value.get(&index_key).and_then(|v| v.as_u64()) {
-                                let list = self.state.lists.entry(var.clone()).or_default();
-                                let idx = idx as usize;
-                                if idx < list.len() {
-                                    list.remove(idx);
-                                }
-                            }
-                        }
-                        temper_jit::table::Effect::EmitEvent(_) => {
-                            // No telemetry in simulation
-                        }
-                        temper_jit::table::Effect::Custom(_) => {
-                            // Custom effects are handled by post-transition hooks
-                        }
-                    }
-                }
-
-                // If no SetState effect, use the transition result's new_state
-                if self.state.status == from_status && !to_status.is_empty() {
-                    self.state.status = to_status;
-                }
-
-                // Update fields: status + action params + counters + booleans
-                if let Some(obj) = self.state.fields.as_object_mut() {
-                    obj.insert(
-                        "Status".to_string(),
-                        serde_json::Value::String(self.state.status.clone()),
-                    );
-                    // Project action params into fields
-                    if let Some(p) = params_value.as_object() {
-                        for (k, v) in p {
-                            obj.insert(k.clone(), v.clone());
-                        }
-                    }
-                    // Sync counters into fields
-                    for (k, v) in &self.state.counters {
-                        obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
-                    }
-                    // Sync booleans into fields
-                    for (k, v) in &self.state.booleans {
-                        obj.insert(k.clone(), serde_json::Value::Bool(*v));
-                    }
-                    // Sync lists into fields
-                    for (k, v) in &self.state.lists {
-                        let arr: Vec<serde_json::Value> = v.iter().map(|s| serde_json::Value::String(s.clone())).collect();
-                        obj.insert(k.clone(), serde_json::Value::Array(arr));
-                    }
-                }
+                // Shared effect application — THE SAME CODE as production.
+                // FoundationDB DST principle: one function for all paths.
+                super::effects::apply_effects(
+                    &mut self.state,
+                    &transition_result.effects,
+                    &params_value,
+                );
+                super::effects::apply_new_state_fallback(
+                    &mut self.state,
+                    &from_status,
+                    &to_status,
+                );
+                super::effects::sync_fields(&mut self.state, &params_value);
 
                 // Record event with sim_now() timestamp (deterministic)
                 let event = EntityEvent {

@@ -9,7 +9,7 @@ use crate::mailbox::MailboxSender;
 
 
 /// An envelope wrapping a message with an optional reply channel.
-pub(crate) enum Envelope<M: Message> {
+pub enum Envelope<M: Message> {
     /// Fire-and-forget message.
     Tell(M),
     /// Request-response message with a reply channel.

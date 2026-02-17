@@ -31,6 +31,10 @@ case "${CMD:-}" in
         # Record pushed commit SHA for CI verification
         PUSHED_SHA="$(cd "$WORKSPACE_ROOT" && git rev-parse HEAD 2>/dev/null || echo "unknown")"
 
+        # Clean up old push-pending markers — new push supersedes all prior ones
+        rm -f "$MARKER_DIR"/push-pending-* 2>/dev/null || true
+        rm -f "$MARKER_DIR"/test-verified-* 2>/dev/null || true
+
         # Write push-pending marker with commit SHA
         echo "${PUSHED_SHA} $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MARKER_DIR/push-pending-${SESSION_ID}"
 

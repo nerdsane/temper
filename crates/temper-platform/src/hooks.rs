@@ -10,7 +10,6 @@
 //!   via the Deploy action. Runs the verify-and-deploy pipeline and
 //!   registers the tenant's specs in the SpecRegistry.
 
-use crate::deploy::{DeployInput, DeployPipeline, EntitySpecSource};
 use crate::state::PlatformState;
 
 /// Dispatch a custom effect from a system entity transition.
@@ -42,7 +41,7 @@ pub fn dispatch_custom_effect(
 fn handle_deploy_specs(
     _entity_type: &str,
     entity_id: &str,
-    state: &PlatformState,
+    _state: &PlatformState,
 ) -> Result<(), String> {
     tracing::info!(
         tenant = entity_id,
