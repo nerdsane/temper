@@ -70,7 +70,7 @@
           {
             "type": "command",
             "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/hooks/stop-verify.sh\"",
-            "timeout": 120
+            "timeout": 660
           }
         ]
       }

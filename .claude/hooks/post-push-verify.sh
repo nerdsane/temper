@@ -28,8 +28,11 @@ case "${CMD:-}" in
         # Session ID from environment or generate one
         SESSION_ID="${CLAUDE_SESSION_ID:-$(date +%s)}"
 
-        # Write push-pending marker
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MARKER_DIR/push-pending-${SESSION_ID}"
+        # Record pushed commit SHA for CI verification
+        PUSHED_SHA="$(cd "$WORKSPACE_ROOT" && git rev-parse HEAD 2>/dev/null || echo "unknown")"
+
+        # Write push-pending marker with commit SHA
+        echo "${PUSHED_SHA} $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MARKER_DIR/push-pending-${SESSION_ID}"
 
         echo "Running post-push verification..." >&2
         if (cd "$WORKSPACE_ROOT" && cargo test --workspace 2>&1 | tail -20 >&2); then
