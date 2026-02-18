@@ -730,9 +730,7 @@ async fn handle_workflows(
                     None => {
                         // Check if verification is still running
                         if let Some(VerificationStatus::Running) = registry.get_verification_status(tenant_id, entity_type) {
-                            if i == 0 && started_event.is_some() && level_events.is_empty() {
-                                "running"
-                            } else if level_events.len() == i {
+                            if (i == 0 && started_event.is_some() && level_events.is_empty()) || level_events.len() == i {
                                 "running"
                             } else {
                                 "pending"

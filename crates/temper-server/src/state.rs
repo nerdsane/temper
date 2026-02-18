@@ -60,6 +60,12 @@ pub struct MetricsCollector {
     pub errors_total: AtomicU64,
 }
 
+impl Default for MetricsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricsCollector {
     /// Create a new, empty collector.
     pub fn new() -> Self {
