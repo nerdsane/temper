@@ -1,21 +1,25 @@
+"use client";
+
+import { useRef, useState, useEffect } from "react";
+
 const KNOWN_COLORS: Record<string, string> = {
-  active: "bg-green-900/40 text-green-400 border-green-800",
-  done: "bg-green-900/40 text-green-400 border-green-800",
-  completed: "bg-green-900/40 text-green-400 border-green-800",
-  cancelled: "bg-red-900/40 text-red-400 border-red-800",
-  failed: "bg-red-900/40 text-red-400 border-red-800",
-  error: "bg-red-900/40 text-red-400 border-red-800",
+  active: "bg-teal-500/15 text-teal-400",
+  done: "bg-teal-500/15 text-teal-400",
+  completed: "bg-teal-500/15 text-teal-400",
+  cancelled: "bg-pink-500/15 text-pink-400",
+  failed: "bg-pink-500/15 text-pink-400",
+  error: "bg-pink-500/15 text-pink-400",
 };
 
 const HASH_PALETTES = [
-  "bg-blue-900/40 text-blue-400 border-blue-800",
-  "bg-yellow-900/40 text-yellow-400 border-yellow-800",
-  "bg-purple-900/40 text-purple-400 border-purple-800",
-  "bg-cyan-900/40 text-cyan-400 border-cyan-800",
-  "bg-orange-900/40 text-orange-400 border-orange-800",
-  "bg-pink-900/40 text-pink-400 border-pink-800",
-  "bg-teal-900/40 text-teal-400 border-teal-800",
-  "bg-indigo-900/40 text-indigo-400 border-indigo-800",
+  "bg-teal-500/15 text-teal-400",
+  "bg-yellow-500/15 text-yellow-400",
+  "bg-violet-500/15 text-violet-300",
+  "bg-lime-500/15 text-lime-400",
+  "bg-pink-500/15 text-pink-400",
+  "bg-orange-500/15 text-orange-400",
+  "bg-cyan-500/15 text-cyan-400",
+  "bg-fuchsia-500/15 text-fuchsia-400",
 ];
 
 function hashString(str: string): number {
@@ -33,11 +37,26 @@ function getStatusColors(status: string): string {
   return HASH_PALETTES[hashString(lower) % HASH_PALETTES.length];
 }
 
+const PINK_STATUSES = new Set(["cancelled", "failed", "error"]);
+
 export default function StatusBadge({ status }: { status: string }) {
   const colors = getStatusColors(status);
+  const prevStatusRef = useRef(status);
+  const [flashClass, setFlashClass] = useState("");
+
+  useEffect(() => {
+    if (prevStatusRef.current !== status) {
+      const isPink = PINK_STATUSES.has(status.toLowerCase());
+      setFlashClass(isPink ? "animate-flash-pink" : "animate-flash-teal");
+      prevStatusRef.current = status;
+    }
+  }, [status]);
 
   return (
-    <span className={`text-xs font-mono px-2 py-0.5 rounded border ${colors}`}>
+    <span
+      className={`text-xs font-mono px-2 py-0.5 rounded-full transition-colors duration-300 ${colors} ${flashClass}`}
+      onAnimationEnd={() => setFlashClass("")}
+    >
       {status}
     </span>
   );

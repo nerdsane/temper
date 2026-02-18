@@ -16,8 +16,8 @@ const STEP_LABELS: Record<string, string> = {
 function StepIcon({ status, passed }: { status: string; passed?: boolean }) {
   if (status === "completed" && passed === false) {
     return (
-      <div className="w-7 h-7 rounded-full bg-red-950 border-2 border-red-500 flex items-center justify-center">
-        <svg className="w-3.5 h-3.5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <div className="w-6 h-6 rounded-full bg-pink-400/10 flex items-center justify-center transition-all duration-300">
+        <svg className="w-3 h-3 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
         </svg>
       </div>
@@ -25,8 +25,8 @@ function StepIcon({ status, passed }: { status: string; passed?: boolean }) {
   }
   if (status === "completed") {
     return (
-      <div className="w-7 h-7 rounded-full bg-green-950 border-2 border-green-500 flex items-center justify-center">
-        <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <div className="w-6 h-6 rounded-full bg-teal-400/10 flex items-center justify-center transition-all duration-300">
+        <svg className="w-3 h-3 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
         </svg>
       </div>
@@ -34,15 +34,15 @@ function StepIcon({ status, passed }: { status: string; passed?: boolean }) {
   }
   if (status === "running") {
     return (
-      <div className="w-7 h-7 rounded-full bg-yellow-950 border-2 border-yellow-500 flex items-center justify-center">
-        <div className="w-2.5 h-2.5 bg-yellow-400 rounded-full animate-pulse" />
+      <div className="w-6 h-6 rounded-full bg-pink-400/10 flex items-center justify-center transition-all duration-300">
+        <div className="w-2 h-2 bg-pink-400 rounded-full animate-pulse" />
       </div>
     );
   }
   if (status === "failed") {
     return (
-      <div className="w-7 h-7 rounded-full bg-red-950 border-2 border-red-500 flex items-center justify-center">
-        <svg className="w-3.5 h-3.5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <div className="w-6 h-6 rounded-full bg-pink-400/10 flex items-center justify-center transition-all duration-300">
+        <svg className="w-3 h-3 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
         </svg>
       </div>
@@ -50,8 +50,8 @@ function StepIcon({ status, passed }: { status: string; passed?: boolean }) {
   }
   // pending
   return (
-    <div className="w-7 h-7 rounded-full bg-gray-900 border-2 border-gray-600 flex items-center justify-center">
-      <div className="w-2 h-2 bg-gray-500 rounded-full" />
+    <div className="w-6 h-6 rounded-full bg-white/[0.02] flex items-center justify-center transition-all duration-300">
+      <div className="w-1.5 h-1.5 bg-zinc-700 rounded-full" />
     </div>
   );
 }
@@ -76,7 +76,7 @@ export default function WorkflowTimeline({ steps }: WorkflowTimelineProps) {
   return (
     <div className="relative">
       {/* Vertical timeline line */}
-      <div className="absolute left-[13px] top-4 bottom-4 w-px bg-gray-700" />
+      <div className="absolute left-[11px] top-3 bottom-3 w-px bg-gradient-to-b from-white/[0.06] via-white/[0.04] to-transparent" />
 
       <div className="space-y-0">
         {steps.map((step, i) => {
@@ -92,7 +92,7 @@ export default function WorkflowTimeline({ steps }: WorkflowTimelineProps) {
             : null;
 
           return (
-            <div key={step.step} className="relative flex gap-3 py-2">
+            <div key={step.step} className="relative flex gap-2.5 py-1.5">
               {/* Step dot */}
               <div className="relative z-10 flex-shrink-0">
                 <StepIcon status={step.status} passed={step.passed} />
@@ -101,31 +101,31 @@ export default function WorkflowTimeline({ steps }: WorkflowTimelineProps) {
               {/* Step content */}
               <button
                 onClick={() => step.summary && toggle(i)}
-                className={`flex-1 text-left rounded-lg p-2.5 min-w-0 transition-colors ${
-                  step.summary ? "hover:bg-gray-800/50 cursor-pointer" : "cursor-default"
+                className={`flex-1 text-left rounded-lg p-2 min-w-0 transition-colors ${
+                  step.summary ? "hover:bg-white/[0.02] cursor-pointer" : "cursor-default"
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className={`text-sm font-medium ${
+                  <span className={`text-[13px] font-medium ${
                     step.status === "completed" && step.passed !== false
-                      ? "text-gray-200"
+                      ? "text-zinc-300"
                       : step.status === "running"
-                      ? "text-yellow-300"
+                      ? "text-pink-400"
                       : step.status === "failed" || step.passed === false
-                      ? "text-red-300"
-                      : "text-gray-500"
+                      ? "text-pink-400"
+                      : "text-zinc-600"
                   }`}>
                     {label}
                   </span>
                   <div className="flex items-center gap-2">
                     {timeStr && (
-                      <span className="text-xs font-mono text-gray-500">{timeStr}</span>
+                      <span className="text-[11px] font-mono text-zinc-600">{timeStr}</span>
                     )}
-                    {step.passed !== undefined && step.status === "completed" && (
-                      <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${
+                    {(step.passed === true || step.passed === false) && step.status === "completed" && (
+                      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${
                         step.passed
-                          ? "bg-green-900/50 text-green-400"
-                          : "bg-red-900/50 text-red-400"
+                          ? "bg-teal-400/10 text-teal-400 animate-flash-teal"
+                          : "bg-pink-400/10 text-pink-400 animate-flash-pink"
                       }`}>
                         {step.passed ? "PASS" : "FAIL"}
                       </span>
@@ -133,9 +133,9 @@ export default function WorkflowTimeline({ steps }: WorkflowTimelineProps) {
                   </div>
                 </div>
 
-                {/* Summary (always visible for completed steps) */}
-                {step.summary && (isExpanded || step.status === "running") && (
-                  <div className="text-xs text-gray-400 mt-1 font-mono">
+                {/* Summary — auto-visible for failed steps */}
+                {step.summary && (isExpanded || step.status === "running" || step.passed === false) && (
+                  <div className="text-[11px] text-zinc-500 mt-1 font-mono">
                     {step.summary}
                   </div>
                 )}

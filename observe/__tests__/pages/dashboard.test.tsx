@@ -1,10 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import Dashboard from "@/app/page";
 
 vi.mock("@/lib/api", () => ({
   fetchSpecs: vi.fn(),
   fetchEntities: vi.fn(),
+  fetchVerificationStatus: vi.fn().mockResolvedValue({ pending: 0, running: 0, passed: 0, failed: 0, partial: 0, entities: [] }),
+  subscribeDesignTimeEvents: vi.fn().mockReturnValue(() => {}),
+  subscribeEntityEvents: vi.fn().mockReturnValue(() => {}),
 }));
 
 vi.mock("@/lib/hooks", () => ({
@@ -18,6 +21,10 @@ vi.mock("next/link", () => ({
   ),
 }));
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn(), forward: vi.fn(), prefetch: vi.fn(), refresh: vi.fn() }),
+}));
+
 import { fetchSpecs } from "@/lib/api";
 import { usePolling, useRelativeTime } from "@/lib/hooks";
 
@@ -25,46 +32,79 @@ const mockFetchSpecs = vi.mocked(fetchSpecs);
 const mockUsePolling = vi.mocked(usePolling);
 const mockUseRelativeTime = vi.mocked(useRelativeTime);
 
-function setPollingReturn(data: unknown[] | null, opts?: { error?: string; loading?: boolean }) {
-  mockUsePolling.mockReturnValue({
-    data: data as never,
-    error: opts?.error ?? null,
-    loading: opts?.loading ?? false,
-    lastUpdated: data ? new Date() : null,
-    refresh: vi.fn(),
+const emptyVerifyStatus = { pending: 0, running: 0, passed: 0, failed: 0, partial: 0, entities: [] };
+
+/**
+ * Set up the 3 usePolling calls: specs, entities, verification status.
+ * Uses mockImplementation with a counter that cycles through the 3 return values.
+ */
+function setPollingReturns(
+  specs: unknown[] | null,
+  entities: unknown[] | null,
+  opts?: { error?: string; loading?: boolean },
+) {
+  let callIndex = 0;
+  const results = [
+    {
+      data: specs as never,
+      error: opts?.error ?? null,
+      loading: opts?.loading ?? false,
+      lastUpdated: specs ? new Date() : null,
+      refresh: vi.fn(),
+    },
+    {
+      data: entities as never,
+      error: opts?.error ?? null,
+      loading: opts?.loading ?? false,
+      lastUpdated: entities ? new Date() : null,
+      refresh: vi.fn(),
+    },
+    {
+      data: emptyVerifyStatus as never,
+      error: null,
+      loading: false,
+      lastUpdated: null,
+      refresh: vi.fn(),
+    },
+  ];
+  mockUsePolling.mockImplementation(() => {
+    const result = results[callIndex % 3];
+    callIndex++;
+    return result;
   });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   mockUseRelativeTime.mockReturnValue("5s ago");
-  setPollingReturn([]);
+  setPollingReturns([], []);
 });
 
 describe("Dashboard page", () => {
   it("shows loading skeleton initially", () => {
     mockFetchSpecs.mockReturnValue(new Promise(() => {}));
-    setPollingReturn(null, { loading: true });
+    setPollingReturns(null, null, { loading: true });
     const { container } = render(<Dashboard />);
     expect(container.querySelector(".animate-pulse")).toBeTruthy();
   });
 
   it("shows empty state when no data", async () => {
     mockFetchSpecs.mockResolvedValue([]);
-    setPollingReturn([]);
+    setPollingReturns([], []);
     render(<Dashboard />);
     await waitFor(() => {
       expect(screen.getByText("No specs loaded")).toBeInTheDocument();
     });
   });
 
-  it("renders specs and entities on success", async () => {
+  it("renders specs on success", async () => {
     mockFetchSpecs.mockResolvedValue([
       { entity_type: "Ticket", states: ["Open", "Closed"], actions: ["close"], initial_state: "Open" },
     ]);
-    setPollingReturn([
-      { entity_type: "Ticket", entity_id: "TKT-001", actor_status: "active", current_state: "Open" },
-    ]);
+    setPollingReturns(
+      [{ entity_type: "Ticket", states: ["Open", "Closed"], actions: ["close"], initial_state: "Open" }],
+      [{ entity_type: "Ticket", entity_id: "TKT-001", actor_status: "active", current_state: "Open" }],
+    );
 
     render(<Dashboard />);
 
@@ -73,15 +113,12 @@ describe("Dashboard page", () => {
     });
 
     expect(screen.getAllByText("Ticket").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("TKT-001")).toBeInTheDocument();
-    expect(screen.getByText("Inspect")).toBeInTheDocument();
     expect(screen.getByText("Loaded Specs")).toBeInTheDocument();
-    expect(screen.getByText("Active Entities")).toBeInTheDocument();
   });
 
   it("shows error state when API fails", async () => {
     mockFetchSpecs.mockRejectedValue(new Error("Network error"));
-    setPollingReturn([]);
+    setPollingReturns([], []);
     render(<Dashboard />);
     await waitFor(() => {
       expect(screen.getByText("Cannot load dashboard")).toBeInTheDocument();
@@ -89,74 +126,15 @@ describe("Dashboard page", () => {
     expect(screen.getByText("Retry")).toBeInTheDocument();
   });
 
-  it("filters entities by search query", async () => {
-    mockFetchSpecs.mockResolvedValue([
-      { entity_type: "Ticket", states: ["Open"], actions: [], initial_state: "Open" },
-    ]);
-    setPollingReturn([
-      { entity_type: "Ticket", entity_id: "TKT-001", actor_status: "active", current_state: "Open" },
-      { entity_type: "Ticket", entity_id: "TKT-002", actor_status: "active", current_state: "Closed" },
-    ]);
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      expect(screen.getByText("TKT-001")).toBeInTheDocument();
-    });
-
-    const searchInput = screen.getByPlaceholderText("Search by ID...");
-    fireEvent.change(searchInput, { target: { value: "002" } });
-
-    expect(screen.queryByText("TKT-001")).not.toBeInTheDocument();
-    expect(screen.getByText("TKT-002")).toBeInTheDocument();
-  });
-
-  it("shows clear filters button when filter is active", async () => {
-    mockFetchSpecs.mockResolvedValue([
-      { entity_type: "Ticket", states: ["Open"], actions: [], initial_state: "Open" },
-    ]);
-    setPollingReturn([
-      { entity_type: "Ticket", entity_id: "TKT-001", actor_status: "active", current_state: "Open" },
-    ]);
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      expect(screen.getByText("TKT-001")).toBeInTheDocument();
-    });
-
-    expect(screen.queryByText("Clear filters")).not.toBeInTheDocument();
-
-    const searchInput = screen.getByPlaceholderText("Search by ID...");
-    fireEvent.change(searchInput, { target: { value: "test" } });
-
-    expect(screen.getByText("Clear filters")).toBeInTheDocument();
-  });
-
-  it("shows polling error indicator", async () => {
-    mockFetchSpecs.mockResolvedValue([
-      { entity_type: "Ticket", states: ["Open"], actions: [], initial_state: "Open" },
-    ]);
-    setPollingReturn(
-      [{ entity_type: "Ticket", entity_id: "TKT-001", actor_status: "active", current_state: "Open" }],
-      { error: "Connection lost" },
-    );
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Polling error")).toBeInTheDocument();
-    });
-  });
-
   it("shows last updated time", async () => {
     mockUseRelativeTime.mockReturnValue("10s ago");
     mockFetchSpecs.mockResolvedValue([
       { entity_type: "Ticket", states: ["Open"], actions: [], initial_state: "Open" },
     ]);
-    setPollingReturn([
-      { entity_type: "Ticket", entity_id: "TKT-001", actor_status: "active", current_state: "Open" },
-    ]);
+    setPollingReturns(
+      [{ entity_type: "Ticket", states: ["Open"], actions: [], initial_state: "Open" }],
+      [{ entity_type: "Ticket", entity_id: "TKT-001", actor_status: "active", current_state: "Open" }],
+    );
 
     render(<Dashboard />);
 

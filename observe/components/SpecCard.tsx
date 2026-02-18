@@ -1,3 +1,7 @@
+"use client";
+
+import { useRef, useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import type { SpecSummary } from "@/lib/types";
 
@@ -13,18 +17,18 @@ function VerificationBadge({ spec }: { spec: SpecSummary }) {
       : null;
 
   const config: Record<string, { bg: string; text: string; label: string; pulse?: boolean }> = {
-    pending: { bg: "bg-gray-700/50", text: "text-gray-400", label: "Pending" },
-    running: { bg: "bg-yellow-900/50", text: "text-yellow-400", label: "Verifying...", pulse: true },
-    passed: { bg: "bg-green-900/50", text: "text-green-400", label: "Verified" },
-    failed: { bg: "bg-red-900/50", text: "text-red-400", label: "Failed" },
-    partial: { bg: "bg-amber-900/50", text: "text-amber-400", label: levelInfo ? `Partial (${levelInfo})` : "Partial" },
+    pending: { bg: "bg-zinc-500/10", text: "text-zinc-500", label: "Pending" },
+    running: { bg: "bg-yellow-500/10", text: "text-yellow-400", label: "Verifying...", pulse: true },
+    passed: { bg: "bg-teal-500/10", text: "text-teal-400", label: "Verified" },
+    failed: { bg: "bg-pink-500/10", text: "text-pink-400", label: "Failed" },
+    partial: { bg: "bg-yellow-500/10", text: "text-yellow-400", label: levelInfo ? `Partial (${levelInfo})` : "Partial" },
   };
 
   const c = config[status] ?? config.pending;
 
   return (
     <span
-      className={`text-xs font-mono px-2 py-0.5 rounded ${c.bg} ${c.text} ${c.pulse ? "animate-pulse" : ""}`}
+      className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${c.bg} ${c.text} ${c.pulse ? "animate-pulse" : ""}`}
     >
       {c.label}
     </span>
@@ -32,42 +36,59 @@ function VerificationBadge({ spec }: { spec: SpecSummary }) {
 }
 
 export default function SpecCard({ spec }: SpecCardProps) {
+  const router = useRouter();
+  const prevVerifyRef = useRef(spec.verification_status);
+  const [cardFlash, setCardFlash] = useState("");
+
+  useEffect(() => {
+    if (prevVerifyRef.current !== spec.verification_status) {
+      setCardFlash(
+        spec.verification_status === "passed" ? "animate-flash-teal" :
+        spec.verification_status === "failed" ? "animate-flash-pink" : ""
+      );
+      prevVerifyRef.current = spec.verification_status;
+    }
+  }, [spec.verification_status]);
+
   return (
     <Link href={`/specs/${spec.entity_type}`}>
-      <div className="bg-gray-900 border border-gray-800 rounded-lg p-5 hover:border-gray-600 transition-colors cursor-pointer">
-        <div className="flex items-start justify-between mb-3">
-          <h3 className="text-lg font-semibold text-gray-100">{spec.entity_type}</h3>
+      <div
+        className={`bg-[#111115] rounded-lg p-5 hover:bg-white/[0.02] transition-colors cursor-pointer group ${cardFlash}`}
+        onAnimationEnd={() => setCardFlash("")}
+      >
+        <div className="flex items-start justify-between mb-2.5">
+          <h3 className="text-base font-semibold text-zinc-100 tracking-tight">{spec.entity_type}</h3>
           <div className="flex gap-1.5">
             <VerificationBadge spec={spec} />
-            <span className="text-xs font-mono bg-blue-900/50 text-blue-400 px-2 py-0.5 rounded">
+            <span className="text-[10px] font-mono bg-teal-500/10 text-teal-400 px-2 py-0.5 rounded-full">
               IOA
             </span>
           </div>
         </div>
 
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           <div className="flex items-center justify-between text-sm">
-            <span className="text-gray-500">States</span>
-            <span className="font-mono text-gray-300">{spec.states.length}</span>
+            <span className="text-zinc-600">States</span>
+            <span className="font-mono text-zinc-400">{spec.states.length}</span>
           </div>
           <div className="flex items-center justify-between text-sm">
-            <span className="text-gray-500">Actions</span>
-            <span className="font-mono text-gray-300">{spec.actions.length}</span>
+            <span className="text-zinc-600">Actions</span>
+            <span className="font-mono text-zinc-400">{spec.actions.length}</span>
           </div>
           <div className="flex items-center justify-between text-sm">
-            <span className="text-gray-500">Initial</span>
-            <span className="font-mono text-green-400">{spec.initial_state}</span>
+            <span className="text-zinc-600">Initial</span>
+            <span className="font-mono text-lime-400">{spec.initial_state}</span>
           </div>
         </div>
 
-        <div className="mt-4 flex flex-wrap gap-1.5">
+        <div className="mt-3 flex flex-wrap gap-1">
           {spec.states.map((state) => (
             <span
               key={state}
-              className={`text-xs px-2 py-0.5 rounded font-mono ${
+              className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
                 state === spec.initial_state
-                  ? "bg-green-900/40 text-green-400 border border-green-800"
-                  : "bg-gray-800 text-gray-400 border border-gray-700"
+                  ? "bg-lime-500/10 text-lime-400"
+                  : "bg-white/[0.03] text-zinc-500"
               }`}
             >
               {state}
@@ -75,14 +96,18 @@ export default function SpecCard({ spec }: SpecCardProps) {
           ))}
         </div>
 
-        <div className="mt-4 flex gap-2">
-          <Link
-            href={`/verify/${spec.entity_type}`}
-            className="text-xs text-blue-400 hover:text-blue-300"
-            onClick={(e) => e.stopPropagation()}
+        <div className="mt-3 flex gap-2">
+          <button
+            type="button"
+            className="text-[11px] text-teal-400 hover:text-teal-300 transition-colors"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              router.push(`/verify/${spec.entity_type}`);
+            }}
           >
             Verify
-          </Link>
+          </button>
         </div>
       </div>
     </Link>

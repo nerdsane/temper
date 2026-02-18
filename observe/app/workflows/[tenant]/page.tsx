@@ -12,12 +12,12 @@ import Link from "next/link";
 function DetailSkeleton() {
   return (
     <div className="animate-pulse">
-      <div className="h-4 bg-gray-800/60 rounded w-24 mb-4" />
-      <div className="h-7 bg-gray-800 rounded w-48 mb-2" />
-      <div className="h-4 bg-gray-800/60 rounded w-72 mb-8" />
-      <div className="space-y-6">
+      <div className="h-3.5 bg-zinc-800/40 rounded w-20 mb-3" />
+      <div className="h-6 bg-zinc-800/60 rounded w-44 mb-1.5" />
+      <div className="h-3.5 bg-zinc-800/40 rounded w-64 mb-6" />
+      <div className="space-y-4">
         {[0, 1, 2].map((i) => (
-          <div key={i} className="bg-gray-900 border border-gray-800 rounded-lg p-5 h-64" />
+          <div key={i} className="bg-[#111115] rounded-lg p-4 h-56" />
         ))}
       </div>
     </div>
@@ -25,24 +25,24 @@ function DetailSkeleton() {
 }
 
 function StatusBanner({ status }: { status: string }) {
-  const configs: Record<string, { bg: string; border: string; text: string; label: string }> = {
-    loading: { bg: "bg-blue-950/30", border: "border-blue-800", text: "text-blue-400", label: "Loading specs..." },
-    verifying: { bg: "bg-yellow-950/30", border: "border-yellow-800", text: "text-yellow-400", label: "Verification in progress" },
-    completed: { bg: "bg-green-950/30", border: "border-green-800", text: "text-green-400", label: "All entities verified and deployed" },
-    failed: { bg: "bg-red-950/30", border: "border-red-800", text: "text-red-400", label: "Some entities failed verification" },
+  const configs: Record<string, { bg: string; text: string; label: string }> = {
+    loading: { bg: "bg-teal-500/5", text: "text-teal-400", label: "Loading specs..." },
+    verifying: { bg: "bg-yellow-500/5", text: "text-yellow-400", label: "Verification in progress" },
+    completed: { bg: "bg-teal-500/5", text: "text-teal-400", label: "All entities verified and deployed" },
+    failed: { bg: "bg-pink-500/5", text: "text-pink-400", label: "Some entities failed verification" },
   };
   const c = configs[status] ?? configs.loading;
   const isActive = status === "loading" || status === "verifying";
 
   return (
-    <div className={`${c.bg} border ${c.border} rounded-lg p-4 mb-6 flex items-center gap-3`}>
-      {isActive && <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse" />}
+    <div className={`${c.bg} rounded-lg px-3.5 py-2.5 mb-5 flex items-center gap-2.5`}>
+      {isActive && <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" />}
       {!isActive && (
-        <span className={`text-lg ${c.text}`}>
+        <span className={`text-sm ${c.text}`}>
           {status === "completed" ? "\u2713" : "\u2717"}
         </span>
       )}
-      <span className={`text-sm font-medium ${c.text}`}>{c.label}</span>
+      <span className={`text-[13px] font-medium ${c.text}`}>{c.label}</span>
     </div>
   );
 }
@@ -103,21 +103,21 @@ export default function WorkflowDetailPage() {
     );
 
   return (
-    <div>
+    <div className="animate-fade-in">
       {/* Breadcrumb */}
-      <div className="mb-4">
-        <Link href="/workflows" className="text-sm text-gray-500 hover:text-gray-300 transition-colors">
+      <div className="mb-3">
+        <Link href="/workflows" className="text-[12px] text-zinc-600 hover:text-zinc-400 transition-colors">
           Workflows
         </Link>
-        <span className="text-gray-600 mx-2">/</span>
-        <span className="text-sm text-gray-300">{tenant}</span>
+        <span className="text-zinc-700 mx-1.5">/</span>
+        <span className="text-[12px] text-zinc-400">{tenant}</span>
       </div>
 
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-5">
         <div>
-          <h1 className="text-2xl font-bold text-gray-100">{tenant}</h1>
-          <p className="text-sm text-gray-500 mt-1">
+          <h1 className="text-2xl font-bold text-zinc-100 tracking-tight font-display">{tenant}</h1>
+          <p className="text-[13px] text-zinc-600 mt-0.5">
             {workflow.entities.length} {workflow.entities.length === 1 ? "entity" : "entities"}
             {workflow.runtime_events_count > 0 && (
               <span className="ml-2">
@@ -132,7 +132,7 @@ export default function WorkflowDetailPage() {
       <StatusBanner status={workflow.status} />
 
       {/* Entity workflows */}
-      <div className="space-y-6">
+      <div className="space-y-4">
         {workflow.entities.map((entity) => {
           const entityDone = entity.steps.every(
             (s) => s.status === "completed" || s.status === "failed",
@@ -144,38 +144,34 @@ export default function WorkflowDetailPage() {
           return (
             <div
               key={entity.entity_type}
-              className={`bg-gray-900 border rounded-lg p-5 ${
-                entityFailed
-                  ? "border-red-800/50"
-                  : entityDone
-                  ? "border-gray-800"
-                  : "border-gray-800"
+              className={`bg-[#111115] rounded-lg p-4 ${
+                entityFailed ? "bg-pink-500/5" : ""
               }`}
             >
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-3">
-                  <h3 className="text-base font-semibold text-gray-200 font-mono">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2.5">
+                  <h3 className="text-sm font-semibold text-zinc-200 font-mono tracking-tight">
                     {entity.entity_type}
                   </h3>
                   {entityDone && !entityFailed && (
-                    <span className="text-xs bg-green-900/50 text-green-400 px-2 py-0.5 rounded">
+                    <span className="text-[10px] bg-teal-500/10 text-teal-400 px-2 py-0.5 rounded-full font-mono">
                       Verified
                     </span>
                   )}
                   {entityFailed && (
-                    <span className="text-xs bg-red-900/50 text-red-400 px-2 py-0.5 rounded">
+                    <span className="text-[10px] bg-pink-500/10 text-pink-400 px-2 py-0.5 rounded-full font-mono">
                       Failed
                     </span>
                   )}
                   {!entityDone && !entityFailed && (
-                    <span className="text-xs bg-yellow-900/50 text-yellow-400 px-2 py-0.5 rounded">
+                    <span className="text-[10px] bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded-full font-mono">
                       In Progress
                     </span>
                   )}
                 </div>
                 <Link
                   href={`/specs/${entity.entity_type}`}
-                  className="text-xs text-blue-400 hover:text-blue-300"
+                  className="text-[11px] text-teal-400 hover:text-teal-300 transition-colors"
                 >
                   View Spec
                 </Link>
@@ -189,28 +185,28 @@ export default function WorkflowDetailPage() {
 
       {/* Live event stream */}
       {liveEvents.length > 0 && (
-        <div className="mt-8">
-          <h2 className="text-lg font-semibold text-gray-200 mb-4">Live Events</h2>
-          <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-            <div className="max-h-64 overflow-y-auto">
+        <div className="mt-6">
+          <h2 className="text-[15px] font-semibold text-zinc-200 mb-3 tracking-tight">Live Events</h2>
+          <div className="bg-[#111115] rounded-lg overflow-hidden">
+            <div className="max-h-56 overflow-y-auto">
               {liveEvents.slice().reverse().map((event, i) => (
                 <div
                   key={i}
-                  className="flex items-center gap-3 px-4 py-2.5 border-b border-gray-800/50 last:border-b-0"
+                  className="flex items-center gap-2.5 px-3.5 py-2 border-b border-white/[0.03] last:border-b-0 animate-slide-in"
                 >
-                  <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                    event.passed === true ? "bg-green-400" :
-                    event.passed === false ? "bg-red-400" :
-                    "bg-blue-400"
+                  <div className={`w-1 h-1 rounded-full flex-shrink-0 ${
+                    event.passed === true ? "bg-teal-400" :
+                    event.passed === false ? "bg-pink-400" :
+                    "bg-teal-400"
                   }`} />
-                  <span className="text-xs font-mono text-gray-400 flex-shrink-0">
+                  <span className="text-[11px] font-mono text-zinc-500 flex-shrink-0">
                     {event.entity_type}
                   </span>
-                  <span className="text-xs text-gray-300 truncate">
+                  <span className="text-[11px] text-zinc-400 truncate">
                     {event.summary}
                   </span>
                   {event.timestamp && (
-                    <span className="text-xs font-mono text-gray-600 flex-shrink-0 ml-auto">
+                    <span className="text-[10px] font-mono text-zinc-700 flex-shrink-0 ml-auto">
                       {new Date(event.timestamp).toLocaleTimeString("en-US", {
                         hour: "2-digit",
                         minute: "2-digit",
