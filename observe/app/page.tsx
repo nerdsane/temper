@@ -223,19 +223,20 @@ export default function Dashboard() {
     loadInitial();
   }, [loadInitial]);
 
-  // Derive unique tenants for filter dropdown
+  // Derive unique tenants for filter dropdown (hide internal platform tenant)
   const tenants = useMemo(() => {
     const set = new Set<string>();
     for (const s of specs) {
-      if (s.tenant) set.add(s.tenant);
+      if (s.tenant && s.tenant !== "temper-system") set.add(s.tenant);
     }
     return Array.from(set).sort();
   }, [specs]);
 
-  // Filtered specs by tenant
+  // Filtered specs by tenant (always exclude temper-system)
   const filteredSpecs = useMemo(() => {
-    if (tenantFilter === "all") return specs;
-    return specs.filter((s) => s.tenant === tenantFilter);
+    const visible = specs.filter((s) => s.tenant !== "temper-system");
+    if (tenantFilter === "all") return visible;
+    return visible.filter((s) => s.tenant === tenantFilter);
   }, [specs, tenantFilter]);
 
   if (initialLoading) return <DashboardSkeleton />;

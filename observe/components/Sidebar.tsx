@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { fetchSpecs, fetchEntities } from "@/lib/api";
 import { useConnection } from "@/lib/connection";
 import type { SpecSummary } from "@/lib/types";
@@ -63,6 +63,55 @@ function NavIcon({ icon }: { icon: string }) {
   }
 }
 
+function CollapsibleSection({
+  title,
+  storageKey,
+  children,
+  count,
+}: {
+  title: string;
+  storageKey: string;
+  children: React.ReactNode;
+  count?: number;
+}) {
+  const [isOpen, setIsOpen] = useState(() => {
+    if (typeof window === "undefined") return true;
+    const stored = localStorage.getItem(`sidebar-${storageKey}`);
+    return stored === null ? true : stored === "true";
+  });
+
+  const toggle = useCallback(() => {
+    setIsOpen((prev) => {
+      const next = !prev;
+      localStorage.setItem(`sidebar-${storageKey}`, String(next));
+      return next;
+    });
+  }, [storageKey]);
+
+  return (
+    <div className="mt-3">
+      <button
+        onClick={toggle}
+        className="flex items-center gap-1.5 px-2.5 py-1 w-full text-left text-[10px] font-medium text-zinc-600 uppercase tracking-widest hover:text-zinc-400 transition-colors group"
+      >
+        <svg
+          className={`w-3 h-3 text-zinc-700 transition-transform duration-150 ${isOpen ? "rotate-90" : ""}`}
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+        </svg>
+        <span>{title}</span>
+        {count !== undefined && (
+          <span className="text-zinc-700 group-hover:text-zinc-500">{count}</span>
+        )}
+      </button>
+      {isOpen && children}
+    </div>
+  );
+}
+
 export default function Sidebar() {
   const pathname = usePathname();
   const { connected, checking } = useConnection();
@@ -101,11 +150,12 @@ export default function Sidebar() {
     { href: "/evolution", label: "Evolution", icon: "dna" },
   ];
 
-  // Group specs by tenant/app
+  // Group specs by tenant/app (hide internal platform tenant)
   const specsByTenant = useMemo(() => {
     const groups: Record<string, SpecSummary[]> = {};
     for (const spec of specs) {
       const tenant = spec.tenant || "default";
+      if (tenant === "temper-system") continue;
       if (!groups[tenant]) groups[tenant] = [];
       groups[tenant].push(spec);
     }
@@ -113,11 +163,11 @@ export default function Sidebar() {
   }, [specs]);
 
   return (
-    <aside className="w-52 bg-[#09090b] border-r border-white/[0.06] flex flex-col min-h-screen">
+    <aside className="w-52 bg-[#0a0a0c] border-r border-white/[0.06] flex flex-col h-screen">
       {/* Logo / Title */}
-      <div className="px-4 py-3.5 border-b border-white/[0.06]">
+      <div className="px-4 py-3.5">
         <Link href="/" className="flex items-center gap-2.5">
-          <div className="w-7 h-7 bg-blue-600 rounded-md flex items-center justify-center text-xs font-bold tracking-tight">
+          <div className="w-7 h-7 bg-teal-500 rounded-lg flex items-center justify-center text-xs font-bold tracking-tight">
             T
           </div>
           <div>
@@ -136,7 +186,7 @@ export default function Sidebar() {
             href={item.href}
             className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] transition-colors ${
               isActive(item.href)
-                ? "text-zinc-100 bg-white/[0.06] border-l-2 border-blue-500 pl-2"
+                ? "text-zinc-100 bg-white/[0.06]"
                 : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
             }`}
           >
@@ -147,22 +197,19 @@ export default function Sidebar() {
 
         {/* Dynamic spec nav grouped by app/tenant */}
         {Object.entries(specsByTenant).map(([tenant, tenantSpecs]) => (
-          <div key={tenant} className="mt-3">
-            <Link
-              href={`/workflows/${tenant}`}
-              className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-medium text-zinc-600 uppercase tracking-widest hover:text-zinc-400 transition-colors group"
-            >
-              <div className="w-0.5 h-3 bg-zinc-800 rounded-full group-hover:bg-zinc-600 transition-colors" />
-              <span>{tenant}</span>
-              <span className="text-zinc-700 group-hover:text-zinc-500">{tenantSpecs.length}</span>
-            </Link>
+          <CollapsibleSection
+            key={tenant}
+            title={tenant}
+            storageKey={`tenant-${tenant}`}
+            count={tenantSpecs.length}
+          >
             {tenantSpecs.map((spec) => (
               <Link
                 key={`${tenant}:${spec.entity_type}`}
                 href={`/specs/${spec.entity_type}`}
                 className={`flex items-center justify-between px-2.5 py-1.5 rounded-md text-[13px] transition-colors ${
                   isActive(`/specs/${spec.entity_type}`)
-                    ? "text-zinc-100 bg-white/[0.06] border-l-2 border-blue-500 pl-2"
+                    ? "text-zinc-100 bg-white/[0.06]"
                     : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
                 }`}
               >
@@ -171,45 +218,41 @@ export default function Sidebar() {
                   <span className="truncate">{spec.entity_type}</span>
                 </div>
                 {entityCounts[spec.entity_type] !== undefined && (
-                  <span className="text-[10px] font-mono bg-white/[0.04] text-zinc-600 px-1.5 py-0.5 rounded">
+                  <span className="text-[10px] font-mono bg-teal-500/10 text-teal-400 px-1.5 py-0.5 rounded">
                     {entityCounts[spec.entity_type]}
                   </span>
                 )}
               </Link>
             ))}
-          </div>
+          </CollapsibleSection>
         ))}
 
         {/* Static verify / entities links */}
-        <div className="mt-3">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-medium text-zinc-600 uppercase tracking-widest">
-            <div className="w-0.5 h-3 bg-zinc-800 rounded-full" />
-            Tools
-          </div>
-        </div>
-        <Link
-          href={specs.length > 0 ? `/verify/${specs[0].entity_type}` : "/verify/Ticket"}
-          className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] transition-colors ${
-            pathname.startsWith("/verify")
-              ? "text-zinc-100 bg-white/[0.06] border-l-2 border-blue-500 pl-2"
-              : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
-          }`}
-        >
-          <NavIcon icon="shield" />
-          Verification
-        </Link>
+        <CollapsibleSection title="Tools" storageKey="tools">
+          <Link
+            href={specs.length > 0 ? `/verify/${specs[0].entity_type}` : "/verify/Ticket"}
+            className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] transition-colors ${
+              pathname.startsWith("/verify")
+                ? "text-zinc-100 bg-white/[0.06]"
+                : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
+            }`}
+          >
+            <NavIcon icon="shield" />
+            Verification
+          </Link>
+        </CollapsibleSection>
       </nav>
 
       {/* Connection Status + Footer */}
-      <div className="px-4 py-3 border-t border-white/[0.06] space-y-1.5">
+      <div className="px-4 py-3 mt-auto space-y-1.5">
         {!checking && (
           <div className="flex items-center gap-2">
             <div
               className={`w-1.5 h-1.5 rounded-full ${
-                connected ? "bg-emerald-400" : "bg-rose-400"
+                connected ? "bg-teal-400" : "bg-pink-400"
               }`}
             />
-            <span className={`text-[11px] ${connected ? "text-zinc-600" : "text-rose-400"}`}>
+            <span className={`text-[11px] ${connected ? "text-zinc-600" : "text-pink-400"}`}>
               {connected ? "Connected" : "Disconnected"}
             </span>
           </div>
