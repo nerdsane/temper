@@ -5,15 +5,44 @@ interface SpecCardProps {
   spec: SpecSummary;
 }
 
+function VerificationBadge({ spec }: { spec: SpecSummary }) {
+  const status = spec.verification_status;
+  const levelInfo =
+    spec.levels_passed != null && spec.levels_total != null
+      ? `${spec.levels_passed}/${spec.levels_total}`
+      : null;
+
+  const config: Record<string, { bg: string; text: string; label: string; pulse?: boolean }> = {
+    pending: { bg: "bg-gray-700/50", text: "text-gray-400", label: "Pending" },
+    running: { bg: "bg-yellow-900/50", text: "text-yellow-400", label: "Verifying...", pulse: true },
+    passed: { bg: "bg-green-900/50", text: "text-green-400", label: "Verified" },
+    failed: { bg: "bg-red-900/50", text: "text-red-400", label: "Failed" },
+    partial: { bg: "bg-amber-900/50", text: "text-amber-400", label: levelInfo ? `Partial (${levelInfo})` : "Partial" },
+  };
+
+  const c = config[status] ?? config.pending;
+
+  return (
+    <span
+      className={`text-xs font-mono px-2 py-0.5 rounded ${c.bg} ${c.text} ${c.pulse ? "animate-pulse" : ""}`}
+    >
+      {c.label}
+    </span>
+  );
+}
+
 export default function SpecCard({ spec }: SpecCardProps) {
   return (
     <Link href={`/specs/${spec.entity_type}`}>
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-5 hover:border-gray-600 transition-colors cursor-pointer">
         <div className="flex items-start justify-between mb-3">
           <h3 className="text-lg font-semibold text-gray-100">{spec.entity_type}</h3>
-          <span className="text-xs font-mono bg-blue-900/50 text-blue-400 px-2 py-0.5 rounded">
-            IOA
-          </span>
+          <div className="flex gap-1.5">
+            <VerificationBadge spec={spec} />
+            <span className="text-xs font-mono bg-blue-900/50 text-blue-400 px-2 py-0.5 rounded">
+              IOA
+            </span>
+          </div>
         </div>
 
         <div className="space-y-2">

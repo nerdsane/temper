@@ -1,6 +1,10 @@
 # Temper
 
 [![CI](https://github.com/nerdsane/temper/actions/workflows/ci.yml/badge.svg)](https://github.com/nerdsane/temper/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE)
+[![Rust](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/rita-aga/883fd73429759b545967fdd6298b34ff/raw/temper-rust.json)](https://www.rust-lang.org)
+[![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/rita-aga/883fd73429759b545967fdd6298b34ff/raw/temper-tests.json)](#)
+[![Crates](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/rita-aga/883fd73429759b545967fdd6298b34ff/raw/temper-crates.json)](#)
 
 **This is research, not a product.**
 
@@ -54,4 +58,4 @@ DATABASE_URL=postgres://user:pass@localhost/db cargo run -- serve \
 
 ## Status
 
-441 tests across 16 crates. Functional end-to-end: spec parsing, verification cascade, actor dispatch, Postgres persistence, OTEL telemetry. The open questions are about generality, not functionality.
+594 tests across 18 crates. Functional end-to-end: spec parsing, verification cascade, actor dispatch, Postgres persistence, OTEL telemetry. The open questions are about generality, not functionality.

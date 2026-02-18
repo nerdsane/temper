@@ -43,7 +43,7 @@ fi
 # --- Check 1b: GitHub CI must pass for the latest pushed commit ---
 # Only check the NEWEST push-pending marker (newest push supersedes older ones).
 if [ -d "$MARKER_DIR" ] && command -v gh >/dev/null 2>&1; then
-    LATEST_PENDING="$(ls -t "$MARKER_DIR"/push-pending-* 2>/dev/null | head -1)"
+    LATEST_PENDING="$(ls -t "$MARKER_DIR"/push-pending-* 2>/dev/null | head -1 || true)"
     if [ -n "$LATEST_PENDING" ] && [ -f "$LATEST_PENDING" ]; then
         # Extract commit SHA from marker (format: "<sha> <timestamp>")
         PUSHED_SHA="$(awk '{print $1}' "$LATEST_PENDING")"

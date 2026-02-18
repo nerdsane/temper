@@ -17,6 +17,39 @@ use temper_spec::csdl::CsdlDocument;
 use crate::reaction::types::ReactionRule;
 use crate::reaction::ReactionRegistry;
 
+/// Verification status for a single entity type.
+#[derive(Debug, Clone, serde::Serialize)]
+pub enum VerificationStatus {
+    /// Verification has not started yet.
+    Pending,
+    /// Verification is currently running.
+    Running,
+    /// Verification completed with results.
+    Completed(EntityVerificationResult),
+}
+
+/// Summary of verification results for an entity type.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EntityVerificationResult {
+    /// Whether all levels passed.
+    pub all_passed: bool,
+    /// Per-level summaries.
+    pub levels: Vec<EntityLevelSummary>,
+    /// ISO-8601 timestamp when verification completed.
+    pub verified_at: String,
+}
+
+/// Summary of a single verification level.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EntityLevelSummary {
+    /// Level name (e.g. "L0 SMT", "L1 Model Check").
+    pub level: String,
+    /// Whether this level passed.
+    pub passed: bool,
+    /// Human-readable summary.
+    pub summary: String,
+}
+
 /// A registered tenant with its specs and entity configuration.
 #[derive(Debug, Clone)]
 pub struct TenantConfig {
@@ -31,6 +64,8 @@ pub struct TenantConfig {
     /// Reaction rules for cross-entity coordination.
     #[allow(dead_code)]
     pub reactions: Vec<ReactionRule>,
+    /// Per-entity verification status (design-time observation).
+    pub verification: BTreeMap<String, VerificationStatus>,
 }
 
 /// A registered entity type's spec and transition table.
@@ -143,6 +178,12 @@ impl SpecRegistry {
             );
         }
 
+        // Initialize verification status to Pending for each entity.
+        let verification = entities
+            .keys()
+            .map(|k| (k.clone(), VerificationStatus::Pending))
+            .collect();
+
         self.tenants.insert(
             tenant,
             TenantConfig {
@@ -151,6 +192,7 @@ impl SpecRegistry {
                 entity_set_map,
                 entities,
                 reactions: Vec::new(),
+                verification,
             },
         );
     }
@@ -242,6 +284,39 @@ impl SpecRegistry {
             .get(tenant)
             .map(|tc| tc.entities.keys().map(|k| k.as_str()).collect())
             .unwrap_or_default()
+    }
+
+    /// Set verification status for a specific entity type.
+    pub fn set_verification_status(
+        &mut self,
+        tenant: &TenantId,
+        entity_type: &str,
+        status: VerificationStatus,
+    ) {
+        if let Some(config) = self.tenants.get_mut(tenant) {
+            config
+                .verification
+                .insert(entity_type.to_string(), status);
+        }
+    }
+
+    /// Get verification status for a specific entity type.
+    pub fn get_verification_status(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Option<&VerificationStatus> {
+        self.tenants
+            .get(tenant)
+            .and_then(|tc| tc.verification.get(entity_type))
+    }
+
+    /// Get all verification statuses for a tenant.
+    pub fn verification_statuses(
+        &self,
+        tenant: &TenantId,
+    ) -> Option<&BTreeMap<String, VerificationStatus>> {
+        self.tenants.get(tenant).map(|tc| &tc.verification)
     }
 }
 

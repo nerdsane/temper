@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { runVerification } from "@/lib/api";
+import { runVerification, fetchVerificationStatus } from "@/lib/api";
 import type { VerificationResult } from "@/lib/types";
 import CascadeResults from "@/components/CascadeResults";
 import ErrorDisplay from "@/components/ErrorDisplay";
@@ -14,6 +14,34 @@ export default function VerificationPage() {
   const [result, setResult] = useState<VerificationResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cachedLoading, setCachedLoading] = useState(true);
+
+  // On mount, check if background verification already completed for this entity
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await fetchVerificationStatus();
+        if (cancelled) return;
+        const match = status.entities.find((e) => e.entity_type === entity);
+        if (match && match.status !== "pending" && match.status !== "running" && match.levels) {
+          setResult({
+            all_passed: match.status === "passed",
+            levels: match.levels.map((l) => ({
+              level: l.level,
+              passed: l.passed,
+              summary: l.summary,
+            })),
+          });
+        }
+      } catch {
+        // Ignore — user can still run verification manually
+      } finally {
+        if (!cancelled) setCachedLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [entity]);
 
   const handleRunVerification = async () => {
     setLoading(true);
@@ -59,7 +87,7 @@ export default function VerificationPage() {
             disabled={loading}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-not-allowed text-white text-sm rounded-md transition-colors"
           >
-            {loading ? "Running..." : "Run Verification"}
+            {loading ? "Running..." : result ? "Re-run Verification" : "Run Verification"}
           </button>
         </div>
       </div>
@@ -91,13 +119,20 @@ export default function VerificationPage() {
         />
       )}
 
-      {/* Results */}
+      {/* Results (from background verification or manual run) */}
       {!loading && result && (
-        <CascadeResults levels={result.levels} allPassed={result.all_passed} />
+        <>
+          {!cachedLoading && (
+            <div className="mb-4 text-xs text-gray-500">
+              {result ? "Showing cached results from background verification. Click \"Re-run Verification\" to run again." : ""}
+            </div>
+          )}
+          <CascadeResults levels={result.levels} allPassed={result.all_passed} />
+        </>
       )}
 
-      {/* Initial prompt */}
-      {!loading && !result && !error && (
+      {/* Initial prompt (only when no cached results and not loading) */}
+      {!loading && !result && !error && !cachedLoading && (
         <div className="text-center py-12">
           <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-gray-800 border border-gray-700 mb-4">
             <svg className="w-6 h-6 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -111,6 +146,13 @@ export default function VerificationPage() {
           >
             Run Verification
           </button>
+        </div>
+      )}
+
+      {/* Loading cached results */}
+      {cachedLoading && !loading && !result && (
+        <div className="flex items-center justify-center h-32">
+          <div className="text-gray-500 text-sm">Checking for cached verification results...</div>
         </div>
       )}
     </div>

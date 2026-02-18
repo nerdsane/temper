@@ -9,7 +9,7 @@ mod dispatch;
 pub mod events;
 mod response;
 mod query_eval;
-mod state;
+pub mod state;
 pub mod entity_actor;
 pub mod registry;
 pub mod reaction;
