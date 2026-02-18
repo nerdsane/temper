@@ -132,8 +132,6 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     needs: check
-    outputs:
-      test_count: ${{ steps.run_tests.outputs.test_count }}
     steps:
       - uses: actions/checkout@v4
 
@@ -154,12 +152,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-test-
 
       - name: cargo test --workspace
-        id: run_tests
-        run: |
-          OUTPUT=$(cargo test --workspace 2>&1)
-          echo "$OUTPUT"
-          COUNT=$(echo "$OUTPUT" | grep '^test result:' | awk '{sum += $4} END {print sum+0}')
-          echo "test_count=$COUNT" >> "$GITHUB_OUTPUT"
+        run: cargo test --workspace
 
   # ─────────────────────────────────────────────────────
   # Gate 4: Spec verification (minutes)
@@ -211,57 +204,3 @@ jobs:
           done
           if [ "$ALL_PASSED" = false ]; then exit 1; fi
           echo "All specs verified: OK"
-
-  # ─────────────────────────────────────────────────────
-  # Gate 5: Dynamic badge updates (seconds, main only)
-  # ─────────────────────────────────────────────────────
-  badges:
-    name: Update Badges
-    runs-on: ubuntu-latest
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Extract metadata
-        id: meta
-        run: |
-          # Count workspace members from Cargo.toml
-          CRATE_COUNT=$(grep -cE '^\s*"(crates|reference-apps)/' Cargo.toml)
-          echo "crate_count=$CRATE_COUNT" >> "$GITHUB_OUTPUT"
-
-          # Rust version and edition from workspace config
-          RUST_VER=$(grep 'rust-version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          EDITION=$(grep '^edition' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "rust_label=${RUST_VER}+ (edition ${EDITION})" >> "$GITHUB_OUTPUT"
-
-      - name: Update test count badge
-        uses: schneegans/dynamic-badges-action@v1.7.0
-        with:
-          auth: ${{ secrets.GIST_SECRET }}
-          gistID: ${{ vars.BADGE_GIST_ID }}
-          filename: temper-tests.json
-          label: tests
-          message: ${{ needs.test.outputs.test_count }}
-          color: brightgreen
-
-      - name: Update crate count badge
-        uses: schneegans/dynamic-badges-action@v1.7.0
-        with:
-          auth: ${{ secrets.GIST_SECRET }}
-          gistID: ${{ vars.BADGE_GIST_ID }}
-          filename: temper-crates.json
-          label: crates
-          message: ${{ steps.meta.outputs.crate_count }}
-          color: informational
-
-      - name: Update Rust version badge
-        uses: schneegans/dynamic-badges-action@v1.7.0
-        with:
-          auth: ${{ secrets.GIST_SECRET }}
-          gistID: ${{ vars.BADGE_GIST_ID }}
-          filename: temper-rust.json
-          label: rust
-          message: ${{ steps.meta.outputs.rust_label }}
-          color: orange
