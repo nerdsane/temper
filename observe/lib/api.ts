@@ -6,7 +6,12 @@ import type {
   EntityHistory,
   AllVerificationStatus,
   DesignTimeEvent,
+  EntityStateChange,
   WorkflowsResponse,
+  TrajectoryResponse,
+  EvolutionRecordsResponse,
+  EvolutionInsightsResponse,
+  SentinelCheckResponse,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -117,6 +122,76 @@ export function subscribeDesignTimeEvents(
     }
   });
   return () => source.close();
+}
+
+/** Subscribe to runtime entity state change events. Returns a cleanup function. */
+export function subscribeEntityEvents(
+  onEvent: (event: EntityStateChange) => void,
+): () => void {
+  const source = new EventSource(`${API_BASE}/observe/events/stream`);
+  source.addEventListener("state_change", (e) => {
+    try {
+      const data = JSON.parse((e as MessageEvent).data) as EntityStateChange;
+      onEvent(data);
+    } catch {
+      // Ignore parse errors
+    }
+  });
+  return () => source.close();
+}
+
+/** Fetch trajectory stats and failed intents */
+export async function fetchTrajectories(params?: {
+  entity_type?: string;
+  success?: string;
+}): Promise<TrajectoryResponse> {
+  const query = new URLSearchParams();
+  if (params?.entity_type) query.set("entity_type", params.entity_type);
+  if (params?.success) query.set("success", params.success);
+  const qs = query.toString();
+  const url = `${API_BASE}/observe/trajectories${qs ? `?${qs}` : ""}`;
+  const res = await fetchWithRetry(url, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch trajectories: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Fetch evolution record chain */
+export async function fetchEvolutionRecords(params?: {
+  record_type?: string;
+  status?: string;
+}): Promise<EvolutionRecordsResponse> {
+  const query = new URLSearchParams();
+  if (params?.record_type) query.set("record_type", params.record_type);
+  if (params?.status) query.set("status", params.status);
+  const qs = query.toString();
+  const url = `${API_BASE}/observe/evolution/records${qs ? `?${qs}` : ""}`;
+  const res = await fetchWithRetry(url, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch evolution records: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Fetch ranked evolution insights */
+export async function fetchEvolutionInsights(): Promise<EvolutionInsightsResponse> {
+  const res = await fetchWithRetry(`${API_BASE}/observe/evolution/insights`, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch insights: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Trigger sentinel health check */
+export async function triggerSentinelCheck(): Promise<SentinelCheckResponse> {
+  const res = await fetchWithRetry(`${API_BASE}/observe/sentinel/check`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!res.ok) throw new ApiError(`Sentinel check failed: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Fetch Prometheus-format metrics as text */
+export async function fetchMetricsText(): Promise<string> {
+  const res = await fetchWithRetry(`${API_BASE}/observe/metrics`, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch metrics: ${res.status}`, res.status);
+  return res.text();
 }
 
 /** Check if the API server is reachable */

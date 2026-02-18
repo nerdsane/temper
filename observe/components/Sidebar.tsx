@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { fetchSpecs, fetchEntities } from "@/lib/api";
 import { useConnection } from "@/lib/connection";
 import type { SpecSummary } from "@/lib/types";
@@ -11,37 +11,51 @@ function NavIcon({ icon }: { icon: string }) {
   switch (icon) {
     case "grid":
       return (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
             d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
         </svg>
       );
     case "workflow":
       return (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
             d="M13 10V3L4 14h7v7l9-11h-7z" />
         </svg>
       );
     case "file-text":
       return (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
             d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
         </svg>
       );
     case "shield":
       return (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
             d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
         </svg>
       );
     case "box":
       return (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
             d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+        </svg>
+      );
+    case "activity":
+      return (
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+            d="M22 12h-4l-3 9L9 3l-3 9H2" />
+        </svg>
+      );
+    case "dna":
+      return (
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+            d="M4 4v2m0 12v2m16-16v2m0 12v2M7.1 6h9.8M7.1 18h9.8M4.93 8.5h14.14M4.93 15.5h14.14M7.1 11h9.8M7.1 13h9.8" />
         </svg>
       );
     default:
@@ -83,34 +97,47 @@ export default function Sidebar() {
   const staticItems = [
     { href: "/", label: "Dashboard", icon: "grid" },
     { href: "/workflows", label: "Workflows", icon: "workflow" },
+    { href: "/activity", label: "Activity", icon: "activity" },
+    { href: "/evolution", label: "Evolution", icon: "dna" },
   ];
 
+  // Group specs by tenant/app
+  const specsByTenant = useMemo(() => {
+    const groups: Record<string, SpecSummary[]> = {};
+    for (const spec of specs) {
+      const tenant = spec.tenant || "default";
+      if (!groups[tenant]) groups[tenant] = [];
+      groups[tenant].push(spec);
+    }
+    return groups;
+  }, [specs]);
+
   return (
-    <aside className="w-56 bg-gray-950 border-r border-gray-800 flex flex-col min-h-screen">
+    <aside className="w-52 bg-[#09090b] border-r border-white/[0.06] flex flex-col min-h-screen">
       {/* Logo / Title */}
-      <div className="p-4 border-b border-gray-800">
-        <Link href="/" className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center text-sm font-bold">
+      <div className="px-4 py-3.5 border-b border-white/[0.06]">
+        <Link href="/" className="flex items-center gap-2.5">
+          <div className="w-7 h-7 bg-blue-600 rounded-md flex items-center justify-center text-xs font-bold tracking-tight">
             T
           </div>
           <div>
-            <div className="text-sm font-semibold text-gray-100">Temper</div>
-            <div className="text-xs text-gray-500">Observe</div>
+            <div className="text-[13px] font-semibold text-zinc-100 tracking-tight">Temper</div>
+            <div className="text-[10px] text-zinc-600 tracking-wide uppercase">Observe</div>
           </div>
         </Link>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
+      <nav className="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
         {/* Static nav */}
         {staticItems.map((item) => (
           <Link
             key={item.href}
             href={item.href}
-            className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
+            className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] transition-colors ${
               isActive(item.href)
-                ? "bg-gray-800 text-white"
-                : "text-gray-400 hover:text-gray-200 hover:bg-gray-900"
+                ? "text-zinc-100 bg-white/[0.06] border-l-2 border-blue-500 pl-2"
+                : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
             }`}
           >
             <NavIcon icon={item.icon} />
@@ -118,46 +145,54 @@ export default function Sidebar() {
           </Link>
         ))}
 
-        {/* Dynamic spec nav */}
-        {specs.length > 0 && (
-          <>
-            <div className="pt-3 pb-1 px-3 text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Specs
-            </div>
-            {specs.map((spec) => (
+        {/* Dynamic spec nav grouped by app/tenant */}
+        {Object.entries(specsByTenant).map(([tenant, tenantSpecs]) => (
+          <div key={tenant} className="mt-3">
+            <Link
+              href={`/workflows/${tenant}`}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-medium text-zinc-600 uppercase tracking-widest hover:text-zinc-400 transition-colors group"
+            >
+              <div className="w-0.5 h-3 bg-zinc-800 rounded-full group-hover:bg-zinc-600 transition-colors" />
+              <span>{tenant}</span>
+              <span className="text-zinc-700 group-hover:text-zinc-500">{tenantSpecs.length}</span>
+            </Link>
+            {tenantSpecs.map((spec) => (
               <Link
-                key={spec.entity_type}
+                key={`${tenant}:${spec.entity_type}`}
                 href={`/specs/${spec.entity_type}`}
-                className={`flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors ${
+                className={`flex items-center justify-between px-2.5 py-1.5 rounded-md text-[13px] transition-colors ${
                   isActive(`/specs/${spec.entity_type}`)
-                    ? "bg-gray-800 text-white"
-                    : "text-gray-400 hover:text-gray-200 hover:bg-gray-900"
+                    ? "text-zinc-100 bg-white/[0.06] border-l-2 border-blue-500 pl-2"
+                    : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
                 }`}
               >
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2.5">
                   <NavIcon icon="file-text" />
                   <span className="truncate">{spec.entity_type}</span>
                 </div>
                 {entityCounts[spec.entity_type] !== undefined && (
-                  <span className="text-xs font-mono bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded">
+                  <span className="text-[10px] font-mono bg-white/[0.04] text-zinc-600 px-1.5 py-0.5 rounded">
                     {entityCounts[spec.entity_type]}
                   </span>
                 )}
               </Link>
             ))}
-          </>
-        )}
+          </div>
+        ))}
 
         {/* Static verify / entities links */}
-        <div className="pt-3 pb-1 px-3 text-xs font-medium text-gray-600 uppercase tracking-wider">
-          Tools
+        <div className="mt-3">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-medium text-zinc-600 uppercase tracking-widest">
+            <div className="w-0.5 h-3 bg-zinc-800 rounded-full" />
+            Tools
+          </div>
         </div>
         <Link
           href={specs.length > 0 ? `/verify/${specs[0].entity_type}` : "/verify/Ticket"}
-          className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
+          className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] transition-colors ${
             pathname.startsWith("/verify")
-              ? "bg-gray-800 text-white"
-              : "text-gray-400 hover:text-gray-200 hover:bg-gray-900"
+              ? "text-zinc-100 bg-white/[0.06] border-l-2 border-blue-500 pl-2"
+              : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
           }`}
         >
           <NavIcon icon="shield" />
@@ -166,20 +201,20 @@ export default function Sidebar() {
       </nav>
 
       {/* Connection Status + Footer */}
-      <div className="p-4 border-t border-gray-800 space-y-2">
+      <div className="px-4 py-3 border-t border-white/[0.06] space-y-1.5">
         {!checking && (
           <div className="flex items-center gap-2">
             <div
-              className={`w-2 h-2 rounded-full ${
-                connected ? "bg-green-500" : "bg-red-500"
+              className={`w-1.5 h-1.5 rounded-full ${
+                connected ? "bg-emerald-400" : "bg-rose-400"
               }`}
             />
-            <span className={`text-xs ${connected ? "text-gray-500" : "text-red-400"}`}>
+            <span className={`text-[11px] ${connected ? "text-zinc-600" : "text-rose-400"}`}>
               {connected ? "Connected" : "Disconnected"}
             </span>
           </div>
         )}
-        <div className="text-xs text-gray-600">v0.1.0</div>
+        <div className="text-[10px] text-zinc-700">v0.1.0</div>
       </div>
     </aside>
   );
