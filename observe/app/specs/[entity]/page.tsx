@@ -11,12 +11,12 @@ import ErrorDisplay from "@/components/ErrorDisplay";
 function SpecSkeleton() {
   return (
     <div className="animate-pulse">
-      <div className="h-4 bg-gray-800/60 rounded w-48 mb-2" />
-      <div className="h-7 bg-gray-800 rounded w-56 mb-6" />
-      <div className="h-5 bg-gray-800 rounded w-32 mb-3" />
-      <div className="bg-gray-900 border border-gray-800 rounded-lg h-64 mb-8" />
-      <div className="h-5 bg-gray-800 rounded w-28 mb-3" />
-      <div className="bg-gray-900 border border-gray-800 rounded-lg h-48" />
+      <div className="h-3.5 bg-zinc-800/40 rounded w-44 mb-1.5" />
+      <div className="h-6 bg-zinc-800/60 rounded w-52 mb-5" />
+      <div className="h-4 bg-zinc-800/50 rounded w-28 mb-2.5" />
+      <div className="bg-[#111115] rounded-lg h-56 mb-6" />
+      <div className="h-4 bg-zinc-800/50 rounded w-24 mb-2.5" />
+      <div className="bg-[#111115] rounded-lg h-44" />
     </div>
   );
 }
@@ -65,87 +65,87 @@ export default function SpecViewer() {
   }
 
   return (
-    <div>
+    <div className="animate-fade-in">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-5">
         <div>
-          <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
-            <Link href="/" className="hover:text-gray-300">Dashboard</Link>
+          <div className="flex items-center gap-1.5 text-[12px] text-zinc-600 mb-1">
+            <Link href="/" className="hover:text-zinc-400 transition-colors">Dashboard</Link>
             <span>/</span>
-            <span className="text-gray-300">Specs</span>
+            <span className="text-zinc-400">Specs</span>
             <span>/</span>
-            <span className="text-gray-300">{spec.entity_type}</span>
+            <span className="text-zinc-400">{spec.entity_type}</span>
           </div>
-          <h1 className="text-2xl font-bold text-gray-100">{spec.entity_type} Spec</h1>
+          <h1 className="text-2xl font-bold text-zinc-100 tracking-tight font-display">{spec.entity_type} Spec</h1>
         </div>
         <Link
           href={`/verify/${spec.entity_type}`}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-md transition-colors"
+          className="px-3.5 py-1.5 bg-teal-500 hover:bg-teal-400 text-white text-[13px] rounded-md transition-colors"
         >
           Run Verification
         </Link>
       </div>
 
       {/* State Machine Diagram */}
-      <div className="mb-8">
-        <h2 className="text-lg font-semibold text-gray-200 mb-3">State Machine</h2>
+      <div className="mb-6">
+        <h2 className="text-base font-semibold text-zinc-200 mb-2.5 tracking-tight">State Machine</h2>
         <StateMachineGraph spec={spec} />
-        <div className="flex gap-6 mt-3 text-xs text-gray-500">
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded border-2 border-green-500 bg-green-950" />
+        <div className="flex gap-5 mt-2.5 text-[11px] text-zinc-600">
+          <div className="flex items-center gap-1.5">
+            <div className="w-2.5 h-2.5 rounded border border-teal-500/50 bg-teal-500/10" />
             <span>Initial state</span>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded border-2 border-gray-600 bg-gray-900" />
+          <div className="flex items-center gap-1.5">
+            <div className="w-2.5 h-2.5 rounded border border-zinc-700 bg-zinc-900" />
             <span>Normal state</span>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded border-2 border-dashed border-gray-500 bg-gray-900" />
+          <div className="flex items-center gap-1.5">
+            <div className="w-2.5 h-2.5 rounded border border-dashed border-zinc-600 bg-zinc-900" />
             <span>Terminal state</span>
           </div>
         </div>
       </div>
 
       {/* Transition Table */}
-      <div className="mb-8">
-        <h2 className="text-lg font-semibold text-gray-200 mb-3">Transitions</h2>
-        <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
+      <div className="mb-6">
+        <h2 className="text-base font-semibold text-zinc-200 mb-2.5 tracking-tight">Transitions</h2>
+        <div className="bg-[#111115] rounded-lg overflow-hidden">
+          <table className="w-full text-[13px]">
             <thead>
-              <tr className="border-b border-gray-800">
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">Action</th>
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">Kind</th>
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">From</th>
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">To</th>
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">Guard</th>
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">Effect</th>
+              <tr className="border-b border-white/[0.06]">
+                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Action</th>
+                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Kind</th>
+                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">From</th>
+                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">To</th>
+                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Guard</th>
+                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Effect</th>
               </tr>
             </thead>
             <tbody>
               {spec.actions.map((action, i) => (
                 <tr
                   key={i}
-                  className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors"
+                  className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors"
                 >
-                  <td className="px-4 py-2.5 font-mono text-blue-400">{action.name}</td>
-                  <td className="px-4 py-2.5">
+                  <td className="px-3.5 py-2 font-mono text-teal-400">{action.name}</td>
+                  <td className="px-3.5 py-2">
                     <span
-                      className={`text-xs font-mono px-1.5 py-0.5 rounded ${
+                      className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${
                         action.kind === "input"
-                          ? "bg-blue-900/40 text-blue-400"
-                          : "bg-purple-900/40 text-purple-400"
+                          ? "bg-teal-500/10 text-teal-400"
+                          : "bg-violet-500/10 text-violet-400"
                       }`}
                     >
                       {action.kind}
                     </span>
                   </td>
-                  <td className="px-4 py-2.5 font-mono text-gray-300">{action.from.join(", ")}</td>
-                  <td className="px-4 py-2.5 font-mono text-gray-300">{action.to ?? <span className="text-gray-600">--</span>}</td>
-                  <td className="px-4 py-2.5 font-mono text-yellow-400/80 text-xs">
-                    {action.guards.length > 0 ? action.guards.join("; ") : <span className="text-gray-600">--</span>}
+                  <td className="px-3.5 py-2 font-mono text-zinc-400">{action.from.join(", ")}</td>
+                  <td className="px-3.5 py-2 font-mono text-zinc-400">{action.to ?? <span className="text-zinc-700">--</span>}</td>
+                  <td className="px-3.5 py-2 font-mono text-yellow-400/70 text-[11px]">
+                    {action.guards.length > 0 ? action.guards.join("; ") : <span className="text-zinc-700">--</span>}
                   </td>
-                  <td className="px-4 py-2.5 font-mono text-gray-400 text-xs">
-                    {action.effects.length > 0 ? action.effects.join("; ") : <span className="text-gray-600">--</span>}
+                  <td className="px-3.5 py-2 font-mono text-zinc-500 text-[11px]">
+                    {action.effects.length > 0 ? action.effects.join("; ") : <span className="text-zinc-700">--</span>}
                   </td>
                 </tr>
               ))}
@@ -155,30 +155,30 @@ export default function SpecViewer() {
       </div>
 
       {/* Invariants */}
-      <div className="mb-8">
-        <h2 className="text-lg font-semibold text-gray-200 mb-3">Invariants</h2>
+      <div className="mb-6">
+        <h2 className="text-base font-semibold text-zinc-200 mb-2.5 tracking-tight">Invariants</h2>
         {spec.invariants.length === 0 ? (
-          <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
-            <p className="text-sm text-gray-400">No invariants defined.</p>
+          <div className="bg-[#111115] rounded-lg p-6 text-center">
+            <p className="text-[13px] text-zinc-500">No invariants defined.</p>
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             {spec.invariants.map((inv, i) => (
               <div
                 key={i}
-                className="bg-gray-900 border border-gray-800 rounded-lg p-4"
+                className="bg-[#111115] rounded-lg p-3"
               >
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-sm font-semibold text-gray-200">{inv.name}</span>
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className="text-[13px] font-semibold text-zinc-200">{inv.name}</span>
                 </div>
-                <div className="text-sm space-y-1">
+                <div className="text-[13px] space-y-0.5">
                   <div className="flex gap-2">
-                    <span className="text-gray-500 w-16 flex-shrink-0">when</span>
-                    <code className="font-mono text-yellow-400/80 text-xs">{inv.when.length > 0 ? inv.when.join(", ") : "always"}</code>
+                    <span className="text-zinc-600 w-14 flex-shrink-0 text-[11px]">when</span>
+                    <code className="font-mono text-yellow-400/70 text-[11px]">{inv.when.length > 0 ? inv.when.join(", ") : "always"}</code>
                   </div>
                   <div className="flex gap-2">
-                    <span className="text-gray-500 w-16 flex-shrink-0">assert</span>
-                    <code className="font-mono text-green-400/80 text-xs">{inv.assertion}</code>
+                    <span className="text-zinc-600 w-14 flex-shrink-0 text-[11px]">assert</span>
+                    <code className="font-mono text-teal-400/70 text-[11px]">{inv.assertion}</code>
                   </div>
                 </div>
               </div>
@@ -188,31 +188,31 @@ export default function SpecViewer() {
       </div>
 
       {/* State Variables */}
-      <div className="mb-8">
-        <h2 className="text-lg font-semibold text-gray-200 mb-3">State Variables</h2>
+      <div className="mb-6">
+        <h2 className="text-base font-semibold text-zinc-200 mb-2.5 tracking-tight">State Variables</h2>
         {spec.state_variables.length === 0 ? (
-          <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
-            <p className="text-sm text-gray-400">No state variables defined.</p>
+          <div className="bg-[#111115] rounded-lg p-6 text-center">
+            <p className="text-[13px] text-zinc-500">No state variables defined.</p>
           </div>
         ) : (
-          <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
+          <div className="bg-[#111115] rounded-lg overflow-hidden">
+            <table className="w-full text-[13px]">
               <thead>
-                <tr className="border-b border-gray-800">
-                  <th className="text-left px-4 py-3 text-gray-500 font-medium">Name</th>
-                  <th className="text-left px-4 py-3 text-gray-500 font-medium">Type</th>
-                  <th className="text-left px-4 py-3 text-gray-500 font-medium">Initial Value</th>
+                <tr className="border-b border-white/[0.06]">
+                  <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Name</th>
+                  <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Type</th>
+                  <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Initial Value</th>
                 </tr>
               </thead>
               <tbody>
                 {spec.state_variables.map((v, i) => (
                   <tr
                     key={i}
-                    className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors"
+                    className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors"
                   >
-                    <td className="px-4 py-2.5 font-mono text-gray-200">{v.name}</td>
-                    <td className="px-4 py-2.5 font-mono text-purple-400 text-xs">{v.var_type}</td>
-                    <td className="px-4 py-2.5 font-mono text-gray-400 text-xs">{v.initial}</td>
+                    <td className="px-3.5 py-2 font-mono text-zinc-200">{v.name}</td>
+                    <td className="px-3.5 py-2 font-mono text-purple-400 text-[11px]">{v.var_type}</td>
+                    <td className="px-3.5 py-2 font-mono text-zinc-500 text-[11px]">{v.initial}</td>
                   </tr>
                 ))}
               </tbody>

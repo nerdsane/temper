@@ -140,6 +140,7 @@ pub struct EventStreamParams {
 pub fn build_observe_router() -> Router<ServerState> {
     Router::new()
         .route("/specs", get(list_specs))
+        .route("/specs/load-dir", post(handle_load_dir))
         .route("/specs/{entity}", get(get_spec_detail))
         .route("/entities", get(list_entities))
         .route("/verify/{entity}", post(run_verification))
@@ -152,6 +153,7 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
         .route("/trajectories", get(handle_trajectories))
+        .route("/trajectories/unmet", post(handle_unmet_intent))
         .route("/sentinel/check", post(handle_sentinel_check))
         .route("/evolution/records", get(list_evolution_records))
         .route("/evolution/records/{id}", get(get_evolution_record))
@@ -207,6 +209,268 @@ async fn list_specs(State(state): State<ServerState>) -> Json<Vec<SpecSummary>> 
     }
 
     Json(specs)
+}
+
+/// Request body for POST /observe/specs/load-dir.
+#[derive(Deserialize)]
+struct LoadDirRequest {
+    /// Tenant name to register specs under.
+    tenant: String,
+    /// Path to the specs directory containing model.csdl.xml and *.ioa.toml files.
+    specs_dir: String,
+}
+
+/// Convert a string to PascalCase (e.g. "my_entity" -> "MyEntity").
+fn to_pascal_case(s: &str) -> String {
+    s.split(['_', '-'])
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    let upper: String = first.to_uppercase().collect();
+                    format!("{}{}", upper, chars.collect::<String>())
+                }
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// POST /observe/specs/load-dir -- hot-load specs from a directory into the running server.
+///
+/// Reads CSDL and IOA files from `specs_dir`, registers them under `tenant`,
+/// emits design-time SSE events for each entity, and spawns background
+/// verification tasks that stream progress via SSE.
+async fn handle_load_dir(
+    State(state): State<ServerState>,
+    Json(body): Json<LoadDirRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let specs_path = std::path::Path::new(&body.specs_dir);
+
+    if !specs_path.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Specs directory not found: {}", specs_path.display()),
+        ));
+    }
+
+    // Read CSDL model
+    let csdl_path = specs_path.join("model.csdl.xml");
+    if !csdl_path.exists() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("CSDL model not found at {}", csdl_path.display()),
+        ));
+    }
+
+    let csdl_xml = std::fs::read_to_string(&csdl_path).map_err(|e| { // determinism-ok: HTTP handler reads user-provided spec files
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read CSDL: {e}"))
+    })?;
+    let csdl = temper_spec::csdl::parse_csdl(&csdl_xml).map_err(|e| {
+        (StatusCode::BAD_REQUEST, format!("Failed to parse CSDL: {e}"))
+    })?;
+
+    // Read all *.ioa.toml files
+    let mut ioa_sources: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let entries = std::fs::read_dir(specs_path).map_err(|e| { // determinism-ok: HTTP handler reads user-provided spec files
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read specs directory: {e}"))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read directory entry: {e}"))
+        })?;
+        let path = entry.path();
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        if file_name.ends_with(".ioa.toml") {
+            let entity_name = file_name.strip_suffix(".ioa.toml").unwrap_or_default();
+            let entity_name = to_pascal_case(entity_name);
+            let source = std::fs::read_to_string(&path).map_err(|e| { // determinism-ok: HTTP handler reads user-provided spec files
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read {}: {e}", path.display()))
+            })?;
+            ioa_sources.insert(entity_name, source);
+        }
+    }
+
+    if ioa_sources.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "No .ioa.toml files found in specs directory".to_string(),
+        ));
+    }
+
+    // Register into shared registry
+    let entity_names: Vec<String> = ioa_sources.keys().cloned().collect();
+    let ioa_pairs: Vec<(&str, &str)> = ioa_sources
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    {
+        let mut registry = state.registry.write().unwrap();
+        registry.register_tenant(body.tenant.as_str(), csdl, csdl_xml, &ioa_pairs);
+    }
+
+    // Emit spec_loaded design-time events for each entity
+    let now = sim_now();
+    for entity_name in &entity_names {
+        let event = crate::state::DesignTimeEvent {
+            kind: "spec_loaded".to_string(),
+            entity_type: entity_name.clone(),
+            tenant: body.tenant.clone(),
+            summary: format!("Loaded spec for {entity_name}"),
+            level: None,
+            passed: None,
+            timestamp: now.to_rfc3339(),
+            step_number: Some(1),
+            total_steps: Some(7),
+        };
+        let _ = state.design_time_tx.send(event.clone());
+        if let Ok(mut log) = state.design_time_log.write() {
+            log.push(event);
+        }
+
+        // Mark as Running in registry
+        {
+            let mut registry = state.registry.write().unwrap();
+            registry.set_verification_status(
+                &body.tenant.clone().into(),
+                entity_name,
+                VerificationStatus::Running,
+            );
+        }
+
+        // Emit verify_started
+        let started_event = crate::state::DesignTimeEvent {
+            kind: "verify_started".to_string(),
+            entity_type: entity_name.clone(),
+            tenant: body.tenant.clone(),
+            summary: format!("Verification started for {entity_name}"),
+            level: None,
+            passed: None,
+            timestamp: now.to_rfc3339(),
+            step_number: Some(2),
+            total_steps: Some(7),
+        };
+        let _ = state.design_time_tx.send(started_event.clone());
+        if let Ok(mut log) = state.design_time_log.write() {
+            log.push(started_event);
+        }
+
+        // Spawn background verification
+        let entity_name_clone = entity_name.clone();
+        let ioa_source = ioa_sources[entity_name].clone();
+        let tenant = body.tenant.clone();
+        let design_tx = state.design_time_tx.clone();
+        let design_log = state.design_time_log.clone();
+        let registry = state.registry.clone();
+        tokio::spawn(async move { // determinism-ok: HTTP handler spawns background verification task
+            // Run verification in a blocking thread
+            let result = tokio::task::spawn_blocking(move || {
+                temper_verify::VerificationCascade::from_ioa(&ioa_source)
+                    .with_sim_seeds(5)
+                    .with_prop_test_cases(100)
+                    .run()
+            })
+            .await;
+
+            let level_labels = ["L0_symbolic", "L1_model_check", "L2_simulation", "L3_property_test"];
+
+            match result {
+                Ok(cascade_result) => {
+                    // Emit verify_level for each level
+                    for (level_idx, level_result) in cascade_result.levels.iter().enumerate() {
+                        let level_event = crate::state::DesignTimeEvent {
+                            kind: "verify_level".to_string(),
+                            entity_type: entity_name_clone.clone(),
+                            tenant: tenant.clone(),
+                            summary: format!(
+                                "{} {} for {}",
+                                level_labels.get(level_idx).unwrap_or(&"unknown"),
+                                if level_result.passed { "passed" } else { "failed" },
+                                entity_name_clone
+                            ),
+                            level: Some(level_labels.get(level_idx).unwrap_or(&"unknown").to_string()),
+                            passed: Some(level_result.passed),
+                            timestamp: sim_now().to_rfc3339(),
+                            step_number: Some(3 + level_idx as u8),
+                            total_steps: Some(7),
+                        };
+                        let _ = design_tx.send(level_event.clone());
+                        if let Ok(mut log) = design_log.write() {
+                            log.push(level_event);
+                        }
+                    }
+
+                    // Emit verify_done
+                    let done_event = crate::state::DesignTimeEvent {
+                        kind: "verify_done".to_string(),
+                        entity_type: entity_name_clone.clone(),
+                        tenant: tenant.clone(),
+                        summary: if cascade_result.all_passed {
+                            format!("All verification levels passed for {entity_name_clone}")
+                        } else {
+                            format!("Verification completed with failures for {entity_name_clone}")
+                        },
+                        level: None,
+                        passed: Some(cascade_result.all_passed),
+                        timestamp: sim_now().to_rfc3339(),
+                        step_number: Some(7),
+                        total_steps: Some(7),
+                    };
+                    let _ = design_tx.send(done_event.clone());
+                    if let Ok(mut log) = design_log.write() {
+                        log.push(done_event);
+                    }
+
+                    // Convert CascadeResult to EntityVerificationResult
+                    let entity_result = crate::registry::EntityVerificationResult {
+                        all_passed: cascade_result.all_passed,
+                        levels: cascade_result.levels.iter().map(|l| {
+                            crate::registry::EntityLevelSummary {
+                                level: format!("{}", l.level),
+                                passed: l.passed,
+                                summary: l.summary.clone(),
+                            }
+                        }).collect(),
+                        verified_at: sim_now().to_rfc3339(),
+                    };
+
+                    // Update registry with final status
+                    if let Ok(mut reg) = registry.write() {
+                        reg.set_verification_status(
+                            &tenant.into(),
+                            &entity_name_clone,
+                            VerificationStatus::Completed(entity_result),
+                        );
+                    }
+                }
+                Err(e) => {
+                    // Verification task panicked — emit failure
+                    let fail_event = crate::state::DesignTimeEvent {
+                        kind: "verify_done".to_string(),
+                        entity_type: entity_name_clone.clone(),
+                        tenant: tenant.clone(),
+                        summary: format!("Verification failed for {entity_name_clone}: {e}"),
+                        level: None,
+                        passed: Some(false),
+                        timestamp: sim_now().to_rfc3339(),
+                        step_number: Some(7),
+                        total_steps: Some(7),
+                    };
+                    let _ = design_tx.send(fail_event.clone());
+                    if let Ok(mut log) = design_log.write() {
+                        log.push(fail_event);
+                    }
+                }
+            }
+        });
+    }
+
+    Ok(Json(serde_json::json!({
+        "tenant": body.tenant,
+        "entities": entity_names,
+        "message": "Specs loaded, verification running",
+    })))
 }
 
 /// GET /observe/specs/{entity} -- full spec detail for a named entity type.
@@ -1032,6 +1296,37 @@ async fn handle_trajectories(
         "by_action": by_action,
         "failed_intents": failed_intents,
     }))
+}
+
+/// POST /observe/trajectories/unmet -- record an unmet user intent.
+///
+/// Called by the production chat proxy when a user asks for something
+/// that doesn't map to any available action. This feeds the Evolution Engine.
+async fn handle_unmet_intent(
+    State(state): State<ServerState>,
+    Json(body): Json<serde_json::Value>,
+) -> StatusCode {
+    use temper_runtime::scheduler::sim_now;
+
+    let intent = body.get("intent").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let tenant = body.get("tenant").and_then(|v| v.as_str()).unwrap_or("default");
+
+    let entry = crate::state::TrajectoryEntry {
+        timestamp: sim_now().to_rfc3339(),
+        tenant: tenant.to_string(),
+        entity_type: "".to_string(),
+        entity_id: "".to_string(),
+        action: intent.to_string(),
+        success: false,
+        from_status: None,
+        to_status: None,
+        error: Some(format!("Unmet intent: {intent}")),
+    };
+    if let Ok(mut log) = state.trajectory_log.write() {
+        log.push(entry);
+    }
+
+    StatusCode::CREATED
 }
 
 // ---------------------------------------------------------------------------
@@ -2085,6 +2380,125 @@ mod tests {
         assert_eq!(steps.len(), 7, "should have 7 workflow steps");
         assert_eq!(steps[0]["step"], "loaded");
         assert_eq!(steps[6]["step"], "deployed");
+    }
+
+    // -- Load-dir endpoint tests --
+
+    #[tokio::test]
+    async fn test_load_dir_registers_specs() {
+        let system = ActorSystem::new("test-load-dir");
+        let registry = SpecRegistry::new();
+        let state = ServerState::from_registry(system, registry);
+
+        let app = Router::new()
+            .nest("/observe", build_observe_router())
+            .with_state(state.clone());
+
+        // Use the test-fixtures/specs directory which has valid specs
+        let specs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-fixtures/specs");
+
+        let body = serde_json::json!({
+            "tenant": "test-tenant",
+            "specs_dir": specs_dir.to_str().unwrap(),
+        });
+
+        let response = app
+            .oneshot(
+                Request::post("/observe/specs/load-dir")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["tenant"], "test-tenant");
+        assert_eq!(json["message"], "Specs loaded, verification running");
+
+        let entities = json["entities"].as_array().unwrap();
+        assert!(!entities.is_empty(), "should have loaded at least one entity");
+
+        // Verify specs are in the registry
+        let registry = state.registry.read().unwrap();
+        let tenant_id: temper_runtime::tenant::TenantId = "test-tenant".into();
+        let entity_types = registry.entity_types(&tenant_id);
+        assert!(!entity_types.is_empty(), "registry should have entity types for test-tenant");
+    }
+
+    #[tokio::test]
+    async fn test_load_dir_missing_dir_returns_error() {
+        let system = ActorSystem::new("test-load-dir-missing");
+        let registry = SpecRegistry::new();
+        let state = ServerState::from_registry(system, registry);
+
+        let app = Router::new()
+            .nest("/observe", build_observe_router())
+            .with_state(state);
+
+        let body = serde_json::json!({
+            "tenant": "test-tenant",
+            "specs_dir": "/nonexistent/path/to/specs",
+        });
+
+        let response = app
+            .oneshot(
+                Request::post("/observe/specs/load-dir")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_load_dir_emits_design_time_events() {
+        let system = ActorSystem::new("test-load-dir-events");
+        let registry = SpecRegistry::new();
+        let state = ServerState::from_registry(system, registry);
+
+        let app = Router::new()
+            .nest("/observe", build_observe_router())
+            .with_state(state.clone());
+
+        let specs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-fixtures/specs");
+
+        let body = serde_json::json!({
+            "tenant": "event-tenant",
+            "specs_dir": specs_dir.to_str().unwrap(),
+        });
+
+        let response = app
+            .oneshot(
+                Request::post("/observe/specs/load-dir")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Check that design-time events were logged
+        let log = state.design_time_log.read().unwrap();
+        assert!(!log.is_empty(), "design-time log should have events");
+
+        // Should have at least spec_loaded and verify_started events
+        let loaded_events: Vec<_> = log.iter().filter(|e| e.kind == "spec_loaded").collect();
+        assert!(!loaded_events.is_empty(), "should have spec_loaded events");
+
+        let started_events: Vec<_> = log.iter().filter(|e| e.kind == "verify_started").collect();
+        assert!(!started_events.is_empty(), "should have verify_started events");
     }
 
     #[tokio::test]

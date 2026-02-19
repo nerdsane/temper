@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 
-const TEMPER_API = process.env.TEMPER_API_URL || "http://localhost:3333";
+const TEMPER_API = process.env.TEMPER_API_URL || "http://127.0.0.1:3333";
 
 const nextConfig: NextConfig = {
   async rewrites() {

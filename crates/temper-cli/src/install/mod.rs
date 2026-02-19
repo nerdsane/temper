@@ -19,6 +19,17 @@ description: \"You MUST use this skill when the user asks to build an app, creat
 ---
 ";
 
+/// The Temper User (production chat proxy) skill body, embedded at compile time.
+const USER_SKILL_BODY: &str = include_str!("../../../../.claude/skills/temper-user.md");
+
+/// YAML frontmatter for the temper-user skill.
+const USER_SKILL_FRONTMATTER: &str = "\
+---
+name: temper-user
+description: \"Production chat proxy for a running Temper application. Translates natural language into OData API calls. Use when the user wants to interact with a running Temper app as an end user.\"
+---
+";
+
 /// Install the skill to the given skills root directory (for testing with custom paths).
 fn install_to(skills_root: &Path) -> Result<()> {
     let skill_dir = skills_root.join("temper");
@@ -30,15 +41,32 @@ fn install_to(skills_root: &Path) -> Result<()> {
     fs::write(&skill_path, &content)
         .with_context(|| format!("Failed to write {}", skill_path.display()))?;
 
-    // Clean up legacy bare file from older installs
+    // Install temper-user skill (production chat proxy)
+    let user_skill_dir = skills_root.join("temper-user");
+    fs::create_dir_all(&user_skill_dir)
+        .with_context(|| format!("Failed to create directory: {}", user_skill_dir.display()))?;
+
+    let user_skill_path = user_skill_dir.join("SKILL.md");
+    let user_content = format!("{USER_SKILL_FRONTMATTER}{USER_SKILL_BODY}");
+    fs::write(&user_skill_path, &user_content)
+        .with_context(|| format!("Failed to write {}", user_skill_path.display()))?;
+
+    // Clean up legacy bare files from older installs
     let legacy_path = skills_root.join("temper.md");
     if legacy_path.is_file() {
         let _ = fs::remove_file(&legacy_path);
     }
+    let legacy_user_path = skills_root.join("temper-user.md");
+    if legacy_user_path.is_file() {
+        let _ = fs::remove_file(&legacy_user_path);
+    }
 
-    println!("Installed Temper skill to {}", skill_path.display());
+    println!("Installed Temper skills to {}", skills_root.display());
+    println!("  - {}", skill_path.display());
+    println!("  - {}", user_skill_path.display());
     println!("\nYou can now open Claude Code in any directory and say:");
-    println!("  \"Build me a [your app idea]\"");
+    println!("  \"Build me a [your app idea]\"  (uses /temper)");
+    println!("  \"/temper-user\"                 (production chat proxy)");
 
     Ok(())
 }
@@ -106,14 +134,57 @@ mod tests {
     }
 
     #[test]
+    fn user_skill_content_is_embedded() {
+        assert!(
+            USER_SKILL_BODY.contains("Production Chat Proxy"),
+            "embedded user skill must mention Production Chat Proxy"
+        );
+        assert!(
+            USER_SKILL_BODY.contains("Translate Requests"),
+            "embedded user skill must contain Translate Requests section"
+        );
+        assert!(
+            USER_SKILL_BODY.contains("Unmet Intents"),
+            "embedded user skill must contain Unmet Intents section"
+        );
+    }
+
+    #[test]
+    fn install_creates_user_skill() {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let skills_root = tmp.path().join(".claude").join("skills");
+
+        install_to(&skills_root).expect("install_to should succeed");
+
+        let user_skill_path = skills_root.join("temper-user").join("SKILL.md");
+        assert!(user_skill_path.is_file(), "temper-user/SKILL.md should exist after install");
+
+        let content = fs::read_to_string(&user_skill_path).unwrap();
+        assert!(
+            content.starts_with("---\n"),
+            "installed user skill should start with YAML frontmatter"
+        );
+        assert!(
+            content.contains("name: temper-user"),
+            "installed user skill should have skill name in frontmatter"
+        );
+        assert!(
+            content.contains("Production Chat Proxy"),
+            "installed user skill should contain skill body"
+        );
+    }
+
+    #[test]
     fn install_overwrites_existing_and_removes_legacy() {
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
         let skills_root = tmp.path().join(".claude").join("skills");
         fs::create_dir_all(&skills_root).unwrap();
 
-        // Create legacy bare file
+        // Create legacy bare files
         let legacy_path = skills_root.join("temper.md");
         fs::write(&legacy_path, "old bare file").unwrap();
+        let legacy_user_path = skills_root.join("temper-user.md");
+        fs::write(&legacy_user_path, "old bare user file").unwrap();
 
         // Create old directory-style file
         let skill_dir = skills_root.join("temper");
@@ -131,6 +202,10 @@ mod tests {
         assert!(
             !legacy_path.exists(),
             "legacy temper.md should be removed"
+        );
+        assert!(
+            !legacy_user_path.exists(),
+            "legacy temper-user.md should be removed"
         );
     }
 }

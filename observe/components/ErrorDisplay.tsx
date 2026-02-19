@@ -18,8 +18,8 @@ export default function ErrorDisplay({
   return (
     <div className="flex items-center justify-center min-h-[256px]">
       <div className="text-center max-w-md">
-        <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-red-950/50 border border-red-900 mb-4">
-          <svg className="w-6 h-6 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-pink-500/10 mb-4">
+          <svg className="w-5 h-5 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -28,20 +28,20 @@ export default function ErrorDisplay({
             />
           </svg>
         </div>
-        <h3 className="text-lg font-semibold text-gray-200 mb-1">{title}</h3>
-        <p className="text-sm text-gray-400 mb-4">{message}</p>
-        <div className="flex items-center justify-center gap-3">
+        <h3 className="text-base font-semibold text-zinc-200 mb-1">{title}</h3>
+        <p className="text-sm text-zinc-500 mb-4">{message}</p>
+        <div className="flex items-center justify-center gap-2.5">
           {retry && (
             <button
               onClick={retry}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-md transition-colors"
+              className="px-3.5 py-1.5 bg-teal-500 hover:bg-teal-400 text-white text-sm rounded-md transition-colors"
             >
               Retry
             </button>
           )}
           <Link
             href={backHref}
-            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded-md transition-colors border border-gray-700"
+            className="px-3.5 py-1.5 bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 text-sm rounded-md transition-colors"
           >
             {backLabel}
           </Link>

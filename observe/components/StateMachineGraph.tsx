@@ -90,7 +90,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
   const getNode = (name: string) => nodes.find((n) => n.name === name);
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 overflow-auto">
+    <div className="bg-[#111115] rounded-lg p-4 overflow-auto">
       <svg
         width={width}
         height={height}
@@ -106,17 +106,17 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
             refY="3.5"
             orient="auto"
           >
-            <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280" />
+            <polygon points="0 0, 10 3.5, 0 7" fill="#52525b" />
           </marker>
           <marker
-            id="arrowhead-blue"
+            id="arrowhead-teal"
             markerWidth="10"
             markerHeight="7"
             refX="10"
             refY="3.5"
             orient="auto"
           >
-            <polygon points="0 0, 10 3.5, 0 7" fill="#3b82f6" />
+            <polygon points="0 0, 10 3.5, 0 7" fill="#2dd4bf" />
           </marker>
         </defs>
 
@@ -134,7 +134,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                 <path
                   d={`M ${cx - 20} ${cy} C ${cx - 30} ${cy - 45}, ${cx + 30} ${cy - 45}, ${cx + 20} ${cy}`}
                   fill="none"
-                  stroke="#4b5563"
+                  stroke="#3f3f46"
                   strokeWidth="1.5"
                   markerEnd="url(#arrowhead)"
                 />
@@ -142,7 +142,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                   x={cx}
                   y={cy - 35}
                   textAnchor="middle"
-                  className="text-[10px] fill-gray-400 font-mono"
+                  className="text-[10px] fill-zinc-400 font-mono"
                 >
                   {edge.label}
                 </text>
@@ -177,7 +177,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                 y1={startY + perpY}
                 x2={endX + perpX}
                 y2={endY + perpY}
-                stroke="#4b5563"
+                stroke="#3f3f46"
                 strokeWidth="1.5"
                 markerEnd="url(#arrowhead)"
               />
@@ -185,7 +185,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                 x={midX + perpX}
                 y={midY + perpY - 8}
                 textAnchor="middle"
-                className="text-[10px] fill-gray-400 font-mono"
+                className="text-[10px] fill-zinc-400 font-mono"
               >
                 {edge.label}
               </text>
@@ -203,15 +203,15 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                 y1={node.y}
                 x2={node.x - 72}
                 y2={node.y}
-                stroke="#22c55e"
+                stroke="#2dd4bf"
                 strokeWidth="2"
-                markerEnd="url(#arrowhead-blue)"
+                markerEnd="url(#arrowhead-teal)"
               />
               <circle
                 cx={node.x - 105}
                 cy={node.y}
                 r="4"
-                fill="#22c55e"
+                fill="#2dd4bf"
               />
             </g>
           ))}
@@ -238,8 +238,8 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
               width={136}
               height={46}
               rx={8}
-              fill={node.isInitial ? "#052e16" : node.isTerminal ? "#1c1917" : "#111827"}
-              stroke={node.isInitial ? "#22c55e" : node.isTerminal ? "#78716c" : "#374151"}
+              fill={node.isInitial ? "#042f2e" : node.isTerminal ? "#1c1917" : "#111115"}
+              stroke={node.isInitial ? "#2dd4bf" : node.isTerminal ? "#78716c" : "#3f3f46"}
               strokeWidth={node.isInitial ? 2 : 1.5}
             />
             <text
@@ -248,7 +248,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
               textAnchor="middle"
               dominantBaseline="middle"
               className={`text-sm font-mono ${
-                node.isInitial ? "fill-green-400" : node.isTerminal ? "fill-gray-500" : "fill-gray-200"
+                node.isInitial ? "fill-teal-400" : node.isTerminal ? "fill-zinc-500" : "fill-zinc-200"
               }`}
             >
               {node.name}

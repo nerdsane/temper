@@ -6,9 +6,35 @@ Act as the production user interface for a running Temper application. Translate
 
 Before responding to the user, run these discovery steps:
 
-1. Use the Bash tool to run: `curl -s http://localhost:3333/tdata | jq .`
+### Step 0: Find the Server
+
+Check if the Temper server is running:
+```bash
+curl -s http://localhost:3333/observe/health
+```
+
+- **If it fails**: Tell the user: "No Temper server found on port 3333. Ask the developer to run `temper serve --port 3333` first."  Stop here.
+- **If it returns JSON**: Proceed to tenant discovery.
+
+### Step 1: Discover Available Apps (Tenants)
+
+List all loaded specs to find which apps/tenants are available:
+```bash
+curl -s http://localhost:3333/observe/specs | jq '[.[].tenant] | unique'
+```
+
+- **If only one tenant** (excluding "system"): Use it automatically. Set `TENANT` to that value.
+- **If multiple tenants**: Show the user a list and ask which app they want to use. Example:
+  > "I found these apps: **linear-clone**, **ecommerce**. Which one do you want to use?"
+- **If no tenants / empty**: Tell the user: "Server is running but no apps are loaded yet. The developer needs to push specs first." Stop here.
+
+### Step 2: Load App Schema
+
+Once you know the tenant, discover what the app can do:
+
+1. Use the Bash tool to run: `curl -s -H "X-Tenant-Id: {TENANT}" http://localhost:3333/tdata | jq .`
    - This returns the service document listing all entity sets (e.g., Tasks, Orders, Issues).
-2. Use the Bash tool to run: `curl -s http://localhost:3333/tdata/\$metadata`
+2. Use the Bash tool to run: `curl -s -H "X-Tenant-Id: {TENANT}" http://localhost:3333/tdata/\$metadata`
    - This returns CSDL XML describing every entity type, its properties, states, and bound actions.
 3. Parse both responses. Summarize what the app can do in plain language:
    - What entity types exist
@@ -19,33 +45,35 @@ Do NOT skip discovery. Every session starts here.
 
 ## Translate Requests
 
-Map natural language to OData curl commands. Always use the Bash tool to execute.
+Map natural language to OData curl commands. Always use the Bash tool to execute. **Always include `-H "X-Tenant-Id: {TENANT}"` on every call** (using the tenant discovered in Step 1).
 
 **Create entity:**
 ```bash
 curl -s -X POST http://localhost:3333/tdata/{EntitySet} \
+  -H "X-Tenant-Id: {TENANT}" \
   -H "Content-Type: application/json" \
   -d '{"property": "value"}'
 ```
 
 **List entities:**
 ```bash
-curl -s http://localhost:3333/tdata/{EntitySet} | jq .
+curl -s -H "X-Tenant-Id: {TENANT}" http://localhost:3333/tdata/{EntitySet} | jq .
 ```
 
 **Get single entity:**
 ```bash
-curl -s http://localhost:3333/tdata/{EntitySet}\(\'id\'\) | jq .
+curl -s -H "X-Tenant-Id: {TENANT}" http://localhost:3333/tdata/{EntitySet}\(\'id\'\) | jq .
 ```
 
 **Query/filter:**
 ```bash
-curl -s "http://localhost:3333/tdata/{EntitySet}?\$filter=Status eq 'Active'" | jq .
+curl -s -H "X-Tenant-Id: {TENANT}" "http://localhost:3333/tdata/{EntitySet}?\$filter=Status eq 'Active'" | jq .
 ```
 
 **Invoke action (bound actions use `Ns.` prefix):**
 ```bash
 curl -s -X POST http://localhost:3333/tdata/{EntitySet}\(\'id\'\)/Ns.{ActionName} \
+  -H "X-Tenant-Id: {TENANT}" \
   -H "Content-Type: application/json" \
   -d '{"param": "value"}'
 ```

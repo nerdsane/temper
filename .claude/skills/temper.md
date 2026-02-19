@@ -98,33 +98,49 @@ permit(principal is User, action == Action::"read", resource is Order)
 when { resource.ownerId == principal.id };
 ```
 
-## Verify
+## Start Server (Before Specs)
 
-Run the verification cascade:
-```bash
-temper verify --specs-dir specs/
-```
-Translate any failures using the error table in the Reference section. Fix specs and re-verify until all levels pass. Show the user plain-language results by default:
-```
-Verified: Order, Payment — all checks passed.
-```
-Or: "Issue with Order spec: an order can reach Submitted with zero items. Should submission require at least one item?"
-
-## Start Server
+**ALWAYS use port 3333.** Check if a server is already running before starting a new one:
 
 ```bash
-temper serve --port 3333 --specs-dir ./specs --tenant <app-name>
+curl -s http://localhost:3333/observe/health
 ```
-Tell the user: "Your app is live. Open http://localhost:3001 for the Observe UI."
+
+- **If it returns JSON** (server already running): Skip starting. Tell the user: "Temper server already running on port 3333. Your app will be added as a new tenant."
+- **If it fails** (no server): Start one:
+  ```bash
+  temper serve --port 3333 &
+  ```
+
+Tell the user: "Open http://localhost:3001 to watch specs load and verify in real-time."
 
 For persistence, set `DATABASE_URL`:
 ```bash
-DATABASE_URL=postgres://user:pass@localhost:5432/dbname temper serve --port 3333 --specs-dir ./specs --tenant <app-name>
+DATABASE_URL=postgres://user:pass@localhost:5432/dbname temper serve --port 3333 &
 ```
+
+**IMPORTANT:** Never start on a different port. All apps share one server as multi-tenant. This ensures `/temper-user` can always find them.
+
+## Push Specs (After Writing)
+
+After writing all spec files to `specs/`, push them to the running server:
+```bash
+curl -s -X POST http://localhost:3333/observe/specs/load-dir \
+  -H "Content-Type: application/json" \
+  -d '{"tenant":"<app-name>","specs_dir":"./specs"}'
+```
+
+This triggers the full verification cascade (L0-L3) in the background. The Observe UI at http://localhost:3001 shows:
+- SpecCards appearing for each entity (fade in)
+- Verification dots pulsing amber (running) then flashing teal (passed)
+- Progress bar filling as each level completes
+- "All entities verified" confirmation
+
+If any verification level fails, translate the error using the error table in the Reference section. Fix specs, then push again.
 
 ## Confirm Ready
 
-Wait for the server to start. Tell the user the app is live and show them how to interact:
+After pushing specs, watch the Observe UI for verification to complete. Tell the user the app is live and show them how to interact:
 ```bash
 # List entities
 curl http://localhost:3333/tdata/Orders
@@ -145,10 +161,11 @@ The API is at `/tdata` (not `/odata`). Invalid actions return 409 Conflict.
 
 ## Handle Changes
 
-When the user wants to modify the app, edit the spec files directly with the Edit tool, then:
+When the user wants to modify the app, edit the spec files directly with the Edit tool, then push again:
 ```bash
-temper verify --specs-dir specs/
-temper serve --port 3333 --specs-dir ./specs --tenant <app-name>
+curl -s -X POST http://localhost:3333/observe/specs/load-dir \
+  -H "Content-Type: application/json" \
+  -d '{"tenant":"<app-name>","specs_dir":"./specs"}'
 ```
 
 ## Check Unmet Intents
@@ -263,8 +280,12 @@ type = "webhook"
 
 ```bash
 temper init <project-name>                    # Scaffold project
-temper verify --specs-dir specs/              # Run verification cascade (L0-L3)
-temper serve --port 3333 --specs-dir ./specs --tenant <name>  # Start server
+temper serve --port 3333 &                    # Start empty server (Observe UI at :3001)
+temper verify --specs-dir specs/              # Run verification cascade (L0-L3) locally
+# Push specs to running server (triggers verification + SSE events):
+curl -s -X POST http://localhost:3333/observe/specs/load-dir \
+  -H "Content-Type: application/json" \
+  -d '{"tenant":"<name>","specs_dir":"./specs"}'
 curl http://localhost:3333/tdata              # Service document
 curl http://localhost:3333/tdata/\$metadata   # Full CSDL metadata
 curl http://localhost:3333/tdata/Orders       # List entities

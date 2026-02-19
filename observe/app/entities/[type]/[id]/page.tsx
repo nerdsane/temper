@@ -11,22 +11,22 @@ import ErrorDisplay from "@/components/ErrorDisplay";
 function EntitySkeleton() {
   return (
     <div className="animate-pulse">
-      <div className="h-4 bg-gray-800/60 rounded w-64 mb-2" />
-      <div className="h-7 bg-gray-800 rounded w-48 mb-6" />
-      <div className="bg-gray-900 border border-gray-800 rounded-lg p-6 mb-8">
-        <div className="grid grid-cols-3 gap-6">
+      <div className="h-3.5 bg-zinc-800/40 rounded w-56 mb-1.5" />
+      <div className="h-6 bg-zinc-800/60 rounded w-44 mb-5" />
+      <div className="bg-[#111115] rounded-lg p-5 mb-6">
+        <div className="grid grid-cols-3 gap-5">
           {[0, 1, 2].map((i) => (
             <div key={i}>
-              <div className="h-4 bg-gray-800 rounded w-20 mb-2" />
-              <div className="h-5 bg-gray-800 rounded w-28" />
+              <div className="h-3 bg-zinc-800/50 rounded w-16 mb-1.5" />
+              <div className="h-4 bg-zinc-800/50 rounded w-24" />
             </div>
           ))}
         </div>
       </div>
-      <div className="h-5 bg-gray-800 rounded w-36 mb-4" />
-      <div className="space-y-3">
+      <div className="h-4 bg-zinc-800/50 rounded w-32 mb-3" />
+      <div className="space-y-2.5">
         {[0, 1, 2].map((i) => (
-          <div key={i} className="h-20 bg-gray-900 border border-gray-800 rounded-lg" />
+          <div key={i} className="h-16 bg-[#111115] rounded-lg" />
         ))}
       </div>
     </div>
@@ -80,38 +80,38 @@ export default function EntityInspector() {
   }
 
   return (
-    <div>
+    <div className="animate-fade-in">
       {/* Header */}
-      <div className="mb-6">
-        <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
-          <Link href="/" className="hover:text-gray-300">Dashboard</Link>
+      <div className="mb-5">
+        <div className="flex items-center gap-1.5 text-[12px] text-zinc-600 mb-1">
+          <Link href="/" className="hover:text-zinc-400 transition-colors">Dashboard</Link>
           <span>/</span>
-          <span className="text-gray-300">Entities</span>
+          <span className="text-zinc-400">Entities</span>
           <span>/</span>
-          <span className="text-gray-300">{entityType}</span>
+          <span className="text-zinc-400">{entityType}</span>
           <span>/</span>
-          <span className="text-gray-300">{entityId}</span>
+          <span className="text-zinc-400">{entityId}</span>
         </div>
-        <h1 className="text-2xl font-bold text-gray-100">
+        <h1 className="text-2xl font-bold text-zinc-100 tracking-tight font-display">
           {entityType}: {entityId}
         </h1>
       </div>
 
       {/* Current state card */}
-      <div className="bg-gray-900 border border-gray-800 rounded-lg p-6 mb-8">
-        <div className="grid grid-cols-3 gap-6">
+      <div className="bg-[#111115] rounded-lg p-5 mb-6">
+        <div className="grid grid-cols-3 gap-5">
           <div>
-            <div className="text-sm text-gray-500 mb-1">Entity Type</div>
-            <div className="font-mono text-gray-200">{history.entity_type}</div>
+            <div className="text-[11px] text-zinc-600 mb-1 uppercase tracking-wider">Entity Type</div>
+            <div className="font-mono text-[13px] text-zinc-200">{history.entity_type}</div>
           </div>
           <div>
-            <div className="text-sm text-gray-500 mb-1">Entity ID</div>
-            <div className="font-mono text-gray-200">{history.entity_id}</div>
+            <div className="text-[11px] text-zinc-600 mb-1 uppercase tracking-wider">Entity ID</div>
+            <div className="font-mono text-[13px] text-zinc-200">{history.entity_id}</div>
           </div>
           <div>
-            <div className="text-sm text-gray-500 mb-1">Current State</div>
+            <div className="text-[11px] text-zinc-600 mb-1 uppercase tracking-wider">Current State</div>
             <div className="inline-block">
-              <span className="font-mono text-lg font-semibold text-green-400 bg-green-900/30 px-3 py-1 rounded border border-green-800">
+              <span className="font-mono text-[14px] font-semibold text-teal-400 bg-teal-500/10 px-2.5 py-1 rounded-md">
                 {history.current_state}
               </span>
             </div>
@@ -120,16 +120,16 @@ export default function EntityInspector() {
       </div>
 
       {/* Quick actions */}
-      <div className="flex gap-3 mb-8">
+      <div className="flex gap-2.5 mb-6">
         <Link
           href={`/specs/${entityType}`}
-          className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded-md transition-colors border border-gray-700"
+          className="px-3.5 py-1.5 bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 text-[13px] rounded-md transition-colors"
         >
           View Spec
         </Link>
         <Link
           href={`/verify/${entityType}`}
-          className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded-md transition-colors border border-gray-700"
+          className="px-3.5 py-1.5 bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 text-[13px] rounded-md transition-colors"
         >
           Verify Spec
         </Link>
@@ -137,7 +137,7 @@ export default function EntityInspector() {
 
       {/* Event history */}
       <div>
-        <h2 className="text-lg font-semibold text-gray-200 mb-4">
+        <h2 className="text-base font-semibold text-zinc-200 mb-3 tracking-tight">
           Event History ({history.events.length} events)
         </h2>
         <EntityTimeline events={history.events} />

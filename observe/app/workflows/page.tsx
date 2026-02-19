@@ -9,16 +9,16 @@ import Link from "next/link";
 
 function StatusIndicator({ status }: { status: string }) {
   const config: Record<string, { color: string; label: string; animate?: boolean }> = {
-    loading: { color: "bg-blue-400", label: "Loading", animate: true },
+    loading: { color: "bg-teal-400", label: "Loading", animate: true },
     verifying: { color: "bg-yellow-400", label: "Verifying", animate: true },
-    completed: { color: "bg-green-400", label: "Verified" },
-    failed: { color: "bg-red-400", label: "Failed" },
+    completed: { color: "bg-teal-400", label: "Verified" },
+    failed: { color: "bg-pink-400", label: "Failed" },
   };
   const c = config[status] ?? config.loading;
   return (
-    <div className="flex items-center gap-2">
-      <div className={`w-2 h-2 rounded-full ${c.color} ${c.animate ? "animate-pulse" : ""}`} />
-      <span className="text-xs text-gray-400">{c.label}</span>
+    <div className="flex items-center gap-1.5">
+      <div className={`w-1.5 h-1.5 rounded-full ${c.color} ${c.animate ? "animate-pulse" : ""}`} />
+      <span className="text-[11px] text-zinc-500">{c.label}</span>
     </div>
   );
 }
@@ -37,32 +37,32 @@ function AppCard({ workflow }: { workflow: AppWorkflow }) {
   return (
     <Link
       href={`/workflows/${workflow.tenant}`}
-      className="block bg-gray-900 border border-gray-800 rounded-lg p-5 hover:border-gray-600 transition-colors"
+      className="block bg-[#111115] rounded-lg p-5 hover:bg-white/[0.02] transition-colors group"
     >
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-lg font-semibold text-gray-100">{workflow.tenant}</h3>
+      <div className="flex items-center justify-between mb-2.5">
+        <h3 className="text-base font-semibold text-zinc-100 tracking-tight">{workflow.tenant}</h3>
         <StatusIndicator status={workflow.status} />
       </div>
 
       {/* Entity count */}
-      <div className="text-sm text-gray-400 mb-3">
+      <div className="text-[13px] text-zinc-500 mb-2.5">
         {workflow.entities.length} {workflow.entities.length === 1 ? "entity" : "entities"}
         {workflow.runtime_events_count > 0 && (
-          <span className="ml-3 text-gray-500">
+          <span className="ml-2.5 text-zinc-600">
             {workflow.runtime_events_count} runtime events
           </span>
         )}
       </div>
 
       {/* Progress bar */}
-      <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden mb-3">
+      <div className="h-1 bg-white/[0.04] rounded-full overflow-hidden mb-2.5">
         <div
           className={`h-full rounded-full transition-all duration-500 ${
             workflow.status === "failed" || !allPassed
-              ? "bg-red-500"
+              ? "bg-pink-500"
               : workflow.status === "completed"
-              ? "bg-green-500"
-              : "bg-blue-500"
+              ? "bg-teal-500"
+              : "bg-teal-500"
           }`}
           style={{ width: `${progressPct}%` }}
         />
@@ -79,17 +79,17 @@ function AppCard({ workflow }: { workflow: AppWorkflow }) {
           );
           const entityRunning = entity.steps.some((s) => s.status === "running");
           const dotColor = entityFailed
-            ? "bg-red-400"
+            ? "bg-pink-400"
             : entityDone
-            ? "bg-green-400"
+            ? "bg-teal-400"
             : entityRunning
-            ? "bg-yellow-400 animate-pulse"
-            : "bg-gray-500";
+            ? "bg-amber-400 animate-pulse"
+            : "bg-zinc-600";
 
           return (
             <div key={entity.entity_type} className="flex items-center gap-1.5">
-              <div className={`w-2 h-2 rounded-full ${dotColor}`} />
-              <span className="text-xs text-gray-400 font-mono">{entity.entity_type}</span>
+              <div className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
+              <span className="text-[11px] text-zinc-500 font-mono">{entity.entity_type}</span>
             </div>
           );
         })}
@@ -101,11 +101,11 @@ function AppCard({ workflow }: { workflow: AppWorkflow }) {
 function WorkflowsSkeleton() {
   return (
     <div className="animate-pulse">
-      <div className="h-7 bg-gray-800 rounded w-40 mb-2" />
-      <div className="h-4 bg-gray-800/60 rounded w-80 mb-8" />
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="h-6 bg-zinc-800/60 rounded w-36 mb-1.5" />
+      <div className="h-3.5 bg-zinc-800/40 rounded w-72 mb-6" />
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {[0, 1].map((i) => (
-          <div key={i} className="bg-gray-900 border border-gray-800 rounded-lg p-5 h-40" />
+          <div key={i} className="bg-[#111115] rounded-lg p-4 h-36" />
         ))}
       </div>
     </div>
@@ -143,10 +143,10 @@ export default function WorkflowsPage() {
     );
 
   return (
-    <div>
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-100">Workflows</h1>
-        <p className="text-sm text-gray-500 mt-1">
+    <div className="animate-fade-in">
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-zinc-100 tracking-tight font-display">Workflows</h1>
+        <p className="text-sm text-zinc-600 mt-0.5">
           App deployment workflows — spec loading, verification cascade, and runtime
         </p>
       </div>
@@ -154,22 +154,22 @@ export default function WorkflowsPage() {
       {workflows.length === 0 ? (
         <div className="flex items-center justify-center min-h-[256px]">
           <div className="text-center max-w-md">
-            <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-gray-800 border border-gray-700 mb-4">
-              <svg className="w-6 h-6 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-white/[0.04] mb-4">
+              <svg className="w-5 h-5 text-zinc-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
             </div>
-            <h3 className="text-lg font-semibold text-gray-200 mb-1">No app workflows</h3>
-            <p className="text-sm text-gray-400">
+            <h3 className="text-[15px] font-semibold text-zinc-200 mb-1">No app workflows</h3>
+            <p className="text-[13px] text-zinc-500">
               Start the server with{" "}
-              <code className="font-mono text-xs bg-gray-800 px-1.5 py-0.5 rounded">
+              <code className="font-mono text-[11px] bg-white/[0.04] px-1.5 py-0.5 rounded">
                 temper serve --app name=specs-dir
               </code>
             </p>
           </div>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {workflows.map((w) => (
             <AppCard key={w.tenant} workflow={w} />
           ))}

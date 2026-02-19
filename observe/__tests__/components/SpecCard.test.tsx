@@ -10,6 +10,11 @@ vi.mock("next/link", () => ({
   ),
 }));
 
+const mockPush = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush, replace: vi.fn(), back: vi.fn(), forward: vi.fn(), prefetch: vi.fn(), refresh: vi.fn() }),
+}));
+
 const mockSpec: SpecSummary = {
   entity_type: "Ticket",
   states: ["Open", "InProgress", "Closed"],
@@ -33,14 +38,14 @@ describe("SpecCard", () => {
     expect(screen.getByText("2")).toBeInTheDocument();
   });
 
-  it("highlights the initial state with green styling", () => {
+  it("highlights the initial state with lime styling", () => {
     render(<SpecCard spec={mockSpec} />);
     // "Open" appears multiple times - once as initial state value, once as state badge
     const openElements = screen.getAllByText("Open");
-    const greenElement = openElements.find(
-      (el) => el.className.includes("text-green-400"),
+    const limeElement = openElements.find(
+      (el) => el.className.includes("text-lime-400"),
     );
-    expect(greenElement).toBeTruthy();
+    expect(limeElement).toBeTruthy();
   });
 
   it("renders all state badges", () => {
@@ -57,9 +62,9 @@ describe("SpecCard", () => {
     expect(specLink).toBeTruthy();
   });
 
-  it("links to the verify page", () => {
+  it("has a verify button", () => {
     render(<SpecCard spec={mockSpec} />);
-    const verifyLink = screen.getByText("Verify");
-    expect(verifyLink).toHaveAttribute("href", "/verify/Ticket");
+    const verifyBtn = screen.getByText("Verify");
+    expect(verifyBtn.tagName).toBe("BUTTON");
   });
 });

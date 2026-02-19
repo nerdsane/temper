@@ -609,10 +609,21 @@ impl ServerState {
             .get_or_spawn_tenant_actor_with_fields(tenant, entity_type, entity_id, initial_fields)
             .ok_or_else(|| format!("No transition table for tenant '{tenant}', entity type '{entity_type}'"))?;
 
-        actor_ref
+        let response = actor_ref
             .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(5))
             .await
-            .map_err(|e| format!("Actor query failed: {e}"))
+            .map_err(|e| format!("Actor query failed: {e}"))?;
+
+        // Broadcast entity creation event for SSE subscribers
+        let _ = self.event_tx.send(EntityStateChange {
+            entity_type: entity_type.to_string(),
+            entity_id: entity_id.to_string(),
+            action: "Created".to_string(),
+            status: response.state.status.clone(),
+            tenant: tenant.to_string(),
+        });
+
+        Ok(response)
     }
 
     /// Update fields on an existing entity.

@@ -27,11 +27,7 @@ export default function VerificationPage() {
         if (match && match.status !== "pending" && match.status !== "running" && match.levels) {
           setResult({
             all_passed: match.status === "passed",
-            levels: match.levels.map((l) => ({
-              level: l.level,
-              passed: l.passed,
-              summary: l.summary,
-            })),
+            levels: match.levels,
           });
         }
       } catch {
@@ -57,35 +53,35 @@ export default function VerificationPage() {
   };
 
   return (
-    <div>
+    <div className="animate-fade-in">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-5">
         <div>
-          <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
-            <Link href="/" className="hover:text-gray-300">Dashboard</Link>
+          <div className="flex items-center gap-1.5 text-[12px] text-zinc-600 mb-1">
+            <Link href="/" className="hover:text-zinc-400 transition-colors">Dashboard</Link>
             <span>/</span>
-            <span className="text-gray-300">Verification</span>
+            <span className="text-zinc-400">Verification</span>
             <span>/</span>
-            <span className="text-gray-300">{entity}</span>
+            <span className="text-zinc-400">{entity}</span>
           </div>
-          <h1 className="text-2xl font-bold text-gray-100">
+          <h1 className="text-2xl font-bold text-zinc-100 tracking-tight font-display">
             Verification: {entity}
           </h1>
-          <p className="text-sm text-gray-500 mt-1">
+          <p className="text-[13px] text-zinc-600 mt-0.5">
             5-level verification cascade (L0 SMT, L1 Model Check, L2 DST, L2b Actor Sim, L3 PropTest)
           </p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex gap-2.5">
           <Link
             href={`/specs/${entity}`}
-            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded-md transition-colors border border-gray-700"
+            className="px-3.5 py-1.5 bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 text-[13px] rounded-md transition-colors"
           >
             View Spec
           </Link>
           <button
             onClick={handleRunVerification}
             disabled={loading}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-not-allowed text-white text-sm rounded-md transition-colors"
+            className="px-3.5 py-1.5 bg-teal-500 hover:bg-teal-400 disabled:bg-teal-600 disabled:cursor-not-allowed text-white text-[13px] rounded-md transition-colors"
           >
             {loading ? "Running..." : result ? "Re-run Verification" : "Run Verification"}
           </button>
@@ -94,14 +90,14 @@ export default function VerificationPage() {
 
       {/* Loading state */}
       {loading && (
-        <div className="flex items-center justify-center h-64">
+        <div className="flex items-center justify-center h-56">
           <div className="text-center">
-            <div className="text-gray-500 text-sm mb-2">Running verification cascade...</div>
+            <div className="text-zinc-600 text-[13px] mb-2">Running verification cascade...</div>
             <div className="flex gap-1 justify-center">
               {[0, 1, 2, 3, 4].map((i) => (
                 <div
                   key={i}
-                  className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"
+                  className="w-1.5 h-1.5 bg-teal-500 rounded-full animate-pulse"
                   style={{ animationDelay: `${i * 150}ms` }}
                 />
               ))}
@@ -123,7 +119,7 @@ export default function VerificationPage() {
       {!loading && result && (
         <>
           {!cachedLoading && (
-            <div className="mb-4 text-xs text-gray-500">
+            <div className="mb-3 text-[11px] text-zinc-600">
               {result ? "Showing cached results from background verification. Click \"Re-run Verification\" to run again." : ""}
             </div>
           )}
@@ -133,16 +129,16 @@ export default function VerificationPage() {
 
       {/* Initial prompt (only when no cached results and not loading) */}
       {!loading && !result && !error && !cachedLoading && (
-        <div className="text-center py-12">
-          <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-gray-800 border border-gray-700 mb-4">
-            <svg className="w-6 h-6 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <div className="text-center py-10">
+          <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-white/[0.04] mb-4">
+            <svg className="w-5 h-5 text-zinc-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
             </svg>
           </div>
-          <p className="text-gray-400 mb-4">Click &quot;Run Verification&quot; to start the cascade</p>
+          <p className="text-zinc-500 text-[13px] mb-3">Click &quot;Run Verification&quot; to start the cascade</p>
           <button
             onClick={handleRunVerification}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-md transition-colors"
+            className="px-3.5 py-1.5 bg-teal-500 hover:bg-teal-400 text-white text-[13px] rounded-md transition-colors"
           >
             Run Verification
           </button>
@@ -151,8 +147,8 @@ export default function VerificationPage() {
 
       {/* Loading cached results */}
       {cachedLoading && !loading && !result && (
-        <div className="flex items-center justify-center h-32">
-          <div className="text-gray-500 text-sm">Checking for cached verification results...</div>
+        <div className="flex items-center justify-center h-28">
+          <div className="text-zinc-600 text-[13px]">Checking for cached verification results...</div>
         </div>
       )}
     </div>

@@ -4,6 +4,7 @@ import ActivityPage from "@/app/activity/page";
 
 vi.mock("@/lib/api", () => ({
   fetchTrajectories: vi.fn(),
+  fetchEntities: vi.fn(),
   subscribeEntityEvents: vi.fn().mockReturnValue(() => {}),
 }));
 
@@ -56,13 +57,28 @@ const sampleTrajectoryData = {
   ],
 };
 
-function setPollingReturn(data: unknown, opts?: { error?: string }) {
-  mockUsePolling.mockReturnValue({
-    data: data as never,
-    error: opts?.error ?? null,
-    loading: false,
-    lastUpdated: data ? new Date() : null,
-    refresh: vi.fn(),
+function setPollingReturn(trajectoryData: unknown, opts?: { error?: string; entities?: unknown[] }) {
+  let callIndex = 0;
+  const results = [
+    {
+      data: trajectoryData as never,
+      error: opts?.error ?? null,
+      loading: false,
+      lastUpdated: trajectoryData ? new Date() : null,
+      refresh: vi.fn(),
+    },
+    {
+      data: (opts?.entities ?? []) as never,
+      error: null,
+      loading: false,
+      lastUpdated: null,
+      refresh: vi.fn(),
+    },
+  ];
+  mockUsePolling.mockImplementation(() => {
+    const result = results[callIndex % 2];
+    callIndex++;
+    return result;
   });
 }
 
