@@ -2,12 +2,22 @@
 
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { useParams } from "next/navigation";
-import { fetchWorkflows, subscribeDesignTimeEvents } from "@/lib/api";
+import { fetchWorkflows, fetchVerificationStatus, subscribeDesignTimeEvents } from "@/lib/api";
 import { usePolling } from "@/lib/hooks";
 import type { WorkflowsResponse, AppWorkflow, DesignTimeEvent } from "@/lib/types";
 import WorkflowTimeline from "@/components/WorkflowTimeline";
+import type { StepDetailsMap } from "@/components/WorkflowTimeline";
 import ErrorDisplay from "@/components/ErrorDisplay";
 import Link from "next/link";
+
+/** Map verification level names from the API to workflow step names. */
+function levelToStepName(level: string): string | null {
+  if (level.includes("Symbolic")) return "L0_symbolic";
+  if (level.includes("Model Check")) return "L1_model_check";
+  if (level.includes("Simulation")) return "L2_simulation";
+  if (level.includes("Property")) return "L3_property_test";
+  return null;
+}
 
 function DetailSkeleton() {
   return (
@@ -63,6 +73,44 @@ export default function WorkflowDetailPage() {
   const workflow: AppWorkflow | undefined = useMemo(() => {
     return poll.data?.workflows.find((w) => w.tenant === tenant);
   }, [poll.data, tenant]);
+
+  // Build a map of entity_type → step_name → VerificationDetail[] from verification status
+  const [entityStepDetails, setEntityStepDetails] = useState<Record<string, StepDetailsMap>>({});
+
+  useEffect(() => {
+    if (!workflow) return;
+    // Only fetch if any entity has failures
+    const hasFailed = workflow.entities.some((e) =>
+      e.steps.some((s) => s.passed === false),
+    );
+    if (!hasFailed) return;
+
+    fetchVerificationStatus()
+      .then((status) => {
+        const map: Record<string, StepDetailsMap> = {};
+        for (const entity of status.entities) {
+          if (entity.tenant !== tenant) continue;
+          if (!entity.levels) continue;
+          const stepMap: StepDetailsMap = {};
+          for (const level of entity.levels) {
+            if (!level.passed && Array.isArray(level.details) && level.details.length > 0) {
+              // Map level name to step name (e.g. "Level 2: Deterministic Simulation" → "L2_simulation")
+              const stepName = levelToStepName(level.level);
+              if (stepName) {
+                stepMap[stepName] = level.details;
+              }
+            }
+          }
+          if (Object.keys(stepMap).length > 0) {
+            map[entity.entity_type] = stepMap;
+          }
+        }
+        setEntityStepDetails(map);
+      })
+      .catch(() => {
+        // Ignore — details are optional enrichment
+      });
+  }, [workflow, tenant]);
 
   // Live SSE subscription for real-time verification progress
   useEffect(() => {
@@ -177,7 +225,11 @@ export default function WorkflowDetailPage() {
                 </Link>
               </div>
 
-              <WorkflowTimeline steps={entity.steps} entityType={entity.entity_type} />
+              <WorkflowTimeline
+                steps={entity.steps}
+                entityType={entity.entity_type}
+                stepDetails={entityStepDetails[entity.entity_type]}
+              />
             </div>
           );
         })}

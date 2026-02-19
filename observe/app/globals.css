@@ -13,6 +13,7 @@
   --color-text-secondary: #a1a1aa;
   --color-text-muted: #52525b;
   --font-mono: var(--font-geist-mono), ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
+  --font-display: var(--font-space-grotesk), system-ui, sans-serif;
 }
 
 body {
@@ -83,7 +84,16 @@ code, .font-mono {
 .animate-flash-teal { animation: status-flash-teal 0.6s ease-out forwards; }
 .animate-flash-pink { animation: status-flash-pink 0.6s ease-out forwards; }
 
+/* Glass utility */
+.glass {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: 0 0 12px 0 rgba(0, 0, 0, 0.25);
+}
+
 /* Display font utility */
 .font-display {
-  font-family: var(--font-display), var(--font-geist-sans), system-ui, sans-serif;
+  font-family: var(--font-display), system-ui, sans-serif;
 }

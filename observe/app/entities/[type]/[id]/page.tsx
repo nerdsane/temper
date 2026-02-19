@@ -13,7 +13,7 @@ function EntitySkeleton() {
     <div className="animate-pulse">
       <div className="h-3.5 bg-zinc-800/40 rounded w-56 mb-1.5" />
       <div className="h-6 bg-zinc-800/60 rounded w-44 mb-5" />
-      <div className="bg-[#111115] rounded-lg p-5 mb-6">
+      <div className="glass rounded p-5 mb-6">
         <div className="grid grid-cols-3 gap-5">
           {[0, 1, 2].map((i) => (
             <div key={i}>
@@ -26,7 +26,7 @@ function EntitySkeleton() {
       <div className="h-4 bg-zinc-800/50 rounded w-32 mb-3" />
       <div className="space-y-2.5">
         {[0, 1, 2].map((i) => (
-          <div key={i} className="h-16 bg-[#111115] rounded-lg" />
+          <div key={i} className="h-16 glass rounded" />
         ))}
       </div>
     </div>
@@ -98,7 +98,7 @@ export default function EntityInspector() {
       </div>
 
       {/* Current state card */}
-      <div className="bg-[#111115] rounded-lg p-5 mb-6">
+      <div className="glass rounded p-5 mb-6">
         <div className="grid grid-cols-3 gap-5">
           <div>
             <div className="text-[11px] text-zinc-600 mb-1 uppercase tracking-wider">Entity Type</div>
@@ -111,7 +111,7 @@ export default function EntityInspector() {
           <div>
             <div className="text-[11px] text-zinc-600 mb-1 uppercase tracking-wider">Current State</div>
             <div className="inline-block">
-              <span className="font-mono text-[14px] font-semibold text-teal-400 bg-teal-500/10 px-2.5 py-1 rounded-md">
+              <span className="font-mono text-[14px] font-semibold text-teal-400 bg-teal-500/10 px-2.5 py-1 rounded-sm">
                 {history.current_state}
               </span>
             </div>
@@ -119,17 +119,92 @@ export default function EntityInspector() {
         </div>
       </div>
 
+      {/* Properties */}
+      {(history.fields || history.counters || history.booleans || history.lists) && (
+        <div className="mb-6">
+          <h2 className="text-base font-semibold text-zinc-200 mb-3 tracking-tight">Properties</h2>
+          <div className="glass rounded overflow-hidden">
+            {/* Fields */}
+            {history.fields && Object.keys(history.fields).length > 0 && (
+              <div className="px-4 py-3 border-b border-white/[0.04]">
+                <div className="text-[10px] text-zinc-600 uppercase tracking-widest mb-2">Fields</div>
+                <div className="space-y-1.5">
+                  {Object.entries(history.fields).map(([key, val]) => (
+                    <div key={key} className="flex items-center justify-between">
+                      <span className="text-[12px] text-zinc-500">{key}</span>
+                      <span className="font-mono text-[12px] text-zinc-300 truncate ml-4 max-w-[60%] text-right">
+                        {typeof val === "object" ? JSON.stringify(val) : String(val ?? "—")}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Counters */}
+            {history.counters && Object.keys(history.counters).length > 0 && (
+              <div className="px-4 py-3 border-b border-white/[0.04]">
+                <div className="text-[10px] text-zinc-600 uppercase tracking-widest mb-2">Counters</div>
+                <div className="flex flex-wrap gap-3">
+                  {Object.entries(history.counters).map(([key, val]) => (
+                    <div key={key} className="bg-white/[0.03] rounded-sm px-2.5 py-1.5">
+                      <span className="text-[11px] text-zinc-500 mr-2">{key}</span>
+                      <span className="font-mono text-[13px] font-semibold text-zinc-200">{val}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Booleans */}
+            {history.booleans && Object.keys(history.booleans).length > 0 && (
+              <div className="px-4 py-3 border-b border-white/[0.04]">
+                <div className="text-[10px] text-zinc-600 uppercase tracking-widest mb-2">Booleans</div>
+                <div className="flex flex-wrap gap-3">
+                  {Object.entries(history.booleans).map(([key, val]) => (
+                    <div key={key} className="flex items-center gap-1.5">
+                      <div className={`w-1.5 h-1.5 rounded-full ${val ? "bg-teal-400" : "bg-zinc-700"}`} />
+                      <span className="text-[12px] text-zinc-400">{key}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Lists */}
+            {history.lists && Object.keys(history.lists).length > 0 && (
+              <div className="px-4 py-3">
+                <div className="text-[10px] text-zinc-600 uppercase tracking-widest mb-2">Lists</div>
+                <div className="space-y-2">
+                  {Object.entries(history.lists).map(([key, items]) => (
+                    <div key={key}>
+                      <span className="text-[11px] text-zinc-500">{key}</span>
+                      <div className="flex flex-wrap gap-1.5 mt-1">
+                        {items.length > 0 ? items.map((item, i) => (
+                          <span key={i} className="font-mono text-[11px] text-zinc-300 bg-white/[0.04] px-1.5 py-0.5 rounded-sm">
+                            {item}
+                          </span>
+                        )) : (
+                          <span className="text-[11px] text-zinc-700">empty</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Quick actions */}
       <div className="flex gap-2.5 mb-6">
         <Link
           href={`/specs/${entityType}`}
-          className="px-3.5 py-1.5 bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 text-[13px] rounded-md transition-colors"
+          className="px-3.5 py-1.5 bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 text-[13px] rounded-sm transition-colors"
         >
           View Spec
         </Link>
         <Link
           href={`/verify/${entityType}`}
-          className="px-3.5 py-1.5 bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 text-[13px] rounded-md transition-colors"
+          className="px-3.5 py-1.5 bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 text-[13px] rounded-sm transition-colors"
         >
           Verify Spec
         </Link>

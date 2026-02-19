@@ -314,7 +314,7 @@ function PropTestPanel({ data }: { data: PropTestDetails }) {
 }
 
 /* ── Verification Detail cards (from registry) ─────── */
-function VerificationDetailsPanel({ details }: { details: VerificationDetail[] }) {
+export function VerificationDetailsPanel({ details }: { details: VerificationDetail[] }) {
   const kindLabel: Record<string, string> = {
     liveness_violation: "Liveness Violation",
     invariant_violation: "Invariant Violation",

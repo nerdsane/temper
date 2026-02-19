@@ -121,43 +121,51 @@ DATABASE_URL=postgres://user:pass@localhost:5432/dbname temper serve --port 3333
 
 **IMPORTANT:** Never start on a different port. All apps share one server as multi-tenant. This ensures `/temper-user` can always find them.
 
-## Push Specs (After Writing)
+## Push Specs and Verify (MANDATORY — DO NOT SKIP)
 
-After writing all spec files to `specs/`, push them to the running server:
+**You MUST complete ALL steps below. The app is NOT live until the response confirms all entities pass. DO NOT tell the user the app is ready until verification passes. DO NOT move on to showing API examples until verification passes.**
+
+### Push and read results (single command)
+
+The endpoint streams newline-delimited JSON (NDJSON). It loads specs, runs verification inline, and streams each result. **The response does NOT return until all verification is complete.** You do NOT need to poll — just read the output.
+
 ```bash
-curl -s -X POST http://localhost:3333/observe/specs/load-dir \
+curl -s -N -X POST http://localhost:3333/observe/specs/load-dir \
   -H "Content-Type: application/json" \
   -d '{"tenant":"<app-name>","specs_dir":"./specs"}'
 ```
 
-This triggers the full verification cascade (L0-L3) in the background. The Observe UI at http://localhost:3001 shows:
-- SpecCards appearing for each entity (fade in)
-- Verification dots pulsing amber (running) then flashing teal (passed)
-- Progress bar filling as each level completes
-- "All entities verified" confirmation
+The response streams one JSON object per line:
 
-If any verification level fails, translate the error using the error table in the Reference section. Fix specs, then push again.
-
-## Confirm Ready
-
-After pushing specs, **actively poll verification status** until all entities pass:
-
-```bash
-# Poll verification status (repeat every 3s until all pass)
-curl -s http://localhost:3333/observe/verification-status | jq '.entities[] | {entity_type, status}'
+```
+{"type":"specs_loaded","tenant":"my-app","entities":["Order","Payment"]}
+{"type":"verification_started","entity":"Order"}
+{"type":"verification_result","entity":"Order","all_passed":true,"levels":[...]}
+{"type":"verification_started","entity":"Payment"}
+{"type":"verification_result","entity":"Payment","all_passed":false,"levels":[{"level":"...","passed":false,"summary":"...","details":[{"kind":"liveness_violation","property":"...","description":"..."}]}]}
+{"type":"summary","tenant":"my-app","all_passed":false,"entities":{"Order":true,"Payment":false}}
 ```
 
-**Verification is a gate**: The server returns HTTP 423 Locked for any POST/PATCH/PUT/DELETE on entities that haven't passed verification. The 423 response includes failure details:
+### Check the summary line and fix failures (MANDATORY)
+
+**Read the LAST line of the output** — it has `"type":"summary"` with `"all_passed":true/false`.
+
+- **If `"all_passed": true`** → proceed to "App is live" below
+- **If `"all_passed": false`**:
+  1. Find the `"type":"verification_result"` lines where `"all_passed":false`
+  2. Read the `levels[].details` array — it tells you exactly which property failed and why
+  3. Map the failure to a fix using the Error Translation Table in the Reference section
+  4. Edit the IOA spec to fix the issue
+  5. Re-push specs (run the curl command again)
+  6. Maximum 3 fix-and-retry cycles, then ask the user for guidance
+
+**CRITICAL: The server returns HTTP 423 Locked for any POST/PATCH/PUT/DELETE on entities that haven't passed verification.** If you skip this step and try to use the API, you will get 423 errors. The 423 response body includes failure details:
 
 ```json
 {"error": {"code": "VerificationRequired", "message": "...", "details": {"verification_status": "failed", "failed_levels": [...]}}}
 ```
 
-**Active verification loop** (max 3 fix-and-retry cycles):
-1. After pushing, poll `GET /observe/verification-status` every 3s
-2. If all entities show `"status": "passed"` → app is live, proceed
-3. If any entity shows `"status": "failed"` → read `failed_levels[].details` from response, map to fix using Error Translation Table below, edit the IOA spec, re-push
-4. If still failing after 3 cycles, ask the user for guidance
+### App is live (only after all entities pass)
 
 Once all entities pass verification, tell the user the app is live and show them how to interact:
 ```bash
@@ -301,8 +309,8 @@ type = "webhook"
 temper init <project-name>                    # Scaffold project
 temper serve --port 3333 &                    # Start empty server (Observe UI at :3001)
 temper verify --specs-dir specs/              # Run verification cascade (L0-L3) locally
-# Push specs to running server (triggers verification + SSE events):
-curl -s -X POST http://localhost:3333/observe/specs/load-dir \
+# Push specs + verify (streams NDJSON with verification results):
+curl -s -N -X POST http://localhost:3333/observe/specs/load-dir \
   -H "Content-Type: application/json" \
   -d '{"tenant":"<name>","specs_dir":"./specs"}'
 curl http://localhost:3333/tdata              # Service document

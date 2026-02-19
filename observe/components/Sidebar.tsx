@@ -163,15 +163,12 @@ export default function Sidebar() {
   }, [specs]);
 
   return (
-    <aside className="w-52 bg-[#0a0a0c] border-r border-white/[0.06] flex flex-col h-screen">
+    <aside className="w-52 bg-[#0a0a0c]/80 backdrop-blur-xl border-r border-white/[0.06] flex flex-col h-screen">
       {/* Logo / Title */}
       <div className="px-4 py-3.5">
         <Link href="/" className="flex items-center gap-2.5">
-          <div className="w-7 h-7 bg-teal-500 rounded-lg flex items-center justify-center text-xs font-bold tracking-tight">
-            T
-          </div>
           <div>
-            <div className="text-[13px] font-semibold text-zinc-100 tracking-tight">Temper</div>
+            <div className="text-[15px] font-bold text-zinc-100 tracking-tight font-display">Temper</div>
             <div className="text-[10px] text-zinc-600 tracking-wide uppercase">Observe</div>
           </div>
         </Link>
@@ -184,7 +181,7 @@ export default function Sidebar() {
           <Link
             key={item.href}
             href={item.href}
-            className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] transition-colors ${
+            className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-sm text-[13px] font-display transition-colors ${
               isActive(item.href)
                 ? "text-zinc-100 bg-white/[0.06]"
                 : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
@@ -207,7 +204,7 @@ export default function Sidebar() {
               <Link
                 key={`${tenant}:${spec.entity_type}`}
                 href={`/specs/${spec.entity_type}`}
-                className={`flex items-center justify-between px-2.5 py-1.5 rounded-md text-[13px] transition-colors ${
+                className={`flex items-center justify-between px-2.5 py-1.5 rounded-sm text-[13px] font-display transition-colors ${
                   isActive(`/specs/${spec.entity_type}`)
                     ? "text-zinc-100 bg-white/[0.06]"
                     : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
@@ -218,7 +215,7 @@ export default function Sidebar() {
                   <span className="truncate">{spec.entity_type}</span>
                 </div>
                 {entityCounts[spec.entity_type] !== undefined && (
-                  <span className="text-[10px] font-mono bg-teal-500/10 text-teal-400 px-1.5 py-0.5 rounded">
+                  <span className="text-[10px] font-mono bg-teal-500/10 text-teal-400 px-1.5 py-0.5 rounded-sm">
                     {entityCounts[spec.entity_type]}
                   </span>
                 )}
@@ -231,7 +228,7 @@ export default function Sidebar() {
         <CollapsibleSection title="Tools" storageKey="tools">
           <Link
             href={specs.length > 0 ? `/verify/${specs[0].entity_type}` : "/verify/Ticket"}
-            className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] transition-colors ${
+            className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-sm text-[13px] font-display transition-colors ${
               pathname.startsWith("/verify")
                 ? "text-zinc-100 bg-white/[0.06]"
                 : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"

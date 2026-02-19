@@ -16,7 +16,7 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::sim_now;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 use tokio_stream::StreamExt;
 
 use temper_evolution::{
@@ -244,7 +244,7 @@ fn to_pascal_case(s: &str) -> String {
 async fn handle_load_dir(
     State(state): State<ServerState>,
     Json(body): Json<LoadDirRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
     let specs_path = std::path::Path::new(&body.specs_dir);
 
     if !specs_path.is_dir() {
@@ -310,61 +310,79 @@ async fn handle_load_dir(
         registry.register_tenant(body.tenant.as_str(), csdl, csdl_xml, &ioa_pairs);
     }
 
-    // Emit spec_loaded design-time events for each entity
-    let now = sim_now();
-    for entity_name in &entity_names {
-        let event = crate::state::DesignTimeEvent {
-            kind: "spec_loaded".to_string(),
-            entity_type: entity_name.clone(),
-            tenant: body.tenant.clone(),
-            summary: format!("Loaded spec for {entity_name}"),
-            level: None,
-            passed: None,
-            timestamp: now.to_rfc3339(),
-            step_number: Some(1),
-            total_steps: Some(7),
-        };
-        let _ = state.design_time_tx.send(event.clone());
-        if let Ok(mut log) = state.design_time_log.write() {
-            log.push(event);
-        }
+    // Stream NDJSON response: verification runs inline and results are streamed per-entity.
+    // Any agent calling this endpoint gets verification results without polling.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, Infallible>>(100);
+    let tenant = body.tenant.clone();
 
-        // Mark as Running in registry
-        {
-            let mut registry = state.registry.write().unwrap();
-            registry.set_verification_status(
-                &body.tenant.clone().into(),
-                entity_name,
-                VerificationStatus::Running,
-            );
-        }
+    tokio::spawn(async move { // determinism-ok: HTTP handler streams verification results inline
+        let now = sim_now();
 
-        // Emit verify_started
-        let started_event = crate::state::DesignTimeEvent {
-            kind: "verify_started".to_string(),
-            entity_type: entity_name.clone(),
-            tenant: body.tenant.clone(),
-            summary: format!("Verification started for {entity_name}"),
-            level: None,
-            passed: None,
-            timestamp: now.to_rfc3339(),
-            step_number: Some(2),
-            total_steps: Some(7),
-        };
-        let _ = state.design_time_tx.send(started_event.clone());
-        if let Ok(mut log) = state.design_time_log.write() {
-            log.push(started_event);
-        }
+        // Emit specs_loaded line
+        let _ = tx.send(Ok(
+            serde_json::to_string(&serde_json::json!({
+                "type": "specs_loaded",
+                "tenant": &tenant,
+                "entities": &entity_names,
+            })).unwrap() + "\n"
+        )).await;
 
-        // Spawn background verification
-        let entity_name_clone = entity_name.clone();
-        let ioa_source = ioa_sources[entity_name].clone();
-        let tenant = body.tenant.clone();
-        let design_tx = state.design_time_tx.clone();
-        let design_log = state.design_time_log.clone();
-        let registry = state.registry.clone();
-        tokio::spawn(async move { // determinism-ok: HTTP handler spawns background verification task
-            // Run verification in a blocking thread
+        let mut entity_results: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+
+        for entity_name in &entity_names {
+            // Emit design-time events for UI (spec_loaded + verify_started)
+            let loaded_event = crate::state::DesignTimeEvent {
+                kind: "spec_loaded".to_string(),
+                entity_type: entity_name.clone(),
+                tenant: tenant.clone(),
+                summary: format!("Loaded spec for {entity_name}"),
+                level: None,
+                passed: None,
+                timestamp: now.to_rfc3339(),
+                step_number: Some(1),
+                total_steps: Some(7),
+            };
+            let _ = state.design_time_tx.send(loaded_event.clone());
+            if let Ok(mut log) = state.design_time_log.write() {
+                log.push(loaded_event);
+            }
+
+            // Mark as Running in registry
+            {
+                let mut registry = state.registry.write().unwrap();
+                registry.set_verification_status(
+                    &tenant.clone().into(),
+                    entity_name,
+                    VerificationStatus::Running,
+                );
+            }
+
+            let started_event = crate::state::DesignTimeEvent {
+                kind: "verify_started".to_string(),
+                entity_type: entity_name.clone(),
+                tenant: tenant.clone(),
+                summary: format!("Verification started for {entity_name}"),
+                level: None,
+                passed: None,
+                timestamp: now.to_rfc3339(),
+                step_number: Some(2),
+                total_steps: Some(7),
+            };
+            let _ = state.design_time_tx.send(started_event.clone());
+            if let Ok(mut log) = state.design_time_log.write() {
+                log.push(started_event);
+            }
+
+            // Stream verification_started
+            let _ = tx.send(Ok(
+                serde_json::to_string(&serde_json::json!({
+                    "type": "verification_started",
+                    "entity": entity_name,
+                })).unwrap() + "\n"
+            )).await;
+
+            // Run verification (blocking, sequential per entity)
+            let ioa_source = ioa_sources[entity_name].clone();
             let result = tokio::task::spawn_blocking(move || {
                 temper_verify::VerificationCascade::from_ioa(&ioa_source)
                     .with_sim_seeds(5)
@@ -377,17 +395,17 @@ async fn handle_load_dir(
 
             match result {
                 Ok(cascade_result) => {
-                    // Emit verify_level for each level
+                    // Emit verify_level events for UI
                     for (level_idx, level_result) in cascade_result.levels.iter().enumerate() {
                         let level_event = crate::state::DesignTimeEvent {
                             kind: "verify_level".to_string(),
-                            entity_type: entity_name_clone.clone(),
+                            entity_type: entity_name.clone(),
                             tenant: tenant.clone(),
                             summary: format!(
                                 "{} {} for {}",
                                 level_labels.get(level_idx).unwrap_or(&"unknown"),
                                 if level_result.passed { "passed" } else { "failed" },
-                                entity_name_clone
+                                entity_name
                             ),
                             level: Some(level_labels.get(level_idx).unwrap_or(&"unknown").to_string()),
                             passed: Some(level_result.passed),
@@ -395,21 +413,21 @@ async fn handle_load_dir(
                             step_number: Some(3 + level_idx as u8),
                             total_steps: Some(7),
                         };
-                        let _ = design_tx.send(level_event.clone());
-                        if let Ok(mut log) = design_log.write() {
+                        let _ = state.design_time_tx.send(level_event.clone());
+                        if let Ok(mut log) = state.design_time_log.write() {
                             log.push(level_event);
                         }
                     }
 
-                    // Emit verify_done
+                    // Emit verify_done event for UI
                     let done_event = crate::state::DesignTimeEvent {
                         kind: "verify_done".to_string(),
-                        entity_type: entity_name_clone.clone(),
+                        entity_type: entity_name.clone(),
                         tenant: tenant.clone(),
                         summary: if cascade_result.all_passed {
-                            format!("All verification levels passed for {entity_name_clone}")
+                            format!("All verification levels passed for {entity_name}")
                         } else {
-                            format!("Verification completed with failures for {entity_name_clone}")
+                            format!("Verification completed with failures for {entity_name}")
                         },
                         level: None,
                         passed: Some(cascade_result.all_passed),
@@ -417,16 +435,15 @@ async fn handle_load_dir(
                         step_number: Some(7),
                         total_steps: Some(7),
                     };
-                    let _ = design_tx.send(done_event.clone());
-                    if let Ok(mut log) = design_log.write() {
+                    let _ = state.design_time_tx.send(done_event.clone());
+                    if let Ok(mut log) = state.design_time_log.write() {
                         log.push(done_event);
                     }
 
-                    // Convert CascadeResult to EntityVerificationResult
+                    // Build EntityVerificationResult for registry
                     let entity_result = crate::registry::EntityVerificationResult {
                         all_passed: cascade_result.all_passed,
                         levels: cascade_result.levels.iter().map(|l| {
-                            // Extract violation details for failed levels
                             let details: Option<Vec<crate::registry::VerificationDetail>> = if !l.passed {
                                 let mut dets = Vec::new();
                                 if let Some(sim) = &l.simulation {
@@ -491,11 +508,35 @@ async fn handle_load_dir(
                         verified_at: sim_now().to_rfc3339(),
                     };
 
+                    // Stream verification_result with full level details
+                    let levels_json: Vec<serde_json::Value> = entity_result.levels.iter().map(|l| {
+                        let mut obj = serde_json::json!({
+                            "level": &l.level,
+                            "passed": l.passed,
+                            "summary": &l.summary,
+                        });
+                        if let Some(details) = &l.details {
+                            obj["details"] = serde_json::to_value(details).unwrap_or_default();
+                        }
+                        obj
+                    }).collect();
+
+                    let _ = tx.send(Ok(
+                        serde_json::to_string(&serde_json::json!({
+                            "type": "verification_result",
+                            "entity": entity_name,
+                            "all_passed": cascade_result.all_passed,
+                            "levels": levels_json,
+                        })).unwrap() + "\n"
+                    )).await;
+
+                    entity_results.insert(entity_name.clone(), cascade_result.all_passed);
+
                     // Update registry with final status
-                    if let Ok(mut reg) = registry.write() {
+                    if let Ok(mut reg) = state.registry.write() {
                         reg.set_verification_status(
-                            &tenant.into(),
-                            &entity_name_clone,
+                            &tenant.clone().into(),
+                            entity_name,
                             VerificationStatus::Completed(entity_result),
                         );
                     }
@@ -504,29 +545,52 @@ async fn handle_load_dir(
                     // Verification task panicked — emit failure
                     let fail_event = crate::state::DesignTimeEvent {
                         kind: "verify_done".to_string(),
-                        entity_type: entity_name_clone.clone(),
+                        entity_type: entity_name.clone(),
                         tenant: tenant.clone(),
-                        summary: format!("Verification failed for {entity_name_clone}: {e}"),
+                        summary: format!("Verification failed for {entity_name}: {e}"),
                         level: None,
                         passed: Some(false),
                         timestamp: sim_now().to_rfc3339(),
                         step_number: Some(7),
                         total_steps: Some(7),
                     };
-                    let _ = design_tx.send(fail_event.clone());
-                    if let Ok(mut log) = design_log.write() {
+                    let _ = state.design_time_tx.send(fail_event.clone());
+                    if let Ok(mut log) = state.design_time_log.write() {
                         log.push(fail_event);
                     }
+
+                    entity_results.insert(entity_name.clone(), false);
+
+                    let _ = tx.send(Ok(
+                        serde_json::to_string(&serde_json::json!({
+                            "type": "verification_error",
+                            "entity": entity_name,
+                            "error": format!("{e}"),
+                        })).unwrap() + "\n"
+                    )).await;
                 }
             }
-        });
-    }
+        }
 
-    Ok(Json(serde_json::json!({
-        "tenant": body.tenant,
-        "entities": entity_names,
-        "message": "Specs loaded, verification running",
-    })))
+        // Stream final summary
+        let all_passed = entity_results.values().all(|&p| p);
+        let _ = tx.send(Ok(
+            serde_json::to_string(&serde_json::json!({
+                "type": "summary",
+                "tenant": &tenant,
+                "all_passed": all_passed,
+                "entities": entity_results,
+            })).unwrap() + "\n"
+        )).await;
+        // tx drops here, closing the stream
+    });
+
+    let stream = ReceiverStream::new(rx);
+    let body = axum::body::Body::from_stream(stream);
+    Ok(axum::response::Response::builder()
+        .header("content-type", "application/x-ndjson")
+        .body(body)
+        .unwrap())
 }
 
 /// GET /observe/specs/{entity} -- full spec detail for a named entity type.
@@ -705,11 +769,20 @@ async fn get_entity_history(
             .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(5))
             .await
         {
-            return Json(format_history_response(
+            let mut json = format_history_response(
                 &entity_type,
                 &entity_id,
                 &response.state.events,
-            ));
+            );
+            // Include entity properties from in-memory state.
+            if let Some(obj) = json.as_object_mut() {
+                obj.insert("current_state".to_string(), serde_json::json!(response.state.status));
+                obj.insert("fields".to_string(), response.state.fields.clone());
+                obj.insert("counters".to_string(), serde_json::json!(response.state.counters));
+                obj.insert("booleans".to_string(), serde_json::json!(response.state.booleans));
+                obj.insert("lists".to_string(), serde_json::json!(response.state.lists));
+            }
+            return Json(json);
         }
     }
 
@@ -2484,15 +2557,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        // Response is NDJSON — parse each line
+        let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
             .await
             .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["tenant"], "test-tenant");
-        assert_eq!(json["message"], "Specs loaded, verification running");
+        let body_str = std::str::from_utf8(&body).unwrap();
+        let lines: Vec<serde_json::Value> = body_str
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
 
-        let entities = json["entities"].as_array().unwrap();
+        // First line: specs_loaded
+        assert_eq!(lines[0]["type"], "specs_loaded");
+        assert_eq!(lines[0]["tenant"], "test-tenant");
+        let entities = lines[0]["entities"].as_array().unwrap();
         assert!(!entities.is_empty(), "should have loaded at least one entity");
+
+        // Last line: summary
+        let summary = lines.last().unwrap();
+        assert_eq!(summary["type"], "summary");
+        assert_eq!(summary["tenant"], "test-tenant");
 
         // Verify specs are in the registry
         let registry = state.registry.read().unwrap();
@@ -2559,16 +2644,24 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
+        // Consume entire body to wait for verification to complete
+        let _ = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+            .await
+            .unwrap();
+
         // Check that design-time events were logged
         let log = state.design_time_log.read().unwrap();
         assert!(!log.is_empty(), "design-time log should have events");
 
-        // Should have at least spec_loaded and verify_started events
+        // Should have spec_loaded, verify_started, verify_level, and verify_done events
         let loaded_events: Vec<_> = log.iter().filter(|e| e.kind == "spec_loaded").collect();
         assert!(!loaded_events.is_empty(), "should have spec_loaded events");
 
         let started_events: Vec<_> = log.iter().filter(|e| e.kind == "verify_started").collect();
         assert!(!started_events.is_empty(), "should have verify_started events");
+
+        let done_events: Vec<_> = log.iter().filter(|e| e.kind == "verify_done").collect();
+        assert!(!done_events.is_empty(), "should have verify_done events");
     }
 
     #[tokio::test]

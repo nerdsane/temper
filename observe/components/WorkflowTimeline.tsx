@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import type { WorkflowStep } from "@/lib/types";
+import type { WorkflowStep, VerificationDetail } from "@/lib/types";
+import { VerificationDetailsPanel } from "@/components/CascadeResults";
 
 const STEP_LABELS: Record<string, string> = {
   loaded: "Spec Loaded",
@@ -56,12 +57,17 @@ function StepIcon({ status, passed }: { status: string; passed?: boolean }) {
   );
 }
 
+/** Map from step name (e.g. "L2_simulation") to verification details for that level. */
+export type StepDetailsMap = Record<string, VerificationDetail[]>;
+
 interface WorkflowTimelineProps {
   steps: WorkflowStep[];
   entityType?: string;
+  /** Verification details keyed by step name, for rendering rich failure info. */
+  stepDetails?: StepDetailsMap;
 }
 
-export default function WorkflowTimeline({ steps }: WorkflowTimelineProps) {
+export default function WorkflowTimeline({ steps, stepDetails }: WorkflowTimelineProps) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
 
   const toggle = (index: number) => {
@@ -140,6 +146,13 @@ export default function WorkflowTimeline({ steps }: WorkflowTimelineProps) {
                   </div>
                 )}
               </button>
+
+              {/* Verification detail panel for failed steps */}
+              {isExpanded && step.passed === false && stepDetails?.[step.step] && (
+                <div className="ml-8 mt-1 mb-2">
+                  <VerificationDetailsPanel details={stepDetails[step.step]} />
+                </div>
+              )}
             </div>
           );
         })}

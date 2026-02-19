@@ -146,6 +146,10 @@ export interface EntityHistory {
   entity_type: string;
   entity_id: string;
   current_state: string;
+  fields?: Record<string, unknown>;
+  counters?: Record<string, number>;
+  booleans?: Record<string, boolean>;
+  lists?: Record<string, string[]>;
   events: EntityEvent[];
 }
 

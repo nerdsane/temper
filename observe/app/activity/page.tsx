@@ -10,7 +10,7 @@ import StatusBadge from "@/components/StatusBadge";
 
 function StatCard({ label, value, color }: { label: string; value: string | number; color?: string }) {
   return (
-    <div className="bg-[#111115] rounded-lg p-3.5">
+    <div className="glass rounded p-3.5">
       <div className="text-[12px] text-zinc-600">{label}</div>
       <div className={`text-4xl font-bold font-mono mt-0.5 ${color ?? "text-zinc-100"}`}>
         {value}
@@ -182,7 +182,7 @@ export default function ActivityPage() {
         <div className="h-3.5 bg-zinc-800/40 rounded w-64 mb-6" />
         <div className="grid grid-cols-4 gap-3 mb-6">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="bg-[#111115] rounded-lg p-3.5">
+            <div key={i} className="glass rounded p-3.5">
               <div className="h-3 bg-zinc-800/50 rounded w-20 mb-2" />
               <div className="h-8 bg-zinc-800/50 rounded w-10" />
             </div>
@@ -219,7 +219,7 @@ export default function ActivityPage() {
             <select
               value={filterType}
               onChange={(e) => setFilterType(e.target.value)}
-              className="bg-[#111115] text-zinc-400 text-xs rounded-md px-2 py-1.5 focus:outline-none"
+              className="bg-[#111115] text-zinc-400 text-xs rounded-sm px-2 py-1.5 focus:outline-none"
             >
               <option value="all">All types</option>
               {entityTypes.map((t) => (
@@ -263,7 +263,7 @@ export default function ActivityPage() {
           </div>
           <div
             ref={feedRef}
-            className="bg-[#111115] rounded-lg overflow-hidden max-h-64 overflow-y-auto"
+            className="glass rounded overflow-hidden max-h-64 overflow-y-auto"
           >
             {liveEvents.map((event, i) => (
               <div
@@ -299,9 +299,9 @@ export default function ActivityPage() {
       {data && actionNames.length > 0 && (
         <div className="mb-6">
           <h2 className="text-base font-semibold text-zinc-200 mb-3 tracking-tight">Action Breakdown</h2>
-          <div className="bg-[#111115] rounded-lg overflow-hidden">
+          <div className="glass rounded overflow-hidden max-h-80 overflow-y-auto">
             <table className="w-full text-[13px]">
-              <thead>
+              <thead className="sticky top-0 bg-[#111115]/90 backdrop-blur-sm z-10">
                 <tr className="border-b border-white/[0.06]">
                   <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">Action</th>
                   <th className="text-right px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">Total</th>
@@ -361,13 +361,13 @@ export default function ActivityPage() {
                 placeholder="Search entities..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="bg-[#111115] text-zinc-300 text-xs rounded-md px-2.5 py-1.5 w-40 placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-teal-500/30"
+                className="bg-[#111115] text-zinc-300 text-xs rounded-sm px-2.5 py-1.5 w-40 placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-teal-500/30"
               />
               {allEntityTypes.length > 1 && (
                 <select
                   value={entityTypeFilter}
                   onChange={(e) => setEntityTypeFilter(e.target.value)}
-                  className="bg-[#111115] text-zinc-400 text-xs rounded-md px-2 py-1.5 focus:outline-none"
+                  className="bg-[#111115] text-zinc-400 text-xs rounded-sm px-2 py-1.5 focus:outline-none"
                 >
                   <option value="all">All types</option>
                   {allEntityTypes.map((t) => (
@@ -379,7 +379,7 @@ export default function ActivityPage() {
                 <select
                   value={entityStateFilter}
                   onChange={(e) => setEntityStateFilter(e.target.value)}
-                  className="bg-[#111115] text-zinc-400 text-xs rounded-md px-2 py-1.5 focus:outline-none"
+                  className="bg-[#111115] text-zinc-400 text-xs rounded-sm px-2 py-1.5 focus:outline-none"
                 >
                   <option value="all">All states</option>
                   {allEntityStates.map((s) => (
@@ -397,9 +397,9 @@ export default function ActivityPage() {
               )}
             </div>
           </div>
-          <div className="bg-[#111115] rounded-lg overflow-hidden">
+          <div className="glass rounded overflow-hidden max-h-72 overflow-y-auto">
             <table className="w-full text-[13px]">
-              <thead>
+              <thead className="sticky top-0 bg-[#111115]/90 backdrop-blur-sm z-10">
                 <tr className="border-b border-white/[0.06]">
                   <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">Type</th>
                   <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">ID</th>
@@ -408,7 +408,7 @@ export default function ActivityPage() {
                 </tr>
               </thead>
               <tbody>
-                {filteredEntities.map((entity) => {
+                {[...filteredEntities].reverse().map((entity) => {
                   const eKey = `${entity.entity_type}-${entity.entity_id}`;
                   const isNew = newEntityKeys.has(eKey);
                   return (
@@ -453,15 +453,16 @@ export default function ActivityPage() {
           Failed Intents
         </h2>
         {!data || data.failed_intents.length === 0 ? (
-          <div className="bg-[#111115] rounded-lg p-6 text-center">
+          <div className="glass rounded p-6 text-center">
             <p className="text-sm text-zinc-500">No failed intents recorded.</p>
           </div>
         ) : (
-          <div className="bg-[#111115] rounded-lg overflow-hidden">
+          <div className="glass rounded overflow-hidden">
             {(() => {
               const totalFailed = data.failed_intents.length;
               const totalPages = Math.ceil(totalFailed / FAILED_PER_PAGE);
-              const paginatedIntents = data.failed_intents.slice(
+              const reversed = [...data.failed_intents].reverse();
+              const paginatedIntents = reversed.slice(
                 (failedPage - 1) * FAILED_PER_PAGE,
                 failedPage * FAILED_PER_PAGE,
               );
@@ -513,14 +514,14 @@ export default function ActivityPage() {
                         <button
                           onClick={() => setFailedPage((p) => Math.max(1, p - 1))}
                           disabled={failedPage === 1}
-                          className="px-3 py-1 text-xs rounded-md bg-white/[0.04] text-zinc-400 hover:bg-white/[0.08] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                          className="px-3 py-1 text-xs rounded-sm bg-white/[0.04] text-zinc-400 hover:bg-white/[0.08] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                         >
                           Prev
                         </button>
                         <button
                           onClick={() => setFailedPage((p) => Math.min(totalPages, p + 1))}
                           disabled={failedPage === totalPages}
-                          className="px-3 py-1 text-xs rounded-md bg-white/[0.04] text-zinc-400 hover:bg-white/[0.08] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                          className="px-3 py-1 text-xs rounded-sm bg-white/[0.04] text-zinc-400 hover:bg-white/[0.08] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                         >
                           Next
                         </button>
