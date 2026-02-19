@@ -110,11 +110,18 @@ export interface PropTestDetails {
   failure: PropTestFailure | null;
 }
 
+export interface VerificationDetail {
+  kind: string;
+  property: string;
+  description: string;
+  actor_id?: string;
+}
+
 export interface VerificationLevel {
   level: string;
   passed: boolean;
   summary: string;
-  details?: string;
+  details?: VerificationDetail[] | string;
   duration_ms?: number;
   smt?: SmtDetails | null;
   verification?: ModelCheckDetails | null;

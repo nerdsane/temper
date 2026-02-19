@@ -18,7 +18,7 @@ use temper_store_postgres::PostgresEventStore;
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 use crate::events::EntityStateChange;
 use crate::reaction::ReactionDispatcher;
-use crate::registry::SpecRegistry;
+use crate::registry::{SpecRegistry, VerificationDetail, VerificationStatus};
 
 /// A design-time event emitted during spec loading and verification.
 ///
@@ -684,4 +684,107 @@ impl ServerState {
     pub fn enrich_metadata(&self, action_name: &str, hint: &str) {
         self.agent_hints.write().unwrap().insert(action_name.to_string(), hint.to_string());
     }
+
+    /// Check the verification gate for a specific entity type.
+    ///
+    /// Returns `Ok(())` if the entity type is verified and operations are allowed.
+    /// Returns `Err(VerificationGateError)` if operations should be blocked.
+    ///
+    /// Policy:
+    /// - `None` → `Ok(())` (backward compat for legacy single-tenant without registry)
+    /// - `Pending` → `Err("pending")` — verification hasn't started yet
+    /// - `Running` → `Err("running")` — verification is in progress
+    /// - `Completed(all_passed: true)` → `Ok(())`
+    /// - `Completed(all_passed: false)` → `Err("failed")` with failed level details
+    pub fn check_verification_gate(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Result<(), VerificationGateError> {
+        let registry = self.registry.read().unwrap();
+
+        // If there's no tenant config in the registry, this is a legacy
+        // single-tenant setup — allow operations for backward compatibility.
+        let Some(tenant_config) = registry.get_tenant(tenant) else {
+            return Ok(());
+        };
+
+        // If the entity type doesn't exist in the tenant, there's nothing to gate.
+        if !tenant_config.entities.contains_key(entity_type) {
+            return Ok(());
+        }
+
+        match tenant_config.verification.get(entity_type) {
+            None => Ok(()),
+            Some(VerificationStatus::Pending) => Err(VerificationGateError {
+                entity_type: entity_type.to_string(),
+                status: "pending".to_string(),
+                message: format!(
+                    "Verification has not started for entity type '{entity_type}'. \
+                     Waiting for verification cascade to begin."
+                ),
+                failed_levels: None,
+            }),
+            Some(VerificationStatus::Running) => Err(VerificationGateError {
+                entity_type: entity_type.to_string(),
+                status: "running".to_string(),
+                message: format!(
+                    "Verification is currently running for entity type '{entity_type}'. \
+                     Please wait for the cascade to complete."
+                ),
+                failed_levels: None,
+            }),
+            Some(VerificationStatus::Completed(result)) => {
+                if result.all_passed {
+                    Ok(())
+                } else {
+                    let failed_levels: Vec<FailedLevelInfo> = result
+                        .levels
+                        .iter()
+                        .filter(|l| !l.passed)
+                        .map(|l| FailedLevelInfo {
+                            level: l.level.clone(),
+                            summary: l.summary.clone(),
+                            details: l.details.clone(),
+                        })
+                        .collect();
+                    Err(VerificationGateError {
+                        entity_type: entity_type.to_string(),
+                        status: "failed".to_string(),
+                        message: format!(
+                            "Verification failed for entity type '{entity_type}'. \
+                             Fix the spec and re-push."
+                        ),
+                        failed_levels: Some(failed_levels),
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Error returned when the verification gate blocks an operation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VerificationGateError {
+    /// The entity type that failed the gate.
+    pub entity_type: String,
+    /// Gate status: "pending", "running", or "failed".
+    pub status: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Failed verification levels with details (only for "failed" status).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_levels: Option<Vec<FailedLevelInfo>>,
+}
+
+/// Information about a failed verification level.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FailedLevelInfo {
+    /// Level name (e.g. "Level 2: Deterministic Simulation").
+    pub level: String,
+    /// Human-readable summary of the failure.
+    pub summary: String,
+    /// Detailed violation information.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Vec<VerificationDetail>>,
 }

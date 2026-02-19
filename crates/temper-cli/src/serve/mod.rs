@@ -275,6 +275,7 @@ fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant:
                                 level: format!("{:?}", l.level),
                                 passed: l.passed,
                                 summary: l.summary.clone(),
+                                details: None,
                             })
                             .collect(),
                         verified_at: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
@@ -321,6 +322,7 @@ fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant:
                             level: "Error".to_string(),
                             passed: false,
                             summary: format!("Verification task panicked: {e}"),
+                            details: None,
                         }],
                         verified_at: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
                     };

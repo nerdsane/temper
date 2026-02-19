@@ -48,6 +48,23 @@ pub struct EntityLevelSummary {
     pub passed: bool,
     /// Human-readable summary.
     pub summary: String,
+    /// Detailed violation information (populated only for failed levels).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Vec<VerificationDetail>>,
+}
+
+/// A single verification violation detail.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VerificationDetail {
+    /// Violation kind: "liveness_violation", "invariant_violation", "counterexample", "proptest_failure".
+    pub kind: String,
+    /// Property or invariant name that was violated.
+    pub property: String,
+    /// Human-readable description of the violation.
+    pub description: String,
+    /// Actor ID that triggered the violation (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
 }
 
 /// A registered tenant with its specs and entity configuration.

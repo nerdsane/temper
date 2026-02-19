@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type {
   VerificationLevel,
+  VerificationDetail,
   SmtDetails,
   SmtState,
   ModelCheckDetails,
@@ -312,6 +313,41 @@ function PropTestPanel({ data }: { data: PropTestDetails }) {
   );
 }
 
+/* ── Verification Detail cards (from registry) ─────── */
+function VerificationDetailsPanel({ details }: { details: VerificationDetail[] }) {
+  const kindLabel: Record<string, string> = {
+    liveness_violation: "Liveness Violation",
+    invariant_violation: "Invariant Violation",
+    counterexample: "Counterexample",
+    proptest_failure: "Property Test Failure",
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="text-[11px] text-zinc-400 mb-2 uppercase tracking-wider">
+        Violations ({details.length})
+      </div>
+      {details.map((d, i) => (
+        <div key={i} className={`${GLASS} p-3 bg-gradient-to-r ${B_GRAD} to-transparent`}>
+          <div className="flex items-center justify-between mb-1.5">
+            <span className={`font-mono text-[12px] ${B}`}>{d.property}</span>
+            <span className="text-[10px] font-mono text-zinc-600">
+              {kindLabel[d.kind] ?? d.kind}
+            </span>
+          </div>
+          <div className="text-[11px] text-zinc-400 mb-1">{d.description}</div>
+          {d.actor_id && (
+            <div className="flex items-center gap-2 font-mono text-[11px]">
+              <span className="text-zinc-500">actor</span>
+              <span className="text-zinc-300">{d.actor_id}</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ── detail panel router ────────────────────────────── */
 function LevelDetailPanel({ level }: { level: VerificationLevel }) {
   if (level.smt) return <SmtPanel data={level.smt} />;
@@ -320,6 +356,10 @@ function LevelDetailPanel({ level }: { level: VerificationLevel }) {
   if (level.prop_test) return <PropTestPanel data={level.prop_test} />;
 
   if (level.details) {
+    // details can be an array of VerificationDetail (from registry) or a string
+    if (Array.isArray(level.details)) {
+      return <VerificationDetailsPanel details={level.details} />;
+    }
     return (
       <pre className={`${INNER} p-2.5 font-mono text-[11px] text-zinc-400 whitespace-pre-wrap`}>
         {level.details}

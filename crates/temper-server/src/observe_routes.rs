@@ -426,10 +426,66 @@ async fn handle_load_dir(
                     let entity_result = crate::registry::EntityVerificationResult {
                         all_passed: cascade_result.all_passed,
                         levels: cascade_result.levels.iter().map(|l| {
+                            // Extract violation details for failed levels
+                            let details: Option<Vec<crate::registry::VerificationDetail>> = if !l.passed {
+                                let mut dets = Vec::new();
+                                if let Some(sim) = &l.simulation {
+                                    for v in &sim.liveness_violations {
+                                        dets.push(crate::registry::VerificationDetail {
+                                            kind: "liveness_violation".into(),
+                                            property: v.property.clone(),
+                                            description: v.description.clone(),
+                                            actor_id: Some(v.actor_id.clone()),
+                                        });
+                                    }
+                                    for v in &sim.violations {
+                                        dets.push(crate::registry::VerificationDetail {
+                                            kind: "invariant_violation".into(),
+                                            property: v.invariant.clone(),
+                                            description: format!(
+                                                "Actor {} violated invariant at tick {} during action {}",
+                                                v.actor_id, v.tick, v.action
+                                            ),
+                                            actor_id: Some(v.actor_id.clone()),
+                                        });
+                                    }
+                                }
+                                if let Some(mc) = &l.verification {
+                                    for cx in &mc.counterexamples {
+                                        dets.push(crate::registry::VerificationDetail {
+                                            kind: "counterexample".into(),
+                                            property: cx.property.clone(),
+                                            description: format!(
+                                                "Counterexample found with {} step trace",
+                                                cx.trace.len()
+                                            ),
+                                            actor_id: None,
+                                        });
+                                    }
+                                }
+                                if let Some(pt) = &l.prop_test {
+                                    if let Some(failure) = &pt.failure {
+                                        dets.push(crate::registry::VerificationDetail {
+                                            kind: "proptest_failure".into(),
+                                            property: failure.invariant.clone(),
+                                            description: format!(
+                                                "Property test failed after sequence: {}",
+                                                failure.action_sequence.join(" → ")
+                                            ),
+                                            actor_id: None,
+                                        });
+                                    }
+                                }
+                                if dets.is_empty() { None } else { Some(dets) }
+                            } else {
+                                None
+                            };
+
                             crate::registry::EntityLevelSummary {
                                 level: format!("{}", l.level),
                                 passed: l.passed,
                                 summary: l.summary.clone(),
+                                details,
                             }
                         }).collect(),
                         verified_at: sim_now().to_rfc3339(),
@@ -832,11 +888,16 @@ async fn handle_verification_status(
                             .levels
                             .iter()
                             .map(|l| {
-                                serde_json::json!({
+                                let mut obj = serde_json::json!({
                                     "level": l.level,
                                     "passed": l.passed,
                                     "summary": l.summary,
-                                })
+                                });
+                                if let Some(details) = &l.details {
+                                    obj["details"] = serde_json::to_value(details)
+                                        .unwrap_or_default();
+                                }
+                                obj
                             })
                             .collect();
                         (
@@ -1308,19 +1369,28 @@ async fn handle_unmet_intent(
 ) -> StatusCode {
     use temper_runtime::scheduler::sim_now;
 
-    let intent = body.get("intent").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let intent = body.get("action")
+        .or_else(|| body.get("intent"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
     let tenant = body.get("tenant").and_then(|v| v.as_str()).unwrap_or("default");
+    let entity_type = body.get("entity_type").and_then(|v| v.as_str()).unwrap_or("");
+    let error_msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
 
     let entry = crate::state::TrajectoryEntry {
         timestamp: sim_now().to_rfc3339(),
         tenant: tenant.to_string(),
-        entity_type: "".to_string(),
+        entity_type: entity_type.to_string(),
         entity_id: "".to_string(),
         action: intent.to_string(),
         success: false,
         from_status: None,
         to_status: None,
-        error: Some(format!("Unmet intent: {intent}")),
+        error: Some(if error_msg.is_empty() {
+            format!("Unmet intent: {intent}")
+        } else {
+            error_msg.to_string()
+        }),
     };
     if let Ok(mut log) = state.trajectory_log.write() {
         log.push(entry);

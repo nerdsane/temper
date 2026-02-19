@@ -9,7 +9,9 @@
 
 use temper_runtime::tenant::TenantId;
 use temper_runtime::ActorSystem;
-use temper_server::registry::SpecRegistry;
+use temper_server::registry::{
+    EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
+};
 use temper_server::ServerState;
 use temper_spec::csdl::parse_csdl;
 
@@ -220,4 +222,181 @@ fn registry_tables_are_functional() {
         .get_table(&TenantId::new("beta"), "Task")
         .unwrap();
     assert_eq!(task_table.initial_state, "Backlog");
+}
+
+// =========================================================================
+// Verification gate tests
+// =========================================================================
+
+#[test]
+fn operations_blocked_when_verification_pending() {
+    let state = build_multi_tenant_state();
+    let alpha = TenantId::new("alpha");
+
+    // Default status after register_tenant is Pending
+    let result = state.check_verification_gate(&alpha, "Order");
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.status, "pending");
+    assert!(err.message.contains("Order"));
+    assert!(err.failed_levels.is_none());
+}
+
+#[test]
+fn operations_blocked_when_verification_running() {
+    let state = build_multi_tenant_state();
+    let alpha = TenantId::new("alpha");
+
+    // Set status to Running
+    {
+        let mut registry = state.registry.write().unwrap();
+        registry.set_verification_status(&alpha, "Order", VerificationStatus::Running);
+    }
+
+    let result = state.check_verification_gate(&alpha, "Order");
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.status, "running");
+    assert!(err.message.contains("running"));
+}
+
+#[test]
+fn operations_allowed_after_verification_passes() {
+    let state = build_multi_tenant_state();
+    let alpha = TenantId::new("alpha");
+
+    // Set status to Completed with all_passed: true
+    {
+        let mut registry = state.registry.write().unwrap();
+        registry.set_verification_status(
+            &alpha,
+            "Order",
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: true,
+                levels: vec![
+                    EntityLevelSummary {
+                        level: "L0 SMT".to_string(),
+                        passed: true,
+                        summary: "All guards satisfiable".to_string(),
+                        details: None,
+                    },
+                    EntityLevelSummary {
+                        level: "L1 Model Check".to_string(),
+                        passed: true,
+                        summary: "All properties hold".to_string(),
+                        details: None,
+                    },
+                ],
+                verified_at: "2026-02-18T00:00:00Z".to_string(),
+            }),
+        );
+    }
+
+    let result = state.check_verification_gate(&alpha, "Order");
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn operations_blocked_after_verification_fails() {
+    let state = build_multi_tenant_state();
+    let alpha = TenantId::new("alpha");
+
+    // Set status to Completed with a failure
+    {
+        let mut registry = state.registry.write().unwrap();
+        registry.set_verification_status(
+            &alpha,
+            "Order",
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: false,
+                levels: vec![
+                    EntityLevelSummary {
+                        level: "L0 SMT".to_string(),
+                        passed: true,
+                        summary: "All guards satisfiable".to_string(),
+                        details: None,
+                    },
+                    EntityLevelSummary {
+                        level: "L2 Simulation".to_string(),
+                        passed: false,
+                        summary: "3 liveness violations across 5 seeds".to_string(),
+                        details: Some(vec![
+                            temper_server::registry::VerificationDetail {
+                                kind: "liveness_violation".to_string(),
+                                property: "EventuallyResolved".to_string(),
+                                description: "Actor order-1 stuck in Draft".to_string(),
+                                actor_id: Some("order-1".to_string()),
+                            },
+                        ]),
+                    },
+                ],
+                verified_at: "2026-02-18T00:00:00Z".to_string(),
+            }),
+        );
+    }
+
+    // Verification gate should block
+    let result = state.check_verification_gate(&alpha, "Order");
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.status, "failed");
+    assert!(err.message.contains("Order"));
+
+    // Verify the error includes failed level details
+    let failed_levels = err.failed_levels.expect("should have failed_levels");
+    assert_eq!(failed_levels.len(), 1);
+    assert_eq!(failed_levels[0].level, "L2 Simulation");
+    let details = failed_levels[0].details.as_ref().expect("should have details");
+    assert_eq!(details[0].property, "EventuallyResolved");
+    assert_eq!(details[0].kind, "liveness_violation");
+
+    // Actual dispatch should also fail (no actor spawned since gate blocks first)
+    let dispatch_result = state
+        .dispatch_tenant_action(&alpha, "Order", "order-1", "SubmitOrder", serde_json::json!({}))
+        .await;
+    // dispatch_tenant_action bypasses the gate (it's at HTTP layer), but still succeeds
+    // because transition tables are registered independently of verification
+    assert!(dispatch_result.is_ok());
+}
+
+#[test]
+fn per_entity_gating_isolation() {
+    let state = build_multi_tenant_state();
+    let alpha = TenantId::new("alpha");
+    let beta = TenantId::new("beta");
+
+    // Alpha Order: mark as passed
+    {
+        let mut registry = state.registry.write().unwrap();
+        registry.set_verification_status(
+            &alpha,
+            "Order",
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: true,
+                levels: vec![EntityLevelSummary {
+                    level: "L0 SMT".to_string(),
+                    passed: true,
+                    summary: "OK".to_string(),
+                    details: None,
+                }],
+                verified_at: "2026-02-18T00:00:00Z".to_string(),
+            }),
+        );
+    }
+
+    // Beta Task: still Pending (default)
+    // Alpha Order should pass the gate
+    assert!(state.check_verification_gate(&alpha, "Order").is_ok());
+
+    // Beta Task should be blocked (pending)
+    let result = state.check_verification_gate(&beta, "Task");
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().status, "pending");
+
+    // Alpha doesn't have Task — should pass (entity not in tenant)
+    assert!(state.check_verification_gate(&alpha, "Task").is_ok());
+
+    // Nonexistent tenant — should pass (backward compat)
+    let unknown = TenantId::new("unknown");
+    assert!(state.check_verification_gate(&unknown, "Order").is_ok());
 }

@@ -140,7 +140,26 @@ If any verification level fails, translate the error using the error table in th
 
 ## Confirm Ready
 
-After pushing specs, watch the Observe UI for verification to complete. Tell the user the app is live and show them how to interact:
+After pushing specs, **actively poll verification status** until all entities pass:
+
+```bash
+# Poll verification status (repeat every 3s until all pass)
+curl -s http://localhost:3333/observe/verification-status | jq '.entities[] | {entity_type, status}'
+```
+
+**Verification is a gate**: The server returns HTTP 423 Locked for any POST/PATCH/PUT/DELETE on entities that haven't passed verification. The 423 response includes failure details:
+
+```json
+{"error": {"code": "VerificationRequired", "message": "...", "details": {"verification_status": "failed", "failed_levels": [...]}}}
+```
+
+**Active verification loop** (max 3 fix-and-retry cycles):
+1. After pushing, poll `GET /observe/verification-status` every 3s
+2. If all entities show `"status": "passed"` → app is live, proceed
+3. If any entity shows `"status": "failed"` → read `failed_levels[].details` from response, map to fix using Error Translation Table below, edit the IOA spec, re-push
+4. If still failing after 3 cycles, ask the user for guidance
+
+Once all entities pass verification, tell the user the app is live and show them how to interact:
 ```bash
 # List entities
 curl http://localhost:3333/tdata/Orders
@@ -157,7 +176,7 @@ curl -X POST http://localhost:3333/tdata/Orders\('entity-id'\)/Ns.SubmitOrder \
 curl http://localhost:3333/tdata/Orders\('entity-id'\)
 ```
 
-The API is at `/tdata` (not `/odata`). Invalid actions return 409 Conflict.
+The API is at `/tdata` (not `/odata`). Invalid actions return 409 Conflict. Unverified entities return 423 Locked.
 
 ## Handle Changes
 

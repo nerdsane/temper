@@ -6,6 +6,9 @@
 //! manages itself using its own framework.
 
 use temper_runtime::tenant::TenantId;
+use temper_server::registry::{
+    EntityLevelSummary, EntityVerificationResult, VerificationStatus,
+};
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_verify::cascade::VerificationCascade;
@@ -65,14 +68,33 @@ pub fn bootstrap_system_tenant(state: &PlatformState) {
         .expect("System CSDL failed to parse");
 
     // Register system tenant
+    let system_tid = TenantId::new(SYSTEM_TENANT);
     {
         let mut registry = state.registry.write().unwrap();
         registry.register_tenant(
-            TenantId::new(SYSTEM_TENANT),
+            system_tid.clone(),
             csdl,
             SYSTEM_CSDL.to_string(),
             SYSTEM_SPECS,
         );
+        // Mark all system entities as pre-verified (they passed the cascade above).
+        let now = temper_runtime::scheduler::sim_now().to_rfc3339();
+        for (entity_type, _) in SYSTEM_SPECS {
+            registry.set_verification_status(
+                &system_tid,
+                entity_type,
+                VerificationStatus::Completed(EntityVerificationResult {
+                    all_passed: true,
+                    levels: vec![EntityLevelSummary {
+                        level: "Bootstrap".to_string(),
+                        passed: true,
+                        summary: "Pre-verified at bootstrap".to_string(),
+                        details: None,
+                    }],
+                    verified_at: now.clone(),
+                }),
+            );
+        }
     }
 
     tracing::info!("temper-system tenant bootstrapped: {:?}",

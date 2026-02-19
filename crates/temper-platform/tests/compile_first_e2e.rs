@@ -16,7 +16,10 @@ use tower::ServiceExt;
 use temper_platform::bootstrap::bootstrap_system_tenant;
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
-use temper_server::registry::SpecRegistry;
+use temper_server::registry::{
+    EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
+};
+use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
 
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
@@ -91,10 +94,31 @@ async fn body_string(response: axum::http::Response<Body>) -> String {
 }
 
 /// Build a SpecRegistry with a single user tenant.
+///
+/// Marks all entities as verification-passed so the verification gate allows
+/// operations. This simulates the compile-first path where specs have already
+/// been verified by `temper verify` before being served.
 fn build_user_registry(tenant: &str, ioa_specs: &[(&str, &str)]) -> SpecRegistry {
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
     let mut registry = SpecRegistry::new();
     registry.register_tenant(tenant, csdl, CSDL_XML.to_string(), ioa_specs);
+    let tenant_id = TenantId::new(tenant);
+    for (entity_type, _) in ioa_specs {
+        registry.set_verification_status(
+            &tenant_id,
+            entity_type,
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: true,
+                levels: vec![EntityLevelSummary {
+                    level: "L0 SMT".to_string(),
+                    passed: true,
+                    summary: "Pre-verified".to_string(),
+                    details: None,
+                }],
+                verified_at: "2026-02-18T00:00:00Z".to_string(),
+            }),
+        );
+    }
     registry
 }
 
@@ -225,6 +249,23 @@ async fn e2e_compile_first_two_tenants() {
     let mut registry = SpecRegistry::new();
     registry.register_tenant("alpha", csdl_alpha, CSDL_XML.to_string(), &[("Order", ORDER_IOA)]);
     registry.register_tenant("beta", csdl_beta, TASK_CSDL_XML.to_string(), &[("Task", TASK_IOA)]);
+    // Mark entities as pre-verified for compile-first tests
+    for (tenant, entity) in &[("alpha", "Order"), ("beta", "Task")] {
+        registry.set_verification_status(
+            &TenantId::new(*tenant),
+            entity,
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: true,
+                levels: vec![EntityLevelSummary {
+                    level: "L0 SMT".to_string(),
+                    passed: true,
+                    summary: "Pre-verified".to_string(),
+                    details: None,
+                }],
+                verified_at: "2026-02-18T00:00:00Z".to_string(),
+            }),
+        );
+    }
 
     let state = PlatformState::with_registry(registry, None);
     bootstrap_system_tenant(&state);

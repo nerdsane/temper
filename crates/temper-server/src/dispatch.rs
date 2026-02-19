@@ -16,7 +16,7 @@ use temper_runtime::tenant::TenantId;
 
 use crate::query_eval::{apply_query_options, expand_entity, select_fields};
 use crate::response::{odata_error, ODataResponse, ODataXmlResponse};
-use crate::state::ServerState;
+use crate::state::{ServerState, VerificationGateError};
 
 /// Extract the tenant ID from request headers.
 ///
@@ -74,6 +74,22 @@ fn tenant_entity_sets(state: &ServerState, tenant: &TenantId) -> Vec<String> {
     } else {
         state.entity_set_map.keys().cloned().collect()
     }
+}
+
+/// Build an HTTP 423 Locked response from a verification gate error.
+fn verification_gate_response(err: VerificationGateError) -> axum::response::Response {
+    let body = serde_json::json!({
+        "error": {
+            "code": "VerificationRequired",
+            "message": err.message,
+            "details": {
+                "verification_status": err.status,
+                "entity_type": err.entity_type,
+                "failed_levels": err.failed_levels,
+            }
+        }
+    });
+    (StatusCode::LOCKED, axum::Json(body)).into_response()
 }
 
 /// Handle GET requests.
@@ -229,6 +245,11 @@ pub async fn handle_odata_post(
                 None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{name}' not found")).into_response(),
             };
 
+            // Verification gate: block entity creation if verification hasn't passed
+            if let Err(gate_err) = state.check_verification_gate(&tenant, &entity_type) {
+                return verification_gate_response(gate_err);
+            }
+
             let body_json: serde_json::Value = match serde_json::from_slice(&body) {
                 Ok(v) => v,
                 Err(e) => return odata_error(StatusCode::BAD_REQUEST, "InvalidBody", &format!("Invalid JSON body: {e}")).into_response(),
@@ -276,6 +297,11 @@ pub async fn handle_odata_post(
                 Some(t) => t,
                 None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{set_name}' not found")).into_response(),
             };
+
+            // Verification gate: block action invocation if verification hasn't passed
+            if let Err(gate_err) = state.check_verification_gate(&tenant, &entity_type) {
+                return verification_gate_response(gate_err);
+            }
 
             // HTTP-level span: covers authz + actor dispatch + response serialization.
             // DST-safe: sim_now() for timestamps, wall clock avoided.
@@ -364,6 +390,11 @@ pub async fn handle_odata_patch(
             };
             let key_str = extract_key(&key);
 
+            // Verification gate: block PATCH if verification hasn't passed
+            if let Err(gate_err) = state.check_verification_gate(&tenant, &entity_type) {
+                return verification_gate_response(gate_err);
+            }
+
             if !state.entity_exists(&tenant, &entity_type, &key_str) {
                 return odata_error(StatusCode::NOT_FOUND, "ResourceNotFound", &format!("Entity '{set_name}' with key '{key_str}' not found")).into_response();
             }
@@ -413,6 +444,11 @@ pub async fn handle_odata_put(
             };
             let key_str = extract_key(&key);
 
+            // Verification gate: block PUT if verification hasn't passed
+            if let Err(gate_err) = state.check_verification_gate(&tenant, &entity_type) {
+                return verification_gate_response(gate_err);
+            }
+
             if !state.entity_exists(&tenant, &entity_type, &key_str) {
                 return odata_error(StatusCode::NOT_FOUND, "ResourceNotFound", &format!("Entity '{set_name}' with key '{key_str}' not found")).into_response();
             }
@@ -460,6 +496,11 @@ pub async fn handle_odata_delete(
                 None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{set_name}' not found")).into_response(),
             };
             let key_str = extract_key(&key);
+
+            // Verification gate: block DELETE if verification hasn't passed
+            if let Err(gate_err) = state.check_verification_gate(&tenant, &entity_type) {
+                return verification_gate_response(gate_err);
+            }
 
             if !state.entity_exists(&tenant, &entity_type, &key_str) {
                 return odata_error(StatusCode::NOT_FOUND, "ResourceNotFound", &format!("Entity '{set_name}' with key '{key_str}' not found")).into_response();
