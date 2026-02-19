@@ -324,7 +324,7 @@ async fn handle_load_dir(
                 "type": "specs_loaded",
                 "tenant": &tenant,
                 "entities": &entity_names,
-            })).unwrap() + "\n"
+            })).unwrap() + "\n" // ci-ok: serde_json::to_string on valid JSON is infallible
         )).await;
 
         let mut entity_results: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
@@ -378,7 +378,7 @@ async fn handle_load_dir(
                 serde_json::to_string(&serde_json::json!({
                     "type": "verification_started",
                     "entity": entity_name,
-                })).unwrap() + "\n"
+                })).unwrap() + "\n" // ci-ok: serde_json::to_string on valid JSON is infallible
             )).await;
 
             // Run verification (blocking, sequential per entity)
@@ -527,7 +527,7 @@ async fn handle_load_dir(
                             "entity": entity_name,
                             "all_passed": cascade_result.all_passed,
                             "levels": levels_json,
-                        })).unwrap() + "\n"
+                        })).unwrap() + "\n" // ci-ok: serde_json::to_string on valid JSON is infallible
                     )).await;
 
                     entity_results.insert(entity_name.clone(), cascade_result.all_passed);
@@ -566,7 +566,7 @@ async fn handle_load_dir(
                             "type": "verification_error",
                             "entity": entity_name,
                             "error": format!("{e}"),
-                        })).unwrap() + "\n"
+                        })).unwrap() + "\n" // ci-ok: serde_json::to_string on valid JSON is infallible
                     )).await;
                 }
             }
@@ -580,7 +580,7 @@ async fn handle_load_dir(
                 "tenant": &tenant,
                 "all_passed": all_passed,
                 "entities": entity_results,
-            })).unwrap() + "\n"
+            })).unwrap() + "\n" // ci-ok: serde_json::to_string on valid JSON is infallible
         )).await;
         // tx drops here, closing the stream
     });
@@ -590,7 +590,7 @@ async fn handle_load_dir(
     Ok(axum::response::Response::builder()
         .header("content-type", "application/x-ndjson")
         .body(body)
-        .unwrap())
+        .unwrap()) // ci-ok: Response::builder with valid headers is infallible
 }
 
 /// GET /observe/specs/{entity} -- full spec detail for a named entity type.
