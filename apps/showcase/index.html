@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Temper UI Showcase</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root {
+    --bg: #09090b; --surface: #18181b; --border: #27272a;
+    --text: #fafafa; --text-2: #a1a1aa; --text-3: #71717a;
+    --accent: #6c8cff; --accent-dim: rgba(108,140,255,0.15);
+    --font-sans: 'Inter', -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: var(--font-sans); background: var(--bg); color: var(--text); min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: 32px; }
+  .wrap { width: min(100%, 40rem); }
+  h1 { font-size: clamp(1.5rem, 3vw, 2.25rem); font-weight: 700; letter-spacing: -0.02em; margin-bottom: 8px; }
+  .sub { font: 0.875rem var(--font-mono); color: var(--text-3); margin-bottom: 48px; }
+  .demos { display: flex; flex-direction: column; gap: 12px; }
+  a {
+    display: flex; align-items: center; gap: 16px;
+    padding: 20px 24px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; text-decoration: none; color: var(--text);
+    transition: border-color 100ms cubic-bezier(0.16,1,0.3,1);
+  }
+  a:hover { border-color: var(--accent); }
+  .num { font: 600 1.25rem var(--font-mono); color: var(--accent); width: 2rem; text-align: center; flex-shrink: 0; }
+  .info { flex: 1; }
+  .name { font: 600 1rem var(--font-sans); margin-bottom: 4px; }
+  .desc { font: 0.8125rem var(--font-sans); color: var(--text-2); }
+  .shape { font: 500 0.6875rem var(--font-mono); color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 2px 8px; background: var(--accent-dim); border-radius: 4px; flex-shrink: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Temper UI Showcase</h1>
+  <div class="sub">5 apps · 1 design system · any shape</div>
+  <div class="demos">
+    <a href="1-signal-board.html">
+      <span class="num">1</span>
+      <div class="info"><div class="name">Signal Board</div><div class="desc">Inter-agent communication. Kanban columns, drawer detail, agent filtering.</div></div>
+      <span class="shape">Kanban</span>
+    </a>
+    <a href="2-incident-timeline.html">
+      <span class="num">2</span>
+      <div class="info"><div class="name">Incident Timeline</div><div class="desc">Production incident tracker. Vertical timeline, severity badges, live duration.</div></div>
+      <span class="shape">Timeline</span>
+    </a>
+    <a href="3-quick-form.html">
+      <span class="num">3</span>
+      <div class="info"><div class="name">Quick Form</div><div class="desc">Multi-step proposal creator. Radio groups, toggles, progress indicator, review.</div></div>
+      <span class="shape">Form</span>
+    </a>
+    <a href="4-content-pipeline.html">
+      <span class="num">4</span>
+      <div class="info"><div class="name">Content Pipeline</div><div class="desc">Calcifer's content calendar. Calendar + list views, status filtering, engagement.</div></div>
+      <span class="shape">Calendar</span>
+    </a>
+    <a href="5-agent-vitals.html">
+      <span class="num">5</span>
+      <div class="info"><div class="name">Agent Vitals</div><div class="desc">Team health dashboard. Sparklines, metrics cards, activity feeds, system status.</div></div>
+      <span class="shape">Dashboard</span>
+    </a>
+  </div>
+</div>
+</body>
+</html>
