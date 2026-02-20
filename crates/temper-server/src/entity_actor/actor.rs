@@ -170,6 +170,20 @@ impl EntityActor {
                 if !envelopes.is_empty() {
                     // Sync all state into fields after full replay
                     super::effects::sync_fields(state, &serde_json::json!({}));
+
+                    // Restore initial fields from the first Created event.
+                    // Replay effects own their projected keys, so only fill gaps.
+                    if let Some(created_event) = state.events.first().filter(|e| e.action == "Created") {
+                        if let (Some(fields_obj), Some(params_obj)) = (
+                            state.fields.as_object_mut(),
+                            created_event.params.as_object(),
+                        ) {
+                            for (k, v) in params_obj {
+                                fields_obj.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                        }
+                    }
+
                     tracing::info!(
                         entity = %state.entity_id,
                         replayed = envelopes.len(),
@@ -222,6 +236,23 @@ impl Actor for EntityActor {
         // all state variables (status, counters, booleans) — not just item_count.
         if let Some(ref store) = self.event_store {
             Self::replay_events(&self.table, store, &self.persistence_id(), &mut state).await;
+        }
+
+        // Persist a bootstrap Created event for first-time entities so initial
+        // fields are durable and replayable.
+        if self.event_store.is_some() && state.events.is_empty() {
+            let created = EntityEvent {
+                action: "Created".to_string(),
+                from_status: String::new(),
+                to_status: state.status.clone(),
+                timestamp: sim_now(),
+                params: self.initial_fields.clone(),
+            };
+
+            if let Some(ref store) = self.event_store {
+                Self::persist_event(store, &self.persistence_id(), &mut state, &created).await;
+            }
+            state.events.push(created);
         }
 
         Ok(state)

@@ -28,6 +28,13 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), PersistenceError> {
             PersistenceError::Storage(format!("failed to create snapshots table: {e}"))
         })?;
 
+    sqlx::query(schema::CREATE_ENTITY_LISTING_INDEX)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PersistenceError::Storage(format!("failed to create entity listing index: {e}"))
+        })?;
+
     Ok(())
 }
 
@@ -45,6 +52,10 @@ mod tests {
         assert!(
             schema::CREATE_SNAPSHOTS_TABLE.contains("IF NOT EXISTS"),
             "snapshots DDL must be idempotent"
+        );
+        assert!(
+            schema::CREATE_ENTITY_LISTING_INDEX.contains("IF NOT EXISTS"),
+            "entity listing index DDL must be idempotent"
         );
     }
 }

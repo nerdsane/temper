@@ -43,6 +43,14 @@ CREATE TABLE IF NOT EXISTS snapshots (
     PRIMARY KEY (tenant, entity_type, entity_id)
 );";
 
+/// CREATE INDEX statement for efficient `list_entity_ids` scans.
+///
+/// This covering index supports filtering by `tenant` and returning distinct
+/// `(entity_type, entity_id)` pairs from the events journal.
+pub const CREATE_ENTITY_LISTING_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_events_tenant_entity
+    ON events (tenant, entity_type, entity_id);";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +134,14 @@ mod tests {
             CREATE_SNAPSHOTS_TABLE.contains("IF NOT EXISTS"),
             "snapshots schema should use IF NOT EXISTS"
         );
+    }
+
+    #[test]
+    fn entity_listing_index_targets_tenant_type_and_id() {
+        let sql = CREATE_ENTITY_LISTING_INDEX.to_uppercase();
+        assert!(sql.contains("CREATE INDEX IF NOT EXISTS"), "index DDL should be idempotent");
+        assert!(sql.contains("IDX_EVENTS_TENANT_ENTITY"), "index name should be stable");
+        assert!(sql.contains("ON EVENTS"), "index should target events table");
+        assert!(sql.contains("(TENANT, ENTITY_TYPE, ENTITY_ID)"), "index should cover tenant/entity_type/entity_id");
     }
 }
