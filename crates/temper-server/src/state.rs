@@ -5,14 +5,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use temper_authz::{AuthzDecision, AuthzEngine, SecurityContext};
+use temper_evolution::RecordStore;
 use temper_jit::table::TransitionTable;
+use temper_runtime::ActorSystem;
 use temper_runtime::actor::ActorRef;
+use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
-use temper_runtime::ActorSystem;
 use temper_spec::csdl::CsdlDocument;
-use temper_authz::{AuthzEngine, AuthzDecision, SecurityContext};
-use temper_evolution::RecordStore;
 use temper_store_postgres::PostgresEventStore;
 
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
@@ -45,7 +46,6 @@ pub struct DesignTimeEvent {
     /// Total steps in the workflow (always 7 for verification).
     pub total_steps: Option<u8>,
 }
-
 
 /// Lightweight metrics collector for the /observe endpoints.
 ///
@@ -243,7 +243,12 @@ impl ServerState {
     }
 
     /// Create ServerState with I/O Automaton TOML specs for transition table resolution.
-    pub fn with_specs(system: ActorSystem, csdl: CsdlDocument, csdl_xml: String, ioa_sources: BTreeMap<String, String>) -> Self {
+    pub fn with_specs(
+        system: ActorSystem,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: BTreeMap<String, String>,
+    ) -> Self {
         let mut state = Self::new(system, csdl, csdl_xml);
         let mut tables = BTreeMap::new();
         for (entity_type, ioa_source) in &ioa_sources {
@@ -276,15 +281,15 @@ impl ServerState {
     ///
     /// Use this when the registry must be shared with another component
     /// (e.g. `PlatformState`) so that writes are visible to dispatch.
-    pub fn from_registry_shared(
-        system: ActorSystem,
-        registry: Arc<RwLock<SpecRegistry>>,
-    ) -> Self {
+    pub fn from_registry_shared(system: ActorSystem, registry: Arc<RwLock<SpecRegistry>>) -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         let (design_time_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             actor_system: Arc::new(system),
-            csdl: Arc::new(CsdlDocument { version: "4.0".into(), schemas: vec![] }),
+            csdl: Arc::new(CsdlDocument {
+                version: "4.0".into(),
+                schemas: vec![],
+            }),
             csdl_xml: Arc::new(String::new()),
             entity_set_map: Arc::new(BTreeMap::new()),
             transition_tables: Arc::new(BTreeMap::new()),
@@ -311,6 +316,32 @@ impl ServerState {
         self
     }
 
+    /// Hydrate actor state from the event store by spawning actors for all
+    /// entities that have persisted events in this tenant.
+    pub async fn hydrate_from_store(&self, tenant: &TenantId) {
+        if let Some(ref store) = self.event_store {
+            match store.list_entity_ids(tenant.as_str()).await {
+                Ok(entities) => {
+                    for (entity_type, entity_id) in &entities {
+                        self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id);
+                    }
+                    tracing::info!(
+                        tenant = %tenant,
+                        count = entities.len(),
+                        "hydrated entities from event store"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        tenant = %tenant,
+                        error = %e,
+                        "failed to hydrate from event store"
+                    );
+                }
+            }
+        }
+    }
+
     /// Get or spawn an entity actor (legacy single-tenant).
     pub fn get_or_spawn_actor(
         &self,
@@ -327,7 +358,12 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
     ) -> Option<ActorRef<EntityMsg>> {
-        self.get_or_spawn_tenant_actor_with_fields(tenant, entity_type, entity_id, serde_json::json!({}))
+        self.get_or_spawn_tenant_actor_with_fields(
+            tenant,
+            entity_type,
+            entity_id,
+            serde_json::json!({}),
+        )
     }
 
     /// Get or spawn an entity actor with initial fields for a specific tenant.
@@ -352,16 +388,19 @@ impl ServerState {
         let table = {
             let reg = self.registry.read().unwrap();
             reg.get_table(tenant, entity_type)
-        }.or_else(|| self.transition_tables.get(entity_type).cloned())?;
+        }
+        .or_else(|| self.transition_tables.get(entity_type).cloned())?;
 
         // Spawn new actor
         let actor = match &self.event_store {
             Some(pg) => EntityActor::with_persistence(
-                entity_type, entity_id, table.clone(), initial_fields, pg.clone(),
+                entity_type,
+                entity_id,
+                table.clone(),
+                initial_fields,
+                pg.clone(),
             ),
-            None => EntityActor::new(
-                entity_type, entity_id, table.clone(), initial_fields,
-            ),
+            None => EntityActor::new(entity_type, entity_id, table.clone(), initial_fields),
         };
         let actor_ref = self.actor_system.spawn(actor, &key);
 
@@ -375,7 +414,10 @@ impl ServerState {
         {
             let index_key = format!("{tenant}:{entity_type}");
             let mut index = self.entity_index.write().unwrap();
-            index.entry(index_key).or_default().insert(entity_id.to_string());
+            index
+                .entry(index_key)
+                .or_default()
+                .insert(entity_id.to_string());
         }
 
         Some(actor_ref)
@@ -405,7 +447,8 @@ impl ServerState {
     pub fn list_entity_ids(&self, tenant: &TenantId, entity_type: &str) -> Vec<String> {
         let index_key = format!("{tenant}:{entity_type}");
         let index = self.entity_index.read().unwrap();
-        index.get(&index_key)
+        index
+            .get(&index_key)
             .map(|ids| ids.iter().cloned().collect())
             .unwrap_or_default()
     }
@@ -413,10 +456,21 @@ impl ServerState {
     /// Check authorization for an action using the Cedar ABAC engine.
     ///
     /// Accepts `BTreeMap` for DST compliance; converts at the authz boundary.
-    pub fn authorize(&self, headers: &[(String, String)], action: &str, resource_type: &str, resource_attrs: &BTreeMap<String, serde_json::Value>) -> Result<(), String> {
+    pub fn authorize(
+        &self,
+        headers: &[(String, String)],
+        action: &str,
+        resource_type: &str,
+        resource_attrs: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), String> {
         let ctx = SecurityContext::from_headers(headers);
-        let attrs: std::collections::HashMap<_, _> = resource_attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(); // determinism-ok
-        let decision = self.authz.authorize_or_bypass(&ctx, action, resource_type, &attrs);
+        let attrs: std::collections::HashMap<_, _> = resource_attrs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(); // determinism-ok
+        let decision = self
+            .authz
+            .authorize_or_bypass(&ctx, action, resource_type, &attrs);
         match decision {
             AuthzDecision::Allow => Ok(()),
             AuthzDecision::Deny(reason) => Err(format!("Authorization denied: {reason}")),
@@ -447,25 +501,26 @@ impl ServerState {
         action: &str,
         params: serde_json::Value,
     ) -> Result<EntityResponse, String> {
-        let response = self.dispatch_tenant_action_core(
-            tenant, entity_type, entity_id, action, params,
-        ).await?;
+        let response = self
+            .dispatch_tenant_action_core(tenant, entity_type, entity_id, action, params)
+            .await?;
 
         // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)
         if response.success {
             if let Some(ref dispatcher) = self.reaction_dispatcher {
-                let fields = serde_json::to_value(&response.state.fields)
-                    .unwrap_or_default();
-                dispatcher.dispatch_reactions(
-                    self,
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    action,
-                    &response.state.status,
-                    &fields,
-                    0,
-                ).await;
+                let fields = serde_json::to_value(&response.state.fields).unwrap_or_default();
+                dispatcher
+                    .dispatch_reactions(
+                        self,
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        action,
+                        &response.state.status,
+                        &fields,
+                        0,
+                    )
+                    .await;
             }
         }
 
@@ -495,7 +550,9 @@ impl ServerState {
                     success: false,
                     from_status: None,
                     to_status: None,
-                    error: Some(format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")),
+                    error: Some(format!(
+                        "No transition table for tenant '{tenant}', entity type '{entity_type}'"
+                    )),
                 };
                 if let Ok(mut log) = self.trajectory_log.write() {
                     log.push(entry);
@@ -532,7 +589,8 @@ impl ServerState {
             })?;
 
         // Record metrics for the /observe endpoints.
-        self.metrics.record_transition(entity_type, action, response.success);
+        self.metrics
+            .record_transition(entity_type, action, response.success);
 
         // Record trajectory entry for every completed action (success or failure).
         {
@@ -548,7 +606,12 @@ impl ServerState {
                 error: if response.success {
                     None
                 } else {
-                    Some(response.error.clone().unwrap_or_else(|| "guard not met".to_string()))
+                    Some(
+                        response
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "guard not met".to_string()),
+                    )
                 },
             };
             if let Ok(mut log) = self.trajectory_log.write() {
@@ -589,7 +652,9 @@ impl ServerState {
     ) -> Result<EntityResponse, String> {
         let actor_ref = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
-            .ok_or_else(|| format!("No transition table for tenant '{tenant}', entity type '{entity_type}'"))?;
+            .ok_or_else(|| {
+                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
+            })?;
 
         actor_ref
             .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(5))
@@ -607,7 +672,9 @@ impl ServerState {
     ) -> Result<EntityResponse, String> {
         let actor_ref = self
             .get_or_spawn_tenant_actor_with_fields(tenant, entity_type, entity_id, initial_fields)
-            .ok_or_else(|| format!("No transition table for tenant '{tenant}', entity type '{entity_type}'"))?;
+            .ok_or_else(|| {
+                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
+            })?;
 
         let response = actor_ref
             .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(5))
@@ -637,7 +704,9 @@ impl ServerState {
     ) -> Result<EntityResponse, String> {
         let actor_ref = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
-            .ok_or_else(|| format!("No transition table for tenant '{tenant}', entity type '{entity_type}'"))?;
+            .ok_or_else(|| {
+                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
+            })?;
 
         actor_ref
             .ask::<EntityResponse>(
@@ -657,7 +726,9 @@ impl ServerState {
     ) -> Result<EntityResponse, String> {
         let actor_ref = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
-            .ok_or_else(|| format!("No transition table for tenant '{tenant}', entity type '{entity_type}'"))?;
+            .ok_or_else(|| {
+                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
+            })?;
 
         let response = actor_ref
             .ask::<EntityResponse>(EntityMsg::Delete, Duration::from_secs(5))
@@ -677,12 +748,17 @@ impl ServerState {
     pub fn entity_exists(&self, tenant: &TenantId, entity_type: &str, entity_id: &str) -> bool {
         let index_key = format!("{tenant}:{entity_type}");
         let index = self.entity_index.read().unwrap();
-        index.get(&index_key).is_some_and(|ids| ids.contains(entity_id))
+        index
+            .get(&index_key)
+            .is_some_and(|ids| ids.contains(entity_id))
     }
 
     /// Update Agent.Hint annotations based on trajectory analysis.
     pub fn enrich_metadata(&self, action_name: &str, hint: &str) {
-        self.agent_hints.write().unwrap().insert(action_name.to_string(), hint.to_string());
+        self.agent_hints
+            .write()
+            .unwrap()
+            .insert(action_name.to_string(), hint.to_string());
     }
 
     /// Check the verification gate for a specific entity type.

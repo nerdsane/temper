@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 /// Marker trait for domain events.
 /// Events must be serializable (for persistence) and Send + 'static (for async).
-pub trait DomainEvent: Send + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug + 'static {}
+pub trait DomainEvent:
+    Send + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug + 'static
+{
+}
 
 /// Metadata attached to every persisted event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +86,12 @@ pub trait EventStore: Send + Sync + 'static {
         &self,
         persistence_id: &str,
     ) -> impl std::future::Future<Output = Result<Option<(u64, Vec<u8>)>, PersistenceError>> + Send;
+
+    /// List all distinct `(entity_type, entity_id)` pairs for a tenant.
+    fn list_entity_ids(
+        &self,
+        tenant: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<(String, String)>, PersistenceError>> + Send;
 }
 
 /// A persisted event with metadata.

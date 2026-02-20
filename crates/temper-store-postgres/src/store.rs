@@ -246,6 +246,25 @@ impl EventStore for PostgresEventStore {
 
         Ok(row.map(|(seq, state)| (seq as u64, state)))
     }
+
+    /// List all distinct entities that have at least one persisted event
+    /// in the given tenant.
+    async fn list_entity_ids(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT DISTINCT entity_type, entity_id \
+             FROM events \
+             WHERE tenant = $1",
+        )
+        .bind(tenant)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+
+        Ok(rows)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -255,13 +274,28 @@ impl EventStore for PostgresEventStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migration::run_migrations;
+
+    fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
+        PersistenceEnvelope {
+            sequence_nr: 0,
+            event_type: event_type.to_string(),
+            payload,
+            metadata: EventMetadata {
+                event_id: uuid::Uuid::new_v4(),
+                causation_id: uuid::Uuid::new_v4(),
+                correlation_id: uuid::Uuid::new_v4(),
+                timestamp: chrono::Utc::now(),
+                actor_id: "store-test".to_string(),
+            },
+        }
+    }
 
     // -- persistence_id parsing ---------------------------------------------
 
     #[test]
     fn parse_3_segment_persistence_id() {
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id("alpha:Order:abc-123").unwrap();
+        let (tenant, entity_type, entity_id) = parse_persistence_id("alpha:Order:abc-123").unwrap();
         assert_eq!(tenant, "alpha");
         assert_eq!(entity_type, "Order");
         assert_eq!(entity_id, "abc-123");
@@ -269,8 +303,7 @@ mod tests {
 
     #[test]
     fn parse_legacy_2_segment_persistence_id() {
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id("Order:abc-123").unwrap();
+        let (tenant, entity_type, entity_id) = parse_persistence_id("Order:abc-123").unwrap();
         assert_eq!(tenant, "default");
         assert_eq!(entity_type, "Order");
         assert_eq!(entity_id, "abc-123");
@@ -279,8 +312,7 @@ mod tests {
     #[test]
     fn parse_3_segment_with_colons_in_id() {
         // splitn(3, ':') puts everything after the second colon into entity_id
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id("beta:Task:T-1:sub").unwrap();
+        let (tenant, entity_type, entity_id) = parse_persistence_id("beta:Task:T-1:sub").unwrap();
         assert_eq!(tenant, "beta");
         assert_eq!(entity_type, "Task");
         assert_eq!(entity_id, "T-1:sub");
@@ -302,5 +334,98 @@ mod tests {
         assert!(parse_persistence_id("tenant:Order:").is_err());
         assert!(parse_persistence_id(":abc").is_err());
         assert!(parse_persistence_id("Order:").is_err());
+    }
+
+    #[test]
+    fn list_entity_ids_returns_distinct_pairs() {
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping Postgres integration test: DATABASE_URL is not set");
+                return;
+            }
+        };
+
+        sqlx::test_block_on(async {
+            let pool = PgPool::connect(&database_url).await.unwrap();
+            run_migrations(&pool).await.unwrap();
+            let store = PostgresEventStore::new(pool);
+
+            let tenant_a = format!("tenant-a-{}", uuid::Uuid::new_v4());
+            let tenant_b = format!("tenant-b-{}", uuid::Uuid::new_v4());
+
+            let order_1 = format!("{tenant_a}:Order:ord-1");
+            let order_2 = format!("{tenant_a}:Order:ord-2");
+            let task_1 = format!("{tenant_a}:Task:task-1");
+            let other_tenant = format!("{tenant_b}:Order:ord-9");
+
+            store
+                .append(
+                    &order_1,
+                    0,
+                    &[test_envelope(
+                        "OrderCreated",
+                        serde_json::json!({"id":"ord-1"}),
+                    )],
+                )
+                .await
+                .unwrap();
+            store
+                .append(
+                    &order_1,
+                    1,
+                    &[test_envelope(
+                        "OrderUpdated",
+                        serde_json::json!({"step": 2}),
+                    )],
+                )
+                .await
+                .unwrap();
+            store
+                .append(
+                    &order_2,
+                    0,
+                    &[test_envelope(
+                        "OrderCreated",
+                        serde_json::json!({"id":"ord-2"}),
+                    )],
+                )
+                .await
+                .unwrap();
+            store
+                .append(
+                    &task_1,
+                    0,
+                    &[test_envelope(
+                        "TaskCreated",
+                        serde_json::json!({"id":"task-1"}),
+                    )],
+                )
+                .await
+                .unwrap();
+            store
+                .append(
+                    &other_tenant,
+                    0,
+                    &[test_envelope(
+                        "OrderCreated",
+                        serde_json::json!({"id":"ord-9"}),
+                    )],
+                )
+                .await
+                .unwrap();
+
+            let mut entities = store.list_entity_ids(&tenant_a).await.unwrap();
+            entities.sort();
+
+            assert_eq!(
+                entities,
+                vec![
+                    ("Order".to_string(), "ord-1".to_string()),
+                    ("Order".to_string(), "ord-2".to_string()),
+                    ("Task".to_string(), "task-1".to_string()),
+                ]
+            );
+        });
     }
 }

@@ -32,10 +32,7 @@ use temper_verify::cascade::VerificationCascade;
 /// and results stream via SSE (design-time observation).
 ///
 /// `apps` is a list of `(tenant_name, specs_dir)` pairs. Can be empty (no user apps).
-pub async fn run(
-    port: u16,
-    apps: Vec<(String, String)>,
-) -> Result<()> {
+pub async fn run(port: u16, apps: Vec<(String, String)>) -> Result<()> {
     // Initialize OTEL tracing if OTLP_ENDPOINT is set.
     // The guard must be held alive for the server's lifetime.
     let _otel_guard = std::env::var("OTLP_ENDPOINT").ok().map(|endpoint| {
@@ -75,6 +72,14 @@ pub async fn run(
     // Wire up Postgres persistence if available.
     if let Some(store) = event_store {
         state.server.event_store = Some(Arc::new(store));
+    }
+
+    // Hydrate entities from the event store for each app tenant.
+    if state.server.event_store.is_some() {
+        for (tenant, _dir) in &apps {
+            let tenant_id = temper_runtime::tenant::TenantId::new(tenant.as_str());
+            state.server.hydrate_from_store(&tenant_id).await;
+        }
     }
 
     println!("Starting Temper platform server...");
@@ -189,17 +194,21 @@ fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant:
 
     // Emit spec_loaded events for each entity
     for entity_name in ioa_sources.keys() {
-        emit_design_time_event(&design_time_tx, &design_time_log, DesignTimeEvent {
-            kind: "spec_loaded".to_string(),
-            entity_type: entity_name.clone(),
-            tenant: tenant_str.clone(),
-            summary: format!("Loaded spec: {entity_name}"),
-            level: None,
-            passed: None,
-            timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
-            step_number: Some(1),
-            total_steps: Some(7),
-        });
+        emit_design_time_event(
+            &design_time_tx,
+            &design_time_log,
+            DesignTimeEvent {
+                kind: "spec_loaded".to_string(),
+                entity_type: entity_name.clone(),
+                tenant: tenant_str.clone(),
+                summary: format!("Loaded spec: {entity_name}"),
+                level: None,
+                passed: None,
+                timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
+                step_number: Some(1),
+                total_steps: Some(7),
+            },
+        );
     }
 
     for (entity_name, ioa_source) in ioa_sources {
@@ -214,24 +223,24 @@ fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant:
             {
                 let tenant_id = temper_runtime::tenant::TenantId::new(&tenant);
                 let mut reg = registry.write().unwrap();
-                reg.set_verification_status(
-                    &tenant_id,
-                    &entity,
-                    VerificationStatus::Running,
-                );
+                reg.set_verification_status(&tenant_id, &entity, VerificationStatus::Running);
             }
 
-            emit_design_time_event(&design_time_tx, &design_time_log, DesignTimeEvent {
-                kind: "verify_started".to_string(),
-                entity_type: entity.clone(),
-                tenant: tenant.clone(),
-                summary: format!("Verification started for {entity}"),
-                level: None,
-                passed: None,
-                timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
-                step_number: Some(2),
-                total_steps: Some(7),
-            });
+            emit_design_time_event(
+                &design_time_tx,
+                &design_time_log,
+                DesignTimeEvent {
+                    kind: "verify_started".to_string(),
+                    entity_type: entity.clone(),
+                    tenant: tenant.clone(),
+                    summary: format!("Verification started for {entity}"),
+                    level: None,
+                    passed: None,
+                    timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
+                    step_number: Some(2),
+                    total_steps: Some(7),
+                },
+            );
 
             println!("  [verify] Starting verification for {entity}...");
 
@@ -252,17 +261,21 @@ fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant:
                         let status_str = if level.passed { "PASS" } else { "FAIL" };
                         println!("  [verify] {entity}: [{status_str}] {}", level.summary);
 
-                        emit_design_time_event(&design_time_tx, &design_time_log, DesignTimeEvent {
-                            kind: "verify_level".to_string(),
-                            entity_type: entity.clone(),
-                            tenant: tenant.clone(),
-                            summary: level.summary.clone(),
-                            level: Some(format!("{:?}", level.level)),
-                            passed: Some(level.passed),
-                            timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
-                            step_number: Some(3 + i as u8), // L0=3, L1=4, L2=5, L3=6
-                            total_steps: Some(7),
-                        });
+                        emit_design_time_event(
+                            &design_time_tx,
+                            &design_time_log,
+                            DesignTimeEvent {
+                                kind: "verify_level".to_string(),
+                                entity_type: entity.clone(),
+                                tenant: tenant.clone(),
+                                summary: level.summary.clone(),
+                                level: Some(format!("{:?}", level.level)),
+                                passed: Some(level.passed),
+                                timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
+                                step_number: Some(3 + i as u8), // L0=3, L1=4, L2=5, L3=6
+                                total_steps: Some(7),
+                            },
+                        );
                     }
 
                     // Build verification result
@@ -301,17 +314,21 @@ fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant:
                     };
                     println!("  [verify] {summary}");
 
-                    emit_design_time_event(&design_time_tx, &design_time_log, DesignTimeEvent {
-                        kind: "verify_done".to_string(),
-                        entity_type: entity,
-                        tenant,
-                        summary,
-                        level: None,
-                        passed: Some(all_passed),
-                        timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
-                        step_number: Some(7),
-                        total_steps: Some(7),
-                    });
+                    emit_design_time_event(
+                        &design_time_tx,
+                        &design_time_log,
+                        DesignTimeEvent {
+                            kind: "verify_done".to_string(),
+                            entity_type: entity,
+                            tenant,
+                            summary,
+                            level: None,
+                            passed: Some(all_passed),
+                            timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
+                            step_number: Some(7),
+                            total_steps: Some(7),
+                        },
+                    );
                 }
                 Err(e) => {
                     eprintln!("  [verify] {entity_clone}: verification task panicked: {e}");
@@ -337,17 +354,21 @@ fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant:
                         );
                     }
 
-                    emit_design_time_event(&design_time_tx, &design_time_log, DesignTimeEvent {
-                        kind: "verify_done".to_string(),
-                        entity_type: entity_clone,
-                        tenant,
-                        summary: "Verification panicked".to_string(),
-                        level: None,
-                        passed: Some(false),
-                        timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
-                        step_number: Some(7),
-                        total_steps: Some(7),
-                    });
+                    emit_design_time_event(
+                        &design_time_tx,
+                        &design_time_log,
+                        DesignTimeEvent {
+                            kind: "verify_done".to_string(),
+                            entity_type: entity_clone,
+                            tenant,
+                            summary: "Verification panicked".to_string(),
+                            level: None,
+                            passed: Some(false),
+                            timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
+                            step_number: Some(7),
+                            total_steps: Some(7),
+                        },
+                    );
                 }
             }
         });
@@ -370,9 +391,7 @@ fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
             .unwrap_or_default();
 
         if file_name.ends_with(".ioa.toml") {
-            let entity_name = file_name
-                .strip_suffix(".ioa.toml")
-                .unwrap_or_default();
+            let entity_name = file_name.strip_suffix(".ioa.toml").unwrap_or_default();
             let entity_name = to_pascal_case(entity_name);
 
             let source = fs::read_to_string(&path)
