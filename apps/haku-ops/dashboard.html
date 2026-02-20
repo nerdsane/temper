@@ -5,73 +5,122 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Haku Ops — Engineering Pipeline</title>
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
   :root {
-    --bg: #0a0a0f;
-    --surface: #12121a;
-    --surface-2: #1a1a26;
-    --border: #2a2a3a;
-    --text: #e0e0e8;
-    --text-dim: #8888a0;
+    --bg: #09090b;
+    --surface: #111113;
+    --surface-2: #1a1a1f;
+    --border: #27272a;
+    --text: #e4e4e7;
+    --text-dim: #71717a;
     --accent: #6c8cff;
     --green: #4ade80;
     --amber: #fbbf24;
     --red: #f87171;
     --purple: #a78bfa;
     --cyan: #22d3ee;
-  }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
-    background: var(--bg);
-    color: var(--text);
-    padding: 24px;
-    max-width: 1400px;
-    margin: 0 auto;
-  }
-  h1 {
-    font-size: 14px;
-    font-weight: 400;
-    color: var(--text-dim);
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    margin-bottom: 8px;
-  }
-  .title-row {
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
-    margin-bottom: 32px;
-  }
-  .title-row .dragon { font-size: 28px; }
-  .title-row .name {
-    font-size: 24px;
-    font-weight: 600;
-    color: var(--text);
-  }
-  .title-row .sub {
-    font-size: 13px;
-    color: var(--text-dim);
+    --selected: #6c8cff;
   }
 
-  /* Stats bar */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 32px 24px;
+  }
+
+  /* Header */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 40px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .brand .dragon { font-size: 28px; }
+  .brand h1 {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .brand .sub {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .refresh-btn {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    transition: all 0.15s;
+  }
+  .refresh-btn:hover { color: var(--text); border-color: var(--accent); }
+
+  /* Stats */
   .stats {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
     gap: 12px;
     margin-bottom: 32px;
   }
+
   .stat {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 10px;
     padding: 16px;
     text-align: center;
   }
+
   .stat .num {
-    font-size: 32px;
-    font-weight: 700;
-    line-height: 1;
+    font-size: 28px;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
   }
+
   .stat .label {
     font-size: 11px;
     color: var(--text-dim);
@@ -79,249 +128,402 @@
     letter-spacing: 1px;
     margin-top: 4px;
   }
+
   .stat.verified .num { color: var(--green); }
   .stat.active .num { color: var(--accent); }
   .stat.seed .num { color: var(--amber); }
   .stat.scratched .num { color: var(--red); }
   .stat.findings .num { color: var(--purple); }
 
-  /* Pipeline viz */
+  /* Pipeline visualization */
   .pipeline {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 10px;
     padding: 24px;
     margin-bottom: 32px;
   }
+
   .pipeline h2 {
-    font-size: 12px;
-    color: var(--text-dim);
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 1.5px;
-    margin-bottom: 16px;
+    color: var(--text-dim);
+    margin-bottom: 20px;
   }
+
   .pipeline-stages {
     display: flex;
-    gap: 4px;
-    align-items: stretch;
-    min-height: 80px;
+    align-items: flex-start;
+    gap: 8px;
+    overflow-x: auto;
   }
+
   .stage {
     flex: 1;
-    background: var(--surface-2);
-    border-radius: 6px;
-    padding: 12px 8px;
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    min-width: 0;
+    min-width: 100px;
+    text-align: center;
   }
-  .stage .stage-name {
-    font-size: 10px;
+
+  .stage-name {
+    font-size: 11px;
+    font-weight: 500;
     color: var(--text-dim);
+    margin-bottom: 8px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    margin-bottom: 8px;
-    white-space: nowrap;
   }
-  .stage .count {
+
+  .count {
     font-size: 24px;
-    font-weight: 700;
-    color: var(--accent);
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    margin-bottom: 8px;
   }
-  .stage .dots {
+
+  .dots {
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
     justify-content: center;
-    margin-top: 8px;
-  }
-  .stage .dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    cursor: pointer;
-    transition: transform 0.15s;
-  }
-  .stage .dot:hover { transform: scale(1.5); }
-  .stage-arrow {
-    display: flex;
-    align-items: center;
-    color: var(--text-dim);
-    font-size: 16px;
-    padding: 0 2px;
   }
 
-  /* Proposal list */
+  .dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.15s;
+    position: relative;
+  }
+
+  .dot:hover {
+    transform: scale(1.5);
+    z-index: 10;
+  }
+
+  .dot.selected {
+    outline: 2px solid var(--selected);
+    outline-offset: 2px;
+    transform: scale(1.3);
+  }
+
+  .stage-arrow {
+    color: var(--border);
+    font-size: 20px;
+    padding-top: 32px;
+  }
+
+  /* Proposals */
   .section {
+    margin-bottom: 32px;
+  }
+
+  .section h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+
+  .proposal-row {
+    display: grid;
+    grid-template-columns: 90px 1fr 100px 80px 80px;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 24px;
-    margin-bottom: 24px;
-  }
-  .section h2 {
-    font-size: 12px;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    margin-bottom: 16px;
-  }
-  .proposal-row {
-    display: grid;
-    grid-template-columns: 100px 1fr 120px 80px;
-    gap: 12px;
-    padding: 10px 0;
-    border-bottom: 1px solid var(--border);
-    align-items: center;
+    margin-bottom: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
     font-size: 13px;
   }
-  .proposal-row:last-child { border-bottom: none; }
-  .proposal-num { color: var(--accent); font-weight: 600; }
-  .proposal-title { color: var(--text); }
+
+  .proposal-row:hover {
+    border-color: var(--accent);
+    background: var(--surface-2);
+  }
+
+  .proposal-row.selected {
+    border-color: var(--selected);
+    background: rgba(108, 140, 255, 0.08);
+  }
+
+  .proposal-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 500;
+    font-size: 12px;
+  }
+
+  .proposal-title {
+    color: var(--text);
+    font-weight: 400;
+  }
+
   .badge {
     display: inline-block;
     padding: 2px 8px;
     border-radius: 4px;
     font-size: 11px;
-    font-weight: 600;
-    text-align: center;
+    font-weight: 500;
+    font-family: 'JetBrains Mono', monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
   }
-  .badge-verified { background: rgba(74,222,128,0.15); color: var(--green); }
+
   .badge-seed { background: rgba(251,191,36,0.15); color: var(--amber); }
-  .badge-implementing { background: rgba(108,140,255,0.15); color: var(--accent); }
   .badge-planned { background: rgba(34,211,238,0.15); color: var(--cyan); }
   .badge-approved { background: rgba(167,139,250,0.15); color: var(--purple); }
-  .badge-completed { background: rgba(74,222,128,0.1); color: #86efac; }
-  .badge-scratched { background: rgba(248,113,113,0.15); color: var(--red); text-decoration: line-through; }
+  .badge-implementing { background: rgba(108,140,255,0.15); color: var(--accent); }
+  .badge-completed { background: rgba(134,239,172,0.15); color: #86efac; }
+  .badge-verified { background: rgba(74,222,128,0.15); color: var(--green); }
+  .badge-scratched { background: rgba(248,113,113,0.15); color: var(--red); }
 
-  .events-col { color: var(--text-dim); text-align: right; }
+  .select-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    transition: all 0.15s;
+  }
+
+  .select-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .select-btn.active {
+    background: rgba(108, 140, 255, 0.15);
+    border-color: var(--selected);
+    color: var(--selected);
+  }
+
+  .events-col {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    text-align: right;
+  }
+
+  /* Selected banner */
+  .selected-banner {
+    background: rgba(108, 140, 255, 0.08);
+    border: 1px solid var(--selected);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    display: none;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+  }
+
+  .selected-banner.show { display: flex; }
+
+  .selected-banner .icon { font-size: 18px; }
+  .selected-banner .msg { flex: 1; color: var(--text-dim); }
+  .selected-banner .msg strong { color: var(--text); }
+
+  .deselect-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .deselect-btn:hover { color: var(--red); border-color: var(--red); }
+
+  /* Detail panel */
+  .detail-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 16px;
+    display: none;
+  }
+
+  .detail-panel.show { display: block; }
+
+  .detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .detail-field .label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+
+  .detail-field .value {
+    font-size: 13px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .guard-row {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .guard {
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    padding: 4px 8px;
+    border-radius: 4px;
+    background: var(--surface-2);
+  }
+
+  .guard.true { color: var(--green); }
+  .guard.false { color: var(--text-dim); }
+
+  /* Timeline */
+  .timeline {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    margin-bottom: 32px;
+  }
+
+  .timeline h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+
+  .tl-event {
+    display: grid;
+    grid-template-columns: 80px 180px 1fr;
+    gap: 12px;
+    padding: 6px 0;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    border-bottom: 1px solid rgba(39, 39, 42, 0.5);
+  }
+
+  .tl-time { color: var(--text-dim); }
+  .tl-action { color: var(--accent); }
+  .tl-arrow { color: var(--text-dim); }
 
   /* Findings */
   .finding-row {
     display: grid;
-    grid-template-columns: 80px 1fr 80px;
+    grid-template-columns: 100px 1fr 80px;
     gap: 12px;
-    padding: 8px 0;
-    border-bottom: 1px solid var(--border);
-    font-size: 13px;
-  }
-  .finding-row:last-child { border-bottom: none; }
-  .badge-observed { background: rgba(251,191,36,0.15); color: var(--amber); }
-  .badge-triaged { background: rgba(108,140,255,0.15); color: var(--accent); }
-  .badge-resolved { background: rgba(74,222,128,0.15); color: var(--green); }
-
-  /* Event timeline */
-  .timeline {
+    padding: 10px 16px;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 24px;
-    margin-bottom: 24px;
+    margin-bottom: 6px;
+    font-size: 13px;
   }
-  .timeline h2 {
-    font-size: 12px;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    margin-bottom: 16px;
-  }
-  .tl-event {
-    display: flex;
-    gap: 12px;
-    padding: 6px 0;
-    font-size: 12px;
-    align-items: baseline;
-  }
-  .tl-time { color: var(--text-dim); min-width: 80px; }
-  .tl-action { color: var(--accent); min-width: 160px; }
-  .tl-detail { color: var(--text-dim); }
-  .tl-arrow { color: var(--text-dim); }
 
   /* Tooltip */
   .tooltip {
-    display: none;
     position: fixed;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 12px;
+    max-width: 280px;
     font-size: 12px;
-    max-width: 300px;
-    z-index: 100;
     pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.1s;
+    z-index: 100;
   }
-  .tooltip.show { display: block; }
-  .tooltip .tt-num { color: var(--accent); font-weight: 600; }
-  .tooltip .tt-title { color: var(--text); margin-top: 4px; }
-  .tooltip .tt-guards { color: var(--text-dim); margin-top: 6px; font-size: 11px; }
 
-  .refresh-btn {
+  .tooltip.show { opacity: 1; }
+  .tt-num { font-family: 'JetBrains Mono', monospace; font-weight: 500; }
+  .tt-title { margin-top: 4px; color: var(--text-dim); }
+  .tt-guards { margin-top: 8px; font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+
+  /* Toast */
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    color: var(--text-dim);
-    padding: 6px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-family: inherit;
-    font-size: 11px;
-    transition: all 0.15s;
+    border-radius: 8px;
+    padding: 12px 20px;
+    font-size: 13px;
+    font-family: 'JetBrains Mono', monospace;
+    opacity: 0;
+    transform: translateY(10px);
+    transition: all 0.2s;
+    z-index: 200;
   }
-  .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-  .header-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 32px;
-  }
-  .last-updated {
-    font-size: 11px;
-    color: var(--text-dim);
-  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.error { border-color: var(--red); color: var(--red); }
+  .toast.ok { border-color: var(--green); color: var(--green); }
 </style>
 </head>
 <body>
-
-<div class="header-row">
-  <div>
-    <h1>Engineering Pipeline</h1>
-    <div class="title-row">
+<div class="container">
+  <header>
+    <div class="brand">
       <span class="dragon">🐉</span>
-      <span class="name">Haku Ops</span>
-      <span class="sub">Deep Sci-Fi · Temper Backend</span>
+      <div>
+        <h1>Haku Ops</h1>
+        <div class="sub">engineering pipeline</div>
+      </div>
     </div>
+    <div class="header-right">
+      <div class="status-dot"></div>
+      <span id="updated">loading...</span>
+      <button class="refresh-btn" onclick="load()">↻</button>
+    </div>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="pipeline">
+    <h2>Pipeline Flow</h2>
+    <div class="pipeline-stages" id="pipeline"></div>
   </div>
-  <div style="text-align: right">
-    <button class="refresh-btn" onclick="load()">↻ Refresh</button>
-    <div class="last-updated" id="updated"></div>
+
+  <div class="selected-banner" id="banner">
+    <span class="icon">📌</span>
+    <span class="msg" id="banner-msg"></span>
+    <button class="deselect-btn" id="deselect-btn">✕ Deselect</button>
   </div>
-</div>
 
-<div class="stats" id="stats"></div>
+  <div class="detail-panel" id="detail"></div>
 
-<div class="pipeline">
-  <h2>Pipeline Flow</h2>
-  <div class="pipeline-stages" id="pipeline"></div>
-</div>
+  <div class="section">
+    <h2>Proposals</h2>
+    <div id="proposals"></div>
+  </div>
 
-<div class="section">
-  <h2>Proposals</h2>
-  <div id="proposals"></div>
-</div>
+  <div class="section">
+    <h2>Open Findings</h2>
+    <div id="findings"></div>
+  </div>
 
-<div class="section">
-  <h2>Open Findings</h2>
-  <div id="findings"></div>
-</div>
-
-<div class="timeline">
-  <h2>Recent Events</h2>
-  <div id="timeline"></div>
+  <div class="timeline">
+    <h2>Recent Events</h2>
+    <div id="timeline"></div>
+  </div>
 </div>
 
 <div class="tooltip" id="tooltip"></div>
+<div class="toast" id="toast"></div>
 
 <script>
 const BASE = window.location.origin + '/tdata';
@@ -333,6 +535,101 @@ const STAGE_COLORS = {
   Scratched: '#f87171'
 };
 
+let allProposals = [];
+let selectedId = null;
+
+// --- Temper Actions ---
+
+async function fireAction(entityId, action) {
+  const url = `${BASE}/Proposals('${entityId}')/Temper.${action}`;
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+      body: JSON.stringify({})
+    });
+    if (resp.ok) {
+      toast(`${action} → ${entityId}`, 'ok');
+      await load();
+      return true;
+    } else {
+      const err = await resp.text();
+      toast(`${action} failed: ${resp.status}`, 'error');
+      console.error(err);
+      return false;
+    }
+  } catch (e) {
+    toast(`${action} failed: ${e.message}`, 'error');
+    return false;
+  }
+}
+
+async function toggleSelect(entityId) {
+  const proposal = allProposals.find(p => p.entity_id === entityId);
+  if (!proposal) return;
+
+  const isSelected = proposal.booleans?.is_selected;
+  const action = isSelected ? 'Deselect' : 'Select';
+  await fireAction(entityId, action);
+}
+
+// --- UI ---
+
+function toast(msg, cls) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = `toast show ${cls || ''}`;
+  setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+function showDetail(proposal) {
+  const p = proposal;
+  const panel = document.getElementById('detail');
+
+  const fields = Object.entries(p.fields || {}).map(([k, v]) =>
+    `<div class="detail-field"><div class="label">${k}</div><div class="value">${v || '—'}</div></div>`
+  ).join('');
+
+  const guards = Object.entries(p.booleans || {}).map(([k, v]) =>
+    `<span class="guard ${v}">${v ? '✓' : '✗'} ${k}</span>`
+  ).join('');
+
+  const events = (p.events || []).slice(-10).reverse().map(e => {
+    const t = new Date(e.timestamp);
+    const time = t.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    return `<div class="tl-event">
+      <span class="tl-time">${time}</span>
+      <span class="tl-action">${e.action}</span>
+      <span class="tl-arrow">${e.from_status || '—'} → ${e.to_status || '—'}</span>
+    </div>`;
+  }).join('');
+
+  panel.innerHTML = `
+    <div class="detail-grid">${fields}</div>
+    <div class="guard-row" style="margin-bottom:16px">${guards}</div>
+    <div style="font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:8px">History</div>
+    ${events || '<div style="font-size:12px;color:var(--text-dim)">No events yet</div>'}
+  `;
+  panel.classList.add('show');
+}
+
+function updateBanner() {
+  const banner = document.getElementById('banner');
+  const selected = allProposals.find(p => p.booleans?.is_selected);
+
+  if (selected) {
+    selectedId = selected.entity_id;
+    const num = selected.fields.ProposalNumber || selected.entity_id;
+    const title = selected.fields.Title || '';
+    document.getElementById('banner-msg').innerHTML =
+      `<strong>${num}</strong> — ${title} <span style="color:var(--text-dim);font-size:12px;margin-left:8px">Haku will pick this up on next watch cycle</span>`;
+    banner.classList.add('show');
+  } else {
+    selectedId = null;
+    banner.classList.remove('show');
+  }
+}
+
 async function load() {
   const hdrs = { 'X-Tenant-Id': TENANT };
   const [proposals, findings] = await Promise.all([
@@ -340,14 +637,14 @@ async function load() {
     fetch(`${BASE}/Findings`, { headers: hdrs }).then(r => r.json())
   ]);
 
-  const props = proposals.value || [];
+  allProposals = proposals.value || [];
   const finds = findings.value || [];
 
   // Stats
-  const verified = props.filter(p => p.status === 'Verified').length;
-  const active = props.filter(p => ['Planned','Approved','Implementing','Completed'].includes(p.status)).length;
-  const seeds = props.filter(p => p.status === 'Seed').length;
-  const scratched = props.filter(p => p.status === 'Scratched').length;
+  const verified = allProposals.filter(p => p.status === 'Verified').length;
+  const active = allProposals.filter(p => ['Planned','Approved','Implementing','Completed'].includes(p.status)).length;
+  const seeds = allProposals.filter(p => p.status === 'Seed').length;
+  const scratched = allProposals.filter(p => p.status === 'Scratched').length;
 
   document.getElementById('stats').innerHTML = `
     <div class="stat verified"><div class="num">${verified}</div><div class="label">Verified</div></div>
@@ -360,7 +657,7 @@ async function load() {
   // Pipeline
   const byStage = {};
   STAGES.forEach(s => byStage[s] = []);
-  props.forEach(p => {
+  allProposals.forEach(p => {
     if (byStage[p.status]) byStage[p.status].push(p);
   });
 
@@ -369,9 +666,11 @@ async function load() {
     const items = byStage[stage];
     const dots = items.map(p => {
       const num = p.fields.ProposalNumber || '?';
-      const title = p.fields.Title || '?';
-      return `<div class="dot" style="background:${STAGE_COLORS[stage]}"
-        onmouseenter="showTip(event,'${num}','${title.replace(/'/g,"\\'")}','${stage}',${JSON.stringify(p.booleans || {}).replace(/"/g,'&quot;')})"
+      const title = (p.fields.Title || '?').replace(/'/g, "\\'");
+      const isSelected = p.booleans?.is_selected ? 'selected' : '';
+      return `<div class="dot ${isSelected}" style="background:${STAGE_COLORS[stage]}"
+        onclick="toggleSelect('${p.entity_id}')"
+        onmouseenter="showTip(event,'${num}','${title}','${stage}',${JSON.stringify(p.booleans||{}).replace(/"/g,'&quot;')})"
         onmouseleave="hideTip()"></div>`;
     }).join('');
 
@@ -380,14 +679,12 @@ async function load() {
       <div class="count">${items.length}</div>
       <div class="dots">${dots}</div>
     </div>`;
-    if (i < STAGES.length - 1) {
-      pipelineHTML += `<div class="stage-arrow">→</div>`;
-    }
+    if (i < STAGES.length - 1) pipelineHTML += `<div class="stage-arrow">→</div>`;
   });
   document.getElementById('pipeline').innerHTML = pipelineHTML;
 
   // Proposals table
-  const sorted = [...props].sort((a, b) => {
+  const sorted = [...allProposals].sort((a, b) => {
     const na = parseInt((a.fields.ProposalNumber || '').replace('PROP-', '')) || 0;
     const nb = parseInt((b.fields.ProposalNumber || '').replace('PROP-', '')) || 0;
     return na - nb;
@@ -397,11 +694,16 @@ async function load() {
     const num = p.fields.ProposalNumber || '?';
     const title = p.fields.Title || '?';
     const cls = `badge badge-${p.status.toLowerCase()}`;
-    return `<div class="proposal-row">
+    const isSelected = p.booleans?.is_selected;
+    const rowCls = isSelected ? 'proposal-row selected' : 'proposal-row';
+    const btnCls = isSelected ? 'select-btn active' : 'select-btn';
+    const btnLabel = isSelected ? '📌' : '○';
+    return `<div class="${rowCls}" onclick="showDetail(allProposals.find(x=>x.entity_id==='${p.entity_id}'))">
       <div class="proposal-num">${num}</div>
       <div class="proposal-title">${title}</div>
       <div><span class="${cls}">${p.status}</span></div>
-      <div class="events-col">${(p.events||[]).length} events</div>
+      <div><button class="${btnCls}" onclick="event.stopPropagation();toggleSelect('${p.entity_id}')">${btnLabel}</button></div>
+      <div class="events-col">${(p.events||[]).length} ev</div>
     </div>`;
   }).join('');
 
@@ -415,13 +717,11 @@ async function load() {
     </div>`;
   }).join('');
 
-  // Timeline — collect all events from all proposals, sort by time desc
+  // Timeline
   const allEvents = [];
-  props.forEach(p => {
+  allProposals.forEach(p => {
     const num = p.fields.ProposalNumber || '?';
-    (p.events || []).forEach(e => {
-      allEvents.push({ ...e, num });
-    });
+    (p.events || []).forEach(e => allEvents.push({ ...e, num }));
   });
   allEvents.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
@@ -431,12 +731,18 @@ async function load() {
     return `<div class="tl-event">
       <span class="tl-time">${time}</span>
       <span class="tl-action">${e.num} · ${e.action}</span>
-      <span class="tl-arrow">${e.from_status} → ${e.to_status}</span>
+      <span class="tl-arrow">${e.from_status || '—'} → ${e.to_status || '—'}</span>
     </div>`;
   }).join('');
 
-  document.getElementById('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  updateBanner();
+  document.getElementById('updated').textContent = new Date().toLocaleTimeString();
 }
+
+// Deselect button
+document.getElementById('deselect-btn').addEventListener('click', () => {
+  if (selectedId) toggleSelect(selectedId);
+});
 
 function showTip(ev, num, title, stage, booleans) {
   const tip = document.getElementById('tooltip');
