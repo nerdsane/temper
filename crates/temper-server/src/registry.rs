@@ -193,9 +193,7 @@ impl SpecRegistry {
                 let table = TransitionTable::from_automaton(&automaton);
                 let integrations = automaton.integrations.clone();
 
-                if let Some(existing_spec) =
-                    existing_config.entities.get_mut(*entity_type)
-                {
+                if let Some(existing_spec) = existing_config.entities.get_mut(*entity_type) {
                     // Hot-swap: write new table into the SAME RwLock that actors hold.
                     let result = existing_spec.swap_controller().swap(table);
                     tracing::info!(

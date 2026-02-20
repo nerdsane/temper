@@ -342,7 +342,8 @@ async fn handle_load_dir(
         ));
     }
 
-    let csdl_xml = std::fs::read_to_string(&csdl_path).map_err(|e| { // determinism-ok: HTTP handler reads spec files
+    let csdl_xml = std::fs::read_to_string(&csdl_path).map_err(|e| {
+        // determinism-ok: HTTP handler reads spec files
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to read CSDL: {e}"),
@@ -358,7 +359,8 @@ async fn handle_load_dir(
     // Read all *.ioa.toml files
     let mut ioa_sources: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
-    let entries = std::fs::read_dir(specs_path).map_err(|e| { // determinism-ok: HTTP handler reads spec directory
+    let entries = std::fs::read_dir(specs_path).map_err(|e| {
+        // determinism-ok: HTTP handler reads spec directory
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to read specs directory: {e}"),
@@ -379,7 +381,8 @@ async fn handle_load_dir(
         if file_name.ends_with(".ioa.toml") {
             let entity_name = file_name.strip_suffix(".ioa.toml").unwrap_or_default();
             let entity_name = to_pascal_case(entity_name);
-            let source = std::fs::read_to_string(&path).map_err(|e| { // determinism-ok: HTTP handler reads spec files
+            let source = std::fs::read_to_string(&path).map_err(|e| {
+                // determinism-ok: HTTP handler reads spec files
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to read {}: {e}", path.display()),
@@ -423,20 +426,19 @@ async fn handle_load_dir(
     let tenant = body.tenant.clone();
     let state_for_task = state.clone();
 
-    tokio::spawn(async move { // determinism-ok: HTTP handler streams verification results inline
+    tokio::spawn(async move {
+        // determinism-ok: HTTP handler streams verification results inline
         let now = sim_now();
 
         // Emit specs_loaded line
         let _ = tx
-            .send(Ok(
-                serde_json::to_string(&serde_json::json!({
+            .send(Ok(serde_json::to_string(&serde_json::json!({
                     "type": "specs_loaded",
                     "tenant": &tenant,
                     "entities": &entity_names,
                 }))
                 .unwrap() // ci-ok: infallible serialization
-                    + "\n",
-            ))
+                    + "\n"))
             .await;
 
         let mut entity_results: std::collections::BTreeMap<String, bool> =
@@ -458,15 +460,13 @@ async fn handle_load_dir(
             if let Err(e) = state_for_task.emit_design_time_event(loaded_event).await {
                 tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to emit spec_loaded event");
                 let _ = tx
-                    .send(Ok(
-                        serde_json::to_string(&serde_json::json!({
+                    .send(Ok(serde_json::to_string(&serde_json::json!({
                             "type": "verification_error",
                             "entity": entity_name,
                             "error": e,
                         }))
                         .unwrap() // ci-ok: infallible serialization
-                            + "\n",
-                    ))
+                            + "\n"))
                     .await;
                 entity_results.insert(entity_name.clone(), false);
                 continue;
@@ -477,15 +477,13 @@ async fn handle_load_dir(
             {
                 tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to persist running verification status");
                 let _ = tx
-                    .send(Ok(
-                        serde_json::to_string(&serde_json::json!({
+                    .send(Ok(serde_json::to_string(&serde_json::json!({
                             "type": "verification_error",
                             "entity": entity_name,
                             "error": e,
                         }))
                         .unwrap() // ci-ok: infallible serialization
-                            + "\n",
-                    ))
+                            + "\n"))
                     .await;
                 entity_results.insert(entity_name.clone(), false);
                 continue;
@@ -513,15 +511,13 @@ async fn handle_load_dir(
             if let Err(e) = state_for_task.emit_design_time_event(started_event).await {
                 tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to emit verify_started event");
                 let _ = tx
-                    .send(Ok(
-                        serde_json::to_string(&serde_json::json!({
+                    .send(Ok(serde_json::to_string(&serde_json::json!({
                             "type": "verification_error",
                             "entity": entity_name,
                             "error": e,
                         }))
                         .unwrap() // ci-ok: infallible serialization
-                            + "\n",
-                    ))
+                            + "\n"))
                     .await;
                 entity_results.insert(entity_name.clone(), false);
                 continue;
@@ -529,19 +525,18 @@ async fn handle_load_dir(
 
             // Stream verification_started
             let _ = tx
-                .send(Ok(
-                    serde_json::to_string(&serde_json::json!({
+                .send(Ok(serde_json::to_string(&serde_json::json!({
                         "type": "verification_started",
                         "entity": entity_name,
                     }))
                     .unwrap() // ci-ok: infallible serialization
-                        + "\n",
-                ))
+                        + "\n"))
                 .await;
 
             // Run verification (blocking, sequential per entity)
             let ioa_source = ioa_sources[entity_name].clone();
-            let result = tokio::task::spawn_blocking(move || { // determinism-ok: HTTP handler offloads CPU-intensive verification
+            let result = tokio::task::spawn_blocking(move || {
+                // determinism-ok: HTTP handler offloads CPU-intensive verification
                 temper_verify::VerificationCascade::from_ioa(&ioa_source)
                     .with_sim_seeds(5)
                     .with_prop_test_cases(100)
@@ -588,15 +583,13 @@ async fn handle_load_dir(
                         if let Err(e) = state_for_task.emit_design_time_event(level_event).await {
                             tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to emit verify_level event");
                             let _ = tx
-                                .send(Ok(
-                                    serde_json::to_string(&serde_json::json!({
+                                .send(Ok(serde_json::to_string(&serde_json::json!({
                                         "type": "verification_error",
                                         "entity": entity_name,
                                         "error": e,
                                     }))
                                     .unwrap() // ci-ok: infallible serialization
-                                        + "\n",
-                                ))
+                                        + "\n"))
                                 .await;
                         }
                     }
@@ -687,16 +680,14 @@ async fn handle_load_dir(
                         .collect();
 
                     let _ = tx
-                        .send(Ok(
-                            serde_json::to_string(&serde_json::json!({
+                        .send(Ok(serde_json::to_string(&serde_json::json!({
                                 "type": "verification_result",
                                 "entity": entity_name,
                                 "all_passed": cascade_result.all_passed,
                                 "levels": levels_json,
                             }))
                             .unwrap() // ci-ok: infallible serialization
-                                + "\n",
-                        ))
+                                + "\n"))
                         .await;
 
                     entity_results.insert(entity_name.clone(), cascade_result.all_passed);
@@ -720,15 +711,13 @@ async fn handle_load_dir(
                     {
                         tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to persist completed verification status");
                         let _ = tx
-                            .send(Ok(
-                                serde_json::to_string(&serde_json::json!({
+                            .send(Ok(serde_json::to_string(&serde_json::json!({
                                     "type": "verification_error",
                                     "entity": entity_name,
                                     "error": e,
                                 }))
                                 .unwrap() // ci-ok: infallible serialization
-                                    + "\n",
-                            ))
+                                    + "\n"))
                             .await;
                         continue;
                     }
@@ -757,15 +746,13 @@ async fn handle_load_dir(
                     if let Err(e) = state_for_task.emit_design_time_event(done_event).await {
                         tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to emit verify_done event");
                         let _ = tx
-                            .send(Ok(
-                                serde_json::to_string(&serde_json::json!({
+                            .send(Ok(serde_json::to_string(&serde_json::json!({
                                     "type": "verification_error",
                                     "entity": entity_name,
                                     "error": e,
                                 }))
                                 .unwrap() // ci-ok: infallible serialization
-                                    + "\n",
-                            ))
+                                    + "\n"))
                             .await;
                     }
                 }
@@ -792,15 +779,13 @@ async fn handle_load_dir(
                     {
                         tracing::error!(tenant = %tenant, entity = %entity_name, error = %persist_err, "failed to persist failed verification status");
                         let _ = tx
-                            .send(Ok(
-                                serde_json::to_string(&serde_json::json!({
+                            .send(Ok(serde_json::to_string(&serde_json::json!({
                                     "type": "verification_error",
                                     "entity": entity_name,
                                     "error": persist_err,
                                 }))
                                 .unwrap() // ci-ok: infallible serialization
-                                    + "\n",
-                            ))
+                                    + "\n"))
                             .await;
                         continue;
                     }
@@ -822,20 +807,19 @@ async fn handle_load_dir(
                         step_number: Some(7),
                         total_steps: Some(7),
                     };
-                    if let Err(event_err) = state_for_task.emit_design_time_event(fail_event).await {
+                    if let Err(event_err) = state_for_task.emit_design_time_event(fail_event).await
+                    {
                         tracing::error!(tenant = %tenant, entity = %entity_name, error = %event_err, "failed to emit failed verify_done event");
                     }
 
                     let _ = tx
-                        .send(Ok(
-                            serde_json::to_string(&serde_json::json!({
+                        .send(Ok(serde_json::to_string(&serde_json::json!({
                                 "type": "verification_error",
                                 "entity": entity_name,
                                 "error": format!("{e}"),
                             }))
                             .unwrap() // ci-ok: infallible serialization
-                                + "\n",
-                        ))
+                                + "\n"))
                         .await;
                 }
             }
@@ -844,16 +828,14 @@ async fn handle_load_dir(
         // Stream final summary
         let all_passed = entity_results.values().all(|&p| p);
         let _ = tx
-            .send(Ok(
-                serde_json::to_string(&serde_json::json!({
+            .send(Ok(serde_json::to_string(&serde_json::json!({
                     "type": "summary",
                     "tenant": &tenant,
                     "all_passed": all_passed,
                     "entities": entity_results,
                 }))
                 .unwrap() // ci-ok: infallible serialization
-                    + "\n",
-            ))
+                    + "\n"))
             .await;
         // tx drops here, closing the stream
     });
@@ -877,7 +859,8 @@ async fn handle_load_inline(
     // Write specs to a temp directory
     let tmp_dir = std::env::temp_dir().join(format!("temper-inline-{}", body.tenant)); // determinism-ok: HTTP handler writes user specs to temp dir for loading
     let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans previous temp dir
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| { // determinism-ok: HTTP handler creates temp dir for inline specs
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| {
+        // determinism-ok: HTTP handler creates temp dir for inline specs
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to create temp dir: {e}"),
@@ -886,7 +869,8 @@ async fn handle_load_inline(
 
     for (filename, content) in &body.specs {
         let path = tmp_dir.join(filename);
-        std::fs::write(&path, content).map_err(|e| { // determinism-ok: HTTP handler writes user specs to temp dir
+        std::fs::write(&path, content).map_err(|e| {
+            // determinism-ok: HTTP handler writes user specs to temp dir
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to write {filename}: {e}"),
@@ -1557,8 +1541,14 @@ async fn handle_workflows(State(state): State<ServerState>) -> Json<WorkflowsRes
     let persisted_events: Option<Vec<crate::state::DesignTimeEvent>> =
         if let Some(ref store) = state.event_store {
             type DtEventRow = (
-                String, String, String, String,
-                Option<String>, Option<bool>, Option<i16>, Option<i16>,
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<bool>,
+                Option<i16>,
+                Option<i16>,
                 chrono::DateTime<chrono::Utc>,
             );
             let rows: Result<Vec<DtEventRow>, sqlx::Error> = sqlx::query_as(
@@ -1992,8 +1982,12 @@ async fn handle_trajectories(
         .await;
 
         type FailedRow = (
-            String, String, String, String,
-            Option<String>, Option<String>,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
             chrono::DateTime<chrono::Utc>,
         );
         let failed_rows: Result<Vec<FailedRow>, sqlx::Error> = sqlx::query_as(

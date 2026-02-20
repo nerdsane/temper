@@ -544,9 +544,7 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                         })
                         .await
                     {
-                        eprintln!(
-                            "Warning: failed to persist/emit verify_done for {tenant}: {e}"
-                        );
+                        eprintln!("Warning: failed to persist/emit verify_done for {tenant}: {e}");
                     }
                 }
                 Err(e) => {

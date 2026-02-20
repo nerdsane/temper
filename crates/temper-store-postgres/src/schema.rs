@@ -239,9 +239,21 @@ mod tests {
     #[test]
     fn entity_listing_index_targets_tenant_type_and_id() {
         let sql = CREATE_ENTITY_LISTING_INDEX.to_uppercase();
-        assert!(sql.contains("CREATE INDEX IF NOT EXISTS"), "index DDL should be idempotent");
-        assert!(sql.contains("IDX_EVENTS_TENANT_ENTITY"), "index name should be stable");
-        assert!(sql.contains("ON EVENTS"), "index should target events table");
-        assert!(sql.contains("(TENANT, ENTITY_TYPE, ENTITY_ID)"), "index should cover tenant/entity_type/entity_id");
+        assert!(
+            sql.contains("CREATE INDEX IF NOT EXISTS"),
+            "index DDL should be idempotent"
+        );
+        assert!(
+            sql.contains("IDX_EVENTS_TENANT_ENTITY"),
+            "index name should be stable"
+        );
+        assert!(
+            sql.contains("ON EVENTS"),
+            "index should target events table"
+        );
+        assert!(
+            sql.contains("(TENANT, ENTITY_TYPE, ENTITY_ID)"),
+            "index should cover tenant/entity_type/entity_id"
+        );
     }
 }

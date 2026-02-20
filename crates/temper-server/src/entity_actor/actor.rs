@@ -184,7 +184,9 @@ impl EntityActor {
 
                     // Restore initial fields from the first Created event.
                     // Replay effects own their projected keys, so only fill gaps.
-                    if let Some(created_event) = state.events.first().filter(|e| e.action == "Created") {
+                    if let Some(created_event) =
+                        state.events.first().filter(|e| e.action == "Created")
+                    {
                         if let (Some(fields_obj), Some(params_obj)) = (
                             state.fields.as_object_mut(),
                             created_event.params.as_object(),
