@@ -324,7 +324,7 @@
 <div class="tooltip" id="tooltip"></div>
 
 <script>
-const BASE = 'http://localhost:3001/tdata';
+const BASE = window.location.origin + '/tdata';
 const STAGES = ['Seed', 'Planned', 'Approved', 'Implementing', 'Completed', 'Verified'];
 const STAGE_COLORS = {
   Seed: '#fbbf24', Planned: '#22d3ee', Approved: '#a78bfa',
