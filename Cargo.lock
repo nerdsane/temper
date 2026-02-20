@@ -3796,6 +3796,7 @@ dependencies = [
  "criterion",
  "hyper",
  "opentelemetry",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",
@@ -3816,6 +3817,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

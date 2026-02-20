@@ -20,6 +20,7 @@ use temper_store_postgres::PostgresEventStore;
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 use crate::events::EntityStateChange;
 use crate::reaction::ReactionDispatcher;
+use crate::webhooks::WebhookDispatcher;
 use crate::registry::{
     EntityVerificationResult, SpecRegistry, VerificationDetail, VerificationStatus,
 };
@@ -201,6 +202,8 @@ pub struct ServerState {
     pub pg_record_store: Option<Arc<PostgresRecordStore>>,
     /// Optional reaction dispatcher for cross-entity coordination.
     pub reaction_dispatcher: Option<Arc<ReactionDispatcher>>,
+    /// Optional webhook dispatcher for external system notifications.
+    pub webhook_dispatcher: Option<Arc<WebhookDispatcher>>,
     /// Broadcast channel for design-time events (spec loading, verification progress).
     pub design_time_tx: Arc<tokio::sync::broadcast::Sender<DesignTimeEvent>>,
     /// In-memory log of design-time events for workflow history (append-only, bounded).
@@ -249,6 +252,7 @@ impl ServerState {
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: None,
+            webhook_dispatcher: None,
             design_time_tx: Arc::new(design_time_tx),
             design_time_log: Arc::new(RwLock::new(Vec::new())),
             entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
@@ -319,6 +323,7 @@ impl ServerState {
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: None,
+            webhook_dispatcher: None,
             design_time_tx: Arc::new(design_time_tx),
             design_time_log: Arc::new(RwLock::new(Vec::new())),
             entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
@@ -328,6 +333,12 @@ impl ServerState {
     /// Attach a reaction dispatcher for cross-entity coordination.
     pub fn with_reaction_dispatcher(mut self, dispatcher: Arc<ReactionDispatcher>) -> Self {
         self.reaction_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Attach a webhook dispatcher for external system notifications.
+    pub fn with_webhook_dispatcher(mut self, dispatcher: Arc<WebhookDispatcher>) -> Self {
+        self.webhook_dispatcher = Some(dispatcher);
         self
     }
 
@@ -793,32 +804,30 @@ impl ServerState {
             .record_transition(entity_type, action, response.success);
 
         // Record trajectory entry for every completed action (success or failure).
-        {
-            let entry = TrajectoryEntry {
-                timestamp: sim_now().to_rfc3339(),
-                tenant: tenant.to_string(),
-                entity_type: entity_type.to_string(),
-                entity_id: entity_id.to_string(),
-                action: action.to_string(),
-                success: response.success,
-                from_status: response.state.events.last().map(|e| e.from_status.clone()),
-                to_status: Some(response.state.status.clone()),
-                error: if response.success {
-                    None
-                } else {
-                    Some(
-                        response
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| "guard not met".to_string()),
-                    )
-                },
-            };
-            if let Err(e) = self.persist_trajectory_entry(&entry).await {
-                tracing::error!(error = %e, "failed to persist trajectory entry");
-            } else if let Ok(mut log) = self.trajectory_log.write() {
-                log.push(entry.clone());
-            }
+        let trajectory_entry = TrajectoryEntry {
+            timestamp: sim_now().to_rfc3339(),
+            tenant: tenant.to_string(),
+            entity_type: entity_type.to_string(),
+            entity_id: entity_id.to_string(),
+            action: action.to_string(),
+            success: response.success,
+            from_status: response.state.events.last().map(|e| e.from_status.clone()),
+            to_status: Some(response.state.status.clone()),
+            error: if response.success {
+                None
+            } else {
+                Some(
+                    response
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "guard not met".to_string()),
+                )
+            },
+        };
+        if let Err(e) = self.persist_trajectory_entry(&trajectory_entry).await {
+            tracing::error!(error = %e, "failed to persist trajectory entry");
+        } else if let Ok(mut log) = self.trajectory_log.write() {
+            log.push(trajectory_entry.clone());
         }
 
         // Broadcast state change for SSE subscribers (best-effort, ignore send errors)
@@ -835,6 +844,15 @@ impl ServerState {
             if let Ok(mut cache) = self.entity_state_cache.write() {
                 cache.insert(cache_key, (response.state.status.clone(), sim_now()));
             }
+        }
+
+        // Fire webhooks (non-blocking — fire-and-forget, failure never affects response)
+        if let Some(ref dispatcher) = self.webhook_dispatcher {
+            let dispatcher = Arc::clone(dispatcher);
+            let entry = trajectory_entry;
+            tokio::spawn(async move { // determinism-ok: external side-effect, no simulation-visible state
+                dispatcher.dispatch(&entry);
+            });
         }
 
         Ok(response)

@@ -33,12 +33,14 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 opentelemetry = { workspace = true }
+reqwest = { workspace = true }
 sqlx = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+wiremock = { workspace = true }
 
 [[bench]]
 name = "actor_throughput"

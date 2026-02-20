@@ -23,6 +23,7 @@ use temper_server::registry::{
     EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
 };
 use temper_server::state::DesignTimeEvent;
+use temper_server::webhooks::WebhookDispatcher;
 use temper_spec::csdl::parse_csdl;
 use temper_store_postgres::PostgresEventStore;
 use temper_verify::cascade::VerificationCascade;
@@ -104,6 +105,29 @@ pub async fn run(port: u16, apps: Vec<(String, String)>) -> Result<()> {
     }
 
     let mut state = PlatformState::with_registry(registry, api_key);
+
+    // Load webhooks.toml from each app directory and build a merged dispatcher.
+    {
+        let mut all_configs = Vec::new();
+        for (tenant, specs_dir) in &apps {
+            let path = Path::new(specs_dir).join("webhooks.toml");
+            if path.exists() {
+                match fs::read_to_string(&path) {
+                    Ok(source) => match WebhookDispatcher::from_toml(&source) {
+                        Ok(d) => {
+                            println!("  Loaded webhooks.toml for {tenant}");
+                            all_configs.extend(d.configs().iter().cloned());
+                        }
+                        Err(e) => eprintln!("  Warning: failed to parse webhooks.toml for {tenant}: {e}"),
+                    },
+                    Err(e) => eprintln!("  Warning: failed to read webhooks.toml for {tenant}: {e}"),
+                }
+            }
+        }
+        if !all_configs.is_empty() {
+            state.server.webhook_dispatcher = Some(Arc::new(WebhookDispatcher::new(all_configs)));
+        }
+    }
 
     // Wire up Postgres persistence if available.
     if let Some(store) = event_store {
