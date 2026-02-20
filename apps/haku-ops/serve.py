@@ -32,7 +32,7 @@ DB_DSN = os.environ.get(
 # OpenClaw webhook — wake Haku when Rita acts
 OPENCLAW_HOOK_URL = os.environ.get(
     "OPENCLAW_HOOK_URL",
-    "http://127.0.0.1:18789/hooks/agent"
+    "http://127.0.0.1:18789/hooks/wake"
 )
 OPENCLAW_HOOK_TOKEN = os.environ.get(
     "OPENCLAW_HOOK_TOKEN",
@@ -51,24 +51,15 @@ def get_db():
 
 
 def wake_haku(action, entity_type, entity_id, from_status, to_status):
-    """POST to OpenClaw webhook to wake Haku."""
+    """POST to OpenClaw /hooks/wake to inject event into Haku's main session."""
     payload = json.dumps({
-        "message": (
-            f"TEMPER EVENT: Rita fired '{action}' on {entity_type} '{entity_id}' "
+        "text": (
+            f"[Temper] Rita fired '{action}' on {entity_type} '{entity_id}' "
             f"({from_status} → {to_status}). "
-            f"Query Temper for the full entity state at "
-            f"http://localhost:3001/tdata/{entity_type}s('{entity_id}') "
-            f"with header X-Tenant-Id: haku-ops. "
-            f"React appropriately and report to Rita on Discord "
-            f"channel 1471700737376391350 with accountId=haku."
+            f"Check state: curl -s http://localhost:3001/tdata/{entity_type}s('{entity_id}') "
+            f"-H 'X-Tenant-Id: haku-ops' | python3 -m json.tool"
         ),
-        "name": "Temper",
-        "agentId": "haku",
-        "deliver": True,
-        "channel": "discord",
-        "to": "1471700737376391350",
-        "model": "anthropic/claude-sonnet-4-6",
-        "timeoutSeconds": 120
+        "mode": "now"
     }).encode()
 
     req = urllib.request.Request(
