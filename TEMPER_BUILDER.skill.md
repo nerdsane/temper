@@ -96,7 +96,37 @@ Runs the 5-level verification cascade:
 - **L2b**: Actor simulation through real TransitionTable
 - **L3**: Property-based testing with random action sequences
 
-Returns `{ "all_passed": true, "levels": [...] }`.
+Returns JSON with full failure details:
+```json
+{
+  "all_passed": false,
+  "levels": [
+    {
+      "level": "L0_symbolic",
+      "passed": true,
+      "summary": "All symbolic checks passed"
+    },
+    {
+      "level": "L2_simulation",
+      "passed": false,
+      "summary": "L2_simulation failed for Task",
+      "details": [
+        {
+          "kind": "invariant_violation",
+          "property": "no_further_transitions",
+          "description": "Actor actor-1 violated invariant at tick 5 during action Reopen",
+          "actor_id": "actor-1"
+        }
+      ]
+    }
+  ],
+  "verified_at": "2026-02-20T..."
+}
+```
+
+**When verification fails**: Read the `details` array in each failed level. The `kind` tells you the failure type (`invariant_violation`, `liveness_violation`, `counterexample`, `proptest_failure`), and `description` explains exactly what went wrong. Use this to fix your spec.
+
+**Also for `POST /observe/specs/load-dir`**: The NDJSON streaming response includes the same `levels[].details` structure in `verification_result` lines. Parse each line as JSON and check for `type: "verification_result"` entries.
 
 ### 4. Check What's Loaded
 

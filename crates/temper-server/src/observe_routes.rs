@@ -1075,11 +1075,67 @@ async fn run_verification(
         levels: result
             .levels
             .iter()
-            .map(|l| crate::registry::EntityLevelSummary {
-                level: l.level.to_string(),
-                passed: l.passed,
-                summary: l.summary.clone(),
-                details: None,
+            .map(|l| {
+                let details: Option<Vec<crate::registry::VerificationDetail>> = if !l.passed {
+                    let mut dets = Vec::new();
+                    if let Some(sim) = &l.simulation {
+                        for v in &sim.liveness_violations {
+                            dets.push(crate::registry::VerificationDetail {
+                                kind: "liveness_violation".into(),
+                                property: v.property.clone(),
+                                description: v.description.clone(),
+                                actor_id: Some(v.actor_id.clone()),
+                            });
+                        }
+                        for v in &sim.violations {
+                            dets.push(crate::registry::VerificationDetail {
+                                kind: "invariant_violation".into(),
+                                property: v.invariant.clone(),
+                                description: format!(
+                                    "Actor {} violated invariant at tick {} during action {}",
+                                    v.actor_id, v.tick, v.action
+                                ),
+                                actor_id: Some(v.actor_id.clone()),
+                            });
+                        }
+                    }
+                    if let Some(mc) = &l.verification {
+                        for cx in &mc.counterexamples {
+                            dets.push(crate::registry::VerificationDetail {
+                                kind: "counterexample".into(),
+                                property: cx.property.clone(),
+                                description: format!(
+                                    "Counterexample found with {} step trace",
+                                    cx.trace.len()
+                                ),
+                                actor_id: None,
+                            });
+                        }
+                    }
+                    if let Some(pt) = &l.prop_test {
+                        if let Some(failure) = &pt.failure {
+                            dets.push(crate::registry::VerificationDetail {
+                                kind: "proptest_failure".into(),
+                                property: failure.invariant.clone(),
+                                description: format!(
+                                    "Property test failed after sequence: {}",
+                                    failure.action_sequence.join(" → ")
+                                ),
+                                actor_id: None,
+                            });
+                        }
+                    }
+                    if dets.is_empty() { None } else { Some(dets) }
+                } else {
+                    None
+                };
+
+                crate::registry::EntityLevelSummary {
+                    level: l.level.to_string(),
+                    passed: l.passed,
+                    summary: l.summary.clone(),
+                    details,
+                }
             })
             .collect(),
         verified_at: sim_now().to_rfc3339(),
