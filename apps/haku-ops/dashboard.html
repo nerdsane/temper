@@ -325,6 +325,7 @@
 
 <script>
 const BASE = window.location.origin + '/tdata';
+const TENANT = 'haku-ops';
 const STAGES = ['Seed', 'Planned', 'Approved', 'Implementing', 'Completed', 'Verified'];
 const STAGE_COLORS = {
   Seed: '#fbbf24', Planned: '#22d3ee', Approved: '#a78bfa',
@@ -333,9 +334,10 @@ const STAGE_COLORS = {
 };
 
 async function load() {
+  const hdrs = { 'X-Tenant-Id': TENANT };
   const [proposals, findings] = await Promise.all([
-    fetch(`${BASE}/Proposals`).then(r => r.json()),
-    fetch(`${BASE}/Findings`).then(r => r.json())
+    fetch(`${BASE}/Proposals`, { headers: hdrs }).then(r => r.json()),
+    fetch(`${BASE}/Findings`, { headers: hdrs }).then(r => r.json())
   ]);
 
   const props = proposals.value || [];

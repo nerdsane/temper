@@ -39,6 +39,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         req = urllib.request.Request(url, data=body, method=method)
         req.add_header("Content-Type", self.headers.get("Content-Type", "application/json"))
+        # Forward tenant header for multi-tenant isolation
+        tenant = self.headers.get("X-Tenant-Id")
+        if tenant:
+            req.add_header("X-Tenant-Id", tenant)
 
         try:
             with urllib.request.urlopen(req) as resp:
