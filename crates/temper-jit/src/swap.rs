@@ -25,10 +25,7 @@ pub struct SwapController {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SwapResult {
     /// Swap succeeded. Contains the old and new versions.
-    Success {
-        old_version: u64,
-        new_version: u64,
-    },
+    Success { old_version: u64, new_version: u64 },
     /// Swap failed (e.g. lock poisoned).
     Failed(String),
 }

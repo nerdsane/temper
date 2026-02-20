@@ -184,15 +184,9 @@ impl Guard {
         match self {
             Guard::Always => true,
             Guard::StateIn(states) => states.iter().any(|s| s == current_state),
-            Guard::ItemCountMin(n) => {
-                ctx.counters.get("items").copied().unwrap_or(0) >= *n
-            }
-            Guard::CounterMin { var, min } => {
-                ctx.counters.get(var).copied().unwrap_or(0) >= *min
-            }
-            Guard::BoolTrue(var) => {
-                ctx.booleans.get(var).copied().unwrap_or(false)
-            }
+            Guard::ItemCountMin(n) => ctx.counters.get("items").copied().unwrap_or(0) >= *n,
+            Guard::CounterMin { var, min } => ctx.counters.get(var).copied().unwrap_or(0) >= *min,
+            Guard::BoolTrue(var) => ctx.booleans.get(var).copied().unwrap_or(false),
             Guard::ListContains { var, value } => {
                 ctx.lists.get(var).is_some_and(|list| list.contains(value))
             }

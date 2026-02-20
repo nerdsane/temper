@@ -22,7 +22,7 @@
 //! - **Deterministic**: Same input -> same output. No randomness in transition logic.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use temper_jit::table::TransitionTable;
 use temper_observe::wide_event;
@@ -42,7 +42,10 @@ use super::types::{
 pub struct EntityActor {
     entity_type: String,
     entity_id: String,
-    table: Arc<TransitionTable>,
+    /// Live reference to the transition table. Reads through `RwLock` so that
+    /// hot-swapped tables are visible on the next action dispatch without
+    /// restarting the actor.
+    table: Arc<RwLock<TransitionTable>>,
     initial_fields: serde_json::Value,
     /// Optional event store for persistence. None = in-memory only.
     event_store: Option<Arc<PostgresEventStore>>,
@@ -55,7 +58,7 @@ impl EntityActor {
     pub fn new(
         entity_type: impl Into<String>,
         entity_id: impl Into<String>,
-        table: Arc<TransitionTable>,
+        table: Arc<RwLock<TransitionTable>>,
         initial_fields: serde_json::Value,
     ) -> Self {
         Self {
@@ -72,7 +75,7 @@ impl EntityActor {
     pub fn with_persistence(
         entity_type: impl Into<String>,
         entity_id: impl Into<String>,
-        table: Arc<TransitionTable>,
+        table: Arc<RwLock<TransitionTable>>,
         initial_fields: serde_json::Value,
         store: Arc<PostgresEventStore>,
     ) -> Self {
@@ -92,7 +95,12 @@ impl EntityActor {
     }
 
     /// Persist an event to Postgres (if store is configured).
-    async fn persist_event(store: &PostgresEventStore, persistence_id: &str, state: &mut EntityState, event: &EntityEvent) {
+    async fn persist_event(
+        store: &PostgresEventStore,
+        persistence_id: &str,
+        state: &mut EntityState,
+        event: &EntityEvent,
+    ) {
         let envelope = PersistenceEnvelope {
             sequence_nr: state.sequence_nr + 1,
             event_type: event.action.clone(),
@@ -106,7 +114,10 @@ impl EntityActor {
             },
         };
 
-        match store.append(persistence_id, state.sequence_nr, &[envelope]).await {
+        match store
+            .append(persistence_id, state.sequence_nr, &[envelope])
+            .await
+        {
             Ok(new_seq) => {
                 state.sequence_nr = new_seq;
                 tracing::debug!(entity = %state.entity_id, seq = new_seq, "event persisted");
@@ -196,18 +207,22 @@ impl Actor for EntityActor {
     type State = EntityState;
 
     async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<Self::State, ActorError> {
+        // Snapshot the table for consistent startup (initial state + replay).
+        // This is a cheap clone — TransitionTable is a few Vecs of strings.
+        let table = self.table.read().expect("table lock poisoned").clone();
+
         let mut fields = self.initial_fields.clone();
         if let Some(obj) = fields.as_object_mut() {
             obj.entry("Id".to_string())
                 .or_insert(serde_json::Value::String(self.entity_id.clone()));
             obj.entry("Status".to_string())
-                .or_insert(serde_json::Value::String(self.table.initial_state.clone()));
+                .or_insert(serde_json::Value::String(table.initial_state.clone()));
         }
 
         let mut state = EntityState {
             entity_type: self.entity_type.clone(),
             entity_id: self.entity_id.clone(),
-            status: self.table.initial_state.clone(),
+            status: table.initial_state.clone(),
             item_count: 0,
             counters: BTreeMap::new(),
             booleans: BTreeMap::new(),
@@ -221,7 +236,7 @@ impl Actor for EntityActor {
         // Re-evaluates each event through the TransitionTable to reconstruct
         // all state variables (status, counters, booleans) — not just item_count.
         if let Some(ref store) = self.event_store {
-            Self::replay_events(&self.table, store, &self.persistence_id(), &mut state).await;
+            Self::replay_events(&table, store, &self.persistence_id(), &mut state).await;
         }
 
         Ok(state)
@@ -239,22 +254,29 @@ impl Actor for EntityActor {
                 // returns logical clock in simulation, wall clock in production).
                 let action_start = sim_now();
 
+                // Snapshot the current table for this action dispatch.
+                // On the next action, any hot-swapped table will be picked up.
+                let table = self.table.read().expect("table lock poisoned").clone();
+
                 // TigerStyle: Assert preconditions before every transition.
                 // These run in production, not just tests.
                 debug_assert!(
-                    self.table.states.contains(&state.status),
+                    table.states.contains(&state.status),
                     "PRECONDITION: status '{}' not in valid states {:?}",
-                    state.status, self.table.states
+                    state.status,
+                    table.states
                 );
                 debug_assert!(
                     state.events.len() < MAX_EVENTS_PER_ENTITY,
                     "PRECONDITION: event budget exhausted ({} >= {})",
-                    state.events.len(), MAX_EVENTS_PER_ENTITY
+                    state.events.len(),
+                    MAX_EVENTS_PER_ENTITY
                 );
                 debug_assert!(
                     state.item_count <= MAX_ITEMS_PER_ENTITY,
                     "PRECONDITION: item budget exceeded ({} > {})",
-                    state.item_count, MAX_ITEMS_PER_ENTITY
+                    state.item_count,
+                    MAX_ITEMS_PER_ENTITY
                 );
 
                 // TigerStyle: Budget enforcement (not just assertions -- hard limits)
@@ -262,18 +284,22 @@ impl Actor for EntityActor {
                     ctx.reply(EntityResponse {
                         success: false,
                         state: state.clone(),
-                        error: Some(format!("Event budget exhausted ({MAX_EVENTS_PER_ENTITY} max)")),
+                        error: Some(format!(
+                            "Event budget exhausted ({MAX_EVENTS_PER_ENTITY} max)"
+                        )),
                         custom_effects: vec![],
                     });
                     return Ok(());
                 }
 
                 let event_count_before = state.events.len();
-                let result = super::effects::process_action(state, &self.table, &name, &params);
+                let result = super::effects::process_action(state, &table, &name, &params);
 
                 if result.success {
                     // process_action returned a successful transition with event.
-                    let event = result.event.expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
+                    let event = result
+                        .event
+                        .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
 
                     // Persist to Postgres (if configured)
                     if let Some(ref store) = self.event_store {
@@ -290,9 +316,16 @@ impl Actor for EntityActor {
                         .unwrap_or(0)
                         .max(0) as u64;
                     let wide = wide_event::from_transition(
-                        &state.entity_type, &state.entity_id, &name,
-                        &event.from_status, &state.status, true, duration_ns,
-                        &event.params, state.item_count, &self.trace_id,
+                        &state.entity_type,
+                        &state.entity_id,
+                        &name,
+                        &event.from_status,
+                        &state.status,
+                        true,
+                        duration_ns,
+                        &event.params,
+                        state.item_count,
+                        &self.trace_id,
                     );
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
@@ -301,17 +334,24 @@ impl Actor for EntityActor {
 
                     // TigerStyle: Assert postconditions after every transition.
                     debug_assert!(
-                        self.table.states.contains(&state.status),
+                        table.states.contains(&state.status),
                         "POSTCONDITION: status '{}' not in valid states after {}",
-                        state.status, name
+                        state.status,
+                        name
                     );
                     debug_assert!(
                         state.events.len() == event_count_before + 1,
                         "POSTCONDITION: event log must grow by exactly 1 (was {}, now {})",
-                        event_count_before, state.events.len()
+                        event_count_before,
+                        state.events.len()
                     );
                     debug_assert!(
-                        state.events.last().expect("events non-empty after push").action == name, // ci-ok: post-assertion, events.len() just checked
+                        state
+                            .events
+                            .last()
+                            .expect("events non-empty after push")
+                            .action
+                            == name, // ci-ok: post-assertion, events.len() just checked
                         "POSTCONDITION: last event must be the action that just fired"
                     );
 
@@ -337,9 +377,16 @@ impl Actor for EntityActor {
                         .unwrap_or(0)
                         .max(0) as u64;
                     let wide = wide_event::from_transition(
-                        &state.entity_type, &state.entity_id, &name,
-                        &state.status, &state.status, false, duration_ns,
-                        &params, state.item_count, &self.trace_id,
+                        &state.entity_type,
+                        &state.entity_id,
+                        &name,
+                        &state.status,
+                        &state.status,
+                        false,
+                        duration_ns,
+                        &params,
+                        state.item_count,
+                        &self.trace_id,
                     );
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
@@ -361,7 +408,11 @@ impl Actor for EntityActor {
                 });
             }
             EntityMsg::GetField { field } => {
-                let value = state.fields.get(&field).cloned().unwrap_or(serde_json::Value::Null);
+                let value = state
+                    .fields
+                    .get(&field)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 ctx.reply(value);
             }
             EntityMsg::UpdateFields { fields, replace } => {
@@ -376,7 +427,9 @@ impl Actor for EntityActor {
                     }
                 } else {
                     // PATCH: merge fields into existing
-                    if let (Some(existing), Some(updates)) = (state.fields.as_object_mut(), fields.as_object()) {
+                    if let (Some(existing), Some(updates)) =
+                        (state.fields.as_object_mut(), fields.as_object())
+                    {
                         for (k, v) in updates {
                             existing.insert(k.clone(), v.clone());
                         }
@@ -415,13 +468,13 @@ impl Actor for EntityActor {
 mod tests {
     use super::*;
     use std::time::Duration;
-    use temper_runtime::ActorSystem;
     use temper_jit::table::TransitionTable;
+    use temper_runtime::ActorSystem;
 
     const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 
-    fn order_table() -> Arc<TransitionTable> {
-        Arc::new(TransitionTable::from_ioa_source(ORDER_IOA))
+    fn order_table() -> Arc<RwLock<TransitionTable>> {
+        Arc::new(RwLock::new(TransitionTable::from_ioa_source(ORDER_IOA)))
     }
 
     // =============================================
@@ -544,7 +597,10 @@ mod tests {
                 .await
                 .unwrap();
             assert!(r.success, "step {i} ({action}) failed: {:?}", r.error);
-            assert_eq!(r.state.status, expected_states[i], "step {i} ({action}) wrong state");
+            assert_eq!(
+                r.state.status, expected_states[i],
+                "step {i} ({action}) wrong state"
+            );
         }
 
         // Verify full event log
@@ -585,7 +641,13 @@ mod tests {
         let actor_ref = system.spawn(actor, "order-6");
 
         // Drive to Shipped
-        for action in &["AddItem", "SubmitOrder", "ConfirmOrder", "ProcessOrder", "ShipOrder"] {
+        for action in &[
+            "AddItem",
+            "SubmitOrder",
+            "ConfirmOrder",
+            "ProcessOrder",
+            "ShipOrder",
+        ] {
             let _: EntityResponse = actor_ref
                 .ask(
                     EntityMsg::Action {
@@ -630,17 +692,37 @@ mod tests {
 
         // Cancel order A
         let _: EntityResponse = a1
-            .ask(EntityMsg::Action { name: "CancelOrder".into(), params: serde_json::json!({}) }, Duration::from_secs(1))
-            .await.unwrap();
+            .ask(
+                EntityMsg::Action {
+                    name: "CancelOrder".into(),
+                    params: serde_json::json!({}),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
 
         // Add item to order B
         let _: EntityResponse = a2
-            .ask(EntityMsg::Action { name: "AddItem".into(), params: serde_json::json!({}) }, Duration::from_secs(1))
-            .await.unwrap();
+            .ask(
+                EntityMsg::Action {
+                    name: "AddItem".into(),
+                    params: serde_json::json!({}),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
 
         // Verify independence
-        let r1: EntityResponse = a1.ask(EntityMsg::GetState, Duration::from_secs(1)).await.unwrap();
-        let r2: EntityResponse = a2.ask(EntityMsg::GetState, Duration::from_secs(1)).await.unwrap();
+        let r1: EntityResponse = a1
+            .ask(EntityMsg::GetState, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let r2: EntityResponse = a2
+            .ask(EntityMsg::GetState, Duration::from_secs(1))
+            .await
+            .unwrap();
 
         assert_eq!(r1.state.status, "Cancelled");
         assert_eq!(r2.state.status, "Draft");

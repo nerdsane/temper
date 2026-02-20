@@ -7,8 +7,8 @@
 //! For new specifications, prefer I/O Automaton TOML (see [`super::automaton`]).
 //! The TLA+ *extractor* is retained for existing specs and deep temporal reasoning.
 
-mod types;
 mod extractor;
+mod types;
 
+pub use extractor::{TlaExtractError, extract_state_machine};
 pub use types::*;
-pub use extractor::{extract_state_machine, TlaExtractError};

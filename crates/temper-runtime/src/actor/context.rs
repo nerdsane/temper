@@ -7,7 +7,6 @@ use super::actor_ref::{ActorId, ActorRef};
 use super::errors::ActorError;
 use super::traits::{Actor, Message};
 
-
 /// Context available to an actor during message handling.
 /// Provides access to the actor's identity, child management,
 /// and reply capabilities.

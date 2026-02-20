@@ -7,16 +7,18 @@
 //! Specs are loaded immediately (design-time observation) and verification
 //! runs in the background so the observe UI can stream progress.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use temper_evolution::PostgresRecordStore;
 use temper_observe::otel::init_tracing;
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
+use temper_runtime::tenant::TenantId;
 use temper_server::registry::{
     EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
 };
@@ -25,6 +27,26 @@ use temper_spec::csdl::parse_csdl;
 use temper_store_postgres::PostgresEventStore;
 use temper_verify::cascade::VerificationCascade;
 
+/// Parsed specs loaded from disk for a tenant.
+struct LoadedTenantSpecs {
+    csdl_xml: String,
+    ioa_sources: HashMap<String, String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PersistedSpecRow {
+    tenant: String,
+    entity_type: String,
+    ioa_source: String,
+    csdl_xml: Option<String>,
+    verification_status: String,
+    verified: bool,
+    levels_passed: Option<i32>,
+    levels_total: Option<i32>,
+    verification_result: Option<serde_json::Value>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Run the `temper serve` command.
 ///
 /// Starts the Temper platform server. Specs are loaded immediately so the
@@ -32,10 +54,7 @@ use temper_verify::cascade::VerificationCascade;
 /// and results stream via SSE (design-time observation).
 ///
 /// `apps` is a list of `(tenant_name, specs_dir)` pairs. Can be empty (no user apps).
-pub async fn run(
-    port: u16,
-    apps: Vec<(String, String)>,
-) -> Result<()> {
+pub async fn run(port: u16, apps: Vec<(String, String)>) -> Result<()> {
     // Initialize OTEL tracing if OTLP_ENDPOINT is set.
     // The guard must be held alive for the server's lifetime.
     let _otel_guard = std::env::var("OTLP_ENDPOINT").ok().map(|endpoint| {
@@ -45,6 +64,7 @@ pub async fn run(
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
     // Connect to Postgres if DATABASE_URL is set.
+    let mut pg_pool: Option<sqlx::PgPool> = None;
     let event_store = if let Ok(database_url) = std::env::var("DATABASE_URL") {
         println!("  Connecting to Postgres...");
         let pool = sqlx::PgPool::connect(&database_url)
@@ -53,28 +73,43 @@ pub async fn run(
         temper_store_postgres::migration::run_migrations(&pool)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to run migrations: {e}"))?;
+        let pg_record_store: PostgresRecordStore = PostgresRecordStore::new(pool.clone());
+        pg_record_store
+            .migrate()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to migrate evolution_records: {e}"))?;
         println!("  Postgres connected, migrations applied.");
+        pg_pool = Some(pool.clone());
         Some(PostgresEventStore::new(pool))
     } else {
-        println!("  No DATABASE_URL — running in-memory only (events not persisted).");
+        println!("  No DATABASE_URL — running in-memory only (state not persisted).");
         None
     };
 
-    // Load specs from all apps without blocking on verification.
-    let mut state = if !apps.is_empty() {
-        let mut registry = SpecRegistry::new();
-        for (tenant, specs_dir) in &apps {
-            println!("  Loading app: {tenant} from {specs_dir}");
-            load_into_registry(&mut registry, specs_dir, tenant)?;
+    // Build initial registry from Postgres (recovery), then override with disk apps if provided.
+    let mut registry = SpecRegistry::new();
+    if let Some(pool) = pg_pool.as_ref() {
+        let restored = load_registry_from_postgres(&mut registry, pool).await?;
+        if restored > 0 {
+            println!("  Restored {restored} specs from Postgres.");
         }
-        PlatformState::with_registry(registry, api_key)
-    } else {
-        PlatformState::new(api_key)
-    };
+    }
+
+    for (tenant, specs_dir) in &apps {
+        println!("  Loading app: {tenant} from {specs_dir}");
+        let loaded = load_into_registry(&mut registry, specs_dir, tenant)?;
+        if let Some(pool) = pg_pool.as_ref() {
+            upsert_loaded_specs_to_postgres(pool, tenant, &loaded).await?;
+        }
+    }
+
+    let mut state = PlatformState::with_registry(registry, api_key);
 
     // Wire up Postgres persistence if available.
     if let Some(store) = event_store {
+        let pool = store.pool().clone();
         state.server.event_store = Some(Arc::new(store));
+        state.server.pg_record_store = Some(Arc::new(PostgresRecordStore::new(pool)));
     }
 
     println!("Starting Temper platform server...");
@@ -101,7 +136,7 @@ pub async fn run(
     // Spawn background verification AFTER the server is listening,
     // so the observe UI can connect and stream results.
     for (tenant, dir) in &apps {
-        spawn_background_verification(&state, dir, tenant);
+        spawn_background_verification(&state, dir, tenant).await;
     }
 
     println!("Listening on http://0.0.0.0:{port}");
@@ -116,7 +151,11 @@ pub async fn run(
 ///
 /// All entities start with `VerificationStatus::Pending`. The observe UI
 /// can display state machines immediately while verification runs in background.
-fn load_into_registry(registry: &mut SpecRegistry, specs_dir: &str, tenant: &str) -> Result<()> {
+fn load_into_registry(
+    registry: &mut SpecRegistry,
+    specs_dir: &str,
+    tenant: &str,
+) -> Result<LoadedTenantSpecs> {
     let specs_path = Path::new(specs_dir);
 
     if !specs_path.is_dir() {
@@ -151,28 +190,160 @@ fn load_into_registry(registry: &mut SpecRegistry, specs_dir: &str, tenant: &str
 
     registry.register_tenant(tenant, csdl, csdl_xml, &ioa_pairs);
 
+    Ok(LoadedTenantSpecs {
+        csdl_xml: registry
+            .get_tenant(&TenantId::new(tenant))
+            .map(|cfg| cfg.csdl_xml.as_ref().clone())
+            .unwrap_or_default(),
+        ioa_sources,
+    })
+}
+
+async fn upsert_loaded_specs_to_postgres(
+    pool: &sqlx::PgPool,
+    tenant: &str,
+    loaded: &LoadedTenantSpecs,
+) -> Result<()> {
+    for (entity_type, ioa_source) in &loaded.ioa_sources {
+        sqlx::query(
+            "INSERT INTO specs \
+             (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, updated_at) \
+             VALUES ($1, $2, $3, $4, 1, false, 'pending', now()) \
+             ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+                 ioa_source = EXCLUDED.ioa_source, \
+                 csdl_xml = EXCLUDED.csdl_xml, \
+                 version = specs.version + 1, \
+                 verified = false, \
+                 verification_status = 'pending', \
+                 levels_passed = NULL, \
+                 levels_total = NULL, \
+                 verification_result = NULL, \
+                 updated_at = now()",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(ioa_source)
+        .bind(&loaded.csdl_xml)
+        .execute(pool)
+        .await
+        .with_context(|| format!("Failed to persist spec {tenant}/{entity_type}"))?;
+    }
     Ok(())
+}
+
+fn persisted_status_to_registry_status(row: &PersistedSpecRow) -> VerificationStatus {
+    let status = row.verification_status.to_lowercase();
+    match status.as_str() {
+        "pending" => VerificationStatus::Pending,
+        "running" => VerificationStatus::Running,
+        _ => {
+            if let Some(value) = row.verification_result.clone() {
+                if let Ok(result) = serde_json::from_value::<EntityVerificationResult>(value) {
+                    return VerificationStatus::Completed(result);
+                }
+            }
+
+            let all_passed = status == "passed" || row.verified;
+            let levels_passed = row
+                .levels_passed
+                .unwrap_or(if all_passed { 1 } else { 0 })
+                .max(0) as usize;
+            let levels_total = row.levels_total.unwrap_or(levels_passed as i32).max(0) as usize;
+            let levels = if levels_total > 0 {
+                (0..levels_total)
+                    .map(|idx| EntityLevelSummary {
+                        level: format!("L{idx}"),
+                        passed: idx < levels_passed,
+                        summary: if idx < levels_passed {
+                            "Restored from persisted verification summary".to_string()
+                        } else {
+                            "Restored failed verification level".to_string()
+                        },
+                        details: None,
+                    })
+                    .collect()
+            } else {
+                vec![EntityLevelSummary {
+                    level: "Persisted".to_string(),
+                    passed: all_passed,
+                    summary: format!("Restored status '{}'", row.verification_status),
+                    details: None,
+                }]
+            };
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed,
+                levels,
+                verified_at: row.updated_at.to_rfc3339(),
+            })
+        }
+    }
+}
+
+async fn load_registry_from_postgres(
+    registry: &mut SpecRegistry,
+    pool: &sqlx::PgPool,
+) -> Result<usize> {
+    let rows: Vec<PersistedSpecRow> = sqlx::query_as(
+        "SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
+                levels_passed, levels_total, verification_result, updated_at \
+         FROM specs \
+         ORDER BY tenant, entity_type",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to read specs from Postgres")?;
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut grouped: BTreeMap<String, Vec<PersistedSpecRow>> = BTreeMap::new();
+    for row in rows {
+        grouped.entry(row.tenant.clone()).or_default().push(row);
+    }
+
+    let mut restored_specs = 0usize;
+    for (tenant, tenant_rows) in grouped {
+        let csdl_xml = tenant_rows
+            .iter()
+            .find_map(|row| row.csdl_xml.clone())
+            .unwrap_or_default();
+        if csdl_xml.trim().is_empty() {
+            eprintln!("Warning: skipping restored tenant '{tenant}' due to missing CSDL");
+            continue;
+        }
+        let csdl = parse_csdl(&csdl_xml)
+            .with_context(|| format!("Failed to parse restored CSDL for tenant '{tenant}'"))?;
+
+        let ioa_owned: Vec<(String, String)> = tenant_rows
+            .iter()
+            .map(|row| (row.entity_type.clone(), row.ioa_source.clone()))
+            .collect();
+        let ioa_pairs: Vec<(&str, &str)> = ioa_owned
+            .iter()
+            .map(|(entity_type, ioa)| (entity_type.as_str(), ioa.as_str()))
+            .collect();
+
+        registry.register_tenant(tenant.as_str(), csdl, csdl_xml, &ioa_pairs);
+        let tenant_id = TenantId::new(&tenant);
+        for row in &tenant_rows {
+            registry.set_verification_status(
+                &tenant_id,
+                &row.entity_type,
+                persisted_status_to_registry_status(row),
+            );
+            restored_specs += 1;
+        }
+    }
+
+    Ok(restored_specs)
 }
 
 /// Spawn background verification tasks for each entity in the specs directory.
 ///
 /// For each entity, runs the verification cascade in a blocking task and
-/// updates the registry and broadcasts design-time events as progress is made.
-/// Helper: send a design-time event to both the broadcast channel and the persistent log.
-fn emit_design_time_event(
-    tx: &tokio::sync::broadcast::Sender<DesignTimeEvent>,
-    log: &std::sync::RwLock<Vec<DesignTimeEvent>>,
-    event: DesignTimeEvent,
-) {
-    let _ = tx.send(event.clone());
-    if let Ok(mut entries) = log.write() {
-        if entries.len() < 10_000 {
-            entries.push(event);
-        }
-    }
-}
-
-fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant: &str) {
+/// updates the registry while persisting workflow history/status to Postgres.
+async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant: &str) {
     let specs_path = Path::new(specs_dir);
     let ioa_sources = match read_ioa_sources(specs_path) {
         Ok(sources) => sources,
@@ -183,55 +354,73 @@ fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant:
     };
 
     let registry = state.registry.clone();
-    let design_time_tx = state.server.design_time_tx.clone();
-    let design_time_log = state.server.design_time_log.clone();
+    let server = state.server.clone();
     let tenant_str = tenant.to_string();
 
     // Emit spec_loaded events for each entity
     for entity_name in ioa_sources.keys() {
-        emit_design_time_event(&design_time_tx, &design_time_log, DesignTimeEvent {
-            kind: "spec_loaded".to_string(),
-            entity_type: entity_name.clone(),
-            tenant: tenant_str.clone(),
-            summary: format!("Loaded spec: {entity_name}"),
-            level: None,
-            passed: None,
-            timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
-            step_number: Some(1),
-            total_steps: Some(7),
-        });
+        if let Err(e) = server
+            .emit_design_time_event(DesignTimeEvent {
+                kind: "spec_loaded".to_string(),
+                entity_type: entity_name.clone(),
+                tenant: tenant_str.clone(),
+                summary: format!("Loaded spec: {entity_name}"),
+                level: None,
+                passed: None,
+                timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
+                step_number: Some(1),
+                total_steps: Some(7),
+            })
+            .await
+        {
+            eprintln!(
+                "Warning: failed to persist/emit spec_loaded for {tenant_str}/{entity_name}: {e}"
+            );
+        }
     }
 
     for (entity_name, ioa_source) in ioa_sources {
         let registry = registry.clone();
-        let design_time_tx = design_time_tx.clone();
-        let design_time_log = design_time_log.clone();
+        let server = server.clone();
         let tenant = tenant_str.clone();
         let entity = entity_name.clone();
 
         tokio::spawn(async move {
-            // Mark as Running
+            // Persist running status first, then update in-memory registry.
+            if let Err(e) = server
+                .persist_spec_verification(&tenant, &entity, "running", None)
+                .await
             {
-                let tenant_id = temper_runtime::tenant::TenantId::new(&tenant);
-                let mut reg = registry.write().unwrap();
-                reg.set_verification_status(
-                    &tenant_id,
-                    &entity,
-                    VerificationStatus::Running,
+                eprintln!(
+                    "Warning: failed to persist running verification status for {tenant}/{entity}: {e}"
                 );
+                return;
+            }
+            {
+                let tenant_id = TenantId::new(&tenant);
+                let mut reg = registry.write().unwrap();
+                reg.set_verification_status(&tenant_id, &entity, VerificationStatus::Running);
             }
 
-            emit_design_time_event(&design_time_tx, &design_time_log, DesignTimeEvent {
-                kind: "verify_started".to_string(),
-                entity_type: entity.clone(),
-                tenant: tenant.clone(),
-                summary: format!("Verification started for {entity}"),
-                level: None,
-                passed: None,
-                timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
-                step_number: Some(2),
-                total_steps: Some(7),
-            });
+            if let Err(e) = server
+                .emit_design_time_event(DesignTimeEvent {
+                    kind: "verify_started".to_string(),
+                    entity_type: entity.clone(),
+                    tenant: tenant.clone(),
+                    summary: format!("Verification started for {entity}"),
+                    level: None,
+                    passed: None,
+                    timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
+                    step_number: Some(2),
+                    total_steps: Some(7),
+                })
+                .await
+            {
+                eprintln!(
+                    "Warning: failed to persist/emit verify_started for {tenant}/{entity}: {e}"
+                );
+                return;
+            }
 
             println!("  [verify] Starting verification for {entity}...");
 
@@ -252,17 +441,24 @@ fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant:
                         let status_str = if level.passed { "PASS" } else { "FAIL" };
                         println!("  [verify] {entity}: [{status_str}] {}", level.summary);
 
-                        emit_design_time_event(&design_time_tx, &design_time_log, DesignTimeEvent {
-                            kind: "verify_level".to_string(),
-                            entity_type: entity.clone(),
-                            tenant: tenant.clone(),
-                            summary: level.summary.clone(),
-                            level: Some(format!("{:?}", level.level)),
-                            passed: Some(level.passed),
-                            timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
-                            step_number: Some(3 + i as u8), // L0=3, L1=4, L2=5, L3=6
-                            total_steps: Some(7),
-                        });
+                        if let Err(e) = server
+                            .emit_design_time_event(DesignTimeEvent {
+                                kind: "verify_level".to_string(),
+                                entity_type: entity.clone(),
+                                tenant: tenant.clone(),
+                                summary: level.summary.clone(),
+                                level: Some(format!("{:?}", level.level)),
+                                passed: Some(level.passed),
+                                timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
+                                step_number: Some(3 + i as u8), // L0=3, L1=4, L2=5, L3=6
+                                total_steps: Some(7),
+                            })
+                            .await
+                        {
+                            eprintln!(
+                                "Warning: failed to persist/emit verify_level for {tenant}/{entity}: {e}"
+                            );
+                        }
                     }
 
                     // Build verification result
@@ -283,14 +479,39 @@ fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant:
 
                     let all_passed = cascade_result.all_passed;
 
-                    // Update registry
+                    let passed_count = verification_result
+                        .levels
+                        .iter()
+                        .filter(|l| l.passed)
+                        .count();
+                    let final_status = if verification_result.all_passed {
+                        "passed"
+                    } else if passed_count == 0 {
+                        "failed"
+                    } else {
+                        "partial"
+                    };
+                    if let Err(e) = server
+                        .persist_spec_verification(
+                            &tenant,
+                            &entity,
+                            final_status,
+                            Some(&verification_result),
+                        )
+                        .await
                     {
-                        let tenant_id = temper_runtime::tenant::TenantId::new(&tenant);
+                        eprintln!(
+                            "Warning: failed to persist final verification status for {tenant}/{entity}: {e}"
+                        );
+                        return;
+                    }
+                    {
+                        let tenant_id = TenantId::new(&tenant);
                         let mut reg = registry.write().unwrap();
                         reg.set_verification_status(
                             &tenant_id,
                             &entity,
-                            VerificationStatus::Completed(verification_result),
+                            VerificationStatus::Completed(verification_result.clone()),
                         );
                     }
 
@@ -301,17 +522,24 @@ fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant:
                     };
                     println!("  [verify] {summary}");
 
-                    emit_design_time_event(&design_time_tx, &design_time_log, DesignTimeEvent {
-                        kind: "verify_done".to_string(),
-                        entity_type: entity,
-                        tenant,
-                        summary,
-                        level: None,
-                        passed: Some(all_passed),
-                        timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
-                        step_number: Some(7),
-                        total_steps: Some(7),
-                    });
+                    if let Err(e) = server
+                        .emit_design_time_event(DesignTimeEvent {
+                            kind: "verify_done".to_string(),
+                            entity_type: entity,
+                            tenant: tenant.clone(),
+                            summary,
+                            level: None,
+                            passed: Some(all_passed),
+                            timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
+                            step_number: Some(7),
+                            total_steps: Some(7),
+                        })
+                        .await
+                    {
+                        eprintln!(
+                            "Warning: failed to persist/emit verify_done for {tenant}: {e}"
+                        );
+                    }
                 }
                 Err(e) => {
                     eprintln!("  [verify] {entity_clone}: verification task panicked: {e}");
@@ -327,27 +555,47 @@ fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant:
                         verified_at: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
                     };
 
+                    if let Err(persist_err) = server
+                        .persist_spec_verification(
+                            &tenant,
+                            &entity_clone,
+                            "failed",
+                            Some(&verification_result),
+                        )
+                        .await
                     {
-                        let tenant_id = temper_runtime::tenant::TenantId::new(&tenant);
+                        eprintln!(
+                            "Warning: failed to persist failed verification status for {tenant}/{entity_clone}: {persist_err}"
+                        );
+                        return;
+                    }
+                    {
+                        let tenant_id = TenantId::new(&tenant);
                         let mut reg = registry.write().unwrap();
                         reg.set_verification_status(
                             &tenant_id,
                             &entity_clone,
-                            VerificationStatus::Completed(verification_result),
+                            VerificationStatus::Completed(verification_result.clone()),
                         );
                     }
-
-                    emit_design_time_event(&design_time_tx, &design_time_log, DesignTimeEvent {
-                        kind: "verify_done".to_string(),
-                        entity_type: entity_clone,
-                        tenant,
-                        summary: "Verification panicked".to_string(),
-                        level: None,
-                        passed: Some(false),
-                        timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
-                        step_number: Some(7),
-                        total_steps: Some(7),
-                    });
+                    if let Err(event_err) = server
+                        .emit_design_time_event(DesignTimeEvent {
+                            kind: "verify_done".to_string(),
+                            entity_type: entity_clone,
+                            tenant: tenant.clone(),
+                            summary: "Verification panicked".to_string(),
+                            level: None,
+                            passed: Some(false),
+                            timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
+                            step_number: Some(7),
+                            total_steps: Some(7),
+                        })
+                        .await
+                    {
+                        eprintln!(
+                            "Warning: failed to persist/emit verify_done panic event for {tenant}: {event_err}"
+                        );
+                    }
                 }
             }
         });
@@ -370,9 +618,7 @@ fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
             .unwrap_or_default();
 
         if file_name.ends_with(".ioa.toml") {
-            let entity_name = file_name
-                .strip_suffix(".ioa.toml")
-                .unwrap_or_default();
+            let entity_name = file_name.strip_suffix(".ioa.toml").unwrap_or_default();
             let entity_name = to_pascal_case(entity_name);
 
             let source = fs::read_to_string(&path)

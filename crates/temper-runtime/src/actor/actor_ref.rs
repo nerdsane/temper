@@ -7,7 +7,6 @@ use super::errors::ActorError;
 use super::traits::Message;
 use crate::mailbox::MailboxSender;
 
-
 /// An envelope wrapping a message with an optional reply channel.
 pub enum Envelope<M: Message> {
     /// Fire-and-forget message.
@@ -78,11 +77,7 @@ impl<M: Message> ActorRef<M> {
 
     /// Send a message and wait for a typed response.
     /// Times out after the specified duration.
-    pub async fn ask<R: Send + 'static>(
-        &self,
-        msg: M,
-        timeout: Duration,
-    ) -> Result<R, ActorError> {
+    pub async fn ask<R: Send + 'static>(&self, msg: M, timeout: Duration) -> Result<R, ActorError> {
         let (tx, rx) = oneshot::channel();
 
         self.sender.send(Envelope::Ask { msg, reply: tx })?;

@@ -69,31 +69,27 @@ pub fn build_spec_model_mixed(
     // Parse each specification source
     for (entity_name, source) in &sources {
         match source {
-            SpecSource::Tla(tla_text) => {
-                match tlaplus::extract_state_machine(tla_text) {
-                    Ok(sm) => {
-                        state_machines.insert(entity_name.clone(), sm);
-                    }
-                    Err(e) => {
-                        validation.errors.push(format!(
-                            "Failed to extract state machine for {entity_name} (TLA+): {e}"
-                        ));
-                    }
+            SpecSource::Tla(tla_text) => match tlaplus::extract_state_machine(tla_text) {
+                Ok(sm) => {
+                    state_machines.insert(entity_name.clone(), sm);
                 }
-            }
-            SpecSource::Ioa(ioa_text) => {
-                match automaton::parse_automaton(ioa_text) {
-                    Ok(aut) => {
-                        let sm = automaton::to_state_machine(&aut);
-                        state_machines.insert(entity_name.clone(), sm);
-                    }
-                    Err(e) => {
-                        validation.errors.push(format!(
-                            "Failed to parse IOA automaton for {entity_name}: {e}"
-                        ));
-                    }
+                Err(e) => {
+                    validation.errors.push(format!(
+                        "Failed to extract state machine for {entity_name} (TLA+): {e}"
+                    ));
                 }
-            }
+            },
+            SpecSource::Ioa(ioa_text) => match automaton::parse_automaton(ioa_text) {
+                Ok(aut) => {
+                    let sm = automaton::to_state_machine(&aut);
+                    state_machines.insert(entity_name.clone(), sm);
+                }
+                Err(e) => {
+                    validation.errors.push(format!(
+                        "Failed to parse IOA automaton for {entity_name}: {e}"
+                    ));
+                }
+            },
         }
     }
 

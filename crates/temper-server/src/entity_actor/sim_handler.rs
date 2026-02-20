@@ -168,17 +168,14 @@ impl SimActorHandler for EntityActorHandler {
         Ok(serde_json::to_value(&self.state).unwrap_or_default())
     }
 
-    fn handle_message(
-        &mut self,
-        action: &str,
-        params: &str,
-    ) -> Result<serde_json::Value, String> {
+    fn handle_message(&mut self, action: &str, params: &str) -> Result<serde_json::Value, String> {
         let params_value: serde_json::Value =
             serde_json::from_str(params).unwrap_or(serde_json::json!({}));
 
         // Unified process_action — THE SAME CODE as production.
         // FoundationDB DST principle: one function for all paths.
-        let result = super::effects::process_action(&mut self.state, &self.table, action, &params_value);
+        let result =
+            super::effects::process_action(&mut self.state, &self.table, action, &params_value);
 
         if result.success {
             if let Some(event) = result.event {
@@ -290,9 +287,15 @@ mod tests {
 
         let actions = handler.valid_actions();
         assert!(actions.contains(&"AddItem".to_string()), "got: {actions:?}");
-        assert!(actions.contains(&"CancelOrder".to_string()), "got: {actions:?}");
+        assert!(
+            actions.contains(&"CancelOrder".to_string()),
+            "got: {actions:?}"
+        );
         // SubmitOrder requires items > 0, so not valid with 0 items
-        assert!(!actions.contains(&"SubmitOrder".to_string()), "got: {actions:?}");
+        assert!(
+            !actions.contains(&"SubmitOrder".to_string()),
+            "got: {actions:?}"
+        );
     }
 
     #[test]
@@ -306,18 +309,27 @@ mod tests {
 
         let actions = handler.valid_actions();
         assert!(actions.contains(&"AddItem".to_string()));
-        assert!(actions.contains(&"SubmitOrder".to_string()), "got: {actions:?}");
-        assert!(actions.contains(&"RemoveItem".to_string()), "got: {actions:?}");
+        assert!(
+            actions.contains(&"SubmitOrder".to_string()),
+            "got: {actions:?}"
+        );
+        assert!(
+            actions.contains(&"RemoveItem".to_string()),
+            "got: {actions:?}"
+        );
     }
 
     #[test]
     fn handler_with_ioa_invariants_parses_spec() {
         let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let handler = EntityActorHandler::new("Order", "o1", order_table())
-            .with_ioa_invariants(ORDER_IOA);
+        let handler =
+            EntityActorHandler::new("Order", "o1", order_table()).with_ioa_invariants(ORDER_IOA);
 
         let invariants = handler.spec_invariants();
-        assert!(!invariants.is_empty(), "should have parsed invariants from IOA spec");
+        assert!(
+            !invariants.is_empty(),
+            "should have parsed invariants from IOA spec"
+        );
 
         let names: Vec<&str> = invariants.iter().map(|i| i.name.as_str()).collect();
         assert!(

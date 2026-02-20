@@ -38,7 +38,11 @@ pub enum SpecAssert {
     /// Expressed as: `never(StateName)`.
     NeverState { state: String },
     /// A counter must satisfy a comparison (e.g., `items >= 1`, `retries < 5`).
-    CounterCompare { var: String, op: CompareOp, value: usize },
+    CounterCompare {
+        var: String,
+        op: CompareOp,
+        value: usize,
+    },
 }
 
 /// Comparison operators for counter invariants.
@@ -65,11 +69,7 @@ pub trait SimActorHandler: Send {
     fn init(&mut self) -> Result<serde_json::Value, String>;
 
     /// Handle a message (action + params) and return the resulting state.
-    fn handle_message(
-        &mut self,
-        action: &str,
-        params: &str,
-    ) -> Result<serde_json::Value, String>;
+    fn handle_message(&mut self, action: &str, params: &str) -> Result<serde_json::Value, String>;
 
     /// Current status string (e.g., "Draft", "Submitted").
     fn current_status(&self) -> String;

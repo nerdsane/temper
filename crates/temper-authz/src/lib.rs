@@ -8,6 +8,6 @@ mod context;
 mod engine;
 mod error;
 
-pub use context::{SecurityContext, Principal, PrincipalKind};
-pub use engine::{AuthzEngine, AuthzDecision};
+pub use context::{Principal, PrincipalKind, SecurityContext};
+pub use engine::{AuthzDecision, AuthzEngine};
 pub use error::AuthzError;

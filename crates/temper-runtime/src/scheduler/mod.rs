@@ -19,17 +19,21 @@
 //! - [`sim_actor_system`]: `SimActorSystem` — runs real handlers through the scheduler
 
 pub mod clock;
-pub mod id_gen;
 pub mod context;
-pub mod sim_handler;
+pub mod id_gen;
 pub mod sim_actor_system;
+pub mod sim_handler;
 
 // Re-export key types from submodules.
-pub use clock::{SimClock, WallClock, LogicalClock};
-pub use id_gen::{SimIdGen, RealIdGen, DeterministicIdGen};
-pub use context::{sim_now, sim_uuid, install_sim_context, install_deterministic_context, SimContextGuard};
-pub use sim_handler::{SimActorHandler, SpecInvariant, SpecAssert, CompareOp};
-pub use sim_actor_system::{SimActorSystem, SimActorSystemConfig, SimActorResult, ActorInvariantViolation, RunRecord};
+pub use clock::{LogicalClock, SimClock, WallClock};
+pub use context::{
+    SimContextGuard, install_deterministic_context, install_sim_context, sim_now, sim_uuid,
+};
+pub use id_gen::{DeterministicIdGen, RealIdGen, SimIdGen};
+pub use sim_actor_system::{
+    ActorInvariantViolation, RunRecord, SimActorResult, SimActorSystem, SimActorSystemConfig,
+};
+pub use sim_handler::{CompareOp, SimActorHandler, SpecAssert, SpecInvariant};
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
@@ -47,7 +51,9 @@ impl DeterministicRng {
     /// Create a new PRNG with the given seed. A zero seed is replaced with 1.
     pub fn new(seed: u64) -> Self {
         // Ensure non-zero state
-        Self { state: if seed == 0 { 1 } else { seed } }
+        Self {
+            state: if seed == 0 { 1 } else { seed },
+        }
     }
 
     /// Generate next pseudo-random u64.
@@ -116,7 +122,9 @@ impl PartialOrd for SimMessage {
 impl Ord for SimMessage {
     fn cmp(&self, other: &Self) -> Ordering {
         // BinaryHeap is a max-heap; we want min-heap (earliest delivery first)
-        other.deliver_at.cmp(&self.deliver_at)
+        other
+            .deliver_at
+            .cmp(&self.deliver_at)
             .then_with(|| other.id.cmp(&self.id))
     }
 }
@@ -234,7 +242,8 @@ impl SimScheduler {
 
     /// Register an actor in the simulation.
     pub fn register_actor(&mut self, actor_id: &str) {
-        self.actor_states.insert(actor_id.to_string(), SimActorState::Running);
+        self.actor_states
+            .insert(actor_id.to_string(), SimActorState::Running);
         self.mailboxes.entry(actor_id.to_string()).or_default();
     }
 
@@ -258,7 +267,9 @@ impl SimScheduler {
         }
 
         let delay = if self.rng.chance(self.fault_config.message_delay_prob) {
-            1 + self.rng.next_bound(self.fault_config.max_delay_ticks as usize) as u64
+            1 + self
+                .rng
+                .next_bound(self.fault_config.max_delay_ticks as usize) as u64
         } else {
             1 // Deliver on next tick
         };
@@ -317,13 +328,16 @@ impl SimScheduler {
 
         // Maybe crash an actor after delivery
         if self.rng.chance(self.fault_config.actor_crash_prob) {
-            let running: Vec<String> = self.actor_states.iter()
+            let running: Vec<String> = self
+                .actor_states
+                .iter()
                 .filter(|(_, s)| **s == SimActorState::Running)
                 .map(|(k, _)| k.clone())
                 .collect();
             if !running.is_empty() {
                 let idx = self.rng.next_bound(running.len());
-                self.actor_states.insert(running[idx].clone(), SimActorState::Crashed);
+                self.actor_states
+                    .insert(running[idx].clone(), SimActorState::Crashed);
             }
         }
 
@@ -447,7 +461,11 @@ mod tests {
 
             sched.run_until_quiescent(100);
 
-            sched.delivered_log().iter().map(|m| m.msg_type.clone()).collect()
+            sched
+                .delivered_log()
+                .iter()
+                .map(|m| m.msg_type.clone())
+                .collect()
         }
 
         let run1 = run_scenario(42);
@@ -467,14 +485,21 @@ mod tests {
             }
 
             sched.run_until_quiescent(100);
-            sched.delivered_log().iter().map(|m| m.msg_type.clone()).collect()
+            sched
+                .delivered_log()
+                .iter()
+                .map(|m| m.msg_type.clone())
+                .collect()
         }
 
         let run1 = run_scenario(42);
         let run2 = run_scenario(999);
         // With light faults (10% delay), different seeds should likely produce different orders
         // This isn't guaranteed for every pair, but is overwhelmingly likely with 20 messages
-        assert_ne!(run1, run2, "Different seeds should usually produce different orders");
+        assert_ne!(
+            run1, run2,
+            "Different seeds should usually produce different orders"
+        );
     }
 
     #[test]
@@ -511,7 +536,9 @@ mod tests {
         assert_eq!(sched.total_delivered(), 1);
 
         // But one of the actors should now be crashed
-        let crashed = sched.actor_states.values()
+        let crashed = sched
+            .actor_states
+            .values()
             .filter(|s| **s == SimActorState::Crashed)
             .count();
         assert!(crashed > 0, "Should have at least one crashed actor");
@@ -524,7 +551,9 @@ mod tests {
         sched.register_actor("b");
 
         // Manually crash actor-b
-        sched.actor_states.insert("b".to_string(), SimActorState::Crashed);
+        sched
+            .actor_states
+            .insert("b".to_string(), SimActorState::Crashed);
 
         sched.send("a", "b", "msg", "{}");
         sched.tick();
@@ -583,9 +612,16 @@ mod tests {
 
         // Run more ticks
         sched.run_until_quiescent(20);
-        assert_eq!(sched.total_delivered(), 1, "Message should eventually arrive");
+        assert_eq!(
+            sched.total_delivered(),
+            1,
+            "Message should eventually arrive"
+        );
         if delivered_at_1 == 0 {
-            assert!(sched.current_time() > 1, "Delivery should be delayed beyond tick 1");
+            assert!(
+                sched.current_time() > 1,
+                "Delivery should be delayed beyond tick 1"
+            );
         }
     }
 

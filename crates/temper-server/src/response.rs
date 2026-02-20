@@ -15,10 +15,9 @@ impl IntoResponse for ODataResponse {
     fn into_response(self) -> Response {
         let mut response = axum::Json(self.body).into_response();
         *response.status_mut() = self.status;
-        response.headers_mut().insert(
-            "OData-Version",
-            HeaderValue::from_static("4.0"),
-        );
+        response
+            .headers_mut()
+            .insert("OData-Version", HeaderValue::from_static("4.0"));
         response.headers_mut().insert(
             "Content-Type",
             HeaderValue::from_static("application/json;odata.metadata=minimal"),
@@ -49,14 +48,12 @@ pub struct ODataXmlResponse {
 impl IntoResponse for ODataXmlResponse {
     fn into_response(self) -> Response {
         let mut response = self.body.into_response();
-        response.headers_mut().insert(
-            "Content-Type",
-            HeaderValue::from_static("application/xml"),
-        );
-        response.headers_mut().insert(
-            "OData-Version",
-            HeaderValue::from_static("4.0"),
-        );
+        response
+            .headers_mut()
+            .insert("Content-Type", HeaderValue::from_static("application/xml"));
+        response
+            .headers_mut()
+            .insert("OData-Version", HeaderValue::from_static("4.0"));
         response
     }
 }

@@ -136,16 +136,16 @@ mod tests {
     #[test]
     fn user_skill_content_is_embedded() {
         assert!(
-            USER_SKILL_BODY.contains("Production Chat Proxy"),
-            "embedded user skill must mention Production Chat Proxy"
-        );
-        assert!(
-            USER_SKILL_BODY.contains("Translate Requests"),
-            "embedded user skill must contain Translate Requests section"
+            USER_SKILL_BODY.contains("Your App Assistant"),
+            "embedded user skill must mention Your App Assistant"
         );
         assert!(
             USER_SKILL_BODY.contains("Unmet Intents"),
             "embedded user skill must contain Unmet Intents section"
+        );
+        assert!(
+            USER_SKILL_BODY.contains("How to Talk to Users"),
+            "embedded user skill must contain How to Talk to Users section"
         );
     }
 
@@ -157,7 +157,10 @@ mod tests {
         install_to(&skills_root).expect("install_to should succeed");
 
         let user_skill_path = skills_root.join("temper-user").join("SKILL.md");
-        assert!(user_skill_path.is_file(), "temper-user/SKILL.md should exist after install");
+        assert!(
+            user_skill_path.is_file(),
+            "temper-user/SKILL.md should exist after install"
+        );
 
         let content = fs::read_to_string(&user_skill_path).unwrap();
         assert!(
@@ -169,7 +172,7 @@ mod tests {
             "installed user skill should have skill name in frontmatter"
         );
         assert!(
-            content.contains("Production Chat Proxy"),
+            content.contains("Your App Assistant"),
             "installed user skill should contain skill body"
         );
     }
@@ -199,10 +202,7 @@ mod tests {
             content.contains("Temper App Builder"),
             "overwritten file should contain new content"
         );
-        assert!(
-            !legacy_path.exists(),
-            "legacy temper.md should be removed"
-        );
+        assert!(!legacy_path.exists(), "legacy temper.md should be removed");
         assert!(
             !legacy_user_path.exists(),
             "legacy temper-user.md should be removed"

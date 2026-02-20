@@ -1,5 +1,5 @@
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 
 use super::types::*;
 
@@ -26,13 +26,11 @@ pub fn parse_csdl(xml: &str) -> Result<CsdlDocument, CsdlParseError> {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => {
-                match local_name(e).as_str() {
-                    "Edmx" => doc.version = attr_str(e, "Version").unwrap_or_default(),
-                    "Schema" => doc.schemas.push(parse_schema(&mut reader, e)?),
-                    _ => {}
-                }
-            }
+            Ok(Event::Start(ref e)) => match local_name(e).as_str() {
+                "Edmx" => doc.version = attr_str(e, "Version").unwrap_or_default(),
+                "Schema" => doc.schemas.push(parse_schema(&mut reader, e)?),
+                _ => {}
+            },
             Ok(Event::Empty(ref e)) => {
                 if local_name(e) == "Edmx" {
                     doc.version = attr_str(e, "Version").unwrap_or_default();
@@ -63,16 +61,18 @@ fn parse_schema(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Schema
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => {
-                match local_name(e).as_str() {
-                    "EntityType" => schema.entity_types.push(parse_entity_type(reader, e)?),
-                    "EnumType" => schema.enum_types.push(parse_enum_type(reader, e)?),
-                    "Action" => schema.actions.push(parse_action(reader, e)?),
-                    "Function" => schema.functions.push(parse_function(reader, e)?),
-                    "EntityContainer" => schema.entity_containers.push(parse_entity_container(reader, e)?),
-                    _ => { skip_element(reader)?; }
+            Ok(Event::Start(ref e)) => match local_name(e).as_str() {
+                "EntityType" => schema.entity_types.push(parse_entity_type(reader, e)?),
+                "EnumType" => schema.enum_types.push(parse_enum_type(reader, e)?),
+                "Action" => schema.actions.push(parse_action(reader, e)?),
+                "Function" => schema.functions.push(parse_function(reader, e)?),
+                "EntityContainer" => schema
+                    .entity_containers
+                    .push(parse_entity_container(reader, e)?),
+                _ => {
+                    skip_element(reader)?;
                 }
-            }
+            },
             Ok(Event::Empty(ref e)) => {
                 if local_name(e).as_str() == "Term" {
                     schema.terms.push(parse_term(e));
@@ -88,7 +88,10 @@ fn parse_schema(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Schema
     Ok(schema)
 }
 
-fn parse_entity_type(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<EntityType, CsdlParseError> {
+fn parse_entity_type(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart,
+) -> Result<EntityType, CsdlParseError> {
     let name = required_attr(start, "Name")?;
     let mut et = EntityType {
         name,
@@ -104,7 +107,8 @@ fn parse_entity_type(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<E
             Ok(Event::Start(ref e)) => {
                 match local_name(e).as_str() {
                     "NavigationProperty" => {
-                        et.navigation_properties.push(parse_navigation_property_children(reader, e)?);
+                        et.navigation_properties
+                            .push(parse_navigation_property_children(reader, e)?);
                     }
                     "Annotation" => {
                         et.annotations.push(parse_annotation_children(reader, e)?);
@@ -127,28 +131,28 @@ fn parse_entity_type(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<E
                             kbuf.clear();
                         }
                     }
-                    _ => { skip_element(reader)?; }
+                    _ => {
+                        skip_element(reader)?;
+                    }
                 }
             }
-            Ok(Event::Empty(ref e)) => {
-                match local_name(e).as_str() {
-                    "PropertyRef" => {
-                        if let Some(n) = attr_str(e, "Name") {
-                            et.key_properties.push(n);
-                        }
+            Ok(Event::Empty(ref e)) => match local_name(e).as_str() {
+                "PropertyRef" => {
+                    if let Some(n) = attr_str(e, "Name") {
+                        et.key_properties.push(n);
                     }
-                    "Property" => et.properties.push(parse_property(e)),
-                    "NavigationProperty" => {
-                        et.navigation_properties.push(nav_prop_from_attrs(e));
-                    }
-                    "Annotation" => {
-                        if let Some(ann) = annotation_from_attrs(e) {
-                            et.annotations.push(ann);
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                "Property" => et.properties.push(parse_property(e)),
+                "NavigationProperty" => {
+                    et.navigation_properties.push(nav_prop_from_attrs(e));
+                }
+                "Annotation" => {
+                    if let Some(ann) = annotation_from_attrs(e) {
+                        et.annotations.push(ann);
+                    }
+                }
+                _ => {}
+            },
             Ok(Event::End(ref e)) if local_name_end(e) == "EntityType" => break,
             Ok(Event::Eof) => break,
             Err(e) => return Err(CsdlParseError::Xml(e)),
@@ -159,7 +163,10 @@ fn parse_entity_type(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<E
     Ok(et)
 }
 
-fn parse_enum_type(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<EnumType, CsdlParseError> {
+fn parse_enum_type(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart,
+) -> Result<EnumType, CsdlParseError> {
     let name = required_attr(start, "Name")?;
     let mut members = Vec::new();
 
@@ -192,24 +199,22 @@ fn parse_action(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Action
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => {
-                match local_name(e).as_str() {
-                    "Annotation" => annotations.push(parse_annotation_children(reader, e)?),
-                    _ => { skip_element(reader)?; }
+            Ok(Event::Start(ref e)) => match local_name(e).as_str() {
+                "Annotation" => annotations.push(parse_annotation_children(reader, e)?),
+                _ => {
+                    skip_element(reader)?;
                 }
-            }
-            Ok(Event::Empty(ref e)) => {
-                match local_name(e).as_str() {
-                    "Parameter" => parameters.push(parse_parameter(e)),
-                    "ReturnType" => return_type = Some(parse_return_type(e)),
-                    "Annotation" => {
-                        if let Some(ann) = annotation_from_attrs(e) {
-                            annotations.push(ann);
-                        }
+            },
+            Ok(Event::Empty(ref e)) => match local_name(e).as_str() {
+                "Parameter" => parameters.push(parse_parameter(e)),
+                "ReturnType" => return_type = Some(parse_return_type(e)),
+                "Annotation" => {
+                    if let Some(ann) = annotation_from_attrs(e) {
+                        annotations.push(ann);
                     }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
             Ok(Event::End(ref e)) if local_name_end(e) == "Action" => break,
             Ok(Event::Eof) => break,
             Err(e) => return Err(CsdlParseError::Xml(e)),
@@ -217,10 +222,19 @@ fn parse_action(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Action
         }
         buf.clear();
     }
-    Ok(Action { name, is_bound, parameters, return_type, annotations })
+    Ok(Action {
+        name,
+        is_bound,
+        parameters,
+        return_type,
+        annotations,
+    })
 }
 
-fn parse_function(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Function, CsdlParseError> {
+fn parse_function(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart,
+) -> Result<Function, CsdlParseError> {
     let name = required_attr(start, "Name")?;
     let is_bound = attr_str(start, "IsBound").is_some_and(|v| v == "true");
     let mut parameters = Vec::new();
@@ -230,24 +244,22 @@ fn parse_function(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Func
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => {
-                match local_name(e).as_str() {
-                    "Annotation" => annotations.push(parse_annotation_children(reader, e)?),
-                    _ => { skip_element(reader)?; }
+            Ok(Event::Start(ref e)) => match local_name(e).as_str() {
+                "Annotation" => annotations.push(parse_annotation_children(reader, e)?),
+                _ => {
+                    skip_element(reader)?;
                 }
-            }
-            Ok(Event::Empty(ref e)) => {
-                match local_name(e).as_str() {
-                    "Parameter" => parameters.push(parse_parameter(e)),
-                    "ReturnType" => return_type = Some(parse_return_type(e)),
-                    "Annotation" => {
-                        if let Some(ann) = annotation_from_attrs(e) {
-                            annotations.push(ann);
-                        }
+            },
+            Ok(Event::Empty(ref e)) => match local_name(e).as_str() {
+                "Parameter" => parameters.push(parse_parameter(e)),
+                "ReturnType" => return_type = Some(parse_return_type(e)),
+                "Annotation" => {
+                    if let Some(ann) = annotation_from_attrs(e) {
+                        annotations.push(ann);
                     }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
             Ok(Event::End(ref e)) if local_name_end(e) == "Function" => break,
             Ok(Event::Eof) => break,
             Err(e) => return Err(CsdlParseError::Xml(e)),
@@ -255,10 +267,19 @@ fn parse_function(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Func
         }
         buf.clear();
     }
-    Ok(Function { name, is_bound, parameters, return_type, annotations })
+    Ok(Function {
+        name,
+        is_bound,
+        parameters,
+        return_type,
+        annotations,
+    })
 }
 
-fn parse_entity_container(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<EntityContainer, CsdlParseError> {
+fn parse_entity_container(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart,
+) -> Result<EntityContainer, CsdlParseError> {
     let name = required_attr(start, "Name")?;
     let mut entity_sets = Vec::new();
     let mut action_imports = Vec::new();
@@ -267,36 +288,34 @@ fn parse_entity_container(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Res
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => {
-                match local_name(e).as_str() {
-                    "EntitySet" => entity_sets.push(parse_entity_set_children(reader, e)?),
-                    _ => { skip_element(reader)?; }
+            Ok(Event::Start(ref e)) => match local_name(e).as_str() {
+                "EntitySet" => entity_sets.push(parse_entity_set_children(reader, e)?),
+                _ => {
+                    skip_element(reader)?;
                 }
-            }
-            Ok(Event::Empty(ref e)) => {
-                match local_name(e).as_str() {
-                    "EntitySet" => {
-                        entity_sets.push(EntitySet {
-                            name: attr_str(e, "Name").unwrap_or_default(),
-                            entity_type: attr_str(e, "EntityType").unwrap_or_default(),
-                            navigation_bindings: Vec::new(),
-                        });
-                    }
-                    "ActionImport" => {
-                        action_imports.push(ActionImport {
-                            name: attr_str(e, "Name").unwrap_or_default(),
-                            action: attr_str(e, "Action").unwrap_or_default(),
-                        });
-                    }
-                    "FunctionImport" => {
-                        function_imports.push(FunctionImport {
-                            name: attr_str(e, "Name").unwrap_or_default(),
-                            function: attr_str(e, "Function").unwrap_or_default(),
-                        });
-                    }
-                    _ => {}
+            },
+            Ok(Event::Empty(ref e)) => match local_name(e).as_str() {
+                "EntitySet" => {
+                    entity_sets.push(EntitySet {
+                        name: attr_str(e, "Name").unwrap_or_default(),
+                        entity_type: attr_str(e, "EntityType").unwrap_or_default(),
+                        navigation_bindings: Vec::new(),
+                    });
                 }
-            }
+                "ActionImport" => {
+                    action_imports.push(ActionImport {
+                        name: attr_str(e, "Name").unwrap_or_default(),
+                        action: attr_str(e, "Action").unwrap_or_default(),
+                    });
+                }
+                "FunctionImport" => {
+                    function_imports.push(FunctionImport {
+                        name: attr_str(e, "Name").unwrap_or_default(),
+                        function: attr_str(e, "Function").unwrap_or_default(),
+                    });
+                }
+                _ => {}
+            },
             Ok(Event::End(ref e)) if local_name_end(e) == "EntityContainer" => break,
             Ok(Event::Eof) => break,
             Err(e) => return Err(CsdlParseError::Xml(e)),
@@ -304,7 +323,12 @@ fn parse_entity_container(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Res
         }
         buf.clear();
     }
-    Ok(EntityContainer { name, entity_sets, action_imports, function_imports })
+    Ok(EntityContainer {
+        name,
+        entity_sets,
+        action_imports,
+        function_imports,
+    })
 }
 
 // --- Element parsers for self-closing (Empty) elements ---
@@ -378,7 +402,10 @@ fn annotation_from_attrs(e: &BytesStart) -> Option<Annotation> {
 
 // --- Element parsers for Start elements (have children) ---
 
-fn parse_navigation_property_children(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<NavigationProperty, CsdlParseError> {
+fn parse_navigation_property_children(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart,
+) -> Result<NavigationProperty, CsdlParseError> {
     let mut nav = nav_prop_from_attrs(start);
 
     let mut buf = Vec::new();
@@ -400,7 +427,10 @@ fn parse_navigation_property_children(reader: &mut Reader<&[u8]>, start: &BytesS
     Ok(nav)
 }
 
-fn parse_entity_set_children(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<EntitySet, CsdlParseError> {
+fn parse_entity_set_children(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart,
+) -> Result<EntitySet, CsdlParseError> {
     let name = attr_str(start, "Name").unwrap_or_default();
     let entity_type = attr_str(start, "EntityType").unwrap_or_default();
     let mut navigation_bindings = Vec::new();
@@ -421,22 +451,35 @@ fn parse_entity_set_children(reader: &mut Reader<&[u8]>, start: &BytesStart) -> 
         }
         buf.clear();
     }
-    Ok(EntitySet { name, entity_type, navigation_bindings })
+    Ok(EntitySet {
+        name,
+        entity_type,
+        navigation_bindings,
+    })
 }
 
 /// Parse annotation with nested children (Collection, String elements).
-fn parse_annotation_children(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Annotation, CsdlParseError> {
+fn parse_annotation_children(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart,
+) -> Result<Annotation, CsdlParseError> {
     let term = attr_str(start, "Term").unwrap_or_default();
 
     // Check inline attributes first
     if let Some(s) = attr_str(start, "String") {
         // Has inline value but also has children (e.g., multi-line) — skip children
         skip_element(reader)?;
-        return Ok(Annotation { term, value: AnnotationValue::String(s) });
+        return Ok(Annotation {
+            term,
+            value: AnnotationValue::String(s),
+        });
     }
     if let Some(f) = attr_str(start, "Float") {
         skip_element(reader)?;
-        return Ok(Annotation { term, value: AnnotationValue::Float(f.parse().unwrap_or(0.0)) });
+        return Ok(Annotation {
+            term,
+            value: AnnotationValue::Float(f.parse().unwrap_or(0.0)),
+        });
     }
 
     // Read children
@@ -530,7 +573,9 @@ mod tests {
         assert_eq!(doc.version, "4.0");
         assert_eq!(doc.schemas.len(), 2);
 
-        let schema = doc.schemas.iter()
+        let schema = doc
+            .schemas
+            .iter()
             .find(|s| s.namespace == "Temper.Example")
             .expect("should have Temper.Example schema");
 
@@ -560,11 +605,19 @@ mod tests {
         assert_eq!(order.tla_spec_path(), Some("order.tla".to_string()));
 
         // Navigation properties
-        let customer_nav = order.navigation_properties.iter().find(|n| n.name == "Customer").unwrap();
+        let customer_nav = order
+            .navigation_properties
+            .iter()
+            .find(|n| n.name == "Customer")
+            .unwrap();
         assert!(!customer_nav.contains_target);
         assert_eq!(customer_nav.referential_constraints.len(), 1);
 
-        let items_nav = order.navigation_properties.iter().find(|n| n.name == "Items").unwrap();
+        let items_nav = order
+            .navigation_properties
+            .iter()
+            .find(|n| n.name == "Items")
+            .unwrap();
         assert!(items_nav.contains_target);
 
         // Actions
@@ -586,7 +639,11 @@ mod tests {
         assert_eq!(container.name, "ExampleService");
         assert_eq!(container.entity_sets.len(), 5);
 
-        let orders_set = container.entity_sets.iter().find(|s| s.name == "Orders").unwrap();
+        let orders_set = container
+            .entity_sets
+            .iter()
+            .find(|s| s.name == "Orders")
+            .unwrap();
         assert_eq!(orders_set.entity_type, "Temper.Example.Order");
         assert_eq!(orders_set.navigation_bindings.len(), 3);
     }

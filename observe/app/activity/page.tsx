@@ -7,6 +7,7 @@ import { usePolling, useRelativeTime } from "@/lib/hooks";
 import type { TrajectoryResponse, EntityStateChange, EntitySummary } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
 import StatusBadge from "@/components/StatusBadge";
+import EntityDetailPanel from "@/components/EntityDetailPanel";
 
 function StatCard({ label, value, color }: { label: string; value: string | number; color?: string }) {
   return (
@@ -43,6 +44,10 @@ export default function ActivityPage() {
   const [newEntityKeys, setNewEntityKeys] = useState<Set<string>>(new Set());
   const prevFailedCountRef = useRef<number>(0);
   const [failedFlash, setFailedFlash] = useState("");
+  const [newFailedCount, setNewFailedCount] = useState(0);
+
+  // Entity detail panel state
+  const [selectedEntity, setSelectedEntity] = useState<{ type: string; id: string } | null>(null);
 
   // Entity table state
   const [searchQuery, setSearchQuery] = useState("");
@@ -114,7 +119,7 @@ export default function ActivityPage() {
     enabled: !initialLoading && !initialError,
   });
 
-  const entities = entityPoll.data ?? [];
+  const entities = useMemo(() => entityPoll.data ?? [], [entityPoll.data]);
 
   // Derive unique entity types/states for filters
   const allEntityTypes = useMemo(() => {
@@ -145,11 +150,12 @@ export default function ActivityPage() {
     prevEntityIdsRef.current = currentKeys;
   }, [entities]);
 
-  // Track failed intent count for flash
+  // Track failed intent count for flash + per-item animation
   useEffect(() => {
     const count = data?.failed_intents?.length ?? 0;
     if (count > prevFailedCountRef.current && prevFailedCountRef.current > 0) {
       setFailedFlash("animate-flash-pink");
+      setNewFailedCount(count - prevFailedCountRef.current);
     }
     prevFailedCountRef.current = count;
   }, [data?.failed_intents?.length]);
@@ -408,13 +414,14 @@ export default function ActivityPage() {
                 </tr>
               </thead>
               <tbody>
-                {[...filteredEntities].reverse().map((entity) => {
+                {filteredEntities.map((entity) => {
                   const eKey = `${entity.entity_type}-${entity.entity_id}`;
                   const isNew = newEntityKeys.has(eKey);
                   return (
                   <tr
                     key={eKey}
-                    className={`border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors ${isNew ? "animate-highlight-new" : ""}`}
+                    className={`border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors cursor-pointer ${isNew ? "animate-highlight-new" : ""}`}
+                    onClick={() => setSelectedEntity({ type: entity.entity_type, id: entity.entity_id })}
                     onAnimationEnd={() => { if (isNew) setNewEntityKeys((prev) => { const next = new Set(prev); next.delete(eKey); return next; }); }}
                   >
                     <td className="px-3.5 py-2.5 font-mono text-zinc-300">{entity.entity_type}</td>
@@ -426,6 +433,7 @@ export default function ActivityPage() {
                       <Link
                         href={`/entities/${entity.entity_type}/${entity.entity_id}`}
                         className="text-[11px] text-teal-400 hover:text-teal-300 transition-colors"
+                        onClick={(e) => e.stopPropagation()}
                       >
                         Inspect
                       </Link>
@@ -473,10 +481,13 @@ export default function ActivityPage() {
                       const isUnmet = intent.entity_type === "";
                       const ts = new Date(intent.timestamp);
                       const timeStr = ts.toLocaleTimeString();
+                      // Animate newly arrived items (first page only, newest items)
+                      const isNewItem = failedPage === 1 && i < newFailedCount;
                       return (
                         <div
                           key={`${intent.timestamp}-${i}`}
-                          className="flex items-center gap-3 px-3.5 py-2.5 border-b border-white/[0.03] last:border-b-0"
+                          className={`flex items-center gap-3 px-3.5 py-2.5 border-b border-white/[0.03] last:border-b-0 ${isNewItem ? "animate-item-slide-in" : ""}`}
+                          onAnimationEnd={() => { if (isNewItem && i === newFailedCount - 1) setNewFailedCount(0); }}
                         >
                           <span className="text-[11px] text-zinc-600 font-mono flex-shrink-0 w-20">
                             {timeStr}
@@ -534,6 +545,15 @@ export default function ActivityPage() {
           </div>
         )}
       </div>
+
+      {/* Entity Detail Panel */}
+      {selectedEntity && (
+        <EntityDetailPanel
+          entityType={selectedEntity.type}
+          entityId={selectedEntity.id}
+          onClose={() => setSelectedEntity(null)}
+        />
+      )}
     </div>
   );
 }

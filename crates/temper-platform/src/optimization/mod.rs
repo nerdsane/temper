@@ -7,8 +7,7 @@
 
 use temper_observe::ObservabilityStore;
 use temper_optimize::{
-    CacheOptimizer, OptimizationRecommendation, QueryOptimizer,
-    Risk, SafetyChecker,
+    CacheOptimizer, OptimizationRecommendation, QueryOptimizer, Risk, SafetyChecker,
 };
 
 use crate::protocol::PlatformEvent;
@@ -54,11 +53,7 @@ pub async fn run_optimization_cycle<S: ObservabilityStore>(
             applied.push(rec.clone());
         } else if rec.risk == Risk::Medium {
             // Medium risk → create O-Record for evolution engine
-            let record_id = format!(
-                "OPT-{}-{}",
-                rec.optimizer,
-                uuid::Uuid::now_v7()
-            );
+            let record_id = format!("OPT-{}-{}", rec.optimizer, uuid::Uuid::now_v7());
 
             tracing::info!(
                 optimizer = %rec.optimizer,
@@ -110,7 +105,10 @@ mod tests {
             ("metric_name".into(), json!("cache_hit_rate")),
             ("timestamp".into(), json!("2025-01-15T12:00:00Z")),
             ("value".into(), json!(0.20)), // 20% hit rate
-            ("tags".into(), json!({"key_pattern": "session:*", "service": "api"})),
+            (
+                "tags".into(),
+                json!({"key_pattern": "session:*", "service": "api"}),
+            ),
         ]);
 
         let applied = run_optimization_cycle(&store, &state).await;
@@ -124,7 +122,10 @@ mod tests {
                     opt_events.push(msg);
                 }
             }
-            assert!(!opt_events.is_empty(), "Should broadcast OptimizationApplied");
+            assert!(
+                !opt_events.is_empty(),
+                "Should broadcast OptimizationApplied"
+            );
         }
     }
 

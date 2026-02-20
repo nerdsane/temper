@@ -14,8 +14,8 @@ use temper_runtime::scheduler::{DeterministicRng, FaultConfig, SimActorState, Si
 use stateright::Model;
 
 use crate::model::{
-    build_model_from_ioa, InvariantKind, LivenessKind, TemperModel, TemperModelAction,
-    TemperModelState,
+    InvariantKind, LivenessKind, TemperModel, TemperModelAction, TemperModelState,
+    build_model_from_ioa,
 };
 
 /// Configuration for a simulation run.
@@ -331,8 +331,8 @@ fn check_invariants_on_state(
 
     // Check each resolved invariant from the spec
     for inv in &model.invariants {
-        let triggered = inv.trigger_states.is_empty()
-            || inv.trigger_states.contains(&state_after.status);
+        let triggered =
+            inv.trigger_states.is_empty() || inv.trigger_states.contains(&state_after.status);
         if !triggered {
             continue;
         }

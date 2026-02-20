@@ -68,9 +68,10 @@ impl AuthzEngine {
             .parse::<PolicySet>()
             .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
 
-        let mut current = self.policy_set.write().map_err(|e| {
-            AuthzError::Engine(format!("policy lock poisoned: {e}"))
-        })?;
+        let mut current = self
+            .policy_set
+            .write()
+            .map_err(|e| AuthzError::Engine(format!("policy lock poisoned: {e}")))?;
         *current = new_policy_set;
         Ok(())
     }
@@ -101,9 +102,10 @@ impl AuthzEngine {
             PrincipalKind::System => "System",
         };
 
-        let principal_uid = match EntityUid::from_str(
-            &format!("{}::\"{}\"", principal_type, security_ctx.principal.id),
-        ) {
+        let principal_uid = match EntityUid::from_str(&format!(
+            "{}::\"{}\"",
+            principal_type, security_ctx.principal.id
+        )) {
             Ok(uid) => uid,
             Err(e) => {
                 return AuthzDecision::Deny(format!("invalid principal: {e}"));
@@ -119,9 +121,11 @@ impl AuthzEngine {
         };
 
         // Build Cedar resource
-        let resource_uid = match EntityUid::from_str(
-            &format!("{}::\"{}\"", resource_type, resource_id_from_attrs(resource_attrs)),
-        ) {
+        let resource_uid = match EntityUid::from_str(&format!(
+            "{}::\"{}\"",
+            resource_type,
+            resource_id_from_attrs(resource_attrs)
+        )) {
             Ok(uid) => uid,
             Err(e) => {
                 return AuthzDecision::Deny(format!("invalid resource: {e}"));
@@ -133,16 +137,25 @@ impl AuthzEngine {
 
         // Add principal attributes to context
         if let Some(ref role) = security_ctx.principal.role {
-            ctx_map.insert("role".to_string(), cedar_policy::RestrictedExpression::new_string(role.clone()));
+            ctx_map.insert(
+                "role".to_string(),
+                cedar_policy::RestrictedExpression::new_string(role.clone()),
+            );
         }
         if let Some(ref acting_for) = security_ctx.principal.acting_for {
-            ctx_map.insert("actingFor".to_string(), cedar_policy::RestrictedExpression::new_string(acting_for.clone()));
+            ctx_map.insert(
+                "actingFor".to_string(),
+                cedar_policy::RestrictedExpression::new_string(acting_for.clone()),
+            );
         }
 
         // Add context attributes
         for (key, value) in &security_ctx.context_attrs {
             if let Some(s) = value.as_str() {
-                ctx_map.insert(key.clone(), cedar_policy::RestrictedExpression::new_string(s.to_string()));
+                ctx_map.insert(
+                    key.clone(),
+                    cedar_policy::RestrictedExpression::new_string(s.to_string()),
+                );
             } else if let Some(b) = value.as_bool() {
                 ctx_map.insert(key.clone(), cedar_policy::RestrictedExpression::new_bool(b));
             }
@@ -175,7 +188,9 @@ impl AuthzEngine {
             Ok(ps) => ps,
             Err(e) => return AuthzDecision::Deny(format!("policy lock poisoned: {e}")),
         };
-        let response: CedarResponse = self.authorizer.is_authorized(&request, &policy_set, &entities);
+        let response: CedarResponse =
+            self.authorizer
+                .is_authorized(&request, &policy_set, &entities);
 
         match response.decision() {
             Decision::Allow => AuthzDecision::Allow,
@@ -239,7 +254,10 @@ mod tests {
     fn customer_context(id: &str) -> SecurityContext {
         SecurityContext::from_headers(&[
             ("X-Temper-Principal-Id".to_string(), id.to_string()),
-            ("X-Temper-Principal-Kind".to_string(), "customer".to_string()),
+            (
+                "X-Temper-Principal-Kind".to_string(),
+                "customer".to_string(),
+            ),
         ])
     }
 
@@ -259,7 +277,10 @@ mod tests {
         let attrs = HashMap::new();
 
         let decision = engine.authorize(&ctx, "read", "Order", &attrs);
-        assert_eq!(decision, AuthzDecision::Deny("no matching permit policy".to_string()));
+        assert_eq!(
+            decision,
+            AuthzDecision::Deny("no matching permit policy".to_string())
+        );
     }
 
     #[test]
@@ -287,7 +308,10 @@ mod tests {
         let attrs = HashMap::new();
 
         let decision = engine.authorize(&ctx, "read", "Order", &attrs);
-        assert!(decision.is_allowed(), "admin should be allowed, got: {decision:?}");
+        assert!(
+            decision.is_allowed(),
+            "admin should be allowed, got: {decision:?}"
+        );
     }
 
     #[test]
@@ -346,7 +370,9 @@ mod tests {
                 resource
             );
         "#;
-        engine.reload_policies(customer_policy).expect("reload should succeed");
+        engine
+            .reload_policies(customer_policy)
+            .expect("reload should succeed");
         assert_eq!(engine.policy_count(), 1);
 
         // Now customer is allowed
@@ -354,7 +380,11 @@ mod tests {
 
         // Admin is now denied (only customer policy active)
         let admin_ctx = admin_context();
-        assert!(!engine.authorize(&admin_ctx, "read", "Order", &attrs).is_allowed());
+        assert!(
+            !engine
+                .authorize(&admin_ctx, "read", "Order", &attrs)
+                .is_allowed()
+        );
     }
 
     #[test]
@@ -391,7 +421,9 @@ mod tests {
         let engine = AuthzEngine::new(admin_policy).expect("initial policy should parse");
 
         // Reload with empty policy set
-        engine.reload_policies("").expect("empty policy should parse");
+        engine
+            .reload_policies("")
+            .expect("empty policy should parse");
         assert_eq!(engine.policy_count(), 0);
 
         // Admin is now denied (no policies)

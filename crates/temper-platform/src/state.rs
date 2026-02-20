@@ -10,8 +10,8 @@ use tokio::sync::broadcast;
 
 use temper_evolution::RecordStore;
 use temper_runtime::ActorSystem;
-use temper_server::registry::SpecRegistry;
 use temper_server::ServerState;
+use temper_server::registry::SpecRegistry;
 
 use crate::protocol::PlatformEvent;
 

@@ -193,14 +193,8 @@ mod tests {
 
         let mm = &result.mismatches[0];
         assert_eq!(mm.test_case.action, "SubmitOrder");
-        assert_eq!(
-            mm.old_result.as_ref().unwrap().new_state,
-            "Submitted"
-        );
-        assert_eq!(
-            mm.new_result.as_ref().unwrap().new_state,
-            "Confirmed"
-        );
+        assert_eq!(mm.old_result.as_ref().unwrap().new_state, "Submitted");
+        assert_eq!(mm.new_result.as_ref().unwrap().new_state, "Confirmed");
     }
 
     // ------------------------------------------------------------------

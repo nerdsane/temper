@@ -227,10 +227,7 @@ pub fn sync_fields(state: &mut EntityState, params: &serde_json::Value) {
         }
         // Sync counters into fields
         for (k, v) in &state.counters {
-            obj.insert(
-                k.clone(),
-                serde_json::Value::Number((*v as u64).into()),
-            );
+            obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
         }
         // Sync booleans into fields
         for (k, v) in &state.booleans {

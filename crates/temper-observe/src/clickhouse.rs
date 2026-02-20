@@ -48,19 +48,30 @@ impl ClickHouseStore {
         result
     }
 
-    async fn execute_query(&self, sql: &str, params: &[SqlParam]) -> Result<ResultSet, ObserveError> {
+    async fn execute_query(
+        &self,
+        sql: &str,
+        params: &[SqlParam],
+    ) -> Result<ResultSet, ObserveError> {
         let final_sql = Self::interpolate_params(sql, params);
-        let resp = self.client.post(self.query_url())
+        let resp = self
+            .client
+            .post(self.query_url())
             .body(final_sql)
-            .send().await
+            .send()
+            .await
             .map_err(|e| ObserveError::ConnectionError(e.to_string()))?;
 
         let status = resp.status();
-        let body = resp.text().await
+        let body = resp
+            .text()
+            .await
             .map_err(|e| ObserveError::ConnectionError(e.to_string()))?;
 
         if !status.is_success() {
-            return Err(ObserveError::ProviderError(format!("ClickHouse HTTP {status}: {body}")));
+            return Err(ObserveError::ProviderError(format!(
+                "ClickHouse HTTP {status}: {body}"
+            )));
         }
 
         parse_json_each_row(&body)
@@ -76,7 +87,11 @@ impl ObservabilityStore for ClickHouseStore {
         self.execute_query(sql, params).await
     }
 
-    async fn query_metrics(&self, sql: &str, params: &[SqlParam]) -> Result<ResultSet, ObserveError> {
+    async fn query_metrics(
+        &self,
+        sql: &str,
+        params: &[SqlParam],
+    ) -> Result<ResultSet, ObserveError> {
         self.execute_query(sql, params).await
     }
 }
@@ -93,7 +108,9 @@ fn parse_json_each_row(body: &str) -> Result<ResultSet, ObserveError> {
 
     for line in trimmed.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         let obj: HashMap<String, serde_json::Value> =
             serde_json::from_str(line).map_err(ObserveError::SerializationError)?;
@@ -103,11 +120,19 @@ fn parse_json_each_row(body: &str) -> Result<ResultSet, ObserveError> {
             columns.sort();
         }
 
-        let row_columns: Vec<(String, serde_json::Value)> = columns.iter()
-            .map(|col| (col.clone(), obj.get(col).cloned().unwrap_or(serde_json::Value::Null)))
+        let row_columns: Vec<(String, serde_json::Value)> = columns
+            .iter()
+            .map(|col| {
+                (
+                    col.clone(),
+                    obj.get(col).cloned().unwrap_or(serde_json::Value::Null),
+                )
+            })
             .collect();
 
-        rows.push(ResultRow { columns: row_columns });
+        rows.push(ResultRow {
+            columns: row_columns,
+        });
     }
 
     Ok(ResultSet { columns, rows })
@@ -128,7 +153,10 @@ mod tests {
         let sql = "SELECT * FROM spans WHERE service = $1 AND duration_ns > $2";
         let params = vec![SqlParam::String("api".into()), SqlParam::Int(1000)];
         let result = ClickHouseStore::interpolate_params(sql, &params);
-        assert_eq!(result, "SELECT * FROM spans WHERE service = 'api' AND duration_ns > 1000");
+        assert_eq!(
+            result,
+            "SELECT * FROM spans WHERE service = 'api' AND duration_ns > 1000"
+        );
     }
 
     #[test]

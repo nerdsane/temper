@@ -12,9 +12,7 @@
 use std::sync::Arc;
 
 use temper_jit::table::TransitionTable;
-use temper_runtime::scheduler::{
-    FaultConfig, SimActorSystem, SimActorSystemConfig,
-};
+use temper_runtime::scheduler::{FaultConfig, SimActorSystem, SimActorSystemConfig};
 use temper_server::entity_actor::sim_handler::EntityActorHandler;
 
 const ORDER_IOA: &str = include_str!("../specs/order.ioa.toml");
@@ -39,11 +37,14 @@ fn shipment_table() -> Arc<TransitionTable> {
 
 #[test]
 fn scripted_order_starts_in_draft() {
-    let config = SimActorSystemConfig { seed: 1, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 1,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Order", "ord-1", order_table())
-        .with_ioa_invariants(ORDER_IOA);
+    let handler =
+        EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA);
     sim.register_actor("ord-1", Box::new(handler));
 
     sim.assert_status("ord-1", "Draft");
@@ -51,11 +52,14 @@ fn scripted_order_starts_in_draft() {
 
 #[test]
 fn scripted_order_add_item_then_submit() {
-    let config = SimActorSystemConfig { seed: 2, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 2,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Order", "ord-1", order_table())
-        .with_ioa_invariants(ORDER_IOA);
+    let handler =
+        EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA);
     sim.register_actor("ord-1", Box::new(handler));
 
     // Draft → AddItem (stays in Draft, increments item counter)
@@ -72,11 +76,14 @@ fn scripted_order_add_item_then_submit() {
 
 #[test]
 fn scripted_order_full_lifecycle() {
-    let config = SimActorSystemConfig { seed: 3, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 3,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Order", "ord-1", order_table())
-        .with_ioa_invariants(ORDER_IOA);
+    let handler =
+        EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA);
     sim.register_actor("ord-1", Box::new(handler));
 
     // Draft → AddItem → SubmitOrder → Confirmed → Processing → Shipped → Delivered
@@ -102,11 +109,14 @@ fn scripted_order_full_lifecycle() {
 
 #[test]
 fn scripted_order_cancel_from_draft() {
-    let config = SimActorSystemConfig { seed: 4, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 4,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Order", "ord-1", order_table())
-        .with_ioa_invariants(ORDER_IOA);
+    let handler =
+        EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA);
     sim.register_actor("ord-1", Box::new(handler));
 
     sim.step("ord-1", "CancelOrder", "{}").unwrap();
@@ -116,11 +126,14 @@ fn scripted_order_cancel_from_draft() {
 
 #[test]
 fn scripted_order_cancel_from_submitted() {
-    let config = SimActorSystemConfig { seed: 5, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 5,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Order", "ord-1", order_table())
-        .with_ioa_invariants(ORDER_IOA);
+    let handler =
+        EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA);
     sim.register_actor("ord-1", Box::new(handler));
 
     sim.step("ord-1", "AddItem", "{}").unwrap();
@@ -134,11 +147,14 @@ fn scripted_order_cancel_from_submitted() {
 
 #[test]
 fn scripted_order_cannot_submit_empty() {
-    let config = SimActorSystemConfig { seed: 6, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 6,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Order", "ord-1", order_table())
-        .with_ioa_invariants(ORDER_IOA);
+    let handler =
+        EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA);
     sim.register_actor("ord-1", Box::new(handler));
 
     // SubmitOrder from Draft without items should fail (guard: items > 0)
@@ -149,11 +165,14 @@ fn scripted_order_cannot_submit_empty() {
 
 #[test]
 fn scripted_order_return_flow() {
-    let config = SimActorSystemConfig { seed: 7, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 7,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Order", "ord-1", order_table())
-        .with_ioa_invariants(ORDER_IOA);
+    let handler =
+        EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA);
     sim.register_actor("ord-1", Box::new(handler));
 
     // Full lifecycle to Delivered
@@ -184,7 +203,10 @@ fn scripted_order_return_flow() {
 
 #[test]
 fn scripted_payment_full_lifecycle() {
-    let config = SimActorSystemConfig { seed: 10, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 10,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     let handler = EntityActorHandler::new("Payment", "pay-1", payment_table())
@@ -205,7 +227,10 @@ fn scripted_payment_full_lifecycle() {
 
 #[test]
 fn scripted_payment_failure() {
-    let config = SimActorSystemConfig { seed: 11, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 11,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     let handler = EntityActorHandler::new("Payment", "pay-1", payment_table())
@@ -217,7 +242,10 @@ fn scripted_payment_failure() {
 
     // Failed is terminal — no further transitions allowed
     let result = sim.step("pay-1", "AuthorizePayment", "{}");
-    assert!(result.is_err(), "AuthorizePayment should fail from Failed state");
+    assert!(
+        result.is_err(),
+        "AuthorizePayment should fail from Failed state"
+    );
     sim.assert_status("pay-1", "Failed");
 
     assert!(!sim.has_violations());
@@ -225,7 +253,10 @@ fn scripted_payment_failure() {
 
 #[test]
 fn scripted_payment_refund() {
-    let config = SimActorSystemConfig { seed: 12, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 12,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     let handler = EntityActorHandler::new("Payment", "pay-1", payment_table())
@@ -239,7 +270,10 @@ fn scripted_payment_refund() {
 
     // Refunded is terminal
     let result = sim.step("pay-1", "CapturePayment", "{}");
-    assert!(result.is_err(), "CapturePayment should fail from Refunded state");
+    assert!(
+        result.is_err(),
+        "CapturePayment should fail from Refunded state"
+    );
 
     assert!(!sim.has_violations());
 }
@@ -250,7 +284,10 @@ fn scripted_payment_refund() {
 
 #[test]
 fn scripted_shipment_full_delivery() {
-    let config = SimActorSystemConfig { seed: 20, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 20,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     let handler = EntityActorHandler::new("Shipment", "ship-1", shipment_table())
@@ -277,7 +314,10 @@ fn scripted_shipment_full_delivery() {
 
 #[test]
 fn scripted_shipment_failure_and_return() {
-    let config = SimActorSystemConfig { seed: 21, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 21,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     let handler = EntityActorHandler::new("Shipment", "ship-1", shipment_table())
@@ -307,12 +347,15 @@ fn scripted_shipment_failure_and_return() {
 
 #[test]
 fn scripted_ecommerce_full_scenario() {
-    let config = SimActorSystemConfig { seed: 100, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 100,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     // Register all three entity types
-    let order = EntityActorHandler::new("Order", "ord-1", order_table())
-        .with_ioa_invariants(ORDER_IOA);
+    let order =
+        EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA);
     let payment = EntityActorHandler::new("Payment", "pay-1", payment_table())
         .with_ioa_invariants(PAYMENT_IOA);
     let shipment = EntityActorHandler::new("Shipment", "ship-1", shipment_table())
@@ -379,7 +422,10 @@ fn random_order_no_faults() {
         "Random exploration found invariant violations: {:?}",
         result.violations
     );
-    assert!(result.transitions > 0, "Should have at least one transition");
+    assert!(
+        result.transitions > 0,
+        "Should have at least one transition"
+    );
 }
 
 #[test]
@@ -392,15 +438,26 @@ fn random_all_entities_light_faults() {
     };
     let mut sim = SimActorSystem::new(config);
 
-    sim.register_actor("ord-1", Box::new(
-        EntityActorHandler::new("Order", "ord-1", order_table())
-            .with_ioa_invariants(ORDER_IOA)));
-    sim.register_actor("pay-1", Box::new(
-        EntityActorHandler::new("Payment", "pay-1", payment_table())
-            .with_ioa_invariants(PAYMENT_IOA)));
-    sim.register_actor("ship-1", Box::new(
-        EntityActorHandler::new("Shipment", "ship-1", shipment_table())
-            .with_ioa_invariants(SHIPMENT_IOA)));
+    sim.register_actor(
+        "ord-1",
+        Box::new(
+            EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA),
+        ),
+    );
+    sim.register_actor(
+        "pay-1",
+        Box::new(
+            EntityActorHandler::new("Payment", "pay-1", payment_table())
+                .with_ioa_invariants(PAYMENT_IOA),
+        ),
+    );
+    sim.register_actor(
+        "ship-1",
+        Box::new(
+            EntityActorHandler::new("Shipment", "ship-1", shipment_table())
+                .with_ioa_invariants(SHIPMENT_IOA),
+        ),
+    );
 
     let result = sim.run_random();
     assert!(
@@ -420,15 +477,26 @@ fn random_all_entities_heavy_faults() {
     };
     let mut sim = SimActorSystem::new(config);
 
-    sim.register_actor("ord-1", Box::new(
-        EntityActorHandler::new("Order", "ord-1", order_table())
-            .with_ioa_invariants(ORDER_IOA)));
-    sim.register_actor("pay-1", Box::new(
-        EntityActorHandler::new("Payment", "pay-1", payment_table())
-            .with_ioa_invariants(PAYMENT_IOA)));
-    sim.register_actor("ship-1", Box::new(
-        EntityActorHandler::new("Shipment", "ship-1", shipment_table())
-            .with_ioa_invariants(SHIPMENT_IOA)));
+    sim.register_actor(
+        "ord-1",
+        Box::new(
+            EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA),
+        ),
+    );
+    sim.register_actor(
+        "pay-1",
+        Box::new(
+            EntityActorHandler::new("Payment", "pay-1", payment_table())
+                .with_ioa_invariants(PAYMENT_IOA),
+        ),
+    );
+    sim.register_actor(
+        "ship-1",
+        Box::new(
+            EntityActorHandler::new("Shipment", "ship-1", shipment_table())
+                .with_ioa_invariants(SHIPMENT_IOA),
+        ),
+    );
 
     let result = sim.run_random();
     assert!(
@@ -451,15 +519,26 @@ fn run_determinism_trial(seed: u64) -> Vec<(String, String, usize, usize)> {
     };
     let mut sim = SimActorSystem::new(config);
 
-    sim.register_actor("ord-1", Box::new(
-        EntityActorHandler::new("Order", "ord-1", order_table())
-            .with_ioa_invariants(ORDER_IOA)));
-    sim.register_actor("pay-1", Box::new(
-        EntityActorHandler::new("Payment", "pay-1", payment_table())
-            .with_ioa_invariants(PAYMENT_IOA)));
-    sim.register_actor("ship-1", Box::new(
-        EntityActorHandler::new("Shipment", "ship-1", shipment_table())
-            .with_ioa_invariants(SHIPMENT_IOA)));
+    sim.register_actor(
+        "ord-1",
+        Box::new(
+            EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA),
+        ),
+    );
+    sim.register_actor(
+        "pay-1",
+        Box::new(
+            EntityActorHandler::new("Payment", "pay-1", payment_table())
+                .with_ioa_invariants(PAYMENT_IOA),
+        ),
+    );
+    sim.register_actor(
+        "ship-1",
+        Box::new(
+            EntityActorHandler::new("Shipment", "ship-1", shipment_table())
+                .with_ioa_invariants(SHIPMENT_IOA),
+        ),
+    );
 
     let result = sim.run_random();
     assert!(result.all_invariants_held);
@@ -505,15 +584,27 @@ fn multi_seed_sweep_all_entities() {
         };
         let mut sim = SimActorSystem::new(config);
 
-        sim.register_actor("ord", Box::new(
-            EntityActorHandler::new("Order", "ord", order_table())
-                .with_ioa_invariants(ORDER_IOA)));
-        sim.register_actor("pay", Box::new(
-            EntityActorHandler::new("Payment", "pay", payment_table())
-                .with_ioa_invariants(PAYMENT_IOA)));
-        sim.register_actor("ship", Box::new(
-            EntityActorHandler::new("Shipment", "ship", shipment_table())
-                .with_ioa_invariants(SHIPMENT_IOA)));
+        sim.register_actor(
+            "ord",
+            Box::new(
+                EntityActorHandler::new("Order", "ord", order_table())
+                    .with_ioa_invariants(ORDER_IOA),
+            ),
+        );
+        sim.register_actor(
+            "pay",
+            Box::new(
+                EntityActorHandler::new("Payment", "pay", payment_table())
+                    .with_ioa_invariants(PAYMENT_IOA),
+            ),
+        );
+        sim.register_actor(
+            "ship",
+            Box::new(
+                EntityActorHandler::new("Shipment", "ship", shipment_table())
+                    .with_ioa_invariants(SHIPMENT_IOA),
+            ),
+        );
 
         let result = sim.run_random();
         assert!(

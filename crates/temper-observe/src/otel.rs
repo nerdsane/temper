@@ -8,10 +8,10 @@
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
+use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use opentelemetry_sdk::Resource;
-use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig};
 
 /// Guard returned by [`init_tracing`].  Holds provider handles so the
 /// caller can [`shutdown`] cleanly before exit.
@@ -41,7 +41,10 @@ impl OtelGuard {
 ///
 /// Returns an [`OtelGuard`] that **must** be kept alive for the
 /// duration of the process and shut down before exit.
-pub fn init_tracing(endpoint: &str, service_name: &str) -> Result<OtelGuard, Box<dyn std::error::Error>> {
+pub fn init_tracing(
+    endpoint: &str,
+    service_name: &str,
+) -> Result<OtelGuard, Box<dyn std::error::Error>> {
     // Clear signal-specific OTEL env vars that take precedence over the
     // generic endpoint.  Tools like Claude Code, Datadog agents, etc.
     // may inject these, causing telemetry to silently route to the wrong
@@ -54,17 +57,19 @@ pub fn init_tracing(endpoint: &str, service_name: &str) -> Result<OtelGuard, Box
         "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
         "OTEL_EXPORTER_OTLP_PROTOCOL",
     ] {
-        unsafe { std::env::remove_var(var); }
+        unsafe {
+            std::env::remove_var(var);
+        }
     }
 
     // Set the generic OTLP endpoint env var so the SDK appends the
     // per-signal path (/v1/traces, /v1/metrics).
-    unsafe { std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint); }
+    unsafe {
+        std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint);
+    }
 
     let resource = Resource::builder_empty()
-        .with_attributes([
-            KeyValue::new("service.name", service_name.to_string()),
-        ])
+        .with_attributes([KeyValue::new("service.name", service_name.to_string())])
         .build();
 
     // --- Traces ---

@@ -37,8 +37,8 @@ fn check_status_in_set(model: &TemperModel, state: &TemperModelState) -> bool {
 fn check_counter_positive(model: &TemperModel, state: &TemperModelState) -> bool {
     for inv in &model.invariants {
         if let InvariantKind::CounterPositive { ref var } = inv.kind {
-            let triggered = inv.trigger_states.is_empty()
-                || inv.trigger_states.contains(&state.status);
+            let triggered =
+                inv.trigger_states.is_empty() || inv.trigger_states.contains(&state.status);
             if triggered {
                 let val = state.counters.get(var).copied().unwrap_or(0);
                 if val == 0 {
@@ -54,8 +54,8 @@ fn check_counter_positive(model: &TemperModel, state: &TemperModelState) -> bool
 fn check_bool_required(model: &TemperModel, state: &TemperModelState) -> bool {
     for inv in &model.invariants {
         if let InvariantKind::BoolRequired { ref var } = inv.kind {
-            let triggered = inv.trigger_states.is_empty()
-                || inv.trigger_states.contains(&state.status);
+            let triggered =
+                inv.trigger_states.is_empty() || inv.trigger_states.contains(&state.status);
             if triggered {
                 let val = state.booleans.get(var).copied().unwrap_or(false);
                 if !val {
@@ -74,16 +74,15 @@ fn check_no_further_transitions(model: &TemperModel, state: &TemperModelState) -
         if !matches!(inv.kind, InvariantKind::NoFurtherTransitions) {
             continue;
         }
-        let triggered = inv.trigger_states.is_empty()
-            || inv.trigger_states.contains(&state.status);
+        let triggered = inv.trigger_states.is_empty() || inv.trigger_states.contains(&state.status);
         if triggered {
             // Check that no transitions are enabled from this state
             let mut actions = Vec::new();
             // We need to check actions manually since we can't call model.actions()
             // inside a property fn (it would recurse). Instead, replicate the logic.
             for t in &model.transitions {
-                let status_ok = t.from_states.is_empty()
-                    || t.from_states.iter().any(|s| s == &state.status);
+                let status_ok =
+                    t.from_states.is_empty() || t.from_states.iter().any(|s| s == &state.status);
                 if status_ok && evaluate_guard(&t.guard, state) {
                     actions.push(&t.name);
                 }
@@ -167,10 +166,9 @@ fn check_reaches_state(model: &TemperModel, state: &TemperModelState) -> bool {
     }
     // No target state reached yet.
     // If there are no ReachesState properties, return true (vacuously satisfied).
-    !model
-        .liveness
-        .iter()
-        .any(|l| matches!(&l.kind, LivenessKind::ReachesState { targets, .. } if !targets.is_empty()))
+    !model.liveness.iter().any(
+        |l| matches!(&l.kind, LivenessKind::ReachesState { targets, .. } if !targets.is_empty()),
+    )
 }
 
 // -- Model trait implementation ----------------------------------------------
@@ -190,8 +188,8 @@ impl Model for TemperModel {
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
         for t in &self.transitions {
             // Check status precondition
-            let status_ok = t.from_states.is_empty()
-                || t.from_states.iter().any(|s| s == &state.status);
+            let status_ok =
+                t.from_states.is_empty() || t.from_states.iter().any(|s| s == &state.status);
             if !status_ok {
                 continue;
             }
@@ -238,9 +236,7 @@ impl Model for TemperModel {
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
         let resolved = self.transitions.iter().find(|t| t.name == action.name)?;
 
-        let new_status = action
-            .target_state
-            .unwrap_or_else(|| state.status.clone());
+        let new_status = action.target_state.unwrap_or_else(|| state.status.clone());
 
         let mut new_counters = state.counters.clone();
         let mut new_booleans = state.booleans.clone();
@@ -343,10 +339,7 @@ impl Model for TemperModel {
             .iter()
             .any(|l| matches!(&l.kind, LivenessKind::ReachesState { targets, .. } if !targets.is_empty()));
         if has_reaches {
-            props.push(Property::eventually(
-                "ReachesTerminal",
-                check_reaches_state,
-            ));
+            props.push(Property::eventually("ReachesTerminal", check_reaches_state));
         }
 
         props

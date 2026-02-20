@@ -103,19 +103,17 @@ impl CacheStore for RedisCache {
 
         loop {
             let item: Option<Result<fred::types::Key, fred::error::Error>> =
-                std::future::poll_fn(|cx| {
-                    futures_core::Stream::poll_next(scanner.as_mut(), cx)
-                })
-                .await;
+                std::future::poll_fn(|cx| futures_core::Stream::poll_next(scanner.as_mut(), cx))
+                    .await;
             match item {
                 Some(Ok(key)) => {
-                    let deleted: i64 = self
-                        .client
-                        .del::<i64, _>(key)
-                        .await
-                        .map_err(|e: fred::error::Error| {
-                            crate::error::RedisStoreError::Command(e.to_string())
-                        })?;
+                    let deleted: i64 =
+                        self.client
+                            .del::<i64, _>(key)
+                            .await
+                            .map_err(|e: fred::error::Error| {
+                                crate::error::RedisStoreError::Command(e.to_string())
+                            })?;
                     total_deleted += deleted as u64;
                 }
                 Some(Err(e)) => {
@@ -202,7 +200,10 @@ mod tests {
     #[tokio::test]
     async fn test_set_and_get() {
         let cache = InMemoryCache::new();
-        cache.set("key1", "value1", Duration::from_secs(60)).await.unwrap();
+        cache
+            .set("key1", "value1", Duration::from_secs(60))
+            .await
+            .unwrap();
         let v = cache.get("key1").await.unwrap();
         assert_eq!(v, Some("value1".to_string()));
     }
@@ -224,7 +225,10 @@ mod tests {
     #[tokio::test]
     async fn test_delete() {
         let cache = InMemoryCache::new();
-        cache.set("key1", "value1", Duration::from_secs(60)).await.unwrap();
+        cache
+            .set("key1", "value1", Duration::from_secs(60))
+            .await
+            .unwrap();
         cache.delete("key1").await.unwrap();
         assert!(cache.get("key1").await.unwrap().is_none());
     }
@@ -232,10 +236,22 @@ mod tests {
     #[tokio::test]
     async fn test_delete_prefix() {
         let cache = InMemoryCache::new();
-        cache.set("temper:cache:fn:A:1", "r1", Duration::from_secs(60)).await.unwrap();
-        cache.set("temper:cache:fn:A:2", "r2", Duration::from_secs(60)).await.unwrap();
-        cache.set("temper:cache:fn:B:1", "r3", Duration::from_secs(60)).await.unwrap();
-        cache.set("temper:other:X", "r4", Duration::from_secs(60)).await.unwrap();
+        cache
+            .set("temper:cache:fn:A:1", "r1", Duration::from_secs(60))
+            .await
+            .unwrap();
+        cache
+            .set("temper:cache:fn:A:2", "r2", Duration::from_secs(60))
+            .await
+            .unwrap();
+        cache
+            .set("temper:cache:fn:B:1", "r3", Duration::from_secs(60))
+            .await
+            .unwrap();
+        cache
+            .set("temper:other:X", "r4", Duration::from_secs(60))
+            .await
+            .unwrap();
 
         let deleted = cache.delete_prefix("temper:cache:fn:A").await.unwrap();
         assert_eq!(deleted, 2);

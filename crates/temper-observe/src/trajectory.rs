@@ -147,8 +147,7 @@ mod tests {
 
     #[test]
     fn test_trajectory_context_serialization_roundtrip() {
-        let ctx = TrajectoryContext::new("trace-rt", 2)
-            .with_user_intent("search products");
+        let ctx = TrajectoryContext::new("trace-rt", 2).with_user_intent("search products");
 
         let json = serde_json::to_string(&ctx).unwrap();
         let deserialized: TrajectoryContext = serde_json::from_str(&json).unwrap();

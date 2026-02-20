@@ -322,14 +322,12 @@ mod tests {
         let o_header = RecordHeader::new(RecordType::Observation, "sentinel");
         let o_id = o_header.id.clone();
 
-        let p_header = RecordHeader::new(RecordType::Problem, "agent")
-            .derived_from(&o_id);
+        let p_header = RecordHeader::new(RecordType::Problem, "agent").derived_from(&o_id);
 
         assert_eq!(p_header.derived_from, Some(o_id.clone()));
         assert!(p_header.id.starts_with("P-"));
 
-        let a_header = RecordHeader::new(RecordType::Analysis, "agent")
-            .derived_from(&p_header.id);
+        let a_header = RecordHeader::new(RecordType::Analysis, "agent").derived_from(&p_header.id);
         assert!(a_header.id.starts_with("A-"));
         assert_eq!(a_header.derived_from, Some(p_header.id));
     }
@@ -340,7 +338,8 @@ mod tests {
             header: RecordHeader::new(RecordType::Observation, "sentinel:latency"),
             source: "sentinel:latency".to_string(),
             classification: ObservationClass::Performance,
-            evidence_query: "SELECT p99(duration_ns) FROM spans WHERE operation = 'handle'".to_string(),
+            evidence_query: "SELECT p99(duration_ns) FROM spans WHERE operation = 'handle'"
+                .to_string(),
             threshold_field: Some("p99".to_string()),
             threshold_value: Some(100_000_000.0),
             observed_value: Some(450_000_000.0),
@@ -414,7 +413,13 @@ mod tests {
         };
 
         assert_eq!(decision.decision, Decision::Approved);
-        assert!(decision.verification_results.as_ref().unwrap().stateright_pass);
+        assert!(
+            decision
+                .verification_results
+                .as_ref()
+                .unwrap()
+                .stateright_pass
+        );
     }
 
     #[test]

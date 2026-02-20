@@ -260,8 +260,7 @@ mod tests {
 
     #[test]
     fn parse_3_segment_persistence_id() {
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id("alpha:Order:abc-123").unwrap();
+        let (tenant, entity_type, entity_id) = parse_persistence_id("alpha:Order:abc-123").unwrap();
         assert_eq!(tenant, "alpha");
         assert_eq!(entity_type, "Order");
         assert_eq!(entity_id, "abc-123");
@@ -269,8 +268,7 @@ mod tests {
 
     #[test]
     fn parse_legacy_2_segment_persistence_id() {
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id("Order:abc-123").unwrap();
+        let (tenant, entity_type, entity_id) = parse_persistence_id("Order:abc-123").unwrap();
         assert_eq!(tenant, "default");
         assert_eq!(entity_type, "Order");
         assert_eq!(entity_id, "abc-123");
@@ -279,8 +277,7 @@ mod tests {
     #[test]
     fn parse_3_segment_with_colons_in_id() {
         // splitn(3, ':') puts everything after the second colon into entity_id
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id("beta:Task:T-1:sub").unwrap();
+        let (tenant, entity_type, entity_id) = parse_persistence_id("beta:Task:T-1:sub").unwrap();
         assert_eq!(tenant, "beta");
         assert_eq!(entity_type, "Task");
         assert_eq!(entity_id, "T-1:sub");

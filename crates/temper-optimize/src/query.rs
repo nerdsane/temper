@@ -93,11 +93,7 @@ impl QueryOptimizer {
             for (op, count) in counts {
                 if count >= 3 {
                     // Extract entity set name from the operation (e.g., "GET /Orders" -> "Orders").
-                    let entity_set = op
-                        .split('/')
-                        .next_back()
-                        .unwrap_or(op)
-                        .to_string();
+                    let entity_set = op.split('/').next_back().unwrap_or(op).to_string();
 
                     recommendations.push(OptimizationRecommendation {
                         optimizer: "QueryOptimizer".to_string(),

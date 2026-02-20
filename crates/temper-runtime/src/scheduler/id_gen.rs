@@ -41,7 +41,9 @@ impl DeterministicIdGen {
 
 impl SimIdGen for DeterministicIdGen {
     fn next_uuid(&self) -> uuid::Uuid {
-        let count = self.counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let count = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Mix seed and counter to produce a deterministic UUID.
         let hi = self.seed ^ (count.wrapping_mul(6364136223846793005));
         let lo = count ^ (self.seed.wrapping_mul(1442695040888963407));
@@ -84,6 +86,10 @@ mod tests {
         let id_gen = DeterministicIdGen::new(42);
         let ids: Vec<uuid::Uuid> = (0..100).map(|_| id_gen.next_uuid()).collect();
         let unique: std::collections::HashSet<_> = ids.iter().collect();
-        assert_eq!(ids.len(), unique.len(), "All generated UUIDs should be unique");
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "All generated UUIDs should be unique"
+        );
     }
 }

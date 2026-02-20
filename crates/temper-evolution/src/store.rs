@@ -8,7 +8,6 @@ use std::sync::{Arc, RwLock};
 
 use crate::records::*;
 
-
 /// Stores evolution records. In-memory implementation for now.
 /// Production: Git (source of truth) + Postgres (indexed for querying).
 #[derive(Clone)]
@@ -42,27 +41,47 @@ impl RecordStore {
 
     /// Insert an observation record into the store.
     pub fn insert_observation(&self, record: ObservationRecord) {
-        self.inner.write().unwrap().observations.insert(record.header.id.clone(), record);
+        self.inner
+            .write()
+            .unwrap()
+            .observations
+            .insert(record.header.id.clone(), record);
     }
 
     /// Insert a problem record into the store.
     pub fn insert_problem(&self, record: ProblemRecord) {
-        self.inner.write().unwrap().problems.insert(record.header.id.clone(), record);
+        self.inner
+            .write()
+            .unwrap()
+            .problems
+            .insert(record.header.id.clone(), record);
     }
 
     /// Insert an analysis record into the store.
     pub fn insert_analysis(&self, record: AnalysisRecord) {
-        self.inner.write().unwrap().analyses.insert(record.header.id.clone(), record);
+        self.inner
+            .write()
+            .unwrap()
+            .analyses
+            .insert(record.header.id.clone(), record);
     }
 
     /// Insert a decision record into the store.
     pub fn insert_decision(&self, record: DecisionRecord) {
-        self.inner.write().unwrap().decisions.insert(record.header.id.clone(), record);
+        self.inner
+            .write()
+            .unwrap()
+            .decisions
+            .insert(record.header.id.clone(), record);
     }
 
     /// Insert an insight record into the store.
     pub fn insert_insight(&self, record: InsightRecord) {
-        self.inner.write().unwrap().insights.insert(record.header.id.clone(), record);
+        self.inner
+            .write()
+            .unwrap()
+            .insights
+            .insert(record.header.id.clone(), record);
     }
 
     // --- Query ---
@@ -94,7 +113,11 @@ impl RecordStore {
 
     /// Get all open observations (not yet resolved).
     pub fn open_observations(&self) -> Vec<ObservationRecord> {
-        self.inner.read().unwrap().observations.values()
+        self.inner
+            .read()
+            .unwrap()
+            .observations
+            .values()
             .filter(|r| r.header.status == RecordStatus::Open)
             .cloned()
             .collect()
@@ -102,12 +125,20 @@ impl RecordStore {
 
     /// Get all insights sorted by priority score (highest first).
     pub fn ranked_insights(&self) -> Vec<InsightRecord> {
-        let mut insights: Vec<InsightRecord> = self.inner.read().unwrap()
-            .insights.values()
+        let mut insights: Vec<InsightRecord> = self
+            .inner
+            .read()
+            .unwrap()
+            .insights
+            .values()
             .filter(|r| r.header.status == RecordStatus::Open)
             .cloned()
             .collect();
-        insights.sort_by(|a, b| b.priority_score.partial_cmp(&a.priority_score).unwrap_or(std::cmp::Ordering::Equal));
+        insights.sort_by(|a, b| {
+            b.priority_score
+                .partial_cmp(&a.priority_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         insights
     }
 
@@ -133,8 +164,7 @@ impl RecordStore {
         fs::create_dir_all(&sub_dir)?;
         for (id, record) in &inner.observations {
             let path = sub_dir.join(format!("{id}.json"));
-            let json = serde_json::to_string_pretty(record)
-                .map_err(std::io::Error::other)?;
+            let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
             fs::write(&path, json)?;
         }
 
@@ -142,8 +172,7 @@ impl RecordStore {
         fs::create_dir_all(&sub_dir)?;
         for (id, record) in &inner.problems {
             let path = sub_dir.join(format!("{id}.json"));
-            let json = serde_json::to_string_pretty(record)
-                .map_err(std::io::Error::other)?;
+            let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
             fs::write(&path, json)?;
         }
 
@@ -151,8 +180,7 @@ impl RecordStore {
         fs::create_dir_all(&sub_dir)?;
         for (id, record) in &inner.analyses {
             let path = sub_dir.join(format!("{id}.json"));
-            let json = serde_json::to_string_pretty(record)
-                .map_err(std::io::Error::other)?;
+            let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
             fs::write(&path, json)?;
         }
 
@@ -160,8 +188,7 @@ impl RecordStore {
         fs::create_dir_all(&sub_dir)?;
         for (id, record) in &inner.decisions {
             let path = sub_dir.join(format!("{id}.json"));
-            let json = serde_json::to_string_pretty(record)
-                .map_err(std::io::Error::other)?;
+            let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
             fs::write(&path, json)?;
         }
 
@@ -169,8 +196,7 @@ impl RecordStore {
         fs::create_dir_all(&sub_dir)?;
         for (id, record) in &inner.insights {
             let path = sub_dir.join(format!("{id}.json"));
-            let json = serde_json::to_string_pretty(record)
-                .map_err(std::io::Error::other)?;
+            let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
             fs::write(&path, json)?;
         }
 
@@ -226,7 +252,10 @@ mod tests {
             category: InsightCategory::Friction,
             signal: InsightSignal {
                 intent: "low priority".into(),
-                volume: 10, success_rate: 0.5, trend: "stable".into(), growth_rate: None,
+                volume: 10,
+                success_rate: 0.5,
+                trend: "stable".into(),
+                growth_rate: None,
             },
             recommendation: "fix later".into(),
             priority_score: 0.3,
@@ -244,7 +273,10 @@ mod tests {
             category: InsightCategory::UnmetIntent,
             signal: InsightSignal {
                 intent: "high priority".into(),
-                volume: 500, success_rate: 0.1, trend: "growing".into(), growth_rate: Some(0.2),
+                volume: 500,
+                success_rate: 0.1,
+                trend: "growing".into(),
+                growth_rate: Some(0.2),
             },
             recommendation: "build now".into(),
             priority_score: 0.9,
@@ -300,8 +332,10 @@ mod tests {
             category: InsightCategory::UnmetIntent,
             signal: InsightSignal {
                 intent: "test insight".into(),
-                volume: 100, success_rate: 0.5,
-                trend: "stable".into(), growth_rate: None,
+                volume: 100,
+                success_rate: 0.5,
+                trend: "stable".into(),
+                growth_rate: None,
             },
             recommendation: "do something".into(),
             priority_score: 0.7,

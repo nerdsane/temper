@@ -6,7 +6,7 @@
 //! its own entity types and specs.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
@@ -14,8 +14,8 @@ use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::{self, Automaton, Integration};
 use temper_spec::csdl::CsdlDocument;
 
-use crate::reaction::types::ReactionRule;
 use crate::reaction::ReactionRegistry;
+use crate::reaction::types::ReactionRule;
 
 /// Verification status for a single entity type.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -29,7 +29,7 @@ pub enum VerificationStatus {
 }
 
 /// Summary of verification results for an entity type.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EntityVerificationResult {
     /// Whether all levels passed.
     pub all_passed: bool,
@@ -40,7 +40,7 @@ pub struct EntityVerificationResult {
 }
 
 /// Summary of a single verification level.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EntityLevelSummary {
     /// Level name (e.g. "L0 SMT", "L1 Model Check").
     pub level: String,
@@ -54,7 +54,7 @@ pub struct EntityLevelSummary {
 }
 
 /// A single verification violation detail.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VerificationDetail {
     /// Violation kind: "liveness_violation", "invariant_violation", "counterexample", "proptest_failure".
     pub kind: String,
@@ -152,6 +152,11 @@ impl SpecRegistry {
     /// `ioa_sources` maps entity type name to IOA TOML source string.
     /// Each source is parsed into an [`Automaton`] and compiled into a
     /// [`TransitionTable`].
+    ///
+    /// If the tenant already exists, existing entity tables are hot-swapped
+    /// via their [`SwapController`] so that live actors see the new table on
+    /// their next action dispatch — no restart required. New entities are
+    /// added; entities not in the new spec set are removed.
     pub fn register_tenant(
         &mut self,
         tenant: impl Into<TenantId>,
@@ -176,42 +181,95 @@ impl SpecRegistry {
             }
         }
 
-        // Parse and compile each IOA spec
-        let mut entities = BTreeMap::new();
-        for (entity_type, ioa_source) in ioa_sources {
-            let automaton = automaton::parse_automaton(ioa_source)
-                .unwrap_or_else(|e| panic!("failed to parse IOA for {entity_type}: {e}"));
-            let table = TransitionTable::from_automaton(&automaton);
+        if let Some(existing_config) = self.tenants.get_mut(&tenant) {
+            // Hot-reload path: swap tables on existing entities, add new ones.
+            existing_config.csdl = Arc::new(csdl);
+            existing_config.csdl_xml = Arc::new(csdl_xml);
+            existing_config.entity_set_map = entity_set_map;
 
-            let integrations = automaton.integrations.clone();
-            entities.insert(
-                entity_type.to_string(),
-                EntitySpec {
-                    automaton,
-                    integrations,
-                    swap: Arc::new(SwapController::new(table)),
-                    ioa_source: ioa_source.to_string(),
+            for (entity_type, ioa_source) in ioa_sources {
+                let automaton = automaton::parse_automaton(ioa_source)
+                    .unwrap_or_else(|e| panic!("failed to parse IOA for {entity_type}: {e}"));
+                let table = TransitionTable::from_automaton(&automaton);
+                let integrations = automaton.integrations.clone();
+
+                if let Some(existing_spec) =
+                    existing_config.entities.get_mut(&entity_type.to_string())
+                {
+                    // Hot-swap: write new table into the SAME RwLock that actors hold.
+                    let result = existing_spec.swap_controller().swap(table);
+                    tracing::info!(
+                        entity_type,
+                        ?result,
+                        "hot-swapped transition table for existing entity"
+                    );
+                    // Update metadata on the existing spec.
+                    existing_spec.automaton = automaton;
+                    existing_spec.integrations = integrations;
+                    existing_spec.ioa_source = ioa_source.to_string();
+                } else {
+                    // New entity type — create fresh EntitySpec.
+                    existing_config.entities.insert(
+                        entity_type.to_string(),
+                        EntitySpec {
+                            automaton,
+                            integrations,
+                            swap: Arc::new(SwapController::new(table)),
+                            ioa_source: ioa_source.to_string(),
+                        },
+                    );
+                }
+            }
+
+            // Remove entities no longer in the spec set.
+            let new_entity_types: std::collections::BTreeSet<String> =
+                ioa_sources.iter().map(|(t, _)| t.to_string()).collect();
+            existing_config
+                .entities
+                .retain(|k, _| new_entity_types.contains(k));
+
+            // Reset verification to Pending for re-verification.
+            existing_config.verification = existing_config
+                .entities
+                .keys()
+                .map(|k| (k.clone(), VerificationStatus::Pending))
+                .collect();
+        } else {
+            // First registration: create new TenantConfig.
+            let mut entities = BTreeMap::new();
+            for (entity_type, ioa_source) in ioa_sources {
+                let automaton = automaton::parse_automaton(ioa_source)
+                    .unwrap_or_else(|e| panic!("failed to parse IOA for {entity_type}: {e}"));
+                let table = TransitionTable::from_automaton(&automaton);
+                let integrations = automaton.integrations.clone();
+                entities.insert(
+                    entity_type.to_string(),
+                    EntitySpec {
+                        automaton,
+                        integrations,
+                        swap: Arc::new(SwapController::new(table)),
+                        ioa_source: ioa_source.to_string(),
+                    },
+                );
+            }
+
+            let verification = entities
+                .keys()
+                .map(|k| (k.clone(), VerificationStatus::Pending))
+                .collect();
+
+            self.tenants.insert(
+                tenant,
+                TenantConfig {
+                    csdl: Arc::new(csdl),
+                    csdl_xml: Arc::new(csdl_xml),
+                    entity_set_map,
+                    entities,
+                    reactions: Vec::new(),
+                    verification,
                 },
             );
         }
-
-        // Initialize verification status to Pending for each entity.
-        let verification = entities
-            .keys()
-            .map(|k| (k.clone(), VerificationStatus::Pending))
-            .collect();
-
-        self.tenants.insert(
-            tenant,
-            TenantConfig {
-                csdl: Arc::new(csdl),
-                csdl_xml: Arc::new(csdl_xml),
-                entity_set_map,
-                entities,
-                reactions: Vec::new(),
-                verification,
-            },
-        );
     }
 
     /// Register a tenant with CSDL, IOA specs, and reaction rules.
@@ -250,34 +308,38 @@ impl SpecRegistry {
     ///
     /// Returns a snapshot of the current table. If a hot-swap has occurred
     /// since the last call, this returns the new table.
-    pub fn get_table(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> Option<Arc<TransitionTable>> {
+    pub fn get_table(&self, tenant: &TenantId, entity_type: &str) -> Option<Arc<TransitionTable>> {
         self.tenants
             .get(tenant)
             .and_then(|tc| tc.entities.get(entity_type))
             .map(|es| es.table())
     }
 
-    /// Look up the entity type name for an entity set in a tenant.
-    pub fn resolve_entity_type(
+    /// Get a live reference to the transition table's `RwLock`.
+    ///
+    /// Unlike [`get_table()`](Self::get_table) which returns a cloned snapshot,
+    /// this returns the `Arc<RwLock<TransitionTable>>` from the [`SwapController`].
+    /// Actors holding this reference will see hot-swapped tables on their next read.
+    pub fn get_table_live(
         &self,
         tenant: &TenantId,
-        entity_set: &str,
-    ) -> Option<String> {
+        entity_type: &str,
+    ) -> Option<Arc<RwLock<TransitionTable>>> {
+        self.tenants
+            .get(tenant)
+            .and_then(|tc| tc.entities.get(entity_type))
+            .map(|es| es.swap_controller().current())
+    }
+
+    /// Look up the entity type name for an entity set in a tenant.
+    pub fn resolve_entity_type(&self, tenant: &TenantId, entity_set: &str) -> Option<String> {
         self.tenants
             .get(tenant)
             .and_then(|tc| tc.entity_set_map.get(entity_set).cloned())
     }
 
     /// Look up the IOA spec for a tenant and entity type.
-    pub fn get_spec(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> Option<&EntitySpec> {
+    pub fn get_spec(&self, tenant: &TenantId, entity_type: &str) -> Option<&EntitySpec> {
         self.tenants
             .get(tenant)
             .and_then(|tc| tc.entities.get(entity_type))
@@ -311,9 +373,7 @@ impl SpecRegistry {
         status: VerificationStatus,
     ) {
         if let Some(config) = self.tenants.get_mut(tenant) {
-            config
-                .verification
-                .insert(entity_type.to_string(), status);
+            config.verification.insert(entity_type.to_string(), status);
         }
     }
 
@@ -463,9 +523,7 @@ mod tests {
 
         registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
 
-        let spec = registry
-            .get_spec(&TenantId::new("alpha"), "Order")
-            .unwrap();
+        let spec = registry.get_spec(&TenantId::new("alpha"), "Order").unwrap();
         assert_eq!(spec.automaton.automaton.name, "Order");
         assert!(!spec.ioa_source.is_empty());
     }

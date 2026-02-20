@@ -1,7 +1,7 @@
 //! Axum router construction for the Temper Data API.
 
-use axum::routing::get;
 use axum::Router;
+use axum::routing::get;
 use tower_http::trace::TraceLayer;
 
 use crate::dispatch;
@@ -26,22 +26,21 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/$metadata", get(dispatch::handle_metadata))
         .route("/$hints", get(dispatch::handle_hints))
         .route("/$events", get(events::handle_events))
-        .route("/{*path}",
+        .route(
+            "/{*path}",
             get(dispatch::handle_odata_get)
-            .post(dispatch::handle_odata_post)
-            .patch(dispatch::handle_odata_patch)
-            .put(dispatch::handle_odata_put)
-            .delete(dispatch::handle_odata_delete));
+                .post(dispatch::handle_odata_post)
+                .patch(dispatch::handle_odata_patch)
+                .put(dispatch::handle_odata_put)
+                .delete(dispatch::handle_odata_delete),
+        );
 
-    let router = Router::new()
-        .nest("/tdata", tdata);
+    let router = Router::new().nest("/tdata", tdata);
 
     #[cfg(feature = "observe")]
     let router = router.nest("/observe", crate::observe_routes::build_observe_router());
 
-    router
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+    router.layer(TraceLayer::new_for_http()).with_state(state)
 }
 
 #[cfg(test)]
@@ -79,7 +78,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["value"].is_array());
         assert_eq!(json["@odata.context"], "$metadata");
@@ -100,7 +101,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let content_type = response.headers().get("Content-Type").unwrap();
         assert_eq!(content_type, "application/xml");
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let body_str = std::str::from_utf8(&body).unwrap();
         assert!(body_str.contains("edmx:Edmx"));
         assert!(body_str.contains("Temper.Example"));
@@ -115,7 +118,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["@odata.context"], "$metadata#Orders");
     }
@@ -141,7 +146,8 @@ mod tests {
         let app = build_router(test_state_with_ioa());
 
         // First create an entity via POST
-        let create_response = app.clone()
+        let create_response = app
+            .clone()
             .oneshot(
                 Request::post("/tdata/Orders")
                     .header("Content-Type", "application/json")
@@ -163,7 +169,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["@odata.context"], "$metadata#Orders/$entity");
     }
@@ -213,7 +221,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "Cancelled");
     }
@@ -246,7 +256,8 @@ mod tests {
         let app = build_router(test_state_with_ioa());
 
         // Create with specific ID and fields
-        let response = app.clone()
+        let response = app
+            .clone()
             .oneshot(
                 Request::post("/tdata/Orders")
                     .header("Content-Type", "application/json")
@@ -257,7 +268,9 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
 
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         // Verify the body fields were stored
         assert_eq!(json["fields"]["customer"], "Bob");
@@ -269,7 +282,8 @@ mod tests {
         let app = build_router(test_state_with_ioa());
 
         // Create two entities
-        let _ = app.clone()
+        let _ = app
+            .clone()
             .oneshot(
                 Request::post("/tdata/Orders")
                     .header("Content-Type", "application/json")
@@ -278,7 +292,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let _ = app.clone()
+        let _ = app
+            .clone()
             .oneshot(
                 Request::post("/tdata/Orders")
                     .header("Content-Type", "application/json")
@@ -295,7 +310,9 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let values = json["value"].as_array().unwrap();
         assert_eq!(values.len(), 2);
@@ -306,7 +323,8 @@ mod tests {
         let app = build_router(test_state_with_ioa());
 
         // Create entity
-        let _ = app.clone()
+        let _ = app
+            .clone()
             .oneshot(
                 Request::post("/tdata/Orders")
                     .header("Content-Type", "application/json")
@@ -317,7 +335,8 @@ mod tests {
             .unwrap();
 
         // PATCH the entity
-        let response = app.clone()
+        let response = app
+            .clone()
             .oneshot(
                 Request::patch("/tdata/Orders('p1')")
                     .header("Content-Type", "application/json")
@@ -328,7 +347,9 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["fields"]["customer"], "Bob");
     }
@@ -338,7 +359,8 @@ mod tests {
         let app = build_router(test_state_with_ioa());
 
         // Create entity
-        let _ = app.clone()
+        let _ = app
+            .clone()
             .oneshot(
                 Request::post("/tdata/Orders")
                     .header("Content-Type", "application/json")
@@ -349,7 +371,8 @@ mod tests {
             .unwrap();
 
         // DELETE
-        let response = app.clone()
+        let response = app
+            .clone()
             .oneshot(
                 Request::delete("/tdata/Orders('d1')")
                     .body(Body::empty())

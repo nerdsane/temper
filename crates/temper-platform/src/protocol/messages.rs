@@ -125,7 +125,10 @@ mod tests {
         assert!(json.contains("\"type\":\"tenant_registered\""));
         let parsed: PlatformEvent = serde_json::from_str(&json).unwrap();
         match parsed {
-            PlatformEvent::TenantRegistered { tenant, entity_count } => {
+            PlatformEvent::TenantRegistered {
+                tenant,
+                entity_count,
+            } => {
                 assert_eq!(tenant, "alpha");
                 assert_eq!(entity_count, 3);
             }
@@ -207,7 +210,11 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: PlatformEvent = serde_json::from_str(&json).unwrap();
         match parsed {
-            PlatformEvent::OptimizationApplied { optimizer, improvement, .. } => {
+            PlatformEvent::OptimizationApplied {
+                optimizer,
+                improvement,
+                ..
+            } => {
                 assert_eq!(optimizer, "CacheOptimizer");
                 assert!((improvement - 0.25).abs() < f64::EPSILON);
             }

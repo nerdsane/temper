@@ -7,8 +7,8 @@
 //! - Actor trait implementations
 
 mod entity;
+mod generator;
 mod messages;
 mod state_machine;
-mod generator;
 
-pub use generator::{generate_entity_module, GeneratedModule, CodegenError};
+pub use generator::{CodegenError, GeneratedModule, generate_entity_module};

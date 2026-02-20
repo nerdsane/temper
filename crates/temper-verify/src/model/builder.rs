@@ -90,8 +90,7 @@ fn resolve_transitions(
                             effects.push(ModelEffect::IncrementCounter(var.clone()));
                         }
                     }
-                } else if name_lower.contains("removeitem") || name_lower.contains("remove_item")
-                {
+                } else if name_lower.contains("removeitem") || name_lower.contains("remove_item") {
                     effects.push(ModelEffect::DecrementCounter("items".to_string()));
                     for var in counter_vars.keys() {
                         if var != "items" {
@@ -150,8 +149,7 @@ fn translate_effects(effects: &[automaton::Effect]) -> Vec<ModelEffect> {
                 value: *value,
             }),
             automaton::Effect::Emit { .. } => None, // Emit is runtime-only
-            automaton::Effect::ListAppend { .. }
-            | automaton::Effect::ListRemoveAt { .. } => None, // List effects are runtime-only
+            automaton::Effect::ListAppend { .. } | automaton::Effect::ListRemoveAt { .. } => None, // List effects are runtime-only
         })
         .collect()
 }
@@ -381,28 +379,33 @@ mod tests {
     fn test_properties_are_generated() {
         let model = build_order_model();
         let props = model.properties();
-        assert!(
-            !props.is_empty(),
-            "Model should have at least one property"
-        );
+        assert!(!props.is_empty(), "Model should have at least one property");
     }
 
     #[test]
     fn test_counter_positive_invariant_resolved() {
         let model = build_order_model();
-        let counter_pos = model.invariants.iter().find(|i| {
-            matches!(i.kind, InvariantKind::CounterPositive { .. })
-        });
-        assert!(counter_pos.is_some(), "Should have a CounterPositive invariant");
+        let counter_pos = model
+            .invariants
+            .iter()
+            .find(|i| matches!(i.kind, InvariantKind::CounterPositive { .. }));
+        assert!(
+            counter_pos.is_some(),
+            "Should have a CounterPositive invariant"
+        );
     }
 
     #[test]
     fn test_no_further_transitions_invariant_resolved() {
         let model = build_order_model();
-        let nft = model.invariants.iter().find(|i| {
-            matches!(i.kind, InvariantKind::NoFurtherTransitions)
-        });
-        assert!(nft.is_some(), "Should have a NoFurtherTransitions invariant");
+        let nft = model
+            .invariants
+            .iter()
+            .find(|i| matches!(i.kind, InvariantKind::NoFurtherTransitions));
+        assert!(
+            nft.is_some(),
+            "Should have a NoFurtherTransitions invariant"
+        );
     }
 
     #[test]
@@ -410,10 +413,18 @@ mod tests {
         // payment_captured is NOT declared as a [[state]] bool var in the spec,
         // so "ShipRequiresPayment" falls back to Implication (we can't model it).
         let model = build_order_model();
-        let ship_inv = model.invariants.iter().find(|i| i.name == "ShipRequiresPayment");
-        assert!(ship_inv.is_some(), "Should have ShipRequiresPayment invariant");
-        assert!(matches!(ship_inv.unwrap().kind, InvariantKind::Implication),
-            "Undeclared bool should fall back to Implication");
+        let ship_inv = model
+            .invariants
+            .iter()
+            .find(|i| i.name == "ShipRequiresPayment");
+        assert!(
+            ship_inv.is_some(),
+            "Should have ShipRequiresPayment invariant"
+        );
+        assert!(
+            matches!(ship_inv.unwrap().kind, InvariantKind::Implication),
+            "Undeclared bool should fall back to Implication"
+        );
     }
 
     #[test]

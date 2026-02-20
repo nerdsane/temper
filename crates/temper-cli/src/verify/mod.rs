@@ -11,7 +11,6 @@ use anyhow::{Context, Result};
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::build_spec_model;
 
-
 /// Run the `temper verify` command.
 ///
 /// Loads specs from the given directory, builds the spec model, and reports
@@ -69,12 +68,7 @@ pub fn run(specs_dir: &str) -> Result<()> {
     println!("{}", "=".repeat(50));
 
     // Schema summary
-    let entity_count: usize = spec
-        .csdl
-        .schemas
-        .iter()
-        .map(|s| s.entity_types.len())
-        .sum();
+    let entity_count: usize = spec.csdl.schemas.iter().map(|s| s.entity_types.len()).sum();
     let action_count: usize = spec.csdl.schemas.iter().map(|s| s.actions.len()).sum();
     let function_count: usize = spec.csdl.schemas.iter().map(|s| s.functions.len()).sum();
 
@@ -146,9 +140,7 @@ fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
             .unwrap_or_default();
 
         if file_name.ends_with(".ioa.toml") {
-            let entity_name = file_name
-                .strip_suffix(".ioa.toml")
-                .unwrap_or_default();
+            let entity_name = file_name.strip_suffix(".ioa.toml").unwrap_or_default();
             let entity_name = to_pascal_case(entity_name);
 
             let source = fs::read_to_string(&path)
@@ -214,10 +206,7 @@ mod tests {
 
     #[test]
     fn test_verify_reference_specs() {
-        let specs_dir = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../test-fixtures/specs"
-        );
+        let specs_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-fixtures/specs");
 
         if !Path::new(specs_dir).join("model.csdl.xml").exists() {
             eprintln!("Skipping verify test: reference specs not found");

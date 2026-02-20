@@ -19,7 +19,10 @@ pub fn generate_state_machine(entity_name: &str, sm: &StateMachine) -> String {
     out.push_str("}\n\n");
 
     // Display impl
-    out.push_str(&format!("impl std::fmt::Display for {}Status {{\n", entity_name));
+    out.push_str(&format!(
+        "impl std::fmt::Display for {}Status {{\n",
+        entity_name
+    ));
     out.push_str("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n");
     out.push_str("        match self {\n");
     for state in &sm.states {

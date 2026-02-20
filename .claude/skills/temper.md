@@ -4,25 +4,47 @@
 
 ## Interview Protocol
 
-When the user says "build me a X", run steps 1-6 in conversation. Do NOT run any CLI commands until the interview is complete.
+When the user says "build me a X", have a quick, friendly conversation to understand what they want. Use plain language — no jargon. Do NOT run any CLI commands until the interview is complete. Keep it to 3 quick questions:
 
-### Step 1: Identify Entities
-Ask: "What are the main things (entities) in your system?" Guide them toward nouns (Users, Orders, Tasks). Each entity becomes a `.ioa.toml` spec file.
+### Step 1: What are you managing?
+Ask: "What are the main things you'll be tracking or managing?"
 
-### Step 2: Define States
-Ask: "What states can a [Entity] be in?" Keep it to 3-5 states. States must be mutually exclusive and exhaustive.
+Guide them toward nouns — projects, bugs, orders, people, tickets. Each one becomes an entity. Don't use the word "entity" with them. Say "thing" or use their word for it.
 
-### Step 3: Define Actions
-Ask: "What actions move a [Entity] between states?" Each action is a verb (Create, Submit, Approve). Actions specify `from` (array of states) and `to` (target state).
+Example: "Sounds like you have **Bugs** and **Developers** — anything else?"
 
-### Step 4: Define Guards
-Ask: "Are there conditions for an action to be allowed?" Guards are string expressions: `guard = "items > 0"`, `guard = "is_true has_reviewer"`. Operators: `>`, `<`, `>=`, `<=`, `==`, `is_true`, `min`.
+### Step 2: What's the lifecycle?
+For each thing, ask: "Walk me through the journey of a [Bug/Order/etc.] from start to finish. What stages does it go through?"
 
-### Step 5: Define Effects
-Ask: "What side effects happen during a transition?" Effects modify state variables: `effect = "increment counter"`, `effect = "set flag true"`, `effect = "decrement count"`.
+Keep it to 3-6 stages. Use their words. If they say "first it gets reported, then someone picks it up, then they fix it, then it's done" — that's Draft → Open → InProgress → Resolved.
 
-### Step 6: Define Invariants
-Ask: "What rules must ALWAYS be true?" Format: `when` (states), `assert` (expression). Common: `"items > 0"`, `"no_further_transitions"` (terminal state).
+Example: "Got it — so a Bug starts as **Open**, gets **Triaged**, someone **Starts Work**, then it's **Resolved** and finally **Closed**. Sound right?"
+
+### Step 3: What can go wrong or go sideways?
+Ask: "Are there any special cases? Things that can be cancelled, restarted, or that shouldn't happen?"
+
+This catches terminal states (Cancelled, Archived), backward transitions (Reopen), and rules (can't ship an empty order). Don't ask about "guards" or "invariants" — listen for "only if", "can't", "must", "not allowed" and translate those into guards/invariants yourself.
+
+Example: "So a Closed bug can't be changed at all — it's final. And you can Cancel from anywhere except Closed. Got it."
+
+### Then summarize and confirm
+Before generating anything, summarize in a simple table:
+
+> "Here's what I'll build:
+> - **Bug**: Open → Triaged → InProgress → Resolved → Closed (can Cancel from anywhere except Closed)
+> - **Developer**: Invited → Active → OnLeave (can Return from leave)
+>
+> Look good?"
+
+Wait for confirmation. Then generate specs.
+
+### Technical mapping (internal — don't show this to the user)
+- Their "stages" = `states` in `[automaton]`
+- Their "what you can do" = `[[action]]` entries with `from`/`to`
+- "Can't" / "not allowed" = `[[invariant]]` with `assert`
+- "Only if" / "must have" = `guard` on the action
+- "Final" / "done forever" = `[[invariant]]` with `assert = "no_further_transitions"`
+- Counters and flags: infer from context (e.g., "must have items" → counter `items`, guard `items > 0`)
 
 ## Generate Specs
 
@@ -129,11 +151,28 @@ DATABASE_URL=postgres://user:pass@localhost:5432/dbname temper serve --port 3333
 
 The endpoint streams newline-delimited JSON (NDJSON). It loads specs, runs verification inline, and streams each result. **The response does NOT return until all verification is complete.** You do NOT need to poll — just read the output.
 
+**Option A — Local specs directory** (if you have file access to the server machine):
 ```bash
 curl -s -N -X POST http://localhost:3333/observe/specs/load-dir \
   -H "Content-Type: application/json" \
   -d '{"tenant":"<app-name>","specs_dir":"./specs"}'
 ```
+
+**Option B — Inline specs over HTTP** (if the server is remote):
+```bash
+curl -s -N -X POST http://localhost:3333/observe/specs/load-inline \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant": "<app-name>",
+    "specs": {
+      "model.csdl.xml": "<full CSDL XML content>",
+      "bug.ioa.toml": "<full IOA TOML content>",
+      "developer.ioa.toml": "<full IOA TOML content>"
+    }
+  }'
+```
+
+Both endpoints return the same NDJSON streaming response.
 
 The response streams one JSON object per line:
 
@@ -195,13 +234,35 @@ curl -s -X POST http://localhost:3333/observe/specs/load-dir \
   -d '{"tenant":"<app-name>","specs_dir":"./specs"}'
 ```
 
-## Check Unmet Intents
+## Monitor for Unmet Intents (MANDATORY after deployment)
+
+After specs are deployed and verified, you MUST start watching for user failures. This is the evolution loop — users will try actions that don't exist yet, and you detect and fix them.
+
+### Start the watcher
+
+Immediately after successful deployment, start a background polling command using the Bash tool with `run_in_background: true`:
+
+```bash
+KNOWN=0; while true; do COUNT=$(curl -s http://localhost:3333/observe/trajectories?success=false 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('error_count',0))" 2>/dev/null || echo 0); if [ "$COUNT" -gt "$KNOWN" ]; then echo "NEW_UNMET_INTENTS: $COUNT (was $KNOWN)"; curl -s http://localhost:3333/observe/trajectories?success=false; exit 0; fi; sleep 10; done
+```
+
+This polls every 10 seconds. When a new unmet intent appears, the background task completes and you receive a notification.
+
+### When notified of new unmet intents
+
+1. Read the background task output — it contains the trajectory data with failed intents
+2. Tell the user: "I detected an unmet intent: users are trying to **[action]** on **[entity]** but it doesn't exist yet."
+3. Propose a fix: explain what transition you'd add (from which states, to which state)
+4. Ask for approval: "Should I add this action to the spec?"
+5. If approved: edit the spec, re-push, re-verify
+6. After fixing, start the watcher again (same command) to catch the next failure
+
+### Manual check
 
 When the user asks about feedback or what users want:
 ```bash
-curl http://127.0.0.1:3333/observe/trajectories | jq '.failed_intents'
+curl http://localhost:3333/observe/trajectories | jq '.failed_intents'
 ```
-Analyze patterns, propose spec changes, get developer approval, modify specs, re-verify, restart.
 
 ---
 

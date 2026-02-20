@@ -9,9 +9,9 @@
 //!   └─ temper.verify.{Entity} (cascade_passed, l1, l2, l3)
 //! ```
 
+use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::trace::{Span, Status, Tracer};
-use opentelemetry::KeyValue;
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
@@ -79,10 +79,7 @@ impl DeployPipeline {
     /// 5. Broadcast deployment status
     ///
     /// Emits a parent `temper.deploy` span with child spans per entity.
-    pub fn verify_and_deploy(
-        state: &PlatformState,
-        input: &DeployInput,
-    ) -> DeployResult {
+    pub fn verify_and_deploy(state: &PlatformState, input: &DeployInput) -> DeployResult {
         let tracer = global::tracer("temper");
         let mut deploy_span = tracer
             .span_builder("temper.deploy")
@@ -340,7 +337,11 @@ kind = "internal"
 
         let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
 
-        assert!(result.success, "Pipeline should succeed: {}", result.summary);
+        assert!(
+            result.success,
+            "Pipeline should succeed: {}",
+            result.summary
+        );
         assert_eq!(result.tenant, "test-tenant");
         assert_eq!(result.entity_results.len(), 1);
         assert!(result.entity_results[0].verified);
@@ -414,8 +415,15 @@ kind = "internal"
             }
         }
 
-        assert!(!verify_msgs.is_empty(), "Should have verify status broadcasts");
-        assert_eq!(deploy_msgs.len(), 1, "Should have exactly one deploy status");
+        assert!(
+            !verify_msgs.is_empty(),
+            "Should have verify status broadcasts"
+        );
+        assert_eq!(
+            deploy_msgs.len(),
+            1,
+            "Should have exactly one deploy status"
+        );
     }
 
     #[test]
@@ -433,7 +441,11 @@ kind = "internal"
         // Verifies that OTEL span instrumentation doesn't panic with no-op tracer.
         let state = PlatformState::new(None);
         let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
-        assert!(result.success, "Pipeline should succeed with no-op OTEL: {}", result.summary);
+        assert!(
+            result.success,
+            "Pipeline should succeed with no-op OTEL: {}",
+            result.summary
+        );
     }
 
     #[test]
@@ -457,7 +469,11 @@ kind = "internal"
 
         let result = DeployPipeline::verify_and_deploy(&state, &input);
 
-        assert!(result.success, "Pipeline should succeed: {}", result.summary);
+        assert!(
+            result.success,
+            "Pipeline should succeed: {}",
+            result.summary
+        );
         assert_eq!(result.entity_results.len(), 2);
 
         let registry = state.registry.read().unwrap();

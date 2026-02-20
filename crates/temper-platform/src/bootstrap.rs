@@ -6,9 +6,7 @@
 //! manages itself using its own framework.
 
 use temper_runtime::tenant::TenantId;
-use temper_server::registry::{
-    EntityLevelSummary, EntityVerificationResult, VerificationStatus,
-};
+use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_verify::cascade::VerificationCascade;
@@ -43,7 +41,10 @@ const SYSTEM_SPECS: &[(&str, &str)] = &[
 ///
 /// Panics if system specs fail to parse or verify (this is a fatal startup error).
 pub fn bootstrap_system_tenant(state: &PlatformState) {
-    tracing::info!("Bootstrapping temper-system tenant with {} entities", SYSTEM_SPECS.len());
+    tracing::info!(
+        "Bootstrapping temper-system tenant with {} entities",
+        SYSTEM_SPECS.len()
+    );
 
     // Validate all specs parse
     for (entity_type, ioa_source) in SYSTEM_SPECS {
@@ -64,8 +65,7 @@ pub fn bootstrap_system_tenant(state: &PlatformState) {
     }
 
     // Parse system CSDL
-    let csdl = parse_csdl(SYSTEM_CSDL)
-        .expect("System CSDL failed to parse");
+    let csdl = parse_csdl(SYSTEM_CSDL).expect("System CSDL failed to parse");
 
     // Register system tenant
     let system_tid = TenantId::new(SYSTEM_TENANT);
@@ -97,8 +97,10 @@ pub fn bootstrap_system_tenant(state: &PlatformState) {
         }
     }
 
-    tracing::info!("temper-system tenant bootstrapped: {:?}",
-        SYSTEM_SPECS.iter().map(|(t, _)| *t).collect::<Vec<_>>());
+    tracing::info!(
+        "temper-system tenant bootstrapped: {:?}",
+        SYSTEM_SPECS.iter().map(|(t, _)| *t).collect::<Vec<_>>()
+    );
 }
 
 #[cfg(test)]
@@ -121,7 +123,11 @@ mod tests {
     #[test]
     fn test_system_csdl_parses() {
         let result = parse_csdl(SYSTEM_CSDL);
-        assert!(result.is_ok(), "System CSDL failed to parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "System CSDL failed to parse: {:?}",
+            result.err()
+        );
     }
 
     #[test]

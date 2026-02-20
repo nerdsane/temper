@@ -12,7 +12,7 @@ use temper_runtime::scheduler::{SimActorHandler, SimActorSystem, SimActorSystemC
 use temper_runtime::tenant::TenantId;
 
 use super::registry::ReactionRegistry;
-use super::types::{ReactionResult, TargetResolver, MAX_REACTION_DEPTH};
+use super::types::{MAX_REACTION_DEPTH, ReactionResult, TargetResolver};
 
 /// Maps actor IDs to their (entity_type, entity_id) for target resolution.
 struct ActorMeta {
@@ -38,7 +38,11 @@ pub struct SimReactionSystem {
 
 impl SimReactionSystem {
     /// Create a new simulation reaction system for a tenant.
-    pub fn new(config: SimActorSystemConfig, registry: ReactionRegistry, tenant: impl Into<TenantId>) -> Self {
+    pub fn new(
+        config: SimActorSystemConfig,
+        registry: ReactionRegistry,
+        tenant: impl Into<TenantId>,
+    ) -> Self {
         Self {
             inner: SimActorSystem::new(config),
             registry,
@@ -58,12 +62,16 @@ impl SimReactionSystem {
         handler: Box<dyn SimActorHandler>,
     ) {
         self.inner.register_actor(actor_id, handler);
-        self.actor_meta.insert(actor_id.to_string(), ActorMeta {
-            entity_type: entity_type.to_string(),
-            entity_id: entity_id.to_string(),
-        });
+        self.actor_meta.insert(
+            actor_id.to_string(),
+            ActorMeta {
+                entity_type: entity_type.to_string(),
+                entity_id: entity_id.to_string(),
+            },
+        );
         let entity_key = format!("{entity_type}:{entity_id}");
-        self.entity_to_actor.insert(entity_key, actor_id.to_string());
+        self.entity_to_actor
+            .insert(entity_key, actor_id.to_string());
     }
 
     /// Register an entity actor, building the handler from an IOA TOML spec.
@@ -98,7 +106,9 @@ impl SimReactionSystem {
         let result = self.inner.step(actor_id, action, params)?;
 
         // Get the actor's entity info for reaction lookup
-        let meta = self.actor_meta.get(actor_id)
+        let meta = self
+            .actor_meta
+            .get(actor_id)
             .ok_or_else(|| format!("No metadata for actor '{actor_id}'"))?;
         let entity_type = meta.entity_type.clone();
         let entity_id = meta.entity_id.clone();
@@ -128,14 +138,16 @@ impl SimReactionSystem {
         }
 
         // Clone the matching rules to avoid borrow conflict
-        let rules: Vec<_> = self.registry
+        let rules: Vec<_> = self
+            .registry
             .lookup(&self.tenant, entity_type, action, to_state)
             .into_iter()
             .cloned()
             .collect();
 
         for rule in rules {
-            let target_entity_id = match resolve_target_id(&rule.resolve_target, entity_id, fields) {
+            let target_entity_id = match resolve_target_id(&rule.resolve_target, entity_id, fields)
+            {
                 Some(id) => id,
                 None => {
                     self.last_results.push(ReactionResult {
@@ -167,7 +179,9 @@ impl SimReactionSystem {
 
             // Execute the target action
             let params_str = serde_json::to_string(&rule.then.params).unwrap_or_default();
-            let step_result = self.inner.step(&target_actor_id, &rule.then.action, &params_str);
+            let step_result = self
+                .inner
+                .step(&target_actor_id, &rule.then.action, &params_str);
 
             match step_result {
                 Ok(_) => {
@@ -234,16 +248,16 @@ fn resolve_target_id(
     fields: &serde_json::Value,
 ) -> Option<String> {
     match resolver {
-        TargetResolver::Field { field } => {
-            fields.get(field)
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        }
+        TargetResolver::Field { field } => fields
+            .get(field)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         TargetResolver::SameId => Some(source_entity_id.to_string()),
         TargetResolver::Static { entity_id } => Some(entity_id.clone()),
         TargetResolver::CreateIfMissing { id_field } => {
             // Try to read from fields; if missing, derive deterministically
-            fields.get(id_field)
+            fields
+                .get(id_field)
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .or_else(|| Some(format!("{source_entity_id}-derived")))
@@ -258,40 +272,65 @@ mod tests {
     #[test]
     fn resolve_target_field() {
         let fields = serde_json::json!({"payment_id": "pay-1"});
-        let resolver = TargetResolver::Field { field: "payment_id".to_string() };
-        assert_eq!(resolve_target_id(&resolver, "order-1", &fields), Some("pay-1".to_string()));
+        let resolver = TargetResolver::Field {
+            field: "payment_id".to_string(),
+        };
+        assert_eq!(
+            resolve_target_id(&resolver, "order-1", &fields),
+            Some("pay-1".to_string())
+        );
     }
 
     #[test]
     fn resolve_target_field_missing() {
         let fields = serde_json::json!({});
-        let resolver = TargetResolver::Field { field: "payment_id".to_string() };
+        let resolver = TargetResolver::Field {
+            field: "payment_id".to_string(),
+        };
         assert_eq!(resolve_target_id(&resolver, "order-1", &fields), None);
     }
 
     #[test]
     fn resolve_target_same_id() {
         let resolver = TargetResolver::SameId;
-        assert_eq!(resolve_target_id(&resolver, "order-1", &serde_json::json!({})), Some("order-1".to_string()));
+        assert_eq!(
+            resolve_target_id(&resolver, "order-1", &serde_json::json!({})),
+            Some("order-1".to_string())
+        );
     }
 
     #[test]
     fn resolve_target_static() {
-        let resolver = TargetResolver::Static { entity_id: "singleton".to_string() };
-        assert_eq!(resolve_target_id(&resolver, "order-1", &serde_json::json!({})), Some("singleton".to_string()));
+        let resolver = TargetResolver::Static {
+            entity_id: "singleton".to_string(),
+        };
+        assert_eq!(
+            resolve_target_id(&resolver, "order-1", &serde_json::json!({})),
+            Some("singleton".to_string())
+        );
     }
 
     #[test]
     fn resolve_target_create_if_missing_with_field() {
         let fields = serde_json::json!({"b_id": "existing-id"});
-        let resolver = TargetResolver::CreateIfMissing { id_field: "b_id".to_string() };
-        assert_eq!(resolve_target_id(&resolver, "order-1", &fields), Some("existing-id".to_string()));
+        let resolver = TargetResolver::CreateIfMissing {
+            id_field: "b_id".to_string(),
+        };
+        assert_eq!(
+            resolve_target_id(&resolver, "order-1", &fields),
+            Some("existing-id".to_string())
+        );
     }
 
     #[test]
     fn resolve_target_create_if_missing_derives() {
         let fields = serde_json::json!({});
-        let resolver = TargetResolver::CreateIfMissing { id_field: "b_id".to_string() };
-        assert_eq!(resolve_target_id(&resolver, "order-1", &fields), Some("order-1-derived".to_string()));
+        let resolver = TargetResolver::CreateIfMissing {
+            id_field: "b_id".to_string(),
+        };
+        assert_eq!(
+            resolve_target_id(&resolver, "order-1", &fields),
+            Some("order-1-derived".to_string())
+        );
     }
 }

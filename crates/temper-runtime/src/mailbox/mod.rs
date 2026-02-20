@@ -13,7 +13,6 @@ use crate::actor::actor_ref::Envelope;
 use crate::actor::errors::ActorError;
 use crate::actor::traits::Message;
 
-
 /// Default mailbox capacity. Sized for typical entity actors.
 /// TigerStyle: This is a budget, not a suggestion.
 pub const DEFAULT_MAILBOX_CAPACITY: usize = 1_000;
@@ -33,11 +32,18 @@ pub struct MailboxReceiver<M: Message> {
 pub fn mailbox<M: Message>(capacity: usize) -> (MailboxSender<M>, MailboxReceiver<M>) {
     // TigerStyle: assert the budget is sane
     debug_assert!(capacity > 0, "mailbox capacity must be > 0");
-    debug_assert!(capacity <= 100_000, "mailbox capacity {} exceeds max budget 100,000", capacity);
+    debug_assert!(
+        capacity <= 100_000,
+        "mailbox capacity {} exceeds max budget 100,000",
+        capacity
+    );
 
     let (tx, rx) = mpsc::channel(capacity);
     (
-        MailboxSender { inner: tx, capacity },
+        MailboxSender {
+            inner: tx,
+            capacity,
+        },
         MailboxReceiver { inner: rx },
     )
 }
@@ -108,7 +114,8 @@ mod tests {
     async fn test_mailbox_fifo_ordering() {
         let (tx, mut rx) = mailbox::<TestMsg>(10);
         for i in 0..5 {
-            tx.send(Envelope::Tell(TestMsg(format!("msg-{i}")))).unwrap();
+            tx.send(Envelope::Tell(TestMsg(format!("msg-{i}"))))
+                .unwrap();
         }
         for i in 0..5 {
             match rx.recv().await.unwrap() {

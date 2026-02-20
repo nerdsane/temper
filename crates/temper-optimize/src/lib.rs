@@ -216,10 +216,7 @@ mod tests {
         let recs = optimizer.analyze(&store).await;
 
         // Should produce at least one N+1 recommendation.
-        assert!(
-            !recs.is_empty(),
-            "QueryOptimizer should detect N+1 pattern"
-        );
+        assert!(!recs.is_empty(), "QueryOptimizer should detect N+1 pattern");
         let n_plus_one = recs
             .iter()
             .find(|r| r.description.contains("N+1"))
@@ -336,8 +333,7 @@ mod tests {
         ];
 
         for action in &actions {
-            let serialized =
-                serde_json::to_string(action).expect("serialization should succeed");
+            let serialized = serde_json::to_string(action).expect("serialization should succeed");
             let deserialized: OptAction =
                 serde_json::from_str(&serialized).expect("deserialization should succeed");
 

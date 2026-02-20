@@ -202,58 +202,63 @@ impl Schema {
 impl EntityType {
     /// Get an annotation by term name (short or fully qualified).
     pub fn annotation(&self, term: &str) -> Option<&Annotation> {
-        self.annotations.iter().find(|a| {
-            a.term == term || a.term.ends_with(&format!(".{term}"))
-        })
+        self.annotations
+            .iter()
+            .find(|a| a.term == term || a.term.ends_with(&format!(".{term}")))
     }
 
     /// Get the state machine states from annotations.
     pub fn state_machine_states(&self) -> Option<Vec<String>> {
-        self.annotation("StateMachine.States").and_then(|a| match &a.value {
-            AnnotationValue::Collection(v) => Some(v.clone()),
-            _ => None,
-        })
+        self.annotation("StateMachine.States")
+            .and_then(|a| match &a.value {
+                AnnotationValue::Collection(v) => Some(v.clone()),
+                _ => None,
+            })
     }
 
     /// Get the initial state from annotations.
     pub fn initial_state(&self) -> Option<String> {
-        self.annotation("StateMachine.InitialState").and_then(|a| match &a.value {
-            AnnotationValue::String(s) => Some(s.clone()),
-            _ => None,
-        })
+        self.annotation("StateMachine.InitialState")
+            .and_then(|a| match &a.value {
+                AnnotationValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
     }
 
     /// Get the TLA+ spec path from annotations.
     pub fn tla_spec_path(&self) -> Option<String> {
-        self.annotation("StateMachine.TlaSpec").and_then(|a| match &a.value {
-            AnnotationValue::String(s) => Some(s.clone()),
-            _ => None,
-        })
+        self.annotation("StateMachine.TlaSpec")
+            .and_then(|a| match &a.value {
+                AnnotationValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
     }
 }
 
 impl Action {
     /// Get an annotation by term name.
     pub fn annotation(&self, term: &str) -> Option<&Annotation> {
-        self.annotations.iter().find(|a| {
-            a.term == term || a.term.ends_with(&format!(".{term}"))
-        })
+        self.annotations
+            .iter()
+            .find(|a| a.term == term || a.term.ends_with(&format!(".{term}")))
     }
 
     /// Get valid-from states for this action.
     pub fn valid_from_states(&self) -> Option<Vec<String>> {
-        self.annotation("StateMachine.ValidFromStates").and_then(|a| match &a.value {
-            AnnotationValue::Collection(v) => Some(v.clone()),
-            _ => None,
-        })
+        self.annotation("StateMachine.ValidFromStates")
+            .and_then(|a| match &a.value {
+                AnnotationValue::Collection(v) => Some(v.clone()),
+                _ => None,
+            })
     }
 
     /// Get the target state after this action.
     pub fn target_state(&self) -> Option<String> {
-        self.annotation("StateMachine.TargetState").and_then(|a| match &a.value {
-            AnnotationValue::String(s) => Some(s.clone()),
-            _ => None,
-        })
+        self.annotation("StateMachine.TargetState")
+            .and_then(|a| match &a.value {
+                AnnotationValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
     }
 
     /// Get the binding parameter type (the entity this action is bound to).

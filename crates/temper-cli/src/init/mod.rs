@@ -5,7 +5,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-
 /// Minimal CSDL template for a new project.
 const CSDL_TEMPLATE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
@@ -147,10 +146,8 @@ mod tests {
 
     #[test]
     fn test_init_creates_directory_structure() {
-        let project_dir = std::env::temp_dir().join(format!(
-            "temper_test_init_project_{}",
-            std::process::id()
-        ));
+        let project_dir =
+            std::env::temp_dir().join(format!("temper_test_init_project_{}", std::process::id()));
         // Clean up in case of previous failed run
         let _ = fs::remove_dir_all(&project_dir);
 
@@ -192,10 +189,8 @@ mod tests {
 
     #[test]
     fn test_init_fails_if_directory_exists() {
-        let project_dir = std::env::temp_dir().join(format!(
-            "temper_test_init_exists_{}",
-            std::process::id()
-        ));
+        let project_dir =
+            std::env::temp_dir().join(format!("temper_test_init_exists_{}", std::process::id()));
         let _ = fs::remove_dir_all(&project_dir);
         fs::create_dir_all(&project_dir).unwrap();
 

@@ -5,9 +5,7 @@
 use std::sync::Arc;
 
 use temper_jit::table::TransitionTable;
-use temper_runtime::scheduler::{
-    FaultConfig, SimActorSystem, SimActorSystemConfig,
-};
+use temper_runtime::scheduler::{FaultConfig, SimActorSystem, SimActorSystemConfig};
 use temper_server::entity_actor::sim_handler::EntityActorHandler;
 use temper_spec::automaton;
 use temper_verify::cascade::VerificationCascade;
@@ -23,15 +21,17 @@ fn interactive_full_pipeline() {
 
     // ── Stage 1: Parse IOA TOML ──────────────────────────────────────
     println!("\n--- STAGE 1: Parse IOA TOML ---\n");
-    let automaton = automaton::parse_automaton(ORDER_IOA)
-        .expect("failed to parse");
+    let automaton = automaton::parse_automaton(ORDER_IOA).expect("failed to parse");
 
     println!("  Entity:   {}", automaton.automaton.name);
     println!("  States:   {:?}", automaton.automaton.states);
     println!("  Initial:  {}", automaton.automaton.initial);
     println!("  State vars:");
     for sv in &automaton.state {
-        println!("    - {} (type={}, initial={})", sv.name, sv.var_type, sv.initial);
+        println!(
+            "    - {} (type={}, initial={})",
+            sv.name, sv.var_type, sv.initial
+        );
     }
     println!("  Actions:  {} total", automaton.actions.len());
     for a in &automaton.actions {
@@ -51,7 +51,12 @@ fn interactive_full_pipeline() {
     }
     println!("  Invariants: {}", automaton.invariants.len());
     for inv in &automaton.invariants {
-        println!("    {:25} when={:<50} assert={}", inv.name, format!("{:?}", inv.when), inv.assert);
+        println!(
+            "    {:25} when={:<50} assert={}",
+            inv.name,
+            format!("{:?}", inv.when),
+            inv.assert
+        );
     }
 
     // ── Stage 2: Build TransitionTable ──────────────────────────────
@@ -76,8 +81,8 @@ fn interactive_full_pipeline() {
     // ── Stage 3: Test guard evaluation ──────────────────────────────
     println!("\n--- STAGE 3: Guard Evaluation Examples ---\n");
 
-    use temper_jit::table::EvalContext;
     use std::collections::BTreeMap;
+    use temper_jit::table::EvalContext;
 
     // SubmitOrder with 0 items -> should FAIL
     let ctx_empty = EvalContext {
@@ -135,11 +140,15 @@ fn interactive_full_pipeline() {
 
         // Show L0 SMT details
         if let Some(ref smt) = level.smt {
-            let dead: Vec<&str> = smt.guard_satisfiability.iter()
+            let dead: Vec<&str> = smt
+                .guard_satisfiability
+                .iter()
                 .filter(|(_, sat)| !sat)
                 .map(|(n, _)| n.as_str())
                 .collect();
-            let non_ind: Vec<&str> = smt.inductive_invariants.iter()
+            let non_ind: Vec<&str> = smt
+                .inductive_invariants
+                .iter()
                 .filter(|(_, ind)| !ind)
                 .map(|(n, _)| n.as_str())
                 .collect();
@@ -176,21 +185,34 @@ fn interactive_full_pipeline() {
         if let Some(ref p) = level.prop_test {
             println!("         Cases run: {}", p.total_cases);
             if let Some(ref f) = p.failure {
-                println!("         FAILURE: invariant '{}' after {} actions",
-                    f.invariant, f.action_sequence.len());
+                println!(
+                    "         FAILURE: invariant '{}' after {} actions",
+                    f.invariant,
+                    f.action_sequence.len()
+                );
             }
         }
     }
 
-    println!("\n  Overall: {}", if cascade_result.all_passed { "ALL PASSED" } else { "FAILED" });
+    println!(
+        "\n  Overall: {}",
+        if cascade_result.all_passed {
+            "ALL PASSED"
+        } else {
+            "FAILED"
+        }
+    );
 
     // ── Stage 5: DST — Scripted scenario ────────────────────────────
     println!("\n--- STAGE 5: DST -- Scripted Scenario (seed=42) ---\n");
 
-    let config = SimActorSystemConfig { seed: 42, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 42,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
-    let handler = EntityActorHandler::new("Order", "ord-1", Arc::new(table))
-        .with_ioa_invariants(ORDER_IOA);
+    let handler =
+        EntityActorHandler::new("Order", "ord-1", Arc::new(table)).with_ioa_invariants(ORDER_IOA);
     sim.register_actor("ord-1", Box::new(handler));
 
     let actions = [
@@ -235,7 +257,8 @@ fn interactive_full_pipeline() {
             "Order",
             &format!("ord-{}", i),
             Arc::new(TransitionTable::from_ioa_source(ORDER_IOA)),
-        ).with_ioa_invariants(ORDER_IOA);
+        )
+        .with_ioa_invariants(ORDER_IOA);
         sim.register_actor(&format!("ord-{}", i), Box::new(handler));
     }
 
@@ -249,7 +272,10 @@ fn interactive_full_pipeline() {
     println!("  Violations:       {}", result.violations.len());
     println!("  Actor final states:");
     for (id, status, items, events) in &result.actor_states {
-        println!("    {}: status={}, items={}, events={}", id, status, items, events);
+        println!(
+            "    {}: status={}, items={}, events={}",
+            id, status, items, events
+        );
     }
 
     // ── Stage 7: Determinism proof ──────────────────────────────────
@@ -267,9 +293,11 @@ fn interactive_full_pipeline() {
         };
         let mut sim = SimActorSystem::new(config);
         let handler = EntityActorHandler::new(
-            "Order", "ord-1",
+            "Order",
+            "ord-1",
             Arc::new(TransitionTable::from_ioa_source(ORDER_IOA)),
-        ).with_ioa_invariants(ORDER_IOA);
+        )
+        .with_ioa_invariants(ORDER_IOA);
         sim.register_actor("ord-1", Box::new(handler));
 
         let result = sim.run_random();
@@ -277,17 +305,32 @@ fn interactive_full_pipeline() {
 
         if let Some(ref r) = reference {
             let matches = &states == r;
-            if !matches { all_match = false; }
-            println!("  Run {}: {:?}  {}",
-                run, states,
-                if matches { "== reference" } else { "!= MISMATCH!" });
+            if !matches {
+                all_match = false;
+            }
+            println!(
+                "  Run {}: {:?}  {}",
+                run,
+                states,
+                if matches {
+                    "== reference"
+                } else {
+                    "!= MISMATCH!"
+                }
+            );
         } else {
             println!("  Run {}: {:?}  (reference)", run, states);
             reference = Some(states);
         }
     }
-    println!("\n  Determinism: {}",
-        if all_match { "PROVEN (all runs bit-exact identical)" } else { "VIOLATED!" });
+    println!(
+        "\n  Determinism: {}",
+        if all_match {
+            "PROVEN (all runs bit-exact identical)"
+        } else {
+            "VIOLATED!"
+        }
+    );
 
     println!();
     println!("============================================================");

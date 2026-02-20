@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 /// Marker trait for domain events.
 /// Events must be serializable (for persistence) and Send + 'static (for async).
-pub trait DomainEvent: Send + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug + 'static {}
+pub trait DomainEvent:
+    Send + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug + 'static
+{
+}
 
 /// Metadata attached to every persisted event.
 #[derive(Debug, Clone, Serialize, Deserialize)]

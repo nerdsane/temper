@@ -100,40 +100,28 @@ impl PostgresRecordStore {
     }
 
     /// Insert a problem record.
-    pub async fn insert_problem(
-        &self,
-        record: &ProblemRecord,
-    ) -> Result<(), PgRecordStoreError> {
+    pub async fn insert_problem(&self, record: &ProblemRecord) -> Result<(), PgRecordStoreError> {
         let payload = serde_json::to_value(record)
             .map_err(|e| PgRecordStoreError::Serialization(e.to_string()))?;
         self.insert_row(&record.header, &payload).await
     }
 
     /// Insert an analysis record.
-    pub async fn insert_analysis(
-        &self,
-        record: &AnalysisRecord,
-    ) -> Result<(), PgRecordStoreError> {
+    pub async fn insert_analysis(&self, record: &AnalysisRecord) -> Result<(), PgRecordStoreError> {
         let payload = serde_json::to_value(record)
             .map_err(|e| PgRecordStoreError::Serialization(e.to_string()))?;
         self.insert_row(&record.header, &payload).await
     }
 
     /// Insert a decision record.
-    pub async fn insert_decision(
-        &self,
-        record: &DecisionRecord,
-    ) -> Result<(), PgRecordStoreError> {
+    pub async fn insert_decision(&self, record: &DecisionRecord) -> Result<(), PgRecordStoreError> {
         let payload = serde_json::to_value(record)
             .map_err(|e| PgRecordStoreError::Serialization(e.to_string()))?;
         self.insert_row(&record.header, &payload).await
     }
 
     /// Insert an insight record.
-    pub async fn insert_insight(
-        &self,
-        record: &InsightRecord,
-    ) -> Result<(), PgRecordStoreError> {
+    pub async fn insert_insight(&self, record: &InsightRecord) -> Result<(), PgRecordStoreError> {
         let payload = serde_json::to_value(record)
             .map_err(|e| PgRecordStoreError::Serialization(e.to_string()))?;
         self.insert_row(&record.header, &payload).await
@@ -150,10 +138,7 @@ impl PostgresRecordStore {
     }
 
     /// Retrieve a problem record by ID.
-    pub async fn get_problem(
-        &self,
-        id: &str,
-    ) -> Result<Option<ProblemRecord>, PgRecordStoreError> {
+    pub async fn get_problem(&self, id: &str) -> Result<Option<ProblemRecord>, PgRecordStoreError> {
         self.get_record(id, "Problem").await
     }
 
@@ -174,17 +159,12 @@ impl PostgresRecordStore {
     }
 
     /// Retrieve an insight record by ID.
-    pub async fn get_insight(
-        &self,
-        id: &str,
-    ) -> Result<Option<InsightRecord>, PgRecordStoreError> {
+    pub async fn get_insight(&self, id: &str) -> Result<Option<InsightRecord>, PgRecordStoreError> {
         self.get_record(id, "Insight").await
     }
 
     /// Get all open observations (status = 'Open').
-    pub async fn open_observations(
-        &self,
-    ) -> Result<Vec<ObservationRecord>, PgRecordStoreError> {
+    pub async fn open_observations(&self) -> Result<Vec<ObservationRecord>, PgRecordStoreError> {
         let rows: Vec<EvolutionRow> = sqlx::query_as(
             "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
              FROM evolution_records WHERE record_type = 'Observation' AND status = 'Open' \
@@ -202,9 +182,7 @@ impl PostgresRecordStore {
     }
 
     /// Get all open insights sorted by priority score (highest first).
-    pub async fn ranked_insights(
-        &self,
-    ) -> Result<Vec<InsightRecord>, PgRecordStoreError> {
+    pub async fn ranked_insights(&self) -> Result<Vec<InsightRecord>, PgRecordStoreError> {
         let rows: Vec<EvolutionRow> = sqlx::query_as(
             "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
              FROM evolution_records WHERE record_type = 'Insight' AND status = 'Open' \
@@ -222,17 +200,13 @@ impl PostgresRecordStore {
     }
 
     /// Count records by type.
-    pub async fn count(
-        &self,
-        record_type: RecordType,
-    ) -> Result<i64, PgRecordStoreError> {
+    pub async fn count(&self, record_type: RecordType) -> Result<i64, PgRecordStoreError> {
         let type_str = record_type_to_string(record_type);
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM evolution_records WHERE record_type = $1",
-        )
-        .bind(type_str)
-        .fetch_one(&self.pool)
-        .await?;
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM evolution_records WHERE record_type = $1")
+                .bind(type_str)
+                .fetch_one(&self.pool)
+                .await?;
 
         Ok(row.0)
     }
@@ -272,14 +246,12 @@ impl PostgresRecordStore {
 
         rows.into_iter()
             .map(|(id, rt, st)| {
-                let record_type = string_to_record_type(&rt)
-                    .ok_or_else(|| PgRecordStoreError::Serialization(
-                        format!("unknown record type: {rt}"),
-                    ))?;
-                let status = string_to_record_status(&st)
-                    .ok_or_else(|| PgRecordStoreError::Serialization(
-                        format!("unknown status: {st}"),
-                    ))?;
+                let record_type = string_to_record_type(&rt).ok_or_else(|| {
+                    PgRecordStoreError::Serialization(format!("unknown record type: {rt}"))
+                })?;
+                let status = string_to_record_status(&st).ok_or_else(|| {
+                    PgRecordStoreError::Serialization(format!("unknown status: {st}"))
+                })?;
                 Ok((id, record_type, status))
             })
             .collect()

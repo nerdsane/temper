@@ -7,8 +7,8 @@ use std::convert::Infallible;
 
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::state::ServerState;
 
@@ -39,9 +39,7 @@ pub async fn handle_events(
         match result {
             Ok(change) => {
                 let data = serde_json::to_string(&change).unwrap_or_default();
-                Some(Ok(Event::default()
-                    .event("state_change")
-                    .data(data)))
+                Some(Ok(Event::default().event("state_change").data(data)))
             }
             // Lagged receiver: skip missed events and continue
             Err(_) => None,
