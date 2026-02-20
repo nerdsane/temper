@@ -1,0 +1,102 @@
+# CC Session Entity — Claude Code Session Lifecycle
+#
+# I spawn CC sessions and forget about them.
+# This tracks each session from spawn to verified merge.
+# The "output_reviewed" guard is the one I skip most —
+# CC finishes, I trust it shipped, bugs follow.
+
+[automaton]
+name = "CCSession"
+states = ["Spawned", "Running", "Completed", "Failed", "Reviewed", "Merged", "Rejected"]
+initial = "Spawned"
+
+# --- State Variables ---
+
+[[state]]
+name = "output_reviewed"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "ci_passed"
+type = "bool"
+initial = "false"
+
+# --- Actions ---
+
+[[action]]
+name = "Start"
+kind = "internal"
+from = ["Spawned"]
+to = "Running"
+params = ["SessionId", "Prompt", "WorkDir"]
+hint = "CC session started running."
+
+[[action]]
+name = "Complete"
+kind = "internal"
+from = ["Running"]
+to = "Completed"
+params = ["ExitCode", "OutputSummary"]
+hint = "CC exited successfully."
+
+[[action]]
+name = "Fail"
+kind = "internal"
+from = ["Running"]
+to = "Failed"
+params = ["ExitCode", "ErrorOutput"]
+hint = "CC exited with error or was killed."
+
+[[action]]
+name = "ReviewOutput"
+kind = "input"
+from = ["Completed"]
+to = "Reviewed"
+effect = "set output_reviewed true"
+params = ["ReviewNotes"]
+hint = "I actually read what CC wrote. This is the step I skip."
+
+[[action]]
+name = "MarkCIPassed"
+kind = "internal"
+from = ["Completed", "Reviewed"]
+effect = "set ci_passed true"
+hint = "CI passed on the branch CC pushed to."
+
+[[action]]
+name = "Merge"
+kind = "input"
+from = ["Reviewed"]
+to = "Merged"
+guard = "is_true ci_passed"
+params = ["Branch", "CommitHash"]
+hint = "Merge CC's work. Must have reviewed output (enforced by state) AND CI must pass."
+
+[[action]]
+name = "Reject"
+kind = "input"
+from = ["Completed", "Reviewed"]
+to = "Rejected"
+params = ["Reason"]
+hint = "CC's output was wrong. Discard or redo."
+
+[[action]]
+name = "Retry"
+kind = "input"
+from = ["Failed", "Rejected"]
+to = "Spawned"
+params = ["NewPrompt"]
+hint = "Try again with a different prompt."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "MergeRequiresReview"
+when = ["Merged"]
+assert = "output_reviewed"
+
+[[invariant]]
+name = "MergeRequiresCI"
+when = ["Merged"]
+assert = "ci_passed"

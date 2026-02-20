@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Haku Ops — Engineering Pipeline</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --surface-2: #1a1a26;
+    --border: #2a2a3a;
+    --text: #e0e0e8;
+    --text-dim: #8888a0;
+    --accent: #6c8cff;
+    --green: #4ade80;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --purple: #a78bfa;
+    --cyan: #22d3ee;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 14px;
+    font-weight: 400;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .title-row {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 32px;
+  }
+  .title-row .dragon { font-size: 28px; }
+  .title-row .name {
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .title-row .sub {
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  /* Stats bar */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-bottom: 32px;
+  }
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+  }
+  .stat .num {
+    font-size: 32px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .stat .label {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-top: 4px;
+  }
+  .stat.verified .num { color: var(--green); }
+  .stat.active .num { color: var(--accent); }
+  .stat.seed .num { color: var(--amber); }
+  .stat.scratched .num { color: var(--red); }
+  .stat.findings .num { color: var(--purple); }
+
+  /* Pipeline viz */
+  .pipeline {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 32px;
+  }
+  .pipeline h2 {
+    font-size: 12px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 16px;
+  }
+  .pipeline-stages {
+    display: flex;
+    gap: 4px;
+    align-items: stretch;
+    min-height: 80px;
+  }
+  .stage {
+    flex: 1;
+    background: var(--surface-2);
+    border-radius: 6px;
+    padding: 12px 8px;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 0;
+  }
+  .stage .stage-name {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+    white-space: nowrap;
+  }
+  .stage .count {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .stage .dots {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    justify-content: center;
+    margin-top: 8px;
+  }
+  .stage .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: transform 0.15s;
+  }
+  .stage .dot:hover { transform: scale(1.5); }
+  .stage-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-dim);
+    font-size: 16px;
+    padding: 0 2px;
+  }
+
+  /* Proposal list */
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 24px;
+  }
+  .section h2 {
+    font-size: 12px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 16px;
+  }
+  .proposal-row {
+    display: grid;
+    grid-template-columns: 100px 1fr 120px 80px;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+    font-size: 13px;
+  }
+  .proposal-row:last-child { border-bottom: none; }
+  .proposal-num { color: var(--accent); font-weight: 600; }
+  .proposal-title { color: var(--text); }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-align: center;
+  }
+  .badge-verified { background: rgba(74,222,128,0.15); color: var(--green); }
+  .badge-seed { background: rgba(251,191,36,0.15); color: var(--amber); }
+  .badge-implementing { background: rgba(108,140,255,0.15); color: var(--accent); }
+  .badge-planned { background: rgba(34,211,238,0.15); color: var(--cyan); }
+  .badge-approved { background: rgba(167,139,250,0.15); color: var(--purple); }
+  .badge-completed { background: rgba(74,222,128,0.1); color: #86efac; }
+  .badge-scratched { background: rgba(248,113,113,0.15); color: var(--red); text-decoration: line-through; }
+
+  .events-col { color: var(--text-dim); text-align: right; }
+
+  /* Findings */
+  .finding-row {
+    display: grid;
+    grid-template-columns: 80px 1fr 80px;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .finding-row:last-child { border-bottom: none; }
+  .badge-observed { background: rgba(251,191,36,0.15); color: var(--amber); }
+  .badge-triaged { background: rgba(108,140,255,0.15); color: var(--accent); }
+  .badge-resolved { background: rgba(74,222,128,0.15); color: var(--green); }
+
+  /* Event timeline */
+  .timeline {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 24px;
+  }
+  .timeline h2 {
+    font-size: 12px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 16px;
+  }
+  .tl-event {
+    display: flex;
+    gap: 12px;
+    padding: 6px 0;
+    font-size: 12px;
+    align-items: baseline;
+  }
+  .tl-time { color: var(--text-dim); min-width: 80px; }
+  .tl-action { color: var(--accent); min-width: 160px; }
+  .tl-detail { color: var(--text-dim); }
+  .tl-arrow { color: var(--text-dim); }
+
+  /* Tooltip */
+  .tooltip {
+    display: none;
+    position: fixed;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    font-size: 12px;
+    max-width: 300px;
+    z-index: 100;
+    pointer-events: none;
+  }
+  .tooltip.show { display: block; }
+  .tooltip .tt-num { color: var(--accent); font-weight: 600; }
+  .tooltip .tt-title { color: var(--text); margin-top: 4px; }
+  .tooltip .tt-guards { color: var(--text-dim); margin-top: 6px; font-size: 11px; }
+
+  .refresh-btn {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+    transition: all 0.15s;
+  }
+  .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 32px;
+  }
+  .last-updated {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+</style>
+</head>
+<body>
+
+<div class="header-row">
+  <div>
+    <h1>Engineering Pipeline</h1>
+    <div class="title-row">
+      <span class="dragon">🐉</span>
+      <span class="name">Haku Ops</span>
+      <span class="sub">Deep Sci-Fi · Temper Backend</span>
+    </div>
+  </div>
+  <div style="text-align: right">
+    <button class="refresh-btn" onclick="load()">↻ Refresh</button>
+    <div class="last-updated" id="updated"></div>
+  </div>
+</div>
+
+<div class="stats" id="stats"></div>
+
+<div class="pipeline">
+  <h2>Pipeline Flow</h2>
+  <div class="pipeline-stages" id="pipeline"></div>
+</div>
+
+<div class="section">
+  <h2>Proposals</h2>
+  <div id="proposals"></div>
+</div>
+
+<div class="section">
+  <h2>Open Findings</h2>
+  <div id="findings"></div>
+</div>
+
+<div class="timeline">
+  <h2>Recent Events</h2>
+  <div id="timeline"></div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+const BASE = 'http://localhost:3001/tdata';
+const STAGES = ['Seed', 'Planned', 'Approved', 'Implementing', 'Completed', 'Verified'];
+const STAGE_COLORS = {
+  Seed: '#fbbf24', Planned: '#22d3ee', Approved: '#a78bfa',
+  Implementing: '#6c8cff', Completed: '#86efac', Verified: '#4ade80',
+  Scratched: '#f87171'
+};
+
+async function load() {
+  const [proposals, findings] = await Promise.all([
+    fetch(`${BASE}/Proposals`).then(r => r.json()),
+    fetch(`${BASE}/Findings`).then(r => r.json())
+  ]);
+
+  const props = proposals.value || [];
+  const finds = findings.value || [];
+
+  // Stats
+  const verified = props.filter(p => p.status === 'Verified').length;
+  const active = props.filter(p => ['Planned','Approved','Implementing','Completed'].includes(p.status)).length;
+  const seeds = props.filter(p => p.status === 'Seed').length;
+  const scratched = props.filter(p => p.status === 'Scratched').length;
+
+  document.getElementById('stats').innerHTML = `
+    <div class="stat verified"><div class="num">${verified}</div><div class="label">Verified</div></div>
+    <div class="stat active"><div class="num">${active}</div><div class="label">Active</div></div>
+    <div class="stat seed"><div class="num">${seeds}</div><div class="label">Seeds</div></div>
+    <div class="stat scratched"><div class="num">${scratched}</div><div class="label">Scratched</div></div>
+    <div class="stat findings"><div class="num">${finds.length}</div><div class="label">Findings</div></div>
+  `;
+
+  // Pipeline
+  const byStage = {};
+  STAGES.forEach(s => byStage[s] = []);
+  props.forEach(p => {
+    if (byStage[p.status]) byStage[p.status].push(p);
+  });
+
+  let pipelineHTML = '';
+  STAGES.forEach((stage, i) => {
+    const items = byStage[stage];
+    const dots = items.map(p => {
+      const num = p.fields.ProposalNumber || '?';
+      const title = p.fields.Title || '?';
+      return `<div class="dot" style="background:${STAGE_COLORS[stage]}"
+        onmouseenter="showTip(event,'${num}','${title.replace(/'/g,"\\'")}','${stage}',${JSON.stringify(p.booleans || {}).replace(/"/g,'&quot;')})"
+        onmouseleave="hideTip()"></div>`;
+    }).join('');
+
+    pipelineHTML += `<div class="stage">
+      <div class="stage-name">${stage}</div>
+      <div class="count">${items.length}</div>
+      <div class="dots">${dots}</div>
+    </div>`;
+    if (i < STAGES.length - 1) {
+      pipelineHTML += `<div class="stage-arrow">→</div>`;
+    }
+  });
+  document.getElementById('pipeline').innerHTML = pipelineHTML;
+
+  // Proposals table
+  const sorted = [...props].sort((a, b) => {
+    const na = parseInt((a.fields.ProposalNumber || '').replace('PROP-', '')) || 0;
+    const nb = parseInt((b.fields.ProposalNumber || '').replace('PROP-', '')) || 0;
+    return na - nb;
+  });
+
+  document.getElementById('proposals').innerHTML = sorted.map(p => {
+    const num = p.fields.ProposalNumber || '?';
+    const title = p.fields.Title || '?';
+    const cls = `badge badge-${p.status.toLowerCase()}`;
+    return `<div class="proposal-row">
+      <div class="proposal-num">${num}</div>
+      <div class="proposal-title">${title}</div>
+      <div><span class="${cls}">${p.status}</span></div>
+      <div class="events-col">${(p.events||[]).length} events</div>
+    </div>`;
+  }).join('');
+
+  // Findings
+  document.getElementById('findings').innerHTML = finds.map(f => {
+    const cls = `badge badge-${f.status.toLowerCase()}`;
+    return `<div class="finding-row">
+      <div><span class="${cls}">${f.status}</span></div>
+      <div>${f.fields.Description || '?'}</div>
+      <div style="color:var(--text-dim)">${f.fields.Priority || '?'}</div>
+    </div>`;
+  }).join('');
+
+  // Timeline — collect all events from all proposals, sort by time desc
+  const allEvents = [];
+  props.forEach(p => {
+    const num = p.fields.ProposalNumber || '?';
+    (p.events || []).forEach(e => {
+      allEvents.push({ ...e, num });
+    });
+  });
+  allEvents.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+
+  document.getElementById('timeline').innerHTML = allEvents.slice(0, 20).map(e => {
+    const t = new Date(e.timestamp);
+    const time = t.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return `<div class="tl-event">
+      <span class="tl-time">${time}</span>
+      <span class="tl-action">${e.num} · ${e.action}</span>
+      <span class="tl-arrow">${e.from_status} → ${e.to_status}</span>
+    </div>`;
+  }).join('');
+
+  document.getElementById('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+}
+
+function showTip(ev, num, title, stage, booleans) {
+  const tip = document.getElementById('tooltip');
+  let guards = '';
+  try {
+    const b = typeof booleans === 'string' ? JSON.parse(booleans) : booleans;
+    guards = Object.entries(b).map(([k,v]) => `${v ? '✓' : '✗'} ${k}`).join('<br>');
+  } catch(e) {}
+
+  tip.innerHTML = `
+    <div class="tt-num">${num}</div>
+    <div class="tt-title">${title}</div>
+    <div style="margin-top:4px;color:${STAGE_COLORS[stage]}">${stage}</div>
+    ${guards ? `<div class="tt-guards">${guards}</div>` : ''}
+  `;
+  tip.style.left = (ev.clientX + 12) + 'px';
+  tip.style.top = (ev.clientY - 10) + 'px';
+  tip.classList.add('show');
+}
+
+function hideTip() {
+  document.getElementById('tooltip').classList.remove('show');
+}
+
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>

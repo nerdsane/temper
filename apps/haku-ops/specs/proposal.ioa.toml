@@ -1,0 +1,136 @@
+# Proposal Entity — Haku's Engineering Pipeline
+#
+# Tracks proposals from observation through implementation to verification.
+# Enforces the workflow I defined in dsf-map/proposal-pipeline.md
+# but constantly violate because markdown doesn't have guards.
+
+[automaton]
+name = "Proposal"
+states = ["Seed", "Planned", "Approved", "Implementing", "Completed", "Verified", "Scratched"]
+initial = "Seed"
+
+# --- State Variables ---
+
+[[state]]
+name = "has_plan"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "has_showboat"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "has_ci_pass"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "is_high_risk"
+type = "bool"
+initial = "false"
+
+# --- Actions ---
+
+[[action]]
+name = "WritePlan"
+kind = "input"
+from = ["Seed"]
+to = "Planned"
+effect = "set has_plan true"
+params = ["ArchDoc", "RiskTier"]
+hint = "Write architecture plan. Moves seed to planned. Required before implementation."
+
+[[action]]
+name = "MarkHighRisk"
+kind = "input"
+from = ["Seed", "Planned"]
+effect = "set is_high_risk true"
+hint = "Flag as high-risk. Requires Rita's approval before implementation."
+
+[[action]]
+name = "Approve"
+kind = "input"
+from = ["Planned"]
+to = "Approved"
+guard = "is_true has_plan"
+params = ["ApprovedBy"]
+hint = "Rita approves the plan. Required for high-risk proposals. Low-risk auto-approves."
+
+[[action]]
+name = "StartImplementation"
+kind = "internal"
+from = ["Approved"]
+to = "Implementing"
+params = ["CCSessionId"]
+hint = "Launch Claude Code session. Must have approval first."
+
+[[action]]
+name = "AttachShowboat"
+kind = "input"
+from = ["Implementing"]
+effect = "set has_showboat true"
+params = ["ShowboatDoc"]
+hint = "Attach showboat proof-of-work doc during implementation."
+
+[[action]]
+name = "CompleteImplementation"
+kind = "internal"
+from = ["Implementing"]
+to = "Completed"
+guard = "is_true has_showboat"
+params = ["Summary"]
+hint = "CC session finished. MUST have showboat proof-of-work doc."
+
+[[action]]
+name = "MarkCIPassed"
+kind = "internal"
+from = ["Completed"]
+effect = "set has_ci_pass true"
+params = ["RunId"]
+hint = "CI passed on the branch."
+
+[[action]]
+name = "VerifyDeployment"
+kind = "internal"
+from = ["Completed"]
+to = "Verified"
+guard = "is_true has_ci_pass"
+params = ["DeploymentUrl", "HealthCheckResult"]
+hint = "CI passed, deployment verified healthy. This is actually done."
+
+[[action]]
+name = "Scratch"
+kind = "input"
+from = ["Seed", "Planned", "Approved"]
+to = "Scratched"
+params = ["Reason"]
+hint = "Kill a proposal. Can't scratch something already implementing."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ImplementingRequiresPlan"
+when = ["Implementing", "Completed", "Verified"]
+assert = "has_plan"
+
+[[invariant]]
+name = "CompletedRequiresShowboat"
+when = ["Completed", "Verified"]
+assert = "has_showboat"
+
+[[invariant]]
+name = "VerifiedRequiresCI"
+when = ["Verified"]
+assert = "has_ci_pass"
+
+[[invariant]]
+name = "ScratchedIsFinal"
+when = ["Scratched"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "VerifiedIsFinal"
+when = ["Verified"]
+assert = "no_further_transitions"

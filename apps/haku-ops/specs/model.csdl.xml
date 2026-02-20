@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Haku Ops — Engineering Pipeline Entities
+
+  Four entity types tracking the lifecycle of proposals,
+  CC sessions, deployments, and patrol findings.
+-->
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+
+    <Schema Namespace="Temper.Vocab" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <Term Name="StateMachine.States" Type="Collection(Edm.String)" AppliesTo="EntityType"/>
+      <Term Name="StateMachine.InitialState" Type="Edm.String" AppliesTo="EntityType"/>
+      <Term Name="StateMachine.Spec" Type="Edm.String" AppliesTo="EntityType"/>
+      <Term Name="StateMachine.ValidFromStates" Type="Collection(Edm.String)" AppliesTo="Action"/>
+      <Term Name="StateMachine.TargetState" Type="Edm.String" AppliesTo="Action"/>
+      <Term Name="Agent.Hint" Type="Edm.String" AppliesTo="Action Function EntityType"/>
+    </Schema>
+
+    <Schema Namespace="HakuOps" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <!-- ============================================================== -->
+      <!-- Proposal                                                        -->
+      <!-- ============================================================== -->
+      <EntityType Name="Proposal">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="Title" Type="Edm.String" Nullable="false"/>
+        <Property Name="RiskTier" Type="Edm.String"/>
+        <Property Name="ProposalNumber" Type="Edm.String"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Seed</String><String>Planned</String>
+            <String>Approved</String><String>Implementing</String>
+            <String>Completed</String><String>Verified</String>
+            <String>Scratched</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Seed"/>
+        <Annotation Term="Temper.Vocab.StateMachine.Spec" String="proposal.ioa.toml"/>
+      </EntityType>
+
+      <!-- ============================================================== -->
+      <!-- CCSession                                                       -->
+      <!-- ============================================================== -->
+      <EntityType Name="CCSession">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="Prompt" Type="Edm.String"/>
+        <Property Name="WorkDir" Type="Edm.String"/>
+        <Property Name="ProposalId" Type="Edm.Guid"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Spawned</String><String>Running</String>
+            <String>Completed</String><String>Failed</String>
+            <String>Reviewed</String><String>Merged</String>
+            <String>Rejected</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Spawned"/>
+        <Annotation Term="Temper.Vocab.StateMachine.Spec" String="cc-session.ioa.toml"/>
+      </EntityType>
+
+      <!-- ============================================================== -->
+      <!-- Deployment                                                      -->
+      <!-- ============================================================== -->
+      <EntityType Name="Deployment">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="Branch" Type="Edm.String"/>
+        <Property Name="CommitHash" Type="Edm.String"/>
+        <Property Name="Environment" Type="Edm.String"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Committed</String><String>CIRunning</String>
+            <String>CIPassed</String><String>CIFailed</String>
+            <String>Deploying</String><String>Deployed</String>
+            <String>Verified</String><String>RolledBack</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Committed"/>
+        <Annotation Term="Temper.Vocab.StateMachine.Spec" String="deployment.ioa.toml"/>
+      </EntityType>
+
+      <!-- ============================================================== -->
+      <!-- Finding                                                         -->
+      <!-- ============================================================== -->
+      <EntityType Name="Finding">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="Description" Type="Edm.String" Nullable="false"/>
+        <Property Name="Category" Type="Edm.String"/>
+        <Property Name="Priority" Type="Edm.String"/>
+        <Property Name="ProposalId" Type="Edm.Guid"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Observed</String><String>Triaged</String>
+            <String>Actioned</String><String>Resolved</String>
+            <String>WontFix</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Observed"/>
+        <Annotation Term="Temper.Vocab.StateMachine.Spec" String="finding.ioa.toml"/>
+      </EntityType>
+
+      <!-- ============================================================== -->
+      <!-- Entity Container                                                -->
+      <!-- ============================================================== -->
+      <EntityContainer Name="HakuOpsContainer">
+        <EntitySet Name="Proposals" EntityType="HakuOps.Proposal"/>
+        <EntitySet Name="CCSessions" EntityType="HakuOps.CCSession"/>
+        <EntitySet Name="Deployments" EntityType="HakuOps.Deployment"/>
+        <EntitySet Name="Findings" EntityType="HakuOps.Finding"/>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>
