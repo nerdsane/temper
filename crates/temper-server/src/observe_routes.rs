@@ -1500,20 +1500,12 @@ struct WorkflowsResponse {
 async fn handle_workflows(State(state): State<ServerState>) -> Json<WorkflowsResponse> {
     let persisted_events: Option<Vec<crate::state::DesignTimeEvent>> =
         if let Some(ref store) = state.event_store {
-            let rows: Result<
-                Vec<(
-                    String,
-                    String,
-                    String,
-                    String,
-                    Option<String>,
-                    Option<bool>,
-                    Option<i16>,
-                    Option<i16>,
-                    chrono::DateTime<chrono::Utc>,
-                )>,
-                sqlx::Error,
-            > = sqlx::query_as(
+            type DtEventRow = (
+                String, String, String, String,
+                Option<String>, Option<bool>, Option<i16>, Option<i16>,
+                chrono::DateTime<chrono::Utc>,
+            );
+            let rows: Result<Vec<DtEventRow>, sqlx::Error> = sqlx::query_as(
                 "SELECT kind, entity_type, tenant, summary, level, passed, step_number, \
                         total_steps, created_at \
                  FROM design_time_events \
@@ -1943,18 +1935,12 @@ async fn handle_trajectories(
         .fetch_all(store.pool())
         .await;
 
-        let failed_rows: Result<
-            Vec<(
-                String,
-                String,
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                chrono::DateTime<chrono::Utc>,
-            )>,
-            sqlx::Error,
-        > = sqlx::query_as(
+        type FailedRow = (
+            String, String, String, String,
+            Option<String>, Option<String>,
+            chrono::DateTime<chrono::Utc>,
+        );
+        let failed_rows: Result<Vec<FailedRow>, sqlx::Error> = sqlx::query_as(
             "SELECT tenant, entity_type, entity_id, action, from_status, error, created_at \
              FROM trajectories \
              WHERE success = false \
@@ -2279,32 +2265,26 @@ async fn list_evolution_records(
         let total_decisions = pg_store.count(RecordType::Decision).await.unwrap_or(0);
         let total_insights = pg_store.count(RecordType::Insight).await.unwrap_or(0);
 
-        if type_filter.is_none() || type_filter == Some("problem") {
-            if total_problems > 0 {
-                records.push(serde_json::json!({
-                    "record_type": "Problem",
-                    "count": total_problems,
-                    "note": "Use GET /observe/evolution/records/{id} for individual records",
-                }));
-            }
+        if (type_filter.is_none() || type_filter == Some("problem")) && total_problems > 0 {
+            records.push(serde_json::json!({
+                "record_type": "Problem",
+                "count": total_problems,
+                "note": "Use GET /observe/evolution/records/{id} for individual records",
+            }));
         }
-        if type_filter.is_none() || type_filter == Some("analysis") {
-            if total_analyses > 0 {
-                records.push(serde_json::json!({
-                    "record_type": "Analysis",
-                    "count": total_analyses,
-                    "note": "Use GET /observe/evolution/records/{id} for individual records",
-                }));
-            }
+        if (type_filter.is_none() || type_filter == Some("analysis")) && total_analyses > 0 {
+            records.push(serde_json::json!({
+                "record_type": "Analysis",
+                "count": total_analyses,
+                "note": "Use GET /observe/evolution/records/{id} for individual records",
+            }));
         }
-        if type_filter.is_none() || type_filter == Some("decision") {
-            if total_decisions > 0 {
-                records.push(serde_json::json!({
-                    "record_type": "Decision",
-                    "count": total_decisions,
-                    "note": "Use GET /observe/evolution/records/{id} for individual records",
-                }));
-            }
+        if (type_filter.is_none() || type_filter == Some("decision")) && total_decisions > 0 {
+            records.push(serde_json::json!({
+                "record_type": "Decision",
+                "count": total_decisions,
+                "note": "Use GET /observe/evolution/records/{id} for individual records",
+            }));
         }
 
         return Json(serde_json::json!({
