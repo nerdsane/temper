@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quick Form</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg: #09090b; --surface: #18181b; --surface-2: #27272a; --surface-3: #3f3f46;
+    --text: #fafafa; --text-2: #a1a1aa; --text-3: #71717a;
+    --border: #27272a; --border-2: #3f3f46;
+    --accent: #6c8cff; --accent-dim: rgba(108,140,255,0.15); --accent-bg: rgba(108,140,255,0.08);
+    --ok: #4ade80; --ok-dim: rgba(74,222,128,0.15);
+    --warn: #fbbf24; --warn-dim: rgba(251,191,36,0.15);
+    --err: #f87171; --err-dim: rgba(248,113,113,0.15);
+    --font-sans: 'Inter', -apple-system, system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+    --space-5: 24px; --space-6: 32px; --space-7: 48px;
+    --radius-sm: 4px; --radius-md: 8px; --radius-lg: 12px; --radius-full: 9999px;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+    --duration-fast: 100ms; --duration-norm: 200ms; --duration-slow: 400ms;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: var(--font-sans); background: var(--bg); color: var(--text); min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: var(--space-5); }
+
+  .form-container {
+    width: min(100%, 32rem);
+  }
+
+  /* Progress indicator */
+  .progress {
+    display: flex; align-items: center; gap: var(--space-2);
+    margin-bottom: var(--space-7);
+  }
+  .progress-step {
+    display: flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; border-radius: 50%;
+    font: 500 0.75rem var(--font-mono);
+    border: 1px solid var(--border); color: var(--text-3);
+    transition: all var(--duration-norm) var(--ease);
+    flex-shrink: 0;
+  }
+  .progress-step.active { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+  .progress-step.done { border-color: var(--ok); color: var(--ok); background: var(--ok-dim); }
+  .progress-line {
+    flex: 1; height: 1px; background: var(--border);
+    transition: background var(--duration-norm);
+  }
+  .progress-line.done { background: var(--ok); }
+
+  /* Form card */
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: var(--space-6);
+  }
+  .card-title { font-size: 1.25rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: var(--space-1); }
+  .card-desc { font-size: 0.875rem; color: var(--text-2); line-height: 1.5; margin-bottom: var(--space-6); }
+
+  /* Steps */
+  .step { display: none; }
+  .step.active { display: block; }
+
+  /* Field */
+  .field { margin-bottom: var(--space-5); }
+  .field:last-child { margin-bottom: 0; }
+  .field-label {
+    font: 500 0.6875rem/1.3 var(--font-mono); text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--text-3); margin-bottom: var(--space-2); display: block;
+  }
+  .field-hint { font-size: 0.75rem; color: var(--text-3); margin-top: var(--space-1); }
+
+  .input {
+    width: 100%; height: 40px; padding: 0 var(--space-3);
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-md); color: var(--text);
+    font: 0.875rem var(--font-sans);
+    transition: border-color var(--duration-fast);
+  }
+  .input:focus { border-color: var(--accent); outline: none; }
+  .input::placeholder { color: var(--text-3); }
+  .input.error { border-color: var(--err); }
+  textarea.input { height: 100px; padding: var(--space-3); resize: vertical; line-height: 1.5; }
+
+  select.input {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2371717a'%3E%3Cpath d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px;
+  }
+
+  /* Radio group */
+  .radio-group { display: flex; flex-direction: column; gap: var(--space-2); }
+  .radio-option {
+    display: flex; align-items: center; gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-md); cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+  }
+  .radio-option:hover { border-color: var(--accent); }
+  .radio-option.selected { border-color: var(--accent); background: var(--accent-bg); }
+  .radio-dot {
+    width: 16px; height: 16px; border-radius: 50%;
+    border: 2px solid var(--border-2); flex-shrink: 0;
+    transition: all var(--duration-fast);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .radio-option.selected .radio-dot {
+    border-color: var(--accent);
+  }
+  .radio-option.selected .radio-dot::after {
+    content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+  }
+  .radio-label { font-size: 0.875rem; }
+  .radio-desc { font-size: 0.75rem; color: var(--text-3); margin-top: 2px; }
+
+  /* Toggle */
+  .toggle-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: var(--space-3) 0;
+  }
+  .toggle-text { font-size: 0.875rem; }
+  .toggle-sub { font-size: 0.75rem; color: var(--text-3); margin-top: 2px; }
+  .toggle {
+    width: 40px; height: 22px; border-radius: var(--radius-full);
+    background: var(--surface-3); cursor: pointer; position: relative;
+    transition: background var(--duration-fast);
+    flex-shrink: 0;
+  }
+  .toggle.on { background: var(--accent); }
+  .toggle::after {
+    content: ''; position: absolute; top: 3px; left: 3px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: white; transition: transform var(--duration-fast) var(--ease);
+  }
+  .toggle.on::after { transform: translateX(18px); }
+
+  /* Buttons */
+  .form-footer { display: flex; justify-content: space-between; margin-top: var(--space-6); gap: var(--space-3); }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1);
+    height: 40px; padding: 0 var(--space-5); border-radius: var(--radius-md);
+    font: 500 0.875rem var(--font-sans); cursor: pointer;
+    transition: all var(--duration-fast) var(--ease); border: 1px solid transparent;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { filter: brightness(1.1); }
+  .btn-ghost { background: transparent; border-color: var(--border); color: var(--text-2); }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Success state */
+  .success {
+    text-align: center; padding: var(--space-7) 0;
+  }
+  .success-icon {
+    width: 56px; height: 56px; border-radius: 50%;
+    background: var(--ok-dim); color: var(--ok);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 1.5rem; margin-bottom: var(--space-5);
+  }
+  .success-title { font-size: 1.125rem; font-weight: 600; margin-bottom: var(--space-2); }
+  .success-body { font-size: 0.875rem; color: var(--text-2); line-height: 1.5; }
+
+  /* Summary */
+  .summary-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.875rem;
+  }
+  .summary-row:last-child { border-bottom: none; }
+  .summary-key { color: var(--text-3); font: 0.75rem var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; }
+  .summary-val { text-align: right; }
+
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 0.01ms !important; } }
+</style>
+</head>
+<body>
+
+<div class="form-container">
+  <div class="progress" id="progress"></div>
+
+  <div class="card">
+    <!-- Step 1: What -->
+    <div class="step active" data-step="1">
+      <div class="card-title">New Proposal</div>
+      <div class="card-desc">What do you want to build? Haku will pick this up on the next cycle.</div>
+
+      <div class="field">
+        <label class="field-label">Title</label>
+        <input class="input" id="f-title" placeholder="e.g. Add story embedding search">
+      </div>
+      <div class="field">
+        <label class="field-label">Description</label>
+        <textarea class="input" id="f-desc" placeholder="What's the problem and what's the proposed solution?"></textarea>
+      </div>
+      <div class="field">
+        <label class="field-label">Priority</label>
+        <div class="radio-group" id="f-priority">
+          <div class="radio-option" data-value="low" onclick="selectRadio(this)">
+            <div class="radio-dot"></div>
+            <div><div class="radio-label">Low</div><div class="radio-desc">Nice to have, no urgency</div></div>
+          </div>
+          <div class="radio-option" data-value="medium" onclick="selectRadio(this)">
+            <div class="radio-dot"></div>
+            <div><div class="radio-label">Medium</div><div class="radio-desc">Should happen this week</div></div>
+          </div>
+          <div class="radio-option selected" data-value="high" onclick="selectRadio(this)">
+            <div class="radio-dot"></div>
+            <div><div class="radio-label">High</div><div class="radio-desc">Blocking other work</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 2: Config -->
+    <div class="step" data-step="2">
+      <div class="card-title">Configuration</div>
+      <div class="card-desc">How should this be handled?</div>
+
+      <div class="field">
+        <label class="field-label">Risk Tier</label>
+        <select class="input" id="f-risk">
+          <option value="low">Low — Haku implements directly</option>
+          <option value="high" selected>High — Needs architecture review first</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="field-label">Target Area</label>
+        <select class="input" id="f-area">
+          <option value="backend">Backend</option>
+          <option value="frontend">Frontend</option>
+          <option value="infra">Infrastructure</option>
+          <option value="data">Data / Content</option>
+        </select>
+      </div>
+      <div class="field">
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-text">Auto-select for next cycle</div>
+            <div class="toggle-sub">Haku picks this up immediately</div>
+          </div>
+          <div class="toggle on" id="f-autoselect" onclick="toggleSwitch(this)"></div>
+        </div>
+      </div>
+      <div class="field">
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-text">Requires showboat proof</div>
+            <div class="toggle-sub">CC session must produce verification doc</div>
+          </div>
+          <div class="toggle on" id="f-showboat" onclick="toggleSwitch(this)"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 3: Review -->
+    <div class="step" data-step="3">
+      <div class="card-title">Review & Submit</div>
+      <div class="card-desc">Confirm everything looks right.</div>
+      <div id="summary"></div>
+    </div>
+
+    <!-- Step 4: Done -->
+    <div class="step" data-step="4">
+      <div class="success">
+        <div class="success-icon">✓</div>
+        <div class="success-title">Proposal Created</div>
+        <div class="success-body" id="success-msg">PROP-029 is in the pipeline as a Seed.<br>Haku will pick it up on the next cycle.</div>
+      </div>
+    </div>
+
+    <div class="form-footer" id="footer"></div>
+  </div>
+</div>
+
+<script>
+let currentStep = 1;
+const totalSteps = 4;
+
+function renderProgress() {
+  let html = '';
+  for (let i = 1; i <= 3; i++) {
+    const cls = i < currentStep ? 'done' : i === currentStep ? 'active' : '';
+    html += `<div class="progress-step ${cls}">${i < currentStep ? '✓' : i}</div>`;
+    if (i < 3) html += `<div class="progress-line ${i < currentStep ? 'done' : ''}"></div>`;
+  }
+  document.getElementById('progress').innerHTML = html;
+}
+
+function renderFooter() {
+  const footer = document.getElementById('footer');
+  if (currentStep === 4) { footer.innerHTML = ''; return; }
+  footer.innerHTML = `
+    ${currentStep > 1 ? `<button class="btn btn-ghost" onclick="prev()">← Back</button>` : '<div></div>'}
+    <button class="btn btn-primary" onclick="next()">${currentStep === 3 ? 'Submit →' : 'Continue →'}</button>
+  `;
+}
+
+function showStep(n) {
+  document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+  document.querySelector(`[data-step="${n}"]`).classList.add('active');
+  currentStep = n;
+  renderProgress();
+  renderFooter();
+  if (n === 3) renderSummary();
+}
+
+function next() {
+  if (currentStep < totalSteps) showStep(currentStep + 1);
+}
+function prev() {
+  if (currentStep > 1) showStep(currentStep - 1);
+}
+
+function selectRadio(el) {
+  el.parentElement.querySelectorAll('.radio-option').forEach(o => o.classList.remove('selected'));
+  el.classList.add('selected');
+}
+
+function toggleSwitch(el) { el.classList.toggle('on'); }
+
+function getFormData() {
+  return {
+    title: document.getElementById('f-title').value || 'Untitled',
+    description: document.getElementById('f-desc').value || '—',
+    priority: document.querySelector('#f-priority .selected')?.dataset.value || 'medium',
+    risk: document.getElementById('f-risk').value,
+    area: document.getElementById('f-area').value,
+    autoselect: document.getElementById('f-autoselect').classList.contains('on'),
+    showboat: document.getElementById('f-showboat').classList.contains('on'),
+  };
+}
+
+function renderSummary() {
+  const d = getFormData();
+  document.getElementById('summary').innerHTML = [
+    ['Title', d.title],
+    ['Priority', d.priority],
+    ['Risk', d.risk],
+    ['Area', d.area],
+    ['Auto-select', d.autoselect ? 'Yes' : 'No'],
+    ['Showboat', d.showboat ? 'Required' : 'Optional'],
+    ['Description', d.description],
+  ].map(([k,v]) => `<div class="summary-row"><span class="summary-key">${k}</span><span class="summary-val">${v}</span></div>`).join('');
+}
+
+showStep(1);
+</script>
+</body>
+</html>

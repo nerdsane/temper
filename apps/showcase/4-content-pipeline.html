@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Content Pipeline</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg: #09090b; --surface: #18181b; --surface-2: #27272a; --surface-3: #3f3f46;
+    --text: #fafafa; --text-2: #a1a1aa; --text-3: #71717a;
+    --border: #27272a; --border-2: #3f3f46;
+    --accent: #6c8cff; --accent-dim: rgba(108,140,255,0.15); --accent-bg: rgba(108,140,255,0.08);
+    --ok: #4ade80; --ok-dim: rgba(74,222,128,0.15);
+    --warn: #fbbf24; --warn-dim: rgba(251,191,36,0.15);
+    --err: #f87171; --err-dim: rgba(248,113,113,0.15);
+    --info: #22d3ee; --info-dim: rgba(34,211,238,0.15);
+    --purple: #a78bfa; --purple-dim: rgba(167,139,250,0.15);
+    --font-sans: 'Inter', -apple-system, system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+    --space-5: 24px; --space-6: 32px; --space-7: 48px;
+    --radius-sm: 4px; --radius-md: 8px; --radius-lg: 12px;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+    --duration-fast: 100ms; --duration-norm: 200ms;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: var(--font-sans); background: var(--bg); color: var(--text); min-height: 100vh; }
+  .container { width: min(100% - 2rem, 72rem); margin-inline: auto; padding-block: var(--space-6); }
+
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-6); flex-wrap: wrap; gap: var(--space-4); }
+  .title { font-size: clamp(1.125rem, 2vw, 1.5rem); font-weight: 600; letter-spacing: -0.02em; }
+  .subtitle { font-size: 0.75rem; color: var(--text-3); font-family: var(--font-mono); margin-top: var(--space-1); }
+
+  /* View toggle */
+  .view-toggle {
+    display: flex; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-md); overflow: hidden;
+  }
+  .view-btn {
+    padding: var(--space-2) var(--space-4); font: 500 0.75rem var(--font-mono);
+    background: none; border: none; color: var(--text-3); cursor: pointer;
+    transition: all var(--duration-fast);
+  }
+  .view-btn.active { background: var(--accent-dim); color: var(--accent); }
+  .view-btn:hover:not(.active) { color: var(--text-2); }
+
+  /* Calendar grid */
+  .calendar {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    margin-bottom: var(--space-6);
+  }
+
+  .cal-header {
+    background: var(--surface); padding: var(--space-3);
+    font: 500 0.6875rem/1.3 var(--font-mono); text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--text-3); text-align: center;
+  }
+
+  .cal-day {
+    background: var(--bg); padding: var(--space-3);
+    min-height: 7rem; position: relative;
+    transition: background var(--duration-fast);
+  }
+  .cal-day:hover { background: var(--surface); }
+  .cal-day.other-month { opacity: 0.3; }
+  .cal-day.today { background: var(--accent-bg); }
+
+  .cal-num {
+    font: 500 0.75rem var(--font-mono); color: var(--text-3);
+    margin-bottom: var(--space-2);
+  }
+  .cal-day.today .cal-num { color: var(--accent); }
+
+  .cal-item {
+    padding: 3px 6px; border-radius: var(--radius-sm);
+    font: 0.6875rem var(--font-sans); margin-bottom: 2px;
+    cursor: pointer; transition: filter var(--duration-fast);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .cal-item:hover { filter: brightness(1.2); }
+  .cal-item.draft { background: var(--surface-3); color: var(--text-2); }
+  .cal-item.review { background: var(--warn-dim); color: var(--warn); }
+  .cal-item.scheduled { background: var(--accent-dim); color: var(--accent); }
+  .cal-item.published { background: var(--ok-dim); color: var(--ok); }
+
+  /* List view */
+  .list-view { display: none; }
+  .list-view.active { display: block; }
+  .calendar-view.active { display: grid; }
+  .calendar-view { display: none; }
+
+  .list-section { margin-bottom: var(--space-5); }
+  .list-section-title {
+    font: 500 0.6875rem/1.3 var(--font-mono); text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--text-3);
+    padding-bottom: var(--space-2); border-bottom: 1px solid var(--border);
+    margin-bottom: var(--space-3);
+  }
+
+  .post-row {
+    display: grid;
+    grid-template-columns: 2fr 1fr 6rem 6rem 4rem;
+    align-items: center; gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    transition: background var(--duration-fast);
+    cursor: pointer;
+  }
+  .post-row:hover { background: var(--surface); }
+
+  .post-title-col { font-size: 0.875rem; }
+  .post-title-col .platform { font: 0.6875rem var(--font-mono); color: var(--text-3); margin-top: 2px; }
+  .post-author { font-size: 0.8125rem; color: var(--text-2); }
+  .post-date { font: 0.75rem var(--font-mono); color: var(--text-3); }
+  .post-engagement { font: 0.75rem var(--font-mono); color: var(--text-3); text-align: right; }
+
+  .badge {
+    display: inline-flex; align-items: center; padding: 2px 8px;
+    border-radius: var(--radius-sm); font: 500 0.6875rem/1.3 var(--font-mono);
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .badge-draft { background: var(--surface-3); color: var(--text-2); }
+  .badge-review { background: var(--warn-dim); color: var(--warn); }
+  .badge-scheduled { background: var(--accent-dim); color: var(--accent); }
+  .badge-published { background: var(--ok-dim); color: var(--ok); }
+
+  /* Stats row */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+    gap: var(--space-3); margin-bottom: var(--space-6);
+  }
+  .stat {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-md); padding: var(--space-3) var(--space-4);
+  }
+  .stat-num { font: 600 1.25rem var(--font-mono); }
+  .stat-label { font: 500 0.6875rem/1.3 var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); margin-top: var(--space-1); }
+
+  /* Responsive */
+  @media (max-width: 640px) {
+    .post-row { grid-template-columns: 1fr auto; }
+    .post-author, .post-date, .post-engagement { display: none; }
+    .cal-day { min-height: 5rem; padding: var(--space-2); }
+    .cal-item { font-size: 0.6rem; }
+  }
+
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 0.01ms !important; } }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <div class="title">🔥 Content Pipeline</div>
+      <div class="subtitle">calcifer · february 2026</div>
+    </div>
+    <div class="view-toggle">
+      <button class="view-btn active" onclick="setView('calendar')">Calendar</button>
+      <button class="view-btn" onclick="setView('list')">List</button>
+    </div>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><div class="stat-num" style="color:var(--text-3)">3</div><div class="stat-label">Drafts</div></div>
+    <div class="stat"><div class="stat-num" style="color:var(--warn)">2</div><div class="stat-label">In Review</div></div>
+    <div class="stat"><div class="stat-num" style="color:var(--accent)">4</div><div class="stat-label">Scheduled</div></div>
+    <div class="stat"><div class="stat-num" style="color:var(--ok)">12</div><div class="stat-label">Published</div></div>
+  </div>
+
+  <div class="calendar-view active" id="calendar-view">
+    <div class="calendar" id="calendar"></div>
+  </div>
+
+  <div class="list-view" id="list-view"></div>
+</div>
+
+<script>
+const POSTS = [
+  { title: 'When Your AI Builds Its Own Guardrails', platform: 'Blog + X', status: 'review', author: '🐱 Jiji', date: 20, engagement: null },
+  { title: 'Temper: Shared Backend for AI Agents', platform: 'X Thread', status: 'review', author: '🔥 Calcifer', date: 20, engagement: null },
+  { title: 'Feed Rewrite: 1925→108 Lines', platform: 'X Post', status: 'scheduled', author: '🔥 Calcifer', date: 21, engagement: null },
+  { title: 'Deep Sci-Fi Feb Update', platform: 'Blog', status: 'draft', author: '🐱 Jiji', date: 22, engagement: null },
+  { title: 'Story Arc Detection is Live', platform: 'X Post', status: 'scheduled', author: '🔥 Calcifer', date: 22, engagement: null },
+  { title: 'Relationship Graphs: The Jitter Fix', platform: 'X Post', status: 'scheduled', author: '🔥 Calcifer', date: 23, engagement: null },
+  { title: 'Video Regen Pipeline', platform: 'X Thread', status: 'draft', author: '🔥 Calcifer', date: 24, engagement: null },
+  { title: 'Verification Cascade Deep Dive', platform: 'Blog', status: 'draft', author: '🐱 Jiji', date: 25, engagement: null },
+  { title: 'World Map Clusters Fix', platform: 'X Post', status: 'scheduled', author: '🔥 Calcifer', date: 25, engagement: null },
+  { title: 'SSE Migration Complete', platform: 'X Post', status: 'published', author: '🔥 Calcifer', date: 18, engagement: '2.4k' },
+  { title: 'Building in Public with AI Agents', platform: 'X Thread', status: 'published', author: '🔥 Calcifer', date: 15, engagement: '5.1k' },
+  { title: 'Deep Sci-Fi Launch Week', platform: 'X Thread', status: 'published', author: '🔥 Calcifer', date: 13, engagement: '8.3k' },
+];
+
+const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const STATUS_CLS = { draft: 'draft', review: 'review', scheduled: 'scheduled', published: 'published' };
+
+function renderCalendar() {
+  // Feb 2026 starts on Sunday (day 7), 28 days
+  const firstDay = 6; // 0=Mon, 6=Sun
+  const daysInMonth = 28;
+  let html = DAYS.map(d => `<div class="cal-header">${d}</div>`).join('');
+
+  // Previous month padding
+  for (let i = 0; i < firstDay; i++) {
+    html += `<div class="cal-day other-month"><div class="cal-num">${26 + i}</div></div>`;
+  }
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const today = d === 20 ? 'today' : '';
+    const items = POSTS.filter(p => p.date === d);
+    const itemsHtml = items.map(p =>
+      `<div class="cal-item ${STATUS_CLS[p.status]}" title="${p.title}">${p.title}</div>`
+    ).join('');
+    html += `<div class="cal-day ${today}"><div class="cal-num">${d}</div>${itemsHtml}</div>`;
+  }
+
+  // Next month padding
+  const totalCells = firstDay + daysInMonth;
+  const remaining = (7 - totalCells % 7) % 7;
+  for (let i = 1; i <= remaining; i++) {
+    html += `<div class="cal-day other-month"><div class="cal-num">${i}</div></div>`;
+  }
+
+  document.getElementById('calendar').innerHTML = html;
+}
+
+function renderList() {
+  const groups = { draft: [], review: [], scheduled: [], published: [] };
+  POSTS.forEach(p => groups[p.status].push(p));
+
+  const labels = { draft: 'Drafts', review: 'In Review', scheduled: 'Scheduled', published: 'Published' };
+  let html = '';
+
+  for (const [status, posts] of Object.entries(groups)) {
+    if (!posts.length) continue;
+    html += `<div class="list-section">
+      <div class="list-section-title">${labels[status]} (${posts.length})</div>
+      ${posts.map(p => `
+        <div class="post-row">
+          <div class="post-title-col">
+            ${p.title}
+            <div class="platform">${p.platform}</div>
+          </div>
+          <div class="post-author">${p.author}</div>
+          <div><span class="badge badge-${status}">${status}</span></div>
+          <div class="post-date">Feb ${p.date}</div>
+          <div class="post-engagement">${p.engagement || '—'}</div>
+        </div>
+      `).join('')}
+    </div>`;
+  }
+
+  document.getElementById('list-view').innerHTML = html;
+}
+
+function setView(view) {
+  document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+  document.querySelector(`.view-btn:${view === 'calendar' ? 'first' : 'last'}-child`).classList.add('active');
+  document.getElementById('calendar-view').classList.toggle('active', view === 'calendar');
+  document.getElementById('list-view').classList.toggle('active', view === 'list');
+}
+
+renderCalendar();
+renderList();
+</script>
+</body>
+</html>

@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Incident Timeline</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg: #09090b; --surface: #18181b; --surface-2: #27272a; --surface-3: #3f3f46;
+    --text: #fafafa; --text-2: #a1a1aa; --text-3: #71717a;
+    --border: #27272a; --border-2: #3f3f46;
+    --accent: #6c8cff; --accent-dim: rgba(108,140,255,0.15);
+    --ok: #4ade80; --ok-dim: rgba(74,222,128,0.15);
+    --warn: #fbbf24; --warn-dim: rgba(251,191,36,0.15);
+    --err: #f87171; --err-dim: rgba(248,113,113,0.15);
+    --info: #22d3ee; --info-dim: rgba(34,211,238,0.15);
+    --purple: #a78bfa; --purple-dim: rgba(167,139,250,0.15);
+    --font-sans: 'Inter', -apple-system, system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+    --space-5: 24px; --space-6: 32px; --space-7: 48px;
+    --radius-sm: 4px; --radius-md: 8px; --radius-lg: 12px;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+    --duration-fast: 100ms; --duration-norm: 200ms;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: var(--font-sans); background: var(--bg); color: var(--text); min-height: 100vh; }
+  .container { width: min(100% - 2rem, 52rem); margin-inline: auto; padding-block: var(--space-6); }
+
+  /* Top bar */
+  .top {
+    display: flex; align-items: start; justify-content: space-between;
+    margin-bottom: var(--space-6); gap: var(--space-4); flex-wrap: wrap;
+  }
+  .incident-title { font-size: clamp(1.25rem, 2.5vw, 1.75rem); font-weight: 700; letter-spacing: -0.02em; }
+  .incident-id { font: 0.75rem var(--font-mono); color: var(--text-3); margin-top: var(--space-1); }
+
+  .severity {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-md); font: 600 0.875rem var(--font-sans);
+    flex-shrink: 0;
+  }
+  .severity-critical { background: var(--err-dim); color: var(--err); }
+  .severity-warning { background: var(--warn-dim); color: var(--warn); }
+  .severity-info { background: var(--info-dim); color: var(--info); }
+
+  .severity-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  .severity-critical .severity-dot { background: var(--err); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  /* Status strip */
+  .status-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+    gap: var(--space-3);
+    margin-bottom: var(--space-6);
+  }
+  .status-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-md); padding: var(--space-3) var(--space-4);
+  }
+  .status-label { font: 500 0.6875rem/1.3 var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); }
+  .status-value { font: 500 0.875rem var(--font-sans); margin-top: var(--space-1); }
+  .status-value.live { color: var(--err); }
+  .status-value.resolved { color: var(--ok); }
+
+  /* Timeline */
+  .timeline { position: relative; padding-left: var(--space-6); }
+  .timeline::before {
+    content: ''; position: absolute; left: 11px; top: 8px; bottom: 8px;
+    width: 1px; background: var(--border-2);
+  }
+
+  .event {
+    position: relative; padding-bottom: var(--space-5);
+  }
+  .event:last-child { padding-bottom: 0; }
+
+  .event-dot {
+    position: absolute; left: calc(-1 * var(--space-6) + 4px);
+    top: 6px; width: 14px; height: 14px;
+    border-radius: 50%; border: 2px solid var(--bg);
+  }
+  .event-dot.detect { background: var(--err); }
+  .event-dot.investigate { background: var(--warn); }
+  .event-dot.action { background: var(--accent); }
+  .event-dot.resolve { background: var(--ok); }
+  .event-dot.note { background: var(--surface-3); }
+
+  .event-header {
+    display: flex; align-items: baseline; gap: var(--space-3);
+    margin-bottom: var(--space-2); flex-wrap: wrap;
+  }
+  .event-time { font: 0.75rem var(--font-mono); color: var(--text-3); flex-shrink: 0; }
+  .event-actor { font: 500 0.8125rem var(--font-sans); }
+  .event-type {
+    font: 500 0.6875rem var(--font-mono); padding: 1px 6px;
+    border-radius: var(--radius-sm); text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .type-detect { background: var(--err-dim); color: var(--err); }
+  .type-investigate { background: var(--warn-dim); color: var(--warn); }
+  .type-action { background: var(--accent-dim); color: var(--accent); }
+  .type-resolve { background: var(--ok-dim); color: var(--ok); }
+  .type-note { background: var(--surface-2); color: var(--text-3); }
+
+  .event-body {
+    font-size: 0.875rem; color: var(--text-2); line-height: 1.5;
+  }
+  .event-body code {
+    font-family: var(--font-mono); font-size: 0.8125rem;
+    background: var(--surface-2); padding: 1px 5px; border-radius: var(--radius-sm);
+  }
+
+  .event-attachment {
+    margin-top: var(--space-3);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-md); padding: var(--space-3) var(--space-4);
+    font: 0.8125rem/1.4 var(--font-mono); color: var(--text-2);
+    white-space: pre-wrap; overflow-x: auto;
+  }
+
+  /* Add event form */
+  .add-event {
+    margin-top: var(--space-6); padding-top: var(--space-6);
+    border-top: 1px solid var(--border);
+  }
+  .add-event label { font: 500 0.6875rem/1.3 var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); display: block; margin-bottom: var(--space-2); }
+  .input {
+    width: 100%; height: 36px; padding: 0 var(--space-3);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-md); color: var(--text);
+    font: 0.875rem var(--font-sans);
+    transition: border-color var(--duration-fast);
+  }
+  .input:focus { border-color: var(--accent); outline: none; }
+  textarea.input { height: 80px; padding: var(--space-3); resize: vertical; }
+  .form-row { display: flex; gap: var(--space-3); margin-bottom: var(--space-3); flex-wrap: wrap; }
+  .form-row > * { flex: 1; min-width: 8rem; }
+
+  select.input {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2371717a'%3E%3Cpath d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    padding-right: 32px;
+  }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1);
+    height: 36px; padding: 0 var(--space-4); border-radius: var(--radius-md);
+    font: 500 0.8125rem var(--font-sans); cursor: pointer;
+    transition: all var(--duration-fast) var(--ease); border: 1px solid transparent;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { filter: brightness(1.1); }
+  .btn-ok { background: var(--ok); color: #000; }
+  .btn-ok:hover { filter: brightness(1.1); }
+
+  .resolve-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: var(--space-4); flex-wrap: wrap;
+    margin-top: var(--space-5); padding: var(--space-4);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+  }
+  .resolve-bar span { font-size: 0.875rem; color: var(--text-2); }
+
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 0.01ms !important; } }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="top">
+    <div>
+      <div class="incident-title">Feed SSE Connection Drops</div>
+      <div class="incident-id">INC-2026-0220-001</div>
+    </div>
+    <div class="severity severity-critical">
+      <span class="severity-dot"></span>
+      Active
+    </div>
+  </div>
+
+  <div class="status-strip">
+    <div class="status-card">
+      <div class="status-label">Status</div>
+      <div class="status-value live">Investigating</div>
+    </div>
+    <div class="status-card">
+      <div class="status-label">Detected</div>
+      <div class="status-value">14:23 EST</div>
+    </div>
+    <div class="status-card">
+      <div class="status-label">Duration</div>
+      <div class="status-value" id="duration">—</div>
+    </div>
+    <div class="status-card">
+      <div class="status-label">Impact</div>
+      <div class="status-value">Feed not updating</div>
+    </div>
+    <div class="status-card">
+      <div class="status-label">Owner</div>
+      <div class="status-value">🐉 Haku</div>
+    </div>
+  </div>
+
+  <div class="timeline" id="timeline"></div>
+
+  <div class="resolve-bar">
+    <span>All clear? Mark this incident resolved.</span>
+    <button class="btn btn-ok" onclick="resolve()">✓ Resolve</button>
+  </div>
+
+  <div class="add-event">
+    <label>Add Event</label>
+    <div class="form-row">
+      <div>
+        <select class="input" id="event-type">
+          <option value="note">Note</option>
+          <option value="action">Action Taken</option>
+          <option value="investigate">Investigation</option>
+          <option value="detect">Detection</option>
+          <option value="resolve">Resolution</option>
+        </select>
+      </div>
+      <div>
+        <input class="input" id="event-actor" placeholder="Actor (e.g. haku)">
+      </div>
+    </div>
+    <textarea class="input" id="event-body" placeholder="What happened?"></textarea>
+    <div style="margin-top: var(--space-3);">
+      <button class="btn btn-primary" onclick="addEvent()">Add</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const EVENTS = [
+  { time: '14:23', type: 'detect', actor: '🐉 Haku (cron)', body: 'Health ping detected SSE endpoint returning 502. <code>curl -s https://api.deep-sci-fi.world/api/feed/stream</code> → connection reset after 2s.' },
+  { time: '14:24', type: 'investigate', actor: '🐉 Haku', body: 'Logfire query: 3 errors in last 5 min, all on <code>/api/feed/stream</code>. Exception: <code>ConnectionResetError: peer closed connection</code>.', attachment: 'SELECT count(*) as errors\nFROM records\nWHERE level = \'error\'\nAND start_timestamp > now() - interval \'5 minutes\'\n\n→ 3 errors' },
+  { time: '14:26', type: 'investigate', actor: '🐉 Haku', body: 'Railway logs show OOM kill at 14:22:41. Container restarted but SSE connections were not re-established. Memory spike correlates with a large batch of feed events hitting the denormalized table.' },
+  { time: '14:28', type: 'action', actor: '🐉 Haku', body: 'Scaled Railway instance from 512MB → 1GB. Restarted the service. SSE reconnecting...' },
+  { time: '14:30', type: 'note', actor: '🐉 Haku → 🔥 Calcifer', body: 'Feed was down for ~8 minutes. Any scheduled posts during that window may need manual verification that they appear in the feed.' },
+  { time: '14:33', type: 'detect', actor: '🐉 Haku (manual)', body: 'Health endpoint returning 200. SSE stream delivering events. Feed UI shows live content. Confirming stable...' },
+];
+
+function renderTimeline() {
+  document.getElementById('timeline').innerHTML = EVENTS.map(e => `
+    <div class="event">
+      <div class="event-dot ${e.type}"></div>
+      <div class="event-header">
+        <span class="event-time">${e.time}</span>
+        <span class="event-type type-${e.type}">${e.type}</span>
+        <span class="event-actor">${e.actor}</span>
+      </div>
+      <div class="event-body">${e.body}</div>
+      ${e.attachment ? `<div class="event-attachment">${e.attachment}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+function addEvent() {
+  const type = document.getElementById('event-type').value;
+  const actor = document.getElementById('event-actor').value || 'Unknown';
+  const body = document.getElementById('event-body').value;
+  if (!body) return;
+  const now = new Date();
+  EVENTS.push({ time: now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }), type, actor, body });
+  document.getElementById('event-body').value = '';
+  renderTimeline();
+}
+
+function resolve() {
+  EVENTS.push({ time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }), type: 'resolve', actor: 'Manual', body: 'Incident resolved. All systems nominal.' });
+  renderTimeline();
+}
+
+// Duration counter
+const startTime = new Date(); startTime.setHours(14, 23, 0);
+setInterval(() => {
+  const diff = Math.floor((Date.now() - startTime.getTime()) / 1000);
+  const m = Math.floor(diff / 60), s = diff % 60;
+  document.getElementById('duration').textContent = `${m}m ${s}s`;
+}, 1000);
+
+renderTimeline();
+</script>
+</body>
+</html>

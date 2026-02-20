@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Vitals</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg: #09090b; --surface: #18181b; --surface-2: #27272a; --surface-3: #3f3f46;
+    --text: #fafafa; --text-2: #a1a1aa; --text-3: #71717a;
+    --border: #27272a; --border-2: #3f3f46;
+    --accent: #6c8cff; --accent-dim: rgba(108,140,255,0.15);
+    --ok: #4ade80; --ok-dim: rgba(74,222,128,0.15);
+    --warn: #fbbf24; --warn-dim: rgba(251,191,36,0.15);
+    --err: #f87171; --err-dim: rgba(248,113,113,0.15);
+    --info: #22d3ee; --info-dim: rgba(34,211,238,0.15);
+    --purple: #a78bfa; --purple-dim: rgba(167,139,250,0.15);
+    --font-sans: 'Inter', -apple-system, system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+    --space-5: 24px; --space-6: 32px; --space-7: 48px;
+    --radius-sm: 4px; --radius-md: 8px; --radius-lg: 12px;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+    --duration-fast: 100ms; --duration-norm: 200ms;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: var(--font-sans); background: var(--bg); color: var(--text); min-height: 100vh; }
+  .container { width: min(100% - 2rem, 72rem); margin-inline: auto; padding-block: var(--space-6); }
+
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-6); flex-wrap: wrap; gap: var(--space-4); }
+  .title { font-size: clamp(1.125rem, 2vw, 1.5rem); font-weight: 600; letter-spacing: -0.02em; }
+  .subtitle { font-size: 0.75rem; color: var(--text-3); font-family: var(--font-mono); margin-top: var(--space-1); }
+  .updated { font: 0.75rem var(--font-mono); color: var(--text-3); }
+
+  /* Agent cards grid */
+  .agents {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+    gap: var(--space-4);
+    margin-bottom: var(--space-6);
+  }
+
+  .agent-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: var(--space-5);
+    transition: border-color var(--duration-fast);
+  }
+  .agent-card:hover { border-color: var(--border-2); }
+
+  .agent-header {
+    display: flex; align-items: center; gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+  .agent-avatar {
+    width: 40px; height: 40px; border-radius: var(--radius-md);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.25rem; flex-shrink: 0;
+  }
+  .agent-name { font: 600 1rem var(--font-sans); }
+  .agent-role { font: 0.75rem var(--font-mono); color: var(--text-3); margin-top: 2px; }
+  .agent-status-dot {
+    width: 8px; height: 8px; border-radius: 50%; margin-left: auto; flex-shrink: 0;
+  }
+  .dot-ok { background: var(--ok); }
+  .dot-warn { background: var(--warn); animation: pulse 2s ease-in-out infinite; }
+  .dot-err { background: var(--err); animation: pulse 1s ease-in-out infinite; }
+  .dot-off { background: var(--surface-3); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  /* Metrics */
+  .metrics {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-3); margin-bottom: var(--space-4);
+  }
+  .metric { text-align: center; }
+  .metric-val { font: 600 1.125rem var(--font-mono); }
+  .metric-label { font: 500 0.625rem/1.3 var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); margin-top: 2px; }
+
+  /* Activity sparkline (CSS-only bar chart) */
+  .spark {
+    display: flex; align-items: flex-end; gap: 2px; height: 32px;
+    margin-bottom: var(--space-4);
+  }
+  .spark-bar {
+    flex: 1; border-radius: 2px 2px 0 0;
+    min-height: 2px; transition: height var(--duration-norm) var(--ease);
+  }
+
+  /* Recent activity */
+  .recent-label { font: 500 0.6875rem/1.3 var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); margin-bottom: var(--space-2); }
+  .recent-item {
+    display: flex; align-items: baseline; gap: var(--space-2);
+    padding: var(--space-1) 0; font-size: 0.8125rem;
+  }
+  .recent-time { font: 0.6875rem var(--font-mono); color: var(--text-3); flex-shrink: 0; }
+  .recent-text { color: var(--text-2); }
+
+  /* System status bar */
+  .system-bar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+    gap: var(--space-3);
+  }
+  .sys-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-md); padding: var(--space-3) var(--space-4);
+    display: flex; align-items: center; gap: var(--space-3);
+  }
+  .sys-icon { font-size: 1.25rem; flex-shrink: 0; }
+  .sys-info { flex: 1; }
+  .sys-name { font: 500 0.8125rem var(--font-sans); }
+  .sys-detail { font: 0.6875rem var(--font-mono); color: var(--text-3); margin-top: 2px; }
+  .sys-status {
+    font: 500 0.6875rem var(--font-mono); padding: 2px 8px;
+    border-radius: var(--radius-sm); text-transform: uppercase;
+  }
+  .sys-ok { background: var(--ok-dim); color: var(--ok); }
+  .sys-warn { background: var(--warn-dim); color: var(--warn); }
+
+  @media (max-width: 480px) {
+    .metrics { grid-template-columns: repeat(3, 1fr); gap: var(--space-2); }
+    .metric-val { font-size: 0.875rem; }
+  }
+
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 0.01ms !important; } }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <div class="title">Agent Vitals</div>
+      <div class="subtitle">team health · real-time</div>
+    </div>
+    <div class="updated" id="updated">—</div>
+  </header>
+
+  <div class="agents" id="agents"></div>
+
+  <div class="system-bar" id="system"></div>
+</div>
+
+<script>
+const AGENTS = [
+  {
+    name: 'Haku', emoji: '🐉', role: 'Engineering', status: 'ok',
+    color: 'var(--accent)',
+    metrics: { actions: 47, proposals: 10, uptime: '99.2%' },
+    spark: [3,5,2,8,4,6,7,3,5,9,4,6,2,8,5,7,3,6,4,8,5,3,7,6],
+    recent: [
+      { time: '18:25', text: 'Design system + Temper skill committed' },
+      { time: '17:49', text: 'PROP-027 selected via dashboard' },
+      { time: '16:30', text: 'Webhook dispatch architecture started' },
+    ]
+  },
+  {
+    name: 'Calcifer', emoji: '🔥', role: 'Content & Social', status: 'ok',
+    color: 'var(--err)',
+    metrics: { posts: 12, drafts: 3, reach: '15.8k' },
+    spark: [2,4,1,3,5,2,4,3,6,2,5,3,4,1,6,3,2,5,4,3,2,6,4,3],
+    recent: [
+      { time: '15:20', text: 'X draft: Temper shared backend' },
+      { time: '14:00', text: 'Blog voice pass in progress' },
+      { time: '09:00', text: 'Morning content scan' },
+    ]
+  },
+  {
+    name: 'Jiji', emoji: '🐱', role: 'Writing & Blog', status: 'warn',
+    color: 'var(--purple)',
+    metrics: { articles: 4, words: '12.4k', queue: 2 },
+    spark: [1,2,0,3,1,2,0,4,2,1,3,0,2,1,3,2,0,1,4,2,1,0,3,1],
+    recent: [
+      { time: '14:00', text: 'Blog draft reviewed — needs more failure stories' },
+      { time: '10:00', text: 'Craft section research: Shep analysis' },
+    ]
+  },
+  {
+    name: 'Chihiro', emoji: '🌸', role: 'Admin & Scheduling', status: 'ok',
+    color: 'var(--info)',
+    metrics: { tasks: 8, resolved: 23, pending: 3 },
+    spark: [4,3,5,2,4,6,3,5,2,4,3,5,6,2,4,3,5,4,2,6,3,4,5,3],
+    recent: [
+      { time: '11:30', text: 'Appointment rescheduled for Thursday' },
+      { time: '09:00', text: 'Daily calendar sync' },
+    ]
+  },
+  {
+    name: 'Koi', emoji: '🎏', role: 'Architecture & Strategy', status: 'off',
+    color: 'var(--ok)',
+    metrics: { reviews: 5, decisions: 3, pending: 1 },
+    spark: [0,1,0,2,0,1,0,0,2,0,1,0,0,1,0,2,0,0,1,0,0,2,0,1],
+    recent: [
+      { time: '10:00', text: 'PROP-028 architecture approved' },
+    ]
+  },
+  {
+    name: 'Ponyo', emoji: '🐟', role: 'Monitoring & Alerts', status: 'ok',
+    color: 'var(--warn)',
+    metrics: { checks: 144, alerts: 2, uptime: '100%' },
+    spark: [6,6,6,6,6,6,6,6,6,6,6,5,6,6,6,6,6,6,6,6,6,6,6,6],
+    recent: [
+      { time: '18:00', text: 'All systems nominal' },
+      { time: '14:23', text: '⚠ SSE endpoint 502 — escalated to Haku' },
+    ]
+  },
+];
+
+const SYSTEMS = [
+  { icon: '🌐', name: 'Deep Sci-Fi API', detail: 'api.deep-sci-fi.world', status: 'ok' },
+  { icon: '⚙️', name: 'Temper', detail: 'localhost:3001', status: 'ok' },
+  { icon: '🚂', name: 'Railway', detail: '512MB → 1GB', status: 'warn' },
+  { icon: '📊', name: 'Postgres', detail: 'schema e97cb81af096', status: 'ok' },
+];
+
+function render() {
+  document.getElementById('agents').innerHTML = AGENTS.map(a => {
+    const maxSpark = Math.max(...a.spark);
+    const bars = a.spark.map(v =>
+      `<div class="spark-bar" style="height:${Math.max(6, (v/maxSpark)*100)}%;background:${a.color};opacity:${0.3 + (v/maxSpark)*0.7}"></div>`
+    ).join('');
+
+    const metricEntries = Object.entries(a.metrics);
+    const metricsHtml = metricEntries.map(([k,v]) =>
+      `<div class="metric"><div class="metric-val">${v}</div><div class="metric-label">${k}</div></div>`
+    ).join('');
+
+    const recentHtml = a.recent.map(r =>
+      `<div class="recent-item"><span class="recent-time">${r.time}</span><span class="recent-text">${r.text}</span></div>`
+    ).join('');
+
+    return `<div class="agent-card">
+      <div class="agent-header">
+        <div class="agent-avatar" style="background:${a.color.replace(')', ',0.15)')}">${a.emoji}</div>
+        <div><div class="agent-name">${a.name}</div><div class="agent-role">${a.role}</div></div>
+        <div class="agent-status-dot dot-${a.status}"></div>
+      </div>
+      <div class="metrics">${metricsHtml}</div>
+      <div class="spark">${bars}</div>
+      <div class="recent-label">Recent</div>
+      ${recentHtml}
+    </div>`;
+  }).join('');
+
+  document.getElementById('system').innerHTML = SYSTEMS.map(s =>
+    `<div class="sys-card">
+      <span class="sys-icon">${s.icon}</span>
+      <div class="sys-info"><div class="sys-name">${s.name}</div><div class="sys-detail">${s.detail}</div></div>
+      <span class="sys-status sys-${s.status}">${s.status}</span>
+    </div>`
+  ).join('');
+
+  document.getElementById('updated').textContent = new Date().toLocaleTimeString();
+}
+
+render();
+setInterval(render, 30000);
+</script>
+</body>
+</html>
