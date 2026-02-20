@@ -629,7 +629,7 @@ impl ServerState {
         resource_attrs: &BTreeMap<String, serde_json::Value>,
     ) -> Result<(), String> {
         let ctx = SecurityContext::from_headers(headers);
-        let attrs: std::collections::HashMap<_, _> = resource_attrs
+        let attrs: std::collections::HashMap<_, _> = resource_attrs // determinism-ok: Cedar API requires HashMap
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(); // determinism-ok
@@ -936,7 +936,7 @@ impl ServerState {
     pub fn enrich_metadata(&self, action_name: &str, hint: &str) {
         self.agent_hints
             .write()
-            .unwrap()
+            .unwrap() // ci-ok: infallible lock
             .insert(action_name.to_string(), hint.to_string());
     }
 

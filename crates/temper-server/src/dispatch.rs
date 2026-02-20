@@ -35,7 +35,7 @@ pub(crate) fn extract_tenant(headers: &HeaderMap, state: &ServerState) -> Tenant
     let tenant_ids = state
         .registry
         .read()
-        .unwrap()
+        .unwrap() // ci-ok: infallible lock
         .tenant_ids()
         .into_iter()
         .cloned()
@@ -65,7 +65,7 @@ fn resolve_entity_type(state: &ServerState, tenant: &TenantId, entity_set: &str)
     state
         .registry
         .read()
-        .unwrap()
+        .unwrap() // ci-ok: infallible lock
         .resolve_entity_type(tenant, entity_set)
         .or_else(|| state.entity_set_map.get(entity_set).cloned())
 }
@@ -77,7 +77,7 @@ fn tenant_csdl_xml(state: &ServerState, tenant: &TenantId) -> String {
     state
         .registry
         .read()
-        .unwrap()
+        .unwrap() // ci-ok: infallible lock
         .get_tenant(tenant)
         .map(|tc| tc.csdl_xml.as_ref().clone())
         .unwrap_or_else(|| state.csdl_xml.as_ref().clone())

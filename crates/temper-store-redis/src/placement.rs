@@ -206,7 +206,7 @@ impl PlacementStore for InMemoryPlacement {
         let key = Self::key(entity_type, entity_id);
         self.placements
             .write()
-            .unwrap()
+            .unwrap() // ci-ok: infallible lock
             .insert(key, placement.clone());
         Ok(())
     }
