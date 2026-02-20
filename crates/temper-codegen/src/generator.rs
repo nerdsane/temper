@@ -7,7 +7,6 @@ use crate::entity;
 use crate::messages;
 use crate::state_machine;
 
-
 /// Errors that can occur during code generation.
 #[derive(Debug, thiserror::Error)]
 pub enum CodegenError {
@@ -94,7 +93,11 @@ pub fn generate_entity_module(
 }
 
 /// Find all actions bound to a given entity type.
-fn find_bound_actions<'a>(schema: &'a Schema, entity_name: &str, namespace: &str) -> Vec<&'a Action> {
+fn find_bound_actions<'a>(
+    schema: &'a Schema,
+    entity_name: &str,
+    namespace: &str,
+) -> Vec<&'a Action> {
     let full_type = format!("{}.{}", namespace, entity_name);
     schema
         .actions
@@ -109,7 +112,11 @@ fn find_bound_actions<'a>(schema: &'a Schema, entity_name: &str, namespace: &str
 }
 
 /// Find all functions bound to a given entity type.
-fn find_bound_functions<'a>(schema: &'a Schema, entity_name: &str, namespace: &str) -> Vec<&'a Function> {
+fn find_bound_functions<'a>(
+    schema: &'a Schema,
+    entity_name: &str,
+    namespace: &str,
+) -> Vec<&'a Function> {
     let full_type = format!("{}.{}", namespace, entity_name);
     schema
         .functions
@@ -205,7 +212,7 @@ mod tests {
         let spec = load_reference_spec();
         let module = generate_entity_module(&spec, "Order").unwrap();
 
-        // Should not contain TODO or stub markers
+        // Generated code must not contain placeholder macros
         assert!(!module.source.contains("todo!"));
         assert!(!module.source.contains("unimplemented!"));
     }

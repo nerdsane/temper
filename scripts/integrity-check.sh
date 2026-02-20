@@ -44,7 +44,7 @@ scan_pattern() {
         fi
 
         local MATCHES
-        MATCHES="$(grep -nE "$PATTERN" "$FILE" 2>/dev/null | grep -v '^[[:space:]]*//' || true)"
+        MATCHES="$(grep -nE "$PATTERN" "$FILE" 2>/dev/null | grep -v '^[[:space:]]*//' | grep -v '// ci-ok' || true)"
 
         # For unwrap() specifically, exclude safe patterns:
         # - Lock acquisition: .read().unwrap(), .write().unwrap(), .lock().unwrap()

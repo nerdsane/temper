@@ -1,12 +1,28 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { runVerification, fetchVerificationStatus } from "@/lib/api";
-import type { VerificationResult } from "@/lib/types";
+import { runVerification, fetchVerificationStatus, subscribeDesignTimeEvents } from "@/lib/api";
+import type { VerificationResult, DesignTimeEvent } from "@/lib/types";
 import CascadeResults from "@/components/CascadeResults";
 import ErrorDisplay from "@/components/ErrorDisplay";
+
+type StepStatus = "pending" | "running" | "passed" | "failed";
+
+interface StepState {
+  label: string;
+  levelPrefix: string;
+  status: StepStatus;
+}
+
+const INITIAL_STEPS: StepState[] = [
+  { label: "L0 SMT", levelPrefix: "Level 0", status: "pending" },
+  { label: "L1 Model Check", levelPrefix: "Level 1", status: "pending" },
+  { label: "L2 DST", levelPrefix: "Level 2:", status: "pending" },
+  { label: "L2b Actor Sim", levelPrefix: "Level 2b", status: "pending" },
+  { label: "L3 PropTest", levelPrefix: "Level 3", status: "pending" },
+];
 
 export default function VerificationPage() {
   const params = useParams();
@@ -15,6 +31,8 @@ export default function VerificationPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cachedLoading, setCachedLoading] = useState(true);
+  const [steps, setSteps] = useState<StepState[]>(INITIAL_STEPS);
+  const cleanupRef = useRef<(() => void) | null>(null);
 
   // On mount, check if background verification already completed for this entity
   useEffect(() => {
@@ -39,18 +57,88 @@ export default function VerificationPage() {
     return () => { cancelled = true; };
   }, [entity]);
 
+  // Cleanup SSE on unmount
+  useEffect(() => {
+    return () => {
+      if (cleanupRef.current) cleanupRef.current();
+    };
+  }, []);
+
+  const handleDesignTimeEvent = useCallback((event: DesignTimeEvent) => {
+    if (event.entity_type !== entity) return;
+
+    if (event.kind === "verify_started") {
+      // Mark first step as running
+      setSteps((prev) => prev.map((s, i) =>
+        i === 0 ? { ...s, status: "running" } : s,
+      ));
+    }
+
+    if (event.kind === "verify_level" && event.level) {
+      setSteps((prev) => {
+        const updated = [...prev];
+        // Find the matching step by level prefix
+        const idx = updated.findIndex((s) => event.level!.startsWith(s.levelPrefix));
+        if (idx >= 0) {
+          updated[idx] = {
+            ...updated[idx],
+            status: event.passed ? "passed" : "failed",
+          };
+          // Mark next step as running if current passed
+          if (event.passed && idx + 1 < updated.length && updated[idx + 1].status === "pending") {
+            updated[idx + 1] = { ...updated[idx + 1], status: "running" };
+          }
+        }
+        return updated;
+      });
+    }
+
+    if (event.kind === "verify_done") {
+      // Mark any remaining running steps based on passed
+      setSteps((prev) => prev.map((s) =>
+        s.status === "running" ? { ...s, status: event.passed ? "passed" : "failed" } : s,
+      ));
+    }
+  }, [entity]);
+
   const handleRunVerification = async () => {
     setLoading(true);
     setError(null);
+    setResult(null);
+    setSteps(INITIAL_STEPS);
+
+    // Subscribe to SSE for per-level progress
+    if (cleanupRef.current) cleanupRef.current();
+    cleanupRef.current = subscribeDesignTimeEvents(handleDesignTimeEvent);
+
     try {
       const data = await runVerification(entity);
       setResult(data);
+      // Update steps from final result
+      setSteps((prev) => prev.map((step) => {
+        const matchingLevel = data.levels.find((l) =>
+          l.level.startsWith(step.levelPrefix),
+        );
+        if (matchingLevel) {
+          return { ...step, status: matchingLevel.passed ? "passed" : "failed" };
+        }
+        return step;
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : `Verification failed for "${entity}"`);
+      setSteps((prev) => prev.map((s) =>
+        s.status === "running" || s.status === "pending" ? { ...s, status: "failed" } : s,
+      ));
     } finally {
       setLoading(false);
+      if (cleanupRef.current) {
+        cleanupRef.current();
+        cleanupRef.current = null;
+      }
     }
   };
+
+  const hasAnyProgress = steps.some((s) => s.status !== "pending");
 
   return (
     <div className="animate-fade-in">
@@ -88,20 +176,67 @@ export default function VerificationPage() {
         </div>
       </div>
 
-      {/* Loading state */}
-      {loading && (
-        <div className="flex items-center justify-center h-56">
-          <div className="text-center">
-            <div className="text-zinc-600 text-[13px] mb-2">Running verification cascade...</div>
-            <div className="flex gap-1 justify-center">
-              {[0, 1, 2, 3, 4].map((i) => (
-                <div
-                  key={i}
-                  className="w-1.5 h-1.5 bg-teal-500 rounded-full animate-pulse"
-                  style={{ animationDelay: `${i * 150}ms` }}
-                />
-              ))}
-            </div>
+      {/* Stepper Progress */}
+      {(loading || hasAnyProgress) && (
+        <div className="glass rounded-lg p-5 mb-5">
+          <div className="flex items-center gap-1">
+            {steps.map((step, i) => (
+              <div key={step.label} className="flex items-center flex-1 last:flex-initial">
+                {/* Step indicator */}
+                <div className="flex flex-col items-center">
+                  <div
+                    className={`w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-mono transition-all duration-300 ${
+                      step.status === "passed"
+                        ? "bg-teal-500/20 text-teal-400 ring-1 ring-teal-500/40"
+                        : step.status === "failed"
+                          ? "bg-pink-500/20 text-pink-400 ring-1 ring-pink-500/40"
+                          : step.status === "running"
+                            ? "bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/40 animate-pulse"
+                            : "bg-white/[0.04] text-zinc-600 ring-1 ring-white/[0.06]"
+                    }`}
+                  >
+                    {step.status === "passed" ? (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                      </svg>
+                    ) : step.status === "failed" ? (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    ) : step.status === "running" ? (
+                      <div className="w-2 h-2 bg-amber-400 rounded-full" />
+                    ) : (
+                      <span>{i}</span>
+                    )}
+                  </div>
+                  <span
+                    className={`text-[10px] mt-1.5 whitespace-nowrap ${
+                      step.status === "passed"
+                        ? "text-teal-400"
+                        : step.status === "failed"
+                          ? "text-pink-400"
+                          : step.status === "running"
+                            ? "text-amber-400"
+                            : "text-zinc-600"
+                    }`}
+                  >
+                    {step.label}
+                  </span>
+                </div>
+                {/* Connector line */}
+                {i < steps.length - 1 && (
+                  <div
+                    className={`flex-1 h-px mx-2 mt-[-18px] transition-colors duration-300 ${
+                      step.status === "passed"
+                        ? "bg-teal-500/40"
+                        : step.status === "failed"
+                          ? "bg-pink-500/40"
+                          : "bg-white/[0.06]"
+                    }`}
+                  />
+                )}
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -118,9 +253,9 @@ export default function VerificationPage() {
       {/* Results (from background verification or manual run) */}
       {!loading && result && (
         <>
-          {!cachedLoading && (
+          {!cachedLoading && !hasAnyProgress && (
             <div className="mb-3 text-[11px] text-zinc-600">
-              {result ? "Showing cached results from background verification. Click \"Re-run Verification\" to run again." : ""}
+              Showing cached results from background verification. Click &quot;Re-run Verification&quot; to run again.
             </div>
           )}
           <CascadeResults levels={result.levels} allPassed={result.all_passed} />

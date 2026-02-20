@@ -193,8 +193,8 @@ mod tests {
     use super::*;
     use crate::registry::SpecRegistry;
     use crate::state::ServerState;
-    use temper_runtime::tenant::TenantId;
     use temper_runtime::ActorSystem;
+    use temper_runtime::tenant::TenantId;
     use temper_spec::csdl::parse_csdl;
 
     const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
@@ -203,7 +203,12 @@ mod tests {
     fn test_state_with_registry() -> ServerState {
         let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
         let mut registry = SpecRegistry::new();
-        registry.register_tenant("default", csdl, CSDL_XML.to_string(), &[("Order", ORDER_IOA)]);
+        registry.register_tenant(
+            "default",
+            csdl,
+            CSDL_XML.to_string(),
+            &[("Order", ORDER_IOA)],
+        );
         let system = ActorSystem::new("test-sentinel");
         ServerState::from_registry(system, registry)
     }
@@ -260,6 +265,9 @@ mod tests {
         let state = test_state_with_registry();
         let rules = default_rules();
         let alerts = check_rules(&rules, &state);
-        assert!(alerts.is_empty(), "no alerts on clean state with no activity and no actors");
+        assert!(
+            alerts.is_empty(),
+            "no alerts on clean state with no activity and no actors"
+        );
     }
 }

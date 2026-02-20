@@ -33,6 +33,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 opentelemetry = { workspace = true }
+sqlx = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

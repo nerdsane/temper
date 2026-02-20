@@ -7,21 +7,20 @@ use std::convert::Infallible;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Json;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
-use axum::Router;
 use serde::{Deserialize, Serialize};
 use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::sim_now;
-use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
 use temper_evolution::{
-    Decision, DecisionRecord, RecordHeader, RecordStatus, RecordType,
-    validate_chain,
+    Decision, DecisionRecord, RecordHeader, RecordStatus, RecordType, validate_chain,
 };
 
 use crate::dispatch::extract_tenant;
@@ -116,6 +115,12 @@ pub struct EntityInstanceSummary {
     pub entity_id: String,
     /// Actor liveness status (e.g. "active", "stopped").
     pub actor_status: String,
+    /// Current state of the entity (e.g. "Open", "InProgress").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_state: Option<String>,
+    /// ISO 8601 timestamp of the last state change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_updated: Option<String>,
 }
 
 /// Query parameters for the simulation endpoint.
@@ -141,11 +146,15 @@ pub fn build_observe_router() -> Router<ServerState> {
     Router::new()
         .route("/specs", get(list_specs))
         .route("/specs/load-dir", post(handle_load_dir))
+        .route("/specs/load-inline", post(handle_load_inline))
         .route("/specs/{entity}", get(get_spec_detail))
         .route("/entities", get(list_entities))
         .route("/verify/{entity}", post(run_verification))
         .route("/simulation/{entity}", get(run_simulation))
-        .route("/entities/{entity_type}/{entity_id}/history", get(get_entity_history))
+        .route(
+            "/entities/{entity_type}/{entity_id}/history",
+            get(get_entity_history),
+        )
         .route("/events/stream", get(handle_event_stream))
         .route("/verification-status", get(handle_verification_status))
         .route("/design-time/stream", get(handle_design_time_stream))
@@ -159,11 +168,75 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/evolution/records/{id}", get(get_evolution_record))
         .route("/evolution/records/{id}/decide", post(handle_decide))
         .route("/evolution/insights", get(list_evolution_insights))
+        .route("/skills/builder", get(serve_builder_skill))
+        .route("/skills/user", get(serve_user_skill))
+}
+
+/// GET /observe/skills/builder -- serve the Builder Agent skill file with dynamic base URL.
+async fn serve_builder_skill(
+    headers: HeaderMap,
+) -> (
+    StatusCode,
+    [(axum::http::header::HeaderName, &'static str); 1],
+    String,
+) {
+    let base_url = extract_base_url(&headers);
+    let content = include_str!("../../../.claude/skills/temper.md")
+        .replace("http://localhost:3333", &base_url)
+        .replace("http://127.0.0.1:3333", &base_url);
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/markdown; charset=utf-8",
+        )],
+        content,
+    )
+}
+
+/// GET /observe/skills/user -- serve the User Agent skill file with dynamic base URL.
+async fn serve_user_skill(
+    headers: HeaderMap,
+) -> (
+    StatusCode,
+    [(axum::http::header::HeaderName, &'static str); 1],
+    String,
+) {
+    let base_url = extract_base_url(&headers);
+    let content = include_str!("../../../.claude/skills/temper-user.md")
+        .replace("http://localhost:3333", &base_url)
+        .replace("http://127.0.0.1:3333", &base_url);
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/markdown; charset=utf-8",
+        )],
+        content,
+    )
+}
+
+/// Extract base URL from request headers (uses X-Forwarded-Host/Proto for proxies like ngrok).
+fn extract_base_url(headers: &HeaderMap) -> String {
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get("host"))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost:3333");
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(if host.contains("ngrok") || host.contains("ts.net") {
+            "https"
+        } else {
+            "http"
+        });
+    format!("{proto}://{host}")
 }
 
 /// GET /observe/specs -- list all loaded specs across all tenants.
 async fn list_specs(State(state): State<ServerState>) -> Json<Vec<SpecSummary>> {
-    let registry = state.registry.read().unwrap();
+    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
     let mut specs = Vec::new();
 
     for tenant_id in registry.tenant_ids() {
@@ -172,27 +245,24 @@ async fn list_specs(State(state): State<ServerState>) -> Json<Vec<SpecSummary>> 
                 let automaton = &entity_spec.automaton;
 
                 // Read verification status
-                let (verification_status, levels_passed, levels_total) =
-                    match registry.get_verification_status(tenant_id, entity_type) {
-                        Some(VerificationStatus::Pending) | None => {
-                            ("pending".to_string(), None, None)
-                        }
-                        Some(VerificationStatus::Running) => {
-                            ("running".to_string(), None, None)
-                        }
-                        Some(VerificationStatus::Completed(result)) => {
-                            let passed = result.levels.iter().filter(|l| l.passed).count();
-                            let total = result.levels.len();
-                            let status = if result.all_passed {
-                                "passed"
-                            } else if passed == 0 {
-                                "failed"
-                            } else {
-                                "partial"
-                            };
-                            (status.to_string(), Some(passed), Some(total))
-                        }
-                    };
+                let (verification_status, levels_passed, levels_total) = match registry
+                    .get_verification_status(tenant_id, entity_type)
+                {
+                    Some(VerificationStatus::Pending) | None => ("pending".to_string(), None, None),
+                    Some(VerificationStatus::Running) => ("running".to_string(), None, None),
+                    Some(VerificationStatus::Completed(result)) => {
+                        let passed = result.levels.iter().filter(|l| l.passed).count();
+                        let total = result.levels.len();
+                        let status = if result.all_passed {
+                            "passed"
+                        } else if passed == 0 {
+                            "failed"
+                        } else {
+                            "partial"
+                        };
+                        (status.to_string(), Some(passed), Some(total))
+                    }
+                };
 
                 specs.push(SpecSummary {
                     tenant: tenant_id.as_str().to_string(),
@@ -218,6 +288,15 @@ struct LoadDirRequest {
     tenant: String,
     /// Path to the specs directory containing model.csdl.xml and *.ioa.toml files.
     specs_dir: String,
+}
+
+/// Request body for POST /observe/specs/load-inline.
+#[derive(Deserialize)]
+struct LoadInlineRequest {
+    /// Tenant name to register specs under.
+    tenant: String,
+    /// Map of filename → content. Must include `model.csdl.xml` and at least one `*.ioa.toml`.
+    specs: std::collections::BTreeMap<String, String>,
 }
 
 /// Convert a string to PascalCase (e.g. "my_entity" -> "MyEntity").
@@ -263,29 +342,48 @@ async fn handle_load_dir(
         ));
     }
 
-    let csdl_xml = std::fs::read_to_string(&csdl_path).map_err(|e| { // determinism-ok: HTTP handler reads user-provided spec files
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read CSDL: {e}"))
+    let csdl_xml = std::fs::read_to_string(&csdl_path).map_err(|e| { // determinism-ok: HTTP handler reads spec files
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read CSDL: {e}"),
+        )
     })?;
     let csdl = temper_spec::csdl::parse_csdl(&csdl_xml).map_err(|e| {
-        (StatusCode::BAD_REQUEST, format!("Failed to parse CSDL: {e}"))
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to parse CSDL: {e}"),
+        )
     })?;
 
     // Read all *.ioa.toml files
-    let mut ioa_sources: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    let entries = std::fs::read_dir(specs_path).map_err(|e| { // determinism-ok: HTTP handler reads user-provided spec files
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read specs directory: {e}"))
+    let mut ioa_sources: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let entries = std::fs::read_dir(specs_path).map_err(|e| { // determinism-ok: HTTP handler reads spec directory
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read specs directory: {e}"),
+        )
     })?;
     for entry in entries {
         let entry = entry.map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read directory entry: {e}"))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read directory entry: {e}"),
+            )
         })?;
         let path = entry.path();
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
         if file_name.ends_with(".ioa.toml") {
             let entity_name = file_name.strip_suffix(".ioa.toml").unwrap_or_default();
             let entity_name = to_pascal_case(entity_name);
-            let source = std::fs::read_to_string(&path).map_err(|e| { // determinism-ok: HTTP handler reads user-provided spec files
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read {}: {e}", path.display()))
+            let source = std::fs::read_to_string(&path).map_err(|e| { // determinism-ok: HTTP handler reads spec files
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read {}: {e}", path.display()),
+                )
             })?;
             ioa_sources.insert(entity_name, source);
         }
@@ -298,7 +396,16 @@ async fn handle_load_dir(
         ));
     }
 
-    // Register into shared registry
+    // Persist loaded specs first when Postgres is configured.
+    let csdl_xml_for_db = csdl_xml.clone();
+    for (entity_type, ioa_source) in &ioa_sources {
+        state
+            .upsert_spec_source(&body.tenant, entity_type, ioa_source, &csdl_xml_for_db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+
+    // Register into shared registry after persistence succeeds.
     let entity_names: Vec<String> = ioa_sources.keys().cloned().collect();
     let ioa_pairs: Vec<(&str, &str)> = ioa_sources
         .iter()
@@ -306,7 +413,7 @@ async fn handle_load_dir(
         .collect();
 
     {
-        let mut registry = state.registry.write().unwrap();
+        let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
         registry.register_tenant(body.tenant.as_str(), csdl, csdl_xml, &ioa_pairs);
     }
 
@@ -314,20 +421,26 @@ async fn handle_load_dir(
     // Any agent calling this endpoint gets verification results without polling.
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, Infallible>>(100);
     let tenant = body.tenant.clone();
+    let state_for_task = state.clone();
 
     tokio::spawn(async move { // determinism-ok: HTTP handler streams verification results inline
         let now = sim_now();
 
         // Emit specs_loaded line
-        let _ = tx.send(Ok(
-            serde_json::to_string(&serde_json::json!({
-                "type": "specs_loaded",
-                "tenant": &tenant,
-                "entities": &entity_names,
-            })).unwrap() + "\n" // ci-ok: serde_json::to_string on valid JSON is infallible
-        )).await;
+        let _ = tx
+            .send(Ok(
+                serde_json::to_string(&serde_json::json!({
+                    "type": "specs_loaded",
+                    "tenant": &tenant,
+                    "entities": &entity_names,
+                }))
+                .unwrap() // ci-ok: infallible serialization
+                    + "\n",
+            ))
+            .await;
 
-        let mut entity_results: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+        let mut entity_results: std::collections::BTreeMap<String, bool> =
+            std::collections::BTreeMap::new();
 
         for entity_name in &entity_names {
             // Emit design-time events for UI (spec_loaded + verify_started)
@@ -342,14 +455,43 @@ async fn handle_load_dir(
                 step_number: Some(1),
                 total_steps: Some(7),
             };
-            let _ = state.design_time_tx.send(loaded_event.clone());
-            if let Ok(mut log) = state.design_time_log.write() {
-                log.push(loaded_event);
+            if let Err(e) = state_for_task.emit_design_time_event(loaded_event).await {
+                tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to emit spec_loaded event");
+                let _ = tx
+                    .send(Ok(
+                        serde_json::to_string(&serde_json::json!({
+                            "type": "verification_error",
+                            "entity": entity_name,
+                            "error": e,
+                        }))
+                        .unwrap() // ci-ok: infallible serialization
+                            + "\n",
+                    ))
+                    .await;
+                entity_results.insert(entity_name.clone(), false);
+                continue;
             }
-
-            // Mark as Running in registry
+            if let Err(e) = state_for_task
+                .persist_spec_verification(&tenant, entity_name, "running", None)
+                .await
             {
-                let mut registry = state.registry.write().unwrap();
+                tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to persist running verification status");
+                let _ = tx
+                    .send(Ok(
+                        serde_json::to_string(&serde_json::json!({
+                            "type": "verification_error",
+                            "entity": entity_name,
+                            "error": e,
+                        }))
+                        .unwrap() // ci-ok: infallible serialization
+                            + "\n",
+                    ))
+                    .await;
+                entity_results.insert(entity_name.clone(), false);
+                continue;
+            }
+            {
+                let mut registry = state_for_task.registry.write().unwrap(); // ci-ok: infallible lock
                 registry.set_verification_status(
                     &tenant.clone().into(),
                     entity_name,
@@ -368,22 +510,38 @@ async fn handle_load_dir(
                 step_number: Some(2),
                 total_steps: Some(7),
             };
-            let _ = state.design_time_tx.send(started_event.clone());
-            if let Ok(mut log) = state.design_time_log.write() {
-                log.push(started_event);
+            if let Err(e) = state_for_task.emit_design_time_event(started_event).await {
+                tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to emit verify_started event");
+                let _ = tx
+                    .send(Ok(
+                        serde_json::to_string(&serde_json::json!({
+                            "type": "verification_error",
+                            "entity": entity_name,
+                            "error": e,
+                        }))
+                        .unwrap() // ci-ok: infallible serialization
+                            + "\n",
+                    ))
+                    .await;
+                entity_results.insert(entity_name.clone(), false);
+                continue;
             }
 
             // Stream verification_started
-            let _ = tx.send(Ok(
-                serde_json::to_string(&serde_json::json!({
-                    "type": "verification_started",
-                    "entity": entity_name,
-                })).unwrap() + "\n" // ci-ok: serde_json::to_string on valid JSON is infallible
-            )).await;
+            let _ = tx
+                .send(Ok(
+                    serde_json::to_string(&serde_json::json!({
+                        "type": "verification_started",
+                        "entity": entity_name,
+                    }))
+                    .unwrap() // ci-ok: infallible serialization
+                        + "\n",
+                ))
+                .await;
 
             // Run verification (blocking, sequential per entity)
             let ioa_source = ioa_sources[entity_name].clone();
-            let result = tokio::task::spawn_blocking(move || {
+            let result = tokio::task::spawn_blocking(move || { // determinism-ok: HTTP handler offloads CPU-intensive verification
                 temper_verify::VerificationCascade::from_ioa(&ioa_source)
                     .with_sim_seeds(5)
                     .with_prop_test_cases(100)
@@ -391,7 +549,12 @@ async fn handle_load_dir(
             })
             .await;
 
-            let level_labels = ["L0_symbolic", "L1_model_check", "L2_simulation", "L3_property_test"];
+            let level_labels = [
+                "L0_symbolic",
+                "L1_model_check",
+                "L2_simulation",
+                "L3_property_test",
+            ];
 
             match result {
                 Ok(cascade_result) => {
@@ -404,40 +567,38 @@ async fn handle_load_dir(
                             summary: format!(
                                 "{} {} for {}",
                                 level_labels.get(level_idx).unwrap_or(&"unknown"),
-                                if level_result.passed { "passed" } else { "failed" },
+                                if level_result.passed {
+                                    "passed"
+                                } else {
+                                    "failed"
+                                },
                                 entity_name
                             ),
-                            level: Some(level_labels.get(level_idx).unwrap_or(&"unknown").to_string()),
+                            level: Some(
+                                level_labels
+                                    .get(level_idx)
+                                    .unwrap_or(&"unknown")
+                                    .to_string(),
+                            ),
                             passed: Some(level_result.passed),
                             timestamp: sim_now().to_rfc3339(),
                             step_number: Some(3 + level_idx as u8),
                             total_steps: Some(7),
                         };
-                        let _ = state.design_time_tx.send(level_event.clone());
-                        if let Ok(mut log) = state.design_time_log.write() {
-                            log.push(level_event);
+                        if let Err(e) = state_for_task.emit_design_time_event(level_event).await {
+                            tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to emit verify_level event");
+                            let _ = tx
+                                .send(Ok(
+                                    serde_json::to_string(&serde_json::json!({
+                                        "type": "verification_error",
+                                        "entity": entity_name,
+                                        "error": e,
+                                    }))
+                                    .unwrap() // ci-ok: infallible serialization
+                                        + "\n",
+                                ))
+                                .await;
                         }
-                    }
-
-                    // Emit verify_done event for UI
-                    let done_event = crate::state::DesignTimeEvent {
-                        kind: "verify_done".to_string(),
-                        entity_type: entity_name.clone(),
-                        tenant: tenant.clone(),
-                        summary: if cascade_result.all_passed {
-                            format!("All verification levels passed for {entity_name}")
-                        } else {
-                            format!("Verification completed with failures for {entity_name}")
-                        },
-                        level: None,
-                        passed: Some(cascade_result.all_passed),
-                        timestamp: sim_now().to_rfc3339(),
-                        step_number: Some(7),
-                        total_steps: Some(7),
-                    };
-                    let _ = state.design_time_tx.send(done_event.clone());
-                    if let Ok(mut log) = state.design_time_log.write() {
-                        log.push(done_event);
                     }
 
                     // Build EntityVerificationResult for registry
@@ -509,40 +670,147 @@ async fn handle_load_dir(
                     };
 
                     // Stream verification_result with full level details
-                    let levels_json: Vec<serde_json::Value> = entity_result.levels.iter().map(|l| {
-                        let mut obj = serde_json::json!({
-                            "level": &l.level,
-                            "passed": l.passed,
-                            "summary": &l.summary,
-                        });
-                        if let Some(details) = &l.details {
-                            obj["details"] = serde_json::to_value(details).unwrap_or_default();
-                        }
-                        obj
-                    }).collect();
+                    let levels_json: Vec<serde_json::Value> = entity_result
+                        .levels
+                        .iter()
+                        .map(|l| {
+                            let mut obj = serde_json::json!({
+                                "level": &l.level,
+                                "passed": l.passed,
+                                "summary": &l.summary,
+                            });
+                            if let Some(details) = &l.details {
+                                obj["details"] = serde_json::to_value(details).unwrap_or_default();
+                            }
+                            obj
+                        })
+                        .collect();
 
-                    let _ = tx.send(Ok(
-                        serde_json::to_string(&serde_json::json!({
-                            "type": "verification_result",
-                            "entity": entity_name,
-                            "all_passed": cascade_result.all_passed,
-                            "levels": levels_json,
-                        })).unwrap() + "\n" // ci-ok: serde_json::to_string on valid JSON is infallible
-                    )).await;
+                    let _ = tx
+                        .send(Ok(
+                            serde_json::to_string(&serde_json::json!({
+                                "type": "verification_result",
+                                "entity": entity_name,
+                                "all_passed": cascade_result.all_passed,
+                                "levels": levels_json,
+                            }))
+                            .unwrap() // ci-ok: infallible serialization
+                                + "\n",
+                        ))
+                        .await;
 
                     entity_results.insert(entity_name.clone(), cascade_result.all_passed);
 
-                    // Update registry with final status
-                    if let Ok(mut reg) = state.registry.write() {
+                    let passed_count = entity_result.levels.iter().filter(|l| l.passed).count();
+                    let final_status = if entity_result.all_passed {
+                        "passed"
+                    } else if passed_count == 0 {
+                        "failed"
+                    } else {
+                        "partial"
+                    };
+                    if let Err(e) = state_for_task
+                        .persist_spec_verification(
+                            &tenant,
+                            entity_name,
+                            final_status,
+                            Some(&entity_result),
+                        )
+                        .await
+                    {
+                        tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to persist completed verification status");
+                        let _ = tx
+                            .send(Ok(
+                                serde_json::to_string(&serde_json::json!({
+                                    "type": "verification_error",
+                                    "entity": entity_name,
+                                    "error": e,
+                                }))
+                                .unwrap() // ci-ok: infallible serialization
+                                    + "\n",
+                            ))
+                            .await;
+                        continue;
+                    }
+                    if let Ok(mut reg) = state_for_task.registry.write() {
                         reg.set_verification_status(
                             &tenant.clone().into(),
                             entity_name,
-                            VerificationStatus::Completed(entity_result),
+                            VerificationStatus::Completed(entity_result.clone()),
                         );
+                    }
+                    let done_event = crate::state::DesignTimeEvent {
+                        kind: "verify_done".to_string(),
+                        entity_type: entity_name.clone(),
+                        tenant: tenant.clone(),
+                        summary: if cascade_result.all_passed {
+                            format!("All verification levels passed for {entity_name}")
+                        } else {
+                            format!("Verification completed with failures for {entity_name}")
+                        },
+                        level: None,
+                        passed: Some(cascade_result.all_passed),
+                        timestamp: sim_now().to_rfc3339(),
+                        step_number: Some(7),
+                        total_steps: Some(7),
+                    };
+                    if let Err(e) = state_for_task.emit_design_time_event(done_event).await {
+                        tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to emit verify_done event");
+                        let _ = tx
+                            .send(Ok(
+                                serde_json::to_string(&serde_json::json!({
+                                    "type": "verification_error",
+                                    "entity": entity_name,
+                                    "error": e,
+                                }))
+                                .unwrap() // ci-ok: infallible serialization
+                                    + "\n",
+                            ))
+                            .await;
                     }
                 }
                 Err(e) => {
-                    // Verification task panicked — emit failure
+                    entity_results.insert(entity_name.clone(), false);
+                    let failure_result = crate::registry::EntityVerificationResult {
+                        all_passed: false,
+                        levels: vec![crate::registry::EntityLevelSummary {
+                            level: "VerificationTask".to_string(),
+                            passed: false,
+                            summary: format!("Verification failed for {entity_name}: {e}"),
+                            details: None,
+                        }],
+                        verified_at: sim_now().to_rfc3339(),
+                    };
+                    if let Err(persist_err) = state_for_task
+                        .persist_spec_verification(
+                            &tenant,
+                            entity_name,
+                            "failed",
+                            Some(&failure_result),
+                        )
+                        .await
+                    {
+                        tracing::error!(tenant = %tenant, entity = %entity_name, error = %persist_err, "failed to persist failed verification status");
+                        let _ = tx
+                            .send(Ok(
+                                serde_json::to_string(&serde_json::json!({
+                                    "type": "verification_error",
+                                    "entity": entity_name,
+                                    "error": persist_err,
+                                }))
+                                .unwrap() // ci-ok: infallible serialization
+                                    + "\n",
+                            ))
+                            .await;
+                        continue;
+                    }
+                    if let Ok(mut reg) = state_for_task.registry.write() {
+                        reg.set_verification_status(
+                            &tenant.clone().into(),
+                            entity_name,
+                            VerificationStatus::Completed(failure_result.clone()),
+                        );
+                    }
                     let fail_event = crate::state::DesignTimeEvent {
                         kind: "verify_done".to_string(),
                         entity_type: entity_name.clone(),
@@ -554,34 +822,39 @@ async fn handle_load_dir(
                         step_number: Some(7),
                         total_steps: Some(7),
                     };
-                    let _ = state.design_time_tx.send(fail_event.clone());
-                    if let Ok(mut log) = state.design_time_log.write() {
-                        log.push(fail_event);
+                    if let Err(event_err) = state_for_task.emit_design_time_event(fail_event).await {
+                        tracing::error!(tenant = %tenant, entity = %entity_name, error = %event_err, "failed to emit failed verify_done event");
                     }
 
-                    entity_results.insert(entity_name.clone(), false);
-
-                    let _ = tx.send(Ok(
-                        serde_json::to_string(&serde_json::json!({
-                            "type": "verification_error",
-                            "entity": entity_name,
-                            "error": format!("{e}"),
-                        })).unwrap() + "\n" // ci-ok: serde_json::to_string on valid JSON is infallible
-                    )).await;
+                    let _ = tx
+                        .send(Ok(
+                            serde_json::to_string(&serde_json::json!({
+                                "type": "verification_error",
+                                "entity": entity_name,
+                                "error": format!("{e}"),
+                            }))
+                            .unwrap() // ci-ok: infallible serialization
+                                + "\n",
+                        ))
+                        .await;
                 }
             }
         }
 
         // Stream final summary
         let all_passed = entity_results.values().all(|&p| p);
-        let _ = tx.send(Ok(
-            serde_json::to_string(&serde_json::json!({
-                "type": "summary",
-                "tenant": &tenant,
-                "all_passed": all_passed,
-                "entities": entity_results,
-            })).unwrap() + "\n" // ci-ok: serde_json::to_string on valid JSON is infallible
-        )).await;
+        let _ = tx
+            .send(Ok(
+                serde_json::to_string(&serde_json::json!({
+                    "type": "summary",
+                    "tenant": &tenant,
+                    "all_passed": all_passed,
+                    "entities": entity_results,
+                }))
+                .unwrap() // ci-ok: infallible serialization
+                    + "\n",
+            ))
+            .await;
         // tx drops here, closing the stream
     });
 
@@ -593,6 +866,42 @@ async fn handle_load_dir(
         .unwrap()) // ci-ok: Response::builder with valid headers is infallible
 }
 
+/// POST /observe/specs/load-inline -- load specs from inline content.
+///
+/// Accepts a JSON body with `tenant` and `specs` (map of filename → content).
+/// Writes them to a temp directory and delegates to the same logic as load-dir.
+async fn handle_load_inline(
+    State(state): State<ServerState>,
+    Json(body): Json<LoadInlineRequest>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    // Write specs to a temp directory
+    let tmp_dir = std::env::temp_dir().join(format!("temper-inline-{}", body.tenant)); // determinism-ok: HTTP handler writes user specs to temp dir for loading
+    let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans previous temp dir
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| { // determinism-ok: HTTP handler creates temp dir for inline specs
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create temp dir: {e}"),
+        )
+    })?;
+
+    for (filename, content) in &body.specs {
+        let path = tmp_dir.join(filename);
+        std::fs::write(&path, content).map_err(|e| { // determinism-ok: HTTP handler writes user specs to temp dir
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to write {filename}: {e}"),
+            )
+        })?;
+    }
+
+    // Delegate to load-dir logic
+    let dir_request = LoadDirRequest {
+        tenant: body.tenant,
+        specs_dir: tmp_dir.to_string_lossy().to_string(),
+    };
+    handle_load_dir(State(state), Json(dir_request)).await
+}
+
 /// GET /observe/specs/{entity} -- full spec detail for a named entity type.
 ///
 /// Searches across all tenants and returns the first match.
@@ -600,7 +909,7 @@ async fn get_spec_detail(
     State(state): State<ServerState>,
     Path(entity): Path<String>,
 ) -> Result<Json<SpecDetail>, StatusCode> {
-    let registry = state.registry.read().unwrap();
+    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
 
     for tenant_id in registry.tenant_ids() {
         if let Some(entity_spec) = registry.get_spec(tenant_id, &entity) {
@@ -648,45 +957,88 @@ async fn get_spec_detail(
 }
 
 /// GET /observe/entities -- list active entity instances from the actor registry.
+///
+/// Returns deduplicated entities with their current state, sorted newest first.
 async fn list_entities(State(state): State<ServerState>) -> Json<Vec<EntityInstanceSummary>> {
-    let registry = state.actor_registry.read().unwrap();
-    let entities: Vec<EntityInstanceSummary> = registry
+    let registry = state.actor_registry.read().unwrap(); // ci-ok: infallible lock
+    let cache = state.entity_state_cache.read().unwrap(); // ci-ok: infallible lock
+    let mut entities: Vec<EntityInstanceSummary> = registry
         .keys()
         .map(|key| {
             // Actor keys are formatted as "{tenant}:{entity_type}:{entity_id}"
             let parts: Vec<&str> = key.splitn(3, ':').collect();
+            let (current_state, last_updated) = cache
+                .get(key.as_str())
+                .map(|(s, t)| (Some(s.clone()), Some(t.to_rfc3339())))
+                .unwrap_or((None, None));
             EntityInstanceSummary {
                 entity_type: parts.get(1).unwrap_or(&"unknown").to_string(),
                 entity_id: parts.get(2).unwrap_or(&"unknown").to_string(),
                 actor_status: "active".to_string(),
+                current_state,
+                last_updated,
             }
         })
         .collect();
+    // Sort newest first (by last_updated descending, entities without timestamps go last)
+    entities.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
     Json(entities)
 }
 
 /// POST /observe/verify/{entity} -- run verification cascade on a spec.
 ///
 /// Runs all levels (L0 SMT, L1 Model Check, L2 DST, L3 PropTest) and returns results.
+/// Emits per-level `DesignTimeEvent`s via SSE so the UI can show streaming progress.
 async fn run_verification(
     State(state): State<ServerState>,
     Path(entity): Path<String>,
 ) -> Result<Json<temper_verify::CascadeResult>, StatusCode> {
-    let ioa_source = {
-        let registry = state.registry.read().unwrap();
+    let lookup = {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
         let mut found = None;
         for tenant_id in registry.tenant_ids() {
             if let Some(entity_spec) = registry.get_spec(tenant_id, &entity) {
-                found = Some(entity_spec.ioa_source.clone());
+                found = Some((tenant_id.clone(), entity_spec.ioa_source.clone()));
                 break;
             }
         }
         found
     };
 
-    let Some(ioa_source) = ioa_source else {
+    let Some((tenant_id, ioa_source)) = lookup else {
         return Err(StatusCode::NOT_FOUND);
     };
+    let tenant = tenant_id.as_str().to_string();
+
+    // Persist first, then update in-memory registry.
+    state
+        .persist_spec_verification(&tenant, &entity, "running", None)
+        .await
+        .map_err(|e| {
+            tracing::error!(tenant = %tenant, entity = %entity, error = %e, "failed to persist running verification status");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    if let Ok(mut reg) = state.registry.write() {
+        reg.set_verification_status(&tenant_id, &entity, VerificationStatus::Running);
+    }
+
+    // Emit verify_started event
+    let now = sim_now();
+    let started_event = crate::state::DesignTimeEvent {
+        kind: "verify_started".to_string(),
+        entity_type: entity.clone(),
+        tenant: tenant.clone(),
+        summary: format!("Verification started for {entity}"),
+        level: None,
+        passed: None,
+        timestamp: now.to_rfc3339(),
+        step_number: Some(2),
+        total_steps: Some(7),
+    };
+    state.emit_design_time_event(started_event).await.map_err(|e| {
+        tracing::error!(tenant = %tenant, entity = %entity, error = %e, "failed to emit verify_started event");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Run the cascade in a blocking task since verification is CPU-intensive.
     let result = tokio::task::spawn_blocking(move || {
@@ -697,6 +1049,140 @@ async fn run_verification(
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Emit per-level events so the UI stepper can update incrementally
+    for (i, level_result) in result.levels.iter().enumerate() {
+        let level_name = level_result.level.to_string();
+        let event = crate::state::DesignTimeEvent {
+            kind: "verify_level".to_string(),
+            entity_type: entity.clone(),
+            tenant: tenant.clone(),
+            summary: format!("{level_name}: {}", level_result.summary),
+            level: Some(level_name),
+            passed: Some(level_result.passed),
+            timestamp: sim_now().to_rfc3339(),
+            step_number: Some(3 + i as u8),
+            total_steps: Some(7),
+        };
+        state.emit_design_time_event(event).await.map_err(|e| {
+            tracing::error!(tenant = %tenant, entity = %entity, error = %e, "failed to emit verify_level event");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
+
+    let entity_result = crate::registry::EntityVerificationResult {
+        all_passed: result.all_passed,
+        levels: result
+            .levels
+            .iter()
+            .map(|l| {
+                let details: Option<Vec<crate::registry::VerificationDetail>> = if !l.passed {
+                    let mut dets = Vec::new();
+                    if let Some(sim) = &l.simulation {
+                        for v in &sim.liveness_violations {
+                            dets.push(crate::registry::VerificationDetail {
+                                kind: "liveness_violation".into(),
+                                property: v.property.clone(),
+                                description: v.description.clone(),
+                                actor_id: Some(v.actor_id.clone()),
+                            });
+                        }
+                        for v in &sim.violations {
+                            dets.push(crate::registry::VerificationDetail {
+                                kind: "invariant_violation".into(),
+                                property: v.invariant.clone(),
+                                description: format!(
+                                    "Actor {} violated invariant at tick {} during action {}",
+                                    v.actor_id, v.tick, v.action
+                                ),
+                                actor_id: Some(v.actor_id.clone()),
+                            });
+                        }
+                    }
+                    if let Some(mc) = &l.verification {
+                        for cx in &mc.counterexamples {
+                            dets.push(crate::registry::VerificationDetail {
+                                kind: "counterexample".into(),
+                                property: cx.property.clone(),
+                                description: format!(
+                                    "Counterexample found with {} step trace",
+                                    cx.trace.len()
+                                ),
+                                actor_id: None,
+                            });
+                        }
+                    }
+                    if let Some(pt) = &l.prop_test {
+                        if let Some(failure) = &pt.failure {
+                            dets.push(crate::registry::VerificationDetail {
+                                kind: "proptest_failure".into(),
+                                property: failure.invariant.clone(),
+                                description: format!(
+                                    "Property test failed after sequence: {}",
+                                    failure.action_sequence.join(" → ")
+                                ),
+                                actor_id: None,
+                            });
+                        }
+                    }
+                    if dets.is_empty() { None } else { Some(dets) }
+                } else {
+                    None
+                };
+
+                crate::registry::EntityLevelSummary {
+                    level: l.level.to_string(),
+                    passed: l.passed,
+                    summary: l.summary.clone(),
+                    details,
+                }
+            })
+            .collect(),
+        verified_at: sim_now().to_rfc3339(),
+    };
+    let passed_count = entity_result.levels.iter().filter(|l| l.passed).count();
+    let final_status = if entity_result.all_passed {
+        "passed"
+    } else if passed_count == 0 {
+        "failed"
+    } else {
+        "partial"
+    };
+    state
+        .persist_spec_verification(&tenant, &entity, final_status, Some(&entity_result))
+        .await
+        .map_err(|e| {
+            tracing::error!(tenant = %tenant, entity = %entity, error = %e, "failed to persist final verification status");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    if let Ok(mut reg) = state.registry.write() {
+        reg.set_verification_status(
+            &tenant_id,
+            &entity,
+            VerificationStatus::Completed(entity_result.clone()),
+        );
+    }
+
+    // Emit verify_done event
+    let done_event = crate::state::DesignTimeEvent {
+        kind: "verify_done".to_string(),
+        entity_type: entity.clone(),
+        tenant: tenant.clone(),
+        summary: if result.all_passed {
+            format!("All levels passed for {entity}")
+        } else {
+            format!("Verification failed for {entity}")
+        },
+        level: None,
+        passed: Some(result.all_passed),
+        timestamp: sim_now().to_rfc3339(),
+        step_number: Some(7),
+        total_steps: Some(7),
+    };
+    state.emit_design_time_event(done_event).await.map_err(|e| {
+        tracing::error!(tenant = %tenant, entity = %entity, error = %e, "failed to emit verify_done event");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(result))
 }
@@ -710,7 +1196,7 @@ async fn run_simulation(
     Query(params): Query<SimQueryParams>,
 ) -> Result<Json<temper_verify::SimulationResult>, StatusCode> {
     let ioa_source = {
-        let registry = state.registry.read().unwrap();
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
         let mut found = None;
         for tenant_id in registry.tenant_ids() {
             if let Some(entity_spec) = registry.get_spec(tenant_id, &entity) {
@@ -760,7 +1246,10 @@ async fn get_entity_history(
     // Path 1: If the actor is loaded, read events from in-memory state.
     let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
     let actor_ref = {
-        let registry = state.actor_registry.read().unwrap_or_else(|e| e.into_inner());
+        let registry = state
+            .actor_registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         registry.get(&actor_key).cloned()
     };
 
@@ -769,17 +1258,23 @@ async fn get_entity_history(
             .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(5))
             .await
         {
-            let mut json = format_history_response(
-                &entity_type,
-                &entity_id,
-                &response.state.events,
-            );
+            let mut json =
+                format_history_response(&entity_type, &entity_id, &response.state.events);
             // Include entity properties from in-memory state.
             if let Some(obj) = json.as_object_mut() {
-                obj.insert("current_state".to_string(), serde_json::json!(response.state.status));
+                obj.insert(
+                    "current_state".to_string(),
+                    serde_json::json!(response.state.status),
+                );
                 obj.insert("fields".to_string(), response.state.fields.clone());
-                obj.insert("counters".to_string(), serde_json::json!(response.state.counters));
-                obj.insert("booleans".to_string(), serde_json::json!(response.state.booleans));
+                obj.insert(
+                    "counters".to_string(),
+                    serde_json::json!(response.state.counters),
+                );
+                obj.insert(
+                    "booleans".to_string(),
+                    serde_json::json!(response.state.booleans),
+                );
                 obj.insert("lists".to_string(), serde_json::json!(response.state.lists));
             }
             return Json(json);
@@ -792,9 +1287,7 @@ async fn get_entity_history(
         if let Ok(envelopes) = store.read_events(&persistence_id, 0).await {
             let events: Vec<serde_json::Value> = envelopes
                 .iter()
-                .filter_map(|env| {
-                    serde_json::from_value::<EntityEvent>(env.payload.clone()).ok()
-                })
+                .filter_map(|env| serde_json::from_value::<EntityEvent>(env.payload.clone()).ok())
                 .enumerate()
                 .map(|(i, event)| {
                     serde_json::json!({
@@ -924,7 +1417,7 @@ struct EntityVerificationStatusResponse {
 async fn handle_verification_status(
     State(state): State<ServerState>,
 ) -> Json<AllVerificationStatus> {
-    let registry = state.registry.read().unwrap();
+    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
     let mut pending = 0usize;
     let mut running = 0usize;
     let mut passed = 0usize;
@@ -945,8 +1438,7 @@ async fn handle_verification_status(
                         ("running".to_string(), None, None)
                     }
                     VerificationStatus::Completed(result) => {
-                        let passed_count =
-                            result.levels.iter().filter(|l| l.passed).count();
+                        let passed_count = result.levels.iter().filter(|l| l.passed).count();
                         let s = if result.all_passed {
                             passed += 1;
                             "passed"
@@ -967,17 +1459,13 @@ async fn handle_verification_status(
                                     "summary": l.summary,
                                 });
                                 if let Some(details) = &l.details {
-                                    obj["details"] = serde_json::to_value(details)
-                                        .unwrap_or_default();
+                                    obj["details"] =
+                                        serde_json::to_value(details).unwrap_or_default();
                                 }
                                 obj
                             })
                             .collect();
-                        (
-                            s.to_string(),
-                            Some(lvls),
-                            Some(result.verified_at.clone()),
-                        )
+                        (s.to_string(), Some(lvls), Some(result.verified_at.clone()))
                     }
                 };
 
@@ -1065,12 +1553,106 @@ struct WorkflowsResponse {
 ///
 /// Builds a Temporal-like workflow timeline from the design-time event log,
 /// verification statuses, and trajectory log.
-async fn handle_workflows(
-    State(state): State<ServerState>,
-) -> Json<WorkflowsResponse> {
-    let registry = state.registry.read().unwrap();
-    let event_log = state.design_time_log.read().unwrap();
-    let trajectory_log = state.trajectory_log.read().unwrap();
+async fn handle_workflows(State(state): State<ServerState>) -> Json<WorkflowsResponse> {
+    let persisted_events: Option<Vec<crate::state::DesignTimeEvent>> =
+        if let Some(ref store) = state.event_store {
+            type DtEventRow = (
+                String, String, String, String,
+                Option<String>, Option<bool>, Option<i16>, Option<i16>,
+                chrono::DateTime<chrono::Utc>,
+            );
+            let rows: Result<Vec<DtEventRow>, sqlx::Error> = sqlx::query_as(
+                "SELECT kind, entity_type, tenant, summary, level, passed, step_number, \
+                        total_steps, created_at \
+                 FROM design_time_events \
+                 ORDER BY created_at ASC, id ASC",
+            )
+            .fetch_all(store.pool())
+            .await;
+            match rows {
+                Ok(rows) => Some(
+                    rows.into_iter()
+                        .map(
+                            |(
+                                kind,
+                                entity_type,
+                                tenant,
+                                summary,
+                                level,
+                                passed,
+                                step_number,
+                                total_steps,
+                                created_at,
+                            )| crate::state::DesignTimeEvent {
+                                kind,
+                                entity_type,
+                                tenant,
+                                summary,
+                                level,
+                                passed,
+                                timestamp: created_at.to_rfc3339(),
+                                step_number: step_number.map(|n| n as u8),
+                                total_steps: total_steps.map(|n| n as u8),
+                            },
+                        )
+                        .collect(),
+                ),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to read design_time_events from postgres");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+    let runtime_counts: std::collections::BTreeMap<String, u64> =
+        if let Some(ref store) = state.event_store {
+            let rows: Result<Vec<(String, i64)>, sqlx::Error> = sqlx::query_as(
+                "SELECT tenant, COUNT(*) AS count \
+                 FROM trajectories \
+                 GROUP BY tenant",
+            )
+            .fetch_all(store.pool())
+            .await;
+            match rows {
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|(tenant, count)| (tenant, count as u64))
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to read trajectory counts from postgres");
+                    let trajectory_log = state
+                        .trajectory_log
+                        .read()
+                        .unwrap_or_else(|err| err.into_inner());
+                    let mut counts = std::collections::BTreeMap::new();
+                    for entry in trajectory_log.entries() {
+                        *counts.entry(entry.tenant.clone()).or_insert(0) += 1;
+                    }
+                    counts
+                }
+            }
+        } else {
+            let trajectory_log = state
+                .trajectory_log
+                .read()
+                .unwrap_or_else(|err| err.into_inner());
+            let mut counts = std::collections::BTreeMap::new();
+            for entry in trajectory_log.entries() {
+                *counts.entry(entry.tenant.clone()).or_insert(0) += 1;
+            }
+            counts
+        };
+
+    let event_log: Vec<crate::state::DesignTimeEvent> = persisted_events.unwrap_or_else(|| {
+        state
+            .design_time_log
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    });
+    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
 
     let mut workflows = Vec::new();
 
@@ -1098,7 +1680,12 @@ async fn handle_workflows(
             let loaded_event = entity_events.iter().find(|e| e.kind == "spec_loaded");
             steps.push(WorkflowStep {
                 step: "loaded".to_string(),
-                status: if loaded_event.is_some() { "completed" } else { "pending" }.to_string(),
+                status: if loaded_event.is_some() {
+                    "completed"
+                } else {
+                    "pending"
+                }
+                .to_string(),
                 passed: None,
                 timestamp: loaded_event.map(|e| e.timestamp.clone()),
                 summary: loaded_event.map(|e| e.summary.clone()),
@@ -1108,7 +1695,12 @@ async fn handle_workflows(
             let started_event = entity_events.iter().find(|e| e.kind == "verify_started");
             steps.push(WorkflowStep {
                 step: "verify_started".to_string(),
-                status: if started_event.is_some() { "completed" } else { "pending" }.to_string(),
+                status: if started_event.is_some() {
+                    "completed"
+                } else {
+                    "pending"
+                }
+                .to_string(),
                 passed: None,
                 timestamp: started_event.map(|e| e.timestamp.clone()),
                 summary: started_event.map(|e| e.summary.clone()),
@@ -1120,15 +1712,24 @@ async fn handle_workflows(
                 .filter(|e| e.kind == "verify_level")
                 .collect();
 
-            let level_labels = ["L0_symbolic", "L1_model_check", "L2_simulation", "L3_property_test"];
+            let level_labels = [
+                "L0_symbolic",
+                "L1_model_check",
+                "L2_simulation",
+                "L3_property_test",
+            ];
             for (i, label) in level_labels.iter().enumerate() {
                 let level_event = level_events.get(i);
                 let status = match level_event {
                     Some(_) => "completed",
                     None => {
                         // Check if verification is still running
-                        if let Some(VerificationStatus::Running) = registry.get_verification_status(tenant_id, entity_type) {
-                            if (i == 0 && started_event.is_some() && level_events.is_empty()) || level_events.len() == i {
+                        if let Some(VerificationStatus::Running) =
+                            registry.get_verification_status(tenant_id, entity_type)
+                        {
+                            if (i == 0 && started_event.is_some() && level_events.is_empty())
+                                || level_events.len() == i
+                            {
                                 "running"
                             } else {
                                 "pending"
@@ -1151,7 +1752,11 @@ async fn handle_workflows(
             let done_event = entity_events.iter().find(|e| e.kind == "verify_done");
             let deploy_status = match registry.get_verification_status(tenant_id, entity_type) {
                 Some(VerificationStatus::Completed(result)) => {
-                    if result.all_passed { "completed" } else { "failed" }
+                    if result.all_passed {
+                        "completed"
+                    } else {
+                        "failed"
+                    }
                 }
                 Some(VerificationStatus::Running) => {
                     tenant_status = "verifying";
@@ -1192,11 +1797,7 @@ async fn handle_workflows(
         }
 
         // Count runtime events for this tenant
-        let runtime_count = trajectory_log
-            .entries()
-            .iter()
-            .filter(|e| e.tenant == tenant_str)
-            .count() as u64;
+        let runtime_count = *runtime_counts.get(&tenant_str).unwrap_or(&0);
 
         workflows.push(AppWorkflow {
             tenant: tenant_str,
@@ -1228,7 +1829,10 @@ async fn handle_health(State(state): State<ServerState>) -> Json<serde_json::Val
     };
 
     let active_entities = {
-        let reg = state.actor_registry.read().unwrap_or_else(|e| e.into_inner());
+        let reg = state
+            .actor_registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         reg.len() as u64
     };
 
@@ -1253,7 +1857,9 @@ async fn handle_health(State(state): State<ServerState>) -> Json<serde_json::Val
 }
 
 /// GET /observe/metrics -- Prometheus text-format metrics.
-async fn handle_metrics(State(state): State<ServerState>) -> (StatusCode, [(String, String); 1], String) {
+async fn handle_metrics(
+    State(state): State<ServerState>,
+) -> (StatusCode, [(String, String); 1], String) {
     let mut lines = Vec::new();
 
     // -- temper_transitions_total --
@@ -1290,7 +1896,9 @@ async fn handle_metrics(State(state): State<ServerState>) -> (StatusCode, [(Stri
     }
 
     // -- temper_active_entities --
-    lines.push("# HELP temper_active_entities Number of currently active entity actors.".to_string());
+    lines.push(
+        "# HELP temper_active_entities Number of currently active entity actors.".to_string(),
+    );
     lines.push("# TYPE temper_active_entities gauge".to_string());
     {
         // Count per entity_type from the entity index.
@@ -1312,7 +1920,10 @@ async fn handle_metrics(State(state): State<ServerState>) -> (StatusCode, [(Stri
 
     (
         StatusCode::OK,
-        [("Content-Type".to_string(), "text/plain; version=0.0.4; charset=utf-8".to_string())],
+        [(
+            "Content-Type".to_string(),
+            "text/plain; version=0.0.4; charset=utf-8".to_string(),
+        )],
         body,
     )
 }
@@ -1347,8 +1958,121 @@ async fn handle_trajectories(
 ) -> Json<serde_json::Value> {
     let failed_limit = params.failed_limit.unwrap_or(50).min(500);
     let success_filter: Option<bool> = params.success.as_deref().map(|s| s == "true");
+    if let Some(ref store) = state.event_store {
+        let totals: Result<(i64, i64), sqlx::Error> = sqlx::query_as(
+            "SELECT COUNT(*) AS total, \
+                    COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END), 0) AS success_count \
+             FROM trajectories \
+             WHERE ($1::text IS NULL OR entity_type = $1) \
+               AND ($2::text IS NULL OR action = $2) \
+               AND ($3::bool IS NULL OR success = $3)",
+        )
+        .bind(params.entity_type.as_deref())
+        .bind(params.action.as_deref())
+        .bind(success_filter)
+        .fetch_one(store.pool())
+        .await;
 
-    let log = state.trajectory_log.read().unwrap_or_else(|e| e.into_inner());
+        let by_action_rows: Result<Vec<(String, i64, i64, i64)>, sqlx::Error> = sqlx::query_as(
+            "SELECT action, \
+                    COUNT(*) AS total, \
+                    COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END), 0) AS success, \
+                    COALESCE(SUM(CASE WHEN NOT success THEN 1 ELSE 0 END), 0) AS error \
+             FROM trajectories \
+             WHERE ($1::text IS NULL OR entity_type = $1) \
+               AND ($2::text IS NULL OR action = $2) \
+               AND ($3::bool IS NULL OR success = $3) \
+             GROUP BY action \
+             ORDER BY action ASC",
+        )
+        .bind(params.entity_type.as_deref())
+        .bind(params.action.as_deref())
+        .bind(success_filter)
+        .fetch_all(store.pool())
+        .await;
+
+        type FailedRow = (
+            String, String, String, String,
+            Option<String>, Option<String>,
+            chrono::DateTime<chrono::Utc>,
+        );
+        let failed_rows: Result<Vec<FailedRow>, sqlx::Error> = sqlx::query_as(
+            "SELECT tenant, entity_type, entity_id, action, from_status, error, created_at \
+             FROM trajectories \
+             WHERE success = false \
+               AND ($1::text IS NULL OR entity_type = $1) \
+               AND ($2::text IS NULL OR action = $2) \
+               AND ($3::bool IS NULL OR success = $3) \
+             ORDER BY created_at DESC \
+             LIMIT $4",
+        )
+        .bind(params.entity_type.as_deref())
+        .bind(params.action.as_deref())
+        .bind(success_filter)
+        .bind(failed_limit as i64)
+        .fetch_all(store.pool())
+        .await;
+
+        if let (Ok((total, success_count)), Ok(by_action_rows), Ok(failed_rows)) =
+            (totals, by_action_rows, failed_rows)
+        {
+            let total = total as u64;
+            let success_count = success_count as u64;
+            let error_count = total.saturating_sub(success_count);
+            let success_rate = if total > 0 {
+                success_count as f64 / total as f64
+            } else {
+                0.0
+            };
+
+            let by_action: std::collections::BTreeMap<String, serde_json::Value> = by_action_rows
+                .into_iter()
+                .map(|(action, total, success, error)| {
+                    (
+                        action,
+                        serde_json::json!({
+                            "total": total as u64,
+                            "success": success as u64,
+                            "error": error as u64,
+                        }),
+                    )
+                })
+                .collect();
+
+            let failed_intents: Vec<serde_json::Value> = failed_rows
+                .into_iter()
+                .map(
+                    |(tenant, entity_type, entity_id, action, from_status, error, created_at)| {
+                        serde_json::json!({
+                            "timestamp": created_at.to_rfc3339(),
+                            "tenant": tenant,
+                            "entity_type": entity_type,
+                            "entity_id": entity_id,
+                            "action": action,
+                            "from_status": from_status,
+                            "error": error,
+                        })
+                    },
+                )
+                .collect();
+
+            return Json(serde_json::json!({
+                "total": total,
+                "success_count": success_count,
+                "error_count": error_count,
+                "success_rate": success_rate,
+                "by_action": by_action,
+                "failed_intents": failed_intents,
+            }));
+        }
+
+        tracing::warn!("failed to query trajectories from postgres, falling back to in-memory log");
+    }
+
+    let log = state
+        .trajectory_log
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
 
     // Filter entries.
     let filtered: Vec<&TrajectoryEntry> = log
@@ -1376,7 +2100,7 @@ async fn handle_trajectories(
 
     let total = filtered.len() as u64;
     let success_count = filtered.iter().filter(|e| e.success).count() as u64;
-    let error_count = total - success_count;
+    let error_count = total.saturating_sub(success_count);
     let success_rate = if total > 0 {
         success_count as f64 / total as f64
     } else {
@@ -1439,15 +2163,22 @@ async fn handle_trajectories(
 async fn handle_unmet_intent(
     State(state): State<ServerState>,
     Json(body): Json<serde_json::Value>,
-) -> StatusCode {
+) -> Result<StatusCode, (StatusCode, String)> {
     use temper_runtime::scheduler::sim_now;
 
-    let intent = body.get("action")
+    let intent = body
+        .get("action")
         .or_else(|| body.get("intent"))
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
-    let tenant = body.get("tenant").and_then(|v| v.as_str()).unwrap_or("default");
-    let entity_type = body.get("entity_type").and_then(|v| v.as_str()).unwrap_or("");
+    let tenant = body
+        .get("tenant")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
+    let entity_type = body
+        .get("entity_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let error_msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
 
     let entry = crate::state::TrajectoryEntry {
@@ -1465,11 +2196,15 @@ async fn handle_unmet_intent(
             error_msg.to_string()
         }),
     };
+    state
+        .persist_trajectory_entry(&entry)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if let Ok(mut log) = state.trajectory_log.write() {
-        log.push(entry);
+        log.push(entry.clone());
     }
 
-    StatusCode::CREATED
+    Ok(StatusCode::CREATED)
 }
 
 // ---------------------------------------------------------------------------
@@ -1483,13 +2218,26 @@ async fn handle_unmet_intent(
 /// Returns a list of alerts (may be empty if all is healthy).
 async fn handle_sentinel_check(
     State(state): State<ServerState>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     let rules = sentinel::default_rules();
     let alerts = sentinel::check_rules(&rules, &state);
 
     // Store generated O-Records.
     let mut results = Vec::new();
     for alert in &alerts {
+        if let Some(ref pg_store) = state.pg_record_store {
+            pg_store
+                .insert_observation(&alert.record)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        record_id = %alert.record.header.id,
+                        error = %e,
+                        "failed to persist sentinel observation to postgres"
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+        }
         state.record_store.insert_observation(alert.record.clone());
         results.push(serde_json::json!({
             "rule": alert.rule_name,
@@ -1501,10 +2249,10 @@ async fn handle_sentinel_check(
         }));
     }
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "alerts_count": alerts.len(),
         "alerts": results,
-    }))
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -1525,6 +2273,86 @@ async fn list_evolution_records(
     State(state): State<ServerState>,
     Query(params): Query<EvolutionRecordParams>,
 ) -> Json<serde_json::Value> {
+    if let Some(ref pg_store) = state.pg_record_store {
+        let mut records: Vec<serde_json::Value> = Vec::new();
+        let type_filter = params.record_type.as_deref();
+        let status_filter = params.status.as_deref().and_then(parse_record_status);
+
+        if type_filter.is_none() || type_filter == Some("observation") {
+            if let Ok(observations) = pg_store.open_observations().await {
+                for obs in observations {
+                    if matches_status_filter(&obs.header.status, &status_filter) {
+                        records.push(serde_json::json!({
+                            "id": obs.header.id,
+                            "record_type": "Observation",
+                            "status": format!("{:?}", obs.header.status),
+                            "created_by": obs.header.created_by,
+                            "timestamp": obs.header.timestamp.to_rfc3339(),
+                            "source": obs.source,
+                            "classification": obs.classification,
+                        }));
+                    }
+                }
+            }
+        }
+
+        if type_filter.is_none() || type_filter == Some("insight") {
+            if let Ok(insights) = pg_store.ranked_insights().await {
+                for insight in insights {
+                    if matches_status_filter(&insight.header.status, &status_filter) {
+                        records.push(serde_json::json!({
+                            "id": insight.header.id,
+                            "record_type": "Insight",
+                            "status": format!("{:?}", insight.header.status),
+                            "created_by": insight.header.created_by,
+                            "timestamp": insight.header.timestamp.to_rfc3339(),
+                            "category": insight.category,
+                            "priority_score": insight.priority_score,
+                            "recommendation": insight.recommendation,
+                        }));
+                    }
+                }
+            }
+        }
+
+        let total_observations = pg_store.count(RecordType::Observation).await.unwrap_or(0);
+        let total_problems = pg_store.count(RecordType::Problem).await.unwrap_or(0);
+        let total_analyses = pg_store.count(RecordType::Analysis).await.unwrap_or(0);
+        let total_decisions = pg_store.count(RecordType::Decision).await.unwrap_or(0);
+        let total_insights = pg_store.count(RecordType::Insight).await.unwrap_or(0);
+
+        if (type_filter.is_none() || type_filter == Some("problem")) && total_problems > 0 {
+            records.push(serde_json::json!({
+                "record_type": "Problem",
+                "count": total_problems,
+                "note": "Use GET /observe/evolution/records/{id} for individual records",
+            }));
+        }
+        if (type_filter.is_none() || type_filter == Some("analysis")) && total_analyses > 0 {
+            records.push(serde_json::json!({
+                "record_type": "Analysis",
+                "count": total_analyses,
+                "note": "Use GET /observe/evolution/records/{id} for individual records",
+            }));
+        }
+        if (type_filter.is_none() || type_filter == Some("decision")) && total_decisions > 0 {
+            records.push(serde_json::json!({
+                "record_type": "Decision",
+                "count": total_decisions,
+                "note": "Use GET /observe/evolution/records/{id} for individual records",
+            }));
+        }
+
+        return Json(serde_json::json!({
+            "records": records,
+            "total_observations": total_observations,
+            "total_problems": total_problems,
+            "total_analyses": total_analyses,
+            "total_decisions": total_decisions,
+            "total_insights": total_insights,
+        }));
+    }
+
     let store = &state.record_store;
     let mut records: Vec<serde_json::Value> = Vec::new();
 
@@ -1612,6 +2440,64 @@ async fn get_evolution_record(
     State(state): State<ServerState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    if let Some(ref pg_store) = state.pg_record_store {
+        if let Ok(Some(obs)) = pg_store.get_observation(&id).await {
+            let chain = validate_chain_pg(pg_store, &id).await;
+            return Ok(Json(serde_json::json!({
+                "record": obs,
+                "chain": {
+                    "is_valid": chain.is_valid,
+                    "chain_length": chain.chain_length,
+                    "errors": chain.errors,
+                },
+            })));
+        }
+        if let Ok(Some(problem)) = pg_store.get_problem(&id).await {
+            let chain = validate_chain_pg(pg_store, &id).await;
+            return Ok(Json(serde_json::json!({
+                "record": problem,
+                "chain": {
+                    "is_valid": chain.is_valid,
+                    "chain_length": chain.chain_length,
+                    "errors": chain.errors,
+                },
+            })));
+        }
+        if let Ok(Some(analysis)) = pg_store.get_analysis(&id).await {
+            let chain = validate_chain_pg(pg_store, &id).await;
+            return Ok(Json(serde_json::json!({
+                "record": analysis,
+                "chain": {
+                    "is_valid": chain.is_valid,
+                    "chain_length": chain.chain_length,
+                    "errors": chain.errors,
+                },
+            })));
+        }
+        if let Ok(Some(decision)) = pg_store.get_decision(&id).await {
+            let chain = validate_chain_pg(pg_store, &id).await;
+            return Ok(Json(serde_json::json!({
+                "record": decision,
+                "chain": {
+                    "is_valid": chain.is_valid,
+                    "chain_length": chain.chain_length,
+                    "errors": chain.errors,
+                },
+            })));
+        }
+        if let Ok(Some(insight)) = pg_store.get_insight(&id).await {
+            let chain = validate_chain_pg(pg_store, &id).await;
+            return Ok(Json(serde_json::json!({
+                "record": insight,
+                "chain": {
+                    "is_valid": chain.is_valid,
+                    "chain_length": chain.chain_length,
+                    "errors": chain.errors,
+                },
+            })));
+        }
+    }
+
     let store = &state.record_store;
 
     // Try each record type.
@@ -1696,11 +2582,54 @@ async fn handle_decide(
     let store = &state.record_store;
 
     // Verify the target record exists.
-    let exists = store.get_observation(&id).is_some()
-        || store.get_problem(&id).is_some()
-        || store.get_analysis(&id).is_some()
-        || store.get_decision(&id).is_some()
-        || store.get_insight(&id).is_some();
+    let exists = if let Some(ref pg_store) = state.pg_record_store {
+        pg_store
+            .get_observation(&id)
+            .await
+            .map_err(|e| {
+                tracing::error!(record_id = %id, error = %e, "failed to lookup observation in postgres");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .is_some()
+            || pg_store
+                .get_problem(&id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(record_id = %id, error = %e, "failed to lookup problem in postgres");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                .is_some()
+            || pg_store
+                .get_analysis(&id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(record_id = %id, error = %e, "failed to lookup analysis in postgres");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                .is_some()
+            || pg_store
+                .get_decision(&id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(record_id = %id, error = %e, "failed to lookup decision in postgres");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                .is_some()
+            || pg_store
+                .get_insight(&id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(record_id = %id, error = %e, "failed to lookup insight in postgres");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                .is_some()
+    } else {
+        store.get_observation(&id).is_some()
+            || store.get_problem(&id).is_some()
+            || store.get_analysis(&id).is_some()
+            || store.get_decision(&id).is_some()
+            || store.get_insight(&id).is_some()
+    };
 
     if !exists {
         return Err(StatusCode::NOT_FOUND);
@@ -1735,6 +2664,12 @@ async fn handle_decide(
         implementation: None,
     };
 
+    if let Some(ref pg_store) = state.pg_record_store {
+        pg_store.insert_decision(&d_record).await.map_err(|e| {
+            tracing::error!(record_id = %record_id, error = %e, "failed to persist decision record");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
     store.insert_decision(d_record.clone());
 
     Ok(Json(serde_json::json!({
@@ -1746,10 +2681,18 @@ async fn handle_decide(
 }
 
 /// GET /observe/evolution/insights -- list ranked insights (I-Records).
-async fn list_evolution_insights(
-    State(state): State<ServerState>,
-) -> Json<serde_json::Value> {
-    let insights = state.record_store.ranked_insights();
+async fn list_evolution_insights(State(state): State<ServerState>) -> Json<serde_json::Value> {
+    let insights = if let Some(ref pg_store) = state.pg_record_store {
+        match pg_store.ranked_insights().await {
+            Ok(items) => items,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read insights from postgres, falling back to in-memory");
+                state.record_store.ranked_insights()
+            }
+        }
+    } else {
+        state.record_store.ranked_insights()
+    };
 
     let items: Vec<serde_json::Value> = insights
         .iter()
@@ -1788,6 +2731,137 @@ fn matches_status_filter(status: &RecordStatus, filter: &Option<RecordStatus>) -
     match filter {
         Some(f) => status == f,
         None => true,
+    }
+}
+
+/// Minimal chain validation summary used for Postgres-backed records.
+#[derive(Debug)]
+struct ChainValidationSummary {
+    is_valid: bool,
+    errors: Vec<String>,
+    chain_length: usize,
+}
+
+fn record_type_from_id_prefix(id: &str) -> Option<RecordType> {
+    if id.starts_with("O-") {
+        Some(RecordType::Observation)
+    } else if id.starts_with("P-") {
+        Some(RecordType::Problem)
+    } else if id.starts_with("A-") {
+        Some(RecordType::Analysis)
+    } else if id.starts_with("D-") {
+        Some(RecordType::Decision)
+    } else if id.starts_with("I-") {
+        Some(RecordType::Insight)
+    } else {
+        None
+    }
+}
+
+async fn fetch_pg_record_derived_from(
+    store: &temper_evolution::PostgresRecordStore,
+    id: &str,
+    record_type: RecordType,
+) -> Result<Option<String>, String> {
+    match record_type {
+        RecordType::Observation => store
+            .get_observation(id)
+            .await
+            .map_err(|e| format!("failed to read Observation '{id}': {e}"))?
+            .map(|r| r.header.derived_from)
+            .ok_or_else(|| format!("record '{id}' not found")),
+        RecordType::Problem => store
+            .get_problem(id)
+            .await
+            .map_err(|e| format!("failed to read Problem '{id}': {e}"))?
+            .map(|r| r.header.derived_from)
+            .ok_or_else(|| format!("record '{id}' not found")),
+        RecordType::Analysis => store
+            .get_analysis(id)
+            .await
+            .map_err(|e| format!("failed to read Analysis '{id}': {e}"))?
+            .map(|r| r.header.derived_from)
+            .ok_or_else(|| format!("record '{id}' not found")),
+        RecordType::Decision => store
+            .get_decision(id)
+            .await
+            .map_err(|e| format!("failed to read Decision '{id}': {e}"))?
+            .map(|r| r.header.derived_from)
+            .ok_or_else(|| format!("record '{id}' not found")),
+        RecordType::Insight => store
+            .get_insight(id)
+            .await
+            .map_err(|e| format!("failed to read Insight '{id}': {e}"))?
+            .map(|r| r.header.derived_from)
+            .ok_or_else(|| format!("record '{id}' not found")),
+    }
+}
+
+async fn validate_chain_pg(
+    store: &temper_evolution::PostgresRecordStore,
+    leaf_id: &str,
+) -> ChainValidationSummary {
+    let mut errors = Vec::new();
+    let mut chain_length = 0usize;
+    let mut current_id = leaf_id.to_string();
+    let mut expected_types: Vec<RecordType> = Vec::new();
+
+    loop {
+        chain_length += 1;
+        let Some(record_type) = record_type_from_id_prefix(&current_id) else {
+            errors.push(format!("unknown record type prefix in '{current_id}'"));
+            break;
+        };
+
+        if !expected_types.is_empty() && !expected_types.contains(&record_type) {
+            errors.push(format!(
+                "record '{current_id}' is {:?} but expected one of {:?}",
+                record_type, expected_types
+            ));
+        }
+
+        expected_types = match record_type {
+            RecordType::Decision => vec![RecordType::Analysis],
+            RecordType::Analysis => vec![RecordType::Problem],
+            RecordType::Problem => vec![RecordType::Observation],
+            RecordType::Observation => vec![],
+            RecordType::Insight => vec![RecordType::Observation],
+        };
+
+        let derived_from = match fetch_pg_record_derived_from(store, &current_id, record_type).await
+        {
+            Ok(parent) => parent,
+            Err(e) => {
+                errors.push(e);
+                break;
+            }
+        };
+
+        match derived_from {
+            Some(parent_id) => {
+                current_id = parent_id;
+            }
+            None => {
+                if record_type != RecordType::Observation && record_type != RecordType::Insight {
+                    errors.push(format!(
+                        "chain root '{current_id}' is {:?}, expected Observation",
+                        record_type
+                    ));
+                }
+                break;
+            }
+        }
+
+        if chain_length > 100 {
+            errors.push("chain exceeded maximum depth of 100".to_string());
+            break;
+        }
+    }
+
+    ChainValidationSummary {
+        is_valid: errors.is_empty(),
+        errors,
+        chain_length,
     }
 }
 
@@ -1994,11 +3068,7 @@ mod tests {
     async fn test_health_returns_status() {
         let app = build_test_app();
         let response = app
-            .oneshot(
-                Request::get("/observe/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/observe/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -2033,11 +3103,7 @@ mod tests {
             .with_state(state);
 
         let response = app
-            .oneshot(
-                Request::get("/observe/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/observe/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -2096,7 +3162,10 @@ mod tests {
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        assert!(ct.contains("text/plain"), "content-type should be text/plain, got: {ct}");
+        assert!(
+            ct.contains("text/plain"),
+            "content-type should be text/plain, got: {ct}"
+        );
 
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -2195,7 +3264,8 @@ mod tests {
             .with_state(state);
 
         // Filter for entity_type=Order should find our entry.
-        let response = app.clone()
+        let response = app
+            .clone()
             .oneshot(
                 Request::get("/observe/trajectories?entity_type=Order")
                     .body(Body::empty())
@@ -2378,7 +3448,8 @@ mod tests {
             .with_state(state);
 
         // Trigger sentinel first.
-        let _ = app.clone()
+        let _ = app
+            .clone()
             .oneshot(
                 Request::post("/observe/sentinel/check")
                     .body(Body::empty())
@@ -2478,7 +3549,9 @@ mod tests {
             .oneshot(
                 Request::post("/observe/evolution/records/O-nonexistent/decide")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"decision":"rejected","decided_by":"bob","rationale":"nope"}"#))
+                    .body(Body::from(
+                        r#"{"decision":"rejected","decided_by":"bob","rationale":"nope"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -2538,8 +3611,8 @@ mod tests {
             .with_state(state.clone());
 
         // Use the test-fixtures/specs directory which has valid specs
-        let specs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test-fixtures/specs");
+        let specs_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-fixtures/specs");
 
         let body = serde_json::json!({
             "tenant": "test-tenant",
@@ -2572,7 +3645,10 @@ mod tests {
         assert_eq!(lines[0]["type"], "specs_loaded");
         assert_eq!(lines[0]["tenant"], "test-tenant");
         let entities = lines[0]["entities"].as_array().unwrap();
-        assert!(!entities.is_empty(), "should have loaded at least one entity");
+        assert!(
+            !entities.is_empty(),
+            "should have loaded at least one entity"
+        );
 
         // Last line: summary
         let summary = lines.last().unwrap();
@@ -2583,7 +3659,10 @@ mod tests {
         let registry = state.registry.read().unwrap();
         let tenant_id: temper_runtime::tenant::TenantId = "test-tenant".into();
         let entity_types = registry.entity_types(&tenant_id);
-        assert!(!entity_types.is_empty(), "registry should have entity types for test-tenant");
+        assert!(
+            !entity_types.is_empty(),
+            "registry should have entity types for test-tenant"
+        );
     }
 
     #[tokio::test]
@@ -2624,8 +3703,8 @@ mod tests {
             .nest("/observe", build_observe_router())
             .with_state(state.clone());
 
-        let specs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test-fixtures/specs");
+        let specs_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-fixtures/specs");
 
         let body = serde_json::json!({
             "tenant": "event-tenant",
@@ -2658,7 +3737,10 @@ mod tests {
         assert!(!loaded_events.is_empty(), "should have spec_loaded events");
 
         let started_events: Vec<_> = log.iter().filter(|e| e.kind == "verify_started").collect();
-        assert!(!started_events.is_empty(), "should have verify_started events");
+        assert!(
+            !started_events.is_empty(),
+            "should have verify_started events"
+        );
 
         let done_events: Vec<_> = log.iter().filter(|e| e.kind == "verify_done").collect();
         assert!(!done_events.is_empty(), "should have verify_done events");

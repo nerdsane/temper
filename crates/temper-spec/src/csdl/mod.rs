@@ -1,5 +1,5 @@
-mod types;
 mod parser;
+mod types;
 
+pub use parser::{CsdlParseError, parse_csdl};
 pub use types::*;
-pub use parser::{parse_csdl, CsdlParseError};

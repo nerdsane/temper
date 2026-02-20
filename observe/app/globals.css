@@ -84,6 +84,20 @@ code, .font-mono {
 .animate-flash-teal { animation: status-flash-teal 0.6s ease-out forwards; }
 .animate-flash-pink { animation: status-flash-pink 0.6s ease-out forwards; }
 
+/* Panel slide-in from right edge */
+@keyframes panel-slide-in-right {
+  from { opacity: 0; transform: translateX(100%); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.animate-slide-in-right { animation: panel-slide-in-right 0.2s ease-out forwards; }
+
+/* Per-item slide in for failed intents */
+@keyframes item-slide-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.animate-item-slide-in { animation: item-slide-in 0.3s ease-out forwards; }
+
 /* Glass utility */
 .glass {
   background: rgba(255, 255, 255, 0.04);

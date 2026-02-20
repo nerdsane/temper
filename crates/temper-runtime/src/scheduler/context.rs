@@ -71,10 +71,7 @@ impl Drop for SimContextGuard {
 /// Returns a guard that restores the default context on drop.
 /// All calls to `sim_now()` and `sim_uuid()` on this thread will
 /// use the provided clock and ID generator until the guard is dropped.
-pub fn install_sim_context(
-    clock: Arc<dyn SimClock>,
-    id_gen: Arc<dyn SimIdGen>,
-) -> SimContextGuard {
+pub fn install_sim_context(clock: Arc<dyn SimClock>, id_gen: Arc<dyn SimIdGen>) -> SimContextGuard {
     SIM_CONTEXT.with(|ctx| {
         *ctx.borrow_mut() = SimContext { clock, id_gen };
     });
@@ -85,7 +82,9 @@ pub fn install_sim_context(
 ///
 /// Convenience function that creates a [`LogicalClock`] and
 /// [`DeterministicIdGen`] from the seed.
-pub fn install_deterministic_context(seed: u64) -> (SimContextGuard, Arc<LogicalClock>, Arc<DeterministicIdGen>) {
+pub fn install_deterministic_context(
+    seed: u64,
+) -> (SimContextGuard, Arc<LogicalClock>, Arc<DeterministicIdGen>) {
     let clock = Arc::new(LogicalClock::new());
     let id_gen = Arc::new(DeterministicIdGen::new(seed));
     let guard = install_sim_context(clock.clone(), id_gen.clone());

@@ -47,7 +47,9 @@ pub trait PlacementStore: Send + Sync + 'static {
     fn get_shard_placements(
         &self,
         shard_id: u32,
-    ) -> impl std::future::Future<Output = Result<Vec<(String, Placement)>, crate::error::RedisStoreError>> + Send;
+    ) -> impl std::future::Future<
+        Output = Result<Vec<(String, Placement)>, crate::error::RedisStoreError>,
+    > + Send;
 }
 
 /// Redis-backed placement store.
@@ -132,19 +134,16 @@ impl PlacementStore for RedisPlacement {
 
         loop {
             let item: Option<Result<fred::types::Key, fred::error::Error>> =
-                std::future::poll_fn(|cx| {
-                    futures_core::Stream::poll_next(scanner.as_mut(), cx)
-                })
-                .await;
+                std::future::poll_fn(|cx| futures_core::Stream::poll_next(scanner.as_mut(), cx))
+                    .await;
             match item {
                 Some(Ok(key)) => {
-                    let value: Option<String> = self
-                        .client
-                        .get::<Option<String>, _>(&key)
-                        .await
-                        .map_err(|e: fred::error::Error| {
-                            crate::error::RedisStoreError::Command(e.to_string())
-                        })?;
+                    let value: Option<String> =
+                        self.client.get::<Option<String>, _>(&key).await.map_err(
+                            |e: fred::error::Error| {
+                                crate::error::RedisStoreError::Command(e.to_string())
+                            },
+                        )?;
                     if let Some(json) = value {
                         if let Ok(placement) = serde_json::from_str::<Placement>(&json) {
                             if placement.shard_id == shard_id {
@@ -205,7 +204,10 @@ impl PlacementStore for InMemoryPlacement {
         placement: &Placement,
     ) -> Result<(), crate::error::RedisStoreError> {
         let key = Self::key(entity_type, entity_id);
-        self.placements.write().unwrap().insert(key, placement.clone());
+        self.placements
+            .write()
+            .unwrap() // ci-ok: infallible lock
+            .insert(key, placement.clone());
         Ok(())
     }
 
@@ -248,7 +250,10 @@ mod tests {
     async fn test_set_and_get_placement() {
         let store = InMemoryPlacement::new();
 
-        store.set_placement("Order", "abc", &test_placement("node-1", 3)).await.unwrap();
+        store
+            .set_placement("Order", "abc", &test_placement("node-1", 3))
+            .await
+            .unwrap();
         let p = store.get_placement("Order", "abc").await.unwrap().unwrap();
         assert_eq!(p.node_id, "node-1");
         assert_eq!(p.shard_id, 3);
@@ -264,7 +269,10 @@ mod tests {
     #[tokio::test]
     async fn test_remove_placement() {
         let store = InMemoryPlacement::new();
-        store.set_placement("Order", "abc", &test_placement("node-1", 1)).await.unwrap();
+        store
+            .set_placement("Order", "abc", &test_placement("node-1", 1))
+            .await
+            .unwrap();
         store.remove_placement("Order", "abc").await.unwrap();
         assert!(store.get_placement("Order", "abc").await.unwrap().is_none());
     }
@@ -272,9 +280,18 @@ mod tests {
     #[tokio::test]
     async fn test_get_shard_placements() {
         let store = InMemoryPlacement::new();
-        store.set_placement("Order", "a", &test_placement("node-1", 5)).await.unwrap();
-        store.set_placement("Order", "b", &test_placement("node-2", 5)).await.unwrap();
-        store.set_placement("Order", "c", &test_placement("node-1", 7)).await.unwrap();
+        store
+            .set_placement("Order", "a", &test_placement("node-1", 5))
+            .await
+            .unwrap();
+        store
+            .set_placement("Order", "b", &test_placement("node-2", 5))
+            .await
+            .unwrap();
+        store
+            .set_placement("Order", "c", &test_placement("node-1", 7))
+            .await
+            .unwrap();
 
         let shard_5 = store.get_shard_placements(5).await.unwrap();
         assert_eq!(shard_5.len(), 2);

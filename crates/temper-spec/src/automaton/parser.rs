@@ -66,7 +66,9 @@ pub fn to_state_machine(automaton: &Automaton) -> StateMachine {
             let trigger = if inv.when.is_empty() {
                 String::new()
             } else {
-                let states = inv.when.iter()
+                let states = inv
+                    .when
+                    .iter()
                     .map(|s| format!("\"{s}\""))
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -86,11 +88,7 @@ pub fn to_state_machine(automaton: &Automaton) -> StateMachine {
         invariants,
         liveness_properties: vec![],
         constants: vec![],
-        variables: automaton
-            .state
-            .iter()
-            .map(|s| s.name.clone())
-            .collect(),
+        variables: automaton.state.iter().map(|s| s.name.clone()).collect(),
     }
 }
 
@@ -99,9 +97,18 @@ fn format_guards(guards: &[Guard]) -> String {
         .iter()
         .map(|g| match g {
             Guard::StateIn { values } => {
-                format!("status \\in {{{}}}", values.iter().map(|v| format!("\"{v}\"")).collect::<Vec<_>>().join(", "))
+                format!(
+                    "status \\in {{{}}}",
+                    values
+                        .iter()
+                        .map(|v| format!("\"{v}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
-            Guard::MinCount { var, min } => format!("Cardinality({var}) > {}", min.saturating_sub(1)),
+            Guard::MinCount { var, min } => {
+                format!("Cardinality({var}) > {}", min.saturating_sub(1))
+            }
             Guard::MaxCount { var, max } => format!("Cardinality({var}) < {max}"),
             Guard::IsTrue { var } => format!("{var} = TRUE"),
             Guard::ListContains { var, value } => format!("\"{value}\" \\in {var}"),
@@ -196,12 +203,30 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
 
         // Section headers
         if trimmed == "[automaton]" {
-            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
+            flush_all(
+                &mut current_action,
+                &mut actions,
+                &mut current_invariant,
+                &mut invariants,
+                &mut current_state_var,
+                &mut state_vars,
+                &mut current_liveness,
+                &mut liveness_props,
+            );
             current_section = "automaton";
             continue;
         }
         if trimmed == "[[state]]" {
-            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
+            flush_all(
+                &mut current_action,
+                &mut actions,
+                &mut current_invariant,
+                &mut invariants,
+                &mut current_state_var,
+                &mut state_vars,
+                &mut current_liveness,
+                &mut liveness_props,
+            );
             current_state_var = Some(StateVar {
                 name: String::new(),
                 var_type: "string".into(),
@@ -211,7 +236,16 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
             continue;
         }
         if trimmed == "[[action]]" {
-            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
+            flush_all(
+                &mut current_action,
+                &mut actions,
+                &mut current_invariant,
+                &mut invariants,
+                &mut current_state_var,
+                &mut state_vars,
+                &mut current_liveness,
+                &mut liveness_props,
+            );
             current_action = Some(Action {
                 name: String::new(),
                 kind: "internal".into(),
@@ -226,7 +260,16 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
             continue;
         }
         if trimmed == "[[invariant]]" {
-            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
+            flush_all(
+                &mut current_action,
+                &mut actions,
+                &mut current_invariant,
+                &mut invariants,
+                &mut current_state_var,
+                &mut state_vars,
+                &mut current_liveness,
+                &mut liveness_props,
+            );
             current_invariant = Some(Invariant {
                 name: String::new(),
                 when: Vec::new(),
@@ -236,7 +279,16 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
             continue;
         }
         if trimmed == "[[liveness]]" {
-            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
+            flush_all(
+                &mut current_action,
+                &mut actions,
+                &mut current_invariant,
+                &mut invariants,
+                &mut current_state_var,
+                &mut state_vars,
+                &mut current_liveness,
+                &mut liveness_props,
+            );
             if let Some(ig) = current_integration.take() {
                 if !ig.name.is_empty() {
                     integrations.push(ig);
@@ -252,7 +304,16 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
             continue;
         }
         if trimmed == "[[integration]]" {
-            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
+            flush_all(
+                &mut current_action,
+                &mut actions,
+                &mut current_invariant,
+                &mut invariants,
+                &mut current_state_var,
+                &mut state_vars,
+                &mut current_liveness,
+                &mut liveness_props,
+            );
             if let Some(ig) = current_integration.take() {
                 if !ig.name.is_empty() {
                     integrations.push(ig);
@@ -316,7 +377,11 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                                 }
                                 // Format: "is_true var" → IsTrue
                                 else if value.starts_with("is_true ") {
-                                    let var = value.strip_prefix("is_true ").unwrap_or("").trim().to_string();
+                                    let var = value
+                                        .strip_prefix("is_true ")
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_string();
                                     if !var.is_empty() {
                                         a.guard.push(Guard::IsTrue { var });
                                     }
@@ -325,14 +390,22 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                             "effect" => {
                                 // Format: "increment var" → Increment
                                 if value.starts_with("increment ") {
-                                    let var = value.strip_prefix("increment ").unwrap_or("").trim().to_string();
+                                    let var = value
+                                        .strip_prefix("increment ")
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_string();
                                     if !var.is_empty() {
                                         a.effect.push(Effect::Increment { var });
                                     }
                                 }
                                 // Format: "decrement var" → Decrement
                                 else if value.starts_with("decrement ") {
-                                    let var = value.strip_prefix("decrement ").unwrap_or("").trim().to_string();
+                                    let var = value
+                                        .strip_prefix("decrement ")
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_string();
                                     if !var.is_empty() {
                                         a.effect.push(Effect::Decrement { var });
                                     }
@@ -348,7 +421,11 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                                 }
                                 // Format: "emit event_name" → Emit
                                 else if value.starts_with("emit ") {
-                                    let event = value.strip_prefix("emit ").unwrap_or("").trim().to_string();
+                                    let event = value
+                                        .strip_prefix("emit ")
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_string();
                                     if !event.is_empty() {
                                         a.effect.push(Effect::Emit { event });
                                     }
@@ -394,7 +471,16 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
         }
     }
 
-    flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
+    flush_all(
+        &mut current_action,
+        &mut actions,
+        &mut current_invariant,
+        &mut invariants,
+        &mut current_state_var,
+        &mut state_vars,
+        &mut current_liveness,
+        &mut liveness_props,
+    );
     if let Some(ig) = current_integration.take() {
         if !ig.name.is_empty() {
             integrations.push(ig);
@@ -452,10 +538,7 @@ fn parse_kv(line: &str) -> Option<(&str, String)> {
     let eq = line.find('=')?;
     let key = line[..eq].trim();
     let raw_value = line[eq + 1..].trim();
-    let value = raw_value
-        .trim_matches('"')
-        .trim_matches('\'')
-        .to_string();
+    let value = raw_value.trim_matches('"').trim_matches('\'').to_string();
     Some((key, value))
 }
 
@@ -502,7 +585,11 @@ mod tests {
     #[test]
     fn test_submit_order_has_guard() {
         let automaton = parse_automaton(ORDER_IOA).unwrap();
-        let submit = automaton.actions.iter().find(|a| a.name == "SubmitOrder").unwrap();
+        let submit = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "SubmitOrder")
+            .unwrap();
         assert_eq!(submit.from, vec!["Draft"]);
         assert_eq!(submit.to, Some("Submitted".to_string()));
         assert!(!submit.guard.is_empty(), "SubmitOrder should have a guard");
@@ -511,7 +598,11 @@ mod tests {
     #[test]
     fn test_cancel_from_multiple_states() {
         let automaton = parse_automaton(ORDER_IOA).unwrap();
-        let cancel = automaton.actions.iter().find(|a| a.name == "CancelOrder").unwrap();
+        let cancel = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "CancelOrder")
+            .unwrap();
         assert_eq!(cancel.from.len(), 3);
         assert!(cancel.from.contains(&"Draft".to_string()));
         assert!(cancel.from.contains(&"Submitted".to_string()));
@@ -522,7 +613,11 @@ mod tests {
     fn test_invariants_parsed() {
         let automaton = parse_automaton(ORDER_IOA).unwrap();
         assert!(!automaton.invariants.is_empty());
-        let names: Vec<&str> = automaton.invariants.iter().map(|i| i.name.as_str()).collect();
+        let names: Vec<&str> = automaton
+            .invariants
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
         assert!(names.contains(&"SubmitRequiresItems"), "got: {names:?}");
     }
 
@@ -535,7 +630,11 @@ mod tests {
         assert!(!sm.transitions.is_empty());
         assert!(!sm.invariants.is_empty());
 
-        let submit = sm.transitions.iter().find(|t| t.name == "SubmitOrder").unwrap();
+        let submit = sm
+            .transitions
+            .iter()
+            .find(|t| t.name == "SubmitOrder")
+            .unwrap();
         assert_eq!(submit.from_states, vec!["Draft"]);
         assert_eq!(submit.to_state, Some("Submitted".to_string()));
     }

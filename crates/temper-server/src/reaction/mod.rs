@@ -8,15 +8,15 @@
 //! verifiable) while enabling multi-entity workflows like e-commerce order
 //! fulfilment cascades.
 
-pub mod types;
+pub mod dispatcher;
 pub mod registry;
 pub mod sim_dispatcher;
-pub mod dispatcher;
+pub mod types;
 
-pub use types::{
-    ReactionRule, ReactionTrigger, ReactionTarget, TargetResolver, ReactionResult,
-    MAX_REACTIONS_PER_TENANT, MAX_REACTION_DEPTH,
-};
+pub use dispatcher::ReactionDispatcher;
 pub use registry::ReactionRegistry;
 pub use sim_dispatcher::SimReactionSystem;
-pub use dispatcher::ReactionDispatcher;
+pub use types::{
+    MAX_REACTION_DEPTH, MAX_REACTIONS_PER_TENANT, ReactionResult, ReactionRule, ReactionTarget,
+    ReactionTrigger, TargetResolver,
+};

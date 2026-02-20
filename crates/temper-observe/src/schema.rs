@@ -40,13 +40,7 @@ pub const SPAN_COLUMNS: &[&str] = &[
 /// | service    | TEXT      | Originating service name       |
 /// | message    | TEXT      | Log message body               |
 /// | attributes | JSONB     | Arbitrary key-value attributes |
-pub const LOG_COLUMNS: &[&str] = &[
-    "timestamp",
-    "level",
-    "service",
-    "message",
-    "attributes",
-];
+pub const LOG_COLUMNS: &[&str] = &["timestamp", "level", "service", "message", "attributes"];
 
 /// Column names for the canonical `metrics` virtual table.
 ///
@@ -56,12 +50,7 @@ pub const LOG_COLUMNS: &[&str] = &[
 /// | timestamp   | TIMESTAMP | Observation time (UTC)         |
 /// | value       | DOUBLE    | Metric value                   |
 /// | tags        | JSONB     | Arbitrary key-value tags       |
-pub const METRIC_COLUMNS: &[&str] = &[
-    "metric_name",
-    "timestamp",
-    "value",
-    "tags",
-];
+pub const METRIC_COLUMNS: &[&str] = &["metric_name", "timestamp", "value", "tags"];
 
 /// Total number of columns in the spans table.
 pub const SPAN_COLUMN_COUNT: usize = SPAN_COLUMNS.len();

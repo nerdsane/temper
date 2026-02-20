@@ -10,11 +10,11 @@
 //! - [`swap`] — Hot-swap protocol for live-updating transition tables.
 //! - [`shadow`] — Shadow testing: compare old and new tables for observational equivalence.
 
-pub mod table;
-pub mod swap;
 pub mod shadow;
+pub mod swap;
+pub mod table;
 
 // Re-export primary types at crate root.
-pub use table::{TransitionTable, TransitionRule, TransitionResult, Guard, Effect, EvalContext};
+pub use shadow::{Mismatch, ShadowResult, TestCase, shadow_test};
 pub use swap::{SwapController, SwapResult};
-pub use shadow::{shadow_test, ShadowResult, TestCase, Mismatch};
+pub use table::{Effect, EvalContext, Guard, TransitionResult, TransitionRule, TransitionTable};

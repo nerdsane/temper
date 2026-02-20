@@ -62,11 +62,21 @@ pub fn validate_chain(store: &RecordStore, leaf_id: &str) -> ChainValidation {
 
         // Get derived_from link
         let derived_from = match record_type {
-            RecordType::Observation => store.get_observation(&current_id).and_then(|r| r.header.derived_from),
-            RecordType::Problem => store.get_problem(&current_id).and_then(|r| r.header.derived_from),
-            RecordType::Analysis => store.get_analysis(&current_id).and_then(|r| r.header.derived_from),
-            RecordType::Decision => store.get_decision(&current_id).and_then(|r| r.header.derived_from),
-            RecordType::Insight => store.get_insight(&current_id).and_then(|r| r.header.derived_from),
+            RecordType::Observation => store
+                .get_observation(&current_id)
+                .and_then(|r| r.header.derived_from),
+            RecordType::Problem => store
+                .get_problem(&current_id)
+                .and_then(|r| r.header.derived_from),
+            RecordType::Analysis => store
+                .get_analysis(&current_id)
+                .and_then(|r| r.header.derived_from),
+            RecordType::Decision => store
+                .get_decision(&current_id)
+                .and_then(|r| r.header.derived_from),
+            RecordType::Insight => store
+                .get_insight(&current_id)
+                .and_then(|r| r.header.derived_from),
         };
 
         match derived_from {

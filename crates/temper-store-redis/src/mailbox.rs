@@ -40,7 +40,9 @@ pub trait MailboxStore: Send + Sync + 'static {
     fn receive(
         &self,
         actor_id: &str,
-    ) -> impl std::future::Future<Output = Result<Option<MailboxEntry>, crate::error::RedisStoreError>> + Send;
+    ) -> impl std::future::Future<
+        Output = Result<Option<MailboxEntry>, crate::error::RedisStoreError>,
+    > + Send;
 
     /// Get the current depth (pending message count) of a mailbox.
     fn depth(
@@ -105,10 +107,7 @@ impl MailboxStore for RedisMailbox {
         }
     }
 
-    async fn depth(
-        &self,
-        actor_id: &str,
-    ) -> Result<u64, crate::error::RedisStoreError> {
+    async fn depth(&self, actor_id: &str) -> Result<u64, crate::error::RedisStoreError> {
         let key = keys::mailbox_key(actor_id);
         let len: i64 = self
             .client
@@ -121,7 +120,11 @@ impl MailboxStore for RedisMailbox {
 
 /// In-memory mailbox for testing (no Redis needed).
 pub struct InMemoryMailbox {
-    queues: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, std::collections::VecDeque<MailboxEntry>>>>,
+    queues: std::sync::Arc<
+        std::sync::RwLock<
+            std::collections::HashMap<String, std::collections::VecDeque<MailboxEntry>>,
+        >,
+    >,
 }
 
 impl InMemoryMailbox {
@@ -159,10 +162,7 @@ impl MailboxStore for InMemoryMailbox {
         Ok(queues.get_mut(&key).and_then(|q| q.pop_front()))
     }
 
-    async fn depth(
-        &self,
-        actor_id: &str,
-    ) -> Result<u64, crate::error::RedisStoreError> {
+    async fn depth(&self, actor_id: &str) -> Result<u64, crate::error::RedisStoreError> {
         let key = keys::mailbox_key(actor_id);
         let queues = self.queues.read().unwrap();
         Ok(queues.get(&key).map_or(0, |q| q.len() as u64))
@@ -187,8 +187,14 @@ mod tests {
     async fn test_send_and_receive() {
         let mailbox = InMemoryMailbox::new();
 
-        mailbox.send("actor-1", &test_entry("SubmitOrder")).await.unwrap();
-        mailbox.send("actor-1", &test_entry("CancelOrder")).await.unwrap();
+        mailbox
+            .send("actor-1", &test_entry("SubmitOrder"))
+            .await
+            .unwrap();
+        mailbox
+            .send("actor-1", &test_entry("CancelOrder"))
+            .await
+            .unwrap();
 
         let msg1 = mailbox.receive("actor-1").await.unwrap().unwrap();
         assert_eq!(msg1.msg_type, "SubmitOrder");
@@ -234,7 +240,10 @@ mod tests {
         let mailbox = InMemoryMailbox::new();
 
         for i in 0..5 {
-            mailbox.send("actor-1", &test_entry(&format!("msg-{i}"))).await.unwrap();
+            mailbox
+                .send("actor-1", &test_entry(&format!("msg-{i}")))
+                .await
+                .unwrap();
         }
 
         for i in 0..5 {

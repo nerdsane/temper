@@ -9,19 +9,19 @@
 //! Each record links to its predecessor, creating a traceable proof chain
 //! from anomaly detection to deployed change.
 
-pub mod records;
-pub mod store;
-pub mod pg_store;
 pub mod chain;
 pub mod insight;
+pub mod pg_store;
+pub mod records;
+pub mod store;
 
 // Re-export primary types at crate root.
+pub use chain::{ChainValidation, validate_chain};
+pub use insight::{classify_insight, compute_priority_score, generate_digest};
+pub use pg_store::{PgRecordStoreError, PostgresRecordStore};
 pub use records::{
-    RecordHeader, RecordType, RecordStatus, RecordId,
-    ObservationRecord, ObservationClass, ProblemRecord, AnalysisRecord, DecisionRecord, InsightRecord,
-    Decision, InsightCategory, InsightSignal,
+    AnalysisRecord, Decision, DecisionRecord, InsightCategory, InsightRecord, InsightSignal,
+    ObservationClass, ObservationRecord, ProblemRecord, RecordHeader, RecordId, RecordStatus,
+    RecordType,
 };
 pub use store::RecordStore;
-pub use pg_store::{PostgresRecordStore, PgRecordStoreError};
-pub use chain::{validate_chain, ChainValidation};
-pub use insight::{compute_priority_score, classify_insight, generate_digest};

@@ -116,7 +116,9 @@ mod tests {
 
     #[test]
     fn target_resolver_variants_serialize() {
-        let field = TargetResolver::Field { field: "payment_id".to_string() };
+        let field = TargetResolver::Field {
+            field: "payment_id".to_string(),
+        };
         let json = serde_json::to_string(&field).unwrap();
         assert!(json.contains("\"type\":\"Field\""));
 
@@ -124,11 +126,15 @@ mod tests {
         let json = serde_json::to_string(&same).unwrap();
         assert!(json.contains("\"type\":\"SameId\""));
 
-        let static_id = TargetResolver::Static { entity_id: "singleton".to_string() };
+        let static_id = TargetResolver::Static {
+            entity_id: "singleton".to_string(),
+        };
         let json = serde_json::to_string(&static_id).unwrap();
         assert!(json.contains("\"type\":\"Static\""));
 
-        let create = TargetResolver::CreateIfMissing { id_field: "payment_id".to_string() };
+        let create = TargetResolver::CreateIfMissing {
+            id_field: "payment_id".to_string(),
+        };
         let json = serde_json::to_string(&create).unwrap();
         assert!(json.contains("\"type\":\"CreateIfMissing\""));
     }

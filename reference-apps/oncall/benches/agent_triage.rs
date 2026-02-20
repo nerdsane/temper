@@ -15,10 +15,10 @@
 
 use std::collections::HashMap;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use hyper::{Request, StatusCode};
 use temper_runtime::ActorSystem;
-use temper_server::{build_router, ServerState};
+use temper_server::{ServerState, build_router};
 use temper_spec::csdl::parse_csdl;
 use temper_store_postgres::PostgresEventStore;
 use tower::ServiceExt;
@@ -34,14 +34,20 @@ const NS: &str = "Temper.OnCall";
 /// Unique run prefix to avoid Postgres entity ID collisions across runs.
 fn run_prefix() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     format!("b{ts}")
 }
 
 fn oncall_sources() -> HashMap<String, String> {
     let mut m = HashMap::new();
     m.insert("Page".to_string(), PAGE_IOA.to_string());
-    m.insert("EscalationPolicy".to_string(), ESCALATION_POLICY_IOA.to_string());
+    m.insert(
+        "EscalationPolicy".to_string(),
+        ESCALATION_POLICY_IOA.to_string(),
+    );
     m.insert("Remediation".to_string(), REMEDIATION_IOA.to_string());
     m.insert("Postmortem".to_string(), POSTMORTEM_IOA.to_string());
     m
@@ -95,7 +101,9 @@ async fn post_action(
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     if status != StatusCode::OK && status != StatusCode::CREATED {
-        let body = axum::body::to_bytes(resp.into_body(), 10_000).await.unwrap_or_default();
+        let body = axum::body::to_bytes(resp.into_body(), 10_000)
+            .await
+            .unwrap_or_default();
         let body_str = String::from_utf8_lossy(&body);
         panic!("POST {uri} returned {status}: {body_str}");
     }
@@ -109,34 +117,86 @@ async fn agent_triage_http(app: &axum::Router, id: &str) {
     let pm_id = format!("pm-{id}");
 
     // --- Page: Triggered → Investigating → Remediated → Resolved ---
-    post_action(app, "Pages", &page_id, "AssignAgent",
-        serde_json::json!({"AgentId": "agent-tier-1"})).await;
-    post_action(app, "Pages", &page_id, "StartInvestigation",
-        serde_json::json!({})).await;
+    post_action(
+        app,
+        "Pages",
+        &page_id,
+        "AssignAgent",
+        serde_json::json!({"AgentId": "agent-tier-1"}),
+    )
+    .await;
+    post_action(
+        app,
+        "Pages",
+        &page_id,
+        "StartInvestigation",
+        serde_json::json!({}),
+    )
+    .await;
 
     // --- Remediation: Proposed → Approved → Executing → Succeeded ---
-    post_action(app, "Remediations", &rem_id, "AutoApprove",
-        serde_json::json!({})).await;
-    post_action(app, "Remediations", &rem_id, "Execute",
-        serde_json::json!({})).await;
-    post_action(app, "Remediations", &rem_id, "Succeed",
-        serde_json::json!({})).await;
+    post_action(
+        app,
+        "Remediations",
+        &rem_id,
+        "AutoApprove",
+        serde_json::json!({}),
+    )
+    .await;
+    post_action(
+        app,
+        "Remediations",
+        &rem_id,
+        "Execute",
+        serde_json::json!({}),
+    )
+    .await;
+    post_action(
+        app,
+        "Remediations",
+        &rem_id,
+        "Succeed",
+        serde_json::json!({}),
+    )
+    .await;
 
     // --- Page: Remediated → Resolved ---
-    post_action(app, "Pages", &page_id, "StartRemediation",
-        serde_json::json!({})).await;
-    post_action(app, "Pages", &page_id, "Resolve",
-        serde_json::json!({})).await;
+    post_action(
+        app,
+        "Pages",
+        &page_id,
+        "StartRemediation",
+        serde_json::json!({}),
+    )
+    .await;
+    post_action(app, "Pages", &page_id, "Resolve", serde_json::json!({})).await;
 
     // --- Postmortem: Draft → InReview → Approved → Published ---
-    post_action(app, "Postmortems", &pm_id, "AddRootCause",
-        serde_json::json!({"RootCauseDescription": "Memory leak in cache layer"})).await;
-    post_action(app, "Postmortems", &pm_id, "SubmitForReview",
-        serde_json::json!({})).await;
-    post_action(app, "Postmortems", &pm_id, "ApprovePostmortem",
-        serde_json::json!({})).await;
-    post_action(app, "Postmortems", &pm_id, "Publish",
-        serde_json::json!({})).await;
+    post_action(
+        app,
+        "Postmortems",
+        &pm_id,
+        "AddRootCause",
+        serde_json::json!({"RootCauseDescription": "Memory leak in cache layer"}),
+    )
+    .await;
+    post_action(
+        app,
+        "Postmortems",
+        &pm_id,
+        "SubmitForReview",
+        serde_json::json!({}),
+    )
+    .await;
+    post_action(
+        app,
+        "Postmortems",
+        &pm_id,
+        "ApprovePostmortem",
+        serde_json::json!({}),
+    )
+    .await;
+    post_action(app, "Postmortems", &pm_id, "Publish", serde_json::json!({})).await;
 }
 
 // ===========================================================================
@@ -177,7 +237,9 @@ fn bench_inmemory(c: &mut Criterion) {
                             agent_triage_http(&a, &tid).await;
                         }));
                     }
-                    for h in handles { h.await.unwrap(); }
+                    for h in handles {
+                        h.await.unwrap();
+                    }
                 })
             })
         });
@@ -199,7 +261,9 @@ fn bench_inmemory(c: &mut Criterion) {
                             agent_triage_http(&a, &tid).await;
                         }));
                     }
-                    for h in handles { h.await.unwrap(); }
+                    for h in handles {
+                        h.await.unwrap();
+                    }
                 })
             })
         });
@@ -253,7 +317,9 @@ fn bench_postgres(c: &mut Criterion) {
                             agent_triage_http(&a, &tid).await;
                         }));
                     }
-                    for h in handles { h.await.unwrap(); }
+                    for h in handles {
+                        h.await.unwrap();
+                    }
                 })
             })
         });
@@ -274,7 +340,9 @@ fn bench_postgres(c: &mut Criterion) {
                             agent_triage_http(&a, &tid).await;
                         }));
                     }
-                    for h in handles { h.await.unwrap(); }
+                    for h in handles {
+                        h.await.unwrap();
+                    }
                 })
             })
         });

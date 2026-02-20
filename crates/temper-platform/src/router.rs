@@ -66,7 +66,11 @@ mod tests {
                 .oneshot(Request::get(*path).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path} should be 404");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} should be 404"
+            );
         }
     }
 }

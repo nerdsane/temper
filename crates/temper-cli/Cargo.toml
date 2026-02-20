@@ -20,6 +20,7 @@ temper-runtime = { workspace = true }
 temper-jit = { workspace = true }
 temper-observe = { workspace = true }
 temper-store-postgres = { workspace = true }
+temper-evolution = { workspace = true }
 sqlx = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }

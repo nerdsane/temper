@@ -15,7 +15,11 @@ pub fn generate_entity_struct(entity: &EntityType, namespace: &str) -> String {
 
     for prop in &entity.properties {
         let rust_type = csdl_type_to_rust(&prop.type_name, prop.nullable, namespace);
-        out.push_str(&format!("    pub {}: {},\n", to_snake_case(&prop.name), rust_type));
+        out.push_str(&format!(
+            "    pub {}: {},\n",
+            to_snake_case(&prop.name),
+            rust_type
+        ));
     }
 
     out.push_str("}\n");
@@ -24,7 +28,9 @@ pub fn generate_entity_struct(entity: &EntityType, namespace: &str) -> String {
 
 /// Generate a Default impl that sets initial state machine state.
 pub fn generate_entity_default(entity: &EntityType) -> String {
-    let initial_state = entity.initial_state().unwrap_or_else(|| "Draft".to_string());
+    let initial_state = entity
+        .initial_state()
+        .unwrap_or_else(|| "Draft".to_string());
     let mut out = String::new();
 
     out.push_str(&format!("impl Default for {}State {{\n", entity.name));
@@ -48,10 +54,13 @@ pub fn generate_entity_default(entity: &EntityType) -> String {
 
 fn property_default(prop: &Property, initial_state: &str) -> String {
     // If this is the Status field, use the initial state
-    if (prop.name == "Status" || prop.name.ends_with("Status"))
-        && prop.type_name.contains("Status")
+    if (prop.name == "Status" || prop.name.ends_with("Status")) && prop.type_name.contains("Status")
     {
-        return format!("{}Status::{}", extract_enum_prefix(&prop.type_name), initial_state);
+        return format!(
+            "{}Status::{}",
+            extract_enum_prefix(&prop.type_name),
+            initial_state
+        );
     }
 
     if let Some(ref default) = prop.default_value {
@@ -107,7 +116,9 @@ pub fn csdl_type_to_rust(type_name: &str, nullable: bool, namespace: &str) -> St
         _ if inner.contains("Decimal") => "Decimal".to_string(),
         _ => {
             // Strip namespace prefix for local types
-            let short = inner.strip_prefix(&format!("{namespace}.")).unwrap_or(inner);
+            let short = inner
+                .strip_prefix(&format!("{namespace}."))
+                .unwrap_or(inner);
             short.rsplit('.').next().unwrap_or(short).to_string()
         }
     };
@@ -154,7 +165,10 @@ mod tests {
     #[test]
     fn test_csdl_type_to_rust() {
         assert_eq!(csdl_type_to_rust("Edm.Guid", false, "Ns"), "Uuid");
-        assert_eq!(csdl_type_to_rust("Edm.String", true, "Ns"), "Option<String>");
+        assert_eq!(
+            csdl_type_to_rust("Edm.String", true, "Ns"),
+            "Option<String>"
+        );
         assert_eq!(csdl_type_to_rust("Edm.Int32", false, "Ns"), "i32");
         assert_eq!(
             csdl_type_to_rust("Collection(Edm.Guid)", false, "Ns"),

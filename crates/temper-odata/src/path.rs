@@ -176,19 +176,13 @@ fn parse_entity_segment(segment: &str) -> Result<ODataPath, ODataError> {
 /// - A qualified bound action: `Namespace.Action` (contains a dot, no parentheses at end)
 /// - A qualified bound function: `Namespace.Function()` (contains a dot, ends with `()`)
 /// - Another entity set access with key: `Items(123)`
-fn parse_continuation_segment(
-    segment: &str,
-    parent: ODataPath,
-) -> Result<ODataPath, ODataError> {
+fn parse_continuation_segment(segment: &str, parent: ODataPath) -> Result<ODataPath, ODataError> {
     // Check if this is a qualified name (contains dot) — bound operation
     if segment.contains('.') {
         // Bound function: ends with ()
         if let Some(qualified_name) = segment.strip_suffix("()") {
             // Extract just the operation name (last part after final dot)
-            let function_name = qualified_name
-                .rsplit('.')
-                .next()
-                .unwrap_or(qualified_name);
+            let function_name = qualified_name.rsplit('.').next().unwrap_or(qualified_name);
             return Ok(ODataPath::BoundFunction {
                 parent: Box::new(parent),
                 function: function_name.to_string(),
@@ -341,9 +335,7 @@ fn validate_identifier(s: &str) -> Result<(), ODataError> {
     for ch in s.chars() {
         if !ch.is_ascii_alphanumeric() && ch != '_' {
             return Err(ODataError::InvalidPath {
-                message: format!(
-                    "invalid identifier '{s}': contains invalid character '{ch}'"
-                ),
+                message: format!("invalid identifier '{s}': contains invalid character '{ch}'"),
             });
         }
     }
@@ -426,8 +418,7 @@ mod tests {
 
     #[test]
     fn parse_bound_function() {
-        let result =
-            parse_path("/Orders('abc-123')/Temper.Example.GetOrderTotal()").unwrap();
+        let result = parse_path("/Orders('abc-123')/Temper.Example.GetOrderTotal()").unwrap();
         assert_eq!(
             result,
             ODataPath::BoundFunction {

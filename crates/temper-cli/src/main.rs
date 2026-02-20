@@ -188,13 +188,16 @@ mod tests {
     #[test]
     fn test_cli_parse_serve_with_specs() {
         let cli = Cli::parse_from([
-            "temper", "serve", "--specs-dir", "my-specs", "--tenant", "my-app",
+            "temper",
+            "serve",
+            "--specs-dir",
+            "my-specs",
+            "--tenant",
+            "my-app",
         ]);
         match cli.command {
             Commands::Serve {
-                specs_dir,
-                tenant,
-                ..
+                specs_dir, tenant, ..
             } => {
                 assert_eq!(specs_dir, Some("my-specs".into()));
                 assert_eq!(tenant, "my-app");
@@ -206,9 +209,12 @@ mod tests {
     #[test]
     fn test_cli_parse_serve_with_app_flags() {
         let cli = Cli::parse_from([
-            "temper", "serve",
-            "--app", "ecommerce=specs/ecommerce",
-            "--app", "linear=specs/linear",
+            "temper",
+            "serve",
+            "--app",
+            "ecommerce=specs/ecommerce",
+            "--app",
+            "linear=specs/linear",
         ]);
         match cli.command {
             Commands::Serve { app, .. } => {

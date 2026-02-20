@@ -415,7 +415,11 @@ mod tests {
 
         let result = cascade.run();
 
-        assert!(result.level_result(CascadeLevel::SymbolicVerification).is_some());
+        assert!(
+            result
+                .level_result(CascadeLevel::SymbolicVerification)
+                .is_some()
+        );
         assert!(result.level_result(CascadeLevel::ModelCheck).is_some());
         assert!(result.level_result(CascadeLevel::Simulation).is_some());
         assert!(result.level_result(CascadeLevel::PropertyTest).is_some());
@@ -429,7 +433,9 @@ mod tests {
 
         let result = cascade.run();
 
-        let l0 = result.level_result(CascadeLevel::SymbolicVerification).unwrap();
+        let l0 = result
+            .level_result(CascadeLevel::SymbolicVerification)
+            .unwrap();
         assert!(l0.summary.contains("L0"), "Should have L0 prefix");
         assert!(l0.passed);
 

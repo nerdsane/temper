@@ -28,10 +28,7 @@ impl TenantId {
     pub fn new(id: impl Into<String>) -> Self {
         let id = id.into();
         assert!(!id.is_empty(), "tenant ID must not be empty");
-        assert!(
-            !id.contains(':'),
-            "tenant ID must not contain colons: {id}"
-        );
+        assert!(!id.contains(':'), "tenant ID must not contain colons: {id}");
         Self(id)
     }
 
@@ -98,10 +95,7 @@ impl QualifiedEntityId {
     }
 
     /// Create a qualified entity ID in the default tenant.
-    pub fn in_default_tenant(
-        entity_type: impl Into<String>,
-        entity_id: impl Into<String>,
-    ) -> Self {
+    pub fn in_default_tenant(entity_type: impl Into<String>, entity_id: impl Into<String>) -> Self {
         Self::new(TenantId::default(), entity_type, entity_id)
     }
 

@@ -126,7 +126,10 @@ mod tests {
     fn test_context_from_headers_customer() {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "cust-123".to_string()),
-            ("X-Temper-Principal-Kind".to_string(), "customer".to_string()),
+            (
+                "X-Temper-Principal-Kind".to_string(),
+                "customer".to_string(),
+            ),
         ];
 
         let ctx = SecurityContext::from_headers(&headers);
@@ -140,7 +143,10 @@ mod tests {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "agent-1".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-            ("X-Temper-Agent-Role".to_string(), "customer_agent".to_string()),
+            (
+                "X-Temper-Agent-Role".to_string(),
+                "customer_agent".to_string(),
+            ),
             ("X-Temper-Acting-For".to_string(), "cust-456".to_string()),
         ];
 
@@ -155,8 +161,14 @@ mod tests {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
-            ("X-Temper-Attr-ApprovalLimit".to_string(), "10000".to_string()),
-            ("X-Temper-Ctx-RateLimitExceeded".to_string(), "false".to_string()),
+            (
+                "X-Temper-Attr-ApprovalLimit".to_string(),
+                "10000".to_string(),
+            ),
+            (
+                "X-Temper-Ctx-RateLimitExceeded".to_string(),
+                "false".to_string(),
+            ),
         ];
 
         let ctx = SecurityContext::from_headers(&headers);

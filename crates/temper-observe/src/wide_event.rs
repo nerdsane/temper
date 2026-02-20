@@ -28,8 +28,8 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
-use opentelemetry::trace::{Span, Status, Tracer};
 use opentelemetry::KeyValue;
+use opentelemetry::trace::{Span, Status, Tracer};
 use serde::{Deserialize, Serialize};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
@@ -181,7 +181,10 @@ pub fn emit_span(event: &WideEvent) {
     // Correlation IDs
     attrs.push(KeyValue::new("temper.trace_id", event.trace_id.clone()));
     attrs.push(KeyValue::new("temper.span_id", event.span_id.clone()));
-    attrs.push(KeyValue::new("temper.from_status", event.from_status.clone()));
+    attrs.push(KeyValue::new(
+        "temper.from_status",
+        event.from_status.clone(),
+    ));
     attrs.push(KeyValue::new("temper.to_status", event.to_status.clone()));
 
     let status = if event.success {
@@ -218,7 +221,9 @@ pub fn emit_metrics(event: &WideEvent) {
     let meter = opentelemetry::global::meter("temper");
 
     // Low-cardinality tag attributes only (the cost decoupling)
-    let tag_attrs: Vec<KeyValue> = event.tags.iter()
+    let tag_attrs: Vec<KeyValue> = event
+        .tags
+        .iter()
         .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
         .collect();
 
@@ -238,10 +243,16 @@ mod tests {
 
     fn sample_event() -> WideEvent {
         from_transition(
-            "Order", "order-123", "SubmitOrder",
-            "Draft", "Submitted", true, 5_000_000,
+            "Order",
+            "order-123",
+            "SubmitOrder",
+            "Draft",
+            "Submitted",
+            true,
+            5_000_000,
             &serde_json::json!({"ShippingAddressId": "addr-1"}),
-            2, "trace-abc",
+            2,
+            "trace-abc",
         )
     }
 
@@ -298,9 +309,16 @@ mod tests {
     #[test]
     fn test_failed_transition_marks_error() {
         let event = from_transition(
-            "Order", "order-456", "SubmitOrder",
-            "Draft", "Draft", false, 1_000_000,
-            &serde_json::json!({}), 0, "trace-def",
+            "Order",
+            "order-456",
+            "SubmitOrder",
+            "Draft",
+            "Draft",
+            false,
+            1_000_000,
+            &serde_json::json!({}),
+            0,
+            "trace-def",
         );
 
         assert!(!event.success);

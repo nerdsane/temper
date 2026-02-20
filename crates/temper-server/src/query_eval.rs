@@ -57,7 +57,10 @@ pub fn apply_query_options(
 }
 
 /// Filter entities by evaluating a `FilterExpr` against each entity.
-fn filter_entities(entities: Vec<serde_json::Value>, filter: &FilterExpr) -> Vec<serde_json::Value> {
+fn filter_entities(
+    entities: Vec<serde_json::Value>,
+    filter: &FilterExpr,
+) -> Vec<serde_json::Value> {
     entities
         .into_iter()
         .filter(|entity| evaluate_filter(entity, filter).unwrap_or(false))
@@ -92,13 +95,9 @@ fn evaluate_filter(entity: &serde_json::Value, expr: &FilterExpr) -> Option<bool
             let val = evaluate_filter(entity, operand)?;
             Some(!val)
         }
-        FilterExpr::FunctionCall { name, args } => {
-            evaluate_function(entity, name, args)
-        }
+        FilterExpr::FunctionCall { name, args } => evaluate_function(entity, name, args),
         // A bare property or literal used as boolean
-        FilterExpr::Property(prop) => {
-            resolve_property(entity, prop).and_then(|v| v.as_bool())
-        }
+        FilterExpr::Property(prop) => resolve_property(entity, prop).and_then(|v| v.as_bool()),
         FilterExpr::Literal(ODataValue::Boolean(b)) => Some(*b),
         _ => None,
     }
@@ -116,7 +115,9 @@ fn evaluate_value(entity: &serde_json::Value, expr: &FilterExpr) -> Option<serde
 /// Resolve a property name against an entity, checking top-level first,
 /// then falling back to the `fields` sub-object.
 fn resolve_property(entity: &serde_json::Value, prop: &str) -> Option<serde_json::Value> {
-    entity.get(prop).cloned()
+    entity
+        .get(prop)
+        .cloned()
         .or_else(|| entity.get("fields").and_then(|f| f.get(prop)).cloned())
 }
 
@@ -134,14 +135,22 @@ fn odata_value_to_json(val: &ODataValue) -> serde_json::Value {
 }
 
 /// Compare two JSON values with a binary operator.
-fn compare_values(left: &serde_json::Value, right: &serde_json::Value, op: &BinaryOperator) -> bool {
+fn compare_values(
+    left: &serde_json::Value,
+    right: &serde_json::Value,
+    op: &BinaryOperator,
+) -> bool {
     match op {
         BinaryOperator::Eq => json_eq(left, right),
         BinaryOperator::Ne => !json_eq(left, right),
-        BinaryOperator::Gt => json_cmp(left, right).is_some_and(|o| o == std::cmp::Ordering::Greater),
+        BinaryOperator::Gt => {
+            json_cmp(left, right).is_some_and(|o| o == std::cmp::Ordering::Greater)
+        }
         BinaryOperator::Ge => json_cmp(left, right).is_some_and(|o| o != std::cmp::Ordering::Less),
         BinaryOperator::Lt => json_cmp(left, right).is_some_and(|o| o == std::cmp::Ordering::Less),
-        BinaryOperator::Le => json_cmp(left, right).is_some_and(|o| o != std::cmp::Ordering::Greater),
+        BinaryOperator::Le => {
+            json_cmp(left, right).is_some_and(|o| o != std::cmp::Ordering::Greater)
+        }
         _ => false, // And/Or/Has handled above
     }
 }
@@ -150,9 +159,7 @@ fn compare_values(left: &serde_json::Value, right: &serde_json::Value, op: &Bina
 fn json_eq(left: &serde_json::Value, right: &serde_json::Value) -> bool {
     match (left, right) {
         (serde_json::Value::String(a), serde_json::Value::String(b)) => a == b,
-        (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
-            a.as_f64() == b.as_f64()
-        }
+        (serde_json::Value::Number(a), serde_json::Value::Number(b)) => a.as_f64() == b.as_f64(),
         (serde_json::Value::Bool(a), serde_json::Value::Bool(b)) => a == b,
         (serde_json::Value::Null, serde_json::Value::Null) => true,
         _ => left == right,
@@ -221,7 +228,10 @@ fn sort_entities(entities: &mut [serde_json::Value], orderby: &[OrderByClause]) 
 /// Prune each entity to only include the selected properties.
 ///
 /// Resolves properties from both top-level and the `fields` sub-object.
-pub fn select_fields(entities: Vec<serde_json::Value>, select: &[String]) -> Vec<serde_json::Value> {
+pub fn select_fields(
+    entities: Vec<serde_json::Value>,
+    select: &[String],
+) -> Vec<serde_json::Value> {
     entities
         .into_iter()
         .map(|entity| {
@@ -265,28 +275,41 @@ pub async fn expand_entity(
     tenant: &temper_runtime::tenant::TenantId,
 ) {
     // Resolve all navigation targets up front (while holding registry lock briefly)
-    let nav_infos: Vec<(&temper_odata::query::types::ExpandItem, Option<NavExpansionInfo>)> = {
+    let nav_infos: Vec<(
+        &temper_odata::query::types::ExpandItem,
+        Option<NavExpansionInfo>,
+    )> = {
         let registry = state.registry.read().unwrap();
         let tenant_config = registry.get_tenant(tenant);
-        expand_items.iter().map(|item| {
-            let target = tenant_config.and_then(|tc| {
-                find_nav_target(&tc.csdl, entity_type, &item.property)
-            }).or_else(|| {
-                find_nav_target(&state.csdl, entity_type, &item.property)
-            });
-            let info = target.map(|target_type| {
-                let is_collection = tenant_config.is_some_and(|tc| {
-                    is_collection_nav(&tc.csdl, entity_type, &item.property)
-                }) || is_collection_nav(&state.csdl, entity_type, &item.property);
-                NavExpansionInfo { target_type, is_collection }
-            });
-            (item, info)
-        }).collect()
+        expand_items
+            .iter()
+            .map(|item| {
+                let target = tenant_config
+                    .and_then(|tc| find_nav_target(&tc.csdl, entity_type, &item.property))
+                    .or_else(|| find_nav_target(&state.csdl, entity_type, &item.property));
+                let info = target.map(|target_type| {
+                    let is_collection = tenant_config
+                        .is_some_and(|tc| is_collection_nav(&tc.csdl, entity_type, &item.property))
+                        || is_collection_nav(&state.csdl, entity_type, &item.property);
+                    NavExpansionInfo {
+                        target_type,
+                        is_collection,
+                    }
+                });
+                (item, info)
+            })
+            .collect()
     }; // Registry lock dropped here
 
-    let entity_id = entity.get("entity_id")
+    let entity_id = entity
+        .get("entity_id")
         .and_then(|v| v.as_str())
-        .or_else(|| entity.get("fields").and_then(|f| f.get("Id")).and_then(|v| v.as_str()))
+        .or_else(|| {
+            entity
+                .get("fields")
+                .and_then(|f| f.get("Id"))
+                .and_then(|v| v.as_str())
+        })
         .map(String::from);
 
     for (item, info) in &nav_infos {
@@ -297,15 +320,20 @@ pub async fn expand_entity(
 
         if let Some(ref parent_id) = entity_id {
             for related_id in &related_ids {
-                if let Ok(response) = state.get_tenant_entity_state(tenant, &info.target_type, related_id).await {
+                if let Ok(response) = state
+                    .get_tenant_entity_state(tenant, &info.target_type, related_id)
+                    .await
+                {
                     let related_json = serde_json::to_value(&response.state).unwrap_or_default();
                     // Check if this entity references the parent
-                    let matches = related_json.get("fields")
+                    let matches = related_json
+                        .get("fields")
                         .and_then(|f| f.as_object())
                         .is_some_and(|fields| {
                             let parent_id_field = format!("{}Id", entity_type);
                             fields.get("parentId").and_then(|v| v.as_str()) == Some(parent_id)
-                                || fields.get(&parent_id_field).and_then(|v| v.as_str()) == Some(parent_id)
+                                || fields.get(&parent_id_field).and_then(|v| v.as_str())
+                                    == Some(parent_id)
                         });
                     if matches {
                         related_entities.push(related_json);
@@ -335,7 +363,10 @@ pub async fn expand_entity(
             } else {
                 obj.insert(
                     item.property.clone(),
-                    related_entities.into_iter().next().unwrap_or(serde_json::Value::Null),
+                    related_entities
+                        .into_iter()
+                        .next()
+                        .unwrap_or(serde_json::Value::Null),
                 );
             }
         }

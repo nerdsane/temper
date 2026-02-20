@@ -41,8 +41,8 @@ impl TransitionTable {
         for &i in indices {
             let rule = &self.rules[i];
 
-            let state_ok = rule.from_states.is_empty()
-                || rule.from_states.iter().any(|s| s == current_state);
+            let state_ok =
+                rule.from_states.is_empty() || rule.from_states.iter().any(|s| s == current_state);
 
             if !state_ok {
                 continue;
@@ -163,8 +163,7 @@ mod tests {
 
         // Serialize → deserialize roundtrip
         let json = serde_json::to_string(&table).expect("serialize");
-        let restored: TransitionTable =
-            serde_json::from_str(&json).expect("deserialize");
+        let restored: TransitionTable = serde_json::from_str(&json).expect("deserialize");
 
         // rule_index must be rebuilt, not empty
         assert!(
@@ -176,7 +175,10 @@ mod tests {
         let result = restored.evaluate("Draft", 2, "SubmitOrder");
         assert!(result.is_some());
         let r = result.unwrap();
-        assert!(r.success, "SubmitOrder from Draft should succeed after roundtrip");
+        assert!(
+            r.success,
+            "SubmitOrder from Draft should succeed after roundtrip"
+        );
         assert_eq!(r.new_state, "Submitted");
     }
 

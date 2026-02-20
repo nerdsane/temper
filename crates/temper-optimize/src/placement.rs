@@ -55,10 +55,7 @@ impl PlacementOptimizer {
         // Calculate average operation count across all services
         let total_ops: u64 = rows
             .iter()
-            .filter_map(|row| {
-                row.get("op_count")
-                    .and_then(|v| v.as_u64())
-            })
+            .filter_map(|row| row.get("op_count").and_then(|v| v.as_u64()))
             .sum();
         let service_count = rows.len() as u64;
         if service_count == 0 || total_ops == 0 {
@@ -72,10 +69,7 @@ impl PlacementOptimizer {
                 .get("service")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let op_count = row
-                .get("op_count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let op_count = row.get("op_count").and_then(|v| v.as_u64()).unwrap_or(0);
 
             if op_count < MIN_OPS_THRESHOLD {
                 continue;
@@ -195,6 +189,9 @@ mod tests {
         let recs = optimizer.analyze(&store).await;
 
         // Uniform load (20 each, avg=20) — no service exceeds 3x average
-        assert!(recs.is_empty(), "Uniform load should not trigger rebalancing");
+        assert!(
+            recs.is_empty(),
+            "Uniform load should not trigger rebalancing"
+        );
     }
 }

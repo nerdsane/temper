@@ -7,8 +7,7 @@ use std::collections::BTreeMap;
 use temper_runtime::tenant::TenantId;
 
 use super::types::{
-    ReactionRule, ReactionTrigger, ReactionTarget, TargetResolver,
-    MAX_REACTIONS_PER_TENANT,
+    MAX_REACTIONS_PER_TENANT, ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
 };
 
 /// Registry of reaction rules, indexed per-tenant for fast lookup.
@@ -166,29 +165,46 @@ struct ResolverToml {
 /// field = "payment_id"
 /// ```
 pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
-    let file: ReactionsFile = toml::from_str(toml_str)
-        .map_err(|e| format!("Failed to parse reactions TOML: {e}"))?;
+    let file: ReactionsFile =
+        toml::from_str(toml_str).map_err(|e| format!("Failed to parse reactions TOML: {e}"))?;
 
     let mut rules = Vec::new();
     for r in file.reaction {
         let resolve_target = match r.resolve_target.resolver_type.as_str() {
             "field" => {
-                let field = r.resolve_target.field
-                    .ok_or_else(|| format!("Reaction '{}': 'field' resolver requires 'field' key", r.name))?;
+                let field = r.resolve_target.field.ok_or_else(|| {
+                    format!(
+                        "Reaction '{}': 'field' resolver requires 'field' key",
+                        r.name
+                    )
+                })?;
                 TargetResolver::Field { field }
             }
             "same_id" => TargetResolver::SameId,
             "static" => {
-                let entity_id = r.resolve_target.entity_id
-                    .ok_or_else(|| format!("Reaction '{}': 'static' resolver requires 'entity_id' key", r.name))?;
+                let entity_id = r.resolve_target.entity_id.ok_or_else(|| {
+                    format!(
+                        "Reaction '{}': 'static' resolver requires 'entity_id' key",
+                        r.name
+                    )
+                })?;
                 TargetResolver::Static { entity_id }
             }
             "create_if_missing" => {
-                let id_field = r.resolve_target.id_field
-                    .ok_or_else(|| format!("Reaction '{}': 'create_if_missing' resolver requires 'id_field' key", r.name))?;
+                let id_field = r.resolve_target.id_field.ok_or_else(|| {
+                    format!(
+                        "Reaction '{}': 'create_if_missing' resolver requires 'id_field' key",
+                        r.name
+                    )
+                })?;
                 TargetResolver::CreateIfMissing { id_field }
             }
-            other => return Err(format!("Reaction '{}': unknown resolver type '{other}'", r.name)),
+            other => {
+                return Err(format!(
+                    "Reaction '{}': unknown resolver type '{other}'",
+                    r.name
+                ));
+            }
         };
 
         rules.push(ReactionRule {
@@ -214,7 +230,14 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
 mod tests {
     use super::*;
 
-    fn sample_rule(name: &str, entity_type: &str, action: Option<&str>, to_state: Option<&str>, target_type: &str, target_action: &str) -> ReactionRule {
+    fn sample_rule(
+        name: &str,
+        entity_type: &str,
+        action: Option<&str>,
+        to_state: Option<&str>,
+        target_type: &str,
+        target_action: &str,
+    ) -> ReactionRule {
         ReactionRule {
             name: name.to_string(),
             when: ReactionTrigger {
@@ -234,9 +257,17 @@ mod tests {
     #[test]
     fn lookup_exact_match() {
         let mut reg = ReactionRegistry::new();
-        reg.register_tenant_rules("t1", vec![
-            sample_rule("r1", "Order", Some("ConfirmOrder"), Some("Confirmed"), "Payment", "Authorize"),
-        ]);
+        reg.register_tenant_rules(
+            "t1",
+            vec![sample_rule(
+                "r1",
+                "Order",
+                Some("ConfirmOrder"),
+                Some("Confirmed"),
+                "Payment",
+                "Authorize",
+            )],
+        );
 
         let tenant = TenantId::new("t1");
         let results = reg.lookup(&tenant, "Order", "ConfirmOrder", "Confirmed");
@@ -247,9 +278,12 @@ mod tests {
     #[test]
     fn lookup_wildcard_match() {
         let mut reg = ReactionRegistry::new();
-        reg.register_tenant_rules("t1", vec![
-            sample_rule("audit", "Order", None, None, "AuditLog", "Record"),
-        ]);
+        reg.register_tenant_rules(
+            "t1",
+            vec![sample_rule(
+                "audit", "Order", None, None, "AuditLog", "Record",
+            )],
+        );
 
         let tenant = TenantId::new("t1");
         let results = reg.lookup(&tenant, "Order", "AnyAction", "AnyState");
@@ -260,9 +294,17 @@ mod tests {
     #[test]
     fn lookup_state_filter_excludes_non_matching() {
         let mut reg = ReactionRegistry::new();
-        reg.register_tenant_rules("t1", vec![
-            sample_rule("r1", "Order", Some("ConfirmOrder"), Some("Confirmed"), "Payment", "Authorize"),
-        ]);
+        reg.register_tenant_rules(
+            "t1",
+            vec![sample_rule(
+                "r1",
+                "Order",
+                Some("ConfirmOrder"),
+                Some("Confirmed"),
+                "Payment",
+                "Authorize",
+            )],
+        );
 
         let tenant = TenantId::new("t1");
         // Wrong to_state
@@ -273,9 +315,17 @@ mod tests {
     #[test]
     fn lookup_no_match_wrong_entity() {
         let mut reg = ReactionRegistry::new();
-        reg.register_tenant_rules("t1", vec![
-            sample_rule("r1", "Order", Some("ConfirmOrder"), None, "Payment", "Authorize"),
-        ]);
+        reg.register_tenant_rules(
+            "t1",
+            vec![sample_rule(
+                "r1",
+                "Order",
+                Some("ConfirmOrder"),
+                None,
+                "Payment",
+                "Authorize",
+            )],
+        );
 
         let tenant = TenantId::new("t1");
         let results = reg.lookup(&tenant, "Payment", "ConfirmOrder", "Confirmed");
@@ -285,9 +335,17 @@ mod tests {
     #[test]
     fn lookup_wrong_tenant_returns_empty() {
         let mut reg = ReactionRegistry::new();
-        reg.register_tenant_rules("t1", vec![
-            sample_rule("r1", "Order", Some("ConfirmOrder"), None, "Payment", "Authorize"),
-        ]);
+        reg.register_tenant_rules(
+            "t1",
+            vec![sample_rule(
+                "r1",
+                "Order",
+                Some("ConfirmOrder"),
+                None,
+                "Payment",
+                "Authorize",
+            )],
+        );
 
         let tenant = TenantId::new("t2");
         let results = reg.lookup(&tenant, "Order", "ConfirmOrder", "Confirmed");
@@ -297,10 +355,20 @@ mod tests {
     #[test]
     fn lookup_combines_exact_and_wildcard() {
         let mut reg = ReactionRegistry::new();
-        reg.register_tenant_rules("t1", vec![
-            sample_rule("exact", "Order", Some("ConfirmOrder"), None, "Payment", "Authorize"),
-            sample_rule("wildcard", "Order", None, None, "AuditLog", "Record"),
-        ]);
+        reg.register_tenant_rules(
+            "t1",
+            vec![
+                sample_rule(
+                    "exact",
+                    "Order",
+                    Some("ConfirmOrder"),
+                    None,
+                    "Payment",
+                    "Authorize",
+                ),
+                sample_rule("wildcard", "Order", None, None, "AuditLog", "Record"),
+            ],
+        );
 
         let tenant = TenantId::new("t1");
         let results = reg.lookup(&tenant, "Order", "ConfirmOrder", "Confirmed");
@@ -336,7 +404,9 @@ type = "same_id"
         let rules = parse_reactions(toml).unwrap();
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[0].name, "order_confirmed_triggers_payment");
-        assert!(matches!(rules[0].resolve_target, TargetResolver::Field { ref field } if field == "payment_id"));
+        assert!(
+            matches!(rules[0].resolve_target, TargetResolver::Field { ref field } if field == "payment_id")
+        );
         assert_eq!(rules[1].name, "audit_all_orders");
         assert!(matches!(rules[1].resolve_target, TargetResolver::SameId));
     }
@@ -362,7 +432,11 @@ type = "field"
 "#;
         let result = parse_reactions(toml);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("'field' resolver requires 'field' key"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("'field' resolver requires 'field' key")
+        );
     }
 
     #[test]
@@ -380,7 +454,11 @@ type = "magic"
 "#;
         let result = parse_reactions(toml);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("unknown resolver type 'magic'"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("unknown resolver type 'magic'")
+        );
     }
 
     #[test]
@@ -431,10 +509,16 @@ id_field = "b_id"
 "#;
         let rules = parse_reactions(toml).unwrap();
         assert_eq!(rules.len(), 4);
-        assert!(matches!(rules[0].resolve_target, TargetResolver::Field { ref field } if field == "b_id"));
+        assert!(
+            matches!(rules[0].resolve_target, TargetResolver::Field { ref field } if field == "b_id")
+        );
         assert!(matches!(rules[1].resolve_target, TargetResolver::SameId));
-        assert!(matches!(rules[2].resolve_target, TargetResolver::Static { ref entity_id } if entity_id == "singleton-1"));
-        assert!(matches!(rules[3].resolve_target, TargetResolver::CreateIfMissing { ref id_field } if id_field == "b_id"));
+        assert!(
+            matches!(rules[2].resolve_target, TargetResolver::Static { ref entity_id } if entity_id == "singleton-1")
+        );
+        assert!(
+            matches!(rules[3].resolve_target, TargetResolver::CreateIfMissing { ref id_field } if id_field == "b_id")
+        );
     }
 
     #[test]

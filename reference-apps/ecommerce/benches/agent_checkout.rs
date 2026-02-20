@@ -15,10 +15,10 @@
 
 use std::collections::HashMap;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use hyper::{Request, StatusCode};
 use temper_runtime::ActorSystem;
-use temper_server::{build_router, ServerState};
+use temper_server::{ServerState, build_router};
 use temper_spec::csdl::parse_csdl;
 use temper_store_postgres::PostgresEventStore;
 use tower::ServiceExt;
@@ -33,7 +33,10 @@ const NS: &str = "Temper.Example";
 /// Unique run prefix to avoid Postgres entity ID collisions across runs.
 fn run_prefix() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     format!("b{ts}")
 }
 
@@ -93,7 +96,9 @@ async fn post_action(
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     if status != StatusCode::OK && status != StatusCode::CREATED {
-        let body = axum::body::to_bytes(resp.into_body(), 10_000).await.unwrap_or_default();
+        let body = axum::body::to_bytes(resp.into_body(), 10_000)
+            .await
+            .unwrap_or_default();
         let body_str = String::from_utf8_lossy(&body);
         panic!("POST {uri} returned {status}: {body_str}");
     }
@@ -103,26 +108,96 @@ async fn post_action(
 /// would call it — 13 POST requests across 3 entity types.
 async fn agent_checkout_http(app: &axum::Router, id: &str) {
     // --- Order: Draft → Submitted ---
-    post_action(app, "Orders", id, "AddItem", serde_json::json!({"ProductId": "SKU-001", "Quantity": 2})).await;
-    post_action(app, "Orders", id, "AddItem", serde_json::json!({"ProductId": "SKU-042", "Quantity": 1})).await;
-    post_action(app, "Orders", id, "SubmitOrder", serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"})).await;
+    post_action(
+        app,
+        "Orders",
+        id,
+        "AddItem",
+        serde_json::json!({"ProductId": "SKU-001", "Quantity": 2}),
+    )
+    .await;
+    post_action(
+        app,
+        "Orders",
+        id,
+        "AddItem",
+        serde_json::json!({"ProductId": "SKU-042", "Quantity": 1}),
+    )
+    .await;
+    post_action(
+        app,
+        "Orders",
+        id,
+        "SubmitOrder",
+        serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
+    )
+    .await;
 
     // --- Payment: Pending → Captured ---
     let pay_id = format!("pay-{id}");
-    post_action(app, "Payments", &pay_id, "AuthorizePayment", serde_json::json!({})).await;
-    post_action(app, "Payments", &pay_id, "CapturePayment", serde_json::json!({})).await;
+    post_action(
+        app,
+        "Payments",
+        &pay_id,
+        "AuthorizePayment",
+        serde_json::json!({}),
+    )
+    .await;
+    post_action(
+        app,
+        "Payments",
+        &pay_id,
+        "CapturePayment",
+        serde_json::json!({}),
+    )
+    .await;
 
     // --- Order: Confirmed → Shipped ---
     post_action(app, "Orders", id, "ConfirmOrder", serde_json::json!({})).await;
     post_action(app, "Orders", id, "ProcessOrder", serde_json::json!({})).await;
-    post_action(app, "Orders", id, "ShipOrder", serde_json::json!({"Carrier": "FedEx", "TrackingNumber": "TRK-12345"})).await;
+    post_action(
+        app,
+        "Orders",
+        id,
+        "ShipOrder",
+        serde_json::json!({"Carrier": "FedEx", "TrackingNumber": "TRK-12345"}),
+    )
+    .await;
 
     // --- Shipment: Created → Delivered ---
     let ship_id = format!("ship-{id}");
-    post_action(app, "Shipments", &ship_id, "ShipOrder", serde_json::json!({"Carrier": "FedEx", "TrackingNumber": "TRK-12345"})).await;
-    post_action(app, "Shipments", &ship_id, "MarkInTransit", serde_json::json!({})).await;
-    post_action(app, "Shipments", &ship_id, "MarkOutForDelivery", serde_json::json!({})).await;
-    post_action(app, "Shipments", &ship_id, "DeliverShipment", serde_json::json!({})).await;
+    post_action(
+        app,
+        "Shipments",
+        &ship_id,
+        "ShipOrder",
+        serde_json::json!({"Carrier": "FedEx", "TrackingNumber": "TRK-12345"}),
+    )
+    .await;
+    post_action(
+        app,
+        "Shipments",
+        &ship_id,
+        "MarkInTransit",
+        serde_json::json!({}),
+    )
+    .await;
+    post_action(
+        app,
+        "Shipments",
+        &ship_id,
+        "MarkOutForDelivery",
+        serde_json::json!({}),
+    )
+    .await;
+    post_action(
+        app,
+        "Shipments",
+        &ship_id,
+        "DeliverShipment",
+        serde_json::json!({}),
+    )
+    .await;
 
     // --- Order: Delivered ---
     post_action(app, "Orders", id, "DeliverOrder", serde_json::json!({})).await;
@@ -166,7 +241,9 @@ fn bench_inmemory(c: &mut Criterion) {
                             agent_checkout_http(&a, &oid).await;
                         }));
                     }
-                    for h in handles { h.await.unwrap(); }
+                    for h in handles {
+                        h.await.unwrap();
+                    }
                 })
             })
         });
@@ -188,7 +265,9 @@ fn bench_inmemory(c: &mut Criterion) {
                             agent_checkout_http(&a, &oid).await;
                         }));
                     }
-                    for h in handles { h.await.unwrap(); }
+                    for h in handles {
+                        h.await.unwrap();
+                    }
                 })
             })
         });
@@ -242,7 +321,9 @@ fn bench_postgres(c: &mut Criterion) {
                             agent_checkout_http(&a, &oid).await;
                         }));
                     }
-                    for h in handles { h.await.unwrap(); }
+                    for h in handles {
+                        h.await.unwrap();
+                    }
                 })
             })
         });
@@ -263,7 +344,9 @@ fn bench_postgres(c: &mut Criterion) {
                             agent_checkout_http(&a, &oid).await;
                         }));
                     }
-                    for h in handles { h.await.unwrap(); }
+                    for h in handles {
+                        h.await.unwrap();
+                    }
                 })
             })
         });

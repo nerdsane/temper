@@ -7,11 +7,11 @@
 use std::sync::Arc;
 
 use temper_jit::table::TransitionTable;
-use temper_runtime::scheduler::{install_deterministic_context, SimActorSystemConfig, FaultConfig};
+use temper_runtime::scheduler::{FaultConfig, SimActorSystemConfig, install_deterministic_context};
 use temper_server::reaction::registry::{ReactionRegistry, parse_reactions};
 use temper_server::reaction::sim_dispatcher::SimReactionSystem;
 use temper_server::reaction::types::{
-    ReactionRule, ReactionTrigger, ReactionTarget, TargetResolver,
+    ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
 };
 
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
@@ -52,8 +52,9 @@ fn payment_table() -> Arc<TransitionTable> {
 
 fn ecommerce_registry() -> ReactionRegistry {
     let mut reg = ReactionRegistry::new();
-    reg.register_tenant_rules("shop", vec![
-        ReactionRule {
+    reg.register_tenant_rules(
+        "shop",
+        vec![ReactionRule {
             name: "order_confirmed_triggers_payment".to_string(),
             when: ReactionTrigger {
                 entity_type: "Order".to_string(),
@@ -66,8 +67,8 @@ fn ecommerce_registry() -> ReactionRegistry {
                 params: serde_json::json!({}),
             },
             resolve_target: TargetResolver::SameId,
-        },
-    ]);
+        }],
+    );
     reg
 }
 
@@ -96,7 +97,8 @@ fn order_confirm_triggers_payment_authorize() {
 
     // Drive Order: AddItem → SubmitOrder → ConfirmOrder
     clock.advance();
-    sys.step("order-e1", "AddItem", r#"{"ProductId":"laptop"}"#).unwrap();
+    sys.step("order-e1", "AddItem", r#"{"ProductId":"laptop"}"#)
+        .unwrap();
     sys.assert_status("order-e1", "Draft");
 
     clock.advance();
@@ -161,7 +163,8 @@ fn no_reaction_when_action_doesnt_match() {
 
     // AddItem should NOT trigger any reaction
     clock.advance();
-    sys.step("order-e3", "AddItem", r#"{"ProductId":"phone"}"#).unwrap();
+    sys.step("order-e3", "AddItem", r#"{"ProductId":"phone"}"#)
+        .unwrap();
     assert!(sys.last_results().is_empty());
 
     // SubmitOrder should NOT trigger either (only ConfirmOrder does)
@@ -180,8 +183,9 @@ fn field_based_target_resolution() {
 
     // Rule resolves payment ID from a field on the Order
     let mut reg = ReactionRegistry::new();
-    reg.register_tenant_rules("shop2", vec![
-        ReactionRule {
+    reg.register_tenant_rules(
+        "shop2",
+        vec![ReactionRule {
             name: "order_to_payment_via_field".to_string(),
             when: ReactionTrigger {
                 entity_type: "Order".to_string(),
@@ -196,8 +200,8 @@ fn field_based_target_resolution() {
             resolve_target: TargetResolver::Field {
                 field: "payment_id".to_string(),
             },
-        },
-    ]);
+        }],
+    );
 
     let mut sys = SimReactionSystem::new(sim_config(), reg, "shop2");
     sys.register_entity("order-f1", "Order", "f1", order_table());
@@ -217,7 +221,13 @@ fn field_based_target_resolution() {
     let results = sys.last_results();
     assert_eq!(results.len(), 1);
     assert!(!results[0].success);
-    assert!(results[0].error.as_ref().unwrap().contains("Could not resolve"));
+    assert!(
+        results[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("Could not resolve")
+    );
 }
 
 // =========================================================================
@@ -263,36 +273,39 @@ fn multi_step_cascade_with_chained_reactions() {
     // Chain: Order:ConfirmOrder → Payment:AuthorizePayment → Payment:CapturePayment
     // (second rule triggers on Payment reaching Authorized)
     let mut reg = ReactionRegistry::new();
-    reg.register_tenant_rules("chain", vec![
-        ReactionRule {
-            name: "confirm_triggers_authorize".to_string(),
-            when: ReactionTrigger {
-                entity_type: "Order".to_string(),
-                action: Some("ConfirmOrder".to_string()),
-                to_state: Some("Confirmed".to_string()),
+    reg.register_tenant_rules(
+        "chain",
+        vec![
+            ReactionRule {
+                name: "confirm_triggers_authorize".to_string(),
+                when: ReactionTrigger {
+                    entity_type: "Order".to_string(),
+                    action: Some("ConfirmOrder".to_string()),
+                    to_state: Some("Confirmed".to_string()),
+                },
+                then: ReactionTarget {
+                    entity_type: "Payment".to_string(),
+                    action: "AuthorizePayment".to_string(),
+                    params: serde_json::json!({}),
+                },
+                resolve_target: TargetResolver::SameId,
             },
-            then: ReactionTarget {
-                entity_type: "Payment".to_string(),
-                action: "AuthorizePayment".to_string(),
-                params: serde_json::json!({}),
+            ReactionRule {
+                name: "authorize_triggers_capture".to_string(),
+                when: ReactionTrigger {
+                    entity_type: "Payment".to_string(),
+                    action: Some("AuthorizePayment".to_string()),
+                    to_state: Some("Authorized".to_string()),
+                },
+                then: ReactionTarget {
+                    entity_type: "Payment".to_string(),
+                    action: "CapturePayment".to_string(),
+                    params: serde_json::json!({}),
+                },
+                resolve_target: TargetResolver::SameId,
             },
-            resolve_target: TargetResolver::SameId,
-        },
-        ReactionRule {
-            name: "authorize_triggers_capture".to_string(),
-            when: ReactionTrigger {
-                entity_type: "Payment".to_string(),
-                action: Some("AuthorizePayment".to_string()),
-                to_state: Some("Authorized".to_string()),
-            },
-            then: ReactionTarget {
-                entity_type: "Payment".to_string(),
-                action: "CapturePayment".to_string(),
-                params: serde_json::json!({}),
-            },
-            resolve_target: TargetResolver::SameId,
-        },
-    ]);
+        ],
+    );
 
     let mut sys = SimReactionSystem::new(sim_config(), reg, "chain");
     sys.register_entity("order-c1", "Order", "c1", order_table());

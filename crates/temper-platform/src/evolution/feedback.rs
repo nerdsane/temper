@@ -7,22 +7,37 @@
 //! and I-Record IDs, priority score, and originating trace ID.
 
 use chrono::{DateTime, Utc};
+use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::trace::{Span, Tracer};
-use opentelemetry::KeyValue;
 use serde::{Deserialize, Serialize};
 
-use temper_evolution::{
-    classify_insight, compute_priority_score,
-    InsightRecord, InsightSignal,
-    ObservationClass, ObservationRecord, RecordHeader, RecordType,
-    DecisionRecord, Decision,
-};
 #[cfg(test)]
 use temper_evolution::InsightCategory;
+use temper_evolution::{
+    Decision, DecisionRecord, InsightRecord, InsightSignal, ObservationClass, ObservationRecord,
+    RecordHeader, RecordType, classify_insight, compute_priority_score,
+};
 
 use crate::protocol::PlatformEvent;
 use crate::state::PlatformState;
+
+fn persist_evolution_record_to_pg<F>(state: &PlatformState, persist: F)
+where
+    F: FnOnce(
+            std::sync::Arc<temper_evolution::PostgresRecordStore>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + 'static,
+{
+    let Some(pg_store) = state.server.pg_record_store.clone() else {
+        return;
+    };
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(persist(pg_store));
+}
 
 /// An unmet intent captured from production usage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,10 +67,7 @@ impl UnmetIntentCollector {
     /// and originating trace ID for end-to-end correlation.
     ///
     /// Returns the created insight record.
-    pub fn collect(
-        unmet: &UnmetIntent,
-        state: &PlatformState,
-    ) -> InsightRecord {
+    pub fn collect(unmet: &UnmetIntent, state: &PlatformState) -> InsightRecord {
         let tracer = global::tracer("temper");
         let mut span = tracer
             .span_builder("temper.evolution.collect")
@@ -89,7 +101,15 @@ impl UnmetIntentCollector {
             }),
         };
         let o_id = o_record.header.id.clone();
+        let o_record_for_pg = o_record.clone();
         record_store.insert_observation(o_record);
+        persist_evolution_record_to_pg(state, move |pg_store| {
+            Box::pin(async move {
+                if let Err(e) = pg_store.insert_observation(&o_record_for_pg).await {
+                    tracing::warn!(record_id = %o_record_for_pg.header.id, error = %e, "failed to persist observation to postgres");
+                }
+            })
+        });
 
         // Build signal for insight classification
         let signal = InsightSignal {
@@ -110,8 +130,7 @@ impl UnmetIntentCollector {
 
         // Create I-Record (Insight)
         let i_record = InsightRecord {
-            header: RecordHeader::new(RecordType::Insight, "production-agent")
-                .derived_from(&o_id),
+            header: RecordHeader::new(RecordType::Insight, "production-agent").derived_from(&o_id),
             category,
             signal,
             recommendation,
@@ -119,6 +138,15 @@ impl UnmetIntentCollector {
         };
         let i_id = i_record.header.id.clone();
         record_store.insert_insight(i_record.clone());
+        let i_record_for_pg = i_record.clone();
+        let i_id_for_pg = i_id.clone();
+        persist_evolution_record_to_pg(state, move |pg_store| {
+            Box::pin(async move {
+                if let Err(e) = pg_store.insert_insight(&i_record_for_pg).await {
+                    tracing::warn!(record_id = %i_id_for_pg, error = %e, "failed to persist insight to postgres");
+                }
+            })
+        });
 
         // Record IDs and priority on the span
         span.set_attribute(KeyValue::new("temper.o_record_id", o_id.clone()));
@@ -167,8 +195,7 @@ impl UnmetIntentCollector {
         };
 
         let d_record = DecisionRecord {
-            header: RecordHeader::new(RecordType::Decision, "developer")
-                .derived_from(request_id),
+            header: RecordHeader::new(RecordType::Decision, "developer").derived_from(request_id),
             decision,
             decided_by: "developer".into(),
             rationale: rationale.unwrap_or("No rationale provided").into(),
@@ -176,7 +203,14 @@ impl UnmetIntentCollector {
             implementation: None,
         };
 
-        record_store.insert_decision(d_record);
+        record_store.insert_decision(d_record.clone());
+        persist_evolution_record_to_pg(state, move |pg_store| {
+            Box::pin(async move {
+                if let Err(e) = pg_store.insert_decision(&d_record).await {
+                    tracing::warn!(record_id = %d_record.header.id, error = %e, "failed to persist decision to postgres");
+                }
+            })
+        });
 
         let event_type = if approved { "approval" } else { "rejection" };
         state.broadcast(PlatformEvent::EvolutionEvent {
@@ -270,7 +304,10 @@ mod tests {
             "I-Record should link to O-Record"
         );
         let o_id = insight.header.derived_from.unwrap();
-        assert!(o_id.starts_with("O-"), "derived_from should reference an O-Record");
+        assert!(
+            o_id.starts_with("O-"),
+            "derived_from should reference an O-Record"
+        );
     }
 
     #[test]
@@ -340,7 +377,10 @@ mod tests {
         let i1 = UnmetIntentCollector::collect(&unmet1, &state);
         let i2 = UnmetIntentCollector::collect(&unmet2, &state);
 
-        assert_ne!(i1.signal.intent, i2.signal.intent, "insights should have different intents");
+        assert_ne!(
+            i1.signal.intent, i2.signal.intent,
+            "insights should have different intents"
+        );
         assert_eq!(i1.signal.intent, "split order into shipments");
         assert_eq!(i2.signal.intent, "bulk update orders");
     }

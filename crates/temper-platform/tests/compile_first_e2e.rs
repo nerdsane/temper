@@ -16,10 +16,10 @@ use tower::ServiceExt;
 use temper_platform::bootstrap::bootstrap_system_tenant;
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
+use temper_runtime::tenant::TenantId;
 use temper_server::registry::{
     EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
 };
-use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
 
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
@@ -247,8 +247,18 @@ async fn e2e_compile_first_two_tenants() {
     let csdl_beta = parse_csdl(TASK_CSDL_XML).expect("Task CSDL should parse");
 
     let mut registry = SpecRegistry::new();
-    registry.register_tenant("alpha", csdl_alpha, CSDL_XML.to_string(), &[("Order", ORDER_IOA)]);
-    registry.register_tenant("beta", csdl_beta, TASK_CSDL_XML.to_string(), &[("Task", TASK_IOA)]);
+    registry.register_tenant(
+        "alpha",
+        csdl_alpha,
+        CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA)],
+    );
+    registry.register_tenant(
+        "beta",
+        csdl_beta,
+        TASK_CSDL_XML.to_string(),
+        &[("Task", TASK_IOA)],
+    );
     // Mark entities as pre-verified for compile-first tests
     for (tenant, entity) in &[("alpha", "Order"), ("beta", "Task")] {
         registry.set_verification_status(

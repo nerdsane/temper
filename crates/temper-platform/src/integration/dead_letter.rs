@@ -86,11 +86,7 @@ impl DeadLetterQueue for InMemoryDeadLetterQueue {
     }
 
     fn len(&self) -> Pin<Box<dyn Future<Output = usize> + Send + '_>> {
-        let result = self
-            .entries
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .len();
+        let result = self.entries.read().unwrap_or_else(|e| e.into_inner()).len();
         Box::pin(std::future::ready(result))
     }
 

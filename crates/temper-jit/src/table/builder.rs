@@ -13,8 +13,8 @@ impl TransitionTable {
     /// This is the primary constructor for production use. The IOA format
     /// has explicit guards and effects — no `CanXxx` predicate inference.
     pub fn from_ioa_source(ioa_toml: &str) -> Self {
-        let automaton = automaton::parse_automaton(ioa_toml)
-            .expect("failed to parse I/O Automaton TOML");
+        let automaton =
+            automaton::parse_automaton(ioa_toml).expect("failed to parse I/O Automaton TOML");
         Self::from_automaton(&automaton)
     }
 
@@ -145,7 +145,10 @@ impl TransitionTable {
         // Build action-name → rule-indices index for O(log K) lookup.
         let mut rule_index = std::collections::BTreeMap::new();
         for (i, rule) in rules.iter().enumerate() {
-            rule_index.entry(rule.name.clone()).or_insert_with(Vec::new).push(i);
+            rule_index
+                .entry(rule.name.clone())
+                .or_insert_with(Vec::new)
+                .push(i);
         }
 
         TransitionTable {

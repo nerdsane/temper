@@ -7,11 +7,11 @@
 
 use std::sync::Arc;
 
-use tracing;
 use temper_runtime::tenant::TenantId;
+use tracing;
 
 use super::registry::ReactionRegistry;
-use super::types::{ReactionResult, TargetResolver, MAX_REACTION_DEPTH};
+use super::types::{MAX_REACTION_DEPTH, ReactionResult, TargetResolver};
 
 /// Async reaction dispatcher for production use.
 ///
@@ -55,7 +55,8 @@ impl ReactionDispatcher {
             return Vec::new();
         }
 
-        let rules: Vec<_> = self.registry
+        let rules: Vec<_> = self
+            .registry
             .lookup(tenant, entity_type, action, to_state)
             .into_iter()
             .cloned()
@@ -68,25 +69,24 @@ impl ReactionDispatcher {
         let mut results = Vec::new();
 
         for rule in rules {
-            let target_entity_id = match resolve_target_id_async(
-                &rule.resolve_target, entity_id, fields,
-            ) {
-                Some(id) => id,
-                None => {
-                    tracing::warn!(
-                        rule = rule.name,
-                        "Could not resolve target entity ID for reaction"
-                    );
-                    results.push(ReactionResult {
-                        rule_name: rule.name.clone(),
-                        success: false,
-                        target_status: None,
-                        error: Some("Could not resolve target entity ID".to_string()),
-                        depth,
-                    });
-                    continue;
-                }
-            };
+            let target_entity_id =
+                match resolve_target_id_async(&rule.resolve_target, entity_id, fields) {
+                    Some(id) => id,
+                    None => {
+                        tracing::warn!(
+                            rule = rule.name,
+                            "Could not resolve target entity ID for reaction"
+                        );
+                        results.push(ReactionResult {
+                            rule_name: rule.name.clone(),
+                            success: false,
+                            target_status: None,
+                            error: Some("Could not resolve target entity ID".to_string()),
+                            depth,
+                        });
+                        continue;
+                    }
+                };
 
             tracing::info!(
                 rule = rule.name,
@@ -101,13 +101,15 @@ impl ReactionDispatcher {
 
             // Fire the target action via the core dispatch (no reaction cascade
             // to avoid infinite async recursion — we handle cascading ourselves).
-            let dispatch_result = state.dispatch_tenant_action_core(
-                tenant,
-                &rule.then.entity_type,
-                &target_entity_id,
-                &rule.then.action,
-                rule.then.params.clone(),
-            ).await;
+            let dispatch_result = state
+                .dispatch_tenant_action_core(
+                    tenant,
+                    &rule.then.entity_type,
+                    &target_entity_id,
+                    &rule.then.action,
+                    rule.then.params.clone(),
+                )
+                .await;
 
             match dispatch_result {
                 Ok(response) => {
@@ -116,7 +118,11 @@ impl ReactionDispatcher {
                         rule_name: rule.name.clone(),
                         success: response.success,
                         target_status: Some(target_status.clone()),
-                        error: if response.success { None } else { response.error.clone() },
+                        error: if response.success {
+                            None
+                        } else {
+                            response.error.clone()
+                        },
                         depth,
                     });
 
@@ -131,7 +137,8 @@ impl ReactionDispatcher {
                             &target_status,
                             &serde_json::to_value(&response.state.fields).unwrap_or_default(),
                             depth + 1,
-                        )).await;
+                        ))
+                        .await;
                         results.extend(cascade_results);
                     }
                 }
@@ -163,18 +170,16 @@ fn resolve_target_id_async(
     fields: &serde_json::Value,
 ) -> Option<String> {
     match resolver {
-        TargetResolver::Field { field } => {
-            fields.get(field)
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        }
+        TargetResolver::Field { field } => fields
+            .get(field)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         TargetResolver::SameId => Some(source_entity_id.to_string()),
         TargetResolver::Static { entity_id } => Some(entity_id.clone()),
-        TargetResolver::CreateIfMissing { id_field } => {
-            fields.get(id_field)
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| Some(format!("{source_entity_id}-derived")))
-        }
+        TargetResolver::CreateIfMissing { id_field } => fields
+            .get(id_field)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| Some(format!("{source_entity_id}-derived"))),
     }
 }

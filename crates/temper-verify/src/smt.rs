@@ -51,8 +51,7 @@ pub fn verify_symbolic(ioa_toml: &str, max_counter: usize) -> SmtResult {
 
     // Unreachable states are warnings, not failures — specs may declare states
     // that are only reachable through composition or external actions.
-    let all_passed =
-        guard_sat.iter().all(|(_, sat)| *sat) && inductive.iter().all(|(_, ind)| *ind);
+    let all_passed = guard_sat.iter().all(|(_, sat)| *sat) && inductive.iter().all(|(_, ind)| *ind);
 
     SmtResult {
         guard_satisfiability: guard_sat,
@@ -70,10 +69,7 @@ pub fn verify_symbolic(ioa_toml: &str, max_counter: usize) -> SmtResult {
 ///
 /// A guard is satisfiable if there exists an assignment of counter values
 /// (0..max_counter) and boolean values that makes the guard true.
-fn check_guard_satisfiability(
-    model: &TemperModel,
-    max_counter: usize,
-) -> Vec<(String, bool)> {
+fn check_guard_satisfiability(model: &TemperModel, max_counter: usize) -> Vec<(String, bool)> {
     model
         .transitions
         .iter()
@@ -113,10 +109,7 @@ fn check_guard_satisfiability(
 ///   - Assume: invariant(S) ∧ guard(S) ∧ bounds
 ///   - Apply: encode effects as S → S'
 ///   - Prove: invariant(S') holds (check that ¬invariant(S') is UNSAT)
-fn check_invariant_induction(
-    model: &TemperModel,
-    max_counter: usize,
-) -> Vec<(String, bool)> {
+fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(String, bool)> {
     model
         .invariants
         .iter()
@@ -132,11 +125,12 @@ fn check_invariant_induction(
                             .unwrap_or(true)
                     })
                 }
-                InvariantKind::CounterPositive { var } => {
-                    check_counter_positive_induction_z3(
-                        model, &inv.trigger_states, var, max_counter,
-                    )
-                }
+                InvariantKind::CounterPositive { var } => check_counter_positive_induction_z3(
+                    model,
+                    &inv.trigger_states,
+                    var,
+                    max_counter,
+                ),
                 InvariantKind::BoolRequired { var } => {
                     check_bool_required_induction_z3(model, &inv.trigger_states, var)
                 }
@@ -144,9 +138,10 @@ fn check_invariant_induction(
                     // For each trigger state: no transitions should have it
                     // as a from_state.
                     inv.trigger_states.iter().all(|trigger| {
-                        !model.transitions.iter().any(|t| {
-                            t.from_states.contains(trigger) || t.from_states.is_empty()
-                        })
+                        !model
+                            .transitions
+                            .iter()
+                            .any(|t| t.from_states.contains(trigger) || t.from_states.is_empty())
                     })
                 }
                 InvariantKind::Implication => {
@@ -522,7 +517,10 @@ assert = "count > 0"
         assert!(inv.is_some());
         // This is inductive (no counter modification), even though the
         // invariant doesn't hold from initial state — that's a BFS check.
-        assert!(inv.unwrap().1, "BRequiresCount is inductive (no counter change)");
+        assert!(
+            inv.unwrap().1,
+            "BRequiresCount is inductive (no counter change)"
+        );
     }
 
     #[test]

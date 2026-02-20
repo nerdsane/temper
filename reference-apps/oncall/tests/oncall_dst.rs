@@ -12,9 +12,7 @@
 use std::sync::Arc;
 
 use temper_jit::table::TransitionTable;
-use temper_runtime::scheduler::{
-    FaultConfig, SimActorSystem, SimActorSystemConfig,
-};
+use temper_runtime::scheduler::{FaultConfig, SimActorSystem, SimActorSystemConfig};
 use temper_server::entity_actor::sim_handler::EntityActorHandler;
 
 const PAGE_IOA: &str = include_str!("../specs/page.ioa.toml");
@@ -44,11 +42,14 @@ fn postmortem_table() -> Arc<TransitionTable> {
 
 #[test]
 fn page_starts_triggered() {
-    let config = SimActorSystemConfig { seed: 1, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 1,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Page", "page-1", page_table())
-        .with_ioa_invariants(PAGE_IOA);
+    let handler =
+        EntityActorHandler::new("Page", "page-1", page_table()).with_ioa_invariants(PAGE_IOA);
     sim.register_actor("page-1", Box::new(handler));
 
     sim.assert_status("page-1", "Triggered");
@@ -56,11 +57,14 @@ fn page_starts_triggered() {
 
 #[test]
 fn page_assign_then_investigate() {
-    let config = SimActorSystemConfig { seed: 2, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 2,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Page", "page-1", page_table())
-        .with_ioa_invariants(PAGE_IOA);
+    let handler =
+        EntityActorHandler::new("Page", "page-1", page_table()).with_ioa_invariants(PAGE_IOA);
     sim.register_actor("page-1", Box::new(handler));
 
     sim.step("page-1", "AssignAgent", "{}").unwrap();
@@ -75,11 +79,14 @@ fn page_assign_then_investigate() {
 
 #[test]
 fn page_full_lifecycle() {
-    let config = SimActorSystemConfig { seed: 3, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 3,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Page", "page-1", page_table())
-        .with_ioa_invariants(PAGE_IOA);
+    let handler =
+        EntityActorHandler::new("Page", "page-1", page_table()).with_ioa_invariants(PAGE_IOA);
     sim.register_actor("page-1", Box::new(handler));
 
     // Triggered → AssignAgent → StartInvestigation → StartRemediation → Resolve
@@ -99,11 +106,14 @@ fn page_full_lifecycle() {
 
 #[test]
 fn page_escalation_flow() {
-    let config = SimActorSystemConfig { seed: 4, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 4,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Page", "page-1", page_table())
-        .with_ioa_invariants(PAGE_IOA);
+    let handler =
+        EntityActorHandler::new("Page", "page-1", page_table()).with_ioa_invariants(PAGE_IOA);
     sim.register_actor("page-1", Box::new(handler));
 
     // Assign → Investigate → Escalate (tier 1) → Reassign → Escalate (tier 2)
@@ -123,11 +133,14 @@ fn page_escalation_flow() {
 
 #[test]
 fn page_auto_resolve() {
-    let config = SimActorSystemConfig { seed: 5, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 5,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Page", "page-1", page_table())
-        .with_ioa_invariants(PAGE_IOA);
+    let handler =
+        EntityActorHandler::new("Page", "page-1", page_table()).with_ioa_invariants(PAGE_IOA);
     sim.register_actor("page-1", Box::new(handler));
 
     sim.step("page-1", "AutoResolve", "{}").unwrap();
@@ -135,33 +148,45 @@ fn page_auto_resolve() {
 
     // Resolved is terminal
     let result = sim.step("page-1", "AssignAgent", "{}");
-    assert!(result.is_err(), "AssignAgent should fail from Resolved state");
+    assert!(
+        result.is_err(),
+        "AssignAgent should fail from Resolved state"
+    );
 
     assert!(!sim.has_violations());
 }
 
 #[test]
 fn page_cannot_investigate_without_agent() {
-    let config = SimActorSystemConfig { seed: 6, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 6,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Page", "page-1", page_table())
-        .with_ioa_invariants(PAGE_IOA);
+    let handler =
+        EntityActorHandler::new("Page", "page-1", page_table()).with_ioa_invariants(PAGE_IOA);
     sim.register_actor("page-1", Box::new(handler));
 
     // StartInvestigation without AssignAgent should fail (guard: is_true agent_assigned)
     let result = sim.step("page-1", "StartInvestigation", "{}");
-    assert!(result.is_err(), "StartInvestigation should fail without agent assigned");
+    assert!(
+        result.is_err(),
+        "StartInvestigation should fail without agent assigned"
+    );
     sim.assert_status("page-1", "Triggered");
 }
 
 #[test]
 fn page_escalation_increments_tier() {
-    let config = SimActorSystemConfig { seed: 7, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 7,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
-    let handler = EntityActorHandler::new("Page", "page-1", page_table())
-        .with_ioa_invariants(PAGE_IOA);
+    let handler =
+        EntityActorHandler::new("Page", "page-1", page_table()).with_ioa_invariants(PAGE_IOA);
     sim.register_actor("page-1", Box::new(handler));
 
     sim.step("page-1", "AssignAgent", "{}").unwrap();
@@ -188,7 +213,10 @@ fn page_escalation_increments_tier() {
 
 #[test]
 fn remediation_approve_execute_succeed() {
-    let config = SimActorSystemConfig { seed: 10, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 10,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     let handler = EntityActorHandler::new("Remediation", "rem-1", remediation_table())
@@ -215,7 +243,10 @@ fn remediation_approve_execute_succeed() {
 
 #[test]
 fn remediation_reject_is_final() {
-    let config = SimActorSystemConfig { seed: 11, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 11,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     let handler = EntityActorHandler::new("Remediation", "rem-1", remediation_table())
@@ -234,7 +265,10 @@ fn remediation_reject_is_final() {
 
 #[test]
 fn remediation_retry_after_failure() {
-    let config = SimActorSystemConfig { seed: 12, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 12,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     let handler = EntityActorHandler::new("Remediation", "rem-1", remediation_table())
@@ -260,7 +294,10 @@ fn remediation_retry_after_failure() {
 
 #[test]
 fn remediation_approval_required_for_execution() {
-    let config = SimActorSystemConfig { seed: 13, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 13,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     let handler = EntityActorHandler::new("Remediation", "rem-1", remediation_table())
@@ -279,7 +316,10 @@ fn remediation_approval_required_for_execution() {
 
 #[test]
 fn postmortem_requires_root_cause() {
-    let config = SimActorSystemConfig { seed: 20, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 20,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     let handler = EntityActorHandler::new("Postmortem", "pm-1", postmortem_table())
@@ -290,13 +330,19 @@ fn postmortem_requires_root_cause() {
 
     // SubmitForReview without root cause should fail (guard: is_true has_root_cause)
     let result = sim.step("pm-1", "SubmitForReview", "{}");
-    assert!(result.is_err(), "SubmitForReview should fail without root cause");
+    assert!(
+        result.is_err(),
+        "SubmitForReview should fail without root cause"
+    );
     sim.assert_status("pm-1", "Draft");
 }
 
 #[test]
 fn postmortem_revision_cycle() {
-    let config = SimActorSystemConfig { seed: 21, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 21,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     let handler = EntityActorHandler::new("Postmortem", "pm-1", postmortem_table())
@@ -321,7 +367,10 @@ fn postmortem_revision_cycle() {
 
 #[test]
 fn postmortem_full_lifecycle() {
-    let config = SimActorSystemConfig { seed: 22, ..Default::default() };
+    let config = SimActorSystemConfig {
+        seed: 22,
+        ..Default::default()
+    };
     let mut sim = SimActorSystem::new(config);
 
     let handler = EntityActorHandler::new("Postmortem", "pm-1", postmortem_table())
@@ -338,7 +387,10 @@ fn postmortem_full_lifecycle() {
 
     // Published is terminal
     let result = sim.step("pm-1", "AddRootCause", "{}");
-    assert!(result.is_err(), "AddRootCause should fail from Published state");
+    assert!(
+        result.is_err(),
+        "AddRootCause should fail from Published state"
+    );
 
     assert!(!sim.has_violations());
 }
@@ -369,7 +421,10 @@ fn random_page_light_faults() {
         "Random page exploration found invariant violations: {:?}",
         result.violations
     );
-    assert!(result.transitions > 0, "Should have at least one transition");
+    assert!(
+        result.transitions > 0,
+        "Should have at least one transition"
+    );
 }
 
 // =========================================================================
@@ -386,18 +441,33 @@ fn random_all_entities_heavy_faults() {
     };
     let mut sim = SimActorSystem::new(config);
 
-    sim.register_actor("page-1", Box::new(
-        EntityActorHandler::new("Page", "page-1", page_table())
-            .with_ioa_invariants(PAGE_IOA)));
-    sim.register_actor("esc-1", Box::new(
-        EntityActorHandler::new("EscalationPolicy", "esc-1", escalation_table())
-            .with_ioa_invariants(ESCALATION_POLICY_IOA)));
-    sim.register_actor("rem-1", Box::new(
-        EntityActorHandler::new("Remediation", "rem-1", remediation_table())
-            .with_ioa_invariants(REMEDIATION_IOA)));
-    sim.register_actor("pm-1", Box::new(
-        EntityActorHandler::new("Postmortem", "pm-1", postmortem_table())
-            .with_ioa_invariants(POSTMORTEM_IOA)));
+    sim.register_actor(
+        "page-1",
+        Box::new(
+            EntityActorHandler::new("Page", "page-1", page_table()).with_ioa_invariants(PAGE_IOA),
+        ),
+    );
+    sim.register_actor(
+        "esc-1",
+        Box::new(
+            EntityActorHandler::new("EscalationPolicy", "esc-1", escalation_table())
+                .with_ioa_invariants(ESCALATION_POLICY_IOA),
+        ),
+    );
+    sim.register_actor(
+        "rem-1",
+        Box::new(
+            EntityActorHandler::new("Remediation", "rem-1", remediation_table())
+                .with_ioa_invariants(REMEDIATION_IOA),
+        ),
+    );
+    sim.register_actor(
+        "pm-1",
+        Box::new(
+            EntityActorHandler::new("Postmortem", "pm-1", postmortem_table())
+                .with_ioa_invariants(POSTMORTEM_IOA),
+        ),
+    );
 
     let result = sim.run_random();
     assert!(
@@ -422,18 +492,33 @@ fn random_multi_seed_sweep() {
         };
         let mut sim = SimActorSystem::new(config);
 
-        sim.register_actor("page", Box::new(
-            EntityActorHandler::new("Page", "page", page_table())
-                .with_ioa_invariants(PAGE_IOA)));
-        sim.register_actor("esc", Box::new(
-            EntityActorHandler::new("EscalationPolicy", "esc", escalation_table())
-                .with_ioa_invariants(ESCALATION_POLICY_IOA)));
-        sim.register_actor("rem", Box::new(
-            EntityActorHandler::new("Remediation", "rem", remediation_table())
-                .with_ioa_invariants(REMEDIATION_IOA)));
-        sim.register_actor("pm", Box::new(
-            EntityActorHandler::new("Postmortem", "pm", postmortem_table())
-                .with_ioa_invariants(POSTMORTEM_IOA)));
+        sim.register_actor(
+            "page",
+            Box::new(
+                EntityActorHandler::new("Page", "page", page_table()).with_ioa_invariants(PAGE_IOA),
+            ),
+        );
+        sim.register_actor(
+            "esc",
+            Box::new(
+                EntityActorHandler::new("EscalationPolicy", "esc", escalation_table())
+                    .with_ioa_invariants(ESCALATION_POLICY_IOA),
+            ),
+        );
+        sim.register_actor(
+            "rem",
+            Box::new(
+                EntityActorHandler::new("Remediation", "rem", remediation_table())
+                    .with_ioa_invariants(REMEDIATION_IOA),
+            ),
+        );
+        sim.register_actor(
+            "pm",
+            Box::new(
+                EntityActorHandler::new("Postmortem", "pm", postmortem_table())
+                    .with_ioa_invariants(POSTMORTEM_IOA),
+            ),
+        );
 
         let result = sim.run_random();
         assert!(
@@ -457,18 +542,33 @@ fn run_determinism_trial(seed: u64) -> Vec<(String, String, usize, usize)> {
     };
     let mut sim = SimActorSystem::new(config);
 
-    sim.register_actor("page-1", Box::new(
-        EntityActorHandler::new("Page", "page-1", page_table())
-            .with_ioa_invariants(PAGE_IOA)));
-    sim.register_actor("esc-1", Box::new(
-        EntityActorHandler::new("EscalationPolicy", "esc-1", escalation_table())
-            .with_ioa_invariants(ESCALATION_POLICY_IOA)));
-    sim.register_actor("rem-1", Box::new(
-        EntityActorHandler::new("Remediation", "rem-1", remediation_table())
-            .with_ioa_invariants(REMEDIATION_IOA)));
-    sim.register_actor("pm-1", Box::new(
-        EntityActorHandler::new("Postmortem", "pm-1", postmortem_table())
-            .with_ioa_invariants(POSTMORTEM_IOA)));
+    sim.register_actor(
+        "page-1",
+        Box::new(
+            EntityActorHandler::new("Page", "page-1", page_table()).with_ioa_invariants(PAGE_IOA),
+        ),
+    );
+    sim.register_actor(
+        "esc-1",
+        Box::new(
+            EntityActorHandler::new("EscalationPolicy", "esc-1", escalation_table())
+                .with_ioa_invariants(ESCALATION_POLICY_IOA),
+        ),
+    );
+    sim.register_actor(
+        "rem-1",
+        Box::new(
+            EntityActorHandler::new("Remediation", "rem-1", remediation_table())
+                .with_ioa_invariants(REMEDIATION_IOA),
+        ),
+    );
+    sim.register_actor(
+        "pm-1",
+        Box::new(
+            EntityActorHandler::new("Postmortem", "pm-1", postmortem_table())
+                .with_ioa_invariants(POSTMORTEM_IOA),
+        ),
+    );
 
     let result = sim.run_random();
     assert!(result.all_invariants_held);

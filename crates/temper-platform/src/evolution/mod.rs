@@ -7,4 +7,4 @@ pub mod agents;
 pub mod feedback;
 
 pub use agents::{AnalysisAgent, ObservationAgent};
-pub use feedback::{UnmetIntentCollector, UnmetIntent};
+pub use feedback::{UnmetIntent, UnmetIntentCollector};

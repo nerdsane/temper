@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use sqlx::types::Json;
 use temper_authz::{AuthzDecision, AuthzEngine, SecurityContext};
-use temper_evolution::RecordStore;
+use temper_evolution::{PostgresRecordStore, RecordStore};
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::actor::ActorRef;
@@ -19,7 +20,9 @@ use temper_store_postgres::PostgresEventStore;
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 use crate::events::EntityStateChange;
 use crate::reaction::ReactionDispatcher;
-use crate::registry::{SpecRegistry, VerificationDetail, VerificationStatus};
+use crate::registry::{
+    EntityVerificationResult, SpecRegistry, VerificationDetail, VerificationStatus,
+};
 
 /// A design-time event emitted during spec loading and verification.
 ///
@@ -95,6 +98,8 @@ impl MetricsCollector {
 
 /// Maximum number of trajectory entries retained in the bounded log.
 const TRAJECTORY_LOG_CAPACITY: usize = 10_000;
+/// Maximum number of design-time events retained in memory.
+const DESIGN_TIME_LOG_CAPACITY: usize = 10_000;
 
 /// A single trajectory entry recording the outcome of a dispatched action.
 ///
@@ -192,12 +197,18 @@ pub struct ServerState {
     pub trajectory_log: Arc<RwLock<TrajectoryLog>>,
     /// In-memory evolution record store (O/P/A/D/I records).
     pub record_store: Arc<RecordStore>,
+    /// Optional Postgres evolution record store (source of truth when configured).
+    pub pg_record_store: Option<Arc<PostgresRecordStore>>,
     /// Optional reaction dispatcher for cross-entity coordination.
     pub reaction_dispatcher: Option<Arc<ReactionDispatcher>>,
     /// Broadcast channel for design-time events (spec loading, verification progress).
     pub design_time_tx: Arc<tokio::sync::broadcast::Sender<DesignTimeEvent>>,
     /// In-memory log of design-time events for workflow history (append-only, bounded).
     pub design_time_log: Arc<RwLock<Vec<DesignTimeEvent>>>,
+    /// Cache of entity current state, updated on every state change broadcast.
+    /// Key: "{tenant}:{entity_type}:{entity_id}", Value: (current_state, last_updated).
+    #[allow(clippy::type_complexity)]
+    pub entity_state_cache: Arc<RwLock<BTreeMap<String, (String, chrono::DateTime<chrono::Utc>)>>>,
 }
 
 impl ServerState {
@@ -236,9 +247,11 @@ impl ServerState {
             metrics: Arc::new(MetricsCollector::new()),
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
             record_store: Arc::new(RecordStore::new()),
+            pg_record_store: None,
             reaction_dispatcher: None,
             design_time_tx: Arc::new(design_time_tx),
             design_time_log: Arc::new(RwLock::new(Vec::new())),
+            entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -304,9 +317,11 @@ impl ServerState {
             metrics: Arc::new(MetricsCollector::new()),
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
             record_store: Arc::new(RecordStore::new()),
+            pg_record_store: None,
             reaction_dispatcher: None,
             design_time_tx: Arc::new(design_time_tx),
             design_time_log: Arc::new(RwLock::new(Vec::new())),
+            entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -314,6 +329,176 @@ impl ServerState {
     pub fn with_reaction_dispatcher(mut self, dispatcher: Arc<ReactionDispatcher>) -> Self {
         self.reaction_dispatcher = Some(dispatcher);
         self
+    }
+
+    /// Attach a Postgres-backed evolution record store.
+    pub fn with_pg_record_store(mut self, store: PostgresRecordStore) -> Self {
+        self.pg_record_store = Some(Arc::new(store));
+        self
+    }
+
+    /// Upsert a spec source into Postgres when persistence is configured.
+    pub async fn upsert_spec_source(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        ioa_source: &str,
+        csdl_xml: &str,
+    ) -> Result<(), String> {
+        let Some(ref store) = self.event_store else {
+            return Ok(());
+        };
+        sqlx::query(
+            "INSERT INTO specs \
+             (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, updated_at) \
+             VALUES ($1, $2, $3, $4, 1, false, 'pending', now()) \
+             ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+                 ioa_source = EXCLUDED.ioa_source, \
+                 csdl_xml = EXCLUDED.csdl_xml, \
+                 version = specs.version + 1, \
+                 verified = false, \
+                 verification_status = 'pending', \
+                 levels_passed = NULL, \
+                 levels_total = NULL, \
+                 verification_result = NULL, \
+                 updated_at = now()",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(ioa_source)
+        .bind(csdl_xml)
+        .execute(store.pool())
+        .await
+        .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in postgres: {e}"))?;
+        Ok(())
+    }
+
+    /// Persist verification summary for a spec when Postgres is configured.
+    pub async fn persist_spec_verification(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        status: &str,
+        result: Option<&EntityVerificationResult>,
+    ) -> Result<(), String> {
+        let Some(ref store) = self.event_store else {
+            return Ok(());
+        };
+        let (verified, levels_passed, levels_total, verification_result) = match result {
+            Some(r) => {
+                let passed = r.levels.iter().filter(|l| l.passed).count() as i32;
+                let total = r.levels.len() as i32;
+                let as_json = serde_json::to_value(r).ok();
+                (r.all_passed, Some(passed), Some(total), as_json)
+            }
+            None => (false, None, None, None),
+        };
+        sqlx::query(
+            "UPDATE specs SET \
+                 verified = $3, \
+                 verification_status = $4, \
+                 levels_passed = $5, \
+                 levels_total = $6, \
+                 verification_result = $7, \
+                 updated_at = now() \
+             WHERE tenant = $1 AND entity_type = $2",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(verified)
+        .bind(status)
+        .bind(levels_passed)
+        .bind(levels_total)
+        .bind(verification_result.map(Json))
+        .execute(store.pool())
+        .await
+        .map_err(|e| {
+            format!(
+                "failed to persist spec verification status for {tenant}/{entity_type} ({status}): {e}"
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Append to in-memory design-time log with bounded capacity.
+    pub fn push_design_time_event(&self, event: DesignTimeEvent) {
+        if let Ok(mut log) = self.design_time_log.write() {
+            if log.len() >= DESIGN_TIME_LOG_CAPACITY {
+                // Keep the newest events; evict oldest one.
+                let _ = log.remove(0);
+            }
+            log.push(event);
+        }
+    }
+
+    /// Broadcast and persist a design-time event.
+    pub async fn emit_design_time_event(&self, event: DesignTimeEvent) -> Result<(), String> {
+        let Some(ref store) = self.event_store else {
+            let _ = self.design_time_tx.send(event.clone());
+            self.push_design_time_event(event);
+            return Ok(());
+        };
+        let created_at = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| sim_now());
+        sqlx::query(
+            "INSERT INTO design_time_events \
+             (kind, entity_type, tenant, summary, level, passed, step_number, total_steps, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(&event.kind)
+        .bind(&event.entity_type)
+        .bind(&event.tenant)
+        .bind(&event.summary)
+        .bind(event.level.as_deref())
+        .bind(event.passed)
+        .bind(event.step_number.map(i16::from))
+        .bind(event.total_steps.map(i16::from))
+        .bind(created_at)
+        .execute(store.pool())
+        .await
+        .map_err(|e| {
+            format!(
+                "failed to persist design-time event {} for {}/{}: {e}",
+                event.kind, event.tenant, event.entity_type
+            )
+        })?;
+        let _ = self.design_time_tx.send(event.clone());
+        self.push_design_time_event(event);
+        Ok(())
+    }
+
+    /// Persist a trajectory entry when Postgres is configured.
+    pub async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
+        let Some(ref store) = self.event_store else {
+            return Ok(());
+        };
+        let created_at = chrono::DateTime::parse_from_rfc3339(&entry.timestamp)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| sim_now());
+        sqlx::query(
+            "INSERT INTO trajectories \
+             (tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(&entry.tenant)
+        .bind(&entry.entity_type)
+        .bind(&entry.entity_id)
+        .bind(&entry.action)
+        .bind(entry.success)
+        .bind(entry.from_status.as_deref())
+        .bind(entry.to_status.as_deref())
+        .bind(entry.error.as_deref())
+        .bind(created_at)
+        .execute(store.pool())
+        .await
+        .map_err(|e| {
+            format!(
+                "failed to persist trajectory entry for {}/{}/{} action {}: {e}",
+                entry.tenant, entry.entity_type, entry.entity_id, entry.action
+            )
+        })?;
+        Ok(())
     }
 
     /// Hydrate actor state from the event store by spawning actors for all
@@ -384,23 +569,31 @@ impl ServerState {
             }
         }
 
-        // Look up transition table: try SpecRegistry first, fall back to legacy map
+        // Look up live transition table reference: try SpecRegistry first,
+        // fall back to legacy map (wrapped in a fresh RwLock for compat).
         let table = {
             let reg = self.registry.read().unwrap();
-            reg.get_table(tenant, entity_type)
+            reg.get_table_live(tenant, entity_type)
         }
-        .or_else(|| self.transition_tables.get(entity_type).cloned())?;
+        .or_else(|| {
+            // Legacy single-tenant: wrap the static Arc<TransitionTable> in a
+            // new RwLock. Hot-swap doesn't apply to legacy mode, but the actor
+            // API is uniform. One clone per entity spawn (cheap).
+            self.transition_tables
+                .get(entity_type)
+                .map(|t| Arc::new(RwLock::new((**t).clone())))
+        })?;
 
         // Spawn new actor
         let actor = match &self.event_store {
             Some(pg) => EntityActor::with_persistence(
                 entity_type,
                 entity_id,
-                table.clone(),
+                table,
                 initial_fields,
                 pg.clone(),
             ),
-            None => EntityActor::new(entity_type, entity_id, table.clone(), initial_fields),
+            None => EntityActor::new(entity_type, entity_id, table, initial_fields),
         };
         let actor_ref = self.actor_system.spawn(actor, &key);
 
@@ -464,7 +657,7 @@ impl ServerState {
         resource_attrs: &BTreeMap<String, serde_json::Value>,
     ) -> Result<(), String> {
         let ctx = SecurityContext::from_headers(headers);
-        let attrs: std::collections::HashMap<_, _> = resource_attrs
+        let attrs: std::collections::HashMap<_, _> = resource_attrs // determinism-ok: Cedar API requires HashMap
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(); // determinism-ok
@@ -537,30 +730,32 @@ impl ServerState {
         action: &str,
         params: serde_json::Value,
     ) -> Result<EntityResponse, String> {
-        let actor_ref = self
-            .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
-            .ok_or_else(|| {
-                // Record a trajectory entry for the "no transition table" failure.
-                let entry = TrajectoryEntry {
-                    timestamp: sim_now().to_rfc3339(),
-                    tenant: tenant.to_string(),
-                    entity_type: entity_type.to_string(),
-                    entity_id: entity_id.to_string(),
-                    action: action.to_string(),
-                    success: false,
-                    from_status: None,
-                    to_status: None,
-                    error: Some(format!(
-                        "No transition table for tenant '{tenant}', entity type '{entity_type}'"
-                    )),
-                };
-                if let Ok(mut log) = self.trajectory_log.write() {
-                    log.push(entry);
-                }
-                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
-            })?;
+        let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
+            // Record a trajectory entry for the "no transition table" failure.
+            let entry = TrajectoryEntry {
+                timestamp: sim_now().to_rfc3339(),
+                tenant: tenant.to_string(),
+                entity_type: entity_type.to_string(),
+                entity_id: entity_id.to_string(),
+                action: action.to_string(),
+                success: false,
+                from_status: None,
+                to_status: None,
+                error: Some(format!(
+                    "No transition table for tenant '{tenant}', entity type '{entity_type}'"
+                )),
+            };
+            if let Err(e) = self.persist_trajectory_entry(&entry).await {
+                tracing::error!(error = %e, "failed to persist trajectory entry");
+            } else if let Ok(mut log) = self.trajectory_log.write() {
+                log.push(entry.clone());
+            }
+            return Err(format!(
+                "No transition table for tenant '{tenant}', entity type '{entity_type}'"
+            ));
+        };
 
-        let response = actor_ref
+        let response = match actor_ref
             .ask::<EntityResponse>(
                 EntityMsg::Action {
                     name: action.to_string(),
@@ -569,7 +764,9 @@ impl ServerState {
                 Duration::from_secs(5),
             )
             .await
-            .map_err(|e| {
+        {
+            Ok(response) => response,
+            Err(e) => {
                 // Record a trajectory entry for actor dispatch failures.
                 let entry = TrajectoryEntry {
                     timestamp: sim_now().to_rfc3339(),
@@ -582,11 +779,14 @@ impl ServerState {
                     to_status: None,
                     error: Some(format!("Actor dispatch failed: {e}")),
                 };
-                if let Ok(mut log) = self.trajectory_log.write() {
-                    log.push(entry);
+                if let Err(persist_err) = self.persist_trajectory_entry(&entry).await {
+                    tracing::error!(error = %persist_err, "failed to persist trajectory entry");
+                } else if let Ok(mut log) = self.trajectory_log.write() {
+                    log.push(entry.clone());
                 }
-                format!("Actor dispatch failed: {e}")
-            })?;
+                return Err(format!("Actor dispatch failed: {e}"));
+            }
+        };
 
         // Record metrics for the /observe endpoints.
         self.metrics
@@ -614,8 +814,10 @@ impl ServerState {
                     )
                 },
             };
-            if let Ok(mut log) = self.trajectory_log.write() {
-                log.push(entry);
+            if let Err(e) = self.persist_trajectory_entry(&entry).await {
+                tracing::error!(error = %e, "failed to persist trajectory entry");
+            } else if let Ok(mut log) = self.trajectory_log.write() {
+                log.push(entry.clone());
             }
         }
 
@@ -628,6 +830,11 @@ impl ServerState {
                 status: response.state.status.clone(),
                 tenant: tenant.to_string(),
             });
+            // Update entity state cache for /observe/entities
+            let cache_key = format!("{tenant}:{entity_type}:{entity_id}");
+            if let Ok(mut cache) = self.entity_state_cache.write() {
+                cache.insert(cache_key, (response.state.status.clone(), sim_now()));
+            }
         }
 
         Ok(response)
@@ -757,7 +964,7 @@ impl ServerState {
     pub fn enrich_metadata(&self, action_name: &str, hint: &str) {
         self.agent_hints
             .write()
-            .unwrap()
+            .unwrap() // ci-ok: infallible lock
             .insert(action_name.to_string(), hint.to_string());
     }
 

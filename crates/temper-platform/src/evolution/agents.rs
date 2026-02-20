@@ -68,16 +68,11 @@ impl<C: ChatClient> ObservationAgent<C> {
     /// - `attempted_tool`: the action that failed
     /// - `tenant`: which tenant
     /// - `trace_id`: for correlation
-    pub async fn formalize(
-        &self,
-        observation_context: &str,
-    ) -> Result<String, ClaudeError> {
-        let messages = vec![
-            Message::user(format!(
-                "Formalize this observation into a problem statement:\n\n{}",
-                observation_context,
-            )),
-        ];
+    pub async fn formalize(&self, observation_context: &str) -> Result<String, ClaudeError> {
+        let messages = vec![Message::user(format!(
+            "Formalize this observation into a problem statement:\n\n{}",
+            observation_context,
+        ))];
 
         self.client.chat(&messages, OBSERVATION_SYSTEM_PROMPT).await
     }
@@ -162,7 +157,9 @@ impl<C: ChatClient> AnalysisAgent<C> {
         if !current_specs.is_empty() {
             prompt.push_str("## Current Specs\n\n");
             for (entity_type, ioa_source) in current_specs {
-                prompt.push_str(&format!("### {entity_type}\n```toml\n{ioa_source}\n```\n\n"));
+                prompt.push_str(&format!(
+                    "### {entity_type}\n```toml\n{ioa_source}\n```\n\n"
+                ));
             }
         }
 

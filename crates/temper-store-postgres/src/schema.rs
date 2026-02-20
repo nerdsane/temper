@@ -1,4 +1,4 @@
-//! SQL schema definitions for the PostgreSQL event store.
+//! SQL schema definitions for the PostgreSQL persistence store.
 //!
 //! These constants define the DDL statements used to create the `events` and
 //! `snapshots` tables that back the event-sourced persistence layer.
@@ -51,6 +51,67 @@ pub const CREATE_ENTITY_LISTING_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_events_tenant_entity
     ON events (tenant, entity_type, entity_id);";
 
+/// CREATE TABLE statement for persisted specs and verification status.
+pub const CREATE_SPECS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS specs (
+    id                  BIGSERIAL    PRIMARY KEY,
+    tenant              TEXT         NOT NULL,
+    entity_type         TEXT         NOT NULL,
+    ioa_source          TEXT         NOT NULL,
+    csdl_xml            TEXT,
+    version             INT          NOT NULL DEFAULT 1,
+    verified            BOOLEAN      NOT NULL DEFAULT false,
+    verification_status TEXT         NOT NULL DEFAULT 'pending',
+    levels_passed       INT,
+    levels_total        INT,
+    verification_result JSONB,
+    created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    UNIQUE (tenant, entity_type)
+);";
+
+/// CREATE TABLE statement for persisted trajectory action outcomes.
+pub const CREATE_TRAJECTORIES_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS trajectories (
+    id            BIGSERIAL    PRIMARY KEY,
+    tenant        TEXT         NOT NULL,
+    entity_type   TEXT         NOT NULL,
+    entity_id     TEXT         NOT NULL DEFAULT '',
+    action        TEXT         NOT NULL,
+    success       BOOLEAN      NOT NULL,
+    from_status   TEXT,
+    to_status     TEXT,
+    error         TEXT,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+);";
+
+/// CREATE INDEX statement for trajectory success filtering.
+pub const CREATE_TRAJECTORIES_SUCCESS_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories (success, created_at DESC);";
+
+/// CREATE INDEX statement for trajectory action/entity grouping.
+pub const CREATE_TRAJECTORIES_ENTITY_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_trajectories_entity ON trajectories (entity_type, action);";
+
+/// CREATE TABLE statement for persisted design-time workflow events.
+pub const CREATE_DESIGN_TIME_EVENTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS design_time_events (
+    id            BIGSERIAL    PRIMARY KEY,
+    kind          TEXT         NOT NULL,
+    entity_type   TEXT         NOT NULL,
+    tenant        TEXT         NOT NULL,
+    summary       TEXT         NOT NULL,
+    level         TEXT,
+    passed        BOOLEAN,
+    step_number   SMALLINT,
+    total_steps   SMALLINT,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+);";
+
+/// CREATE INDEX statement for tenant-scoped design-time history queries.
+pub const CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_dt_events_tenant ON design_time_events (tenant, created_at DESC);";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,10 +129,7 @@ mod tests {
             "METADATA",
             "CREATED_AT",
         ] {
-            assert!(
-                sql.contains(col),
-                "events schema missing column: {col}"
-            );
+            assert!(sql.contains(col), "events schema missing column: {col}");
         }
     }
 
@@ -84,44 +142,74 @@ mod tests {
         );
         let unique_pos = sql.find("UNIQUE").unwrap();
         let after_unique = &sql[unique_pos..];
-        assert!(after_unique.contains("TENANT"), "UNIQUE constraint missing tenant");
-        assert!(after_unique.contains("ENTITY_TYPE"), "UNIQUE constraint missing entity_type");
-        assert!(after_unique.contains("ENTITY_ID"), "UNIQUE constraint missing entity_id");
-        assert!(after_unique.contains("SEQUENCE_NR"), "UNIQUE constraint missing sequence_nr");
+        assert!(
+            after_unique.contains("TENANT"),
+            "UNIQUE constraint missing tenant"
+        );
+        assert!(
+            after_unique.contains("ENTITY_TYPE"),
+            "UNIQUE constraint missing entity_type"
+        );
+        assert!(
+            after_unique.contains("ENTITY_ID"),
+            "UNIQUE constraint missing entity_id"
+        );
+        assert!(
+            after_unique.contains("SEQUENCE_NR"),
+            "UNIQUE constraint missing sequence_nr"
+        );
     }
 
     #[test]
     fn snapshots_table_contains_required_columns() {
         let sql = CREATE_SNAPSHOTS_TABLE.to_uppercase();
-        for col in &["TENANT", "ENTITY_TYPE", "ENTITY_ID", "SEQUENCE_NR", "STATE", "CREATED_AT"] {
-            assert!(
-                sql.contains(col),
-                "snapshots schema missing column: {col}"
-            );
+        for col in &[
+            "TENANT",
+            "ENTITY_TYPE",
+            "ENTITY_ID",
+            "SEQUENCE_NR",
+            "STATE",
+            "CREATED_AT",
+        ] {
+            assert!(sql.contains(col), "snapshots schema missing column: {col}");
         }
     }
 
     #[test]
     fn snapshots_table_has_composite_primary_key() {
         let sql = CREATE_SNAPSHOTS_TABLE.to_uppercase();
-        let pk_pos = sql.find("PRIMARY KEY").expect("snapshots schema missing PRIMARY KEY");
+        let pk_pos = sql
+            .find("PRIMARY KEY")
+            .expect("snapshots schema missing PRIMARY KEY");
         let after_pk = &sql[pk_pos..];
         assert!(after_pk.contains("TENANT"), "PRIMARY KEY missing tenant");
-        assert!(after_pk.contains("ENTITY_TYPE"), "PRIMARY KEY missing entity_type");
-        assert!(after_pk.contains("ENTITY_ID"), "PRIMARY KEY missing entity_id");
+        assert!(
+            after_pk.contains("ENTITY_TYPE"),
+            "PRIMARY KEY missing entity_type"
+        );
+        assert!(
+            after_pk.contains("ENTITY_ID"),
+            "PRIMARY KEY missing entity_id"
+        );
     }
 
     #[test]
     fn events_table_uses_jsonb_for_payload_and_metadata() {
         let sql = CREATE_EVENTS_TABLE.to_uppercase();
         // Find PAYLOAD line and verify it uses JSONB
-        assert!(sql.contains("PAYLOAD") && sql.contains("JSONB"), "payload should be JSONB");
+        assert!(
+            sql.contains("PAYLOAD") && sql.contains("JSONB"),
+            "payload should be JSONB"
+        );
     }
 
     #[test]
     fn snapshots_table_uses_bytea_for_state() {
         let sql = CREATE_SNAPSHOTS_TABLE.to_uppercase();
-        assert!(sql.contains("STATE") && sql.contains("BYTEA"), "state should be BYTEA");
+        assert!(
+            sql.contains("STATE") && sql.contains("BYTEA"),
+            "state should be BYTEA"
+        );
     }
 
     #[test]
@@ -133,6 +221,18 @@ mod tests {
         assert!(
             CREATE_SNAPSHOTS_TABLE.contains("IF NOT EXISTS"),
             "snapshots schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_SPECS_TABLE.contains("IF NOT EXISTS"),
+            "specs schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_TRAJECTORIES_TABLE.contains("IF NOT EXISTS"),
+            "trajectories schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_DESIGN_TIME_EVENTS_TABLE.contains("IF NOT EXISTS"),
+            "design_time_events schema should use IF NOT EXISTS"
         );
     }
 

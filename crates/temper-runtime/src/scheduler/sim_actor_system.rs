@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::clock::{LogicalClock, SimClock};
-use super::context::{install_sim_context, SimContextGuard};
+use super::context::{SimContextGuard, install_sim_context};
 use super::id_gen::DeterministicIdGen;
 use super::sim_handler::SimActorHandler;
 use super::{DeterministicRng, FaultConfig, SimScheduler};
@@ -332,12 +332,7 @@ impl SimActorSystem {
             let action = valid[action_idx].clone();
 
             // Execute through the scheduler for fault injection
-            self.scheduler.send(
-                "sim-driver",
-                &actor_id,
-                &action,
-                "{}",
-            );
+            self.scheduler.send("sim-driver", &actor_id, &action, "{}");
             self.total_messages += 1;
 
             let delivered = self.scheduler.tick();
@@ -445,8 +440,8 @@ impl SimActorSystem {
                 // Serialize the full events_json as a proxy for counters
                 // since SimActorHandler doesn't expose counters directly.
                 // The events contain all state change details.
-                let counters_json = serde_json::to_string(&handler.events_json())
-                    .unwrap_or_default();
+                let counters_json =
+                    serde_json::to_string(&handler.events_json()).unwrap_or_default();
                 (id.clone(), status, item_count, event_count, counters_json)
             })
             .collect();
@@ -479,8 +474,7 @@ impl SimActorSystem {
         if let Some(handler) = self.actors.get(actor_id) {
             let invariants: Vec<_> = handler.spec_invariants().to_vec();
             for inv in &invariants {
-                let triggered = inv.when.is_empty()
-                    || inv.when.iter().any(|s| s == status_after);
+                let triggered = inv.when.is_empty() || inv.when.iter().any(|s| s == status_after);
                 if !triggered {
                     continue;
                 }
@@ -525,11 +519,7 @@ impl SimActorSystem {
                     super::sim_handler::SpecAssert::CounterCompare { var, op, value } => {
                         // Only the "items" counter is passed to check_invariants.
                         // Other counters require expanding the SimActorHandler trait.
-                        let counter_val = if var == "items" {
-                            item_count
-                        } else {
-                            0
-                        };
+                        let counter_val = if var == "items" { item_count } else { 0 };
                         let passed = match op {
                             super::sim_handler::CompareOp::Gt => counter_val > *value,
                             super::sim_handler::CompareOp::Gte => counter_val >= *value,
@@ -541,11 +531,8 @@ impl SimActorSystem {
                     }
                 };
 
-                self.recorded_invariants.push((
-                    actor_id.to_string(),
-                    inv.name.clone(),
-                    !violated,
-                ));
+                self.recorded_invariants
+                    .push((actor_id.to_string(), inv.name.clone(), !violated));
 
                 if violated {
                     self.violations.push(ActorInvariantViolation {

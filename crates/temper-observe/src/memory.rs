@@ -12,7 +12,6 @@ use crate::error::ObserveError;
 use crate::schema::{LOG_COLUMNS, METRIC_COLUMNS, SPAN_COLUMNS};
 use crate::store::{ObservabilityStore, ResultRow, ResultSet, SqlParam};
 
-
 /// An in-memory row is a map from column name to JSON value.
 type Row = Vec<(String, JsonValue)>;
 
@@ -183,21 +182,13 @@ fn json_value_matches(value: &JsonValue, target: &str) -> bool {
 }
 
 impl ObservabilityStore for InMemoryStore {
-    async fn query_spans(
-        &self,
-        sql: &str,
-        params: &[SqlParam],
-    ) -> Result<ResultSet, ObserveError> {
+    async fn query_spans(&self, sql: &str, params: &[SqlParam]) -> Result<ResultSet, ObserveError> {
         let filter = parse_filter(sql, params)?;
         let inner = self.inner.read().expect("lock poisoned");
         apply_filter(&inner.spans, SPAN_COLUMNS, &filter)
     }
 
-    async fn query_logs(
-        &self,
-        sql: &str,
-        params: &[SqlParam],
-    ) -> Result<ResultSet, ObserveError> {
+    async fn query_logs(&self, sql: &str, params: &[SqlParam]) -> Result<ResultSet, ObserveError> {
         let filter = parse_filter(sql, params)?;
         let inner = self.inner.read().expect("lock poisoned");
         apply_filter(&inner.logs, LOG_COLUMNS, &filter)
@@ -237,10 +228,7 @@ mod tests {
             ("status".into(), json!("ok")),
         ]);
 
-        let result = store
-            .query_spans("SELECT * FROM spans", &[])
-            .await
-            .unwrap();
+        let result = store.query_spans("SELECT * FROM spans", &[]).await.unwrap();
         assert_eq!(result.len(), 2);
         assert!(!result.is_empty());
     }
@@ -264,10 +252,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(
-            result.rows[0].get("service"),
-            Some(&json!("api"))
-        );
+        assert_eq!(result.rows[0].get("service"), Some(&json!("api")));
     }
 
     #[tokio::test]
@@ -292,10 +277,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(
-            result.rows[0].get("message"),
-            Some(&json!("login failed"))
-        );
+        assert_eq!(result.rows[0].get("message"), Some(&json!("login failed")));
     }
 
     #[tokio::test]
@@ -327,10 +309,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(
-            result.rows[0].get("value"),
-            Some(&json!(42.5))
-        );
+        assert_eq!(result.rows[0].get("value"), Some(&json!(42.5)));
     }
 
     #[tokio::test]
