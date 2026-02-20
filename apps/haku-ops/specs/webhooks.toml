@@ -1,0 +1,11 @@
+# Webhook configuration for haku-ops tenant.
+# Fires on proposal state changes → wakes Haku's main session via OpenClaw.
+
+[[webhook]]
+name = "openclaw-haku"
+url = "http://127.0.0.1:18789/hooks/wake"
+headers = { "Authorization" = "Bearer ${TEMPER_WEBHOOK_TOKEN}" }
+actions = ["Select", "Deselect", "Approve", "Scratch", "WritePlan"]
+entity_types = ["Proposal"]
+on_success_only = true
+payload_template = '{"text": "[Temper] ${action} fired on ${entity_type} ${entity_id} (${from_status} → ${to_status})", "mode": "now"}'
