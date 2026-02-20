@@ -206,6 +206,7 @@ pub struct ServerState {
     pub design_time_log: Arc<RwLock<Vec<DesignTimeEvent>>>,
     /// Cache of entity current state, updated on every state change broadcast.
     /// Key: "{tenant}:{entity_type}:{entity_id}", Value: (current_state, last_updated).
+    #[allow(clippy::type_complexity)]
     pub entity_state_cache: Arc<RwLock<BTreeMap<String, (String, chrono::DateTime<chrono::Utc>)>>>,
 }
 
