@@ -96,9 +96,10 @@ tailwindcss.config={theme:{extend:{colors:{
   ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:99px}
 
   @media(max-width:639px){
-    .cal-cell{min-height:56px;padding:4px}
-    .cal-event{font-size:10px;padding:2px 4px}
-    .day-names{display:none}
+    .cal-cell{min-height:48px;padding:4px}
+    .cal-event{font-size:9px;padding:2px 4px}
+    .day-names span{font-size:9px !important;letter-spacing:0.06em !important}
+    #cg{font-size:10px}
   }
 </style>
 </head>
@@ -195,9 +196,18 @@ const SC={
 };
 
 function renderCal(){
-  const fd=6;let h='';
-  for(let i=0;i<fd;i++)h+=`<div class="cal-cell" style="opacity:0.3"><span style="font-family:'Space Mono',monospace;font-size:11px;color:#555568">${26+i}</span></div>`;
-  for(let d=1;d<=28;d++){
+  // Feb 2026: starts Sunday (index 6 in Mon-start grid), 28 days
+  const startOffset=6; // Mon=0..Sun=6
+  const daysInMonth=28;
+  let h='';
+  
+  // Previous month filler
+  for(let i=0;i<startOffset;i++){
+    h+=`<div class="cal-cell" style="opacity:0.25"><span style="font-family:'Space Mono',monospace;font-size:11px;color:#555568">${25+i}</span></div>`;
+  }
+  
+  // Actual days
+  for(let d=1;d<=daysInMonth;d++){
     const today=d===20;
     const items=P.filter(p=>p.d===d);
     h+=`<div class="cal-cell ${today?'cal-today':''}">
@@ -207,8 +217,14 @@ function renderCal(){
       </div>
     </div>`;
   }
-  const tot=fd+28,rem=(7-tot%7)%7;
-  for(let i=1;i<=rem;i++)h+=`<div class="cal-cell" style="opacity:0.3"><span style="font-family:'Space Mono',monospace;font-size:11px;color:#555568">${i}</span></div>`;
+  
+  // Next month filler
+  const totalCells=startOffset+daysInMonth;
+  const rem=(7-totalCells%7)%7;
+  for(let i=1;i<=rem;i++){
+    h+=`<div class="cal-cell" style="opacity:0.25"><span style="font-family:'Space Mono',monospace;font-size:11px;color:#555568">${i}</span></div>`;
+  }
+  
   document.getElementById('cg').innerHTML=h;
 }
 

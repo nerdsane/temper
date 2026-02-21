@@ -336,8 +336,27 @@ When showing lots of items (agent cards, content rows, calendar cells, metrics),
 </div>
 ```
 
-### Calendar Cells Need Color
-Calendar events use status-colored pills (`background:status-dim; color:status`), not plain text. Today's cell gets a tinted background (`rgba(accent, 0.06)`). Empty cells are visually quieter (lower opacity).
+### Complex Visual Elements — Go Wild
+You are encouraged to build **any visual element the UI needs**: charts (bar, line, area, sparkline), graphs (node-link, force-directed), timelines (vertical, horizontal), calendars, maps, trees, Gantt charts, heatmaps, progress rings, radar charts — whatever tells the story best.
+
+**Build them with:**
+- **SVG** for charts, graphs, sparklines — inline SVG in HTML, style with the design tokens
+- **Canvas** for high-density data (hundreds of points, real-time updates, heatmaps)
+- **CSS Grid** for calendar/table layouts
+- **CSS animations** for progress indicators, loading states, status pulses
+
+**Style rules for custom elements:**
+- Use the color tokens — `accent` for active/selected, `status` colors for state, `t2`/`t3` for axes/labels
+- Glass containers: wrap complex elements in `.glass` cards
+- Grid lines / axes: `rgba(255,255,255,0.06)` — visible but quiet
+- Data points / bars: entity's accent color, with opacity variation for time-series (older = dimmer)
+- Tooltips: glass card with `backdrop-filter`, small text, accent border on hover
+- Interactive hover states: `brightness(1.3)` filter or border-color shift
+- Today/active markers: tinted background `rgba(accent, 0.06)`
+- Empty/inactive cells: lower opacity (0.3)
+- Responsive: complex grids should scale down gracefully — consider switching to a list view on mobile rather than cramming
+
+**Don't hold back.** If the data wants a force-directed graph, build a force-directed graph. If it wants a radial progress ring, build one. The design system gives you the color tokens and glass surfaces — what you put inside them is up to the use case.
 
 ### Graphic Elements
 - **Gradient highlight on key words** — `.hl { background: linear-gradient(120deg, rgba(violet,0.25), rgba(lime,0.15)); padding: 1px 6px; border-radius: 4px; }` — Use on titles, section names, important words.

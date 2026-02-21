@@ -165,20 +165,37 @@ guards = [
 
 ## Building a UI
 
-Temper UIs are single-file HTML served by a lightweight proxy. Any shape — dashboard, form, map, timeline, kanban.
+Temper UIs are single-file HTML served by a lightweight proxy. **Any shape** — dashboard, form, map, timeline, kanban, graph, chart, calendar, wizard, anything.
 
 ### Design System
 
 **Always read `apps/shared/design-system.md` before generating any UI.**
 
-It defines tokens (colors, spacing, typography, radius, motion), layout primitives, and component atoms. Every Temper UI uses the same system so they feel cohesive regardless of what they display.
+It defines tokens (colors, spacing, typography, glass surfaces, gradient effects), layout primitives, and component atoms. Every Temper UI uses the same system so they feel cohesive regardless of what they display.
 
 Key rules:
-- Inter for prose, JetBrains Mono for data
-- Zinc color scale, semantic colors only for state
-- `min()`/`clamp()`/`auto-fit` for responsive — no media queries for basic layout
-- Borders over shadows
-- Labels are quiet (11px, uppercase, muted)
+- Space Grotesk for prose, Space Mono for data/labels
+- Dark glass surfaces with ambient gradient orbs (violet, lime, rose)
+- `auto-fit`/`minmax` grids for responsive — sharp corners (10px cards, 8px inputs)
+- Gradient highlights on key words, colored accents per entity
+- Left accent bars on list items, big metric numbers, summary strips
+- Form inputs are tinted (`rgba(255,255,255,0.04)`), never white
+
+### Build Any Visual Element
+
+You are **not limited to text and cards**. Build whatever the data needs:
+
+- **Charts** — bar, line, area, sparkline, pie (inline SVG, use design tokens for colors)
+- **Graphs** — node-link, force-directed, dependency trees (SVG or Canvas)
+- **Timelines** — vertical, horizontal, Gantt-style
+- **Maps** — geographic, network, concept maps
+- **Interactive elements** — drag-and-drop, toggles, sliders, multi-step wizards
+- **Data viz** — heatmaps, radar charts, progress rings, treemaps
+- **Real-time** — SSE-driven live updates, animated sparklines, status pulses
+
+Use SVG for most charts (clean, scalable, styleable with tokens). Use Canvas for high-density data (hundreds of points). CSS Grid for tabular layouts. CSS animations for status indicators.
+
+The design system gives you the palette, glass surfaces, and typography. What you render inside them is driven by the use case — not by a template.
 
 ### Proxy Pattern
 
