@@ -3,9 +3,9 @@
 
 [[webhook]]
 name = "openclaw-haku"
-url = "http://127.0.0.1:18789/hooks/wake"
+url = "http://127.0.0.1:18789/hooks/agent"
 headers = { "Authorization" = "Bearer d43a532c3e1ef83771dbc77c45ff2992" }
 actions = ["Select", "Deselect", "Approve", "Scratch", "WritePlan"]
 entity_types = ["Proposal"]
 on_success_only = true
-payload_template = '{"text": "[Temper] ${action} fired on ${entity_type} ${entity_id} (${from_status} → ${to_status})", "mode": "now"}'
+payload_template = '{"message": "[Temper] ${action} fired on ${entity_type} ${entity_id} (${from_status} → ${to_status})", "agentId": "haku"}'
