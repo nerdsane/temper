@@ -30,3 +30,4 @@ credentials.json
 # Harness
 .cascade-results/
 .proof/archive/
+apps/scratch/

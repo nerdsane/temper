@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Haku Ops — Proposal Pipeline</title>
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="/temper-client.js"></script>
 <script>
 tailwindcss.config = {
   theme: {
@@ -186,6 +187,7 @@ tailwindcss.config = {
           <span class="hl">Proposal Pipeline</span>
         </h1>
         <span style="font-family:'Space Mono',monospace;font-size:12px;color:#555568">haku-ops · temper</span>
+        <span id="sse-status" style="font-family:'Space Mono',monospace;font-size:11px;color:#555568;margin-left:auto">○ offline</span>
       </div>
       <div style="height:2px;margin-top:16px;background:linear-gradient(90deg,#8b5cf6 0%,#a3e635 50%,#fb7185 100%);border-radius:1px;opacity:0.6"></div>
     </div>
@@ -418,9 +420,18 @@ function showToast(msg, type) {
   setTimeout(() => t.classList.remove('show'), 3000);
 }
 
-// Initial load + auto-refresh every 10s
+// Initial load
 load();
-setInterval(load, 10000);
+
+// Live updates via Temper SSE — no polling
+const temper = new Temper(window.location.origin, 'haku-ops');
+temper.on('Proposal', () => load());
+temper.on('Finding', () => load());
+temper.onStatus((s) => {
+  const el = document.getElementById('sse-status');
+  if (el) el.textContent = s === 'connected' ? '● live' : s === 'reconnecting' ? '◌ reconnecting' : '○ offline';
+  if (el) el.style.color = s === 'connected' ? '#3dd68c' : s === 'reconnecting' ? '#e5a63e' : '#555568';
+});
 </script>
 </body>
 </html>

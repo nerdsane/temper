@@ -1,5 +1,5 @@
 {
-  "id": "temper",
+  "id": "openclaw-temper",
   "name": "Temper",
   "description": "Temper state machine integration — real-time entity subscriptions and agent tools",
   "configSchema": {
