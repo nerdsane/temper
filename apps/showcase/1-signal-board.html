@@ -6,35 +6,118 @@
 <title>Signal Board</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
-tailwindcss.config={theme:{extend:{colors:{s1:'#0c0c10',s2:'#14141a',s3:'#1c1c24',s4:'#24242e',t1:'#ededf0',t2:'#8b8b9e',t3:'#55556a',a1:'#8b5cf6',a2:'#a78bfa',a3:'rgba(139,92,246,0.12)',b1:'rgba(255,255,255,0.06)',b2:'rgba(255,255,255,0.10)',b3:'rgba(255,255,255,0.16)',green:{DEFAULT:'#3dd68c',dim:'rgba(61,214,140,0.10)'},amber:{DEFAULT:'#e5a63e',dim:'rgba(229,166,62,0.10)'},red:{DEFAULT:'#e5534b',dim:'rgba(229,83,75,0.10)'},blue:{DEFAULT:'#38bdf8',dim:'rgba(56,189,248,0.10)'},purple:{DEFAULT:'#c084fc',dim:'rgba(192,132,252,0.10)'}},fontFamily:{sans:['Geist','system-ui','sans-serif'],mono:['Geist Mono','"JetBrains Mono"','monospace']}}}}
+tailwindcss.config={theme:{extend:{colors:{
+  s1:'#08080c',s2:'#101016',s3:'#18181f',s4:'#222230',
+  t1:'#eeeef2',t2:'#8888a0',t3:'#555568',
+},fontFamily:{sans:['Space Grotesk','system-ui','sans-serif'],mono:['Space Mono','monospace']}}}}
 </script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap">
 <style>
   *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-  body{font-family:'Geist',system-ui,sans-serif;background:#0c0c10;color:#ededf0;min-height:100vh;-webkit-font-smoothing:antialiased}
-  body::before{content:'';position:fixed;top:-30%;left:-10%;width:60%;height:60%;background:radial-gradient(circle,rgba(139,92,246,0.08) 0%,transparent 70%);pointer-events:none;z-index:0}
-  body::after{content:'';position:fixed;bottom:-20%;right:-10%;width:50%;height:50%;background:radial-gradient(circle,rgba(61,214,140,0.04) 0%,transparent 70%);pointer-events:none;z-index:0}
-  body>*{position:relative;z-index:1}
-  .glass{background:linear-gradient(135deg,rgba(255,255,255,0.05) 0%,rgba(255,255,255,0.02) 100%);border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
-  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:99px}
-  :focus-visible{outline:2px solid rgba(139,92,246,0.5);outline-offset:2px}
-  ::selection{background:rgba(139,92,246,0.3);color:#ededf0}
+  body{font-family:'Space Grotesk',system-ui,sans-serif;background:#08080c;color:#eeeef2;min-height:100vh;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+
+  /* ── Ambient orbs ── */
+  .orb{position:fixed;border-radius:50%;pointer-events:none;z-index:0}
+  .orb-1{top:-20%;left:-10%;width:55vw;height:55vw;background:radial-gradient(circle,rgba(139,92,246,0.40) 0%,rgba(139,92,246,0.15) 35%,transparent 65%);filter:blur(70px)}
+  .orb-2{bottom:-15%;right:-10%;width:50vw;height:50vw;background:radial-gradient(circle,rgba(163,230,53,0.28) 0%,rgba(163,230,53,0.08) 35%,transparent 65%);filter:blur(70px)}
+  .orb-3{top:40%;left:55%;width:35vw;height:35vw;background:radial-gradient(circle,rgba(251,113,133,0.18) 0%,rgba(251,113,133,0.04) 40%,transparent 65%);filter:blur(60px)}
+
+  body>:not(.orb){position:relative;z-index:1}
+
+  /* ── Noise texture overlay for depth ── */
+  body::after{
+    content:'';position:fixed;inset:0;z-index:2;pointer-events:none;opacity:0.025;
+    background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-repeat:repeat;background-size:128px 128px;
+  }
+
+  /* ── Glass surface ── */
+  .glass{
+    background:linear-gradient(
+      135deg,
+      rgba(255,255,255,0.06) 0%,
+      rgba(255,255,255,0.02) 50%,
+      rgba(139,92,246,0.03) 100%
+    );
+    border:1px solid rgba(255,255,255,0.10);
+    backdrop-filter:blur(48px) saturate(2.0);
+    -webkit-backdrop-filter:blur(48px) saturate(2.0);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.10),
+      inset 0 0 20px rgba(139,92,246,0.02),
+      0 8px 32px rgba(0,0,0,0.4);
+    transition:all 0.25s ease;
+  }
+  .glass:hover{
+    background:linear-gradient(
+      135deg,
+      rgba(255,255,255,0.08) 0%,
+      rgba(255,255,255,0.03) 50%,
+      rgba(139,92,246,0.06) 100%
+    );
+    border-color:rgba(139,92,246,0.30);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.10),
+      inset 0 0 30px rgba(139,92,246,0.04),
+      0 0 24px rgba(139,92,246,0.10),
+      0 12px 40px rgba(0,0,0,0.45);
+    transform:translateY(-1px);
+  }
+
+  /* ── Column glass (slightly different tint per column) ── */
+  .col-sent .glass{background:linear-gradient(135deg,rgba(139,92,246,0.05) 0%,rgba(255,255,255,0.02) 100%)}
+  .col-processing .glass{background:linear-gradient(135deg,rgba(251,191,36,0.04) 0%,rgba(255,255,255,0.02) 100%)}
+  .col-done .glass{background:linear-gradient(135deg,rgba(163,230,53,0.04) 0%,rgba(255,255,255,0.02) 100%)}
+
+  .tag{
+    height:20px;padding:0 8px;border-radius:999px;
+    font-family:'Space Mono','JetBrains Mono',monospace;
+    font-size:10px;font-weight:500;letter-spacing:0.05em;
+    display:inline-flex;align-items:center;
+  }
+
+  .btn-primary{
+    height:36px;padding:0 16px;border-radius:8px;border:none;cursor:pointer;
+    background:#8b5cf6;color:white;font-size:13px;font-weight:500;font-family:inherit;
+    transition:all 0.15s;
+  }
+  .btn-primary:hover{background:#a78bfa}
+  .btn-primary:active{transform:scale(0.98)}
+
+  .btn-ghost{
+    height:36px;padding:0 16px;border-radius:8px;cursor:pointer;
+    background:transparent;border:1px solid rgba(255,255,255,0.10);
+    color:#8888a0;font-size:13px;font-weight:500;font-family:inherit;
+    transition:all 0.15s;
+  }
+  .btn-ghost:hover{border-color:rgba(255,255,255,0.22);color:#eeeef2}
+
   .line-clamp-3{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+
+  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:99px}
+  ::selection{background:rgba(139,92,246,0.35);color:#eeeef2}
 </style>
 </head>
 <body>
+
+<div class="orb orb-1"></div>
+<div class="orb orb-2"></div>
+<div class="orb orb-3"></div>
+
 <div class="mx-auto w-full max-w-5xl px-4 sm:px-6 lg:px-8 py-6 sm:py-10">
 
   <!-- Header -->
   <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
     <div>
-      <h1 class="text-xl sm:text-2xl font-semibold tracking-tight">Signal Board</h1>
-      <p class="text-sm text-t2 mt-1">Inter-agent communication</p>
+      <div class="flex items-center gap-2 mb-1">
+        <a href="index.html" style="color:#555568;font-size:13px;text-decoration:none;font-family:'Space Mono',monospace">← showcase</a>
+      </div>
+      <h1 style="font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-0.02em">Signal <span style="background:linear-gradient(120deg,rgba(139,92,246,0.25) 0%,rgba(163,230,53,0.15) 100%);padding:1px 6px;border-radius:4px">Board</span></h1>
+      <p style="font-size:15px;color:#8888a0;margin-top:4px">Inter-agent communication</p>
     </div>
     <div class="flex items-center gap-3">
-      <span class="text-xs font-mono text-t3"><span id="count">—</span> signals</span>
-      <div class="w-2 h-2 rounded-full bg-green animate-pulse"></div>
+      <span class="text-xs font-mono" style="color:#555568"><span id="count">—</span> signals</span>
+      <div class="w-2 h-2 rounded-full animate-pulse" style="background:#a3e635"></div>
     </div>
   </div>
 
@@ -46,15 +129,15 @@ tailwindcss.config={theme:{extend:{colors:{s1:'#0c0c10',s2:'#14141a',s3:'#1c1c24
 
   <!-- Temper section -->
   <details class="group">
-    <summary class="flex items-center gap-2 cursor-pointer text-t3 hover:text-t2 transition-colors mb-4">
-      <span class="text-[11px] font-mono font-medium uppercase tracking-[0.1em]">⚙ How this uses Temper</span>
+    <summary class="flex items-center gap-2 cursor-pointer transition-colors mb-4" style="color:#555568">
+      <span style="font-family:'Space Mono',monospace;font-size:11px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase">⚙ How this uses Temper</span>
       <svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="currentColor" viewBox="0 0 20 20"><path d="M6 6l8 4-8 4z"/></svg>
     </summary>
-    <div class="glass rounded-2xl p-5 sm:p-6 space-y-5 text-sm">
+    <div class="glass rounded-lg p-5 sm:p-6 space-y-5 text-sm">
       <div>
-        <h4 class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-2">Entity: Signal</h4>
-        <p class="text-t2 leading-relaxed mb-3">Each signal is a Temper entity: <code class="text-[13px] font-mono bg-s3 px-1.5 py-0.5 rounded-lg">Sent → Processing → Done</code>. Agents POST to create, receivers fire actions to transition.</p>
-        <pre class="bg-s2 rounded-xl p-4 text-[13px] font-mono text-t2 leading-relaxed overflow-x-auto border border-b1"># signal.ioa.toml
+        <h4 style="font-family:'Space Mono',monospace;font-size:11px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase;color:#555568;margin-bottom:8px">Entity: Signal</h4>
+        <p style="color:#8888a0;line-height:1.6;margin-bottom:12px">Each signal is a Temper entity: <code style="font-family:'Space Mono',monospace;font-size:13px;background:rgba(24,24,31,0.8);padding:2px 6px;border-radius:6px">Sent → Processing → Done</code>. Agents POST to create, receivers fire actions to transition.</p>
+        <pre style="background:#101016;border-radius:8px;padding:16px;font-family:'Space Mono',monospace;font-size:13px;color:#8888a0;line-height:1.6;overflow-x:auto;border:1px solid rgba(255,255,255,0.07)"># signal.ioa.toml
 [entity]
 name = "Signal"
 initial_status = "Sent"
@@ -79,8 +162,8 @@ from = ["Sent", "Processing"]
 to = "Done"</pre>
       </div>
       <div>
-        <h4 class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-2">API Flow</h4>
-        <pre class="bg-s2 rounded-xl p-4 text-[13px] font-mono text-t2 leading-relaxed overflow-x-auto border border-b1"># Haku sends a signal to Calcifer
+        <h4 style="font-family:'Space Mono',monospace;font-size:11px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase;color:#555568;margin-bottom:8px">API Flow</h4>
+        <pre style="background:#101016;border-radius:8px;padding:16px;font-family:'Space Mono',monospace;font-size:13px;color:#8888a0;line-height:1.6;overflow-x:auto;border:1px solid rgba(255,255,255,0.07)"># Haku sends a signal to Calcifer
 POST /tdata/Signals
 { "entity_id": "s-001",
   "fields": { "from": "haku", "to": "calcifer",
@@ -96,8 +179,8 @@ POST /tdata/Signals('s-001')/Temper.Acknowledge
 </div>
 
 <!-- Drawer -->
-<div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 opacity-0 pointer-events-none transition-opacity duration-200" id="overlay" onclick="closeDrawer()">
-  <div class="fixed top-0 right-0 bottom-0 w-full max-w-md bg-s1 border-l border-b1 overflow-y-auto translate-x-full transition-transform duration-200 ease-out" id="drawer" onclick="event.stopPropagation()">
+<div class="fixed inset-0 z-50 opacity-0 pointer-events-none transition-opacity duration-200" id="overlay" onclick="closeDrawer()" style="background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)">
+  <div class="fixed top-0 right-0 bottom-0 w-full max-w-md overflow-y-auto translate-x-full transition-transform duration-200 ease-out" id="drawer" onclick="event.stopPropagation()" style="background:#0c0c12;border-left:1px solid rgba(255,255,255,0.08)">
     <div class="p-5 sm:p-6" id="drawer-content"></div>
   </div>
 </div>
@@ -109,62 +192,103 @@ const SIGNALS = [
   {id:'s-003',from:'haku',to:'koi',status:'Sent',time:'13:10',body:'Graph jitter root cause: inline filteredData → full SVG rebuild on hover. Fixed with useMemo.',action:'Review'},
   {id:'s-004',from:'rita',to:'haku',status:'Sent',time:'12:00',body:'Map clusters still generic. Check truncation in map_service.py — premises cut short.',action:'Investigate'},
   {id:'s-005',from:'jiji',to:'calcifer',status:'Done',time:'09:15',body:'Blog draft at intel/blog-drafts/. Ready for voice pass.',action:null},
-  {id:'s-006',from:'chihiro',to:'rita',status:'Sent',time:'11:30',body:'Reyni\'s appointment moved to Thursday 3pm. Conflicts with design review — reschedule?',action:'Confirm'},
+  {id:'s-006',from:'chihiro',to:'rita',status:'Sent',time:'11:30',body:"Reyni's appointment moved to Thursday 3pm. Conflicts with design review — reschedule?",action:'Confirm'},
   {id:'s-007',from:'haku',to:'jiji',status:'Processing',time:'15:20',body:'Verification cascade caught 3 spec bugs before runtime. Craft section angle: "the compiler as editor."',action:'Consider for post'},
   {id:'s-008',from:'koi',to:'haku',status:'Done',time:'10:00',body:'PROP-028 arch review complete. Approved. Note: add TTL on events table.',action:null},
 ];
+
 const AGENTS=['all','haku','calcifer','jiji','chihiro','koi','rita'];
 const E={haku:'🐉',calcifer:'🔥',jiji:'🐱',chihiro:'🌸',koi:'🎏',rita:'👩‍💻'};
-const C={haku:{bg:'bg-a3',t:'text-a1'},calcifer:{bg:'bg-red-dim',t:'text-red'},jiji:{bg:'bg-purple-dim',t:'text-purple'},chihiro:{bg:'bg-blue-dim',t:'text-blue'},koi:{bg:'bg-green-dim',t:'text-green'},rita:{bg:'bg-amber-dim',t:'text-amber'}};
-const S=['Sent','Processing','Done'];
+const ACOLORS={
+  haku:   {bg:'rgba(139,92,246,0.15)', text:'#a78bfa'},
+  calcifer:{bg:'rgba(251,113,133,0.12)', text:'#fb7185'},
+  jiji:   {bg:'rgba(192,132,252,0.12)', text:'#c084fc'},
+  chihiro:{bg:'rgba(56,189,248,0.12)',  text:'#38bdf8'},
+  koi:    {bg:'rgba(163,230,53,0.12)',  text:'#a3e635'},
+  rita:   {bg:'rgba(251,191,36,0.12)',  text:'#fbbf24'},
+};
+const STATUS_COLORS={
+  Sent:      {bg:'rgba(139,92,246,0.15)',text:'#a78bfa'},
+  Processing:{bg:'rgba(251,191,36,0.12)',text:'#fbbf24'},
+  Done:      {bg:'rgba(163,230,53,0.12)',text:'#a3e635'},
+};
+const STATUSES=['Sent','Processing','Done'];
 let filter='all';
 
 function render(){
   const f=filter==='all'?SIGNALS:SIGNALS.filter(s=>s.from===filter||s.to===filter);
+  
   document.getElementById('tabs').innerHTML=AGENTS.map(a=>{
     const n=a==='all'?SIGNALS.length:SIGNALS.filter(s=>s.from===a||s.to===a).length;
     const on=a===filter;
-    return`<button onclick="setF('${a}')" class="flex items-center gap-2 h-8 px-3 rounded-xl text-[13px] font-medium transition-all duration-150 border ${on?'bg-a3 border-a1/20 text-a2':'border-b1 text-t3 hover:border-b2 hover:text-t2'}">${a==='all'?'All':E[a]+' '+a}<span class="text-[11px] font-mono ${on?'text-a2/70':'text-t3'}">${n}</span></button>`;
+    const ac=ACOLORS[a];
+    const style=on
+      ? `background:rgba(139,92,246,0.15);border-color:rgba(139,92,246,0.25);color:#a78bfa`
+      : `border-color:rgba(255,255,255,0.08);color:#555568`;
+    return`<button onclick="setF('${a}')" style="${style};height:32px;padding:0 12px;border-radius:8px;font-size:13px;font-weight:500;border-width:1px;border-style:solid;cursor:pointer;background-color:${on?'rgba(139,92,246,0.12)':'transparent'};display:inline-flex;align-items:center;gap:6px;font-family:inherit;transition:all 0.15s">${a==='all'?'All':E[a]+' '+a}<span style="font-family:'Space Mono',monospace;font-size:11px;opacity:0.7">${n}</span></button>`;
   }).join('');
-  document.getElementById('board').innerHTML=S.map(st=>{
+
+  const COL_CLASS={Sent:'col-sent',Processing:'col-processing',Done:'col-done'};
+  const COL_GRAD={
+    Sent:'linear-gradient(90deg,rgba(139,92,246,0.6) 0%,rgba(139,92,246,0) 100%)',
+    Processing:'linear-gradient(90deg,rgba(251,191,36,0.5) 0%,rgba(251,191,36,0) 100%)',
+    Done:'linear-gradient(90deg,rgba(163,230,53,0.5) 0%,rgba(163,230,53,0) 100%)',
+  };
+
+  document.getElementById('board').innerHTML=STATUSES.map(st=>{
     const items=f.filter(s=>s.status===st);
+    const sc=STATUS_COLORS[st];
     const cards=items.length?items.map(s=>{
-      const fc=C[s.from]||C.haku,tc=C[s.to]||C.haku;
-      return`<div class="glass rounded-2xl p-4 cursor-pointer transition-all duration-150 hover:border-b2" onclick="open('${s.id}')">
-        <div class="flex items-center gap-2.5 mb-3">
-          <span class="w-7 h-7 rounded-lg ${fc.bg} flex items-center justify-center text-sm shrink-0">${E[s.from]}</span>
-          <span class="text-[13px] font-medium truncate">${s.from}</span>
-          <span class="text-[11px] font-mono text-t3 ml-auto shrink-0">${s.time}</span>
+      const ac=ACOLORS[s.from]||ACOLORS.haku;
+      const tc=ACOLORS[s.to]||ACOLORS.haku;
+      return`<div class="glass" style="border-radius:10px;padding:16px;cursor:pointer" onclick="openDrawer('${s.id}')">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+          <span style="width:28px;height:28px;border-radius:8px;background:${ac.bg};display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0">${E[s.from]}</span>
+          <span style="font-size:13px;font-weight:500">${s.from}</span>
+          <span style="font-family:'Space Mono',monospace;font-size:11px;color:#555568;margin-left:auto;flex-shrink:0">${s.time}</span>
         </div>
-        <p class="text-sm text-t2 leading-relaxed mb-3 line-clamp-3">${s.body}</p>
-        <div class="flex items-center gap-2 flex-wrap">
-          <span class="h-5 px-2 rounded-full text-[10px] font-mono font-medium tracking-wide ${tc.bg} ${tc.t} inline-flex items-center">→ ${s.to}</span>
-          ${s.action?`<button class="ml-auto text-[11px] font-mono text-t3 h-6 px-2 rounded-lg border border-b1 hover:border-green/30 hover:text-green transition-all duration-150">${s.action}</button>`:''}
+        <p class="line-clamp-3" style="font-size:14px;color:#8888a0;line-height:1.6;margin-bottom:12px">${s.body}</p>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="tag" style="background:${tc.bg};color:${tc.text}">→ ${s.to}</span>
+          ${s.action?`<button style="margin-left:auto;font-family:'Space Mono',monospace;font-size:11px;color:#555568;height:24px;padding:0 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);background:transparent;cursor:pointer;transition:all 0.15s">${s.action}</button>`:''}
         </div>
       </div>`;
-    }).join(''):`<div class="flex flex-col items-center justify-center py-16 text-t3"><div class="w-10 h-10 rounded-full bg-s3 flex items-center justify-center text-lg mb-3">∅</div><p class="text-sm">No signals</p></div>`;
-    return`<div class="flex flex-col gap-3"><div class="flex items-center justify-between px-1 mb-1"><span class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">${st}</span><span class="text-[11px] font-mono text-t3">${items.length}</span></div>${cards}</div>`;
+    }).join(''):`<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:64px 0;color:#555568"><div style="width:40px;height:40px;border-radius:50%;background:#18181f;display:flex;align-items:center;justify-content:center;font-size:18px;margin-bottom:12px">∅</div><p style="font-size:14px">No signals</p></div>`;
+    
+    return`<div class="${COL_CLASS[st]}" style="display:flex;flex-direction:column;gap:12px">
+      <div style="padding:0 4px;margin-bottom:4px">
+        <div style="height:2px;border-radius:1px;background:${COL_GRAD[st]};margin-bottom:10px"></div>
+        <div style="display:flex;align-items:center">
+          <span style="font-family:'Space Mono',monospace;font-size:11px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase;color:${sc.text};flex:1;opacity:0.8">${st}</span>
+          <span class="tag" style="background:${sc.bg};color:${sc.text}">${items.length}</span>
+        </div>
+      </div>
+      ${cards}
+    </div>`;
   }).join('');
+  
   document.getElementById('count').textContent=f.length;
 }
+
 function setF(a){filter=a;render();}
-function open(id){
+
+function openDrawer(id){
   const s=SIGNALS.find(x=>x.id===id);if(!s)return;
-  const fc=C[s.from]||C.haku;
-  const stBadge=s.status==='Done'?'bg-green-dim text-green':s.status==='Processing'?'bg-amber-dim text-amber':'bg-a3 text-a2';
+  const ac=ACOLORS[s.from]||ACOLORS.haku;
+  const sc=STATUS_COLORS[s.status];
   document.getElementById('drawer-content').innerHTML=`
-    <button class="absolute top-4 right-4 text-t3 hover:text-t1 text-lg transition-colors" onclick="closeDrawer()">✕</button>
-    <div class="flex items-center gap-3 mb-6 mt-1">
-      <span class="w-10 h-10 rounded-xl ${fc.bg} flex items-center justify-center text-xl">${E[s.from]}</span>
-      <div><div class="font-medium">${s.from}</div><div class="text-xs font-mono text-t3">→ ${s.to}</div></div>
-      <span class="ml-auto h-5 px-2.5 rounded-full text-[11px] font-mono font-medium tracking-wide ${stBadge} inline-flex items-center">${s.status}</span>
+    <button onclick="closeDrawer()" style="position:absolute;top:16px;right:16px;background:none;border:none;color:#555568;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:24px;margin-top:4px">
+      <span style="width:40px;height:40px;border-radius:8px;background:${ac.bg};display:flex;align-items:center;justify-content:center;font-size:20px">${E[s.from]}</span>
+      <div><div style="font-weight:500">${s.from}</div><div style="font-size:12px;font-family:'Space Mono',monospace;color:#555568">→ ${s.to}</div></div>
+      <span class="tag" style="margin-left:auto;background:${sc.bg};color:${sc.text}">${s.status}</span>
     </div>
-    <div class="mb-5"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-1.5">Time</div><div class="text-sm font-mono text-t2">${s.time}</div></div>
-    <div class="mb-5"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-1.5">Message</div><div class="text-sm text-t2 leading-relaxed">${s.body}</div></div>
-    ${s.action?`<div class="mb-6"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-1.5">Suggested Action</div><div class="text-sm text-t1">${s.action}</div></div>`:''}
-    <div class="flex gap-2 pt-5 border-t border-b1">
-      <button class="h-9 px-4 rounded-xl bg-a1 text-white text-[13px] font-medium hover:bg-a2 active:scale-[0.98] transition-all duration-150">Mark Done</button>
-      <button class="h-9 px-4 rounded-xl border border-b1 text-t2 text-[13px] font-medium hover:border-b2 hover:text-t1 transition-all duration-150">Reassign</button>
+    <div style="margin-bottom:20px"><div style="font-family:'Space Mono',monospace;font-size:11px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase;color:#555568;margin-bottom:6px">Time</div><div style="font-size:14px;font-family:'Space Mono',monospace;color:#8888a0">${s.time}</div></div>
+    <div style="margin-bottom:20px"><div style="font-family:'Space Mono',monospace;font-size:11px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase;color:#555568;margin-bottom:6px">Message</div><div style="font-size:14px;color:#8888a0;line-height:1.6">${s.body}</div></div>
+    ${s.action?`<div style="margin-bottom:24px"><div style="font-family:'Space Mono',monospace;font-size:11px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase;color:#555568;margin-bottom:6px">Suggested Action</div><div style="font-size:14px;color:#eeeef2">${s.action}</div></div>`:''}
+    <div style="display:flex;gap:8px;padding-top:20px;border-top:1px solid rgba(255,255,255,0.08)">
+      <button class="btn-primary">Mark Done</button>
+      <button class="btn-ghost">Reassign</button>
     </div>`;
   document.getElementById('overlay').classList.remove('opacity-0','pointer-events-none');
   document.getElementById('drawer').classList.remove('translate-x-full');

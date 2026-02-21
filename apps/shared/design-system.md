@@ -1,4 +1,4 @@
-# Temper Design System v3
+# Temper Design System v4
 
 *The default look. Users can replace this file with their own.*
 
@@ -46,8 +46,8 @@ tailwindcss.config = {
         b3: 'rgba(255,255,255,0.16)',  // active / focus
       },
       fontFamily: {
-        sans: ['Geist', 'system-ui', 'sans-serif'],
-        mono: ['Geist Mono', '"JetBrains Mono"', 'monospace'],
+        sans: ['Space Grotesk', 'system-ui', 'sans-serif'],
+        mono: ['Space Mono', 'monospace'],
       },
     },
   },
@@ -55,8 +55,7 @@ tailwindcss.config = {
 </script>
 
 <!-- Geist font -->
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700\geist@1.3.1/dist/fonts/geist-sans/style.min.cssfamily=Space+Mono:wght@400;700\geist@1.3.1/dist/fonts/geist-sans/style.min.cssdisplay=swap">
 ```
 
 ## Base Styles
@@ -68,7 +67,7 @@ Paste this `<style>` block in every UI:
   *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
   body {
-    font-family: 'Geist', system-ui, sans-serif;
+    font-family: 'Space Grotesk', system-ui, sans-serif;
     background: #0c0c10;
     color: #ededf0;
     min-height: 100vh;
@@ -306,6 +305,71 @@ active:scale-[0.98]           /* button press feedback */
 
 `prefers-reduced-motion: reduce` → kill all transitions. Already handled by Tailwind's `motion-reduce:` prefix.
 
+## Data-Heavy UIs: Dashboards, Grids, Pipelines
+
+When showing lots of items (agent cards, content rows, calendar cells, metrics), plain glass cards become a wall of same-looking rectangles. Fix it:
+
+### Visual Hierarchy Rules
+1. **Left accent bars** — 3px colored vertical bar on cards, color-coded per entity/status. This is the fastest way a human scans "which one is this?"
+2. **Big numbers first** — Metric values in `Space Mono` at 28px+ before any label. The eye hits the number, then reads the label below it. Never label-first.
+3. **Summary strip at top** — 3-5 key metrics in a horizontal row of mini-cards above the detail grid. Gives the "at a glance" before diving in.
+4. **Gradient dividers** — Use `linear-gradient(90deg, accent 0%, transparent 100%)` as section separators instead of plain borders. Creates visual flow.
+5. **Colored sparklines** — Match the entity's accent color. Last 3 bars at full opacity, older bars fade. Shows trend without words.
+6. **Highlight key activity** — In activity feeds, flag important items with the entity's accent color. Most items are `t2`, the one you need to read is `color`.
+
+### List Items Need Structure
+```html
+<!-- BAD: flat row, nothing to scan -->
+<div class="flex items-center p-3">
+  <span>Title</span><span>Status</span><span>Date</span>
+</div>
+
+<!-- GOOD: left accent, hierarchy, colored status -->
+<div class="list-row s-review" style="display:flex;align-items:center;gap:12px;padding:12px 16px">
+  <!-- 3px colored bar via ::before pseudo-element -->
+  <div style="flex:1">
+    <div style="font-size:15px;font-weight:500">Title goes big</div>
+    <div style="font-family:monospace;font-size:11px;color:#555568;margin-top:3px">Type · Author</div>
+  </div>
+  <span style="font-family:monospace;font-size:12px;color:#fbbf24;font-weight:700">REVIEW</span>
+  <span style="font-family:monospace;font-size:12px;color:#555568">Feb 20</span>
+</div>
+```
+
+### Calendar Cells Need Color
+Calendar events use status-colored pills (`background:status-dim; color:status`), not plain text. Today's cell gets a tinted background (`rgba(accent, 0.06)`). Empty cells are visually quieter (lower opacity).
+
+### Graphic Elements
+- **Gradient highlight on key words** — `.hl { background: linear-gradient(120deg, rgba(violet,0.25), rgba(lime,0.15)); padding: 1px 6px; border-radius: 4px; }` — Use on titles, section names, important words.
+- **Colored keyword in descriptions** — One word in the description gets the entity's accent color. "Inter-agent comms — <span style="color:violet">kanban</span>, drawer, filters". Breaks the gray monotony.
+- **Decorative gradient line** — `height:2px; background: linear-gradient(90deg, violet 0%, lime 50%, rose 100%)` — Use as page footer accent. Subtle but adds personality.
+- **Status dots** — 8px circles with color-matched glow animation for active states. `@keyframes pulse { 50% { opacity: 0.4 } }`
+
+### Form Inputs Are Not White
+```css
+/* NEVER this */
+input { background: white; color: black; }
+
+/* ALWAYS this */
+input {
+  background: rgba(255,255,255,0.04);     /* barely visible tint */
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #eeeef2;
+}
+input:focus {
+  border-color: rgba(139,92,246,0.4);     /* accent glow */
+  box-shadow: 0 0 0 3px rgba(139,92,246,0.10);
+  background: rgba(255,255,255,0.06);     /* slightly brighter */
+}
+```
+Labels above inputs should be in **accent color** (not gray). Use the `label` class: `font-family: monospace; font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: accent;`
+
+### Typography Scale
+Don't be afraid of size. Page titles: 28-48px, bold, tight tracking. Section headings: 17-22px. Body: 15px. Metadata: 13px. Labels: 11px monospace uppercase. The size difference IS the hierarchy — if everything is 14px, nothing stands out.
+
+### Border Radius
+Keep it sharp. Cards: 10px. Buttons/inputs: 8px. Pills/badges: 999px (full round). Nothing at 16px+ — that's bubbly, not premium.
+
 ## Replacing This System
 
 This file is read by agents before generating UI. To use your own aesthetic:
@@ -318,4 +382,4 @@ The structure should match this file: Tailwind config → base styles → philos
 
 ---
 
-*Frosted glass floating on a dark void. Violet glow behind everything. Warm, not cold. Felt, not seen.*
+*Frosted glass floating on a dark void. Violet + lime glow behind everything. Sharp, not bubbly. Color means something.*

@@ -5,42 +5,171 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Content Pipeline</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script>tailwindcss.config={theme:{extend:{colors:{s1:'#0c0c10',s2:'#14141a',s3:'#1c1c24',s4:'#24242e',t1:'#ededf0',t2:'#8b8b9e',t3:'#55556a',a1:'#8b5cf6',a2:'#a78bfa',a3:'rgba(139,92,246,0.12)',b1:'rgba(255,255,255,0.06)',b2:'rgba(255,255,255,0.10)',green:{DEFAULT:'#3dd68c',dim:'rgba(61,214,140,0.10)'},amber:{DEFAULT:'#e5a63e',dim:'rgba(229,166,62,0.10)'},red:{DEFAULT:'#e5534b',dim:'rgba(229,83,75,0.10)'}},fontFamily:{sans:['Geist','system-ui','sans-serif'],mono:['Geist Mono','monospace']}}}}</script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.min.css">
+<script>
+tailwindcss.config={theme:{extend:{colors:{
+  s1:'#08080c',s2:'#101016',s3:'#18181f',s4:'#222230',
+  t1:'#eeeef2',t2:'#8888a0',t3:'#555568',
+},fontFamily:{sans:['Space Grotesk','system-ui','sans-serif'],mono:['Space Mono','monospace']}}}}
+</script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap">
 <style>
   *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-  body{font-family:'Geist',system-ui,sans-serif;background:#0c0c10;color:#ededf0;min-height:100vh;-webkit-font-smoothing:antialiased}
-  body::before{content:'';position:fixed;top:-30%;left:-10%;width:60%;height:60%;background:radial-gradient(circle,rgba(139,92,246,0.08) 0%,transparent 70%);pointer-events:none;z-index:0}
-  body::after{content:'';position:fixed;bottom:-20%;right:-10%;width:50%;height:50%;background:radial-gradient(circle,rgba(61,214,140,0.04) 0%,transparent 70%);pointer-events:none;z-index:0}
-  body>*{position:relative;z-index:1}
-  .glass{background:linear-gradient(135deg,rgba(255,255,255,0.05) 0%,rgba(255,255,255,0.02) 100%);border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
-  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:99px}
-  ::selection{background:rgba(139,92,246,0.3)}
+  body{font-family:'Space Grotesk',system-ui,sans-serif;background:#08080c;color:#eeeef2;min-height:100vh;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+
+  .orb{position:fixed;border-radius:50%;pointer-events:none;z-index:0}
+  .orb-1{top:-20%;left:-10%;width:55vw;height:55vw;background:radial-gradient(circle,rgba(139,92,246,0.40) 0%,rgba(139,92,246,0.15) 35%,transparent 65%);filter:blur(70px)}
+  .orb-2{bottom:-15%;right:-10%;width:50vw;height:50vw;background:radial-gradient(circle,rgba(251,191,36,0.20) 0%,rgba(251,191,36,0.05) 35%,transparent 65%);filter:blur(70px)}
+
+  body>:not(.orb){position:relative;z-index:1}
+  body::after{content:'';position:fixed;inset:0;z-index:2;pointer-events:none;opacity:0.025;
+    background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-repeat:repeat;background-size:128px 128px}
+
+  .glass{
+    background:linear-gradient(135deg,rgba(255,255,255,0.06) 0%,rgba(255,255,255,0.02) 50%,rgba(139,92,246,0.03) 100%);
+    border:1px solid rgba(255,255,255,0.10);
+    backdrop-filter:blur(48px) saturate(2.0);
+    -webkit-backdrop-filter:blur(48px) saturate(2.0);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,0.10),0 8px 32px rgba(0,0,0,0.4);
+  }
+
+  .hl{background:linear-gradient(120deg,rgba(139,92,246,0.25) 0%,rgba(251,191,36,0.15) 100%);padding:1px 6px;border-radius:4px}
+  .label{font-family:'Space Mono',monospace;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase}
+  .metric-big{font-family:'Space Mono',monospace;font-size:28px;font-weight:700;line-height:1}
+  .metric-label{font-family:'Space Mono',monospace;font-size:10px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#555568;margin-top:4px}
+
+  /* Status colors */
+  .st-draft{color:#555568}
+  .st-review{color:#fbbf24}
+  .st-scheduled{color:#a78bfa}
+  .st-published{color:#3dd68c}
+
+  .bg-draft{background:rgba(255,255,255,0.04)}
+  .bg-review{background:rgba(251,191,36,0.08)}
+  .bg-scheduled{background:rgba(139,92,246,0.08)}
+  .bg-published{background:rgba(61,214,140,0.08)}
+
+  /* Calendar cell */
+  .cal-cell{
+    border-right:1px solid rgba(255,255,255,0.04);
+    border-bottom:1px solid rgba(255,255,255,0.04);
+    padding:8px;min-height:80px;
+    transition:background 0.15s;
+  }
+  .cal-cell:hover{background:rgba(255,255,255,0.02)}
+  .cal-today{background:rgba(139,92,246,0.06)}
+
+  /* Calendar event pill */
+  .cal-event{
+    padding:3px 8px;border-radius:6px;font-size:11px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    cursor:pointer;transition:all 0.15s;margin-bottom:2px;
+  }
+  .cal-event:hover{filter:brightness(1.3)}
+
+  /* List row */
+  .list-row{
+    display:flex;align-items:center;gap:12px;
+    padding:12px 16px;border-radius:8px;
+    transition:background 0.15s;cursor:pointer;
+  }
+  .list-row:hover{background:rgba(255,255,255,0.03)}
+
+  /* Left accent on list items */
+  .list-row::before{
+    content:'';width:3px;height:24px;border-radius:2px;flex-shrink:0;
+  }
+  .list-row.s-draft::before{background:#555568}
+  .list-row.s-review::before{background:#fbbf24}
+  .list-row.s-scheduled::before{background:#a78bfa}
+  .list-row.s-published::before{background:#3dd68c}
+
+  /* View toggle */
+  .view-btn{
+    padding:6px 14px;font-family:'Space Mono',monospace;font-size:12px;font-weight:700;
+    border:none;cursor:pointer;background:transparent;color:#555568;
+    transition:all 0.15s;border-radius:6px;
+  }
+  .view-btn.on{background:rgba(139,92,246,0.15);color:#a78bfa}
+
+  ::selection{background:rgba(139,92,246,0.35);color:#eeeef2}
+  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:99px}
+
+  @media(max-width:639px){
+    .cal-cell{min-height:56px;padding:4px}
+    .cal-event{font-size:10px;padding:2px 4px}
+    .day-names{display:none}
+  }
 </style>
 </head>
 <body>
+
+<div class="orb orb-1"></div>
+<div class="orb orb-2"></div>
+
 <div class="mx-auto w-full max-w-5xl px-4 sm:px-6 lg:px-8 py-6 sm:py-10">
-  <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
-    <div><h1 class="text-xl sm:text-2xl font-semibold tracking-tight">🔥 Content Pipeline</h1><p class="text-sm text-t2 mt-1">Calcifer · February 2026</p></div>
-    <div class="glass rounded-xl flex overflow-hidden">
-      <button onclick="setV('cal')" class="vb px-3 py-1.5 text-xs font-mono font-medium transition-all bg-a3 text-a2" data-v="cal">Calendar</button>
-      <button onclick="setV('list')" class="vb px-3 py-1.5 text-xs font-mono font-medium transition-all text-t3 hover:text-t2" data-v="list">List</button>
+
+  <!-- Header -->
+  <div style="margin-bottom:24px">
+    <a href="index.html" style="color:#555568;font-size:13px;text-decoration:none;font-family:'Space Mono',monospace;display:inline-block;margin-bottom:12px">← showcase</a>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+      <div>
+        <h1 style="font-size:clamp(24px,4vw,32px);font-weight:700;letter-spacing:-0.02em">🔥 Content <span class="hl">Pipeline</span></h1>
+        <p style="font-size:15px;color:#8888a0;margin-top:4px">Calcifer · <span style="color:#fbbf24">February 2026</span></p>
+      </div>
+      <div class="glass" style="border-radius:8px;display:flex;overflow:hidden;padding:3px">
+        <button onclick="setV('cal')" class="view-btn on" data-v="cal">Calendar</button>
+        <button onclick="setV('list')" class="view-btn" data-v="list">List</button>
+      </div>
     </div>
   </div>
-  <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-    <div class="glass rounded-xl p-3 sm:p-4"><div class="text-xl font-semibold font-mono text-t3">3</div><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mt-1">Drafts</div></div>
-    <div class="glass rounded-xl p-3 sm:p-4"><div class="text-xl font-semibold font-mono text-amber">2</div><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mt-1">In Review</div></div>
-    <div class="glass rounded-xl p-3 sm:p-4"><div class="text-xl font-semibold font-mono text-a1">4</div><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mt-1">Scheduled</div></div>
-    <div class="glass rounded-xl p-3 sm:p-4"><div class="text-xl font-semibold font-mono text-green">12</div><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mt-1">Published</div></div>
+
+  <!-- Summary strip -->
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,120px),1fr));gap:12px;margin-bottom:24px">
+    <div class="glass" style="border-radius:10px;padding:16px;text-align:center">
+      <div class="metric-big st-draft">3</div><div class="metric-label">Drafts</div>
+    </div>
+    <div class="glass" style="border-radius:10px;padding:16px;text-align:center">
+      <div class="metric-big st-review">2</div><div class="metric-label">In Review</div>
+    </div>
+    <div class="glass" style="border-radius:10px;padding:16px;text-align:center">
+      <div class="metric-big st-scheduled">4</div><div class="metric-label">Scheduled</div>
+    </div>
+    <div class="glass" style="border-radius:10px;padding:16px;text-align:center">
+      <div class="metric-big st-published">12</div><div class="metric-label">Published</div>
+    </div>
   </div>
-  <div id="calv" class="glass rounded-2xl overflow-hidden mb-6">
-    <div class="grid grid-cols-7 border-b border-b1 hidden sm:grid"><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Mon</div><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Tue</div><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Wed</div><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Thu</div><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Fri</div><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Sat</div><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Sun</div></div>
-    <div class="grid grid-cols-7" id="cg"></div>
+
+  <!-- Gradient divider -->
+  <div style="height:1px;background:linear-gradient(90deg,rgba(139,92,246,0.4) 0%,rgba(251,191,36,0.3) 50%,transparent 100%);margin-bottom:24px"></div>
+
+  <!-- Calendar view -->
+  <div id="calv" class="glass" style="border-radius:10px;overflow:hidden;margin-bottom:32px">
+    <div class="day-names" style="display:grid;grid-template-columns:repeat(7,1fr);border-bottom:1px solid rgba(255,255,255,0.06)">
+      <div style="padding:10px;text-align:center" class="label st-draft">Mon</div>
+      <div style="padding:10px;text-align:center" class="label st-draft">Tue</div>
+      <div style="padding:10px;text-align:center" class="label st-draft">Wed</div>
+      <div style="padding:10px;text-align:center" class="label st-draft">Thu</div>
+      <div style="padding:10px;text-align:center" class="label st-draft">Fri</div>
+      <div style="padding:10px;text-align:center" class="label st-draft">Sat</div>
+      <div style="padding:10px;text-align:center" class="label st-draft">Sun</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(7,1fr)" id="cg"></div>
   </div>
-  <div id="listv" class="hidden mb-6"></div>
+
+  <!-- List view -->
+  <div id="listv" style="display:none;margin-bottom:32px" ></div>
+
+  <!-- Temper section -->
   <div id="temper-section"></div>
+
+  <!-- Decorative line -->
+  <div style="margin-top:40px;height:2px;border-radius:1px;background:linear-gradient(90deg,rgba(139,92,246,0.4) 0%,rgba(251,191,36,0.3) 50%,rgba(163,230,53,0.2) 100%)"></div>
+  <p style="text-align:center;font-family:'Space Mono',monospace;font-size:12px;color:#555568;margin-top:16px">
+    <span style="color:#a78bfa">violet</span> + <span style="color:#fbbf24">amber</span> · design-system v4
+  </p>
 </div>
+
 <script src="temper-sections.js"></script>
 <script>
 const P=[
@@ -57,23 +186,67 @@ const P=[
   {t:'Building in Public with AI Agents',p:'X Thread',s:'published',a:'🔥',d:15,e:'5.1k'},
   {t:'Deep Sci-Fi Launch Week',p:'X Thread',s:'published',a:'🔥',d:13,e:'8.3k'},
 ];
-const SC={draft:{bg:'bg-white/[0.03]',t:'text-t3',b:'bg-s4 text-t3'},review:{bg:'bg-amber/[0.05]',t:'text-amber',b:'bg-amber-dim text-amber'},scheduled:{bg:'bg-a1/[0.05]',t:'text-a2',b:'bg-a3 text-a2'},published:{bg:'bg-green/[0.05]',t:'text-green',b:'bg-green-dim text-green'}};
+
+const SC={
+  draft:     {bg:'bg-draft',    text:'st-draft',    color:'#555568', pill:'rgba(255,255,255,0.06)'},
+  review:    {bg:'bg-review',   text:'st-review',   color:'#fbbf24', pill:'rgba(251,191,36,0.12)'},
+  scheduled: {bg:'bg-scheduled',text:'st-scheduled',color:'#a78bfa', pill:'rgba(139,92,246,0.12)'},
+  published: {bg:'bg-published',text:'st-published',color:'#3dd68c', pill:'rgba(61,214,140,0.12)'},
+};
 
 function renderCal(){
   const fd=6;let h='';
-  for(let i=0;i<fd;i++)h+=`<div class="border-r border-b border-b1 p-1.5 sm:p-2 min-h-[4rem] sm:min-h-[6rem] opacity-25"><span class="text-[11px] font-mono text-t3">${26+i}</span></div>`;
-  for(let d=1;d<=28;d++){const today=d===20,items=P.filter(p=>p.d===d);h+=`<div class="border-r border-b border-b1 p-1.5 sm:p-2 min-h-[4rem] sm:min-h-[6rem] transition-all hover:bg-white/[0.01] ${today?'bg-a1/[0.03]':''}"><span class="text-[11px] font-mono ${today?'text-a2 font-medium':'text-t3'}">${d}</span><div class="mt-1 flex flex-col gap-0.5">${items.map(p=>{const s=SC[p.s];return`<div class="px-1.5 py-0.5 rounded-md text-[10px] sm:text-[11px] truncate cursor-pointer transition-all hover:brightness-125 ${s.bg} ${s.t}" title="${p.t}">${p.t}</div>`;}).join('')}</div></div>`;}
-  const tot=fd+28,rem=(7-tot%7)%7;for(let i=1;i<=rem;i++)h+=`<div class="border-r border-b border-b1 p-1.5 sm:p-2 min-h-[4rem] sm:min-h-[6rem] opacity-25"><span class="text-[11px] font-mono text-t3">${i}</span></div>`;
+  for(let i=0;i<fd;i++)h+=`<div class="cal-cell" style="opacity:0.3"><span style="font-family:'Space Mono',monospace;font-size:11px;color:#555568">${26+i}</span></div>`;
+  for(let d=1;d<=28;d++){
+    const today=d===20;
+    const items=P.filter(p=>p.d===d);
+    h+=`<div class="cal-cell ${today?'cal-today':''}">
+      <span style="font-family:'Space Mono',monospace;font-size:11px;${today?'color:#a78bfa;font-weight:700':'color:#555568'}">${d}</span>
+      <div style="margin-top:4px;display:flex;flex-direction:column;gap:2px">
+        ${items.map(p=>{const sc=SC[p.s];return`<div class="cal-event" style="background:${sc.pill};color:${sc.color}" title="${p.t}">${p.t}</div>`;}).join('')}
+      </div>
+    </div>`;
+  }
+  const tot=fd+28,rem=(7-tot%7)%7;
+  for(let i=1;i<=rem;i++)h+=`<div class="cal-cell" style="opacity:0.3"><span style="font-family:'Space Mono',monospace;font-size:11px;color:#555568">${i}</span></div>`;
   document.getElementById('cg').innerHTML=h;
 }
+
 function renderList(){
-  const g={draft:[],review:[],scheduled:[],published:[]};P.forEach(p=>g[p.s].push(p));
-  const lb={draft:'Drafts',review:'In Review',scheduled:'Scheduled',published:'Published'};
-  document.getElementById('listv').innerHTML=Object.entries(g).filter(([_,p])=>p.length).map(([s,ps])=>`<div class="mb-6"><h3 class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-3 pb-2 border-b border-b1">${lb[s]} (${ps.length})</h3>${ps.map(p=>{const c=SC[s];return`<div class="flex items-center gap-3 px-4 py-3 -mx-4 rounded-xl hover:bg-white/[0.02] transition-all cursor-pointer"><div class="flex-1 min-w-0"><div class="text-sm truncate">${p.t}</div><div class="text-[11px] font-mono text-t3 mt-0.5">${p.p}</div></div><span class="hidden sm:block text-sm text-t2">${p.a}</span><span class="h-5 px-2 rounded-full text-[10px] font-mono font-medium tracking-wide ${c.b} inline-flex items-center shrink-0">${s}</span><span class="hidden sm:block text-xs font-mono text-t3 w-12 text-right">Feb ${p.d}</span>${p.e?`<span class="hidden sm:block text-xs font-mono text-t3 w-10 text-right">${p.e}</span>`:''}</div>`}).join('')}</div>`).join('');
+  const groups={draft:[],review:[],scheduled:[],published:[]};
+  P.forEach(p=>groups[p.s].push(p));
+  const labels={draft:'Drafts',review:'In Review',scheduled:'Scheduled',published:'Published'};
+  
+  document.getElementById('listv').innerHTML=Object.entries(groups).filter(([_,ps])=>ps.length).map(([s,ps])=>{
+    const sc=SC[s];
+    return`<div style="margin-bottom:28px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.06)">
+        <div style="width:8px;height:8px;border-radius:50%;background:${sc.color}"></div>
+        <span class="label" style="color:${sc.color}">${labels[s]}</span>
+        <span style="font-family:'Space Mono',monospace;font-size:11px;color:#555568;margin-left:auto">${ps.length}</span>
+      </div>
+      ${ps.map(p=>`
+        <div class="list-row s-${s}">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.t}</div>
+            <div style="font-family:'Space Mono',monospace;font-size:11px;color:#555568;margin-top:3px">${p.p} · ${p.a}</div>
+          </div>
+          <span style="font-family:'Space Mono',monospace;font-size:12px;color:#555568;flex-shrink:0">Feb ${p.d}</span>
+          ${p.e?`<span style="font-family:'Space Mono',monospace;font-size:12px;color:${sc.color};font-weight:700;flex-shrink:0;min-width:48px;text-align:right">${p.e}</span>`:''}
+        </div>
+      `).join('')}
+    </div>`;
+  }).join('');
 }
-function setV(v){document.getElementById('calv').classList.toggle('hidden',v!=='cal');document.getElementById('listv').classList.toggle('hidden',v!=='list');document.querySelectorAll('.vb').forEach(b=>{const on=b.dataset.v===v;b.classList.toggle('bg-a3',on);b.classList.toggle('text-a2',on);b.classList.toggle('text-t3',!on);});}
+
+function setV(v){
+  document.getElementById('calv').style.display=v==='cal'?'block':'none';
+  document.getElementById('listv').style.display=v==='list'?'block':'none';
+  document.querySelectorAll('.view-btn').forEach(b=>b.classList.toggle('on',b.dataset.v===v));
+}
+
 renderCal();renderList();
-renderTemperSection('temper-section','content-pipeline');
+if(typeof renderTemperSection==='function')renderTemperSection('temper-section','content-pipeline');
 </script>
 </body>
 </html>

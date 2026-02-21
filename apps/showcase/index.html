@@ -6,78 +6,177 @@
 <title>Temper UI Showcase</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
-tailwindcss.config={theme:{extend:{colors:{s1:'#0c0c10',s2:'#14141a',s3:'#1c1c24',s4:'#24242e',t1:'#ededf0',t2:'#8b8b9e',t3:'#55556a',a1:'#8b5cf6',a2:'#a78bfa',a3:'rgba(139,92,246,0.12)',b1:'rgba(255,255,255,0.06)',b2:'rgba(255,255,255,0.10)',b3:'rgba(255,255,255,0.16)',green:{DEFAULT:'#3dd68c',dim:'rgba(61,214,140,0.10)'},amber:{DEFAULT:'#e5a63e',dim:'rgba(229,166,62,0.10)'},red:{DEFAULT:'#e5534b',dim:'rgba(229,83,75,0.10)'}},fontFamily:{sans:['Geist','system-ui','sans-serif'],mono:['Geist Mono','"JetBrains Mono"','monospace']}}}}
+tailwindcss.config={theme:{extend:{colors:{
+  s1:'#08080c',s2:'#101016',s3:'#18181f',s4:'#222230',
+  t1:'#eeeef2',t2:'#8888a0',t3:'#555568',
+},fontFamily:{sans:['Space Grotesk','system-ui','sans-serif'],mono:['Space Mono','monospace']}}}}
 </script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap">
 <style>
   *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-  body{font-family:'Geist',system-ui,sans-serif;background:#0c0c10;color:#ededf0;min-height:100vh;-webkit-font-smoothing:antialiased}
-  body::before{content:'';position:fixed;top:-30%;left:-10%;width:60%;height:60%;background:radial-gradient(circle,rgba(139,92,246,0.08) 0%,transparent 70%);pointer-events:none;z-index:0}
-  body::after{content:'';position:fixed;bottom:-20%;right:-10%;width:50%;height:50%;background:radial-gradient(circle,rgba(61,214,140,0.04) 0%,transparent 70%);pointer-events:none;z-index:0}
-  body>*{position:relative;z-index:1}
-  .glass{background:linear-gradient(135deg,rgba(255,255,255,0.05) 0%,rgba(255,255,255,0.02) 100%);border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
-  ::selection{background:rgba(139,92,246,0.3);color:#ededf0}
+  body{
+    font-family:'Space Grotesk',system-ui,sans-serif;
+    background:#08080c;
+    color:#eeeef2;
+    min-height:100vh;
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+
+  /* ── Ambient orbs — BIG, VISIBLE ── */
+  .orb{position:fixed;border-radius:50%;pointer-events:none;z-index:0}
+  .orb-1{
+    top:-20%;left:-10%;width:55vw;height:55vw;
+    background:radial-gradient(circle,rgba(139,92,246,0.40) 0%,rgba(139,92,246,0.15) 35%,transparent 65%);
+    filter:blur(70px);
+  }
+  .orb-2{
+    bottom:-15%;right:-10%;width:50vw;height:50vw;
+    background:radial-gradient(circle,rgba(163,230,53,0.28) 0%,rgba(163,230,53,0.08) 35%,transparent 65%);
+    filter:blur(70px);
+  }
+  .orb-3{
+    top:40%;left:55%;width:35vw;height:35vw;
+    background:radial-gradient(circle,rgba(251,113,133,0.18) 0%,rgba(251,113,133,0.04) 40%,transparent 65%);
+    filter:blur(60px);
+  }
+
+  /* Noise texture */
+  body::after{
+    content:'';position:fixed;inset:0;z-index:2;pointer-events:none;opacity:0.025;
+    background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-repeat:repeat;background-size:128px 128px;
+  }
+
+  body>:not(.orb){position:relative;z-index:1}
+
+  /* ── Glass card ── */
+  .card{
+    background:linear-gradient(135deg,rgba(255,255,255,0.06) 0%,rgba(255,255,255,0.02) 50%,rgba(139,92,246,0.03) 100%);
+    border:1px solid rgba(255,255,255,0.10);
+    backdrop-filter:blur(48px) saturate(2.0);
+    -webkit-backdrop-filter:blur(48px) saturate(2.0);
+    border-radius:10px;
+    padding:20px;
+    display:flex;align-items:center;gap:16px;
+    text-decoration:none;color:#eeeef2;
+    transition:all 0.25s ease;
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.10),
+      inset 0 0 20px rgba(139,92,246,0.02),
+      0 8px 32px rgba(0,0,0,0.4);
+  }
+  .card:hover{
+    background:linear-gradient(135deg,rgba(255,255,255,0.08) 0%,rgba(255,255,255,0.03) 50%,rgba(139,92,246,0.06) 100%);
+    border-color:rgba(139,92,246,0.30);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.10),
+      inset 0 0 30px rgba(139,92,246,0.04),
+      0 0 24px rgba(139,92,246,0.10),
+      0 12px 40px rgba(0,0,0,0.45);
+    transform:translateY(-2px);
+  }
+
+  /* ── Number badges ── */
+  .num{
+    width:44px;height:44px;border-radius:8px;
+    display:flex;align-items:center;justify-content:center;
+    font-family:'Space Mono','JetBrains Mono',monospace;
+    font-size:18px;font-weight:700;flex-shrink:0;
+  }
+
+  /* ── Tag pills ── */
+  .tag{
+    height:24px;padding:0 12px;border-radius:999px;
+    font-family:'Space Mono','JetBrains Mono',monospace;
+    font-size:11px;font-weight:500;letter-spacing:0.05em;
+    display:inline-flex;align-items:center;flex-shrink:0;
+  }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:99px}
+  ::selection{background:rgba(139,92,246,0.35);color:#eeeef2}
+
+  @media(max-width:639px){.tag{display:none}}
 </style>
 </head>
 <body>
-<div class="mx-auto w-full max-w-2xl px-4 sm:px-6 py-16 sm:py-24">
 
-  <div class="mb-14">
-    <h1 class="text-3xl sm:text-4xl font-semibold tracking-tight mb-3">Temper UI</h1>
-    <p class="text-sm text-t2">5 apps · 1 design system · any shape</p>
-    <p class="text-xs text-t3 font-mono mt-2">v3 — Geist · glass · violet accent</p>
+<div class="orb orb-1"></div>
+<div class="orb orb-2"></div>
+<div class="orb orb-3"></div>
+
+<div style="max-width:640px;margin:0 auto;padding:64px 20px">
+
+  <div style="margin-bottom:56px">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+      <div style="width:36px;height:36px;border-radius:10px;background:rgba(139,92,246,0.15);display:flex;align-items:center;justify-content:center">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      </div>
+      <h1 style="font-size:clamp(32px,6vw,48px);font-weight:700;letter-spacing:-0.03em">Temper <span style="background:linear-gradient(120deg,rgba(139,92,246,0.25) 0%,rgba(163,230,53,0.15) 100%);padding:1px 8px;border-radius:4px;-webkit-box-decoration-break:clone;box-decoration-break:clone">UI</span></h1>
+    </div>
+    <p style="font-size:17px;color:#8888a0;line-height:1.6">5 apps · 1 design system · <span style="color:#a78bfa;font-weight:500">any shape</span></p>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <span class="tag" style="background:rgba(139,92,246,0.15);color:#a78bfa">v4</span>
+      <span class="tag" style="background:rgba(163,230,53,0.12);color:#a3e635">lime</span>
+      <span class="tag" style="background:rgba(139,92,246,0.15);color:#a78bfa">violet</span>
+    </div>
   </div>
 
-  <div class="flex flex-col gap-3">
-    <a href="1-signal-board.html" class="glass rounded-2xl p-5 flex items-center gap-4 no-underline text-t1 transition-all duration-150 group hover:border-b2">
-      <span class="w-10 h-10 rounded-xl bg-a3 text-a1 flex items-center justify-center text-lg font-mono font-semibold shrink-0">1</span>
-      <div class="flex-1 min-w-0">
-        <div class="text-[15px] font-medium group-hover:text-a2 transition-colors">Signal Board</div>
-        <div class="text-sm text-t2 mt-0.5">Inter-agent comms — kanban, drawer, agent filters</div>
+  <div style="display:flex;flex-direction:column;gap:12px">
+
+    <a href="1-signal-board.html" class="card">
+      <div class="num" style="background:rgba(139,92,246,0.15);color:#a78bfa">1</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:17px;font-weight:600">Signal Board</div>
+        <div style="font-size:14px;color:#8888a0;margin-top:3px">Inter-agent comms — <span style="color:#a78bfa">kanban</span>, drawer, agent filters</div>
       </div>
-      <span class="hidden sm:inline-flex h-5 px-2.5 rounded-full text-[11px] font-mono font-medium tracking-wide bg-a3 text-a2 items-center shrink-0">Kanban</span>
+      <span class="tag" style="background:rgba(139,92,246,0.12);color:#a78bfa">Kanban</span>
     </a>
 
-    <a href="2-incident-timeline.html" class="glass rounded-2xl p-5 flex items-center gap-4 no-underline text-t1 transition-all duration-150 group hover:border-b2">
-      <span class="w-10 h-10 rounded-xl bg-red-dim text-red flex items-center justify-center text-lg font-mono font-semibold shrink-0">2</span>
-      <div class="flex-1 min-w-0">
-        <div class="text-[15px] font-medium group-hover:text-a2 transition-colors">Incident Timeline</div>
-        <div class="text-sm text-t2 mt-0.5">Prod incidents — timeline, severity, live duration</div>
+    <a href="2-incident-timeline.html" class="card">
+      <div class="num" style="background:rgba(251,113,133,0.12);color:#fb7185">2</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:17px;font-weight:600">Incident Timeline</div>
+        <div style="font-size:14px;color:#8888a0;margin-top:3px">Prod incidents — <span style="color:#fb7185">timeline</span>, severity, live duration</div>
       </div>
-      <span class="hidden sm:inline-flex h-5 px-2.5 rounded-full text-[11px] font-mono font-medium tracking-wide bg-red-dim text-red items-center shrink-0">Timeline</span>
+      <span class="tag" style="background:rgba(251,113,133,0.12);color:#fb7185">Timeline</span>
     </a>
 
-    <a href="3-quick-form.html" class="glass rounded-2xl p-5 flex items-center gap-4 no-underline text-t1 transition-all duration-150 group hover:border-b2">
-      <span class="w-10 h-10 rounded-xl bg-green-dim text-green flex items-center justify-center text-lg font-mono font-semibold shrink-0">3</span>
-      <div class="flex-1 min-w-0">
-        <div class="text-[15px] font-medium group-hover:text-a2 transition-colors">Quick Form</div>
-        <div class="text-sm text-t2 mt-0.5">Multi-step wizard — radios, toggles, review & submit</div>
+    <a href="3-quick-form.html" class="card">
+      <div class="num" style="background:rgba(163,230,53,0.12);color:#a3e635">3</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:17px;font-weight:600">Quick Form</div>
+        <div style="font-size:14px;color:#8888a0;margin-top:3px">Multi-step <span style="color:#a3e635">wizard</span> — radios, toggles, review & submit</div>
       </div>
-      <span class="hidden sm:inline-flex h-5 px-2.5 rounded-full text-[11px] font-mono font-medium tracking-wide bg-green-dim text-green items-center shrink-0">Form</span>
+      <span class="tag" style="background:rgba(163,230,53,0.12);color:#a3e635">Form</span>
     </a>
 
-    <a href="4-content-pipeline.html" class="glass rounded-2xl p-5 flex items-center gap-4 no-underline text-t1 transition-all duration-150 group hover:border-b2">
-      <span class="w-10 h-10 rounded-xl bg-amber-dim text-amber flex items-center justify-center text-lg font-mono font-semibold shrink-0">4</span>
-      <div class="flex-1 min-w-0">
-        <div class="text-[15px] font-medium group-hover:text-a2 transition-colors">Content Pipeline</div>
-        <div class="text-sm text-t2 mt-0.5">Calendar + list — content scheduling, status tracking</div>
+    <a href="4-content-pipeline.html" class="card">
+      <div class="num" style="background:rgba(251,191,36,0.12);color:#fbbf24">4</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:17px;font-weight:600">Content Pipeline</div>
+        <div style="font-size:14px;color:#8888a0;margin-top:3px"><span style="color:#fbbf24">Calendar</span> + list — content scheduling, status tracking</div>
       </div>
-      <span class="hidden sm:inline-flex h-5 px-2.5 rounded-full text-[11px] font-mono font-medium tracking-wide bg-amber-dim text-amber items-center shrink-0">Calendar</span>
+      <span class="tag" style="background:rgba(251,191,36,0.12);color:#fbbf24">Calendar</span>
     </a>
 
-    <a href="5-agent-vitals.html" class="glass rounded-2xl p-5 flex items-center gap-4 no-underline text-t1 transition-all duration-150 group hover:border-b2">
-      <span class="w-10 h-10 rounded-xl bg-a3 text-a1 flex items-center justify-center text-lg font-mono font-semibold shrink-0">5</span>
-      <div class="flex-1 min-w-0">
-        <div class="text-[15px] font-medium group-hover:text-a2 transition-colors">Agent Vitals</div>
-        <div class="text-sm text-t2 mt-0.5">Team health — sparklines, metrics, activity feeds</div>
+    <a href="5-agent-vitals.html" class="card">
+      <div class="num" style="background:rgba(56,189,248,0.12);color:#38bdf8">5</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:17px;font-weight:600">Agent Vitals</div>
+        <div style="font-size:14px;color:#8888a0;margin-top:3px">Team health — <span style="color:#38bdf8">sparklines</span>, metrics, activity feeds</div>
       </div>
-      <span class="hidden sm:inline-flex h-5 px-2.5 rounded-full text-[11px] font-mono font-medium tracking-wide bg-a3 text-a2 items-center shrink-0">Dashboard</span>
+      <span class="tag" style="background:rgba(56,189,248,0.12);color:#38bdf8">Dashboard</span>
     </a>
+
   </div>
 
-  <p class="text-center text-xs font-mono text-t3 mt-14">
-    design-system.md v3 · Geist · glass · violet
+  <!-- Decorative gradient line -->
+  <div style="margin-top:48px;height:2px;border-radius:1px;background:linear-gradient(90deg,rgba(139,92,246,0.5) 0%,rgba(163,230,53,0.3) 50%,rgba(251,113,133,0.2) 100%)"></div>
+  <p style="text-align:center;font-family:'Space Mono',monospace;font-size:12px;color:#555568;margin-top:16px">
+    design-system.md v4 · <span style="color:#a78bfa">violet</span> + <span style="color:#a3e635">lime</span>
   </p>
 </div>
 </body>

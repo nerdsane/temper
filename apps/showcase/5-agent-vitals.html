@@ -6,66 +6,234 @@
 <title>Agent Vitals</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
-tailwindcss.config={theme:{extend:{colors:{s1:'#0c0c10',s2:'#14141a',s3:'#1c1c24',s4:'#24242e',t1:'#ededf0',t2:'#8b8b9e',t3:'#55556a',a1:'#8b5cf6',a2:'#a78bfa',a3:'rgba(139,92,246,0.12)',b1:'rgba(255,255,255,0.06)',b2:'rgba(255,255,255,0.10)',green:{DEFAULT:'#3dd68c',dim:'rgba(61,214,140,0.10)'},amber:{DEFAULT:'#e5a63e',dim:'rgba(229,166,62,0.10)'},red:{DEFAULT:'#e5534b',dim:'rgba(229,83,75,0.10)'},blue:{DEFAULT:'#38bdf8',dim:'rgba(56,189,248,0.10)'},purple:{DEFAULT:'#c084fc',dim:'rgba(192,132,252,0.10)'}},fontFamily:{sans:['Geist','system-ui','sans-serif'],mono:['Geist Mono','"JetBrains Mono"','monospace']}}}}
+tailwindcss.config={theme:{extend:{colors:{
+  s1:'#08080c',s2:'#101016',s3:'#18181f',s4:'#222230',
+  t1:'#eeeef2',t2:'#8888a0',t3:'#555568',
+},fontFamily:{sans:['Space Grotesk','system-ui','sans-serif'],mono:['Space Mono','monospace']}}}}
 </script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap">
 <style>
   *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-  body{font-family:'Geist',system-ui,sans-serif;background:#0c0c10;color:#ededf0;min-height:100vh;-webkit-font-smoothing:antialiased}
-  body::before{content:'';position:fixed;top:-30%;left:-10%;width:60%;height:60%;background:radial-gradient(circle,rgba(139,92,246,0.08) 0%,transparent 70%);pointer-events:none;z-index:0}
-  body::after{content:'';position:fixed;bottom:-20%;right:-10%;width:50%;height:50%;background:radial-gradient(circle,rgba(61,214,140,0.04) 0%,transparent 70%);pointer-events:none;z-index:0}
-  body>*{position:relative;z-index:1}
-  .glass{background:linear-gradient(135deg,rgba(255,255,255,0.05) 0%,rgba(255,255,255,0.02) 100%);border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
-  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:99px}
-  ::selection{background:rgba(139,92,246,0.3)}
+  body{font-family:'Space Grotesk',system-ui,sans-serif;background:#08080c;color:#eeeef2;min-height:100vh;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+
+  .orb{position:fixed;border-radius:50%;pointer-events:none;z-index:0}
+  .orb-1{top:-20%;left:-10%;width:55vw;height:55vw;background:radial-gradient(circle,rgba(139,92,246,0.40) 0%,rgba(139,92,246,0.15) 35%,transparent 65%);filter:blur(70px)}
+  .orb-2{bottom:-15%;right:-10%;width:50vw;height:50vw;background:radial-gradient(circle,rgba(163,230,53,0.28) 0%,rgba(163,230,53,0.08) 35%,transparent 65%);filter:blur(70px)}
+  .orb-3{top:50%;left:55%;width:30vw;height:30vw;background:radial-gradient(circle,rgba(56,189,248,0.12) 0%,transparent 60%);filter:blur(60px)}
+
+  body>:not(.orb){position:relative;z-index:1}
+  body::after{content:'';position:fixed;inset:0;z-index:2;pointer-events:none;opacity:0.025;
+    background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-repeat:repeat;background-size:128px 128px}
+
+  .glass{
+    background:linear-gradient(135deg,rgba(255,255,255,0.06) 0%,rgba(255,255,255,0.02) 50%,rgba(139,92,246,0.03) 100%);
+    border:1px solid rgba(255,255,255,0.10);
+    backdrop-filter:blur(48px) saturate(2.0);
+    -webkit-backdrop-filter:blur(48px) saturate(2.0);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,0.10),0 8px 32px rgba(0,0,0,0.4);
+  }
+
+  .hl{background:linear-gradient(120deg,rgba(139,92,246,0.25) 0%,rgba(163,230,53,0.15) 100%);padding:1px 6px;border-radius:4px}
+  .label{font-family:'Space Mono',monospace;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase}
+
+  /* Agent card with colored left accent */
+  .agent-card{position:relative;overflow:hidden;transition:all 0.25s}
+  .agent-card::before{content:'';position:absolute;top:0;left:0;bottom:0;width:3px;border-radius:0 2px 2px 0}
+  .agent-card:hover{transform:translateY(-1px);border-color:rgba(255,255,255,0.16)}
+
+  /* Sparkline bars */
+  .spark{display:flex;align-items:flex-end;gap:1px;height:32px}
+  .spark-bar{flex:1;border-radius:2px 2px 0 0;min-height:2px;transition:height 0.3s}
+
+  /* Big metric number */
+  .metric-big{font-family:'Space Mono',monospace;font-size:28px;font-weight:700;line-height:1}
+  .metric-label{font-family:'Space Mono',monospace;font-size:10px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#555568;margin-top:4px}
+
+  /* Status dot */
+  .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .dot-ok{background:#3dd68c}
+  .dot-warn{background:#e5a63e;animation:pulse 2s infinite}
+  .dot-off{background:#222230}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+
+  /* Activity row */
+  .activity{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+  .activity:last-child{border-bottom:none}
+
+  ::selection{background:rgba(139,92,246,0.35);color:#eeeef2}
+  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:99px}
 </style>
 </head>
 <body>
+
+<div class="orb orb-1"></div>
+<div class="orb orb-2"></div>
+<div class="orb orb-3"></div>
+
 <div class="mx-auto w-full max-w-5xl px-4 sm:px-6 lg:px-8 py-6 sm:py-10">
-  <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
-    <div><h1 class="text-xl sm:text-2xl font-semibold tracking-tight">Agent Vitals</h1><p class="text-sm text-t2 mt-1">Team health · real-time</p></div>
-    <div class="flex items-center gap-3"><div class="w-2 h-2 rounded-full bg-green animate-pulse"></div><span class="text-xs font-mono text-t3" id="ts">—</span></div>
+
+  <!-- Header -->
+  <div style="margin-bottom:32px">
+    <a href="index.html" style="color:#555568;font-size:13px;text-decoration:none;font-family:'Space Mono',monospace;display:inline-block;margin-bottom:12px">← showcase</a>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+      <div>
+        <h1 style="font-size:clamp(24px,4vw,32px);font-weight:700;letter-spacing:-0.02em">Agent <span class="hl">Vitals</span></h1>
+        <p style="font-size:15px;color:#8888a0;margin-top:4px">Team health · <span style="color:#38bdf8">real-time</span></p>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <div class="dot dot-ok"></div>
+        <span style="font-family:'Space Mono',monospace;font-size:12px;color:#555568" id="ts">—</span>
+      </div>
+    </div>
   </div>
-  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-10" id="agents"></div>
-  <h3 class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-3">Infrastructure</h3>
-  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-12" id="sys"></div>
+
+  <!-- Summary strip -->
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,120px),1fr));gap:12px;margin-bottom:32px" id="summary"></div>
+
+  <!-- Gradient divider -->
+  <div style="height:1px;background:linear-gradient(90deg,rgba(139,92,246,0.4) 0%,rgba(56,189,248,0.2) 50%,transparent 100%);margin-bottom:24px"></div>
+
+  <!-- Agent grid -->
+  <div class="label" style="color:#a78bfa;margin-bottom:16px">Agents</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:16px;margin-bottom:40px" id="agents"></div>
+
+  <!-- Infrastructure -->
+  <div class="label" style="color:#a3e635;margin-bottom:16px">Infrastructure</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr));gap:12px;margin-bottom:40px" id="sys"></div>
+
+  <!-- Temper section -->
   <div id="temper-section"></div>
+
+  <!-- Decorative line -->
+  <div style="margin-top:40px;height:2px;border-radius:1px;background:linear-gradient(90deg,rgba(139,92,246,0.4) 0%,rgba(163,230,53,0.3) 50%,rgba(56,189,248,0.2) 100%)"></div>
+  <p style="text-align:center;font-family:'Space Mono',monospace;font-size:12px;color:#555568;margin-top:16px">
+    <span style="color:#a78bfa">violet</span> + <span style="color:#a3e635">lime</span> · design-system v4
+  </p>
 </div>
+
 <script src="temper-sections.js"></script>
 <script>
-const A=[
-  {n:'Haku',e:'🐉',r:'Engineering',st:'ok',c:'a1',m:{actions:47,proposals:10,uptime:'99.2%'},sp:[3,5,2,8,4,6,7,3,5,9,4,6,2,8,5,7,3,6,4,8,5,3,7,6],rc:[{t:'18:25',x:'Design system v3 committed'},{t:'17:49',x:'PROP-027 selected'},{t:'16:30',x:'Webhook dispatch started'}]},
-  {n:'Calcifer',e:'🔥',r:'Content',st:'ok',c:'red',m:{posts:12,drafts:3,reach:'15.8k'},sp:[2,4,1,3,5,2,4,3,6,2,5,3,4,1,6,3,2,5,4,3,2,6,4,3],rc:[{t:'15:20',x:'X draft: shared backend'},{t:'14:00',x:'Blog voice pass'}]},
-  {n:'Jiji',e:'🐱',r:'Writing',st:'warn',c:'purple',m:{articles:4,words:'12.4k',queue:2},sp:[1,2,0,3,1,2,0,4,2,1,3,0,2,1,3,2,0,1,4,2,1,0,3,1],rc:[{t:'14:00',x:'Blog needs more failure stories'}]},
-  {n:'Chihiro',e:'🌸',r:'Admin',st:'ok',c:'blue',m:{tasks:8,resolved:23,pending:3},sp:[4,3,5,2,4,6,3,5,2,4,3,5,6,2,4,3,5,4,2,6,3,4,5,3],rc:[{t:'11:30',x:'Appointment → Thursday'}]},
-  {n:'Koi',e:'🎏',r:'Architecture',st:'off',c:'green',m:{reviews:5,decisions:3,pending:1},sp:[0,1,0,2,0,1,0,0,2,0,1,0,0,1,0,2,0,0,1,0,0,2,0,1],rc:[{t:'10:00',x:'PROP-028 approved'}]},
-  {n:'Ponyo',e:'🐟',r:'Monitoring',st:'ok',c:'amber',m:{checks:144,alerts:2,uptime:'100%'},sp:[6,6,6,6,6,6,6,6,6,6,6,5,6,6,6,6,6,6,6,6,6,6,6,6],rc:[{t:'18:00',x:'All nominal'},{t:'14:23',x:'⚠ SSE 502 → Haku'}]}
+const AGENTS=[
+  {n:'Haku',e:'🐉',r:'Engineering',st:'ok',color:'#8b5cf6',dim:'rgba(139,92,246,0.12)',
+   m:{actions:47,proposals:10,uptime:'99.2%'},
+   sp:[3,5,2,8,4,6,7,3,5,9,4,6,2,8,5,7,3,6,4,8,5,3,7,6],
+   rc:[{t:'18:25',x:'Design system v4 committed',hl:true},{t:'17:49',x:'PROP-027 selected'},{t:'16:30',x:'Webhook dispatch live'}]},
+  {n:'Calcifer',e:'🔥',r:'Content',st:'ok',color:'#fb7185',dim:'rgba(251,113,133,0.12)',
+   m:{posts:12,drafts:3,reach:'15.8k'},
+   sp:[2,4,1,3,5,2,4,3,6,2,5,3,4,1,6,3,2,5,4,3,2,6,4,3],
+   rc:[{t:'15:20',x:'X draft: shared backend'},{t:'14:00',x:'Blog voice pass'}]},
+  {n:'Jiji',e:'🐱',r:'Writing',st:'warn',color:'#c084fc',dim:'rgba(192,132,252,0.12)',
+   m:{articles:4,words:'12.4k',queue:2},
+   sp:[1,2,0,3,1,2,0,4,2,1,3,0,2,1,3,2,0,1,4,2,1,0,3,1],
+   rc:[{t:'14:00',x:'Blog needs more failure stories',hl:true}]},
+  {n:'Chihiro',e:'🌸',r:'Admin',st:'ok',color:'#38bdf8',dim:'rgba(56,189,248,0.12)',
+   m:{tasks:8,resolved:23,pending:3},
+   sp:[4,3,5,2,4,6,3,5,2,4,3,5,6,2,4,3,5,4,2,6,3,4,5,3],
+   rc:[{t:'11:30',x:'Appointment → Thursday'}]},
+  {n:'Koi',e:'🎏',r:'Architecture',st:'off',color:'#a3e635',dim:'rgba(163,230,53,0.12)',
+   m:{reviews:5,decisions:3,pending:1},
+   sp:[0,1,0,2,0,1,0,0,2,0,1,0,0,1,0,2,0,0,1,0,0,2,0,1],
+   rc:[{t:'10:00',x:'PROP-028 approved'}]},
+  {n:'Ponyo',e:'🐟',r:'Monitoring',st:'ok',color:'#fbbf24',dim:'rgba(251,191,36,0.12)',
+   m:{checks:144,alerts:2,uptime:'100%'},
+   sp:[6,6,6,6,6,6,6,6,6,6,6,5,6,6,6,6,6,6,6,6,6,6,6,6],
+   rc:[{t:'18:00',x:'All nominal'},{t:'14:23',x:'⚠ SSE 502 → Haku',hl:true}]}
 ];
-const CM={a1:{av:'bg-a3',bar:'bg-a1'},red:{av:'bg-red-dim',bar:'bg-red'},purple:{av:'bg-purple-dim',bar:'bg-purple'},blue:{av:'bg-blue-dim',bar:'bg-blue'},green:{av:'bg-green-dim',bar:'bg-green'},amber:{av:'bg-amber-dim',bar:'bg-amber'}};
-const DOT={ok:'bg-green',warn:'bg-amber animate-pulse',err:'bg-red animate-pulse',off:'bg-s4'};
-const SYS=[{i:'🌐',n:'Deep Sci-Fi',d:'api.deep-sci-fi.world',s:'ok'},{i:'⚙️',n:'Temper',d:'localhost:3001',s:'ok'},{i:'🚂',n:'Railway',d:'1GB instance',s:'warn'},{i:'📊',n:'Postgres',d:'schema e97cb81',s:'ok'}];
+
+const DOT_CLASS={ok:'dot-ok',warn:'dot-warn',off:'dot-off'};
+const SYS=[
+  {i:'🌐',n:'Deep Sci-Fi',d:'api.deep-sci-fi.world',s:'ok',latency:'142ms'},
+  {i:'⚙️',n:'Temper',d:'localhost:3001',s:'ok',latency:'3ms'},
+  {i:'🚂',n:'Railway',d:'1GB instance',s:'warn',latency:'—'},
+  {i:'📊',n:'Postgres',d:'schema e97cb81',s:'ok',latency:'1ms'}
+];
 
 function render(){
-  document.getElementById('agents').innerHTML=A.map(a=>{
-    const c=CM[a.c],mx=Math.max(...a.sp);
-    return`<div class="glass rounded-2xl p-5">
-      <div class="flex items-center gap-3 mb-4">
-        <div class="w-10 h-10 rounded-xl ${c.av} flex items-center justify-center text-xl shrink-0">${a.e}</div>
-        <div class="flex-1 min-w-0"><div class="font-medium">${a.n}</div><div class="text-[11px] font-mono text-t3">${a.r}</div></div>
-        <div class="w-2 h-2 rounded-full ${DOT[a.st]} shrink-0"></div>
+  // Summary strip — big numbers
+  const totalActions=AGENTS.reduce((s,a)=>s+(a.m.actions||a.m.posts||a.m.tasks||a.m.checks||a.m.reviews||0),0);
+  const online=AGENTS.filter(a=>a.st==='ok').length;
+  const warnings=AGENTS.filter(a=>a.st==='warn').length;
+  document.getElementById('summary').innerHTML=[
+    {v:AGENTS.length,l:'Agents',c:'#a78bfa'},
+    {v:online,l:'Online',c:'#3dd68c'},
+    {v:warnings,l:'Warnings',c:'#e5a63e'},
+    {v:totalActions,l:'Actions/24h',c:'#38bdf8'},
+  ].map(s=>`
+    <div class="glass" style="border-radius:10px;padding:16px;text-align:center">
+      <div class="metric-big" style="color:${s.c}">${s.v}</div>
+      <div class="metric-label">${s.l}</div>
+    </div>
+  `).join('');
+
+  // Agent cards
+  document.getElementById('agents').innerHTML=AGENTS.map(a=>{
+    const mx=Math.max(...a.sp,1);
+    return`<div class="glass agent-card" style="border-radius:10px;padding:20px;--accent:${a.color}">
+      <style>.agent-card[style*="${a.color}"]::before{background:${a.color}}</style>
+      
+      <!-- Header -->
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+        <div style="width:44px;height:44px;border-radius:10px;background:${a.dim};display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">${a.e}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:17px;font-weight:600">${a.n}</div>
+          <div style="font-family:'Space Mono',monospace;font-size:11px;color:#555568;margin-top:1px">${a.r}</div>
+        </div>
+        <div class="dot ${DOT_CLASS[a.st]}"></div>
       </div>
-      <div class="grid grid-cols-3 gap-2 mb-4">${Object.entries(a.m).map(([k,v])=>`<div class="text-center"><div class="text-base font-semibold font-mono">${v}</div><div class="text-[10px] font-mono font-medium uppercase tracking-[0.08em] text-t3 mt-0.5">${k}</div></div>`).join('')}</div>
-      <div class="flex items-end gap-px h-8 mb-4">${a.sp.map(v=>`<div class="flex-1 rounded-t ${c.bar}" style="height:${Math.max(8,(v/mx)*100)}%;opacity:${0.2+(v/mx)*0.8}"></div>`).join('')}</div>
-      <div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-2">Recent</div>
-      ${a.rc.map(r=>`<div class="flex items-start gap-2 py-1"><span class="text-[11px] font-mono text-t3 shrink-0">${r.t}</span><span class="text-[13px] text-t2">${r.x}</span></div>`).join('')}
+
+      <!-- Metrics row -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px">
+        ${Object.entries(a.m).map(([k,v])=>`
+          <div style="text-align:center;padding:8px 0;background:rgba(255,255,255,0.03);border-radius:6px">
+            <div style="font-family:'Space Mono',monospace;font-size:16px;font-weight:700;color:${a.color}">${v}</div>
+            <div class="metric-label">${k}</div>
+          </div>
+        `).join('')}
+      </div>
+
+      <!-- Sparkline -->
+      <div class="spark" style="margin-bottom:16px">
+        ${a.sp.map((v,i)=>{
+          const h=Math.max(6,(v/mx)*100);
+          const isLast=i>=a.sp.length-3;
+          return`<div class="spark-bar" style="height:${h}%;background:${a.color};opacity:${isLast?1:0.2+(v/mx)*0.5}"></div>`;
+        }).join('')}
+      </div>
+
+      <!-- Recent activity -->
+      <div class="label" style="color:#555568;margin-bottom:8px">Recent</div>
+      ${a.rc.map(r=>`
+        <div class="activity">
+          <span style="font-family:'Space Mono',monospace;font-size:11px;color:#555568;flex-shrink:0;margin-top:1px">${r.t}</span>
+          <span style="font-size:13px;color:${r.hl?a.color:'#8888a0'}">${r.x}</span>
+        </div>
+      `).join('')}
     </div>`;
   }).join('');
-  document.getElementById('sys').innerHTML=SYS.map(s=>`<div class="glass rounded-xl p-3.5 flex items-center gap-3"><span class="text-lg shrink-0">${s.i}</span><div class="flex-1 min-w-0"><div class="text-sm font-medium truncate">${s.n}</div><div class="text-[11px] font-mono text-t3 mt-0.5 truncate">${s.d}</div></div><span class="h-5 px-2 rounded-full text-[10px] font-mono font-medium tracking-wide inline-flex items-center shrink-0 ${s.s==='ok'?'bg-green-dim text-green':'bg-amber-dim text-amber'}">${s.s}</span></div>`).join('');
+
+  // Infrastructure
+  document.getElementById('sys').innerHTML=SYS.map(s=>{
+    const isOk=s.s==='ok';
+    return`<div class="glass" style="border-radius:10px;padding:14px;display:flex;align-items:center;gap:12px">
+      <span style="font-size:20px;flex-shrink:0">${s.i}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:14px;font-weight:600">${s.n}</div>
+        <div style="font-family:'Space Mono',monospace;font-size:11px;color:#555568;margin-top:2px">${s.d}</div>
+      </div>
+      <div style="text-align:right;flex-shrink:0">
+        <div style="font-family:'Space Mono',monospace;font-size:12px;color:${isOk?'#3dd68c':'#e5a63e'};font-weight:700">${s.s.toUpperCase()}</div>
+        <div style="font-family:'Space Mono',monospace;font-size:10px;color:#555568;margin-top:1px">${s.latency}</div>
+      </div>
+    </div>`;
+  }).join('');
+
   document.getElementById('ts').textContent=new Date().toLocaleTimeString();
 }
-render();setInterval(render,30000);
-renderTemperSection('temper-section','agent-vitals');
+
+render();
+setInterval(render,30000);
+if(typeof renderTemperSection==='function')renderTemperSection('temper-section','agent-vitals');
 </script>
 </body>
 </html>
