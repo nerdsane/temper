@@ -1,8 +1,10 @@
 {
-  "name": "@temper/openclaw-plugin",
+  "name": "@temper/openclaw-temper",
   "version": "0.1.0",
   "openclaw": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "dependencies": {}
 }

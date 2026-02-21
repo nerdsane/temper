@@ -543,7 +543,7 @@ const createSseService = (api: OpenClawPluginApi, config: TemperPluginConfig) =>
 };
 
 const temperPlugin = {
-  id: "temper",
+  id: "openclaw-temper",
   name: "Temper",
   description: "Temper state machine integration — real-time entity subscriptions and agent tools",
   register(api: OpenClawPluginApi) {
