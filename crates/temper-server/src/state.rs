@@ -603,8 +603,10 @@ impl ServerState {
                 table,
                 initial_fields,
                 pg.clone(),
-            ),
-            None => EntityActor::new(entity_type, entity_id, table, initial_fields),
+            )
+            .with_tenant(tenant.as_str()),
+            None => EntityActor::new(entity_type, entity_id, table, initial_fields)
+                .with_tenant(tenant.as_str()),
         };
         let actor_ref = self.actor_system.spawn(actor, &key);
 

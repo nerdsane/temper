@@ -40,6 +40,7 @@ use super::types::{
 /// Optionally persists events to PostgreSQL. Wide events are emitted
 /// via the OTEL SDK (no-op when OTEL is not initialised).
 pub struct EntityActor {
+    tenant: String,
     entity_type: String,
     entity_id: String,
     /// Live reference to the transition table. Reads through `RwLock` so that
@@ -62,6 +63,7 @@ impl EntityActor {
         initial_fields: serde_json::Value,
     ) -> Self {
         Self {
+            tenant: "default".into(),
             entity_type: entity_type.into(),
             entity_id: entity_id.into(),
             table,
@@ -80,6 +82,7 @@ impl EntityActor {
         store: Arc<PostgresEventStore>,
     ) -> Self {
         Self {
+            tenant: "default".into(),
             entity_type: entity_type.into(),
             entity_id: entity_id.into(),
             table,
@@ -89,9 +92,15 @@ impl EntityActor {
         }
     }
 
-    /// Persistence ID for this entity: "EntityType:EntityId".
+    /// Set the tenant for this actor (must be called before spawning).
+    pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.tenant = tenant.into();
+        self
+    }
+
+    /// Persistence ID for this entity: "tenant:EntityType:EntityId".
     fn persistence_id(&self) -> String {
-        format!("{}:{}", self.entity_type, self.entity_id)
+        format!("{}:{}:{}", self.tenant, self.entity_type, self.entity_id)
     }
 
     /// Persist an event to Postgres (if store is configured).
