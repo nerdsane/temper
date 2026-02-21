@@ -1,0 +1,25 @@
+[package]
+name = "temper-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "MCP stdio server for Temper Code Mode tools"
+
+[dependencies]
+temper-spec = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "rt", "macros"] }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+
+# pydantic/monty Rust sandbox crate
+monty = { git = "https://github.com/pydantic/monty.git", package = "monty", rev = "87f8f3104e9f0da0bf03f59a745b1e364d39d3bf" }
+
+[dev-dependencies]
+axum = { workspace = true }
+temper-server = { workspace = true }
+temper-runtime = { workspace = true }
+tempfile = "3"

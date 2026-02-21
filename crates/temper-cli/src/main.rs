@@ -6,6 +6,7 @@
 mod codegen;
 mod init;
 mod install;
+mod mcp;
 mod serve;
 mod verify;
 
@@ -68,6 +69,15 @@ enum Commands {
         #[arg(long, default_value = "default")]
         tenant: String,
     },
+    /// Start the stdio MCP server for Code Mode
+    Mcp {
+        /// Port where Temper HTTP server is running
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+        /// Load an app: --app name=specs-dir (repeatable)
+        #[arg(long)]
+        app: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -106,6 +116,17 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             serve::run(port, apps, storage, storage_explicit).await?
+        }
+        Commands::Mcp { port, app } => {
+            let mut apps: Vec<(String, String)> = Vec::new();
+            for entry in &app {
+                if let Some((name, path)) = entry.split_once('=') {
+                    apps.push((name.to_string(), path.to_string()));
+                } else {
+                    anyhow::bail!("Invalid --app format: '{entry}'. Expected name=specs-dir");
+                }
+            }
+            mcp::run(port, apps).await?
         }
     }
 
@@ -264,6 +285,34 @@ mod tests {
                 ..
             } => {}
             _ => panic!("expected Serve command with default postgres storage"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_mcp_default_port() {
+        let cli = Cli::parse_from(["temper", "mcp"]);
+        match cli.command {
+            Commands::Mcp { port, .. } => assert_eq!(port, 3000),
+            _ => panic!("expected Mcp command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_mcp_with_apps() {
+        let cli = Cli::parse_from([
+            "temper",
+            "mcp",
+            "--port",
+            "3001",
+            "--app",
+            "haku-ops=apps/haku-ops/specs",
+        ]);
+        match cli.command {
+            Commands::Mcp { port, app } => {
+                assert_eq!(port, 3001);
+                assert_eq!(app, vec!["haku-ops=apps/haku-ops/specs"]);
+            }
+            _ => panic!("expected Mcp command"),
         }
     }
 }
