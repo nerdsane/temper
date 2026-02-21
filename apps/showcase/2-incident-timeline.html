@@ -4,292 +4,149 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Incident Timeline</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwindcss.config={theme:{extend:{colors:{base:{DEFAULT:'#0a0a0c',50:'#12121a',100:'#1a1a24',200:'#242430'},pri:{DEFAULT:'#7c6cff',dim:'rgba(124,108,255,0.12)',light:'#9d8fff'},ok:{DEFAULT:'#34d399',dim:'rgba(52,211,153,0.12)'},warn:{DEFAULT:'#fbbf24',dim:'rgba(251,191,36,0.12)'},err:{DEFAULT:'#f87171',dim:'rgba(248,113,113,0.12)'},txt:{DEFAULT:'#eeeef2',2:'#9898a8',3:'#5c5c6e'},glass:{DEFAULT:'rgba(255,255,255,0.06)',2:'rgba(255,255,255,0.1)'}},fontFamily:{sans:['Inter','system-ui','sans-serif'],mono:['"JetBrains Mono"','"SF Mono"','monospace']}}}}
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-
-  :root {
-    --bg: #09090b; --surface: #18181b; --surface-2: #27272a; --surface-3: #3f3f46;
-    --text: #fafafa; --text-2: #a1a1aa; --text-3: #71717a;
-    --border: #27272a; --border-2: #3f3f46;
-    --accent: #6c8cff; --accent-dim: rgba(108,140,255,0.15);
-    --ok: #4ade80; --ok-dim: rgba(74,222,128,0.15);
-    --warn: #fbbf24; --warn-dim: rgba(251,191,36,0.15);
-    --err: #f87171; --err-dim: rgba(248,113,113,0.15);
-    --info: #22d3ee; --info-dim: rgba(34,211,238,0.15);
-    --purple: #a78bfa; --purple-dim: rgba(167,139,250,0.15);
-    --font-sans: 'Inter', -apple-system, system-ui, sans-serif;
-    --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
-    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
-    --space-5: 24px; --space-6: 32px; --space-7: 48px;
-    --radius-sm: 4px; --radius-md: 8px; --radius-lg: 12px;
-    --ease: cubic-bezier(0.16, 1, 0.3, 1);
-    --duration-fast: 100ms; --duration-norm: 200ms;
-  }
-
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: var(--font-sans); background: var(--bg); color: var(--text); min-height: 100vh; }
-  .container { width: min(100% - 2rem, 52rem); margin-inline: auto; padding-block: var(--space-6); }
-
-  /* Top bar */
-  .top {
-    display: flex; align-items: start; justify-content: space-between;
-    margin-bottom: var(--space-6); gap: var(--space-4); flex-wrap: wrap;
-  }
-  .incident-title { font-size: clamp(1.25rem, 2.5vw, 1.75rem); font-weight: 700; letter-spacing: -0.02em; }
-  .incident-id { font: 0.75rem var(--font-mono); color: var(--text-3); margin-top: var(--space-1); }
-
-  .severity {
-    display: inline-flex; align-items: center; gap: var(--space-2);
-    padding: var(--space-2) var(--space-4);
-    border-radius: var(--radius-md); font: 600 0.875rem var(--font-sans);
-    flex-shrink: 0;
-  }
-  .severity-critical { background: var(--err-dim); color: var(--err); }
-  .severity-warning { background: var(--warn-dim); color: var(--warn); }
-  .severity-info { background: var(--info-dim); color: var(--info); }
-
-  .severity-dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    animation: pulse 2s ease-in-out infinite;
-  }
-  .severity-critical .severity-dot { background: var(--err); }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
-
-  /* Status strip */
-  .status-strip {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
-    gap: var(--space-3);
-    margin-bottom: var(--space-6);
-  }
-  .status-card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-md); padding: var(--space-3) var(--space-4);
-  }
-  .status-label { font: 500 0.6875rem/1.3 var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); }
-  .status-value { font: 500 0.875rem var(--font-sans); margin-top: var(--space-1); }
-  .status-value.live { color: var(--err); }
-  .status-value.resolved { color: var(--ok); }
-
-  /* Timeline */
-  .timeline { position: relative; padding-left: var(--space-6); }
-  .timeline::before {
-    content: ''; position: absolute; left: 11px; top: 8px; bottom: 8px;
-    width: 1px; background: var(--border-2);
-  }
-
-  .event {
-    position: relative; padding-bottom: var(--space-5);
-  }
-  .event:last-child { padding-bottom: 0; }
-
-  .event-dot {
-    position: absolute; left: calc(-1 * var(--space-6) + 4px);
-    top: 6px; width: 14px; height: 14px;
-    border-radius: 50%; border: 2px solid var(--bg);
-  }
-  .event-dot.detect { background: var(--err); }
-  .event-dot.investigate { background: var(--warn); }
-  .event-dot.action { background: var(--accent); }
-  .event-dot.resolve { background: var(--ok); }
-  .event-dot.note { background: var(--surface-3); }
-
-  .event-header {
-    display: flex; align-items: baseline; gap: var(--space-3);
-    margin-bottom: var(--space-2); flex-wrap: wrap;
-  }
-  .event-time { font: 0.75rem var(--font-mono); color: var(--text-3); flex-shrink: 0; }
-  .event-actor { font: 500 0.8125rem var(--font-sans); }
-  .event-type {
-    font: 500 0.6875rem var(--font-mono); padding: 1px 6px;
-    border-radius: var(--radius-sm); text-transform: uppercase; letter-spacing: 0.04em;
-  }
-  .type-detect { background: var(--err-dim); color: var(--err); }
-  .type-investigate { background: var(--warn-dim); color: var(--warn); }
-  .type-action { background: var(--accent-dim); color: var(--accent); }
-  .type-resolve { background: var(--ok-dim); color: var(--ok); }
-  .type-note { background: var(--surface-2); color: var(--text-3); }
-
-  .event-body {
-    font-size: 0.875rem; color: var(--text-2); line-height: 1.5;
-  }
-  .event-body code {
-    font-family: var(--font-mono); font-size: 0.8125rem;
-    background: var(--surface-2); padding: 1px 5px; border-radius: var(--radius-sm);
-  }
-
-  .event-attachment {
-    margin-top: var(--space-3);
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-md); padding: var(--space-3) var(--space-4);
-    font: 0.8125rem/1.4 var(--font-mono); color: var(--text-2);
-    white-space: pre-wrap; overflow-x: auto;
-  }
-
-  /* Add event form */
-  .add-event {
-    margin-top: var(--space-6); padding-top: var(--space-6);
-    border-top: 1px solid var(--border);
-  }
-  .add-event label { font: 500 0.6875rem/1.3 var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); display: block; margin-bottom: var(--space-2); }
-  .input {
-    width: 100%; height: 36px; padding: 0 var(--space-3);
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-md); color: var(--text);
-    font: 0.875rem var(--font-sans);
-    transition: border-color var(--duration-fast);
-  }
-  .input:focus { border-color: var(--accent); outline: none; }
-  textarea.input { height: 80px; padding: var(--space-3); resize: vertical; }
-  .form-row { display: flex; gap: var(--space-3); margin-bottom: var(--space-3); flex-wrap: wrap; }
-  .form-row > * { flex: 1; min-width: 8rem; }
-
-  select.input {
-    appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2371717a'%3E%3Cpath d='M6 8L1 3h10z'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 12px center;
-    padding-right: 32px;
-  }
-
-  .btn {
-    display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1);
-    height: 36px; padding: 0 var(--space-4); border-radius: var(--radius-md);
-    font: 500 0.8125rem var(--font-sans); cursor: pointer;
-    transition: all var(--duration-fast) var(--ease); border: 1px solid transparent;
-  }
-  .btn-primary { background: var(--accent); color: #fff; }
-  .btn-primary:hover { filter: brightness(1.1); }
-  .btn-ok { background: var(--ok); color: #000; }
-  .btn-ok:hover { filter: brightness(1.1); }
-
-  .resolve-bar {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: var(--space-4); flex-wrap: wrap;
-    margin-top: var(--space-5); padding: var(--space-4);
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-  }
-  .resolve-bar span { font-size: 0.875rem; color: var(--text-2); }
-
-  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 0.01ms !important; } }
+  body { background: #0a0a0c; -webkit-font-smoothing: antialiased; }
+  .glass { background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.06); backdrop-filter: blur(12px); }
+  .glass-static { background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.06); }
+  .glow-top { background-image: radial-gradient(ellipse at 50% -20%, rgba(248,113,113,0.1) 0%, transparent 60%); }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
 </style>
 </head>
-<body>
-<div class="container">
-  <div class="top">
+<body class="font-sans text-txt min-h-screen glow-top">
+<div class="mx-auto w-full max-w-3xl px-4 sm:px-6 py-6 sm:py-8">
+
+  <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
     <div>
-      <div class="incident-title">Feed SSE Connection Drops</div>
-      <div class="incident-id">INC-2026-0220-001</div>
+      <h1 class="text-xl sm:text-2xl font-bold tracking-tight">Feed SSE Connection Drops</h1>
+      <p class="text-xs font-mono text-txt-3 mt-1">INC-2026-0220-001</p>
     </div>
-    <div class="severity severity-critical">
-      <span class="severity-dot"></span>
-      Active
-    </div>
-  </div>
-
-  <div class="status-strip">
-    <div class="status-card">
-      <div class="status-label">Status</div>
-      <div class="status-value live">Investigating</div>
-    </div>
-    <div class="status-card">
-      <div class="status-label">Detected</div>
-      <div class="status-value">14:23 EST</div>
-    </div>
-    <div class="status-card">
-      <div class="status-label">Duration</div>
-      <div class="status-value" id="duration">—</div>
-    </div>
-    <div class="status-card">
-      <div class="status-label">Impact</div>
-      <div class="status-value">Feed not updating</div>
-    </div>
-    <div class="status-card">
-      <div class="status-label">Owner</div>
-      <div class="status-value">🐉 Haku</div>
+    <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-err-dim text-err text-sm font-semibold shrink-0">
+      <span class="w-2 h-2 rounded-full bg-err animate-pulse"></span>Active
     </div>
   </div>
 
-  <div class="timeline" id="timeline"></div>
-
-  <div class="resolve-bar">
-    <span>All clear? Mark this incident resolved.</span>
-    <button class="btn btn-ok" onclick="resolve()">✓ Resolve</button>
+  <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-8">
+    <div class="glass rounded-lg p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3">Status</div><div class="text-sm font-medium text-err mt-1">Investigating</div></div>
+    <div class="glass rounded-lg p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3">Detected</div><div class="text-sm font-mono mt-1">14:23</div></div>
+    <div class="glass rounded-lg p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3">Duration</div><div class="text-sm font-mono mt-1" id="duration">—</div></div>
+    <div class="glass rounded-lg p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3">Impact</div><div class="text-sm mt-1">Feed down</div></div>
+    <div class="glass rounded-lg p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3">Owner</div><div class="text-sm mt-1">🐉 Haku</div></div>
   </div>
 
-  <div class="add-event">
-    <label>Add Event</label>
-    <div class="form-row">
+  <div class="relative pl-6 sm:pl-8 mb-8" id="timeline"></div>
+
+  <div class="glass rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-8">
+    <span class="text-sm text-txt-2">All clear? Mark this incident resolved.</span>
+    <button onclick="resolve()" class="h-9 px-4 rounded-lg bg-ok text-black text-sm font-medium hover:brightness-110 transition-all duration-150 shrink-0">✓ Resolve</button>
+  </div>
+
+  <div class="border-t border-glass pt-6 mb-10">
+    <h3 class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-4">Add Event</h3>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+      <select id="event-type" class="h-9 px-3 rounded-lg bg-base-50 border border-glass text-txt text-sm appearance-none focus:border-pri/50 focus:outline-none transition-all"><option value="note">Note</option><option value="action">Action Taken</option><option value="investigate">Investigation</option><option value="detect">Detection</option><option value="resolve">Resolution</option></select>
+      <input id="event-actor" class="h-9 px-3 rounded-lg bg-base-50 border border-glass text-txt text-sm placeholder:text-txt-3 focus:border-pri/50 focus:outline-none transition-all" placeholder="Actor (e.g. haku)">
+    </div>
+    <textarea id="event-body" class="w-full h-20 px-3 py-2 rounded-lg bg-base-50 border border-glass text-txt text-sm placeholder:text-txt-3 focus:border-pri/50 focus:outline-none transition-all resize-y leading-relaxed mb-3" placeholder="What happened?"></textarea>
+    <button onclick="addEvent()" class="h-9 px-4 rounded-lg bg-pri text-white text-sm font-medium hover:bg-pri-light transition-all duration-150">Add</button>
+  </div>
+
+  <!-- Temper Integration -->
+  <details class="group">
+    <summary class="flex items-center gap-2 cursor-pointer text-txt-3 hover:text-txt-2 transition-colors mb-4">
+      <span class="text-[11px] font-mono font-medium uppercase tracking-[0.08em]">⚙ How this uses Temper</span>
+      <svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="currentColor" viewBox="0 0 20 20"><path d="M6 6l8 4-8 4z"/></svg>
+    </summary>
+    <div class="glass-static rounded-xl p-4 sm:p-6 space-y-5 text-sm">
       <div>
-        <select class="input" id="event-type">
-          <option value="note">Note</option>
-          <option value="action">Action Taken</option>
-          <option value="investigate">Investigation</option>
-          <option value="detect">Detection</option>
-          <option value="resolve">Resolution</option>
-        </select>
+        <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-2">Entity: Incident</div>
+        <p class="text-txt-2 leading-relaxed mb-3">An incident has states <code class="text-[13px] font-mono bg-white/[0.04] px-1.5 py-0.5 rounded">Detected → Investigating → Mitigating → Resolved</code>. Events are child entities. The incident can't be resolved until at least one Action event exists (guard).</p>
+        <pre class="glass-static rounded-lg p-3 text-[13px] font-mono text-txt-2 leading-relaxed overflow-x-auto whitespace-pre"># incident.ioa.toml
+[entity]
+name = "Incident"
+initial_status = "Detected"
+
+[vars]
+has_mitigation = { type = "bool", init = false }
+
+[[actions]]
+name = "Investigate"
+from = ["Detected"]
+to = "Investigating"
+
+[[actions]]
+name = "Mitigate"
+from = ["Investigating"]
+to = "Mitigating"
+effects = [{ set = { var = "has_mitigation", value = true } }]
+
+[[actions]]
+name = "Resolve"
+from = ["Investigating", "Mitigating"]
+to = "Resolved"
+guards = [{ is_true = "has_mitigation" }]
+
+# Can't resolve without having mitigated first.
+# Temper catches this at L1 model checking.</pre>
       </div>
       <div>
-        <input class="input" id="event-actor" placeholder="Actor (e.g. haku)">
+        <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-2">API Flow</div>
+        <pre class="glass-static rounded-lg p-3 text-[13px] font-mono text-txt-2 leading-relaxed overflow-x-auto whitespace-pre"># Haku's cron detects the issue
+POST /tdata/Incidents
+{ "entity_id": "inc-0220-001",
+  "fields": { "title": "Feed SSE drops",
+              "severity": "critical", "owner": "haku" } }
+
+# Timeline events are PATCH updates to fields
+PATCH /tdata/Incidents('inc-0220-001')
+{ "fields": { "events": [...] } }
+
+# Or events could be their own entity set (IncidentEvents)
+
+# State transitions are verified actions:
+POST /tdata/Incidents('inc-0220-001')/Temper.Mitigate
+POST /tdata/Incidents('inc-0220-001')/Temper.Resolve</pre>
+      </div>
+      <div>
+        <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-2">Why Temper?</div>
+        <p class="text-txt-2 leading-relaxed">Without Temper, an agent could accidentally "resolve" an incident it never investigated. The state machine makes that <strong class="text-txt">impossible</strong> — the guard on <code class="font-mono bg-white/[0.04] px-1 py-0.5 rounded">Resolve</code> requires <code class="font-mono bg-white/[0.04] px-1 py-0.5 rounded">has_mitigation = true</code>. The trajectory log gives you a full audit trail.</p>
       </div>
     </div>
-    <textarea class="input" id="event-body" placeholder="What happened?"></textarea>
-    <div style="margin-top: var(--space-3);">
-      <button class="btn btn-primary" onclick="addEvent()">Add</button>
-    </div>
-  </div>
+  </details>
 </div>
 
 <script>
+const TYPE_STYLES = { detect:{dot:'bg-err',badge:'bg-err-dim text-err'}, investigate:{dot:'bg-warn',badge:'bg-warn-dim text-warn'}, action:{dot:'bg-pri',badge:'bg-pri-dim text-pri'}, resolve:{dot:'bg-ok',badge:'bg-ok-dim text-ok'}, note:{dot:'bg-base-200',badge:'bg-white/[0.04] text-txt-3'} };
 const EVENTS = [
-  { time: '14:23', type: 'detect', actor: '🐉 Haku (cron)', body: 'Health ping detected SSE endpoint returning 502. <code>curl -s https://api.deep-sci-fi.world/api/feed/stream</code> → connection reset after 2s.' },
-  { time: '14:24', type: 'investigate', actor: '🐉 Haku', body: 'Logfire query: 3 errors in last 5 min, all on <code>/api/feed/stream</code>. Exception: <code>ConnectionResetError: peer closed connection</code>.', attachment: 'SELECT count(*) as errors\nFROM records\nWHERE level = \'error\'\nAND start_timestamp > now() - interval \'5 minutes\'\n\n→ 3 errors' },
-  { time: '14:26', type: 'investigate', actor: '🐉 Haku', body: 'Railway logs show OOM kill at 14:22:41. Container restarted but SSE connections were not re-established. Memory spike correlates with a large batch of feed events hitting the denormalized table.' },
-  { time: '14:28', type: 'action', actor: '🐉 Haku', body: 'Scaled Railway instance from 512MB → 1GB. Restarted the service. SSE reconnecting...' },
-  { time: '14:30', type: 'note', actor: '🐉 Haku → 🔥 Calcifer', body: 'Feed was down for ~8 minutes. Any scheduled posts during that window may need manual verification that they appear in the feed.' },
-  { time: '14:33', type: 'detect', actor: '🐉 Haku (manual)', body: 'Health endpoint returning 200. SSE stream delivering events. Feed UI shows live content. Confirming stable...' },
+  { time:'14:23', type:'detect', actor:'🐉 Haku (cron)', body:'Health ping detected SSE endpoint returning 502.' },
+  { time:'14:24', type:'investigate', actor:'🐉 Haku', body:'Logfire: 3 errors in last 5 min on <code class="text-[13px] font-mono bg-white/[0.04] px-1.5 py-0.5 rounded">/api/feed/stream</code>.', attachment:'SELECT count(*) FROM records\nWHERE level = \'error\'\nAND start_timestamp > now() - interval \'5 min\'\n→ 3 errors' },
+  { time:'14:26', type:'investigate', actor:'🐉 Haku', body:'Railway OOM kill at 14:22:41. Memory spike from large feed event batch.' },
+  { time:'14:28', type:'action', actor:'🐉 Haku', body:'Scaled Railway 512MB → 1GB. Restarted service.' },
+  { time:'14:30', type:'note', actor:'🐉 Haku → 🔥 Calcifer', body:'Feed was down ~8 min. Verify scheduled posts appeared.' },
+  { time:'14:33', type:'detect', actor:'🐉 Haku', body:'Health 200. SSE streaming. Feed UI live. Stable.' },
 ];
 
 function renderTimeline() {
-  document.getElementById('timeline').innerHTML = EVENTS.map(e => `
-    <div class="event">
-      <div class="event-dot ${e.type}"></div>
-      <div class="event-header">
-        <span class="event-time">${e.time}</span>
-        <span class="event-type type-${e.type}">${e.type}</span>
-        <span class="event-actor">${e.actor}</span>
-      </div>
-      <div class="event-body">${e.body}</div>
-      ${e.attachment ? `<div class="event-attachment">${e.attachment}</div>` : ''}
-    </div>
-  `).join('');
+  document.getElementById('timeline').innerHTML = `<div class="absolute left-[11px] sm:left-[15px] top-2 bottom-2 w-px bg-glass"></div>` + EVENTS.map(e => {
+    const s = TYPE_STYLES[e.type]||TYPE_STYLES.note;
+    return `<div class="relative pb-6 last:pb-0"><div class="absolute -left-6 sm:-left-8 top-1.5 w-3 h-3 rounded-full ${s.dot} ring-2 ring-base"></div><div class="flex flex-wrap items-baseline gap-2 mb-1.5"><span class="text-xs font-mono text-txt-3 shrink-0">${e.time}</span><span class="inline-flex px-1.5 py-0.5 rounded text-[10px] font-mono font-medium uppercase tracking-wider ${s.badge}">${e.type}</span><span class="text-sm font-medium">${e.actor}</span></div><div class="text-sm text-txt-2 leading-relaxed">${e.body}</div>${e.attachment?`<pre class="mt-3 glass-static rounded-lg p-3 text-[13px] font-mono text-txt-2 leading-relaxed whitespace-pre-wrap overflow-x-auto">${e.attachment}</pre>`:''}</div>`;
+  }).join('');
 }
 
 function addEvent() {
-  const type = document.getElementById('event-type').value;
-  const actor = document.getElementById('event-actor').value || 'Unknown';
-  const body = document.getElementById('event-body').value;
+  const type=document.getElementById('event-type').value, actor=document.getElementById('event-actor').value||'Unknown', body=document.getElementById('event-body').value;
   if (!body) return;
-  const now = new Date();
-  EVENTS.push({ time: now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }), type, actor, body });
-  document.getElementById('event-body').value = '';
-  renderTimeline();
+  EVENTS.push({time:new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}),type,actor,body});
+  document.getElementById('event-body').value=''; renderTimeline();
 }
-
-function resolve() {
-  EVENTS.push({ time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }), type: 'resolve', actor: 'Manual', body: 'Incident resolved. All systems nominal.' });
-  renderTimeline();
-}
-
-// Duration counter
-const startTime = new Date(); startTime.setHours(14, 23, 0);
-setInterval(() => {
-  const diff = Math.floor((Date.now() - startTime.getTime()) / 1000);
-  const m = Math.floor(diff / 60), s = diff % 60;
-  document.getElementById('duration').textContent = `${m}m ${s}s`;
-}, 1000);
-
+function resolve() { EVENTS.push({time:new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}),type:'resolve',actor:'Manual',body:'Incident resolved. All systems nominal.'}); renderTimeline(); }
+const start=new Date();start.setHours(14,23,0);
+setInterval(()=>{const d=Math.floor((Date.now()-start)/1000);document.getElementById('duration').textContent=`${Math.floor(d/60)}m ${d%60}s`;},1000);
 renderTimeline();
 </script>
 </body>

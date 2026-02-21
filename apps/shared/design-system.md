@@ -1,307 +1,260 @@
-# Temper UI Design System
+# Temper UI Design System v2
 
-*For any agent generating any UI served by Temper. Not a template — a system.*
+*One system. Any surface. Always responsive. Always snatched.*
+
+## Foundation
+
+**Tailwind CSS via CDN** — every Temper UI includes this in `<head>`:
+
+```html
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwindcss.config = {
+  theme: {
+    extend: {
+      colors: {
+        // Surfaces
+        base: { DEFAULT: '#0a0a0c', 50: '#12121a', 100: '#1a1a24', 200: '#242430' },
+        // Primary palette — cool indigo with slight warmth
+        pri: { DEFAULT: '#7c6cff', dim: 'rgba(124,108,255,0.12)', light: '#9d8fff', dark: '#5b4dd4' },
+        // Semantic — muted, not screaming
+        ok:   { DEFAULT: '#34d399', dim: 'rgba(52,211,153,0.12)' },
+        warn: { DEFAULT: '#fbbf24', dim: 'rgba(251,191,36,0.12)' },
+        err:  { DEFAULT: '#f87171', dim: 'rgba(248,113,113,0.12)' },
+        // Text
+        txt:  { DEFAULT: '#eeeef2', 2: '#9898a8', 3: '#5c5c6e' },
+        // Glass border
+        glass: { DEFAULT: 'rgba(255,255,255,0.06)', 2: 'rgba(255,255,255,0.1)' },
+      },
+      fontFamily: {
+        sans: ['Inter', 'system-ui', 'sans-serif'],
+        mono: ['"JetBrains Mono"', '"SF Mono"', 'monospace'],
+      },
+      backgroundImage: {
+        'glass': 'linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%)',
+        'glass-hover': 'linear-gradient(135deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.02) 100%)',
+        'glow': 'radial-gradient(ellipse at 50% 0%, rgba(124,108,255,0.15) 0%, transparent 60%)',
+      },
+      boxShadow: {
+        'glass': '0 0 0 1px rgba(255,255,255,0.06), 0 2px 12px rgba(0,0,0,0.3)',
+        'glass-lg': '0 0 0 1px rgba(255,255,255,0.06), 0 8px 32px rgba(0,0,0,0.4)',
+        'glow': '0 0 24px rgba(124,108,255,0.15)',
+        'glow-sm': '0 0 12px rgba(124,108,255,0.1)',
+      },
+      borderRadius: {
+        'xl': '12px',
+        '2xl': '16px',
+      },
+    },
+  },
+}
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+```
 
 ## Philosophy
 
-- **Minimal but alive.** Whitespace is structure. Borders are rare. Color is signal.
-- **Fluid, not fixed.** Everything scales. No breakpoint snapping — fluid type, fluid space, container queries.
-- **Monochrome + one accent.** The palette is zinc. Color means something happened.
-- **Typography carries hierarchy.** If you need color to show importance, your type is wrong.
+1. **Glass over borders.** Surfaces are semi-transparent with subtle gradients. Not flat cards with hard borders — glass panels that breathe.
+2. **One palette, three weights.** Primary (`pri`), plus dim and light variants. Semantic colors only for actual state. That's it.
+3. **Responsive is not optional.** If it doesn't work at 320px, it's broken. Tailwind's responsive prefixes (`sm:`, `md:`, `lg:`) + grid `auto-fit` handle this. No excuses.
+4. **Gradients are gentle.** Never saturated. Always near-transparent whites or the faintest accent glow. The gradient should be felt, not seen.
+5. **Typography carries hierarchy.** Size + weight + opacity. Not color.
+6. **Mono for data, sans for everything else.** Timestamps, IDs, metrics, code → `font-mono`. Prose, labels, headings → `font-sans`.
+7. **Motion is subtle.** `transition-all duration-150 ease-out`. Never bounce. Never delay.
 
-## Tokens
+## Base Styles
 
-### Colors (Dark Mode Default)
+Every Temper UI includes this `<style>` block after the Tailwind config:
 
-```css
-:root {
-  /* Surfaces — zinc scale, not pure black */
-  --bg:         #09090b;
-  --surface:    #18181b;
-  --surface-2:  #27272a;
-  --surface-3:  #3f3f46;
-  
-  /* Text */
-  --text:       #fafafa;
-  --text-2:     #a1a1aa;
-  --text-3:     #71717a;
-  
-  /* Borders — barely there */
-  --border:     #27272a;
-  --border-2:   #3f3f46;
-  
-  /* Accent — one hue, three weights */
-  --accent:     #6c8cff;
-  --accent-dim: rgba(108, 140, 255, 0.15);
-  --accent-bg:  rgba(108, 140, 255, 0.08);
-  
-  /* Semantic — only for state */
-  --ok:         #4ade80;
-  --ok-dim:     rgba(74, 222, 128, 0.15);
-  --warn:       #fbbf24;
-  --warn-dim:   rgba(251, 191, 36, 0.15);
-  --err:        #f87171;
-  --err-dim:    rgba(248, 113, 113, 0.15);
-  --info:       #22d3ee;
-  --info-dim:   rgba(34, 211, 238, 0.15);
-  --purple:     #a78bfa;
-  --purple-dim: rgba(167, 139, 250, 0.15);
-}
+```html
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    background: #0a0a0c;
+    color: #eeeef2;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* Glass card */
+  .glass {
+    background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%);
+    border: 1px solid rgba(255,255,255,0.06);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+  .glass:hover {
+    border-color: rgba(255,255,255,0.1);
+  }
+  /* Glow accent on headers/heroes */
+  .glow-top {
+    background-image: radial-gradient(ellipse at 50% -20%, rgba(124,108,255,0.12) 0%, transparent 60%);
+  }
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+  /* Focus */
+  :focus-visible {
+    outline: 2px solid rgba(124,108,255,0.5);
+    outline-offset: 2px;
+  }
+</style>
 ```
 
-### Typography
+## Layout Patterns
 
-```css
-/* Two fonts. No more. */
---font-sans: 'Inter', -apple-system, system-ui, sans-serif;
---font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace;
-
-/* Import */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+### Container
+```html
+<div class="mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8 py-8">
 ```
 
-**Scale** — fluid, clamped:
-
-| Role | Size | Weight | Font |
-|------|------|--------|------|
-| Display | clamp(1.5rem, 3vw, 2.25rem) | 700 | sans |
-| Title | clamp(1.125rem, 2vw, 1.5rem) | 600 | sans |
-| Heading | 1rem | 600 | sans |
-| Body | 0.875rem (14px) | 400 | sans |
-| Caption | 0.75rem (12px) | 400 | sans |
-| Label | 0.6875rem (11px) | 500, uppercase, ls: 0.08em | sans |
-| Code/Data | 0.8125rem (13px) | 400 | mono |
-
-**Line height:** headings 1.2, body 1.5, tight data 1.3.
-
-**Letter spacing:** headings -0.02em, labels +0.08em.
-
-### Spacing
-
-```
---space-1: 4px    /* icon gaps, tight coupling */
---space-2: 8px    /* related elements */
---space-3: 12px   /* compact padding */
---space-4: 16px   /* standard gap, card padding */
---space-5: 24px   /* section breaks */
---space-6: 32px   /* major sections */
---space-7: 48px   /* page sections */
---space-8: 64px   /* hero spacing */
+### Responsive Grid (auto-fit, no breakpoints needed)
+```html
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
 ```
 
-Only use these values. No 14px. No 22px. No 38px.
-
-### Radius
-
-```
---radius-sm: 4px   /* badges, small buttons */
---radius-md: 8px   /* cards, inputs */
---radius-lg: 12px  /* panels, modals */
---radius-xl: 16px  /* hero cards */
---radius-full: 9999px  /* pills, avatars */
+Or truly fluid:
+```html
+<div class="grid gap-4" style="grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr))">
 ```
 
-### Depth
-
-**Borders over shadows.** Shadows only for floating elements (tooltips, dropdowns).
-
-```css
-/* Surface separation = border, not shadow */
-.card { border: 1px solid var(--border); }
-
-/* Only floating elements get shadow */
-.tooltip, .dropdown, .modal {
-  box-shadow: 0 8px 32px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.2);
-}
+### Stack
+```html
+<div class="flex flex-col gap-4">
 ```
 
-### Motion
-
-```css
---ease: cubic-bezier(0.16, 1, 0.3, 1);  /* snappy decel */
---duration-fast: 100ms;   /* hover, focus */
---duration-norm: 200ms;   /* transitions */
---duration-slow: 400ms;   /* entrances */
+### Cluster
+```html
+<div class="flex flex-wrap items-center gap-2">
 ```
 
-Reduce motion for `prefers-reduced-motion`.
+## Component Patterns
 
-## Layout
-
-### Responsive Container
-
-```css
-.container {
-  width: min(100% - 2rem, 72rem);
-  margin-inline: auto;
-}
+### Glass Card
+```html
+<div class="glass rounded-xl p-4 sm:p-5 transition-all duration-150">
+  <!-- content -->
+</div>
 ```
-
-Never `max-width: 1200px; margin: 0 auto; padding: 0 24px`. The `min()` pattern is shorter and fluid.
-
-### Grid
-
-Use CSS Grid with `auto-fit` / `auto-fill` and `minmax()`. Not fixed column counts.
-
-```css
-/* Cards, stats, any repeating items */
-.grid { 
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
-  gap: var(--space-4);
-}
-```
-
-This is responsive without a single media query.
-
-### Stack (Vertical Rhythm)
-
-```css
-.stack > * + * { margin-block-start: var(--space-4); }
-.stack-sm > * + * { margin-block-start: var(--space-2); }
-.stack-lg > * + * { margin-block-start: var(--space-6); }
-```
-
-### Cluster (Horizontal Wrap)
-
-```css
-.cluster {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  align-items: center;
-}
-```
-
-## Components (Atoms)
-
-These are patterns, not rigid components. Adapt the shape, keep the tokens.
 
 ### Badge
-
-```css
-.badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
-  font: 500 0.6875rem/1.3 var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-/* Semantic variants use dim backgrounds + full-chroma text */
-.badge-ok   { background: var(--ok-dim);   color: var(--ok); }
-.badge-warn { background: var(--warn-dim); color: var(--warn); }
-.badge-err  { background: var(--err-dim);  color: var(--err); }
+```html
+<span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium uppercase tracking-wider bg-pri-dim text-pri">
+  Active
+</span>
 ```
 
-### Button
+Semantic variants:
+- OK: `bg-ok-dim text-ok`
+- Warn: `bg-warn-dim text-warn`
+- Error: `bg-err-dim text-err`
 
-```css
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-1);
-  height: 36px;
-  padding: 0 var(--space-4);
-  border-radius: var(--radius-md);
-  font: 500 0.8125rem var(--font-sans);
-  cursor: pointer;
-  transition: all var(--duration-fast) var(--ease);
-  border: 1px solid transparent;
-}
-.btn-primary { background: var(--accent); color: #fff; }
-.btn-primary:hover { filter: brightness(1.1); }
-.btn-ghost { background: transparent; border-color: var(--border); color: var(--text-2); }
-.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+### Button — Primary
+```html
+<button class="h-9 px-4 rounded-lg bg-pri text-white text-sm font-medium
+  hover:bg-pri-light active:bg-pri-dark transition-all duration-150
+  focus-visible:ring-2 focus-visible:ring-pri/50 focus-visible:ring-offset-2 focus-visible:ring-offset-base">
+  Action
+</button>
+```
+
+### Button — Ghost
+```html
+<button class="h-9 px-4 rounded-lg border border-glass text-txt-2 text-sm font-medium
+  hover:border-glass-2 hover:text-txt transition-all duration-150">
+  Secondary
+</button>
 ```
 
 ### Input
-
-```css
-.input {
-  height: 36px;
-  padding: 0 var(--space-3);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--text);
-  font: 0.875rem var(--font-sans);
-  transition: border-color var(--duration-fast);
-}
-.input:focus { border-color: var(--accent); outline: none; }
-.input::placeholder { color: var(--text-3); }
+```html
+<input class="w-full h-9 px-3 rounded-lg bg-base-50 border border-glass text-txt text-sm
+  placeholder:text-txt-3 focus:border-pri/50 focus:outline-none transition-all duration-150">
 ```
 
-### Card
-
-```css
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: var(--space-4);
-}
+### Section Label
+```html
+<h3 class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-3">
+  Section Title
+</h3>
 ```
 
-### Table Row (Interactive)
-
-```css
-.row {
-  display: grid;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: background var(--duration-fast);
-}
-.row:hover { background: var(--surface-2); }
-.row + .row { border-top: 1px solid var(--border); }
+### Interactive Row
+```html
+<div class="flex items-center gap-3 px-4 py-3 rounded-lg cursor-pointer
+  hover:bg-white/[0.03] transition-all duration-150">
 ```
 
 ### Toast
-
-```css
-.toast {
-  position: fixed;
-  bottom: var(--space-5);
-  right: var(--space-5);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: var(--space-3) var(--space-5);
-  font: 0.8125rem var(--font-mono);
-  transform: translateY(8px);
-  opacity: 0;
-  transition: all var(--duration-norm) var(--ease);
-}
-.toast.show { transform: translateY(0); opacity: 1; }
+```html
+<div class="fixed bottom-6 right-6 glass rounded-lg px-5 py-3 text-sm font-mono
+  shadow-glass-lg transition-all duration-200 translate-y-2 opacity-0"
+  id="toast">
+</div>
 ```
 
-## Rules
+### Empty State
+```html
+<div class="flex flex-col items-center justify-center py-12 text-txt-3 text-sm">
+  <span class="text-2xl mb-3">∅</span>
+  <span>Nothing here yet</span>
+</div>
+```
 
-1. **No raw pixel values outside the token scale.** If you need 14px, use 12 or 16.
-2. **Mono font for data, sans font for prose.** Numbers, IDs, timestamps, code → mono. Everything else → sans.
-3. **Labels are quiet.** 11px, uppercase, letter-spaced, `--text-3`. They support data, never compete with it.
-4. **Color = state change.** Green/amber/red mean something happened. Don't use semantic colors decoratively.
-5. **One accent.** If a second color is needed, use `--purple` sparingly. Three accent colors means zero accent colors.
-6. **Hover = border highlight, not background flood.** `border-color: var(--accent)` on hover. Not a full accent background.
-7. **Responsive by default.** Every layout uses `min()`, `clamp()`, `auto-fit`, or container queries. Zero media queries for basic responsiveness.
-8. **Animate only what moves.** Border, opacity, transform. Not width, height, or layout properties.
-9. **Focus states are mandatory.** Every interactive element needs a visible `:focus-visible` ring.
-10. **Empty states exist.** Every list, table, and container must handle "no data" gracefully. Not blank — a message in `--text-3`.
+### Drawer / Slide-over
+```html
+<!-- Overlay -->
+<div class="fixed inset-0 bg-black/50 z-50 transition-opacity" onclick="close()">
+  <!-- Panel -->
+  <div class="fixed top-0 right-0 bottom-0 w-full max-w-md bg-base border-l border-glass
+    p-6 overflow-y-auto transition-transform duration-200" onclick="event.stopPropagation()">
+  </div>
+</div>
+```
 
-## Generating UI
+## Color Rules
 
-When an agent (CC, Haku, any agent) generates a Temper UI:
+1. **Primary (`pri`)** — interactive elements, accents, focus rings, selected states
+2. **Semantic** — ONLY for actual state: `ok` = success/healthy, `warn` = caution/pending, `err` = error/danger
+3. **Text hierarchy** — `txt` (primary), `txt-2` (secondary), `txt-3` (muted/labels)
+4. **Surfaces** — `base` (darkest bg), `base-50` (input bg), `base-100` (card bg), `base-200` (elevated)
+5. **Glass** — `glass` (subtle border), `glass-2` (hover border)
+6. **Never use raw hex in components.** Always reference the token.
 
-1. Include the `@import` for Inter + JetBrains Mono
-2. Paste the `:root` tokens block
-3. Use the layout primitives (container, grid, stack, cluster)
-4. Build with the atom patterns (badge, btn, input, card, row, toast)
-5. Never invent new spacing values, colors, or font sizes outside the scale
-6. Test: resize the browser from 320px to 2560px. If anything breaks, it's wrong.
+## Glass & Gradient Rules
 
-The UI should look like one hand built the whole thing, whether it's a proposal pipeline, a content calendar, a form wizard, or a world map.
+- **Cards**: Always use `.glass` class. Never flat `bg-*` without the gradient.
+- **Page header area**: Use `.glow-top` for a subtle purple radial glow from the top
+- **Hover states**: Border goes from `glass` → `glass-2`. Background shifts by +2% white.
+- **Selected/active**: `bg-pri-dim border-pri/30` — tinted, not flooded
+- **Gradients are always white-to-transparent or accent-to-transparent.** Never two saturated colors.
+
+## Responsive Rules
+
+1. **Text**: Base 14px body. 13px on mobile is fine for data. Never below 11px for anything.
+2. **Padding**: `p-4 sm:p-5 lg:p-6` — scales up, never cramped.
+3. **Grids**: `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3` or `auto-fit` with `minmax`.
+4. **Tables on mobile**: Convert to stacked cards below `sm:`. Or hide low-priority columns.
+5. **Touch targets**: Minimum 36px height for any interactive element. 44px preferred on mobile.
+6. **Drawers**: `w-full max-w-md` — full width on mobile, capped on desktop.
+7. **Test at 320px, 768px, 1440px.** If it breaks at any, it's wrong.
+
+## Typography
+
+| Role | Classes |
+|------|---------|
+| Display | `text-2xl sm:text-3xl font-bold tracking-tight` |
+| Title | `text-lg sm:text-xl font-semibold tracking-tight` |
+| Heading | `text-base font-semibold` |
+| Body | `text-sm` |
+| Caption | `text-xs text-txt-2` |
+| Label | `text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3` |
+| Data | `text-[13px] font-mono` |
+
+## Agent Prompt
+
+When generating a Temper UI, include this in the prompt to CC or any agent:
+
+> Build a single-file HTML page. Include Tailwind CDN with the custom config from `apps/shared/design-system.md`. Use glass cards, subtle gradients, and the pri/ok/warn/err palette. Make it fully responsive — test at 320px and 1440px. Use Inter for text, JetBrains Mono for data. Follow the component patterns exactly. The UI should feel like frosted glass floating on a dark void with a faint purple glow.

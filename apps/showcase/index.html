@@ -4,67 +4,75 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Temper UI Showcase</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwindcss.config={theme:{extend:{colors:{base:{DEFAULT:'#0a0a0c',50:'#12121a',100:'#1a1a24',200:'#242430'},pri:{DEFAULT:'#7c6cff',dim:'rgba(124,108,255,0.12)',light:'#9d8fff',dark:'#5b4dd4'},ok:{DEFAULT:'#34d399',dim:'rgba(52,211,153,0.12)'},warn:{DEFAULT:'#fbbf24',dim:'rgba(251,191,36,0.12)'},err:{DEFAULT:'#f87171',dim:'rgba(248,113,113,0.12)'},txt:{DEFAULT:'#eeeef2',2:'#9898a8',3:'#5c5c6e'},glass:{DEFAULT:'rgba(255,255,255,0.06)',2:'rgba(255,255,255,0.1)'}},fontFamily:{sans:['Inter','system-ui','sans-serif'],mono:['"JetBrains Mono"','"SF Mono"','monospace']}}}}
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-  :root {
-    --bg: #09090b; --surface: #18181b; --border: #27272a;
-    --text: #fafafa; --text-2: #a1a1aa; --text-3: #71717a;
-    --accent: #6c8cff; --accent-dim: rgba(108,140,255,0.15);
-    --font-sans: 'Inter', -apple-system, sans-serif;
-    --font-mono: 'JetBrains Mono', monospace;
-  }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: var(--font-sans); background: var(--bg); color: var(--text); min-height: 100vh;
-    display: flex; align-items: center; justify-content: center; padding: 32px; }
-  .wrap { width: min(100%, 40rem); }
-  h1 { font-size: clamp(1.5rem, 3vw, 2.25rem); font-weight: 700; letter-spacing: -0.02em; margin-bottom: 8px; }
-  .sub { font: 0.875rem var(--font-mono); color: var(--text-3); margin-bottom: 48px; }
-  .demos { display: flex; flex-direction: column; gap: 12px; }
-  a {
-    display: flex; align-items: center; gap: 16px;
-    padding: 20px 24px; background: var(--surface); border: 1px solid var(--border);
-    border-radius: 12px; text-decoration: none; color: var(--text);
-    transition: border-color 100ms cubic-bezier(0.16,1,0.3,1);
-  }
-  a:hover { border-color: var(--accent); }
-  .num { font: 600 1.25rem var(--font-mono); color: var(--accent); width: 2rem; text-align: center; flex-shrink: 0; }
-  .info { flex: 1; }
-  .name { font: 600 1rem var(--font-sans); margin-bottom: 4px; }
-  .desc { font: 0.8125rem var(--font-sans); color: var(--text-2); }
-  .shape { font: 500 0.6875rem var(--font-mono); color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em;
-    padding: 2px 8px; background: var(--accent-dim); border-radius: 4px; flex-shrink: 0; }
+  body { background: #0a0a0c; -webkit-font-smoothing: antialiased; }
+  .glass { background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.06); backdrop-filter: blur(12px); }
+  .glass:hover { border-color: rgba(255,255,255,0.12); }
+  .glow-top { background-image: radial-gradient(ellipse at 50% -20%, rgba(124,108,255,0.12) 0%, transparent 60%); }
 </style>
 </head>
-<body>
-<div class="wrap">
-  <h1>Temper UI Showcase</h1>
-  <div class="sub">5 apps · 1 design system · any shape</div>
-  <div class="demos">
-    <a href="1-signal-board.html">
-      <span class="num">1</span>
-      <div class="info"><div class="name">Signal Board</div><div class="desc">Inter-agent communication. Kanban columns, drawer detail, agent filtering.</div></div>
-      <span class="shape">Kanban</span>
+<body class="font-sans text-txt min-h-screen glow-top">
+<div class="mx-auto w-full max-w-2xl px-4 sm:px-6 py-16 sm:py-24">
+
+  <div class="mb-12 sm:mb-16">
+    <h1 class="text-3xl sm:text-4xl font-bold tracking-tight mb-2">Temper UI</h1>
+    <p class="text-sm font-mono text-txt-3">5 apps · 1 design system · any shape</p>
+  </div>
+
+  <div class="flex flex-col gap-3">
+    <a href="1-signal-board.html" class="glass rounded-xl p-4 sm:p-5 flex items-center gap-4 no-underline text-txt transition-all duration-150 group">
+      <span class="text-xl sm:text-2xl font-mono font-bold text-pri w-8 text-center shrink-0">1</span>
+      <div class="flex-1 min-w-0">
+        <div class="font-semibold text-sm sm:text-base group-hover:text-pri transition-colors duration-150">Signal Board</div>
+        <div class="text-xs sm:text-sm text-txt-2 mt-0.5">Inter-agent comms — kanban, drawer detail, agent filters</div>
+      </div>
+      <span class="hidden sm:inline-flex px-2.5 py-1 rounded-md text-[11px] font-mono font-medium uppercase tracking-wider bg-pri-dim text-pri shrink-0">Kanban</span>
     </a>
-    <a href="2-incident-timeline.html">
-      <span class="num">2</span>
-      <div class="info"><div class="name">Incident Timeline</div><div class="desc">Production incident tracker. Vertical timeline, severity badges, live duration.</div></div>
-      <span class="shape">Timeline</span>
+
+    <a href="2-incident-timeline.html" class="glass rounded-xl p-4 sm:p-5 flex items-center gap-4 no-underline text-txt transition-all duration-150 group">
+      <span class="text-xl sm:text-2xl font-mono font-bold text-pri w-8 text-center shrink-0">2</span>
+      <div class="flex-1 min-w-0">
+        <div class="font-semibold text-sm sm:text-base group-hover:text-pri transition-colors duration-150">Incident Timeline</div>
+        <div class="text-xs sm:text-sm text-txt-2 mt-0.5">Prod incident tracker — timeline, severity, live duration</div>
+      </div>
+      <span class="hidden sm:inline-flex px-2.5 py-1 rounded-md text-[11px] font-mono font-medium uppercase tracking-wider bg-err-dim text-err shrink-0">Timeline</span>
     </a>
-    <a href="3-quick-form.html">
-      <span class="num">3</span>
-      <div class="info"><div class="name">Quick Form</div><div class="desc">Multi-step proposal creator. Radio groups, toggles, progress indicator, review.</div></div>
-      <span class="shape">Form</span>
+
+    <a href="3-quick-form.html" class="glass rounded-xl p-4 sm:p-5 flex items-center gap-4 no-underline text-txt transition-all duration-150 group">
+      <span class="text-xl sm:text-2xl font-mono font-bold text-pri w-8 text-center shrink-0">3</span>
+      <div class="flex-1 min-w-0">
+        <div class="font-semibold text-sm sm:text-base group-hover:text-pri transition-colors duration-150">Quick Form</div>
+        <div class="text-xs sm:text-sm text-txt-2 mt-0.5">Multi-step wizard — radios, toggles, progress, review</div>
+      </div>
+      <span class="hidden sm:inline-flex px-2.5 py-1 rounded-md text-[11px] font-mono font-medium uppercase tracking-wider bg-ok-dim text-ok shrink-0">Form</span>
     </a>
-    <a href="4-content-pipeline.html">
-      <span class="num">4</span>
-      <div class="info"><div class="name">Content Pipeline</div><div class="desc">Calcifer's content calendar. Calendar + list views, status filtering, engagement.</div></div>
-      <span class="shape">Calendar</span>
+
+    <a href="4-content-pipeline.html" class="glass rounded-xl p-4 sm:p-5 flex items-center gap-4 no-underline text-txt transition-all duration-150 group">
+      <span class="text-xl sm:text-2xl font-mono font-bold text-pri w-8 text-center shrink-0">4</span>
+      <div class="flex-1 min-w-0">
+        <div class="font-semibold text-sm sm:text-base group-hover:text-pri transition-colors duration-150">Content Pipeline</div>
+        <div class="text-xs sm:text-sm text-txt-2 mt-0.5">Calendar + list views — content status, scheduling</div>
+      </div>
+      <span class="hidden sm:inline-flex px-2.5 py-1 rounded-md text-[11px] font-mono font-medium uppercase tracking-wider bg-warn-dim text-warn shrink-0">Calendar</span>
     </a>
-    <a href="5-agent-vitals.html">
-      <span class="num">5</span>
-      <div class="info"><div class="name">Agent Vitals</div><div class="desc">Team health dashboard. Sparklines, metrics cards, activity feeds, system status.</div></div>
-      <span class="shape">Dashboard</span>
+
+    <a href="5-agent-vitals.html" class="glass rounded-xl p-4 sm:p-5 flex items-center gap-4 no-underline text-txt transition-all duration-150 group">
+      <span class="text-xl sm:text-2xl font-mono font-bold text-pri w-8 text-center shrink-0">5</span>
+      <div class="flex-1 min-w-0">
+        <div class="font-semibold text-sm sm:text-base group-hover:text-pri transition-colors duration-150">Agent Vitals</div>
+        <div class="text-xs sm:text-sm text-txt-2 mt-0.5">Team health — sparklines, metrics, activity, system status</div>
+      </div>
+      <span class="hidden sm:inline-flex px-2.5 py-1 rounded-md text-[11px] font-mono font-medium uppercase tracking-wider bg-pri-dim text-pri shrink-0">Dashboard</span>
     </a>
+  </div>
+
+  <div class="mt-12 text-center text-xs font-mono text-txt-3">
+    Tailwind + glass + one palette · design-system v2
   </div>
 </div>
 </body>
