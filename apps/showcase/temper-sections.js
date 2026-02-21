@@ -188,15 +188,15 @@ function renderTemperSection(containerId, appKey) {
         <span class="text-[11px] font-mono font-medium uppercase tracking-[0.08em]">⚙ How this uses Temper</span>
         <svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="currentColor" viewBox="0 0 20 20"><path d="M6 6l8 4-8 4z"/></svg>
       </summary>
-      <div class="glass-static rounded-xl p-4 sm:p-6 space-y-5 text-sm">
+      <div class="glass rounded-xl p-4 sm:p-6 space-y-5 text-sm">
         <div>
           <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-2">Entity: ${cfg.entity}</div>
-          <p class="text-txt-2 leading-relaxed mb-3">States: <code class="text-[13px] font-mono bg-white/[0.04] px-1.5 py-0.5 rounded">${cfg.states}</code></p>
-          <pre class="glass-static rounded-lg p-3 text-[13px] font-mono text-txt-2 leading-relaxed overflow-x-auto whitespace-pre">${cfg.spec}</pre>
+          <p class="text-txt-2 leading-relaxed mb-3">States: <code class="text-[13px] font-mono bg-s3 px-1.5 py-0.5 rounded">${cfg.states}</code></p>
+          <pre class="glass rounded-lg p-3 text-[13px] font-mono text-txt-2 leading-relaxed overflow-x-auto whitespace-pre">${cfg.spec}</pre>
         </div>
         <div>
           <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-2">API Flow</div>
-          <pre class="glass-static rounded-lg p-3 text-[13px] font-mono text-txt-2 leading-relaxed overflow-x-auto whitespace-pre">${cfg.flow}</pre>
+          <pre class="glass rounded-lg p-3 text-[13px] font-mono text-txt-2 leading-relaxed overflow-x-auto whitespace-pre">${cfg.flow}</pre>
         </div>
         <div>
           <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-2">Why Temper?</div>

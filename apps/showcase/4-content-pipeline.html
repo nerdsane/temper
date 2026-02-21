@@ -5,175 +5,75 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Content Pipeline</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script>
-tailwindcss.config={theme:{extend:{colors:{base:{DEFAULT:'#0a0a0c',50:'#12121a',100:'#1a1a24',200:'#242430'},pri:{DEFAULT:'#7c6cff',dim:'rgba(124,108,255,0.12)',light:'#9d8fff'},ok:{DEFAULT:'#34d399',dim:'rgba(52,211,153,0.12)'},warn:{DEFAULT:'#fbbf24',dim:'rgba(251,191,36,0.12)'},err:{DEFAULT:'#f87171',dim:'rgba(248,113,113,0.12)'},info:{DEFAULT:'#38bdf8',dim:'rgba(56,189,248,0.12)'},txt:{DEFAULT:'#eeeef2',2:'#9898a8',3:'#5c5c6e'},glass:{DEFAULT:'rgba(255,255,255,0.06)',2:'rgba(255,255,255,0.1)'}},fontFamily:{sans:['Inter','system-ui','sans-serif'],mono:['"JetBrains Mono"','"SF Mono"','monospace']}}}}
-</script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script>tailwindcss.config={theme:{extend:{colors:{s1:'#0c0c10',s2:'#14141a',s3:'#1c1c24',s4:'#24242e',t1:'#ededf0',t2:'#8b8b9e',t3:'#55556a',a1:'#8b5cf6',a2:'#a78bfa',a3:'rgba(139,92,246,0.12)',b1:'rgba(255,255,255,0.06)',b2:'rgba(255,255,255,0.10)',green:{DEFAULT:'#3dd68c',dim:'rgba(61,214,140,0.10)'},amber:{DEFAULT:'#e5a63e',dim:'rgba(229,166,62,0.10)'},red:{DEFAULT:'#e5534b',dim:'rgba(229,83,75,0.10)'}},fontFamily:{sans:['Geist','system-ui','sans-serif'],mono:['Geist Mono','monospace']}}}}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.min.css">
 <style>
-  body { background: #0a0a0c; color: #eeeef2; -webkit-font-smoothing: antialiased; }
-  .glass { background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.06); backdrop-filter: blur(12px); }
-  .glow-top { background-image: radial-gradient(ellipse at 50% -20%, rgba(124,108,255,0.08) 0%, transparent 60%); }
-  .glass-static { background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.06); }
-  ::-webkit-scrollbar { width: 6px; }
-  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Geist',system-ui,sans-serif;background:#0c0c10;color:#ededf0;min-height:100vh;-webkit-font-smoothing:antialiased}
+  body::before{content:'';position:fixed;top:-30%;left:-10%;width:60%;height:60%;background:radial-gradient(circle,rgba(139,92,246,0.08) 0%,transparent 70%);pointer-events:none;z-index:0}
+  body::after{content:'';position:fixed;bottom:-20%;right:-10%;width:50%;height:50%;background:radial-gradient(circle,rgba(61,214,140,0.04) 0%,transparent 70%);pointer-events:none;z-index:0}
+  body>*{position:relative;z-index:1}
+  .glass{background:linear-gradient(135deg,rgba(255,255,255,0.05) 0%,rgba(255,255,255,0.02) 100%);border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:99px}
+  ::selection{background:rgba(139,92,246,0.3)}
 </style>
 </head>
-<body class="font-sans text-txt min-h-screen glow-top">
-<div class="mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
-
-  <!-- Header -->
+<body>
+<div class="mx-auto w-full max-w-5xl px-4 sm:px-6 lg:px-8 py-6 sm:py-10">
   <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
-    <div>
-      <h1 class="text-xl sm:text-2xl font-bold tracking-tight">🔥 Content Pipeline</h1>
-      <p class="text-xs font-mono text-txt-3 mt-1">calcifer · february 2026</p>
-    </div>
-    <div class="glass rounded-lg flex overflow-hidden">
-      <button onclick="setView('calendar')" class="view-btn px-3 py-1.5 text-xs font-mono font-medium transition-all bg-pri-dim text-pri" data-view="calendar">Calendar</button>
-      <button onclick="setView('list')" class="view-btn px-3 py-1.5 text-xs font-mono font-medium transition-all text-txt-3 hover:text-txt-2" data-view="list">List</button>
+    <div><h1 class="text-xl sm:text-2xl font-semibold tracking-tight">🔥 Content Pipeline</h1><p class="text-sm text-t2 mt-1">Calcifer · February 2026</p></div>
+    <div class="glass rounded-xl flex overflow-hidden">
+      <button onclick="setV('cal')" class="vb px-3 py-1.5 text-xs font-mono font-medium transition-all bg-a3 text-a2" data-v="cal">Calendar</button>
+      <button onclick="setV('list')" class="vb px-3 py-1.5 text-xs font-mono font-medium transition-all text-t3 hover:text-t2" data-v="list">List</button>
     </div>
   </div>
-
-  <!-- Stats -->
   <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-    <div class="glass rounded-lg p-3 sm:p-4">
-      <div class="text-xl sm:text-2xl font-semibold font-mono text-txt-3">3</div>
-      <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mt-1">Drafts</div>
-    </div>
-    <div class="glass rounded-lg p-3 sm:p-4">
-      <div class="text-xl sm:text-2xl font-semibold font-mono text-warn">2</div>
-      <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mt-1">In Review</div>
-    </div>
-    <div class="glass rounded-lg p-3 sm:p-4">
-      <div class="text-xl sm:text-2xl font-semibold font-mono text-pri">4</div>
-      <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mt-1">Scheduled</div>
-    </div>
-    <div class="glass rounded-lg p-3 sm:p-4">
-      <div class="text-xl sm:text-2xl font-semibold font-mono text-ok">12</div>
-      <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mt-1">Published</div>
-    </div>
+    <div class="glass rounded-xl p-3 sm:p-4"><div class="text-xl font-semibold font-mono text-t3">3</div><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mt-1">Drafts</div></div>
+    <div class="glass rounded-xl p-3 sm:p-4"><div class="text-xl font-semibold font-mono text-amber">2</div><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mt-1">In Review</div></div>
+    <div class="glass rounded-xl p-3 sm:p-4"><div class="text-xl font-semibold font-mono text-a1">4</div><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mt-1">Scheduled</div></div>
+    <div class="glass rounded-xl p-3 sm:p-4"><div class="text-xl font-semibold font-mono text-green">12</div><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mt-1">Published</div></div>
   </div>
-
-  <!-- Calendar View -->
-  <div id="calendar-view" class="mb-6">
-    <div class="glass rounded-xl overflow-hidden">
-      <!-- Day headers -->
-      <div class="grid grid-cols-7 border-b border-glass">
-        <div class="p-2 sm:p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 hidden sm:block" id="day-Mon">Mon</div>
-        <div class="p-2 sm:p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 hidden sm:block">Tue</div>
-        <div class="p-2 sm:p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 hidden sm:block">Wed</div>
-        <div class="p-2 sm:p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 hidden sm:block">Thu</div>
-        <div class="p-2 sm:p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 hidden sm:block">Fri</div>
-        <div class="p-2 sm:p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 hidden sm:block">Sat</div>
-        <div class="p-2 sm:p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 hidden sm:block">Sun</div>
-      </div>
-      <div class="grid grid-cols-7" id="cal-grid"></div>
-    </div>
+  <div id="calv" class="glass rounded-2xl overflow-hidden mb-6">
+    <div class="grid grid-cols-7 border-b border-b1 hidden sm:grid"><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Mon</div><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Tue</div><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Wed</div><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Thu</div><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Fri</div><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Sat</div><div class="p-3 text-center text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Sun</div></div>
+    <div class="grid grid-cols-7" id="cg"></div>
   </div>
-
-  <!-- List View -->
-  <div id="list-view" class="hidden mb-10"></div>
-
-  <!-- Temper Integration -->
+  <div id="listv" class="hidden mb-6"></div>
   <div id="temper-section"></div>
 </div>
 <script src="temper-sections.js"></script>
-
 <script>
-const POSTS = [
-  { title:'When Your AI Builds Its Own Guardrails', platform:'Blog + X', status:'review', author:'🐱 Jiji', date:20 },
-  { title:'Temper: Shared Backend for AI Agents', platform:'X Thread', status:'review', author:'🔥 Calcifer', date:20 },
-  { title:'Feed Rewrite: 1925→108 Lines', platform:'X Post', status:'scheduled', author:'🔥 Calcifer', date:21 },
-  { title:'Deep Sci-Fi Feb Update', platform:'Blog', status:'draft', author:'🐱 Jiji', date:22 },
-  { title:'Story Arc Detection is Live', platform:'X Post', status:'scheduled', author:'🔥 Calcifer', date:22 },
-  { title:'Relationship Graphs: The Jitter Fix', platform:'X Post', status:'scheduled', author:'🔥 Calcifer', date:23 },
-  { title:'Video Regen Pipeline', platform:'X Thread', status:'draft', author:'🔥 Calcifer', date:24 },
-  { title:'Verification Cascade Deep Dive', platform:'Blog', status:'draft', author:'🐱 Jiji', date:25 },
-  { title:'World Map Clusters Fix', platform:'X Post', status:'scheduled', author:'🔥 Calcifer', date:25 },
-  { title:'SSE Migration Complete', platform:'X Post', status:'published', author:'🔥 Calcifer', date:18, engagement:'2.4k' },
-  { title:'Building in Public with AI Agents', platform:'X Thread', status:'published', author:'🔥 Calcifer', date:15, engagement:'5.1k' },
-  { title:'Deep Sci-Fi Launch Week', platform:'X Thread', status:'published', author:'🔥 Calcifer', date:13, engagement:'8.3k' },
+const P=[
+  {t:'When Your AI Builds Its Own Guardrails',p:'Blog+X',s:'review',a:'🐱',d:20},
+  {t:'Temper: Shared Backend for AI Agents',p:'X Thread',s:'review',a:'🔥',d:20},
+  {t:'Feed Rewrite: 1925→108 Lines',p:'X Post',s:'scheduled',a:'🔥',d:21},
+  {t:'Deep Sci-Fi Feb Update',p:'Blog',s:'draft',a:'🐱',d:22},
+  {t:'Story Arc Detection is Live',p:'X Post',s:'scheduled',a:'🔥',d:22},
+  {t:'Relationship Graphs: Jitter Fix',p:'X Post',s:'scheduled',a:'🔥',d:23},
+  {t:'Video Regen Pipeline',p:'X Thread',s:'draft',a:'🔥',d:24},
+  {t:'Verification Cascade Deep Dive',p:'Blog',s:'draft',a:'🐱',d:25},
+  {t:'World Map Clusters Fix',p:'X Post',s:'scheduled',a:'🔥',d:25},
+  {t:'SSE Migration Complete',p:'X Post',s:'published',a:'🔥',d:18,e:'2.4k'},
+  {t:'Building in Public with AI Agents',p:'X Thread',s:'published',a:'🔥',d:15,e:'5.1k'},
+  {t:'Deep Sci-Fi Launch Week',p:'X Thread',s:'published',a:'🔥',d:13,e:'8.3k'},
 ];
+const SC={draft:{bg:'bg-white/[0.03]',t:'text-t3',b:'bg-s4 text-t3'},review:{bg:'bg-amber/[0.05]',t:'text-amber',b:'bg-amber-dim text-amber'},scheduled:{bg:'bg-a1/[0.05]',t:'text-a2',b:'bg-a3 text-a2'},published:{bg:'bg-green/[0.05]',t:'text-green',b:'bg-green-dim text-green'}};
 
-const STATUS_STYLES = {
-  draft: { bg:'bg-white/[0.04]', text:'text-txt-3', badge:'bg-base-200 text-txt-3' },
-  review: { bg:'bg-warn/[0.06]', text:'text-warn', badge:'bg-warn-dim text-warn' },
-  scheduled: { bg:'bg-pri/[0.06]', text:'text-pri', badge:'bg-pri-dim text-pri' },
-  published: { bg:'bg-ok/[0.06]', text:'text-ok', badge:'bg-ok-dim text-ok' },
-};
-
-function renderCalendar() {
-  const firstDay = 6; // Feb 2026 starts on Sunday (index 6 in Mon-first)
-  const days = 28;
-  let html = '';
-  for (let i = 0; i < firstDay; i++) {
-    html += `<div class="border-r border-b border-glass p-1.5 sm:p-2 min-h-[4rem] sm:min-h-[6rem] opacity-30">
-      <span class="text-[11px] font-mono text-txt-3">${26+i}</span>
-    </div>`;
-  }
-  for (let d = 1; d <= days; d++) {
-    const isToday = d === 20;
-    const items = POSTS.filter(p => p.date === d);
-    html += `<div class="border-r border-b border-glass p-1.5 sm:p-2 min-h-[4rem] sm:min-h-[6rem] transition-all hover:bg-white/[0.01] ${isToday ? 'bg-pri/[0.03]' : ''}">
-      <span class="text-[11px] font-mono ${isToday ? 'text-pri font-medium' : 'text-txt-3'}">${d}</span>
-      <div class="mt-1 flex flex-col gap-0.5">
-        ${items.map(p => {
-          const s = STATUS_STYLES[p.status];
-          return `<div class="px-1.5 py-0.5 rounded text-[10px] sm:text-[11px] truncate cursor-pointer transition-all hover:brightness-125 ${s.bg} ${s.text}" title="${p.title}">${p.title}</div>`;
-        }).join('')}
-      </div>
-    </div>`;
-  }
-  const total = firstDay + days;
-  const rem = (7 - total % 7) % 7;
-  for (let i = 1; i <= rem; i++) {
-    html += `<div class="border-r border-b border-glass p-1.5 sm:p-2 min-h-[4rem] sm:min-h-[6rem] opacity-30">
-      <span class="text-[11px] font-mono text-txt-3">${i}</span>
-    </div>`;
-  }
-  document.getElementById('cal-grid').innerHTML = html;
+function renderCal(){
+  const fd=6;let h='';
+  for(let i=0;i<fd;i++)h+=`<div class="border-r border-b border-b1 p-1.5 sm:p-2 min-h-[4rem] sm:min-h-[6rem] opacity-25"><span class="text-[11px] font-mono text-t3">${26+i}</span></div>`;
+  for(let d=1;d<=28;d++){const today=d===20,items=P.filter(p=>p.d===d);h+=`<div class="border-r border-b border-b1 p-1.5 sm:p-2 min-h-[4rem] sm:min-h-[6rem] transition-all hover:bg-white/[0.01] ${today?'bg-a1/[0.03]':''}"><span class="text-[11px] font-mono ${today?'text-a2 font-medium':'text-t3'}">${d}</span><div class="mt-1 flex flex-col gap-0.5">${items.map(p=>{const s=SC[p.s];return`<div class="px-1.5 py-0.5 rounded-md text-[10px] sm:text-[11px] truncate cursor-pointer transition-all hover:brightness-125 ${s.bg} ${s.t}" title="${p.t}">${p.t}</div>`;}).join('')}</div></div>`;}
+  const tot=fd+28,rem=(7-tot%7)%7;for(let i=1;i<=rem;i++)h+=`<div class="border-r border-b border-b1 p-1.5 sm:p-2 min-h-[4rem] sm:min-h-[6rem] opacity-25"><span class="text-[11px] font-mono text-t3">${i}</span></div>`;
+  document.getElementById('cg').innerHTML=h;
 }
-
-function renderList() {
-  const groups = { draft:[], review:[], scheduled:[], published:[] };
-  POSTS.forEach(p => groups[p.status].push(p));
-  const labels = { draft:'Drafts', review:'In Review', scheduled:'Scheduled', published:'Published' };
-  
-  document.getElementById('list-view').innerHTML = Object.entries(groups).filter(([_,p]) => p.length).map(([status, posts]) => `
-    <div class="mb-6">
-      <h3 class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-3 pb-2 border-b border-glass">${labels[status]} (${posts.length})</h3>
-      <div class="flex flex-col gap-1">
-        ${posts.map(p => {
-          const s = STATUS_STYLES[status];
-          return `<div class="flex items-center gap-3 px-3 sm:px-4 py-2.5 sm:py-3 rounded-lg hover:bg-white/[0.02] transition-all cursor-pointer">
-            <div class="flex-1 min-w-0">
-              <div class="text-sm truncate">${p.title}</div>
-              <div class="text-[11px] font-mono text-txt-3 mt-0.5">${p.platform}</div>
-            </div>
-            <span class="hidden sm:block text-sm text-txt-2">${p.author}</span>
-            <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-mono font-medium uppercase tracking-wider ${s.badge} shrink-0">${status}</span>
-            <span class="hidden sm:block text-xs font-mono text-txt-3 w-12 text-right">Feb ${p.date}</span>
-            ${p.engagement ? `<span class="hidden sm:block text-xs font-mono text-txt-3 w-10 text-right">${p.engagement}</span>` : `<span class="hidden sm:block w-10"></span>`}
-          </div>`;
-        }).join('')}
-      </div>
-    </div>
-  `).join('');
+function renderList(){
+  const g={draft:[],review:[],scheduled:[],published:[]};P.forEach(p=>g[p.s].push(p));
+  const lb={draft:'Drafts',review:'In Review',scheduled:'Scheduled',published:'Published'};
+  document.getElementById('listv').innerHTML=Object.entries(g).filter(([_,p])=>p.length).map(([s,ps])=>`<div class="mb-6"><h3 class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-3 pb-2 border-b border-b1">${lb[s]} (${ps.length})</h3>${ps.map(p=>{const c=SC[s];return`<div class="flex items-center gap-3 px-4 py-3 -mx-4 rounded-xl hover:bg-white/[0.02] transition-all cursor-pointer"><div class="flex-1 min-w-0"><div class="text-sm truncate">${p.t}</div><div class="text-[11px] font-mono text-t3 mt-0.5">${p.p}</div></div><span class="hidden sm:block text-sm text-t2">${p.a}</span><span class="h-5 px-2 rounded-full text-[10px] font-mono font-medium tracking-wide ${c.b} inline-flex items-center shrink-0">${s}</span><span class="hidden sm:block text-xs font-mono text-t3 w-12 text-right">Feb ${p.d}</span>${p.e?`<span class="hidden sm:block text-xs font-mono text-t3 w-10 text-right">${p.e}</span>`:''}</div>`}).join('')}</div>`).join('');
 }
-
-function setView(v) {
-  document.getElementById('calendar-view').classList.toggle('hidden', v !== 'calendar');
-  document.getElementById('list-view').classList.toggle('hidden', v !== 'list');
-  document.querySelectorAll('.view-btn').forEach(b => {
-    const isActive = b.dataset.view === v;
-    b.classList.toggle('bg-pri-dim', isActive);
-    b.classList.toggle('text-pri', isActive);
-    b.classList.toggle('text-txt-3', !isActive);
-  });
-}
-
-renderCalendar();
-renderList();
-renderTemperSection('temper-section', 'content-pipeline');
+function setV(v){document.getElementById('calv').classList.toggle('hidden',v!=='cal');document.getElementById('listv').classList.toggle('hidden',v!=='list');document.querySelectorAll('.vb').forEach(b=>{const on=b.dataset.v===v;b.classList.toggle('bg-a3',on);b.classList.toggle('text-a2',on);b.classList.toggle('text-t3',!on);});}
+renderCal();renderList();
+renderTemperSection('temper-section','content-pipeline');
 </script>
 </body>
 </html>

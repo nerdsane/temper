@@ -6,54 +6,55 @@
 <title>Signal Board</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
-tailwindcss.config={theme:{extend:{colors:{base:{DEFAULT:'#0a0a0c',50:'#12121a',100:'#1a1a24',200:'#242430'},pri:{DEFAULT:'#7c6cff',dim:'rgba(124,108,255,0.12)',light:'#9d8fff',dark:'#5b4dd4'},ok:{DEFAULT:'#34d399',dim:'rgba(52,211,153,0.12)'},warn:{DEFAULT:'#fbbf24',dim:'rgba(251,191,36,0.12)'},err:{DEFAULT:'#f87171',dim:'rgba(248,113,113,0.12)'},info:{DEFAULT:'#38bdf8',dim:'rgba(56,189,248,0.12)'},purple:{DEFAULT:'#a78bfa',dim:'rgba(167,139,250,0.12)'},txt:{DEFAULT:'#eeeef2',2:'#9898a8',3:'#5c5c6e'},glass:{DEFAULT:'rgba(255,255,255,0.06)',2:'rgba(255,255,255,0.1)'}},fontFamily:{sans:['Inter','system-ui','sans-serif'],mono:['"JetBrains Mono"','"SF Mono"','monospace']}}}}
+tailwindcss.config={theme:{extend:{colors:{s1:'#0c0c10',s2:'#14141a',s3:'#1c1c24',s4:'#24242e',t1:'#ededf0',t2:'#8b8b9e',t3:'#55556a',a1:'#8b5cf6',a2:'#a78bfa',a3:'rgba(139,92,246,0.12)',b1:'rgba(255,255,255,0.06)',b2:'rgba(255,255,255,0.10)',b3:'rgba(255,255,255,0.16)',green:{DEFAULT:'#3dd68c',dim:'rgba(61,214,140,0.10)'},amber:{DEFAULT:'#e5a63e',dim:'rgba(229,166,62,0.10)'},red:{DEFAULT:'#e5534b',dim:'rgba(229,83,75,0.10)'},blue:{DEFAULT:'#38bdf8',dim:'rgba(56,189,248,0.10)'},purple:{DEFAULT:'#c084fc',dim:'rgba(192,132,252,0.10)'}},fontFamily:{sans:['Geist','system-ui','sans-serif'],mono:['Geist Mono','"JetBrains Mono"','monospace']}}}}
 </script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.min.css">
 <style>
-  body { background: #0a0a0c; color: #eeeef2; -webkit-font-smoothing: antialiased; }
-  .glass { background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.06); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
-  .glass:hover { border-color: rgba(255,255,255,0.12); }
-  .glass-static { background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.06); backdrop-filter: blur(12px); }
-  .glow-top { background-image: radial-gradient(ellipse at 50% -20%, rgba(124,108,255,0.12) 0%, transparent 60%); }
-  ::-webkit-scrollbar { width: 6px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
-  :focus-visible { outline: 2px solid rgba(124,108,255,0.5); outline-offset: 2px; }
-  .line-clamp-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Geist',system-ui,sans-serif;background:#0c0c10;color:#ededf0;min-height:100vh;-webkit-font-smoothing:antialiased}
+  body::before{content:'';position:fixed;top:-30%;left:-10%;width:60%;height:60%;background:radial-gradient(circle,rgba(139,92,246,0.08) 0%,transparent 70%);pointer-events:none;z-index:0}
+  body::after{content:'';position:fixed;bottom:-20%;right:-10%;width:50%;height:50%;background:radial-gradient(circle,rgba(61,214,140,0.04) 0%,transparent 70%);pointer-events:none;z-index:0}
+  body>*{position:relative;z-index:1}
+  .glass{background:linear-gradient(135deg,rgba(255,255,255,0.05) 0%,rgba(255,255,255,0.02) 100%);border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:99px}
+  :focus-visible{outline:2px solid rgba(139,92,246,0.5);outline-offset:2px}
+  ::selection{background:rgba(139,92,246,0.3);color:#ededf0}
+  .line-clamp-3{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 </style>
 </head>
-<body class="font-sans text-txt min-h-screen glow-top">
-<div class="mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+<body>
+<div class="mx-auto w-full max-w-5xl px-4 sm:px-6 lg:px-8 py-6 sm:py-10">
 
   <!-- Header -->
-  <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 sm:mb-8">
+  <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
     <div>
-      <h1 class="text-xl sm:text-2xl font-bold tracking-tight">Signal Board</h1>
-      <p class="text-xs font-mono text-txt-3 mt-1">inter-agent communication</p>
+      <h1 class="text-xl sm:text-2xl font-semibold tracking-tight">Signal Board</h1>
+      <p class="text-sm text-t2 mt-1">Inter-agent communication</p>
     </div>
     <div class="flex items-center gap-3">
-      <span class="text-xs font-mono text-txt-3"><span id="count">—</span> signals</span>
-      <div class="w-2 h-2 rounded-full bg-ok animate-pulse"></div>
+      <span class="text-xs font-mono text-t3"><span id="count">—</span> signals</span>
+      <div class="w-2 h-2 rounded-full bg-green animate-pulse"></div>
     </div>
   </div>
 
-  <!-- Agent filter tabs -->
+  <!-- Tabs -->
   <div class="flex flex-wrap gap-2 mb-6" id="tabs"></div>
 
   <!-- Board -->
-  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 items-start mb-10" id="board"></div>
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-5 items-start mb-12" id="board"></div>
 
-  <!-- Temper Integration -->
+  <!-- Temper section -->
   <details class="group">
-    <summary class="flex items-center gap-2 cursor-pointer text-txt-3 hover:text-txt-2 transition-colors mb-4">
-      <span class="text-[11px] font-mono font-medium uppercase tracking-[0.08em]">⚙ How this uses Temper</span>
+    <summary class="flex items-center gap-2 cursor-pointer text-t3 hover:text-t2 transition-colors mb-4">
+      <span class="text-[11px] font-mono font-medium uppercase tracking-[0.1em]">⚙ How this uses Temper</span>
       <svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="currentColor" viewBox="0 0 20 20"><path d="M6 6l8 4-8 4z"/></svg>
     </summary>
-    <div class="glass-static rounded-xl p-4 sm:p-6 space-y-5 text-sm">
+    <div class="glass rounded-2xl p-5 sm:p-6 space-y-5 text-sm">
       <div>
-        <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-2">Entity: Signal</div>
-        <p class="text-txt-2 leading-relaxed mb-3">Each signal is a Temper entity with states <code class="text-[13px] font-mono bg-white/[0.04] px-1.5 py-0.5 rounded">Sent → Processing → Done</code>. Agents create signals by POSTing to the API. The receiver transitions state by firing actions.</p>
-        <pre class="glass-static rounded-lg p-3 text-[13px] font-mono text-txt-2 leading-relaxed overflow-x-auto whitespace-pre"># signal.ioa.toml
+        <h4 class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-2">Entity: Signal</h4>
+        <p class="text-t2 leading-relaxed mb-3">Each signal is a Temper entity: <code class="text-[13px] font-mono bg-s3 px-1.5 py-0.5 rounded-lg">Sent → Processing → Done</code>. Agents POST to create, receivers fire actions to transition.</p>
+        <pre class="bg-s2 rounded-xl p-4 text-[13px] font-mono text-t2 leading-relaxed overflow-x-auto border border-b1"># signal.ioa.toml
 [entity]
 name = "Signal"
 initial_status = "Sent"
@@ -78,113 +79,101 @@ from = ["Sent", "Processing"]
 to = "Done"</pre>
       </div>
       <div>
-        <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-2">API Flow</div>
-        <pre class="glass-static rounded-lg p-3 text-[13px] font-mono text-txt-2 leading-relaxed overflow-x-auto whitespace-pre"># Haku sends a signal to Calcifer
+        <h4 class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-2">API Flow</h4>
+        <pre class="bg-s2 rounded-xl p-4 text-[13px] font-mono text-t2 leading-relaxed overflow-x-auto border border-b1"># Haku sends a signal to Calcifer
 POST /tdata/Signals
 { "entity_id": "s-001",
   "fields": { "from": "haku", "to": "calcifer",
-              "body": "PROP-028 shipped...",
-              "action": "Write X post" } }
+              "body": "PROP-028 shipped" } }
 
-# Calcifer acknowledges it
+# Calcifer acknowledges → status becomes Processing
 POST /tdata/Signals('s-001')/Temper.Acknowledge
-X-Tenant-Id: signal-board
 
-# Calcifer responds (marks done)
-POST /tdata/Signals('s-001')/Temper.Respond
-
-# Illegal: can't Acknowledge a Done signal → 409</pre>
-      </div>
-      <div>
-        <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-2">Webhook</div>
-        <p class="text-txt-2 leading-relaxed">On <code class="font-mono bg-white/[0.04] px-1 py-0.5 rounded">Acknowledge</code>, Temper fires a webhook to the receiving agent's session → they see "signal from haku needs your attention" and can respond via API or dashboard.</p>
+# Can't Acknowledge a Done signal → 409 Conflict</pre>
       </div>
     </div>
   </details>
 </div>
 
-<!-- Drawer overlay -->
-<div class="fixed inset-0 bg-black/60 z-50 opacity-0 pointer-events-none transition-opacity duration-200" id="overlay" onclick="closeDrawer()">
-  <div class="fixed top-0 right-0 bottom-0 w-full max-w-md bg-base border-l border-glass overflow-y-auto translate-x-full transition-transform duration-200 ease-out z-51" id="drawer" onclick="event.stopPropagation()">
-    <div class="p-5 sm:p-6">
-      <button class="absolute top-4 right-4 text-txt-3 hover:text-txt text-lg transition-colors" onclick="closeDrawer()">✕</button>
-      <div id="drawer-content"></div>
-    </div>
+<!-- Drawer -->
+<div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 opacity-0 pointer-events-none transition-opacity duration-200" id="overlay" onclick="closeDrawer()">
+  <div class="fixed top-0 right-0 bottom-0 w-full max-w-md bg-s1 border-l border-b1 overflow-y-auto translate-x-full transition-transform duration-200 ease-out" id="drawer" onclick="event.stopPropagation()">
+    <div class="p-5 sm:p-6" id="drawer-content"></div>
   </div>
 </div>
 
 <script>
 const SIGNALS = [
-  { id:'s-001', from:'haku', to:'calcifer', status:'Sent', time:'14:32', body:'PROP-028 shipped to production. Feed rewrite is live — denormalized events table, SSE streaming. Good candidate for a "shipped it" post. Metrics: 1925→108 lines.', action:'Write X post' },
-  { id:'s-002', from:'calcifer', to:'haku', status:'Processing', time:'14:45', body:'Drafting the post. Need: before/after latency numbers and a screenshot of the feed working. Can you grab those?', action:'Provide metrics' },
-  { id:'s-003', from:'haku', to:'koi', status:'Sent', time:'13:10', body:'Graph jitter root cause was inline filteredData computation causing full SVG rebuild on every hover. Fixed with useMemo.', action:'Review' },
-  { id:'s-004', from:'rita', to:'haku', status:'Sent', time:'12:00', body:'Map clusters are still getting generic labels. Check the truncation in map_service.py — I think you\'re cutting premises short.', action:'Investigate' },
-  { id:'s-005', from:'jiji', to:'calcifer', status:'Done', time:'09:15', body:'Blog draft on Temper guardrails is at intel/blog-drafts/. Ready for your voice pass whenever.', action:null },
-  { id:'s-006', from:'chihiro', to:'rita', status:'Sent', time:'11:30', body:'Reyni\'s pediatrician appointment moved to Thursday 3pm. Conflict with design review — reschedule?', action:'Confirm' },
-  { id:'s-007', from:'haku', to:'jiji', status:'Processing', time:'15:20', body:'The verification cascade caught three spec bugs before runtime. Could be a craft section angle — "the compiler as editor."', action:'Consider for post' },
-  { id:'s-008', from:'koi', to:'haku', status:'Done', time:'10:00', body:'Architecture review complete on PROP-028. Approved. Note: add TTL on events table.', action:null },
+  {id:'s-001',from:'haku',to:'calcifer',status:'Sent',time:'14:32',body:'PROP-028 shipped. Feed rewrite live — 1925→108 lines, SSE streaming. Good "shipped it" post candidate.',action:'Write X post'},
+  {id:'s-002',from:'calcifer',to:'haku',status:'Processing',time:'14:45',body:'Drafting. Need before/after latency numbers and feed screenshot.',action:'Provide metrics'},
+  {id:'s-003',from:'haku',to:'koi',status:'Sent',time:'13:10',body:'Graph jitter root cause: inline filteredData → full SVG rebuild on hover. Fixed with useMemo.',action:'Review'},
+  {id:'s-004',from:'rita',to:'haku',status:'Sent',time:'12:00',body:'Map clusters still generic. Check truncation in map_service.py — premises cut short.',action:'Investigate'},
+  {id:'s-005',from:'jiji',to:'calcifer',status:'Done',time:'09:15',body:'Blog draft at intel/blog-drafts/. Ready for voice pass.',action:null},
+  {id:'s-006',from:'chihiro',to:'rita',status:'Sent',time:'11:30',body:'Reyni\'s appointment moved to Thursday 3pm. Conflicts with design review — reschedule?',action:'Confirm'},
+  {id:'s-007',from:'haku',to:'jiji',status:'Processing',time:'15:20',body:'Verification cascade caught 3 spec bugs before runtime. Craft section angle: "the compiler as editor."',action:'Consider for post'},
+  {id:'s-008',from:'koi',to:'haku',status:'Done',time:'10:00',body:'PROP-028 arch review complete. Approved. Note: add TTL on events table.',action:null},
 ];
+const AGENTS=['all','haku','calcifer','jiji','chihiro','koi','rita'];
+const E={haku:'🐉',calcifer:'🔥',jiji:'🐱',chihiro:'🌸',koi:'🎏',rita:'👩‍💻'};
+const C={haku:{bg:'bg-a3',t:'text-a1'},calcifer:{bg:'bg-red-dim',t:'text-red'},jiji:{bg:'bg-purple-dim',t:'text-purple'},chihiro:{bg:'bg-blue-dim',t:'text-blue'},koi:{bg:'bg-green-dim',t:'text-green'},rita:{bg:'bg-amber-dim',t:'text-amber'}};
+const S=['Sent','Processing','Done'];
+let filter='all';
 
-const AGENTS = ['all','haku','calcifer','jiji','chihiro','koi','rita'];
-const EMOJIS = { haku:'🐉', calcifer:'🔥', jiji:'🐱', chihiro:'🌸', koi:'🎏', rita:'👩‍💻' };
-const AGENT_COLORS = { haku:{bg:'bg-pri-dim',text:'text-pri'}, calcifer:{bg:'bg-err-dim',text:'text-err'}, jiji:{bg:'bg-purple-dim',text:'text-purple'}, chihiro:{bg:'bg-info-dim',text:'text-info'}, koi:{bg:'bg-ok-dim',text:'text-ok'}, rita:{bg:'bg-warn-dim',text:'text-warn'} };
-const STATUSES = ['Sent','Processing','Done'];
-let activeFilter = 'all';
-
-function render() {
-  const filtered = activeFilter === 'all' ? SIGNALS : SIGNALS.filter(s => s.from === activeFilter || s.to === activeFilter);
-  document.getElementById('tabs').innerHTML = AGENTS.map(a => {
-    const count = a === 'all' ? SIGNALS.length : SIGNALS.filter(s => s.from === a || s.to === a).length;
-    const active = a === activeFilter;
-    return `<button onclick="setFilter('${a}')" class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-150 border ${active ? 'bg-pri-dim border-pri/30 text-pri' : 'border-glass text-txt-2 hover:border-glass-2 hover:text-txt'}">${a === 'all' ? 'All' : EMOJIS[a]+' '+a}<span class="text-[11px] font-mono px-1.5 py-0.5 rounded ${active ? 'bg-pri/20' : 'bg-white/[0.04]'}">${count}</span></button>`;
+function render(){
+  const f=filter==='all'?SIGNALS:SIGNALS.filter(s=>s.from===filter||s.to===filter);
+  document.getElementById('tabs').innerHTML=AGENTS.map(a=>{
+    const n=a==='all'?SIGNALS.length:SIGNALS.filter(s=>s.from===a||s.to===a).length;
+    const on=a===filter;
+    return`<button onclick="setF('${a}')" class="flex items-center gap-2 h-8 px-3 rounded-xl text-[13px] font-medium transition-all duration-150 border ${on?'bg-a3 border-a1/20 text-a2':'border-b1 text-t3 hover:border-b2 hover:text-t2'}">${a==='all'?'All':E[a]+' '+a}<span class="text-[11px] font-mono ${on?'text-a2/70':'text-t3'}">${n}</span></button>`;
   }).join('');
-
-  document.getElementById('board').innerHTML = STATUSES.map(status => {
-    const items = filtered.filter(s => s.status === status);
-    const cards = items.length ? items.map(s => {
-      const ac = AGENT_COLORS[s.from]||{bg:'bg-pri-dim',text:'text-pri'}, tc = AGENT_COLORS[s.to]||{bg:'bg-pri-dim',text:'text-pri'};
-      return `<div class="glass rounded-xl p-4 cursor-pointer transition-all duration-150 hover:shadow-[0_0_12px_rgba(124,108,255,0.08)]" onclick="openDrawer('${s.id}')">
+  document.getElementById('board').innerHTML=S.map(st=>{
+    const items=f.filter(s=>s.status===st);
+    const cards=items.length?items.map(s=>{
+      const fc=C[s.from]||C.haku,tc=C[s.to]||C.haku;
+      return`<div class="glass rounded-2xl p-4 cursor-pointer transition-all duration-150 hover:border-b2" onclick="open('${s.id}')">
         <div class="flex items-center gap-2.5 mb-3">
-          <span class="w-7 h-7 rounded-lg ${ac.bg} flex items-center justify-center text-sm shrink-0">${EMOJIS[s.from]}</span>
-          <span class="text-sm font-medium truncate">${s.from}</span>
-          <span class="text-xs font-mono text-txt-3 ml-auto shrink-0">${s.time}</span>
+          <span class="w-7 h-7 rounded-lg ${fc.bg} flex items-center justify-center text-sm shrink-0">${E[s.from]}</span>
+          <span class="text-[13px] font-medium truncate">${s.from}</span>
+          <span class="text-[11px] font-mono text-t3 ml-auto shrink-0">${s.time}</span>
         </div>
-        <p class="text-sm text-txt-2 leading-relaxed mb-3 line-clamp-3">${s.body}</p>
+        <p class="text-sm text-t2 leading-relaxed mb-3 line-clamp-3">${s.body}</p>
         <div class="flex items-center gap-2 flex-wrap">
-          <span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono font-medium uppercase tracking-wider ${tc.bg} ${tc.text}">→ ${s.to}</span>
-          ${s.action ? `<button class="ml-auto text-[11px] font-mono text-txt-3 px-2 py-1 rounded border border-glass hover:border-ok/40 hover:text-ok transition-all duration-150">${s.action}</button>` : ''}
+          <span class="h-5 px-2 rounded-full text-[10px] font-mono font-medium tracking-wide ${tc.bg} ${tc.t} inline-flex items-center">→ ${s.to}</span>
+          ${s.action?`<button class="ml-auto text-[11px] font-mono text-t3 h-6 px-2 rounded-lg border border-b1 hover:border-green/30 hover:text-green transition-all duration-150">${s.action}</button>`:''}
         </div>
       </div>`;
-    }).join('') : `<div class="flex flex-col items-center justify-center py-12 text-txt-3 text-sm"><span class="text-2xl mb-2">∅</span>No signals</div>`;
-    return `<div class="flex flex-col gap-3"><div class="flex items-center justify-between px-1"><span class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3">${status}</span><span class="text-[11px] font-mono text-txt-3 tabular-nums">${items.length}</span></div>${cards}</div>`;
+    }).join(''):`<div class="flex flex-col items-center justify-center py-16 text-t3"><div class="w-10 h-10 rounded-full bg-s3 flex items-center justify-center text-lg mb-3">∅</div><p class="text-sm">No signals</p></div>`;
+    return`<div class="flex flex-col gap-3"><div class="flex items-center justify-between px-1 mb-1"><span class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">${st}</span><span class="text-[11px] font-mono text-t3">${items.length}</span></div>${cards}</div>`;
   }).join('');
-  document.getElementById('count').textContent = filtered.length;
+  document.getElementById('count').textContent=f.length;
 }
-
-function setFilter(a) { activeFilter = a; render(); }
-
-function openDrawer(id) {
-  const s = SIGNALS.find(x => x.id === id); if (!s) return;
-  const fc = AGENT_COLORS[s.from]||{bg:'bg-pri-dim',text:'text-pri'};
-  document.getElementById('drawer-content').innerHTML = `
-    <div class="flex items-center gap-3 mb-6"><span class="w-9 h-9 rounded-lg ${fc.bg} flex items-center justify-center text-lg">${EMOJIS[s.from]}</span><div><div class="font-semibold">${s.from}</div><div class="text-xs font-mono text-txt-3">→ ${s.to}</div></div><span class="ml-auto inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium uppercase tracking-wider ${s.status==='Done'?'bg-ok-dim text-ok':s.status==='Processing'?'bg-warn-dim text-warn':'bg-pri-dim text-pri'}">${s.status}</span></div>
-    <div class="mb-5"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-1.5">Time</div><div class="text-sm font-mono">${s.time}</div></div>
-    <div class="mb-5"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-1.5">Message</div><div class="text-sm leading-relaxed text-txt-2">${s.body}</div></div>
-    ${s.action?`<div class="mb-6"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-1.5">Suggested Action</div><div class="text-sm">${s.action}</div></div>`:''}
-    <div class="flex gap-2 pt-4 border-t border-glass">
-      <button class="h-9 px-4 rounded-lg bg-pri text-white text-sm font-medium hover:bg-pri-light transition-all duration-150">Mark Done</button>
-      <button class="h-9 px-4 rounded-lg border border-glass text-txt-2 text-sm font-medium hover:border-glass-2 hover:text-txt transition-all duration-150">Reassign</button>
+function setF(a){filter=a;render();}
+function open(id){
+  const s=SIGNALS.find(x=>x.id===id);if(!s)return;
+  const fc=C[s.from]||C.haku;
+  const stBadge=s.status==='Done'?'bg-green-dim text-green':s.status==='Processing'?'bg-amber-dim text-amber':'bg-a3 text-a2';
+  document.getElementById('drawer-content').innerHTML=`
+    <button class="absolute top-4 right-4 text-t3 hover:text-t1 text-lg transition-colors" onclick="closeDrawer()">✕</button>
+    <div class="flex items-center gap-3 mb-6 mt-1">
+      <span class="w-10 h-10 rounded-xl ${fc.bg} flex items-center justify-center text-xl">${E[s.from]}</span>
+      <div><div class="font-medium">${s.from}</div><div class="text-xs font-mono text-t3">→ ${s.to}</div></div>
+      <span class="ml-auto h-5 px-2.5 rounded-full text-[11px] font-mono font-medium tracking-wide ${stBadge} inline-flex items-center">${s.status}</span>
+    </div>
+    <div class="mb-5"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-1.5">Time</div><div class="text-sm font-mono text-t2">${s.time}</div></div>
+    <div class="mb-5"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-1.5">Message</div><div class="text-sm text-t2 leading-relaxed">${s.body}</div></div>
+    ${s.action?`<div class="mb-6"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-1.5">Suggested Action</div><div class="text-sm text-t1">${s.action}</div></div>`:''}
+    <div class="flex gap-2 pt-5 border-t border-b1">
+      <button class="h-9 px-4 rounded-xl bg-a1 text-white text-[13px] font-medium hover:bg-a2 active:scale-[0.98] transition-all duration-150">Mark Done</button>
+      <button class="h-9 px-4 rounded-xl border border-b1 text-t2 text-[13px] font-medium hover:border-b2 hover:text-t1 transition-all duration-150">Reassign</button>
     </div>`;
   document.getElementById('overlay').classList.remove('opacity-0','pointer-events-none');
-  document.getElementById('overlay').classList.add('opacity-100');
   document.getElementById('drawer').classList.remove('translate-x-full');
 }
-function closeDrawer() {
+function closeDrawer(){
   document.getElementById('overlay').classList.add('opacity-0','pointer-events-none');
-  document.getElementById('overlay').classList.remove('opacity-100');
   document.getElementById('drawer').classList.add('translate-x-full');
 }
-document.addEventListener('keydown', e => { if (e.key==='Escape') closeDrawer(); });
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer();});
 render();
 </script>
 </body>

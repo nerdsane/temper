@@ -6,74 +6,79 @@
 <title>Temper UI Showcase</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
-tailwindcss.config={theme:{extend:{colors:{base:{DEFAULT:'#0a0a0c',50:'#12121a',100:'#1a1a24',200:'#242430'},pri:{DEFAULT:'#7c6cff',dim:'rgba(124,108,255,0.12)',light:'#9d8fff',dark:'#5b4dd4'},ok:{DEFAULT:'#34d399',dim:'rgba(52,211,153,0.12)'},warn:{DEFAULT:'#fbbf24',dim:'rgba(251,191,36,0.12)'},err:{DEFAULT:'#f87171',dim:'rgba(248,113,113,0.12)'},txt:{DEFAULT:'#eeeef2',2:'#9898a8',3:'#5c5c6e'},glass:{DEFAULT:'rgba(255,255,255,0.06)',2:'rgba(255,255,255,0.1)'}},fontFamily:{sans:['Inter','system-ui','sans-serif'],mono:['"JetBrains Mono"','"SF Mono"','monospace']}}}}
+tailwindcss.config={theme:{extend:{colors:{s1:'#0c0c10',s2:'#14141a',s3:'#1c1c24',s4:'#24242e',t1:'#ededf0',t2:'#8b8b9e',t3:'#55556a',a1:'#8b5cf6',a2:'#a78bfa',a3:'rgba(139,92,246,0.12)',b1:'rgba(255,255,255,0.06)',b2:'rgba(255,255,255,0.10)',b3:'rgba(255,255,255,0.16)',green:{DEFAULT:'#3dd68c',dim:'rgba(61,214,140,0.10)'},amber:{DEFAULT:'#e5a63e',dim:'rgba(229,166,62,0.10)'},red:{DEFAULT:'#e5534b',dim:'rgba(229,83,75,0.10)'}},fontFamily:{sans:['Geist','system-ui','sans-serif'],mono:['Geist Mono','"JetBrains Mono"','monospace']}}}}
 </script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.min.css">
 <style>
-  body { background: #0a0a0c; color: #eeeef2; -webkit-font-smoothing: antialiased; }
-  .glass { background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.06); backdrop-filter: blur(12px); }
-  .glass:hover { border-color: rgba(255,255,255,0.12); }
-  .glow-top { background-image: radial-gradient(ellipse at 50% -20%, rgba(124,108,255,0.12) 0%, transparent 60%); }
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Geist',system-ui,sans-serif;background:#0c0c10;color:#ededf0;min-height:100vh;-webkit-font-smoothing:antialiased}
+  body::before{content:'';position:fixed;top:-30%;left:-10%;width:60%;height:60%;background:radial-gradient(circle,rgba(139,92,246,0.08) 0%,transparent 70%);pointer-events:none;z-index:0}
+  body::after{content:'';position:fixed;bottom:-20%;right:-10%;width:50%;height:50%;background:radial-gradient(circle,rgba(61,214,140,0.04) 0%,transparent 70%);pointer-events:none;z-index:0}
+  body>*{position:relative;z-index:1}
+  .glass{background:linear-gradient(135deg,rgba(255,255,255,0.05) 0%,rgba(255,255,255,0.02) 100%);border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+  ::selection{background:rgba(139,92,246,0.3);color:#ededf0}
 </style>
 </head>
-<body class="font-sans text-txt min-h-screen glow-top">
+<body>
 <div class="mx-auto w-full max-w-2xl px-4 sm:px-6 py-16 sm:py-24">
 
-  <div class="mb-12 sm:mb-16">
-    <h1 class="text-3xl sm:text-4xl font-bold tracking-tight mb-2">Temper UI</h1>
-    <p class="text-sm font-mono text-txt-3">5 apps · 1 design system · any shape</p>
+  <div class="mb-14">
+    <h1 class="text-3xl sm:text-4xl font-semibold tracking-tight mb-3">Temper UI</h1>
+    <p class="text-sm text-t2">5 apps · 1 design system · any shape</p>
+    <p class="text-xs text-t3 font-mono mt-2">v3 — Geist · glass · violet accent</p>
   </div>
 
   <div class="flex flex-col gap-3">
-    <a href="1-signal-board.html" class="glass rounded-xl p-4 sm:p-5 flex items-center gap-4 no-underline text-txt transition-all duration-150 group">
-      <span class="text-xl sm:text-2xl font-mono font-bold text-pri w-8 text-center shrink-0">1</span>
+    <a href="1-signal-board.html" class="glass rounded-2xl p-5 flex items-center gap-4 no-underline text-t1 transition-all duration-150 group hover:border-b2">
+      <span class="w-10 h-10 rounded-xl bg-a3 text-a1 flex items-center justify-center text-lg font-mono font-semibold shrink-0">1</span>
       <div class="flex-1 min-w-0">
-        <div class="font-semibold text-sm sm:text-base group-hover:text-pri transition-colors duration-150">Signal Board</div>
-        <div class="text-xs sm:text-sm text-txt-2 mt-0.5">Inter-agent comms — kanban, drawer detail, agent filters</div>
+        <div class="text-[15px] font-medium group-hover:text-a2 transition-colors">Signal Board</div>
+        <div class="text-sm text-t2 mt-0.5">Inter-agent comms — kanban, drawer, agent filters</div>
       </div>
-      <span class="hidden sm:inline-flex px-2.5 py-1 rounded-md text-[11px] font-mono font-medium uppercase tracking-wider bg-pri-dim text-pri shrink-0">Kanban</span>
+      <span class="hidden sm:inline-flex h-5 px-2.5 rounded-full text-[11px] font-mono font-medium tracking-wide bg-a3 text-a2 items-center shrink-0">Kanban</span>
     </a>
 
-    <a href="2-incident-timeline.html" class="glass rounded-xl p-4 sm:p-5 flex items-center gap-4 no-underline text-txt transition-all duration-150 group">
-      <span class="text-xl sm:text-2xl font-mono font-bold text-pri w-8 text-center shrink-0">2</span>
+    <a href="2-incident-timeline.html" class="glass rounded-2xl p-5 flex items-center gap-4 no-underline text-t1 transition-all duration-150 group hover:border-b2">
+      <span class="w-10 h-10 rounded-xl bg-red-dim text-red flex items-center justify-center text-lg font-mono font-semibold shrink-0">2</span>
       <div class="flex-1 min-w-0">
-        <div class="font-semibold text-sm sm:text-base group-hover:text-pri transition-colors duration-150">Incident Timeline</div>
-        <div class="text-xs sm:text-sm text-txt-2 mt-0.5">Prod incident tracker — timeline, severity, live duration</div>
+        <div class="text-[15px] font-medium group-hover:text-a2 transition-colors">Incident Timeline</div>
+        <div class="text-sm text-t2 mt-0.5">Prod incidents — timeline, severity, live duration</div>
       </div>
-      <span class="hidden sm:inline-flex px-2.5 py-1 rounded-md text-[11px] font-mono font-medium uppercase tracking-wider bg-err-dim text-err shrink-0">Timeline</span>
+      <span class="hidden sm:inline-flex h-5 px-2.5 rounded-full text-[11px] font-mono font-medium tracking-wide bg-red-dim text-red items-center shrink-0">Timeline</span>
     </a>
 
-    <a href="3-quick-form.html" class="glass rounded-xl p-4 sm:p-5 flex items-center gap-4 no-underline text-txt transition-all duration-150 group">
-      <span class="text-xl sm:text-2xl font-mono font-bold text-pri w-8 text-center shrink-0">3</span>
+    <a href="3-quick-form.html" class="glass rounded-2xl p-5 flex items-center gap-4 no-underline text-t1 transition-all duration-150 group hover:border-b2">
+      <span class="w-10 h-10 rounded-xl bg-green-dim text-green flex items-center justify-center text-lg font-mono font-semibold shrink-0">3</span>
       <div class="flex-1 min-w-0">
-        <div class="font-semibold text-sm sm:text-base group-hover:text-pri transition-colors duration-150">Quick Form</div>
-        <div class="text-xs sm:text-sm text-txt-2 mt-0.5">Multi-step wizard — radios, toggles, progress, review</div>
+        <div class="text-[15px] font-medium group-hover:text-a2 transition-colors">Quick Form</div>
+        <div class="text-sm text-t2 mt-0.5">Multi-step wizard — radios, toggles, review & submit</div>
       </div>
-      <span class="hidden sm:inline-flex px-2.5 py-1 rounded-md text-[11px] font-mono font-medium uppercase tracking-wider bg-ok-dim text-ok shrink-0">Form</span>
+      <span class="hidden sm:inline-flex h-5 px-2.5 rounded-full text-[11px] font-mono font-medium tracking-wide bg-green-dim text-green items-center shrink-0">Form</span>
     </a>
 
-    <a href="4-content-pipeline.html" class="glass rounded-xl p-4 sm:p-5 flex items-center gap-4 no-underline text-txt transition-all duration-150 group">
-      <span class="text-xl sm:text-2xl font-mono font-bold text-pri w-8 text-center shrink-0">4</span>
+    <a href="4-content-pipeline.html" class="glass rounded-2xl p-5 flex items-center gap-4 no-underline text-t1 transition-all duration-150 group hover:border-b2">
+      <span class="w-10 h-10 rounded-xl bg-amber-dim text-amber flex items-center justify-center text-lg font-mono font-semibold shrink-0">4</span>
       <div class="flex-1 min-w-0">
-        <div class="font-semibold text-sm sm:text-base group-hover:text-pri transition-colors duration-150">Content Pipeline</div>
-        <div class="text-xs sm:text-sm text-txt-2 mt-0.5">Calendar + list views — content status, scheduling</div>
+        <div class="text-[15px] font-medium group-hover:text-a2 transition-colors">Content Pipeline</div>
+        <div class="text-sm text-t2 mt-0.5">Calendar + list — content scheduling, status tracking</div>
       </div>
-      <span class="hidden sm:inline-flex px-2.5 py-1 rounded-md text-[11px] font-mono font-medium uppercase tracking-wider bg-warn-dim text-warn shrink-0">Calendar</span>
+      <span class="hidden sm:inline-flex h-5 px-2.5 rounded-full text-[11px] font-mono font-medium tracking-wide bg-amber-dim text-amber items-center shrink-0">Calendar</span>
     </a>
 
-    <a href="5-agent-vitals.html" class="glass rounded-xl p-4 sm:p-5 flex items-center gap-4 no-underline text-txt transition-all duration-150 group">
-      <span class="text-xl sm:text-2xl font-mono font-bold text-pri w-8 text-center shrink-0">5</span>
+    <a href="5-agent-vitals.html" class="glass rounded-2xl p-5 flex items-center gap-4 no-underline text-t1 transition-all duration-150 group hover:border-b2">
+      <span class="w-10 h-10 rounded-xl bg-a3 text-a1 flex items-center justify-center text-lg font-mono font-semibold shrink-0">5</span>
       <div class="flex-1 min-w-0">
-        <div class="font-semibold text-sm sm:text-base group-hover:text-pri transition-colors duration-150">Agent Vitals</div>
-        <div class="text-xs sm:text-sm text-txt-2 mt-0.5">Team health — sparklines, metrics, activity, system status</div>
+        <div class="text-[15px] font-medium group-hover:text-a2 transition-colors">Agent Vitals</div>
+        <div class="text-sm text-t2 mt-0.5">Team health — sparklines, metrics, activity feeds</div>
       </div>
-      <span class="hidden sm:inline-flex px-2.5 py-1 rounded-md text-[11px] font-mono font-medium uppercase tracking-wider bg-pri-dim text-pri shrink-0">Dashboard</span>
+      <span class="hidden sm:inline-flex h-5 px-2.5 rounded-full text-[11px] font-mono font-medium tracking-wide bg-a3 text-a2 items-center shrink-0">Dashboard</span>
     </a>
   </div>
 
-  <div class="mt-12 text-center text-xs font-mono text-txt-3">
-    Tailwind + glass + one palette · design-system v2
-  </div>
+  <p class="text-center text-xs font-mono text-t3 mt-14">
+    design-system.md v3 · Geist · glass · violet
+  </p>
 </div>
 </body>
 </html>

@@ -6,191 +6,124 @@
 <title>Quick Form</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
-tailwindcss.config={theme:{extend:{colors:{base:{DEFAULT:'#0a0a0c',50:'#12121a',100:'#1a1a24',200:'#242430'},pri:{DEFAULT:'#7c6cff',dim:'rgba(124,108,255,0.12)',light:'#9d8fff',dark:'#5b4dd4'},ok:{DEFAULT:'#34d399',dim:'rgba(52,211,153,0.12)'},warn:{DEFAULT:'#fbbf24',dim:'rgba(251,191,36,0.12)'},err:{DEFAULT:'#f87171',dim:'rgba(248,113,113,0.12)'},txt:{DEFAULT:'#eeeef2',2:'#9898a8',3:'#5c5c6e'},glass:{DEFAULT:'rgba(255,255,255,0.06)',2:'rgba(255,255,255,0.1)'}},fontFamily:{sans:['Inter','system-ui','sans-serif'],mono:['"JetBrains Mono"','"SF Mono"','monospace']}}}}
+tailwindcss.config={theme:{extend:{colors:{s1:'#0c0c10',s2:'#14141a',s3:'#1c1c24',s4:'#24242e',t1:'#ededf0',t2:'#8b8b9e',t3:'#55556a',a1:'#8b5cf6',a2:'#a78bfa',a3:'rgba(139,92,246,0.12)',b1:'rgba(255,255,255,0.06)',b2:'rgba(255,255,255,0.10)',b3:'rgba(255,255,255,0.16)',green:{DEFAULT:'#3dd68c',dim:'rgba(61,214,140,0.10)'},amber:{DEFAULT:'#e5a63e',dim:'rgba(229,166,62,0.10)'},red:{DEFAULT:'#e5534b',dim:'rgba(229,83,75,0.10)'}},fontFamily:{sans:['Geist','system-ui','sans-serif'],mono:['Geist Mono','"JetBrains Mono"','monospace']}}}}
 </script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.min.css">
 <style>
-  body { background: #0a0a0c; color: #eeeef2; -webkit-font-smoothing: antialiased; }
-  .glass { background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.06); backdrop-filter: blur(12px); }
-  .glow-top { background-image: radial-gradient(ellipse at 50% -20%, rgba(124,108,255,0.1) 0%, transparent 60%); }
-  .glass-static { background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.06); }
-  :focus-visible { outline: 2px solid rgba(124,108,255,0.5); outline-offset: 2px; }
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Geist',system-ui,sans-serif;background:#0c0c10;color:#ededf0;min-height:100vh;-webkit-font-smoothing:antialiased;display:flex;align-items:center;justify-content:center;padding:1rem}
+  body::before{content:'';position:fixed;top:-30%;left:-10%;width:60%;height:60%;background:radial-gradient(circle,rgba(139,92,246,0.08) 0%,transparent 70%);pointer-events:none;z-index:0}
+  body::after{content:'';position:fixed;bottom:-20%;right:-10%;width:50%;height:50%;background:radial-gradient(circle,rgba(61,214,140,0.04) 0%,transparent 70%);pointer-events:none;z-index:0}
+  body>*{position:relative;z-index:1}
+  .glass{background:linear-gradient(135deg,rgba(255,255,255,0.05) 0%,rgba(255,255,255,0.02) 100%);border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+  :focus-visible{outline:2px solid rgba(139,92,246,0.5);outline-offset:2px}
+  ::selection{background:rgba(139,92,246,0.3)}
 </style>
 </head>
-<body class="font-sans text-txt min-h-screen glow-top flex items-center justify-center p-4 sm:p-6">
-
+<body>
 <div class="w-full max-w-lg">
-  <!-- Progress -->
   <div class="flex items-center gap-2 mb-10 px-4" id="progress"></div>
-
-  <!-- Card -->
-  <div class="glass rounded-2xl p-5 sm:p-8">
-
+  <div class="glass rounded-2xl p-6 sm:p-8">
     <!-- Step 1 -->
     <div class="step" data-step="1">
-      <h2 class="text-lg sm:text-xl font-semibold tracking-tight mb-1">New Proposal</h2>
-      <p class="text-sm text-txt-2 mb-6">What do you want to build?</p>
-
+      <h2 class="text-lg font-semibold tracking-tight mb-1">New Proposal</h2>
+      <p class="text-sm text-t2 mb-6">What do you want to build?</p>
       <div class="mb-5">
-        <label class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 block mb-2">Title</label>
-        <input id="f-title" class="w-full h-10 px-3 rounded-lg bg-base-50 border border-glass text-txt text-sm placeholder:text-txt-3 focus:border-pri/50 focus:outline-none transition-all" placeholder="e.g. Add story embedding search">
+        <label class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 block mb-2">Title</label>
+        <input id="f-title" class="w-full h-10 px-3.5 rounded-xl bg-s3 border border-b1 text-t1 text-sm placeholder:text-t3 hover:border-b2 focus:border-a1/50 focus:ring-1 focus:ring-a1/20 focus:outline-none transition-all" placeholder="e.g. Add story embedding search">
       </div>
-
       <div class="mb-5">
-        <label class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 block mb-2">Description</label>
-        <textarea id="f-desc" class="w-full h-24 px-3 py-2.5 rounded-lg bg-base-50 border border-glass text-txt text-sm placeholder:text-txt-3 focus:border-pri/50 focus:outline-none transition-all resize-y leading-relaxed" placeholder="What's the problem and proposed solution?"></textarea>
+        <label class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 block mb-2">Description</label>
+        <textarea id="f-desc" class="w-full min-h-[6rem] px-3.5 py-2.5 rounded-xl bg-s3 border border-b1 text-t1 text-sm placeholder:text-t3 hover:border-b2 focus:border-a1/50 focus:ring-1 focus:ring-a1/20 focus:outline-none resize-y leading-relaxed transition-all" placeholder="What's the problem and proposed solution?"></textarea>
       </div>
-
       <div>
-        <label class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 block mb-2">Priority</label>
+        <label class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 block mb-2">Priority</label>
         <div class="flex flex-col gap-2" id="f-priority">
-          <div class="radio-opt flex items-center gap-3 p-3 rounded-lg bg-base-50 border border-glass cursor-pointer transition-all duration-150 hover:border-glass-2" data-value="low" onclick="selectRadio(this)">
-            <div class="radio-dot w-4 h-4 rounded-full border-2 border-glass-2 flex items-center justify-center shrink-0 transition-all"></div>
-            <div><div class="text-sm">Low</div><div class="text-xs text-txt-3 mt-0.5">Nice to have, no urgency</div></div>
+          <div class="radio flex items-center gap-3 p-3.5 rounded-xl bg-s3 border border-b1 cursor-pointer transition-all hover:border-b2" data-value="low" onclick="pickRadio(this)">
+            <div class="rdot w-[18px] h-[18px] rounded-full border-2 border-b3 flex items-center justify-center shrink-0 transition-all"></div>
+            <div><div class="text-sm">Low</div><div class="text-xs text-t3 mt-0.5">Nice to have</div></div>
           </div>
-          <div class="radio-opt flex items-center gap-3 p-3 rounded-lg bg-base-50 border border-glass cursor-pointer transition-all duration-150 hover:border-glass-2" data-value="medium" onclick="selectRadio(this)">
-            <div class="radio-dot w-4 h-4 rounded-full border-2 border-glass-2 flex items-center justify-center shrink-0 transition-all"></div>
-            <div><div class="text-sm">Medium</div><div class="text-xs text-txt-3 mt-0.5">Should happen this week</div></div>
+          <div class="radio flex items-center gap-3 p-3.5 rounded-xl bg-s3 border border-b1 cursor-pointer transition-all hover:border-b2" data-value="medium" onclick="pickRadio(this)">
+            <div class="rdot w-[18px] h-[18px] rounded-full border-2 border-b3 flex items-center justify-center shrink-0 transition-all"></div>
+            <div><div class="text-sm">Medium</div><div class="text-xs text-t3 mt-0.5">This week</div></div>
           </div>
-          <div class="radio-opt selected flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-all duration-150 bg-pri/[0.04] border-pri/20" data-value="high" onclick="selectRadio(this)">
-            <div class="radio-dot w-4 h-4 rounded-full border-2 border-pri flex items-center justify-center shrink-0 transition-all"><div class="w-2 h-2 rounded-full bg-pri"></div></div>
-            <div><div class="text-sm">High</div><div class="text-xs text-txt-3 mt-0.5">Blocking other work</div></div>
+          <div class="radio on flex items-center gap-3 p-3.5 rounded-xl border cursor-pointer transition-all bg-a3 border-a1/20" data-value="high" onclick="pickRadio(this)">
+            <div class="rdot w-[18px] h-[18px] rounded-full border-2 border-a1 flex items-center justify-center shrink-0 transition-all"><div class="w-2 h-2 rounded-full bg-a1"></div></div>
+            <div><div class="text-sm">High</div><div class="text-xs text-t3 mt-0.5">Blocking work</div></div>
           </div>
         </div>
       </div>
     </div>
-
     <!-- Step 2 -->
     <div class="step hidden" data-step="2">
-      <h2 class="text-lg sm:text-xl font-semibold tracking-tight mb-1">Configuration</h2>
-      <p class="text-sm text-txt-2 mb-6">How should this be handled?</p>
-
+      <h2 class="text-lg font-semibold tracking-tight mb-1">Configuration</h2>
+      <p class="text-sm text-t2 mb-6">How should this be handled?</p>
       <div class="mb-5">
-        <label class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 block mb-2">Risk Tier</label>
-        <select id="f-risk" class="w-full h-10 px-3 rounded-lg bg-base-50 border border-glass text-txt text-sm appearance-none focus:border-pri/50 focus:outline-none transition-all">
-          <option value="low">Low — Haku implements directly</option>
-          <option value="high" selected>High — Needs architecture review first</option>
+        <label class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 block mb-2">Risk Tier</label>
+        <select id="f-risk" class="w-full h-10 px-3.5 rounded-xl bg-s3 border border-b1 text-t1 text-sm appearance-none hover:border-b2 focus:border-a1/50 focus:ring-1 focus:ring-a1/20 focus:outline-none transition-all">
+          <option value="low">Low — implement directly</option>
+          <option value="high" selected>High — needs arch review</option>
         </select>
       </div>
-
       <div class="mb-5">
-        <label class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 block mb-2">Target Area</label>
-        <select id="f-area" class="w-full h-10 px-3 rounded-lg bg-base-50 border border-glass text-txt text-sm appearance-none focus:border-pri/50 focus:outline-none transition-all">
-          <option value="backend">Backend</option>
-          <option value="frontend">Frontend</option>
-          <option value="infra">Infrastructure</option>
-          <option value="data">Data / Content</option>
+        <label class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 block mb-2">Area</label>
+        <select id="f-area" class="w-full h-10 px-3.5 rounded-xl bg-s3 border border-b1 text-t1 text-sm appearance-none hover:border-b2 focus:border-a1/50 focus:ring-1 focus:ring-a1/20 focus:outline-none transition-all">
+          <option>Backend</option><option>Frontend</option><option>Infrastructure</option><option>Data</option>
         </select>
       </div>
-
-      <div class="flex items-center justify-between py-3 mb-3">
-        <div><div class="text-sm">Auto-select for next cycle</div><div class="text-xs text-txt-3 mt-0.5">Haku picks this up immediately</div></div>
-        <div class="toggle on w-10 h-[22px] rounded-full bg-pri relative cursor-pointer transition-all shrink-0" onclick="toggleSwitch(this)">
-          <div class="absolute top-[3px] left-[3px] w-4 h-4 rounded-full bg-white transition-transform duration-150 translate-x-[18px]"></div>
-        </div>
+      <div class="flex items-center justify-between py-3.5">
+        <div><div class="text-sm">Auto-select</div><div class="text-xs text-t3 mt-0.5">Pick up on next cycle</div></div>
+        <div class="tog on w-11 h-6 rounded-full bg-a1 relative cursor-pointer transition-all shrink-0" onclick="tog(this)"><div class="absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform duration-150 translate-x-5"></div></div>
       </div>
-
-      <div class="flex items-center justify-between py-3">
-        <div><div class="text-sm">Requires showboat proof</div><div class="text-xs text-txt-3 mt-0.5">CC must produce verification doc</div></div>
-        <div class="toggle on w-10 h-[22px] rounded-full bg-pri relative cursor-pointer transition-all shrink-0" onclick="toggleSwitch(this)">
-          <div class="absolute top-[3px] left-[3px] w-4 h-4 rounded-full bg-white transition-transform duration-150 translate-x-[18px]"></div>
-        </div>
+      <div class="flex items-center justify-between py-3.5">
+        <div><div class="text-sm">Showboat proof</div><div class="text-xs text-t3 mt-0.5">CC must produce verification doc</div></div>
+        <div class="tog on w-11 h-6 rounded-full bg-a1 relative cursor-pointer transition-all shrink-0" onclick="tog(this)"><div class="absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform duration-150 translate-x-5"></div></div>
       </div>
     </div>
-
     <!-- Step 3 -->
     <div class="step hidden" data-step="3">
-      <h2 class="text-lg sm:text-xl font-semibold tracking-tight mb-1">Review & Submit</h2>
-      <p class="text-sm text-txt-2 mb-6">Confirm everything looks right.</p>
-      <div id="summary" class="divide-y divide-glass"></div>
+      <h2 class="text-lg font-semibold tracking-tight mb-1">Review</h2>
+      <p class="text-sm text-t2 mb-6">Confirm and submit.</p>
+      <div id="summary" class="divide-y divide-b1"></div>
     </div>
-
     <!-- Step 4 -->
     <div class="step hidden" data-step="4">
-      <div class="text-center py-8">
-        <div class="w-14 h-14 rounded-full bg-ok-dim text-ok inline-flex items-center justify-center text-2xl mb-5">✓</div>
+      <div class="text-center py-10">
+        <div class="w-14 h-14 rounded-full bg-green-dim text-green inline-flex items-center justify-center text-2xl mb-5">✓</div>
         <h2 class="text-lg font-semibold mb-2">Proposal Created</h2>
-        <p class="text-sm text-txt-2">PROP-029 is in the pipeline as a Seed.<br>Haku will pick it up on the next cycle.</p>
+        <p class="text-sm text-t2">PROP-029 is a Seed. Haku picks it up next cycle.</p>
       </div>
     </div>
-
-    <!-- Footer -->
     <div class="flex justify-between mt-8" id="footer"></div>
   </div>
-
-  <!-- Temper Integration -->
   <div class="mt-8" id="temper-section"></div>
 </div>
 <script src="temper-sections.js"></script>
-
 <script>
-let step = 1;
-
-function showStep(n) {
-  step = n;
-  document.querySelectorAll('.step').forEach((el, i) => {
-    el.classList.toggle('hidden', i + 1 !== n);
-  });
-  // Progress
-  let html = '';
-  for (let i = 1; i <= 3; i++) {
-    const done = i < n, active = i === n && n < 4;
-    html += `<div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-mono font-medium shrink-0 transition-all duration-150 ${done ? 'bg-ok-dim text-ok border border-ok/30' : active ? 'bg-pri-dim text-pri border border-pri/30' : 'border border-glass text-txt-3'}">${done ? '✓' : i}</div>`;
-    if (i < 3) html += `<div class="flex-1 h-px transition-all ${done ? 'bg-ok/40' : 'bg-glass'}"></div>`;
-  }
-  document.getElementById('progress').innerHTML = html;
-  // Footer
-  const f = document.getElementById('footer');
-  if (n === 4) { f.innerHTML = ''; return; }
-  f.innerHTML = `
-    ${n > 1 ? `<button onclick="showStep(${n-1})" class="h-9 px-4 rounded-lg border border-glass text-txt-2 text-sm font-medium hover:border-glass-2 hover:text-txt transition-all duration-150">← Back</button>` : '<div></div>'}
-    <button onclick="showStep(${n+1})" class="h-9 px-4 rounded-lg bg-pri text-white text-sm font-medium hover:bg-pri-light transition-all duration-150">${n === 3 ? 'Submit →' : 'Continue →'}</button>
-  `;
-  if (n === 3) renderSummary();
+let step=1;
+function go(n){
+  step=n;
+  document.querySelectorAll('.step').forEach((el,i)=>el.classList.toggle('hidden',i+1!==n));
+  let p='';
+  for(let i=1;i<=3;i++){const d=i<n,a=i===n&&n<4;p+=`<div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-mono font-medium shrink-0 transition-all ${d?'bg-green-dim text-green border border-green/20':a?'bg-a3 text-a2 border border-a1/20':'border border-b1 text-t3'}">${d?'✓':i}</div>`;if(i<3)p+=`<div class="flex-1 h-px ${d?'bg-green/30':'bg-b1'}"></div>`;}
+  document.getElementById('progress').innerHTML=p;
+  const f=document.getElementById('footer');
+  if(n===4){f.innerHTML='';return;}
+  f.innerHTML=`${n>1?`<button onclick="go(${n-1})" class="h-9 px-4 rounded-xl border border-b1 text-t2 text-[13px] font-medium hover:border-b2 hover:text-t1 transition-all">← Back</button>`:'<div></div>'}<button onclick="go(${n+1})" class="h-9 px-4 rounded-xl bg-a1 text-white text-[13px] font-medium hover:bg-a2 active:scale-[0.98] transition-all">${n===3?'Submit →':'Continue →'}</button>`;
+  if(n===3)renderSum();
 }
-
-function selectRadio(el) {
-  el.parentElement.querySelectorAll('.radio-opt').forEach(o => {
-    o.classList.remove('selected','bg-pri/[0.04]','border-pri/20');
-    o.classList.add('bg-base-50','border-glass');
-    o.querySelector('.radio-dot').classList.remove('border-pri');
-    o.querySelector('.radio-dot').classList.add('border-glass-2');
-    o.querySelector('.radio-dot').innerHTML = '';
-  });
-  el.classList.add('selected','bg-pri/[0.04]','border-pri/20');
-  el.classList.remove('bg-base-50','border-glass');
-  el.querySelector('.radio-dot').classList.add('border-pri');
-  el.querySelector('.radio-dot').classList.remove('border-glass-2');
-  el.querySelector('.radio-dot').innerHTML = '<div class="w-2 h-2 rounded-full bg-pri"></div>';
+function pickRadio(el){
+  el.parentElement.querySelectorAll('.radio').forEach(o=>{o.classList.remove('on','bg-a3','border-a1/20');o.classList.add('bg-s3','border-b1');const d=o.querySelector('.rdot');d.classList.remove('border-a1');d.classList.add('border-b3');d.innerHTML='';});
+  el.classList.add('on','bg-a3','border-a1/20');el.classList.remove('bg-s3','border-b1');const d=el.querySelector('.rdot');d.classList.add('border-a1');d.classList.remove('border-b3');d.innerHTML='<div class="w-2 h-2 rounded-full bg-a1"></div>';
 }
-
-function toggleSwitch(el) {
-  el.classList.toggle('on');
-  const isOn = el.classList.contains('on');
-  el.style.background = isOn ? '' : 'rgba(255,255,255,0.1)';
-  el.classList.toggle('bg-pri', isOn);
-  el.querySelector('div').style.transform = isOn ? 'translateX(18px)' : 'translateX(0)';
+function tog(el){const on=el.classList.toggle('on');el.style.background=on?'':'rgba(255,255,255,0.1)';el.classList.toggle('bg-a1',on);el.querySelector('div').style.transform=on?'translateX(1.25rem)':'translateX(0)';}
+function renderSum(){
+  const d={Title:document.getElementById('f-title').value||'Untitled',Priority:document.querySelector('#f-priority .on')?.dataset.value||'medium',Risk:document.getElementById('f-risk').value,Area:document.getElementById('f-area').value,Description:document.getElementById('f-desc').value||'—'};
+  document.getElementById('summary').innerHTML=Object.entries(d).map(([k,v])=>`<div class="flex justify-between items-baseline py-3"><span class="text-[11px] font-mono font-medium uppercase tracking-[0.04em] text-t3">${k}</span><span class="text-sm text-right max-w-[60%]">${v}</span></div>`).join('');
 }
-
-function renderSummary() {
-  const d = {
-    Title: document.getElementById('f-title').value || 'Untitled',
-    Priority: document.querySelector('#f-priority .selected')?.dataset.value || 'medium',
-    Risk: document.getElementById('f-risk').value,
-    Area: document.getElementById('f-area').value,
-    'Auto-select': document.querySelector('.toggle:nth-of-type(1)')?.classList.contains('on') ? 'Yes' : 'No',
-    Description: document.getElementById('f-desc').value || '—',
-  };
-  document.getElementById('summary').innerHTML = Object.entries(d).map(([k,v]) =>
-    `<div class="flex justify-between items-baseline py-3">
-      <span class="text-[11px] font-mono font-medium uppercase tracking-[0.04em] text-txt-3">${k}</span>
-      <span class="text-sm text-right max-w-[60%]">${v}</span>
-    </div>`
-  ).join('');
-}
-
-showStep(1);
-renderTemperSection('temper-section', 'quick-form');
+go(1);
+renderTemperSection('temper-section','quick-form');
 </script>
 </body>
 </html>

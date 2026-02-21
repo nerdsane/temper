@@ -1,10 +1,16 @@
-# Temper UI Design System v2
+# Temper Design System v3
 
-*One system. Any surface. Always responsive. Always snatched.*
+*The default look. Users can replace this file with their own.*
+
+This is a markdown file. Agents read it before generating any UI. The Temper skill tells them where to find it. If you want a different aesthetic, write your own `design-system.md` with your palette, fonts, and component patterns — drop it in `apps/shared/` and every generated UI will follow it.
+
+---
 
 ## Foundation
 
-**Tailwind CSS via CDN** — every Temper UI includes this in `<head>`:
+**Tailwind CSS CDN** + **Geist font** (Vercel's typeface — geometric, modern, not-Inter-not-system-ui).
+
+Every Temper UI starts with this `<head>`:
 
 ```html
 <script src="https://cdn.tailwindcss.com"></script>
@@ -13,248 +19,303 @@ tailwindcss.config = {
   theme: {
     extend: {
       colors: {
-        // Surfaces
-        base: { DEFAULT: '#0a0a0c', 50: '#12121a', 100: '#1a1a24', 200: '#242430' },
-        // Primary palette — cool indigo with slight warmth
-        pri: { DEFAULT: '#7c6cff', dim: 'rgba(124,108,255,0.12)', light: '#9d8fff', dark: '#5b4dd4' },
-        // Semantic — muted, not screaming
-        ok:   { DEFAULT: '#34d399', dim: 'rgba(52,211,153,0.12)' },
-        warn: { DEFAULT: '#fbbf24', dim: 'rgba(251,191,36,0.12)' },
-        err:  { DEFAULT: '#f87171', dim: 'rgba(248,113,113,0.12)' },
-        // Text
-        txt:  { DEFAULT: '#eeeef2', 2: '#9898a8', 3: '#5c5c6e' },
-        // Glass border
-        glass: { DEFAULT: 'rgba(255,255,255,0.06)', 2: 'rgba(255,255,255,0.1)' },
+        // Surface stack — NOT pure black. Warm dark with blue undertone.
+        s1: '#0c0c10',    // page background
+        s2: '#14141a',    // card / panel background
+        s3: '#1c1c24',    // elevated (dropdowns, modals)
+        s4: '#24242e',    // active/hover surfaces
+
+        // Text — warm white, not #fff
+        t1: '#ededf0',    // primary text
+        t2: '#8b8b9e',    // secondary / descriptions
+        t3: '#55556a',    // muted / labels / placeholders
+
+        // Accent — electric violet, one hue, three stops
+        a1: '#8b5cf6',    // primary actions, focus rings
+        a2: '#a78bfa',    // hover / lighter variant
+        a3: 'rgba(139,92,246,0.12)', // tinted backgrounds
+
+        // Status — muted, desaturated, not neon
+        green:  { DEFAULT: '#3dd68c', dim: 'rgba(61,214,140,0.10)' },
+        amber:  { DEFAULT: '#e5a63e', dim: 'rgba(229,166,62,0.10)' },
+        red:    { DEFAULT: '#e5534b', dim: 'rgba(229,83,75,0.10)' },
+
+        // Borders — visible but quiet
+        b1: 'rgba(255,255,255,0.06)',  // default
+        b2: 'rgba(255,255,255,0.10)',  // hover
+        b3: 'rgba(255,255,255,0.16)',  // active / focus
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['"JetBrains Mono"', '"SF Mono"', 'monospace'],
-      },
-      backgroundImage: {
-        'glass': 'linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%)',
-        'glass-hover': 'linear-gradient(135deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.02) 100%)',
-        'glow': 'radial-gradient(ellipse at 50% 0%, rgba(124,108,255,0.15) 0%, transparent 60%)',
-      },
-      boxShadow: {
-        'glass': '0 0 0 1px rgba(255,255,255,0.06), 0 2px 12px rgba(0,0,0,0.3)',
-        'glass-lg': '0 0 0 1px rgba(255,255,255,0.06), 0 8px 32px rgba(0,0,0,0.4)',
-        'glow': '0 0 24px rgba(124,108,255,0.15)',
-        'glow-sm': '0 0 12px rgba(124,108,255,0.1)',
-      },
-      borderRadius: {
-        'xl': '12px',
-        '2xl': '16px',
+        sans: ['Geist', 'system-ui', 'sans-serif'],
+        mono: ['Geist Mono', '"JetBrains Mono"', 'monospace'],
       },
     },
   },
 }
 </script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<!-- Geist font -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.min.css">
 ```
-
-## Philosophy
-
-1. **Glass over borders.** Surfaces are semi-transparent with subtle gradients. Not flat cards with hard borders — glass panels that breathe.
-2. **One palette, three weights.** Primary (`pri`), plus dim and light variants. Semantic colors only for actual state. That's it.
-3. **Responsive is not optional.** If it doesn't work at 320px, it's broken. Tailwind's responsive prefixes (`sm:`, `md:`, `lg:`) + grid `auto-fit` handle this. No excuses.
-4. **Gradients are gentle.** Never saturated. Always near-transparent whites or the faintest accent glow. The gradient should be felt, not seen.
-5. **Typography carries hierarchy.** Size + weight + opacity. Not color.
-6. **Mono for data, sans for everything else.** Timestamps, IDs, metrics, code → `font-mono`. Prose, labels, headings → `font-sans`.
-7. **Motion is subtle.** `transition-all duration-150 ease-out`. Never bounce. Never delay.
 
 ## Base Styles
 
-Every Temper UI includes this `<style>` block after the Tailwind config:
+Paste this `<style>` block in every UI:
 
 ```html
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
   body {
-    font-family: 'Inter', system-ui, sans-serif;
-    background: #0a0a0c;
-    color: #eeeef2;
+    font-family: 'Geist', system-ui, sans-serif;
+    background: #0c0c10;
+    color: #ededf0;
     min-height: 100vh;
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
-  /* Glass card */
+
+  /* ── Ambient gradient orbs ─────────────────────────────
+     Two soft blurred circles behind everything.
+     They give glass surfaces something to distort. */
+  body::before {
+    content: '';
+    position: fixed;
+    top: -30%; left: -10%;
+    width: 60%; height: 60%;
+    background: radial-gradient(circle, rgba(139,92,246,0.08) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  body::after {
+    content: '';
+    position: fixed;
+    bottom: -20%; right: -10%;
+    width: 50%; height: 50%;
+    background: radial-gradient(circle, rgba(61,214,140,0.04) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* Everything above the gradient orbs */
+  body > * { position: relative; z-index: 1; }
+
+  /* ── Glass surface ──────────────────────────────────── */
   .glass {
-    background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%);
+    background: linear-gradient(
+      135deg,
+      rgba(255,255,255,0.05) 0%,
+      rgba(255,255,255,0.02) 100%
+    );
     border: 1px solid rgba(255,255,255,0.06);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
   }
-  .glass:hover {
-    border-color: rgba(255,255,255,0.1);
-  }
-  /* Glow accent on headers/heroes */
-  .glow-top {
-    background-image: radial-gradient(ellipse at 50% -20%, rgba(124,108,255,0.12) 0%, transparent 60%);
-  }
-  /* Scrollbar */
-  ::-webkit-scrollbar { width: 6px; }
+
+  /* ── Scrollbar ──────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
-  /* Focus */
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 99px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.16); }
+
+  /* ── Focus ring ─────────────────────────────────────── */
   :focus-visible {
-    outline: 2px solid rgba(124,108,255,0.5);
+    outline: 2px solid rgba(139,92,246,0.5);
     outline-offset: 2px;
+  }
+
+  /* ── Selection ──────────────────────────────────────── */
+  ::selection {
+    background: rgba(139,92,246,0.3);
+    color: #ededf0;
   }
 </style>
 ```
 
-## Layout Patterns
+## Design Philosophy
+
+### 1. Depth through glass, not borders
+Cards are frosted glass panels. The ambient gradient orbs behind them create subtle color shifts when you scroll or resize. Borders exist but they're `rgba(255,255,255,0.06)` — felt, not seen.
+
+### 2. One accent, three weights
+Violet (`a1` = electric, `a2` = light hover, `a3` = tinted bg). That's the entire accent system. Status colors (green/amber/red) are for *state only* — never decorative.
+
+### 3. Warm dark, not cold black
+`s1` (#0c0c10) has a blue undertone. Pure black (#000) is banned. The surface stack goes s1→s2→s3→s4 with increasing brightness. Every step is perceivable.
+
+### 4. Text has three tiers
+`t1` (primary), `t2` (secondary), `t3` (muted). Never use `text-white` — it's too harsh. `t1` is #ededf0, warm and easy on the eyes.
+
+### 5. Inputs are tinted, not hollow
+Form fields use `bg-s2` or `bg-s3` background — NOT transparent. They should be clearly distinguishable from the surrounding surface. The border glows `a1` on focus.
+
+### 6. Responsive is structural
+Use Tailwind's responsive prefixes (`sm:` `md:` `lg:`). Grids use `auto-fit` with `minmax`. Touch targets are 44px minimum. Test at 320px.
+
+## Layout
 
 ### Container
 ```html
-<div class="mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8 py-8">
+<div class="mx-auto w-full max-w-5xl px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
 ```
 
-### Responsive Grid (auto-fit, no breakpoints needed)
+### Responsive Grid
 ```html
+<!-- Auto-fit: no breakpoints needed -->
+<div class="grid gap-4" style="grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr))">
+
+<!-- Or explicit breakpoints -->
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
 ```
 
-Or truly fluid:
-```html
-<div class="grid gap-4" style="grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr))">
-```
-
-### Stack
-```html
-<div class="flex flex-col gap-4">
-```
-
-### Cluster
-```html
-<div class="flex flex-wrap items-center gap-2">
-```
-
-## Component Patterns
+## Components
 
 ### Glass Card
 ```html
-<div class="glass rounded-xl p-4 sm:p-5 transition-all duration-150">
-  <!-- content -->
-</div>
+<div class="glass rounded-2xl p-5 sm:p-6 transition-all duration-150
+  hover:border-b2">
 ```
+Never use flat `bg-s2` without the glass gradient. The gradient is what makes it feel like a surface, not a box.
 
 ### Badge
 ```html
-<span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium uppercase tracking-wider bg-pri-dim text-pri">
+<span class="inline-flex items-center h-5 px-2 rounded-full
+  text-[11px] font-mono font-medium tracking-wide
+  bg-a3 text-a2">
   Active
 </span>
+<!-- Status: bg-green-dim text-green / bg-amber-dim text-amber / bg-red-dim text-red -->
 ```
-
-Semantic variants:
-- OK: `bg-ok-dim text-ok`
-- Warn: `bg-warn-dim text-warn`
-- Error: `bg-err-dim text-err`
+Badges are `rounded-full` (pill shape), not `rounded`. Small, quiet, informational.
 
 ### Button — Primary
 ```html
-<button class="h-9 px-4 rounded-lg bg-pri text-white text-sm font-medium
-  hover:bg-pri-light active:bg-pri-dark transition-all duration-150
-  focus-visible:ring-2 focus-visible:ring-pri/50 focus-visible:ring-offset-2 focus-visible:ring-offset-base">
+<button class="h-9 px-4 rounded-xl bg-a1 text-white text-[13px] font-medium
+  hover:bg-a2 active:scale-[0.98] transition-all duration-150
+  focus-visible:ring-2 focus-visible:ring-a1/50 focus-visible:ring-offset-2 focus-visible:ring-offset-s1">
   Action
 </button>
 ```
 
 ### Button — Ghost
 ```html
-<button class="h-9 px-4 rounded-lg border border-glass text-txt-2 text-sm font-medium
-  hover:border-glass-2 hover:text-txt transition-all duration-150">
+<button class="h-9 px-4 rounded-xl border border-b1 text-t2 text-[13px] font-medium
+  hover:border-b2 hover:text-t1 hover:bg-white/[0.02] transition-all duration-150">
   Secondary
 </button>
 ```
 
 ### Input
 ```html
-<input class="w-full h-9 px-3 rounded-lg bg-base-50 border border-glass text-txt text-sm
-  placeholder:text-txt-3 focus:border-pri/50 focus:outline-none transition-all duration-150">
+<input class="w-full h-10 px-3.5 rounded-xl bg-s3 border border-b1 text-t1 text-sm
+  placeholder:text-t3 hover:border-b2
+  focus:border-a1/50 focus:ring-1 focus:ring-a1/20 focus:outline-none
+  transition-all duration-150" placeholder="Enter something...">
+```
+Key: `bg-s3` gives it a visible tinted background. NOT transparent, NOT white.
+
+### Textarea
+```html
+<textarea class="w-full min-h-[6rem] px-3.5 py-2.5 rounded-xl bg-s3 border border-b1 text-t1 text-sm
+  placeholder:text-t3 hover:border-b2
+  focus:border-a1/50 focus:ring-1 focus:ring-a1/20 focus:outline-none
+  resize-y leading-relaxed transition-all duration-150"></textarea>
+```
+
+### Select
+```html
+<select class="w-full h-10 px-3.5 rounded-xl bg-s3 border border-b1 text-t1 text-sm
+  appearance-none hover:border-b2
+  focus:border-a1/50 focus:ring-1 focus:ring-a1/20 focus:outline-none
+  transition-all duration-150
+  bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 fill=%22%2355556a%22><path d=%22M6 8L1 3h10z%22/></svg>')]
+  bg-no-repeat bg-[position:right_12px_center]">
+  <option>Option</option>
+</select>
 ```
 
 ### Section Label
 ```html
-<h3 class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-3">
-  Section Title
+<h3 class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-3">
+  Section
 </h3>
 ```
 
 ### Interactive Row
 ```html
-<div class="flex items-center gap-3 px-4 py-3 rounded-lg cursor-pointer
-  hover:bg-white/[0.03] transition-all duration-150">
+<div class="flex items-center gap-3 px-4 py-3 -mx-4 rounded-xl cursor-pointer
+  hover:bg-white/[0.03] active:bg-white/[0.05] transition-all duration-150">
+```
+The `-mx-4` extends the hover zone to the container edges. Feels more spacious.
+
+### Empty State
+```html
+<div class="flex flex-col items-center justify-center py-16 text-t3">
+  <div class="w-10 h-10 rounded-full bg-s3 flex items-center justify-center text-lg mb-4">∅</div>
+  <p class="text-sm">Nothing here yet</p>
+</div>
 ```
 
 ### Toast
 ```html
-<div class="fixed bottom-6 right-6 glass rounded-lg px-5 py-3 text-sm font-mono
-  shadow-glass-lg transition-all duration-200 translate-y-2 opacity-0"
-  id="toast">
-</div>
-```
-
-### Empty State
-```html
-<div class="flex flex-col items-center justify-center py-12 text-txt-3 text-sm">
-  <span class="text-2xl mb-3">∅</span>
-  <span>Nothing here yet</span>
-</div>
+<div class="fixed bottom-5 right-5 glass rounded-xl px-4 py-3 text-[13px] font-mono
+  shadow-[0_8px_32px_rgba(0,0,0,0.4)] transition-all duration-200
+  translate-y-2 opacity-0 [&.show]:translate-y-0 [&.show]:opacity-100">
 ```
 
 ### Drawer / Slide-over
 ```html
-<!-- Overlay -->
-<div class="fixed inset-0 bg-black/50 z-50 transition-opacity" onclick="close()">
-  <!-- Panel -->
-  <div class="fixed top-0 right-0 bottom-0 w-full max-w-md bg-base border-l border-glass
-    p-6 overflow-y-auto transition-transform duration-200" onclick="event.stopPropagation()">
+<div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50" onclick="close()">
+  <div class="fixed top-0 right-0 bottom-0 w-full max-w-md bg-s1 border-l border-b1
+    overflow-y-auto transition-transform duration-200 ease-out p-6" onclick="event.stopPropagation()">
   </div>
 </div>
 ```
-
-## Color Rules
-
-1. **Primary (`pri`)** — interactive elements, accents, focus rings, selected states
-2. **Semantic** — ONLY for actual state: `ok` = success/healthy, `warn` = caution/pending, `err` = error/danger
-3. **Text hierarchy** — `txt` (primary), `txt-2` (secondary), `txt-3` (muted/labels)
-4. **Surfaces** — `base` (darkest bg), `base-50` (input bg), `base-100` (card bg), `base-200` (elevated)
-5. **Glass** — `glass` (subtle border), `glass-2` (hover border)
-6. **Never use raw hex in components.** Always reference the token.
-
-## Glass & Gradient Rules
-
-- **Cards**: Always use `.glass` class. Never flat `bg-*` without the gradient.
-- **Page header area**: Use `.glow-top` for a subtle purple radial glow from the top
-- **Hover states**: Border goes from `glass` → `glass-2`. Background shifts by +2% white.
-- **Selected/active**: `bg-pri-dim border-pri/30` — tinted, not flooded
-- **Gradients are always white-to-transparent or accent-to-transparent.** Never two saturated colors.
-
-## Responsive Rules
-
-1. **Text**: Base 14px body. 13px on mobile is fine for data. Never below 11px for anything.
-2. **Padding**: `p-4 sm:p-5 lg:p-6` — scales up, never cramped.
-3. **Grids**: `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3` or `auto-fit` with `minmax`.
-4. **Tables on mobile**: Convert to stacked cards below `sm:`. Or hide low-priority columns.
-5. **Touch targets**: Minimum 36px height for any interactive element. 44px preferred on mobile.
-6. **Drawers**: `w-full max-w-md` — full width on mobile, capped on desktop.
-7. **Test at 320px, 768px, 1440px.** If it breaks at any, it's wrong.
 
 ## Typography
 
 | Role | Classes |
 |------|---------|
-| Display | `text-2xl sm:text-3xl font-bold tracking-tight` |
-| Title | `text-lg sm:text-xl font-semibold tracking-tight` |
-| Heading | `text-base font-semibold` |
-| Body | `text-sm` |
-| Caption | `text-xs text-txt-2` |
-| Label | `text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3` |
-| Data | `text-[13px] font-mono` |
+| Display | `text-2xl sm:text-3xl font-semibold tracking-tight text-t1` |
+| Title | `text-lg sm:text-xl font-semibold tracking-tight text-t1` |
+| Heading | `text-base font-semibold text-t1` |
+| Body | `text-sm text-t1 leading-relaxed` |
+| Secondary | `text-sm text-t2` |
+| Caption | `text-xs text-t3` |
+| Label | `text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3` |
+| Data / Code | `text-[13px] font-mono text-t2` |
 
-## Agent Prompt
+## Color Rules
 
-When generating a Temper UI, include this in the prompt to CC or any agent:
+1. **One accent** — `a1`/`a2`/`a3`. For interactive elements, focus, selection.
+2. **Three text tiers** — `t1` (read this), `t2` (supporting), `t3` (whisper).
+3. **Status = state change only** — `green`/`amber`/`red` with their `dim` variants. Never decorative.
+4. **Surfaces stack** — `s1` < `s2` < `s3` < `s4`. Each step up = closer to the user.
+5. **No raw hex** in component classes. Always use token names.
+6. **No `text-white` or `bg-black`**. Use `t1` and `s1`.
 
-> Build a single-file HTML page. Include Tailwind CDN with the custom config from `apps/shared/design-system.md`. Use glass cards, subtle gradients, and the pri/ok/warn/err palette. Make it fully responsive — test at 320px and 1440px. Use Inter for text, JetBrains Mono for data. Follow the component patterns exactly. The UI should feel like frosted glass floating on a dark void with a faint purple glow.
+## Motion
+
+```
+transition-all duration-150   /* default: hover, focus, border */
+duration-200                  /* panels, drawers, modals */
+duration-300                  /* page transitions */
+active:scale-[0.98]           /* button press feedback */
+```
+
+`prefers-reduced-motion: reduce` → kill all transitions. Already handled by Tailwind's `motion-reduce:` prefix.
+
+## Replacing This System
+
+This file is read by agents before generating UI. To use your own aesthetic:
+
+1. Create your own `design-system.md` in `apps/shared/`
+2. Define your Tailwind config, base styles, and component patterns
+3. All generated UIs will follow your system instead
+
+The structure should match this file: Tailwind config → base styles → philosophy → components → typography → color rules. Agents look for these sections.
+
+---
+
+*Frosted glass floating on a dark void. Violet glow behind everything. Warm, not cold. Felt, not seen.*

@@ -5,68 +5,51 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Incident Timeline</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script>
-tailwindcss.config={theme:{extend:{colors:{base:{DEFAULT:'#0a0a0c',50:'#12121a',100:'#1a1a24',200:'#242430'},pri:{DEFAULT:'#7c6cff',dim:'rgba(124,108,255,0.12)',light:'#9d8fff'},ok:{DEFAULT:'#34d399',dim:'rgba(52,211,153,0.12)'},warn:{DEFAULT:'#fbbf24',dim:'rgba(251,191,36,0.12)'},err:{DEFAULT:'#f87171',dim:'rgba(248,113,113,0.12)'},txt:{DEFAULT:'#eeeef2',2:'#9898a8',3:'#5c5c6e'},glass:{DEFAULT:'rgba(255,255,255,0.06)',2:'rgba(255,255,255,0.1)'}},fontFamily:{sans:['Inter','system-ui','sans-serif'],mono:['"JetBrains Mono"','"SF Mono"','monospace']}}}}
-</script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script>tailwindcss.config={theme:{extend:{colors:{s1:'#0c0c10',s2:'#14141a',s3:'#1c1c24',s4:'#24242e',t1:'#ededf0',t2:'#8b8b9e',t3:'#55556a',a1:'#8b5cf6',a2:'#a78bfa',a3:'rgba(139,92,246,0.12)',b1:'rgba(255,255,255,0.06)',b2:'rgba(255,255,255,0.10)',green:{DEFAULT:'#3dd68c',dim:'rgba(61,214,140,0.10)'},amber:{DEFAULT:'#e5a63e',dim:'rgba(229,166,62,0.10)'},red:{DEFAULT:'#e5534b',dim:'rgba(229,83,75,0.10)'}},fontFamily:{sans:['Geist','system-ui','sans-serif'],mono:['Geist Mono','monospace']}}}}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.min.css">
 <style>
-  body { background: #0a0a0c; color: #eeeef2; -webkit-font-smoothing: antialiased; }
-  .glass { background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.06); backdrop-filter: blur(12px); }
-  .glass-static { background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.06); }
-  .glow-top { background-image: radial-gradient(ellipse at 50% -20%, rgba(248,113,113,0.1) 0%, transparent 60%); }
-  ::-webkit-scrollbar { width: 6px; }
-  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Geist',system-ui,sans-serif;background:#0c0c10;color:#ededf0;min-height:100vh;-webkit-font-smoothing:antialiased}
+  body::before{content:'';position:fixed;top:-30%;left:-10%;width:60%;height:60%;background:radial-gradient(circle,rgba(229,83,75,0.06) 0%,transparent 70%);pointer-events:none;z-index:0}
+  body::after{content:'';position:fixed;bottom:-20%;right:-10%;width:50%;height:50%;background:radial-gradient(circle,rgba(139,92,246,0.04) 0%,transparent 70%);pointer-events:none;z-index:0}
+  body>*{position:relative;z-index:1}
+  .glass{background:linear-gradient(135deg,rgba(255,255,255,0.05) 0%,rgba(255,255,255,0.02) 100%);border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:99px}
+  ::selection{background:rgba(139,92,246,0.3)}
 </style>
 </head>
-<body class="font-sans text-txt min-h-screen glow-top">
-<div class="mx-auto w-full max-w-3xl px-4 sm:px-6 py-6 sm:py-8">
-
+<body>
+<div class="mx-auto w-full max-w-3xl px-4 sm:px-6 py-6 sm:py-10">
   <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
-    <div>
-      <h1 class="text-xl sm:text-2xl font-bold tracking-tight">Feed SSE Connection Drops</h1>
-      <p class="text-xs font-mono text-txt-3 mt-1">INC-2026-0220-001</p>
-    </div>
-    <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-err-dim text-err text-sm font-semibold shrink-0">
-      <span class="w-2 h-2 rounded-full bg-err animate-pulse"></span>Active
-    </div>
+    <div><h1 class="text-xl sm:text-2xl font-semibold tracking-tight">Feed SSE Connection Drops</h1><p class="text-xs font-mono text-t3 mt-1">INC-2026-0220-001</p></div>
+    <div class="flex items-center gap-2 h-7 px-3 rounded-full bg-red-dim text-red text-sm font-medium shrink-0"><span class="w-2 h-2 rounded-full bg-red animate-pulse"></span>Active</div>
   </div>
-
   <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-8">
-    <div class="glass rounded-lg p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3">Status</div><div class="text-sm font-medium text-err mt-1">Investigating</div></div>
-    <div class="glass rounded-lg p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3">Detected</div><div class="text-sm font-mono mt-1">14:23</div></div>
-    <div class="glass rounded-lg p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3">Duration</div><div class="text-sm font-mono mt-1" id="duration">—</div></div>
-    <div class="glass rounded-lg p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3">Impact</div><div class="text-sm mt-1">Feed down</div></div>
-    <div class="glass rounded-lg p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3">Owner</div><div class="text-sm mt-1">🐉 Haku</div></div>
+    <div class="glass rounded-xl p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Status</div><div class="text-sm font-medium text-red mt-1">Investigating</div></div>
+    <div class="glass rounded-xl p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Detected</div><div class="text-sm font-mono text-t2 mt-1">14:23</div></div>
+    <div class="glass rounded-xl p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Duration</div><div class="text-sm font-mono text-t2 mt-1" id="dur">—</div></div>
+    <div class="glass rounded-xl p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Impact</div><div class="text-sm mt-1">Feed down</div></div>
+    <div class="glass rounded-xl p-3"><div class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3">Owner</div><div class="text-sm mt-1">🐉 Haku</div></div>
   </div>
-
-  <div class="relative pl-6 sm:pl-8 mb-8" id="timeline"></div>
-
-  <div class="glass rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-8">
-    <span class="text-sm text-txt-2">All clear? Mark this incident resolved.</span>
-    <button onclick="resolve()" class="h-9 px-4 rounded-lg bg-ok text-black text-sm font-medium hover:brightness-110 transition-all duration-150 shrink-0">✓ Resolve</button>
+  <div class="relative pl-7 mb-8" id="tl"></div>
+  <div class="glass rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-8">
+    <span class="text-sm text-t2">All clear?</span>
+    <button onclick="res()" class="h-9 px-4 rounded-xl bg-green text-s1 text-[13px] font-medium hover:brightness-110 active:scale-[0.98] transition-all shrink-0">✓ Resolve</button>
   </div>
-
-  <div class="border-t border-glass pt-6 mb-10">
-    <h3 class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-4">Add Event</h3>
+  <div class="border-t border-b1 pt-6 mb-12">
+    <h3 class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-4">Add Event</h3>
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-      <select id="event-type" class="h-9 px-3 rounded-lg bg-base-50 border border-glass text-txt text-sm appearance-none focus:border-pri/50 focus:outline-none transition-all"><option value="note">Note</option><option value="action">Action Taken</option><option value="investigate">Investigation</option><option value="detect">Detection</option><option value="resolve">Resolution</option></select>
-      <input id="event-actor" class="h-9 px-3 rounded-lg bg-base-50 border border-glass text-txt text-sm placeholder:text-txt-3 focus:border-pri/50 focus:outline-none transition-all" placeholder="Actor (e.g. haku)">
+      <select id="et" class="h-10 px-3.5 rounded-xl bg-s3 border border-b1 text-t1 text-sm appearance-none focus:border-a1/50 focus:outline-none transition-all"><option value="note">Note</option><option value="action">Action</option><option value="investigate">Investigation</option><option value="detect">Detection</option><option value="resolve">Resolution</option></select>
+      <input id="ea" class="h-10 px-3.5 rounded-xl bg-s3 border border-b1 text-t1 text-sm placeholder:text-t3 focus:border-a1/50 focus:outline-none transition-all" placeholder="Actor">
     </div>
-    <textarea id="event-body" class="w-full h-20 px-3 py-2 rounded-lg bg-base-50 border border-glass text-txt text-sm placeholder:text-txt-3 focus:border-pri/50 focus:outline-none transition-all resize-y leading-relaxed mb-3" placeholder="What happened?"></textarea>
-    <button onclick="addEvent()" class="h-9 px-4 rounded-lg bg-pri text-white text-sm font-medium hover:bg-pri-light transition-all duration-150">Add</button>
+    <textarea id="eb" class="w-full min-h-[5rem] px-3.5 py-2.5 rounded-xl bg-s3 border border-b1 text-t1 text-sm placeholder:text-t3 focus:border-a1/50 focus:outline-none resize-y leading-relaxed transition-all mb-3" placeholder="What happened?"></textarea>
+    <button onclick="add()" class="h-9 px-4 rounded-xl bg-a1 text-white text-[13px] font-medium hover:bg-a2 active:scale-[0.98] transition-all">Add</button>
   </div>
-
-  <!-- Temper Integration -->
-  <details class="group">
-    <summary class="flex items-center gap-2 cursor-pointer text-txt-3 hover:text-txt-2 transition-colors mb-4">
-      <span class="text-[11px] font-mono font-medium uppercase tracking-[0.08em]">⚙ How this uses Temper</span>
-      <svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="currentColor" viewBox="0 0 20 20"><path d="M6 6l8 4-8 4z"/></svg>
-    </summary>
-    <div class="glass-static rounded-xl p-4 sm:p-6 space-y-5 text-sm">
-      <div>
-        <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-2">Entity: Incident</div>
-        <p class="text-txt-2 leading-relaxed mb-3">An incident has states <code class="text-[13px] font-mono bg-white/[0.04] px-1.5 py-0.5 rounded">Detected → Investigating → Mitigating → Resolved</code>. Events are child entities. The incident can't be resolved until at least one Action event exists (guard).</p>
-        <pre class="glass-static rounded-lg p-3 text-[13px] font-mono text-txt-2 leading-relaxed overflow-x-auto whitespace-pre"># incident.ioa.toml
+  <details class="group"><summary class="flex items-center gap-2 cursor-pointer text-t3 hover:text-t2 transition-colors mb-4"><span class="text-[11px] font-mono font-medium uppercase tracking-[0.1em]">⚙ How this uses Temper</span><svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="currentColor" viewBox="0 0 20 20"><path d="M6 6l8 4-8 4z"/></svg></summary>
+    <div class="glass rounded-2xl p-5 sm:p-6 space-y-5 text-sm">
+      <div><h4 class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-2">Entity: Incident</h4><p class="text-t2 leading-relaxed mb-3">States: <code class="text-[13px] font-mono bg-s3 px-1.5 py-0.5 rounded-lg">Detected → Investigating → Mitigating → Resolved</code>. Guard: can't Resolve without Mitigating first.</p>
+      <pre class="bg-s2 rounded-xl p-4 text-[13px] font-mono text-t2 leading-relaxed overflow-x-auto border border-b1"># incident.ioa.toml
 [entity]
 name = "Incident"
 initial_status = "Detected"
@@ -89,65 +72,31 @@ effects = [{ set = { var = "has_mitigation", value = true } }]
 name = "Resolve"
 from = ["Investigating", "Mitigating"]
 to = "Resolved"
-guards = [{ is_true = "has_mitigation" }]
-
-# Can't resolve without having mitigated first.
-# Temper catches this at L1 model checking.</pre>
-      </div>
-      <div>
-        <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-2">API Flow</div>
-        <pre class="glass-static rounded-lg p-3 text-[13px] font-mono text-txt-2 leading-relaxed overflow-x-auto whitespace-pre"># Haku's cron detects the issue
-POST /tdata/Incidents
-{ "entity_id": "inc-0220-001",
-  "fields": { "title": "Feed SSE drops",
-              "severity": "critical", "owner": "haku" } }
-
-# Timeline events are PATCH updates to fields
-PATCH /tdata/Incidents('inc-0220-001')
-{ "fields": { "events": [...] } }
-
-# Or events could be their own entity set (IncidentEvents)
-
-# State transitions are verified actions:
-POST /tdata/Incidents('inc-0220-001')/Temper.Mitigate
-POST /tdata/Incidents('inc-0220-001')/Temper.Resolve</pre>
-      </div>
-      <div>
-        <div class="text-[11px] font-mono font-medium uppercase tracking-[0.08em] text-txt-3 mb-2">Why Temper?</div>
-        <p class="text-txt-2 leading-relaxed">Without Temper, an agent could accidentally "resolve" an incident it never investigated. The state machine makes that <strong class="text-txt">impossible</strong> — the guard on <code class="font-mono bg-white/[0.04] px-1 py-0.5 rounded">Resolve</code> requires <code class="font-mono bg-white/[0.04] px-1 py-0.5 rounded">has_mitigation = true</code>. The trajectory log gives you a full audit trail.</p>
-      </div>
+guards = [{ is_true = "has_mitigation" }]</pre></div>
+      <div><h4 class="text-[11px] font-mono font-medium uppercase tracking-[0.1em] text-t3 mb-2">Why Temper?</h4><p class="text-t2 leading-relaxed">Can't resolve what wasn't mitigated. The state machine makes shortcuts <strong class="text-t1">impossible</strong>. Full audit trail in the trajectory table.</p></div>
     </div>
   </details>
 </div>
-
 <script>
-const TYPE_STYLES = { detect:{dot:'bg-err',badge:'bg-err-dim text-err'}, investigate:{dot:'bg-warn',badge:'bg-warn-dim text-warn'}, action:{dot:'bg-pri',badge:'bg-pri-dim text-pri'}, resolve:{dot:'bg-ok',badge:'bg-ok-dim text-ok'}, note:{dot:'bg-base-200',badge:'bg-white/[0.04] text-txt-3'} };
-const EVENTS = [
-  { time:'14:23', type:'detect', actor:'🐉 Haku (cron)', body:'Health ping detected SSE endpoint returning 502.' },
-  { time:'14:24', type:'investigate', actor:'🐉 Haku', body:'Logfire: 3 errors in last 5 min on <code class="text-[13px] font-mono bg-white/[0.04] px-1.5 py-0.5 rounded">/api/feed/stream</code>.', attachment:'SELECT count(*) FROM records\nWHERE level = \'error\'\nAND start_timestamp > now() - interval \'5 min\'\n→ 3 errors' },
-  { time:'14:26', type:'investigate', actor:'🐉 Haku', body:'Railway OOM kill at 14:22:41. Memory spike from large feed event batch.' },
-  { time:'14:28', type:'action', actor:'🐉 Haku', body:'Scaled Railway 512MB → 1GB. Restarted service.' },
-  { time:'14:30', type:'note', actor:'🐉 Haku → 🔥 Calcifer', body:'Feed was down ~8 min. Verify scheduled posts appeared.' },
-  { time:'14:33', type:'detect', actor:'🐉 Haku', body:'Health 200. SSE streaming. Feed UI live. Stable.' },
+const TS={detect:{d:'bg-red',b:'bg-red-dim text-red'},investigate:{d:'bg-amber',b:'bg-amber-dim text-amber'},action:{d:'bg-a1',b:'bg-a3 text-a2'},resolve:{d:'bg-green',b:'bg-green-dim text-green'},note:{d:'bg-s4',b:'bg-s3 text-t3'}};
+const EV=[
+  {t:'14:23',y:'detect',a:'🐉 Haku (cron)',b:'SSE endpoint returning 502.'},
+  {t:'14:24',y:'investigate',a:'🐉 Haku',b:'Logfire: 3 errors, ConnectionResetError.',x:'SELECT count(*) FROM records\nWHERE level=\'error\' AND start_timestamp > now()-interval \'5m\'\n→ 3'},
+  {t:'14:26',y:'investigate',a:'🐉 Haku',b:'Railway OOM kill at 14:22. Memory spike from feed event batch.'},
+  {t:'14:28',y:'action',a:'🐉 Haku',b:'Scaled 512MB → 1GB. Restarted.'},
+  {t:'14:30',y:'note',a:'🐉 → 🔥',b:'Feed down ~8 min. Verify scheduled posts.'},
+  {t:'14:33',y:'detect',a:'🐉 Haku',b:'Health 200. SSE live. Stable.'},
 ];
-
-function renderTimeline() {
-  document.getElementById('timeline').innerHTML = `<div class="absolute left-[11px] sm:left-[15px] top-2 bottom-2 w-px bg-glass"></div>` + EVENTS.map(e => {
-    const s = TYPE_STYLES[e.type]||TYPE_STYLES.note;
-    return `<div class="relative pb-6 last:pb-0"><div class="absolute -left-6 sm:-left-8 top-1.5 w-3 h-3 rounded-full ${s.dot} ring-2 ring-base"></div><div class="flex flex-wrap items-baseline gap-2 mb-1.5"><span class="text-xs font-mono text-txt-3 shrink-0">${e.time}</span><span class="inline-flex px-1.5 py-0.5 rounded text-[10px] font-mono font-medium uppercase tracking-wider ${s.badge}">${e.type}</span><span class="text-sm font-medium">${e.actor}</span></div><div class="text-sm text-txt-2 leading-relaxed">${e.body}</div>${e.attachment?`<pre class="mt-3 glass-static rounded-lg p-3 text-[13px] font-mono text-txt-2 leading-relaxed whitespace-pre-wrap overflow-x-auto">${e.attachment}</pre>`:''}</div>`;
+function renderTL(){
+  document.getElementById('tl').innerHTML=`<div class="absolute left-3 top-2 bottom-2 w-px bg-b1"></div>`+EV.map(e=>{
+    const s=TS[e.y]||TS.note;
+    return`<div class="relative pb-6 last:pb-0"><div class="absolute -left-7 top-1.5 w-3 h-3 rounded-full ${s.d} ring-2 ring-s1"></div><div class="flex flex-wrap items-baseline gap-2 mb-1.5"><span class="text-[11px] font-mono text-t3 shrink-0">${e.t}</span><span class="h-4 px-1.5 rounded-full text-[10px] font-mono font-medium tracking-wide ${s.b} inline-flex items-center">${e.y}</span><span class="text-sm font-medium">${e.a}</span></div><div class="text-sm text-t2 leading-relaxed">${e.b}</div>${e.x?`<pre class="mt-3 bg-s2 rounded-xl p-3 text-[13px] font-mono text-t2 leading-relaxed overflow-x-auto border border-b1">${e.x}</pre>`:''}</div>`;
   }).join('');
 }
-
-function addEvent() {
-  const type=document.getElementById('event-type').value, actor=document.getElementById('event-actor').value||'Unknown', body=document.getElementById('event-body').value;
-  if (!body) return;
-  EVENTS.push({time:new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}),type,actor,body});
-  document.getElementById('event-body').value=''; renderTimeline();
-}
-function resolve() { EVENTS.push({time:new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}),type:'resolve',actor:'Manual',body:'Incident resolved. All systems nominal.'}); renderTimeline(); }
-const start=new Date();start.setHours(14,23,0);
-setInterval(()=>{const d=Math.floor((Date.now()-start)/1000);document.getElementById('duration').textContent=`${Math.floor(d/60)}m ${d%60}s`;},1000);
-renderTimeline();
+function add(){const y=document.getElementById('et').value,a=document.getElementById('ea').value||'?',b=document.getElementById('eb').value;if(!b)return;EV.push({t:new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}),y,a,b});document.getElementById('eb').value='';renderTL();}
+function res(){EV.push({t:new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}),y:'resolve',a:'Manual',b:'Resolved. All nominal.'});renderTL();}
+const st=new Date();st.setHours(14,23,0);setInterval(()=>{const d=Math.floor((Date.now()-st)/1000);document.getElementById('dur').textContent=`${Math.floor(d/60)}m ${d%60}s`;},1000);
+renderTL();
 </script>
 </body>
 </html>
