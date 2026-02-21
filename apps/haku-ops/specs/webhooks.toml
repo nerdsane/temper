@@ -1,5 +1,7 @@
 # Webhook configuration for haku-ops tenant.
-# Fires on proposal state changes → OpenClaw isolated agent session.
+# Fires on proposal state changes → Haku isolated session.
+# Session DMs Rita + posts summary to Haku's main session + triggers heartbeat.
+# Handling instructions are in AGENTS.md (system prompt), not here.
 
 [[webhook]]
 name = "openclaw-haku"
@@ -8,4 +10,4 @@ headers = { "Authorization" = "Bearer d43a532c3e1ef83771dbc77c45ff2992" }
 actions = ["Select", "Deselect", "Approve", "Scratch", "WritePlan"]
 entity_types = ["Proposal"]
 on_success_only = true
-payload_template = '{"message": "Temper webhook: ${action} on ${entity_type} ${entity_id} (${from_status} to ${to_status})", "agentId": "haku", "name": "Temper", "deliver": false, "model": "anthropic/claude-sonnet-4-6", "timeoutSeconds": 60, "allowUnsafeExternalContent": true}'
+payload_template = '{"message": "Temper webhook: ${action} fired on ${entity_type} ${entity_id} (${from_status} → ${to_status})", "agentId": "haku", "name": "Temper", "deliver": true, "channel": "discord", "to": "1471700737376391350", "model": "anthropic/claude-sonnet-4-6", "wakeMode": "now", "timeoutSeconds": 60}'
