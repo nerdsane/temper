@@ -1,0 +1,35 @@
+{
+  "id": "temper",
+  "name": "Temper",
+  "description": "Temper state machine integration — real-time entity subscriptions and agent tools",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "url": { "type": "string", "description": "Temper server URL" },
+      "apps": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "agent": { "type": "string", "description": "Agent ID to route events to" },
+            "subscribe": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Entity types to subscribe to"
+            }
+          },
+          "required": ["agent"]
+        }
+      },
+      "hooksToken": { "type": "string", "description": "OpenClaw hooks bearer token" },
+      "hooksPort": { "type": "integer", "description": "OpenClaw gateway port (default 18789)" }
+    },
+    "required": ["url", "apps"]
+  },
+  "uiHints": {
+    "url": { "label": "Temper URL", "placeholder": "http://localhost:3001" },
+    "hooksToken": { "label": "Hooks Token", "sensitive": true },
+    "hooksPort": { "label": "Gateway Port", "placeholder": "18789" }
+  }
+}

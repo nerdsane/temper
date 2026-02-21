@@ -1,12 +1,32 @@
 //! Axum router construction for the Temper Data API.
 
 use axum::Router;
+use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderName};
+use axum::http::{Method, StatusCode};
 use axum::routing::get;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::dispatch;
 use crate::events;
 use crate::state::ServerState;
+
+const TEMPER_CLIENT_JS: &str = include_str!("../static/temper-client.js");
+
+async fn serve_temper_client() -> (
+    StatusCode,
+    [(axum::http::header::HeaderName, &'static str); 2],
+    &'static str,
+) {
+    (
+        StatusCode::OK,
+        [
+            (CONTENT_TYPE, "application/javascript"),
+            (CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        TEMPER_CLIENT_JS,
+    )
+}
 
 /// Build the axum router with all Temper Data API routes.
 ///
@@ -35,12 +55,33 @@ pub fn build_router(state: ServerState) -> Router {
                 .delete(dispatch::handle_odata_delete),
         );
 
-    let router = Router::new().nest("/tdata", tdata);
+    let router = Router::new()
+        .nest("/tdata", tdata)
+        .route("/temper-client.js", get(serve_temper_client))
+        .route("/static/temper-client.js", get(serve_temper_client));
 
     #[cfg(feature = "observe")]
     let router = router.nest("/observe", crate::observe_routes::build_observe_router());
 
-    router.layer(TraceLayer::new_for_http()).with_state(state)
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            CONTENT_TYPE,
+            AUTHORIZATION,
+            HeaderName::from_static("x-tenant-id"),
+        ]);
+
+    router
+        .layer(TraceLayer::new_for_http())
+        .layer(cors)
+        .with_state(state)
 }
 
 #[cfg(test)]
@@ -421,5 +462,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_temper_client_script_served() {
+        let app = build_router(test_state());
+        let response = app
+            .oneshot(
+                Request::get("/temper-client.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("Content-Type").unwrap(),
+            "application/javascript"
+        );
+        assert_eq!(
+            response.headers().get("Cache-Control").unwrap(),
+            "public, max-age=3600"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body_str = std::str::from_utf8(&body).unwrap();
+        assert!(body_str.contains("Temper"));
+    }
+
+    #[tokio::test]
+    async fn test_temper_client_script_alias_served() {
+        let app = build_router(test_state());
+        let response = app
+            .oneshot(
+                Request::get("/static/temper-client.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("Content-Type").unwrap(),
+            "application/javascript"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cors_header_present() {
+        let app = build_router(test_state());
+        let response = app
+            .oneshot(
+                Request::get("/tdata/Orders")
+                    .header("Origin", "http://localhost:5173")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get("Access-Control-Allow-Origin")
+                .unwrap(),
+            "*"
+        );
     }
 }

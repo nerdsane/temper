@@ -1,0 +1,8 @@
+{
+  "name": "@temper/openclaw-plugin",
+  "version": "0.1.0",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {}
+}
