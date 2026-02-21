@@ -111,7 +111,8 @@ impl WebhookDispatcher {
             let name = config.name.clone();
             let headers = config.headers.clone();
 
-                tokio::spawn(async move { // determinism-ok: fire-and-forget webhook side-effect; no simulation-visible state touched
+            tokio::spawn(async move {
+                // determinism-ok: fire-and-forget webhook side-effect; no simulation-visible state touched
                 let mut builder = client
                     .post(&url)
                     .header("Content-Type", "application/json")
@@ -162,10 +163,7 @@ impl WebhookDispatcher {
             return false;
         }
         if !config.entity_types.is_empty()
-            && !config
-                .entity_types
-                .iter()
-                .any(|t| t == &entry.entity_type)
+            && !config.entity_types.iter().any(|t| t == &entry.entity_type)
         {
             return false;
         }
@@ -208,10 +206,7 @@ fn expand_template(template: &str, entry: &TrajectoryEntry) -> String {
         .replace("${entity_type}", &entry.entity_type)
         .replace("${entity_id}", &entry.entity_id)
         .replace("${action}", &entry.action)
-        .replace(
-            "${from_status}",
-            entry.from_status.as_deref().unwrap_or(""),
-        )
+        .replace("${from_status}", entry.from_status.as_deref().unwrap_or(""))
         .replace("${to_status}", entry.to_status.as_deref().unwrap_or(""))
 }
 
@@ -246,7 +241,14 @@ mod tests {
     fn template_expansion_all_vars() {
         let tmpl =
             "[${tenant}] ${action} on ${entity_type}:${entity_id} (${from_status} -> ${to_status})";
-        let e = entry("Approve", "Proposal", "p-1", true, Some("Draft"), Some("Approved"));
+        let e = entry(
+            "Approve",
+            "Proposal",
+            "p-1",
+            true,
+            Some("Draft"),
+            Some("Approved"),
+        );
         assert_eq!(
             expand_template(tmpl, &e),
             "[default] Approve on Proposal:p-1 (Draft -> Approved)"
@@ -423,7 +425,14 @@ payload_template = "{{\"action\": \"${{action}}\"}}"
             mock_server.uri()
         );
         let d = WebhookDispatcher::from_toml(&toml).unwrap();
-        d.dispatch(&entry("Approve", "Proposal", "p-1", true, Some("Draft"), Some("Approved")));
+        d.dispatch(&entry(
+            "Approve",
+            "Proposal",
+            "p-1",
+            true,
+            Some("Draft"),
+            Some("Approved"),
+        ));
 
         // Give the spawned task a moment to complete.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await; // determinism-ok: test-only helper delay
@@ -470,7 +479,14 @@ url = "http://127.0.0.1:19997/hook"
 payload_template = "test"
 "#;
         let d = WebhookDispatcher::from_toml(toml).unwrap();
-        d.dispatch(&entry("Approve", "Proposal", "p-1", true, Some("Draft"), Some("Approved")));
+        d.dispatch(&entry(
+            "Approve",
+            "Proposal",
+            "p-1",
+            true,
+            Some("Draft"),
+            Some("Approved"),
+        ));
         // Wait for the spawned task to fail gracefully — no panic expected.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await; // determinism-ok: test-only helper delay
     }

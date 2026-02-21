@@ -20,10 +20,10 @@ use temper_store_postgres::PostgresEventStore;
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 use crate::events::EntityStateChange;
 use crate::reaction::ReactionDispatcher;
-use crate::webhooks::WebhookDispatcher;
 use crate::registry::{
     EntityVerificationResult, SpecRegistry, VerificationDetail, VerificationStatus,
 };
+use crate::webhooks::WebhookDispatcher;
 
 /// A design-time event emitted during spec loading and verification.
 ///
@@ -852,7 +852,8 @@ impl ServerState {
         if let Some(ref dispatcher) = self.webhook_dispatcher {
             let dispatcher = Arc::clone(dispatcher);
             let entry = trajectory_entry;
-            tokio::spawn(async move { // determinism-ok: external side-effect, no simulation-visible state
+            tokio::spawn(async move {
+                // determinism-ok: external side-effect, no simulation-visible state
                 dispatcher.dispatch(&entry);
             });
         }

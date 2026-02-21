@@ -118,9 +118,13 @@ pub async fn run(port: u16, apps: Vec<(String, String)>) -> Result<()> {
                             println!("  Loaded webhooks.toml for {tenant}");
                             all_configs.extend(d.configs().iter().cloned());
                         }
-                        Err(e) => eprintln!("  Warning: failed to parse webhooks.toml for {tenant}: {e}"),
+                        Err(e) => {
+                            eprintln!("  Warning: failed to parse webhooks.toml for {tenant}: {e}")
+                        }
                     },
-                    Err(e) => eprintln!("  Warning: failed to read webhooks.toml for {tenant}: {e}"),
+                    Err(e) => {
+                        eprintln!("  Warning: failed to read webhooks.toml for {tenant}: {e}")
+                    }
                 }
             }
         }

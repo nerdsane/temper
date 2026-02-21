@@ -14,10 +14,10 @@ pub mod reaction;
 pub mod registry;
 mod response;
 mod router;
-pub mod webhooks;
 #[cfg(feature = "observe")]
 pub mod sentinel;
 pub mod state;
+pub mod webhooks;
 
 pub use entity_actor::{EntityActor, EntityActorHandler, EntityMsg, EntityResponse, EntityState};
 pub use registry::SpecRegistry;

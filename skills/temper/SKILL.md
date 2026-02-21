@@ -327,19 +327,106 @@ nohup cloudflared tunnel --url http://localhost:8080 > /tmp/tunnel.log 2>&1 &
 grep -o 'https://[^ ]*trycloudflare.com' /tmp/tunnel.log
 ```
 
-## Webhooks
+## The Agent Loop — Shared Surfaces
 
-Temper can POST to a URL when state transitions happen. Configure in your spec directory:
+The core pattern: **human and agent are both actors in the same Temper app.** They see each other's actions in real time through the same UI.
+
+### How It Works
+
+```
+Human acts in UI → Temper state transition → SSE pushes to UI (instant)
+                                           → Webhook wakes agent
+Agent wakes     → reads Temper state      → does real work
+                → fires Temper actions    → SSE pushes to UI (instant)
+                                           → Human sees agent working
+```
+
+Both actors go through the same state machine. The UI is the shared surface — not Discord, not markdown, not a status report.
+
+### SSE — Real-Time State
+
+Every Temper app has SSE built in at `/tdata/$events`. Your UI subscribes on load:
+
+```javascript
+const events = new EventSource('/tdata/$events');
+events.onmessage = (e) => {
+  const change = JSON.parse(e.data);
+  // change = { entity_type, entity_id, action, status, tenant }
+  // Re-fetch the entity and re-render
+  refreshEntity(change.entity_type, change.entity_id);
+};
+```
+
+This means: when the agent fires `Temper.StartWork` from the backend, the human sees the UI update within milliseconds. No polling. No refresh button.
+
+### Agent Presence
+
+Design your spec with agent actions alongside human actions:
+
+```toml
+# Human actions
+[[actions]]
+name = "Approve"
+from = ["Planned"]
+to = "Approved"
+
+# Agent actions
+[[actions]]
+name = "StartWork"
+from = ["Approved"]
+to = "InProgress"
+
+[[actions]]
+name = "CompleteWork"
+from = ["InProgress"]
+to = "Done"
+```
+
+The UI renders agent actions the same as human actions — they're all state transitions. Show them in a timeline, a status badge, a progress bar. The agent isn't invisible; it's a visible participant.
+
+### Agent Writes to Temper, Not Discord
+
+When the agent does work, the result goes back through Temper:
+
+```bash
+# Agent fires action after completing work
+curl -X POST "http://localhost:3001/tdata/Tasks('task-001')/Temper.CompleteWork" \
+  -H "X-Tenant-Id: my-app" \
+  -H "Content-Type: application/json" \
+  -d '{"result": "Deployed to staging, CI green"}'
+```
+
+The human sees it in the app immediately (SSE). Discord DMs are fallback notifications, not the primary channel.
+
+### Webhooks — Waking the Agent
+
+Temper POSTs to a URL when state transitions happen. Configure in your spec directory:
 
 ```toml
 # apps/{your-app}/specs/webhooks.toml
-[[webhooks]]
-url = "http://127.0.0.1:18789/hooks/wake"
-actions = ["Select", "Approve", "Complete"]  # optional filter
-entity_types = ["Proposal"]                   # optional filter
+[[webhook]]
+name = "my-webhook"
+url = "http://127.0.0.1:18789/hooks/agent"
+headers = { "Authorization" = "Bearer ${OPENCLAW_HOOKS_TOKEN}" }
+actions = ["Approve", "Assign"]  # fire only on these
+entity_types = ["Task"]
+on_success_only = true
+payload_template = '{"message": "Temper webhook: ${action} on ${entity_type} ${entity_id} (${from_status} → ${to_status})", "agentId": "haku", "name": "Temper", "deliver": true, "channel": "discord", "to": "YOUR_DM_CHANNEL", "wakeMode": "now", "timeoutSeconds": 60}'
 ```
 
-This lets agents react to human actions in real time — no polling.
+The webhook wakes the agent. The agent reads Temper state, does real work, writes results back through Temper. The UI shows everything in real time.
+
+### The Full Loop in Practice
+
+1. **Human** opens the app, sees all entities with current state
+2. **Human** clicks "Approve" → Temper transitions state → UI updates instantly (SSE)
+3. **Webhook** fires → agent wakes up
+4. **Agent** reads the entity from Temper, does the actual work (code, deploy, generate, etc.)
+5. **Agent** fires `StartWork` → UI shows "In Progress" instantly (SSE)
+6. **Agent** finishes, fires `CompleteWork` with results → UI shows "Done" with results (SSE)
+7. **Human** sees it all without leaving the app
+
+Discord/Telegram/etc are notification channels for when the human isn't watching the app. The app is the source of truth.
 
 ## Multi-Tenant
 
