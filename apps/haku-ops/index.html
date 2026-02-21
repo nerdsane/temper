@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Haku Ops — Proposal Pipeline</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwindcss.config = {
+  theme: {
+    extend: {
+      colors: {
+        s1: '#0c0c10', s2: '#14141a', s3: '#1c1c24', s4: '#24242e',
+        t1: '#ededf0', t2: '#8b8b9e', t3: '#55556a',
+        a1: '#8b5cf6', a2: '#a78bfa', a3: 'rgba(139,92,246,0.12)',
+        green:  { DEFAULT: '#3dd68c', dim: 'rgba(61,214,140,0.10)' },
+        amber:  { DEFAULT: '#e5a63e', dim: 'rgba(229,166,62,0.10)' },
+        red:    { DEFAULT: '#e5534b', dim: 'rgba(229,83,75,0.10)' },
+        b1: 'rgba(255,255,255,0.06)', b2: 'rgba(255,255,255,0.10)', b3: 'rgba(255,255,255,0.16)',
+      },
+      fontFamily: {
+        sans: ['Space Grotesk', 'system-ui', 'sans-serif'],
+        mono: ['Space Mono', 'monospace'],
+      },
+    },
+  },
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    background: #08080c;
+    color: #eeeef2;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Ambient orbs — visible enough for glass to distort */
+  .orb {
+    position: fixed;
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .orb-violet {
+    top: -15%; left: -5%;
+    width: 50%; height: 50%;
+    background: radial-gradient(circle, rgba(139,92,246,0.35) 0%, transparent 70%);
+    filter: blur(70px);
+  }
+  .orb-lime {
+    bottom: -15%; right: -5%;
+    width: 45%; height: 45%;
+    background: radial-gradient(circle, rgba(163,230,53,0.22) 0%, transparent 70%);
+    filter: blur(70px);
+  }
+  .orb-rose {
+    top: 40%; right: 15%;
+    width: 30%; height: 30%;
+    background: radial-gradient(circle, rgba(251,113,133,0.14) 0%, transparent 70%);
+    filter: blur(70px);
+  }
+
+  /* Noise texture */
+  .noise {
+    position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.025;
+  }
+
+  body > .content { position: relative; z-index: 1; }
+
+  .glass {
+    background: rgba(16,16,24,0.30);
+    border: 1px solid rgba(255,255,255,0.10);
+    backdrop-filter: blur(48px) saturate(2.0);
+    -webkit-backdrop-filter: blur(48px) saturate(2.0);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.10);
+  }
+
+  .hl {
+    background: linear-gradient(120deg, rgba(139,92,246,0.25), rgba(163,230,53,0.15));
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  /* Proposal row accent bars */
+  .prop-row { position: relative; cursor: pointer; transition: all 0.15s; }
+  .prop-row:hover { background: rgba(255,255,255,0.03); }
+  .prop-row::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 8px; bottom: 8px;
+    width: 3px;
+    border-radius: 2px;
+  }
+  .prop-row[data-status="Verified"]::before { background: #3dd68c; }
+  .prop-row[data-status="Seed"]::before { background: #8b5cf6; }
+  .prop-row[data-status="Planned"]::before { background: #38bdf8; }
+  .prop-row[data-status="Approved"]::before { background: #fbbf24; }
+  .prop-row[data-status="Implementing"]::before { background: #fb7185; }
+  .prop-row[data-status="Completed"]::before { background: #a78bfa; }
+  .prop-row[data-status="Scratched"]::before { background: #555568; }
+
+  .prop-row[data-selected="true"] {
+    background: rgba(139,92,246,0.06);
+    border-color: rgba(139,92,246,0.20);
+  }
+
+  /* Status badge colors */
+  .badge { font-family: 'Space Mono', monospace; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; padding: 3px 8px; border-radius: 8px; text-transform: uppercase; }
+  .badge-Verified { background: rgba(61,214,140,0.10); color: #3dd68c; }
+  .badge-Seed { background: rgba(139,92,246,0.12); color: #a78bfa; }
+  .badge-Planned { background: rgba(56,189,248,0.12); color: #38bdf8; }
+  .badge-Approved { background: rgba(251,191,36,0.10); color: #fbbf24; }
+  .badge-Implementing { background: rgba(251,113,133,0.12); color: #fb7185; }
+  .badge-Completed { background: rgba(167,139,250,0.12); color: #a78bfa; }
+  .badge-Scratched { background: rgba(85,85,104,0.15); color: #555568; }
+
+  /* Metric card */
+  .metric-val { font-family: 'Space Mono', monospace; font-size: 32px; font-weight: 700; line-height: 1; }
+
+  /* Action buttons */
+  .action-btn {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 6px 14px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.10);
+    background: rgba(255,255,255,0.04);
+    color: #8b8b9e;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .action-btn:hover { border-color: rgba(139,92,246,0.4); color: #a78bfa; background: rgba(139,92,246,0.08); }
+  .action-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .action-btn.primary { background: rgba(139,92,246,0.15); color: #a78bfa; border-color: rgba(139,92,246,0.3); }
+  .action-btn.primary:hover { background: rgba(139,92,246,0.25); }
+
+  /* Toast */
+  .toast {
+    position: fixed; bottom: 20px; right: 20px;
+    padding: 12px 20px;
+    border-radius: 10px;
+    font-family: 'Space Mono', monospace;
+    font-size: 12px;
+    z-index: 100;
+    transition: all 0.2s;
+    transform: translateY(10px);
+    opacity: 0;
+    pointer-events: none;
+  }
+  .toast.show { transform: translateY(0); opacity: 1; }
+  .toast.ok { background: rgba(61,214,140,0.15); border: 1px solid rgba(61,214,140,0.3); color: #3dd68c; }
+  .toast.err { background: rgba(229,83,75,0.15); border: 1px solid rgba(229,83,75,0.3); color: #e5534b; }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 99px; }
+
+  ::selection { background: rgba(139,92,246,0.3); }
+</style>
+</head>
+<body>
+
+<!-- Orbs -->
+<div class="orb orb-violet"></div>
+<div class="orb orb-lime"></div>
+<div class="orb orb-rose"></div>
+
+<!-- Noise -->
+<svg class="noise" width="100%" height="100%"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="4" stitchTiles="stitch"/></filter><rect width="100%" height="100%" filter="url(#n)"/></svg>
+
+<div class="content">
+  <!-- Header -->
+  <header style="padding:32px 24px 0">
+    <div style="max-width:960px;margin:0 auto">
+      <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+        <h1 style="font-size:36px;font-weight:700;letter-spacing:-0.02em">
+          <span class="hl">Proposal Pipeline</span>
+        </h1>
+        <span style="font-family:'Space Mono',monospace;font-size:12px;color:#555568">haku-ops · temper</span>
+      </div>
+      <div style="height:2px;margin-top:16px;background:linear-gradient(90deg,#8b5cf6 0%,#a3e635 50%,#fb7185 100%);border-radius:1px;opacity:0.6"></div>
+    </div>
+  </header>
+
+  <!-- Summary Strip -->
+  <section style="padding:24px 24px 0">
+    <div style="max-width:960px;margin:0 auto">
+      <div id="summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,140px),1fr));gap:12px">
+        <!-- filled by JS -->
+      </div>
+    </div>
+  </section>
+
+  <!-- Proposals -->
+  <section style="padding:24px 24px 0">
+    <div style="max-width:960px;margin:0 auto">
+      <h2 style="font-family:'Space Mono',monospace;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.12em;color:#555568;margin-bottom:12px">Proposals</h2>
+      <div id="proposals" class="glass" style="border-radius:10px;overflow:hidden">
+        <!-- filled by JS -->
+      </div>
+    </div>
+  </section>
+
+  <!-- Detail Drawer (hidden by default) -->
+  <div id="drawer-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:50" onclick="closeDrawer()">
+    <div id="drawer" style="position:fixed;top:0;right:0;bottom:0;width:100%;max-width:420px;background:#0c0c10;border-left:1px solid rgba(255,255,255,0.08);overflow-y:auto;padding:28px 24px" onclick="event.stopPropagation()">
+      <!-- filled by JS -->
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast glass"></div>
+
+  <!-- Footer gradient line -->
+  <div style="max-width:960px;margin:48px auto 32px;padding:0 24px">
+    <div style="height:2px;background:linear-gradient(90deg,#8b5cf6 0%,#a3e635 50%,#fb7185 100%);border-radius:1px;opacity:0.3"></div>
+    <div style="text-align:center;margin-top:12px;font-family:'Space Mono',monospace;font-size:11px;color:#555568">
+      🐉 haku · temper verified state machine
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '/tdata';
+const TENANT = 'haku-ops';
+
+const STATUS_ORDER = ['Seed','Planned','Approved','Implementing','Completed','Verified','Scratched'];
+
+const STATUS_COLORS = {
+  Verified: '#3dd68c', Seed: '#a78bfa', Planned: '#38bdf8',
+  Approved: '#fbbf24', Implementing: '#fb7185', Completed: '#a78bfa', Scratched: '#555568'
+};
+
+let proposals = [];
+
+async function load() {
+  const r = await fetch(`${API}/Proposals`, { headers: { 'X-Tenant-Id': TENANT } });
+  const d = await r.json();
+  proposals = (d.value || []).sort((a, b) => {
+    const ai = STATUS_ORDER.indexOf(a.status);
+    const bi = STATUS_ORDER.indexOf(b.status);
+    return ai - bi;
+  });
+  renderSummary();
+  renderList();
+}
+
+function renderSummary() {
+  const counts = {};
+  proposals.forEach(p => { counts[p.status] = (counts[p.status] || 0) + 1; });
+  
+  const metrics = [
+    { label: 'Total', val: proposals.length, color: '#eeeef2' },
+    { label: 'Verified', val: counts.Verified || 0, color: '#3dd68c' },
+    { label: 'In Flight', val: (counts.Seed||0) + (counts.Planned||0) + (counts.Approved||0) + (counts.Implementing||0) + (counts.Completed||0), color: '#a78bfa' },
+    { label: 'Scratched', val: counts.Scratched || 0, color: '#555568' },
+  ];
+  
+  document.getElementById('summary').innerHTML = metrics.map(m => `
+    <div class="glass" style="border-radius:10px;padding:16px 20px">
+      <div class="metric-val" style="color:${m.color}">${m.val}</div>
+      <div style="font-family:'Space Mono',monospace;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.12em;color:#555568;margin-top:6px">${m.label}</div>
+    </div>
+  `).join('');
+}
+
+function renderList() {
+  if (proposals.length === 0) {
+    document.getElementById('proposals').innerHTML = `
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px;color:#555568">
+        <div style="width:40px;height:40px;border-radius:50%;background:#1c1c24;display:flex;align-items:center;justify-content:center;font-size:18px;margin-bottom:12px">∅</div>
+        <p style="font-size:14px">No proposals yet</p>
+      </div>`;
+    return;
+  }
+  
+  document.getElementById('proposals').innerHTML = proposals.map(p => {
+    const title = p.fields?.Title || p.entity_id;
+    const selected = p.fields?.is_selected;
+    return `
+      <div class="prop-row" data-status="${p.status}" data-selected="${!!selected}" data-id="${p.entity_id}"
+           style="display:flex;align-items:center;gap:12px;padding:14px 20px 14px 16px;border-bottom:1px solid rgba(255,255,255,0.04)"
+           onclick="openDrawer('${p.entity_id}')">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+            ${selected ? '✋ ' : ''}${title}
+          </div>
+          <div style="font-family:'Space Mono',monospace;font-size:11px;color:#555568;margin-top:3px">
+            ${p.entity_id}
+          </div>
+        </div>
+        <span class="badge badge-${p.status}">${p.status}</span>
+      </div>`;
+  }).join('');
+}
+
+function openDrawer(id) {
+  const p = proposals.find(x => x.entity_id === id);
+  if (!p) return;
+  
+  const title = p.fields?.Title || p.entity_id;
+  const selected = p.fields?.is_selected;
+  const color = STATUS_COLORS[p.status] || '#8b8b9e';
+  
+  // Determine available actions based on status
+  const actions = getActions(p);
+  
+  document.getElementById('drawer').innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px">
+      <span class="badge badge-${p.status}">${p.status}</span>
+      <button onclick="closeDrawer()" style="background:none;border:none;color:#555568;cursor:pointer;font-size:18px">✕</button>
+    </div>
+    <h2 style="font-size:22px;font-weight:700;letter-spacing:-0.01em;margin-bottom:4px">${title}</h2>
+    <div style="font-family:'Space Mono',monospace;font-size:12px;color:#555568;margin-bottom:20px">${p.entity_id}</div>
+    
+    ${selected ? '<div style="font-family:\'Space Mono\',monospace;font-size:11px;color:#a78bfa;margin-bottom:16px;padding:8px 12px;background:rgba(139,92,246,0.08);border-radius:8px;border:1px solid rgba(139,92,246,0.15)">✋ SELECTED</div>' : ''}
+    
+    <!-- Fields -->
+    <div style="margin-bottom:24px">
+      <h3 style="font-family:'Space Mono',monospace;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.12em;color:#555568;margin-bottom:10px">Fields</h3>
+      ${Object.entries(p.fields || {}).map(([k, v]) => `
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04)">
+          <span style="font-family:'Space Mono',monospace;font-size:12px;color:#8b8b9e">${k}</span>
+          <span style="font-family:'Space Mono',monospace;font-size:12px;color:#eeeef2">${v}</span>
+        </div>
+      `).join('')}
+    </div>
+    
+    <!-- Actions -->
+    ${actions.length > 0 ? `
+    <div>
+      <h3 style="font-family:'Space Mono',monospace;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.12em;color:#555568;margin-bottom:10px">Actions</h3>
+      <div style="display:flex;flex-wrap:wrap;gap:8px">
+        ${actions.map(a => `<button class="action-btn ${a.primary ? 'primary' : ''}" onclick="fireAction('${p.entity_id}','${a.name}')">${a.label}</button>`).join('')}
+      </div>
+    </div>` : ''}
+  `;
+  
+  document.getElementById('drawer-overlay').style.display = 'block';
+}
+
+function getActions(p) {
+  const s = p.status;
+  const sel = p.fields?.is_selected;
+  const actions = [];
+  
+  // State transitions from the IOA spec
+  if (s === 'Seed') {
+    actions.push({ name: 'WritePlan', label: 'Write Plan', primary: true });
+    actions.push({ name: 'Scratch', label: 'Scratch' });
+    if (!sel) actions.push({ name: 'Select', label: 'Select' });
+    else actions.push({ name: 'Deselect', label: 'Deselect' });
+  }
+  if (s === 'Planned') {
+    actions.push({ name: 'Approve', label: 'Approve', primary: true });
+    actions.push({ name: 'Scratch', label: 'Scratch' });
+    if (!sel) actions.push({ name: 'Select', label: 'Select' });
+    else actions.push({ name: 'Deselect', label: 'Deselect' });
+  }
+  if (s === 'Approved') {
+    actions.push({ name: 'StartImplementation', label: 'Start Impl', primary: true });
+    actions.push({ name: 'Scratch', label: 'Scratch' });
+    if (!sel) actions.push({ name: 'Select', label: 'Select' });
+    else actions.push({ name: 'Deselect', label: 'Deselect' });
+  }
+  if (s === 'Implementing') {
+    actions.push({ name: 'CompleteImplementation', label: 'Complete', primary: true });
+    actions.push({ name: 'Scratch', label: 'Scratch' });
+    if (!sel) actions.push({ name: 'Select', label: 'Select' });
+    else actions.push({ name: 'Deselect', label: 'Deselect' });
+  }
+  if (s === 'Completed') {
+    actions.push({ name: 'Verify', label: 'Verify', primary: true });
+    if (!sel) actions.push({ name: 'Select', label: 'Select' });
+    else actions.push({ name: 'Deselect', label: 'Deselect' });
+  }
+  // Verified and Scratched are terminal — no actions
+  return actions;
+}
+
+async function fireAction(id, action) {
+  try {
+    const r = await fetch(`${API}/Proposals('${id}')/Temper.${action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+      body: '{}'
+    });
+    if (r.ok) {
+      showToast(`${action} ✓`, 'ok');
+      await load();
+      openDrawer(id);
+    } else {
+      const txt = await r.text();
+      showToast(`${r.status}: ${txt.slice(0, 80)}`, 'err');
+    }
+  } catch (e) {
+    showToast(`Error: ${e.message}`, 'err');
+  }
+}
+
+function closeDrawer() {
+  document.getElementById('drawer-overlay').style.display = 'none';
+}
+
+function showToast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast glass ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// Initial load + auto-refresh every 10s
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>
