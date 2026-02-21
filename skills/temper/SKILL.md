@@ -2,6 +2,62 @@
 
 Spin up persistent, verified stateful apps with Temper. Any agent, any use case.
 
+## Getting Temper
+
+```bash
+# Clone the repo
+git clone https://github.com/nerdsane/temper.git ~/workspace/Development/temper
+cd ~/workspace/Development/temper
+```
+
+### Prerequisites
+
+| Dependency | Install | Why |
+|-----------|---------|-----|
+| **Rust** | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` | Temper is Rust |
+| **Z3** | `brew install z3` (macOS) / `apt install libz3-dev` (Linux) | L0 verification (SMT solver) |
+| **Postgres 17** | `brew install postgresql@17` (macOS) / `apt install postgresql` | Persistence |
+| **Python 3** | Usually pre-installed | Proxy server (`serve.py`) |
+
+### Build
+
+```bash
+# Source Rust + set Z3 paths
+. "$HOME/.cargo/env"
+export Z3_SYS_Z3_HEADER="/opt/homebrew/include/z3.h"          # macOS (brew)
+export BINDGEN_EXTRA_CLANG_ARGS="-I/opt/homebrew/include"
+export LIBRARY_PATH="/opt/homebrew/lib"
+export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"
+
+# Build (release, ~60s on Mac mini M2)
+cargo build --release
+```
+
+### Set Up Postgres
+
+```bash
+# Create user + database for your app
+createuser temper
+createdb -O temper my_app_db
+psql -d my_app_db -c "ALTER USER temper PASSWORD 'temper_dev';"
+export DATABASE_URL="postgres://temper:temper_dev@localhost/my_app_db"
+```
+
+### Verify It Works
+
+```bash
+# Run the test suite (594+ tests)
+cargo test
+
+# Start with a sample app
+./target/release/temper serve --app my-app=apps/my-app/specs --port 3001
+# → OData API at http://localhost:3001/tdata
+```
+
+You now have a running Temper instance. Everything below assumes this is done.
+
+---
+
 ## What Temper Is
 
 A Rust state machine backend. You define entities with states, actions, guards, and effects in IOA TOML. Temper gives you:
@@ -341,14 +397,15 @@ apps/{your-app}/
 
 ## Environment
 
+See "Getting Temper" at the top for full setup. Key env vars:
+
 ```bash
-# Required for building Temper
 . "$HOME/.cargo/env"
-export Z3_SYS_Z3_HEADER="/opt/homebrew/include/z3.h"
+export Z3_SYS_Z3_HEADER="/opt/homebrew/include/z3.h"     # adjust for your Z3 install path
 export BINDGEN_EXTRA_CLANG_ARGS="-I/opt/homebrew/include"
 export LIBRARY_PATH="/opt/homebrew/lib"
 export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"
-export DATABASE_URL="postgres://temper:temper_dev@localhost/haku_ops"
+export DATABASE_URL="postgres://temper:temper_dev@localhost/{your_db}"
 ```
 
 ## Key Constraints
