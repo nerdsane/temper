@@ -5,6 +5,8 @@
 [![Rust](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/rita-aga/883fd73429759b545967fdd6298b34ff/raw/temper-rust.json)](https://www.rust-lang.org)
 [![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/rita-aga/883fd73429759b545967fdd6298b34ff/raw/temper-tests.json)](#)
 [![Crates](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/rita-aga/883fd73429759b545967fdd6298b34ff/raw/temper-crates.json)](#)
+[![MCP](https://img.shields.io/badge/MCP-Code%20Mode-0A84FF)](#integrations)
+[![OpenClaw](https://img.shields.io/badge/OpenClaw-Plugin-0EA5E9)](#integrations)
 
 **This is research, not a product.**
 
@@ -39,16 +41,84 @@ This approach works for applications whose core logic is state machine shaped. T
 
 [docs/POSITIONING.md](docs/POSITIONING.md) has a fuller discussion.
 
+## Getting Started
+
+Run tests, then choose a storage backend explicitly:
+
+```bash
+cargo test --workspace
+
+# Postgres (production / multi-tenant default)
+DATABASE_URL=postgres://user:pass@localhost/db cargo run -- serve \
+  --storage postgres \
+  --specs-dir reference-apps/ecommerce/specs --tenant ecommerce
+
+# Turso/libSQL (edge + low-ops; local file mode needs no cloud account)
+TURSO_URL=file:local.db cargo run -- serve \
+  --storage turso \
+  --specs-dir reference-apps/ecommerce/specs --tenant ecommerce
+
+# Redis (ephemeral/cache-oriented workflows)
+REDIS_URL=redis://127.0.0.1:6379 cargo run -- serve \
+  --storage redis \
+  --specs-dir reference-apps/ecommerce/specs --tenant ecommerce
+```
+
 ## Running
 
 ```bash
 cargo test --workspace
 
 DATABASE_URL=postgres://user:pass@localhost/db cargo run -- serve \
+  --storage postgres \
   --specs-dir reference-apps/ecommerce/specs --tenant ecommerce
 
 ./scripts/bench.sh
 ```
+
+## Storage Backends
+
+Temper supports three event-store backends selected with `--storage postgres|turso|redis`:
+
+| Backend | Required env | Optional env | Best for |
+|-----|-----|-----|-----|
+| Postgres | `DATABASE_URL` | - | Production, multi-tenant workloads, existing infra |
+| Turso/libSQL | `TURSO_URL` | `TURSO_AUTH_TOKEN` (optional for local `file:`) | Edge deployment, embedded/local DBs, low-ops |
+| Redis | `REDIS_URL` | - | Ephemeral/cache use cases |
+
+Local Turso dev example:
+
+```bash
+TURSO_URL=file:local.db cargo run -- serve --storage turso \
+  --specs-dir reference-apps/ecommerce/specs --tenant ecommerce
+```
+
+## Integrations
+
+### MCP (Code Mode)
+
+Temper exposes `search` and `execute` tools over stdio MCP:
+
+```bash
+cargo run -- mcp --app my-app=path/to/specs --port 3001
+```
+
+- Pattern: https://blog.cloudflare.com/code-mode-mcp/
+- Sandbox runtime: https://github.com/pydantic/monty
+
+### OpenClaw Plugin
+
+The repo includes `plugins/openclaw-temper`, which adds:
+- `temper` tool (`list`, `get`, `create`, `action`, `patch`)
+- Background SSE subscriber that wakes OpenClaw agents from `/tdata/$events`
+
+Install and configure:
+
+```bash
+openclaw plugins install ./plugins/openclaw-temper
+```
+
+Add plugin config under `plugins.entries.temper.config` in `~/.openclaw/openclaw.json` (URL, hooks token/port, app-to-agent routing map).
 
 ## Documentation
 

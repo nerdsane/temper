@@ -16,7 +16,7 @@ cd ~/workspace/Development/temper
 |-----------|---------|-----|
 | **Rust** | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` | Temper is Rust |
 | **Z3** | `brew install z3` (macOS) / `apt install libz3-dev` (Linux) | L0 verification (SMT solver) |
-| **Postgres 17** | `brew install postgresql@17` (macOS) / `apt install postgresql` | Persistence |
+| **Postgres 17** | `brew install postgresql@17` (macOS) / `apt install postgresql` | Persistence when using `--storage postgres` |
 | **Python 3** | Usually pre-installed | Proxy server (`serve.py`) |
 
 ### Build
@@ -63,7 +63,7 @@ You now have a running Temper instance. Everything below assumes this is done.
 A Rust state machine backend. You define entities with states, actions, guards, and effects in IOA TOML. Temper gives you:
 
 - **OData API** — CRUD, bound actions (state transitions), SSE events
-- **Postgres persistence** — events, trajectories, entity state
+- **Pluggable persistence** — Postgres, Turso/libSQL, or Redis event storage
 - **Verification cascade** — L0-L3 model checking catches spec bugs before runtime
 - **Multi-tenant** — one server, many apps, isolated by `X-Tenant-Id`
 - **Webhook dispatch** — Temper POSTs to your URL on state transitions
@@ -75,6 +75,209 @@ A Rust state machine backend. You define entities with states, actions, guards, 
 - You want verified transitions — illegal moves are rejected, not silently corrupted
 - You want a UI that reflects live state and lets humans interact
 - Multiple agents need to share state
+
+## Storage Backends
+
+Choose a backend per server process with `--storage`:
+
+```bash
+./target/release/temper serve --storage postgres --app my-app=apps/my-app/specs --port 3001
+./target/release/temper serve --storage turso --app my-app=apps/my-app/specs --port 3001
+./target/release/temper serve --storage redis --app my-app=apps/my-app/specs --port 3001
+```
+
+| Backend | CLI | Environment | Best for |
+|--------|-----|-------------|----------|
+| Postgres | `--storage postgres` | `DATABASE_URL` | Production, multi-tenant deployments, existing Postgres infrastructure |
+| Turso/libSQL | `--storage turso` | `TURSO_URL` (+ optional `TURSO_AUTH_TOKEN`) | Edge deployment, embedded/local files, low-ops setups (no Postgres to manage) |
+| Redis | `--storage redis` | `REDIS_URL` | Ephemeral/cache-style workflows where durability is not the primary goal |
+
+Notes:
+- If you omit `--storage`, Temper defaults to `postgres`.
+- Legacy fallback remains: if `DATABASE_URL` is missing and you did not explicitly set `--storage`, Temper runs in-memory only.
+
+### Local Turso Dev (No Cloud Account)
+
+You can run Turso locally with a plain file:
+
+```bash
+export TURSO_URL="file:local.db"
+./target/release/temper serve --storage turso --app my-app=apps/my-app/specs --port 3001
+```
+
+No `TURSO_AUTH_TOKEN` is required for `file:` URLs.
+
+## Code Mode MCP
+
+Temper includes a stdio MCP server (`temper mcp`) for Code Mode workflows:
+- Pattern: Cloudflare Code Mode MCP — https://blog.cloudflare.com/code-mode-mcp/
+- Sandbox runtime: Pydantic Monty — https://github.com/pydantic/monty
+
+Why use it:
+- `search(code)` lets agents inspect loaded IOA specs programmatically.
+- `execute(code)` lets agents run guarded operations via `temper.list/get/create/action/patch`.
+
+### Start It
+
+```bash
+# Terminal 1: run Temper HTTP server
+./target/release/temper serve --storage turso --app my-app=apps/my-app/specs --port 3001
+
+# Terminal 2: run MCP stdio server
+./target/release/temper mcp --app my-app=path/to/specs --port 3001
+```
+
+### MCP Client Config
+
+Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "temper": {
+      "command": "/Users/you/workspace/Development/temper/target/release/temper",
+      "args": ["mcp", "--app", "my-app=apps/my-app/specs", "--port", "3001"]
+    }
+  }
+}
+```
+
+OpenClaw (`~/.openclaw/openclaw.json`, MCP-capable config blocks):
+
+```json5
+{
+  agents: {
+    defaults: {
+      mcpServers: {
+        temper: {
+          command: "/Users/you/workspace/Development/temper/target/release/temper",
+          args: ["mcp", "--app", "my-app=apps/my-app/specs", "--port", "3001"]
+        },
+      },
+    },
+  },
+}
+```
+
+Cursor (`~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "temper": {
+      "command": "/Users/you/workspace/Development/temper/target/release/temper",
+      "args": ["mcp", "--app", "my-app=apps/my-app/specs", "--port", "3001"]
+    }
+  }
+}
+```
+
+### Example: Search Then Compound Execute
+
+Search entity types:
+
+```python
+return list(spec['my-app']['entities'].keys())
+```
+
+Compound operation (create + action + read status):
+
+```python
+await temper.create('my-app', 'Orders', {'id': 'mcp-order-1'})
+await temper.action('my-app', 'Orders', 'mcp-order-1', 'CancelOrder', {'Reason': 'user_cancelled'})
+order = await temper.get('my-app', 'Orders', 'mcp-order-1')
+return order['status']
+```
+
+### Security Model
+
+- Code runs inside Monty sandbox limits (no filesystem, no env vars, no raw network access).
+- Only external `temper.*` methods can issue network calls.
+- Those methods call only your local Temper server (`localhost:{port}`) configured for this MCP process.
+
+## OpenClaw Plugin
+
+Temper ships an OpenClaw plugin at `plugins/openclaw-temper`:
+- Agent tool: `temper` (`list`, `get`, `create`, `action`, `patch`)
+- Background service: subscribes to Temper SSE and wakes agents on matching events
+
+### Install
+
+```bash
+openclaw plugins install ./plugins/openclaw-temper
+openclaw plugins list | rg temper
+```
+
+### Configure (`~/.openclaw/openclaw.json`)
+
+```json5
+{
+  plugins: {
+    entries: {
+      temper: {
+        enabled: true,
+        config: {
+          url: "http://127.0.0.1:3001",
+          hooksToken: "replace-with-your-openclaw-hooks-token",
+          hooksPort: 18789,
+          apps: {
+            "my-app": {
+              agent: "main",
+              subscribe: ["Task", "Order"],
+            },
+            "ops-app": {
+              agent: "ops",
+              subscribe: ["*"],
+            },
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+### How SSE Events Show Up in Sessions
+
+The plugin consumes `{url}/tdata/$events`. For matching `subscribe` rules, it posts to OpenClaw hooks and injects a wake message like:
+
+`Temper: Approve on Task task-123 (Planned → Approved) [app: my-app]`
+
+In practice this appears in the target agent's session as a system wake/event message, so the agent can immediately react.
+
+### Using the `temper` Tool From Agents
+
+List entities:
+
+```json
+{
+  "operation": "list",
+  "app": "my-app",
+  "entityType": "Tasks"
+}
+```
+
+Fire an action:
+
+```json
+{
+  "operation": "action",
+  "app": "my-app",
+  "entityType": "Tasks",
+  "entityId": "task-123",
+  "actionName": "Approve",
+  "body": {
+    "Reason": "Ready for implementation"
+  }
+}
+```
+
+### Multi-Agent Setup
+
+Use `apps` entries to route different Temper tenants to different OpenClaw agents:
+- each app/tenant has its own `agent`
+- each app can subscribe to specific entity types (or `*`)
+- one plugin instance can wake multiple agents based on event-to-app matches
 
 ## Quick Start
 
@@ -493,6 +696,11 @@ export BINDGEN_EXTRA_CLANG_ARGS="-I/opt/homebrew/include"
 export LIBRARY_PATH="/opt/homebrew/lib"
 export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"
 export DATABASE_URL="postgres://temper:temper_dev@localhost/{your_db}"
+# Or, for Turso/libSQL:
+# export TURSO_URL="file:local.db"
+# export TURSO_AUTH_TOKEN="{optional-for-cloud}"
+# Or, for Redis:
+# export REDIS_URL="redis://127.0.0.1:6379"
 ```
 
 ## Key Constraints
