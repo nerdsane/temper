@@ -6,6 +6,7 @@
 
 mod dispatch;
 pub mod entity_actor;
+pub mod event_store;
 pub mod events;
 #[cfg(feature = "observe")]
 pub mod observe_routes;
@@ -20,6 +21,7 @@ pub mod state;
 pub mod webhooks;
 
 pub use entity_actor::{EntityActor, EntityActorHandler, EntityMsg, EntityResponse, EntityState};
+pub use event_store::ServerEventStore;
 pub use registry::SpecRegistry;
 pub use router::build_router;
 pub use state::ServerState;

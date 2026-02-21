@@ -9,7 +9,14 @@ mod install;
 mod serve;
 mod verify;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub(crate) enum StorageBackend {
+    Postgres,
+    Turso,
+    Redis,
+}
 
 #[derive(Parser)]
 #[command(name = "temper", about = "Temper framework CLI")]
@@ -44,6 +51,13 @@ enum Commands {
         /// Port to listen on
         #[arg(short, long, default_value = "3000")]
         port: u16,
+        /// Storage backend (`postgres`, `turso`, `redis`).
+        ///
+        /// If omitted, startup preserves legacy behavior:
+        /// - use Postgres when `DATABASE_URL` is set
+        /// - otherwise run in-memory only
+        #[arg(long, value_enum, default_value = "postgres")]
+        storage: StorageBackend,
         /// Load an app: --app name=specs-dir (repeatable)
         #[arg(long)]
         app: Vec<String>,
@@ -70,10 +84,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Verify { specs_dir } => verify::run(&specs_dir)?,
         Commands::Serve {
             port,
+            storage,
             app,
             specs_dir,
             tenant,
         } => {
+            let storage_explicit =
+                std::env::args().any(|arg| arg == "--storage" || arg.starts_with("--storage="));
             // Build app list from --app flags, fall back to --specs-dir/--tenant
             let mut apps: Vec<(String, String)> = Vec::new();
             for entry in &app {
@@ -88,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
                     apps.push((tenant.clone(), dir.clone()));
                 }
             }
-            serve::run(port, apps).await?
+            serve::run(port, apps, storage, storage_explicit).await?
         }
     }
 
@@ -223,6 +240,30 @@ mod tests {
                 assert_eq!(app[1], "linear=specs/linear");
             }
             _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_with_storage() {
+        let cli = Cli::parse_from(["temper", "serve", "--storage", "turso"]);
+        match cli.command {
+            Commands::Serve {
+                storage: StorageBackend::Turso,
+                ..
+            } => {}
+            _ => panic!("expected Serve command with turso storage"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_default_storage() {
+        let cli = Cli::parse_from(["temper", "serve"]);
+        match cli.command {
+            Commands::Serve {
+                storage: StorageBackend::Postgres,
+                ..
+            } => {}
+            _ => panic!("expected Serve command with default postgres storage"),
         }
     }
 }

@@ -19,6 +19,7 @@ use temper_observe::otel::init_tracing;
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
+use temper_server::event_store::ServerEventStore;
 use temper_server::registry::{
     EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
 };
@@ -26,7 +27,11 @@ use temper_server::state::DesignTimeEvent;
 use temper_server::webhooks::WebhookDispatcher;
 use temper_spec::csdl::parse_csdl;
 use temper_store_postgres::PostgresEventStore;
+use temper_store_redis::RedisEventStore;
+use temper_store_turso::TursoEventStore;
 use temper_verify::cascade::VerificationCascade;
+
+use crate::StorageBackend;
 
 /// Parsed specs loaded from disk for a tenant.
 struct LoadedTenantSpecs {
@@ -55,7 +60,12 @@ struct PersistedSpecRow {
 /// and results stream via SSE (design-time observation).
 ///
 /// `apps` is a list of `(tenant_name, specs_dir)` pairs. Can be empty (no user apps).
-pub async fn run(port: u16, apps: Vec<(String, String)>) -> Result<()> {
+pub async fn run(
+    port: u16,
+    apps: Vec<(String, String)>,
+    storage: StorageBackend,
+    storage_explicit: bool,
+) -> Result<()> {
     // Initialize OTEL tracing if OTLP_ENDPOINT is set.
     // The guard must be held alive for the server's lifetime.
     let _otel_guard = std::env::var("OTLP_ENDPOINT").ok().map(|endpoint| {
@@ -64,27 +74,45 @@ pub async fn run(port: u16, apps: Vec<(String, String)>) -> Result<()> {
 
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
-    // Connect to Postgres if DATABASE_URL is set.
+    // Select and initialize storage backend.
     let mut pg_pool: Option<sqlx::PgPool> = None;
-    let event_store = if let Ok(database_url) = std::env::var("DATABASE_URL") {
-        println!("  Connecting to Postgres...");
-        let pool = sqlx::PgPool::connect(&database_url)
-            .await
-            .context("Failed to connect to Postgres")?;
-        temper_store_postgres::migration::run_migrations(&pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to run migrations: {e}"))?;
-        let pg_record_store: PostgresRecordStore = PostgresRecordStore::new(pool.clone());
-        pg_record_store
-            .migrate()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to migrate evolution_records: {e}"))?;
-        println!("  Postgres connected, migrations applied.");
-        pg_pool = Some(pool.clone());
-        Some(PostgresEventStore::new(pool))
-    } else {
-        println!("  No DATABASE_URL — running in-memory only (state not persisted).");
-        None
+    let event_store: Option<ServerEventStore> = match storage {
+        StorageBackend::Postgres => {
+            if let Ok(database_url) = std::env::var("DATABASE_URL") {
+                let (store, pool) = connect_postgres_store(&database_url).await?;
+                println!(
+                    "  Storage: postgres ({})",
+                    redact_connection_url(&database_url)
+                );
+                pg_pool = Some(pool);
+                Some(store)
+            } else if storage_explicit {
+                anyhow::bail!("DATABASE_URL is required when --storage postgres is selected");
+            } else {
+                println!("  Storage: memory (in-memory only)");
+                println!("  No DATABASE_URL — running in-memory only (state not persisted).");
+                None
+            }
+        }
+        StorageBackend::Turso => {
+            let turso_url = std::env::var("TURSO_URL")
+                .context("TURSO_URL is required when --storage turso is selected")?;
+            let turso_token = std::env::var("TURSO_AUTH_TOKEN").ok();
+            let store = TursoEventStore::new(&turso_url, turso_token.as_deref())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to connect to Turso/libSQL: {e}"))?;
+            println!("  Storage: turso ({})", redact_connection_url(&turso_url));
+            Some(ServerEventStore::Turso(store))
+        }
+        StorageBackend::Redis => {
+            let redis_url = std::env::var("REDIS_URL")
+                .context("REDIS_URL is required when --storage redis is selected")?;
+            let store = RedisEventStore::new(&redis_url)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to connect to Redis: {e}"))?;
+            println!("  Storage: redis ({})", redact_connection_url(&redis_url));
+            Some(ServerEventStore::Redis(store))
+        }
     };
 
     // Build initial registry from Postgres (recovery), then override with disk apps if provided.
@@ -133,11 +161,12 @@ pub async fn run(port: u16, apps: Vec<(String, String)>) -> Result<()> {
         }
     }
 
-    // Wire up Postgres persistence if available.
+    // Wire up persistence if available.
     if let Some(store) = event_store {
-        let pool = store.pool().clone();
+        if let Some(pool) = store.postgres_pool().cloned() {
+            state.server.pg_record_store = Some(Arc::new(PostgresRecordStore::new(pool)));
+        }
         state.server.event_store = Some(Arc::new(store));
-        state.server.pg_record_store = Some(Arc::new(PostgresRecordStore::new(pool)));
     }
 
     // Hydrate entities from the event store for each app tenant.
@@ -181,6 +210,42 @@ pub async fn run(port: u16, apps: Vec<(String, String)>) -> Result<()> {
         .context("Server error")?;
 
     Ok(())
+}
+
+async fn connect_postgres_store(database_url: &str) -> Result<(ServerEventStore, sqlx::PgPool)> {
+    println!("  Connecting to Postgres...");
+    let pool = sqlx::PgPool::connect(database_url)
+        .await
+        .context("Failed to connect to Postgres")?;
+    temper_store_postgres::migration::run_migrations(&pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to run migrations: {e}"))?;
+    let pg_record_store: PostgresRecordStore = PostgresRecordStore::new(pool.clone());
+    pg_record_store
+        .migrate()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to migrate evolution_records: {e}"))?;
+    println!("  Postgres connected, migrations applied.");
+    Ok((
+        ServerEventStore::Postgres(PostgresEventStore::new(pool.clone())),
+        pool,
+    ))
+}
+
+fn redact_connection_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let Some(at_idx) = rest.find('@') else {
+        return url.to_string();
+    };
+    let creds = &rest[..at_idx];
+    let host_and_path = &rest[at_idx + 1..];
+    if let Some((user, _password)) = creds.split_once(':') {
+        format!("{scheme}://{user}:***@{host_and_path}")
+    } else {
+        format!("{scheme}://***@{host_and_path}")
+    }
 }
 
 /// Load specs from a directory into an existing SpecRegistry WITHOUT running verification.

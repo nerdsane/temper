@@ -16,6 +16,8 @@ temper-odata = { workspace = true }
 temper-spec = { workspace = true }
 temper-jit = { workspace = true }
 temper-store-postgres = { workspace = true }
+temper-store-turso = { workspace = true }
+temper-store-redis = { workspace = true }
 temper-observe = { workspace = true }
 temper-authz = { workspace = true }
 temper-evolution = { workspace = true }

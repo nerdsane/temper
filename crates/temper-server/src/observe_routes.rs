@@ -1265,7 +1265,7 @@ async fn get_entity_history(
         }
     }
 
-    // Path 2: Query Postgres event store directly (for inactive entities).
+    // Path 2: Query event store directly (for inactive entities).
     if let Some(ref store) = state.event_store {
         let persistence_id = format!("{entity_type}:{entity_id}");
         if let Ok(envelopes) = store.read_events(&persistence_id, 0).await {
@@ -1538,102 +1538,108 @@ struct WorkflowsResponse {
 /// Builds a Temporal-like workflow timeline from the design-time event log,
 /// verification statuses, and trajectory log.
 async fn handle_workflows(State(state): State<ServerState>) -> Json<WorkflowsResponse> {
-    let persisted_events: Option<Vec<crate::state::DesignTimeEvent>> =
-        if let Some(ref store) = state.event_store {
-            type DtEventRow = (
-                String,
-                String,
-                String,
-                String,
-                Option<String>,
-                Option<bool>,
-                Option<i16>,
-                Option<i16>,
-                chrono::DateTime<chrono::Utc>,
-            );
-            let rows: Result<Vec<DtEventRow>, sqlx::Error> = sqlx::query_as(
-                "SELECT kind, entity_type, tenant, summary, level, passed, step_number, \
+    let persisted_events: Option<Vec<crate::state::DesignTimeEvent>> = if let Some(pool) = state
+        .event_store
+        .as_ref()
+        .and_then(|store| store.postgres_pool())
+    {
+        type DtEventRow = (
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<bool>,
+            Option<i16>,
+            Option<i16>,
+            chrono::DateTime<chrono::Utc>,
+        );
+        let rows: Result<Vec<DtEventRow>, sqlx::Error> = sqlx::query_as(
+            "SELECT kind, entity_type, tenant, summary, level, passed, step_number, \
                         total_steps, created_at \
                  FROM design_time_events \
                  ORDER BY created_at ASC, id ASC",
-            )
-            .fetch_all(store.pool())
-            .await;
-            match rows {
-                Ok(rows) => Some(
-                    rows.into_iter()
-                        .map(
-                            |(
-                                kind,
-                                entity_type,
-                                tenant,
-                                summary,
-                                level,
-                                passed,
-                                step_number,
-                                total_steps,
-                                created_at,
-                            )| crate::state::DesignTimeEvent {
-                                kind,
-                                entity_type,
-                                tenant,
-                                summary,
-                                level,
-                                passed,
-                                timestamp: created_at.to_rfc3339(),
-                                step_number: step_number.map(|n| n as u8),
-                                total_steps: total_steps.map(|n| n as u8),
-                            },
-                        )
-                        .collect(),
-                ),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to read design_time_events from postgres");
-                    None
-                }
+        )
+        .fetch_all(pool)
+        .await;
+        match rows {
+            Ok(rows) => Some(
+                rows.into_iter()
+                    .map(
+                        |(
+                            kind,
+                            entity_type,
+                            tenant,
+                            summary,
+                            level,
+                            passed,
+                            step_number,
+                            total_steps,
+                            created_at,
+                        )| crate::state::DesignTimeEvent {
+                            kind,
+                            entity_type,
+                            tenant,
+                            summary,
+                            level,
+                            passed,
+                            timestamp: created_at.to_rfc3339(),
+                            step_number: step_number.map(|n| n as u8),
+                            total_steps: total_steps.map(|n| n as u8),
+                        },
+                    )
+                    .collect(),
+            ),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read design_time_events from postgres");
+                None
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
 
-    let runtime_counts: std::collections::BTreeMap<String, u64> =
-        if let Some(ref store) = state.event_store {
-            let rows: Result<Vec<(String, i64)>, sqlx::Error> = sqlx::query_as(
-                "SELECT tenant, COUNT(*) AS count \
+    let runtime_counts: std::collections::BTreeMap<String, u64> = if let Some(pool) = state
+        .event_store
+        .as_ref()
+        .and_then(|store| store.postgres_pool())
+    {
+        let rows: Result<Vec<(String, i64)>, sqlx::Error> = sqlx::query_as(
+            "SELECT tenant, COUNT(*) AS count \
                  FROM trajectories \
                  GROUP BY tenant",
-            )
-            .fetch_all(store.pool())
-            .await;
-            match rows {
-                Ok(rows) => rows
-                    .into_iter()
-                    .map(|(tenant, count)| (tenant, count as u64))
-                    .collect(),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to read trajectory counts from postgres");
-                    let trajectory_log = state
-                        .trajectory_log
-                        .read()
-                        .unwrap_or_else(|err| err.into_inner());
-                    let mut counts = std::collections::BTreeMap::new();
-                    for entry in trajectory_log.entries() {
-                        *counts.entry(entry.tenant.clone()).or_insert(0) += 1;
-                    }
-                    counts
+        )
+        .fetch_all(pool)
+        .await;
+        match rows {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(tenant, count)| (tenant, count as u64))
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read trajectory counts from postgres");
+                let trajectory_log = state
+                    .trajectory_log
+                    .read()
+                    .unwrap_or_else(|err| err.into_inner());
+                let mut counts = std::collections::BTreeMap::new();
+                for entry in trajectory_log.entries() {
+                    *counts.entry(entry.tenant.clone()).or_insert(0) += 1;
                 }
+                counts
             }
-        } else {
-            let trajectory_log = state
-                .trajectory_log
-                .read()
-                .unwrap_or_else(|err| err.into_inner());
-            let mut counts = std::collections::BTreeMap::new();
-            for entry in trajectory_log.entries() {
-                *counts.entry(entry.tenant.clone()).or_insert(0) += 1;
-            }
-            counts
-        };
+        }
+    } else {
+        let trajectory_log = state
+            .trajectory_log
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
+        let mut counts = std::collections::BTreeMap::new();
+        for entry in trajectory_log.entries() {
+            *counts.entry(entry.tenant.clone()).or_insert(0) += 1;
+        }
+        counts
+    };
 
     let event_log: Vec<crate::state::DesignTimeEvent> = persisted_events.unwrap_or_else(|| {
         state
@@ -1829,11 +1835,11 @@ async fn handle_health(State(state): State<ServerState>) -> Json<serde_json::Val
     let transitions_total = state.metrics.transitions_total.load(Ordering::Relaxed);
     let errors_total = state.metrics.errors_total.load(Ordering::Relaxed);
 
-    let event_store_type = if state.event_store.is_some() {
-        "postgres"
-    } else {
-        "none"
-    };
+    let event_store_type = state
+        .event_store
+        .as_ref()
+        .map(|store| store.backend_name())
+        .unwrap_or("none");
 
     Json(serde_json::json!({
         "status": "healthy",
@@ -1948,7 +1954,11 @@ async fn handle_trajectories(
 ) -> Json<serde_json::Value> {
     let failed_limit = params.failed_limit.unwrap_or(50).min(500);
     let success_filter: Option<bool> = params.success.as_deref().map(|s| s == "true");
-    if let Some(ref store) = state.event_store {
+    if let Some(pool) = state
+        .event_store
+        .as_ref()
+        .and_then(|store| store.postgres_pool())
+    {
         let totals: Result<(i64, i64), sqlx::Error> = sqlx::query_as(
             "SELECT COUNT(*) AS total, \
                     COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END), 0) AS success_count \
@@ -1960,7 +1970,7 @@ async fn handle_trajectories(
         .bind(params.entity_type.as_deref())
         .bind(params.action.as_deref())
         .bind(success_filter)
-        .fetch_one(store.pool())
+        .fetch_one(pool)
         .await;
 
         let by_action_rows: Result<Vec<(String, i64, i64, i64)>, sqlx::Error> = sqlx::query_as(
@@ -1978,7 +1988,7 @@ async fn handle_trajectories(
         .bind(params.entity_type.as_deref())
         .bind(params.action.as_deref())
         .bind(success_filter)
-        .fetch_all(store.pool())
+        .fetch_all(pool)
         .await;
 
         type FailedRow = (
@@ -2004,7 +2014,7 @@ async fn handle_trajectories(
         .bind(params.action.as_deref())
         .bind(success_filter)
         .bind(failed_limit as i64)
-        .fetch_all(store.pool())
+        .fetch_all(pool)
         .await;
 
         if let (Ok((total, success_count)), Ok(by_action_rows), Ok(failed_rows)) =

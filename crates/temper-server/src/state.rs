@@ -18,6 +18,7 @@ use temper_spec::csdl::CsdlDocument;
 use temper_store_postgres::PostgresEventStore;
 
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
+use crate::event_store::ServerEventStore;
 use crate::events::EntityStateChange;
 use crate::reaction::ReactionDispatcher;
 use crate::registry::{
@@ -178,8 +179,8 @@ pub struct ServerState {
     pub transition_tables: Arc<BTreeMap<String, Arc<TransitionTable>>>,
     /// Live actor registry: actor_key -> ActorRef.
     pub actor_registry: Arc<RwLock<BTreeMap<String, ActorRef<EntityMsg>>>>,
-    /// Optional Postgres event store for persistence.
-    pub event_store: Option<Arc<PostgresEventStore>>,
+    /// Optional runtime event store backend for persistence.
+    pub event_store: Option<Arc<ServerEventStore>>,
     /// Agent hints learned from trajectory analysis, keyed by action name.
     pub agent_hints: Arc<RwLock<BTreeMap<String, String>>>,
     /// Cedar ABAC authorization engine.
@@ -285,6 +286,19 @@ impl ServerState {
         store: PostgresEventStore,
     ) -> Self {
         let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources);
+        state.event_store = Some(Arc::new(ServerEventStore::Postgres(store)));
+        state
+    }
+
+    /// Create ServerState with specs and an explicit runtime event store.
+    pub fn with_event_store(
+        system: ActorSystem,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: BTreeMap<String, String>,
+        store: ServerEventStore,
+    ) -> Self {
+        let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources);
         state.event_store = Some(Arc::new(store));
         state
     }
@@ -356,7 +370,11 @@ impl ServerState {
         ioa_source: &str,
         csdl_xml: &str,
     ) -> Result<(), String> {
-        let Some(ref store) = self.event_store else {
+        let Some(pool) = self
+            .event_store
+            .as_ref()
+            .and_then(|store| store.postgres_pool())
+        else {
             return Ok(());
         };
         sqlx::query(
@@ -378,7 +396,7 @@ impl ServerState {
         .bind(entity_type)
         .bind(ioa_source)
         .bind(csdl_xml)
-        .execute(store.pool())
+        .execute(pool)
         .await
         .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in postgres: {e}"))?;
         Ok(())
@@ -392,7 +410,11 @@ impl ServerState {
         status: &str,
         result: Option<&EntityVerificationResult>,
     ) -> Result<(), String> {
-        let Some(ref store) = self.event_store else {
+        let Some(pool) = self
+            .event_store
+            .as_ref()
+            .and_then(|store| store.postgres_pool())
+        else {
             return Ok(());
         };
         let (verified, levels_passed, levels_total, verification_result) = match result {
@@ -421,7 +443,7 @@ impl ServerState {
         .bind(levels_passed)
         .bind(levels_total)
         .bind(verification_result.map(Json))
-        .execute(store.pool())
+        .execute(pool)
         .await
         .map_err(|e| {
             format!(
@@ -444,7 +466,11 @@ impl ServerState {
 
     /// Broadcast and persist a design-time event.
     pub async fn emit_design_time_event(&self, event: DesignTimeEvent) -> Result<(), String> {
-        let Some(ref store) = self.event_store else {
+        let Some(pool) = self
+            .event_store
+            .as_ref()
+            .and_then(|store| store.postgres_pool())
+        else {
             let _ = self.design_time_tx.send(event.clone());
             self.push_design_time_event(event);
             return Ok(());
@@ -466,7 +492,7 @@ impl ServerState {
         .bind(event.step_number.map(i16::from))
         .bind(event.total_steps.map(i16::from))
         .bind(created_at)
-        .execute(store.pool())
+        .execute(pool)
         .await
         .map_err(|e| {
             format!(
@@ -481,7 +507,11 @@ impl ServerState {
 
     /// Persist a trajectory entry when Postgres is configured.
     pub async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
-        let Some(ref store) = self.event_store else {
+        let Some(pool) = self
+            .event_store
+            .as_ref()
+            .and_then(|store| store.postgres_pool())
+        else {
             return Ok(());
         };
         let created_at = chrono::DateTime::parse_from_rfc3339(&entry.timestamp)
@@ -501,7 +531,7 @@ impl ServerState {
         .bind(entry.to_status.as_deref())
         .bind(entry.error.as_deref())
         .bind(created_at)
-        .execute(store.pool())
+        .execute(pool)
         .await
         .map_err(|e| {
             format!(
@@ -597,12 +627,12 @@ impl ServerState {
 
         // Spawn new actor
         let actor = match &self.event_store {
-            Some(pg) => EntityActor::with_persistence(
+            Some(store) => EntityActor::with_persistence(
                 entity_type,
                 entity_id,
                 table,
                 initial_fields,
-                pg.clone(),
+                store.clone(),
             )
             .with_tenant(tenant.as_str()),
             None => EntityActor::new(entity_type, entity_id, table, initial_fields)

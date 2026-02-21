@@ -29,7 +29,8 @@ use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
-use temper_store_postgres::PostgresEventStore;
+
+use crate::event_store::ServerEventStore;
 
 use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_PER_ENTITY,
@@ -37,7 +38,7 @@ use super::types::{
 };
 
 /// The entity actor -- processes actions through a TransitionTable.
-/// Optionally persists events to PostgreSQL. Wide events are emitted
+/// Optionally persists events to the configured backend. Wide events are emitted
 /// via the OTEL SDK (no-op when OTEL is not initialised).
 pub struct EntityActor {
     tenant: String,
@@ -49,7 +50,7 @@ pub struct EntityActor {
     table: Arc<RwLock<TransitionTable>>,
     initial_fields: serde_json::Value,
     /// Optional event store for persistence. None = in-memory only.
-    event_store: Option<Arc<PostgresEventStore>>,
+    event_store: Option<Arc<ServerEventStore>>,
     /// Trace ID for correlating all events from this actor.
     trace_id: String,
 }
@@ -73,13 +74,13 @@ impl EntityActor {
         }
     }
 
-    /// Create a new entity actor with Postgres persistence.
+    /// Create a new entity actor with persistence.
     pub fn with_persistence(
         entity_type: impl Into<String>,
         entity_id: impl Into<String>,
         table: Arc<RwLock<TransitionTable>>,
         initial_fields: serde_json::Value,
-        store: Arc<PostgresEventStore>,
+        store: Arc<ServerEventStore>,
     ) -> Self {
         Self {
             tenant: "default".into(),
@@ -103,9 +104,9 @@ impl EntityActor {
         format!("{}:{}:{}", self.tenant, self.entity_type, self.entity_id)
     }
 
-    /// Persist an event to Postgres (if store is configured).
+    /// Persist an event to the configured event store.
     async fn persist_event(
-        store: &PostgresEventStore,
+        store: &ServerEventStore,
         persistence_id: &str,
         state: &mut EntityState,
         event: &EntityEvent,
@@ -140,7 +141,7 @@ impl EntityActor {
         }
     }
 
-    /// Replay events from Postgres to rebuild state (called in pre_start).
+    /// Replay events from the configured store to rebuild state (called in pre_start).
     ///
     /// Re-evaluates each event through the `TransitionTable` to reconstruct
     /// all state variables (status, counters, booleans). This is option 2 from
@@ -148,7 +149,7 @@ impl EntityActor {
     /// effects, so replay produces the same state as the original execution.
     async fn replay_events(
         table: &TransitionTable,
-        store: &PostgresEventStore,
+        store: &ServerEventStore,
         persistence_id: &str,
         state: &mut EntityState,
     ) {
