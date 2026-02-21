@@ -1,18 +1,137 @@
 #!/bin/bash
 # pow-generate-proof.sh — Generate enhanced proof document with 7-section showboat format
-# Usage: pow-generate-proof.sh [output-dir]
+# Usage:
+#   pow-generate-proof.sh [output-dir]
+#   pow-generate-proof.sh --session <id> [--output-dir <dir>] [--strict]
+#
+# In strict mode, the script skips generation unless core PoW evidence is present.
 set -euo pipefail
+export LC_ALL=C
+export LANG=C
 
 WORKSPACE_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 PROJECT_HASH="$(echo "$WORKSPACE_ROOT" | shasum -a 256 | cut -c1-12)"
 MARKER_DIR="/tmp/temper-harness/${PROJECT_HASH}"
 
 SESSION_ID="${CLAUDE_SESSION_ID:-default}"
+OUTPUT_DIR="$WORKSPACE_ROOT/.proof"
+STRICT_MODE=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --session)
+            SESSION_ID="${2:-}"
+            shift 2
+            ;;
+        --output-dir)
+            OUTPUT_DIR="${2:-}"
+            shift 2
+            ;;
+        --strict)
+            STRICT_MODE=true
+            shift
+            ;;
+        -h|--help)
+            cat <<EOF
+Usage: scripts/pow-generate-proof.sh [output-dir]
+       scripts/pow-generate-proof.sh --session <id> [--output-dir <dir>] [--strict]
+
+Options:
+  --session <id>      Use a specific session id.
+  --output-dir <dir>  Override proof output directory (default: .proof).
+  --strict            Require claims+trace and review markers; skip empty proofs.
+EOF
+            exit 0
+            ;;
+        *)
+            # Backward-compatible positional output dir
+            OUTPUT_DIR="$1"
+            shift
+            ;;
+    esac
+done
+
+mkdir -p "$OUTPUT_DIR"
+
+get_mtime() {
+    local FILE="$1"
+    stat -f "%m" "$FILE" 2>/dev/null || stat -c "%Y" "$FILE" 2>/dev/null || echo 0
+}
+
+discover_latest_evidence_session() {
+    local BEST_SESSION=""
+    local BEST_MTIME=0
+    local CLAIM_FILE=""
+
+    for CLAIM_FILE in "$MARKER_DIR"/claims-*.toml; do
+        [ -f "$CLAIM_FILE" ] || continue
+        local SID
+        SID="$(basename "$CLAIM_FILE" | sed 's/^claims-//;s/\.toml$//')"
+        local TRACE_CANDIDATE="$MARKER_DIR/trace-${SID}.jsonl"
+        if [ -s "$CLAIM_FILE" ] && [ -s "$TRACE_CANDIDATE" ]; then
+            local MTIME
+            MTIME="$(get_mtime "$CLAIM_FILE")"
+            if [ "$MTIME" -gt "$BEST_MTIME" ]; then
+                BEST_MTIME="$MTIME"
+                BEST_SESSION="$SID"
+            fi
+        fi
+    done
+
+    echo "$BEST_SESSION"
+}
+
 TRACE_FILE="$MARKER_DIR/trace-${SESSION_ID}.jsonl"
 CLAIMS_FILE="$MARKER_DIR/claims-${SESSION_ID}.toml"
 
-OUTPUT_DIR="${1:-$WORKSPACE_ROOT/.proof}"
-mkdir -p "$OUTPUT_DIR"
+# If default session has no evidence, pick latest session with claims+trace.
+if { [ "$SESSION_ID" = "default" ] || [ -z "$SESSION_ID" ]; } \
+    && { [ ! -s "$CLAIMS_FILE" ] || [ ! -s "$TRACE_FILE" ]; }; then
+    DISCOVERED_SESSION="$(discover_latest_evidence_session)"
+    if [ -n "$DISCOVERED_SESSION" ]; then
+        SESSION_ID="$DISCOVERED_SESSION"
+        TRACE_FILE="$MARKER_DIR/trace-${SESSION_ID}.jsonl"
+        CLAIMS_FILE="$MARKER_DIR/claims-${SESSION_ID}.toml"
+    fi
+fi
+
+marker_exists() {
+    local NAME="$1"
+    [ -f "$MARKER_DIR/$NAME" ] || [ -f "$MARKER_DIR/$NAME.toml" ]
+}
+
+maybe_skip_empty_proof() {
+    local REASONS=()
+
+    if [ ! -s "$CLAIMS_FILE" ]; then
+        REASONS+=("missing claims (${CLAIMS_FILE})")
+    fi
+    if [ ! -s "$TRACE_FILE" ]; then
+        REASONS+=("missing trace (${TRACE_FILE})")
+    fi
+
+    if [ "$STRICT_MODE" = true ]; then
+        if ! marker_exists "pow-verified"; then
+            REASONS+=("missing pow-verified marker")
+        fi
+        if ! marker_exists "alignment-reviewed"; then
+            REASONS+=("missing alignment-reviewed marker")
+        fi
+        if ! marker_exists "code-reviewed"; then
+            REASONS+=("missing code-reviewed marker")
+        fi
+        if marker_exists "sim-changed" && ! marker_exists "dst-reviewed"; then
+            REASONS+=("sim-changed present but dst-reviewed marker missing")
+        fi
+    fi
+
+    if [ "${#REASONS[@]}" -gt 0 ]; then
+        echo "Skipping proof generation: ${REASONS[*]}" >&2
+        exit 0
+    fi
+}
+
+maybe_skip_empty_proof
 
 # Generate filename from date + short commit hash
 COMMIT_SHORT="$(cd "$WORKSPACE_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo "nocommit")"
@@ -96,7 +215,28 @@ read_marker_field() {
     local MARKER="$1" FIELD="$2" DEFAULT="${3:-}"
     local FILE="$MARKER_DIR/${MARKER}.toml"
     if [ -f "$FILE" ]; then
-        grep "^${FIELD}" "$FILE" 2>/dev/null | sed "s/^${FIELD} = //;s/^\"//;s/\"$//" || echo "$DEFAULT"
+        local RAW
+        RAW="$(grep "^${FIELD}[[:space:]]*=" "$FILE" 2>/dev/null | head -1 | sed "s/^${FIELD}[[:space:]]*=[[:space:]]*//" || true)"
+        RAW="$(echo "$RAW" | sed 's/^ *//;s/ *$//')"
+        if [ -z "$RAW" ]; then
+            echo "$DEFAULT"
+            return
+        fi
+
+        # Quoted scalar
+        if [[ "$RAW" == \"*\" ]]; then
+            echo "$RAW" | sed 's/^"//;s/"$//'
+            return
+        fi
+
+        # TOML array -> render as comma-separated scalar for readability
+        if [[ "$RAW" == \[*\] ]]; then
+            echo "$RAW" | sed 's/^\[//;s/\]$//;s/"//g;s/, */, /g'
+            return
+        fi
+
+        # Numeric/bool/raw scalar
+        echo "$RAW"
     else
         echo "$DEFAULT"
     fi
@@ -149,7 +289,7 @@ done
 # --- Run comparison and capture output ---
 COMPARISON_OUTPUT=""
 if [ -f "$CLAIMS_FILE" ]; then
-    COMPARISON_OUTPUT="$(bash "$WORKSPACE_ROOT/scripts/pow-compare.sh" "$CLAIMS_FILE" 2>&1 || true)"
+    COMPARISON_OUTPUT="$(LC_ALL=C LANG=C bash "$WORKSPACE_ROOT/scripts/pow-compare.sh" --no-marker "$CLAIMS_FILE" 2>&1 || true)"
 fi
 
 # --- Test count from trace ---

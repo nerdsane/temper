@@ -3,8 +3,10 @@
 # Reads trace + agent-generated claims, cross-references against
 # ground truth (trace evidence + git diff), outputs verification table.
 # Claims are written by the agent via pow-agent-claims.sh (self-report).
-# Usage: pow-compare.sh [claims-file]
+# Usage: pow-compare.sh [--no-marker] [claims-file]
 set -euo pipefail
+export LC_ALL=C
+export LANG=C
 
 WORKSPACE_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 PROJECT_HASH="$(echo "$WORKSPACE_ROOT" | shasum -a 256 | cut -c1-12)"
@@ -12,6 +14,13 @@ MARKER_DIR="/tmp/temper-harness/${PROJECT_HASH}"
 
 SESSION_ID="${CLAUDE_SESSION_ID:-default}"
 TRACE_FILE="$MARKER_DIR/trace-${SESSION_ID}.jsonl"
+WRITE_MARKER=true
+
+if [ "${1:-}" = "--no-marker" ]; then
+    WRITE_MARKER=false
+    shift
+fi
+
 CLAIMS_FILE="${1:-$MARKER_DIR/claims-${SESSION_ID}.toml}"
 
 if [ ! -f "$CLAIMS_FILE" ]; then
@@ -193,13 +202,15 @@ else
     echo ""
     echo "RESULT: PASS — all mechanical checks verified"
 
-    # Write pow-verified marker
-    bash "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" "pow-verified" "pass" \
-        "checks_passed=$PASS_COUNT" \
-        "checks_warned=$WARN_COUNT" \
-        "checks_failed=0" \
-        "trace_file=$(basename "$TRACE_FILE")" \
-        "claims_file=$(basename "$CLAIMS_FILE")"
+    # Write pow-verified marker (skip in read-only mode).
+    if [ "$WRITE_MARKER" = true ]; then
+        bash "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" "pow-verified" "pass" \
+            "checks_passed=$PASS_COUNT" \
+            "checks_warned=$WARN_COUNT" \
+            "checks_failed=0" \
+            "trace_file=$(basename "$TRACE_FILE")" \
+            "claims_file=$(basename "$CLAIMS_FILE")"
+    fi
 
     exit 0
 fi

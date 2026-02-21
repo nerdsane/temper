@@ -644,6 +644,36 @@ PostToolUse hook that fires for ALL tools (`".*"` matcher). Appends one hash-cha
   6. Pre-commit gate checks pow-verified + alignment-reviewed markers
 ```
 
+### Producing Non-Empty Proofs
+
+`pow-generate-proof.sh` now skips generation when core evidence is missing, so it does not emit empty template docs.
+
+To generate a proper proof document:
+
+```bash
+# 1) Write self-claims for this session
+scripts/pow-agent-claims.sh \
+  intent="..." \
+  plan_file=".progress/NNN_....md" \
+  files_modified="a.rs,b.rs" \
+  tests_ran=true \
+  tests_added=0 \
+  scope="..."
+
+# 2) Mechanical verification (writes pow-verified marker on pass)
+scripts/pow-compare.sh
+
+# 3) Run semantic reviewers (write markers on pass)
+#    - code-reviewer
+#    - dst-reviewer (if sim-visible code changed)
+#    - alignment-reviewer
+
+# 4) Generate proof (strict mode requires evidence + markers)
+scripts/pow-generate-proof.sh --strict
+```
+
+`stop-verify.sh` also calls proof generation in strict mode, so session exit no longer creates empty `.proof` artifacts.
+
 **Why agent-generated claims matter:** Previously, claims were mechanically extracted FROM the trace, making `pow-compare.sh` a tautological self-check. Now the agent self-reports what it did, and mechanical verification independently checks that self-report against trace + git evidence. This gives the PoW triangle actual teeth.
 
 ### Scripts

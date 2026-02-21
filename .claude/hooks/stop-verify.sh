@@ -89,7 +89,8 @@ fi
 if [ "$ANY_BLOCKED" = false ] && [ -d "$MARKER_DIR" ]; then
     # Generate proof document BEFORE deleting anything
     if [ -x "$WORKSPACE_ROOT/scripts/pow-generate-proof.sh" ]; then
-        bash "$WORKSPACE_ROOT/scripts/pow-generate-proof.sh" 2>/dev/null || true
+        # Strict mode prevents empty/template proofs when PoW evidence is missing.
+        bash "$WORKSPACE_ROOT/scripts/pow-generate-proof.sh" --strict 2>/dev/null || true
     fi
 
     # Archive trace + claims to .proof/archive/
