@@ -24,18 +24,23 @@ The Temper harness is a multi-layered enforcement system that catches problems a
 │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  │
 │                                                                     │
 │   ┌─────────────────────┐     ┌─────────────────────┐              │
-│   │ Git Pre-Commit      │     │ Git Pre-Push         │              │
-│   │ • Integrity check   │     │ • Integrity check    │              │
-│   │ • Spec syntax       │     │ • Determinism audit  │              │
-│   │ • Dep audit         │     │ • Full test suite    │              │
+│   │ Git Pre-Commit      │     │ Git Pre-Push        │              │
+│   │ • Integrity check   │     │ • Integrity check   │              │
+│   │ • Spec syntax       │     │ • Determinism audit │              │
+│   │ • Dep audit         │     │ • Full test suite   │              │
 │   └─────────────────────┘     └─────────────────────┘              │
+│   ┌─────────────────────┐                                           │
+│   │ Git Post-Commit     │                                           │
+│   │ • commit-pending    │                                           │
+│   │ • sim-changed       │                                           │
+│   └─────────────────────┘                                           │
 │    BLOCKING (git hooks)        BLOCKING (git hooks)                 │
 │                                                                     │
 │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  │
 │                                                                     │
 │   ┌─────────────────────────────────────────────────────────────┐  │
 │   │ CI (GitHub Actions) — cannot be bypassed                    │  │
-│   │ • temper verify    • cargo test    • DST pattern scan       │  │
+│   │ • temper verify    • cargo test    • dependency audit        │  │
 │   └─────────────────────────────────────────────────────────────┘  │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -99,6 +104,7 @@ This harness enforces quality for **agents developing Temper itself** (the frame
 | 14 | Spec Syntax | Git hook | pre-commit | `git commit` | **YES** |
 | 15 | Dep Audit | Git hook | pre-commit | `git commit` | **YES** |
 | 16 | Full Test Suite | Git hook | pre-push | `git push` | **YES** |
+| 17 | Commit Marker Writer | Git hook | post-commit | `git commit` | **YES** (for stop-gate wiring) |
 
 ---
 
@@ -401,10 +407,23 @@ Runs a 3-gate pipeline before every push:
 | Gate | What it checks | Blocking |
 |------|---------------|----------|
 | 1/3 | Integrity (no TODO/unwrap/hacks) | YES |
-| 2/3 | Determinism patterns in sim crates | YES |
+| 2/3 | Determinism patterns in sim crates | Advisory |
 | 3/3 | `cargo test --workspace` | YES |
 
 Bypass with `git push --no-verify` for emergencies only.
+
+### Component 14: Post-Commit — Commit Marker Writer
+
+```
+File:      .claude/hooks/post-commit.sh (installed to .git/hooks/post-commit)
+Blocking:  YES (for session exit safety-net wiring)
+```
+
+After every successful commit, writes:
+- `commit-pending` marker (a commit happened this session)
+- `sim-changed` marker if the commit touched `crates/temper-runtime`, `crates/temper-jit`, or `crates/temper-server` Rust files
+
+These markers are consumed by the session exit gate to enforce review safety nets.
 
 ---
 
@@ -414,8 +433,9 @@ The one layer that **cannot be bypassed**. Runs on every PR.
 
 - `temper verify --specs-dir specs/` — full L0-L3 cascade
 - `cargo test --workspace` — all tests
-- DST pattern scan — 25-pattern determinism check
 - Dependency isolation audit — no verify deps in production
+
+Note: CI DST pattern scan is currently disabled due false positives (`.github/workflows/ci.yml`); semantic DST review is enforced via the review markers/gates.
 
 ---
 
@@ -504,7 +524,7 @@ A typical development session flows through all enforcement layers:
   │                      ───────────    ─────────    ──           │
   │  Broken spec         Spec Verify    Spec Syntax  temper verify│
   │  Bad deps            Dep Isolate    Dep Audit    Dep audit    │
-  │  HashMap in sim      DST Scan       Pre-push     DST scan    │
+  │  HashMap in sim      DST Scan       Pre-push     —           │
   │  Semantic DST bug    DST Reviewer   —            —            │
   │  Code quality        Code Reviewer  —            —            │
   │  Tests failing       Review Gate    Pre-push     cargo test   │
@@ -658,9 +678,24 @@ Backward-compatible plain markers are also written for existing gate compatibili
 
 ### Portability
 
-The minimum portable kit for any Claude Code project:
-1. `trace-capture.sh` + settings.json entry
-2. `pow-agent-claims.sh` (agent self-reports claims)
-3. `pow-compare.sh` (cross-references claims vs trace)
+The portable output contract for this harness is `verification.v1`.
 
-Three scripts + one hook config = trace capture and mechanical claim verification.
+- Schema: `docs/verification.v1.schema.json`
+- Mapping + hardness baseline: `docs/verification.v1.mapping.md`
+- Report generator: `scripts/verification-v1-report.sh`
+- Contract validator: `scripts/verification-v1-validate.sh`
+
+Generate a normalized report:
+
+```bash
+scripts/verification-v1-report.sh --pretty
+```
+
+This exports hook/gate/marker evidence in one model-agnostic JSON document that any runtime can consume.
+
+CI now consumes this contract via job `verification-contract` in `.github/workflows/ci.yml`:
+
+- Generates `verification.v1.json`
+- Validates contract shape
+- Enforces policy (`blocking_failures == 0` and `checks_failed == 0`)
+- Uploads the report as build artifact

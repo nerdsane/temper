@@ -12,6 +12,46 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────
+  # Gate 0: Verification contract (seconds)
+  # ─────────────────────────────────────────────────────
+  verification-contract:
+    name: Verification Contract (verification.v1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install git hook wrappers
+        run: bash scripts/setup-hooks.sh
+
+      - name: Generate verification.v1 report
+        env:
+          VERIFICATION_AGENT_PROVIDER: github-actions
+          VERIFICATION_AGENT_MODEL: ci
+        run: |
+          bash scripts/verification-v1-report.sh \
+            --session "${{ github.run_id }}" \
+            --out verification.v1.json \
+            --pretty
+
+      - name: Validate verification.v1 contract
+        run: bash scripts/verification-v1-validate.sh verification.v1.json
+
+      - name: Enforce verification policy
+        run: |
+          jq -e '
+            .summary.blocking_failures == 0 and
+            .summary.checks_failed == 0
+          ' verification.v1.json >/dev/null
+          jq '{summary: .summary}' verification.v1.json
+
+      - name: Upload verification artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-v1
+          path: verification.v1.json
+
+  # ─────────────────────────────────────────────────────
   # Gate 1: Fast checks (seconds)
   # ─────────────────────────────────────────────────────
   check:

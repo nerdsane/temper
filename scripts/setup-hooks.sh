@@ -1,6 +1,6 @@
 #!/bin/bash
 # Item 15: Git Hook Installer
-# Installs pre-commit and pre-push hooks into .git/hooks/
+# Installs pre-commit, pre-push, and post-commit hooks into .git/hooks/
 # Idempotent — safe to run multiple times.
 set -euo pipefail
 
@@ -45,9 +45,26 @@ HOOK_EOF
 chmod +x "$HOOKS_DIR/pre-push"
 echo "Installed: pre-push (full test suite)"
 
+# Install post-commit hook
+if [ -f "$HOOKS_DIR/post-commit" ] && ! grep -q "temper harness" "$HOOKS_DIR/post-commit" 2>/dev/null; then
+    echo "WARNING: Existing post-commit hook found. Backing up to post-commit.backup"
+    cp "$HOOKS_DIR/post-commit" "$HOOKS_DIR/post-commit.backup"
+fi
+
+cat > "$HOOKS_DIR/post-commit" << 'HOOK_EOF'
+#!/bin/bash
+# temper harness — post-commit hook (marker wiring)
+# Installed by scripts/setup-hooks.sh
+WORKSPACE_ROOT="$(git rev-parse --show-toplevel)"
+exec "$WORKSPACE_ROOT/.claude/hooks/post-commit.sh"
+HOOK_EOF
+chmod +x "$HOOKS_DIR/post-commit"
+echo "Installed: post-commit (commit-pending/sim-changed markers)"
+
 echo ""
 echo "=== Git hooks installed ==="
 echo "Pre-commit: integrity check, spec syntax validation, dependency audit"
 echo "Pre-push: full cargo test --workspace"
+echo "Post-commit: commit lifecycle markers for stop gate"
 echo ""
 echo "Bypass for emergencies: git commit --no-verify / git push --no-verify"
