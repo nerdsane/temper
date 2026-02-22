@@ -41,9 +41,38 @@ impl TursoEventStore {
         Ok(store)
     }
 
+    /// Obtain a connection configured for local-SQLite concurrency.
+    ///
+    /// WAL mode is set in `migrate()` (persists in the DB file). `busy_timeout`
+    /// is a per-connection setting — 30 s gives concurrent verification threads
+    /// time to wait for the write lock instead of immediately returning SQLITE_BUSY.
+    async fn configured_connection(&self) -> Result<libsql::Connection, PersistenceError> {
+        let conn = self.db.connect().map_err(storage_error)?;
+        // busy_timeout returns the old value as a row — use query() and drop it.
+        let _ = conn
+            .query("PRAGMA busy_timeout=30000", ())
+            .await
+            .map_err(storage_error)?;
+        Ok(conn)
+    }
+
     /// Run schema migrations on connect.
     async fn migrate(&self) -> Result<(), PersistenceError> {
         let conn = self.connection()?;
+
+        // WAL journal mode lets concurrent readers proceed while a writer holds the
+        // lock, and allows multiple writers to serialise without SQLITE_BUSY errors
+        // (combined with busy_timeout). The setting persists in the DB file.
+        //
+        // Both PRAGMAs return a row — use query() and drop the result set.
+        let _ = conn
+            .query("PRAGMA journal_mode=WAL", ())
+            .await
+            .map_err(storage_error)?;
+        let _ = conn
+            .query("PRAGMA busy_timeout=30000", ())
+            .await
+            .map_err(storage_error)?;
 
         conn.execute(schema::CREATE_EVENTS_TABLE, ())
             .await
@@ -78,7 +107,7 @@ impl TursoEventStore {
         ioa_source: &str,
         csdl_xml: &str,
     ) -> Result<(), PersistenceError> {
-        let conn = self.connection()?;
+        let conn = self.configured_connection().await?;
         conn.execute(
             "INSERT INTO specs (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, updated_at)
              VALUES (?1, ?2, ?3, ?4, 1, 0, 'pending', datetime('now'))
@@ -110,7 +139,7 @@ impl TursoEventStore {
         levels_total: Option<i32>,
         verification_result_json: Option<&str>,
     ) -> Result<(), PersistenceError> {
-        let conn = self.connection()?;
+        let conn = self.configured_connection().await?;
         conn.execute(
             "UPDATE specs SET
                  verified = ?3,
@@ -137,7 +166,7 @@ impl TursoEventStore {
 
     /// Load all persisted specs (for startup recovery).
     pub async fn load_specs(&self) -> Result<Vec<TursoSpecRow>, PersistenceError> {
-        let conn = self.connection()?;
+        let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
                 "SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
@@ -186,7 +215,7 @@ impl TursoEventStore {
         error: Option<&str>,
         created_at: &str,
     ) -> Result<(), PersistenceError> {
-        let conn = self.connection()?;
+        let conn = self.configured_connection().await?;
         conn.execute(
             "INSERT INTO trajectories \
              (tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at) \
@@ -213,7 +242,7 @@ impl TursoEventStore {
         &self,
         limit: i64,
     ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
-        let conn = self.connection()?;
+        let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
                 "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at \
@@ -303,7 +332,7 @@ impl EventStore for TursoEventStore {
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
         let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
-        let conn = self.connection()?;
+        let conn = self.configured_connection().await?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
@@ -381,7 +410,7 @@ impl EventStore for TursoEventStore {
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
         let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
-        let conn = self.connection()?;
+        let conn = self.configured_connection().await?;
 
         let mut rows = conn
             .query(
@@ -427,7 +456,7 @@ impl EventStore for TursoEventStore {
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
         let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
-        let conn = self.connection()?;
+        let conn = self.configured_connection().await?;
 
         conn.execute(
             "INSERT INTO snapshots (tenant, entity_type, entity_id, sequence_nr, snapshot)
@@ -456,7 +485,7 @@ impl EventStore for TursoEventStore {
         persistence_id: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
         let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
-        let conn = self.connection()?;
+        let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
                 "SELECT sequence_nr, snapshot
@@ -482,7 +511,7 @@ impl EventStore for TursoEventStore {
         &self,
         tenant: &str,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
-        let conn = self.connection()?;
+        let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
                 "SELECT DISTINCT entity_type, entity_id
