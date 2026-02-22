@@ -68,10 +68,10 @@ cargo test  # 647 tests
 A Rust state machine backend. You define entities with states, actions, guards, and effects in IOA TOML. Temper gives you:
 
 - **OData API** — CRUD, bound actions (state transitions), SSE events
-- **Turso persistence** — state survives restarts via libSQL event log
+- **Turso persistence** — state survives restarts via libSQL event log; all three backends (Turso, Redis, Postgres) support hydration on restart
 - **Verification cascade** — L0-L3 model checking at load time; illegal specs don't start
 - **Multi-tenant** — one server, many apps, isolated by `X-Tenant-Id`
-- **Webhook dispatch** — Temper POSTs to your URL on state transitions
+- **OpenClaw plugin** — real-time two-way connection for any OpenClaw agent (SSE → signal files → heartbeat wake)
 
 ## When to Use This
 
@@ -335,15 +335,18 @@ Bad notification:
 
 ## 6. Wire the OpenClaw Plugin
 
-For real-time two-way connection between Temper and your agent session:
+**This is required for any OpenClaw agent.** The plugin is the event system — it's how Temper state changes reach your agent session. Without it, your agent is blind to transitions your human makes in the UI.
+
+### Install
 
 ```bash
-# Install
 ln -s ~/workspace/Development/temper/plugins/openclaw-temper \
       ~/.openclaw/extensions/openclaw-temper
 ```
 
-Configure in `~/.openclaw/openclaw.json`:
+### Configure
+
+Add to `~/.openclaw/openclaw.json`:
 
 ```json5
 {
@@ -355,12 +358,12 @@ Configure in `~/.openclaw/openclaw.json`:
         enabled: true,
         config: {
           url: "http://127.0.0.1:3001",
-          hooksToken: "YOUR_OPENCLAW_HOOKS_TOKEN",
-          hooksPort: 18789,
+          hooksToken: "YOUR_OPENCLAW_HOOKS_TOKEN",  // find in openclaw.json > gateway.token
+          hooksPort: 18789,                          // find in openclaw.json > gateway.port
           apps: {
             "my-app": {
-              agent: "main",
-              subscribe: ["Task", "Order"],
+              agent: "your-agent-id",   // e.g. "haku", "calcifer", "main"
+              subscribe: ["Task"],      // entity types to watch
             },
           },
         },
@@ -370,44 +373,34 @@ Configure in `~/.openclaw/openclaw.json`:
 }
 ```
 
-Restart the gateway. The plugin:
-1. Subscribes to `{url}/tdata/$events` over SSE
-2. On a matching event, writes a signal file to `~/workspace/shared-context/signals/for-{agent}/`
-3. Fires `/hooks/wake` to trigger your agent's heartbeat immediately
-4. Agent reads the signal file, queries Temper for the specific entity, responds
+Restart the gateway (`openclaw gateway restart`). Verify the plugin loaded:
+```
+grep -i "temper" /tmp/openclaw.log   # or check gateway logs
+# Should see: [temper] SSE subscriber active for my-app
+```
 
-No isolated sessions. No polling. No inference cost at idle.
+### How It Works
+
+1. Plugin subscribes to `{url}/tdata/$events` over SSE (in-process, zero polling)
+2. On a matching event, writes a compact signal file to `~/workspace/shared-context/signals/for-{agent}/`
+3. Fires `/hooks/wake` to wake the agent's heartbeat immediately
+4. Agent reads the signal, queries Temper for the specific entity by ID, acts
+
+No isolated sessions. No polling. No inference cost at idle. The signal file is durable — if the agent is busy, the signal waits.
 
 ### Using the `temper` Tool
 
-Once the plugin is loaded, you have a `temper` tool in every agent session:
+Once the plugin is loaded, every agent session has a `temper` tool:
 
 ```json
-{ "operation": "list", "app": "my-app", "entityType": "Tasks" }
-{ "operation": "get",  "app": "my-app", "entityType": "Tasks", "entityId": "task-123" }
+{ "operation": "list",   "app": "my-app", "entityType": "Tasks" }
+{ "operation": "get",    "app": "my-app", "entityType": "Tasks", "entityId": "task-123" }
+{ "operation": "create", "app": "my-app", "entityType": "Tasks", "body": { "Title": "Fix login" } }
 { "operation": "action", "app": "my-app", "entityType": "Tasks", "entityId": "task-123",
   "actionName": "Complete", "body": { "Result": "deployed" } }
+{ "operation": "patch",  "app": "my-app", "entityType": "Tasks", "entityId": "task-123",
+  "body": { "Notes": "Updated" } }
 ```
-
----
-
-## 7. Wire Webhooks (Optional)
-
-Temper can POST to any URL on state transitions. Useful when the agent consuming events is not OpenClaw (third-party tools, other systems):
-
-```toml
-# apps/{your-app}/specs/webhooks.toml
-[[webhook]]
-name = "my-webhook"
-url = "http://127.0.0.1:18789/hooks/wake"
-headers = { "Authorization" = "Bearer ${OPENCLAW_HOOKS_TOKEN}" }
-actions = ["Approve", "Complete"]
-entity_types = ["Task"]
-on_success_only = true
-payload_template = '{"text": "Temper: ${action} on ${entity_type} ${entity_id} (${from_status} → ${to_status})"}'
-```
-
-For OpenClaw agents, prefer the plugin (signal files + wake) over webhooks — it's more reliable and doesn't create isolated sessions.
 
 ---
 
@@ -518,8 +511,7 @@ Every agent builds their own app with their own specs and UI. One Temper server 
 apps/{your-app}/
 ├── specs/
 │   ├── entity1.ioa.toml
-│   ├── entity2.ioa.toml
-│   └── webhooks.toml       # optional
+│   └── entity2.ioa.toml
 ├── {your-app}.db            # Turso local file (gitignore this)
 ├── index.html               # UI (any shape)
 ├── serve.py                 # proxy
