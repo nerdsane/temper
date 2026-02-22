@@ -172,26 +172,37 @@ If verification fails, the server won't start. Fix the spec first.
 
 ---
 
-## 2. Start the Server
+## 2. Start or Join the Server
 
+**Check if Temper is already running first:**
 ```bash
-cd ~/workspace/Development/temper
-export TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db"
-
-./target/release/temper serve --storage turso \
-  --app my-app=/Users/openclaw/workspace/apps/my-app/specs \
-  --port 3001
+curl -s http://localhost:3001/tdata -H "X-Tenant-Id: test" 2>/dev/null && echo "RUNNING" || echo "DOWN"
 ```
 
-Multiple apps (all agents, one server, one db):
+If it's running: **skip to hot-load** (see File Structure section). Your app loads in seconds without disturbing other agents.
 
+If it's down — start it:
 ```bash
 TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db" \
-./target/release/temper serve --storage turso \
+nohup /Users/openclaw/workspace/Development/temper/target/release/temper serve \
+  --storage turso \
+  --app my-app=/Users/openclaw/workspace/apps/my-app/specs \
+  --port 3001 > /tmp/temper.log 2>&1 &
+
+sleep 5 && grep "Listening\|Error" /tmp/temper.log | head -3
+```
+
+After restart, any agent whose app wasn't in the launch args should hot-load their specs to re-register (data persists in the db, only in-memory actor registration needs restoring).
+
+**Running multiple apps** — just add `--app` flags:
+```bash
+TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db" \
+nohup /Users/openclaw/workspace/Development/temper/target/release/temper serve \
+  --storage turso \
   --app haku-ops=/Users/openclaw/workspace/apps/haku-ops/specs \
   --app calcifer-content=/Users/openclaw/workspace/apps/calcifer-content/specs \
-  --app kiki-tasks=/Users/openclaw/workspace/apps/kiki-tasks/specs \
-  --port 3001
+  --app kiki-wellness=/Users/openclaw/workspace/apps/kiki-wellness/specs \
+  --port 3001 > /tmp/temper.log 2>&1 &
 ```
 
 ---
@@ -543,22 +554,22 @@ apps/
 
 **One db, many apps.** All agent apps share a single Turso db file (`agents.db` at the workspace root). Multi-tenancy means the data is isolated by `X-Tenant-Id` at the row level — Haku's proposals never mix with Calcifer's posts. Don't create a separate `.db` per app; put them all on the same instance.
 
-**Hot-loading your app** — no restart needed. Call this from your specs directory:
+**Hot-loading your app** — no restart needed. Any agent can call this at any time:
 
 ```bash
-# Load from a directory (most common)
+# Load from a directory (most common) — runs L0-L3 verification inline
 curl -s -X POST http://localhost:3001/observe/specs/load-dir \
   -H "Content-Type: application/json" \
   -d '{
-    "tenant": "kiki-wellness",
-    "specs_dir": "/Users/openclaw/workspace/apps/kiki-wellness/specs"
+    "tenant": "my-app",
+    "specs_dir": "/Users/openclaw/workspace/apps/my-app/specs"
   }'
 ```
 
-Temper streams back NDJSON: specs loaded, verification per entity (L0-L3), then a summary. If `all_passed: true`, your entity sets are live immediately. Zero downtime, no coordination with anyone.
+Temper streams NDJSON back: specs loaded → verification per entity → summary. If the last line says `"all_passed":true`, your entity sets are live. Zero downtime, no coordination with anyone.
 
 ```bash
-# Load from inline content (if you don't have a directory yet)
+# Or load from inline content (no spec files needed yet)
 curl -s -X POST http://localhost:3001/observe/specs/load-inline \
   -H "Content-Type: application/json" \
   -d '{
@@ -570,7 +581,26 @@ curl -s -X POST http://localhost:3001/observe/specs/load-inline \
   }'
 ```
 
-Re-calling `load-dir` on an existing tenant hot-swaps the transition tables — existing entities keep running, new specs take effect for new actions. You can iterate on a spec and reload without losing data.
+Re-calling `load-dir` on an existing tenant **hot-swaps** the transition tables — existing entities keep running, new spec takes effect immediately. Iterate freely without losing data.
+
+**Check if Temper is running:**
+```bash
+curl -s http://localhost:3001/tdata -H "X-Tenant-Id: my-app" | python3 -c "import sys,json; print('UP:', len(json.load(sys.stdin).get('value',[])),'entity sets')"
+```
+
+**If Temper is down — start it yourself:**
+```bash
+TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db" \
+nohup /Users/openclaw/workspace/Development/temper/target/release/temper serve \
+  --storage turso \
+  --app my-app=/Users/openclaw/workspace/apps/my-app/specs \
+  --port 3001 > /tmp/temper.log 2>&1 &
+
+# Verify it started:
+sleep 5 && curl -s http://localhost:3001/tdata -H "X-Tenant-Id: my-app"
+```
+
+Add `--app other-app=...` for each app that should be loaded at startup. **After restarting, every agent whose app wasn't in the launch command should call `load-dir` to re-register their specs.** The db retains all data — only the in-memory actor registration is lost on restart.
 
 ---
 
