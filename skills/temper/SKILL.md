@@ -32,19 +32,21 @@ cargo build --release   # ~60s on Mac mini M2
 
 ### Storage — Turso (local file, no account needed)
 
-Temper uses Turso/libSQL as its storage backend. Local dev needs nothing but a file path:
+Temper uses Turso/libSQL as its storage backend. **For local use, you need exactly one env var and zero credentials:**
 
 ```bash
 export TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db"
+# That's it. No TURSO_AUTH_TOKEN. No account. No cloud.
 
 ./target/release/temper serve --storage turso \
   --app my-app=/path/to/specs \
   --port 3001
 ```
 
-For production with a real Turso cloud database:
+`TURSO_AUTH_TOKEN` is only needed when pointing at a remote Turso cloud database:
 
 ```bash
+# Remote Turso only — not needed for local
 export TURSO_URL="libsql://your-db.turso.io"
 export TURSO_AUTH_TOKEN="your-token"
 ```
@@ -524,6 +526,8 @@ apps/
 ```
 
 **One db, many apps.** All agent apps share a single Turso db file (`agents.db` at the workspace root). Multi-tenancy means the data is isolated by `X-Tenant-Id` at the row level — Haku's proposals never mix with Calcifer's posts. Don't create a separate `.db` per app; put them all on the same instance.
+
+**You don't restart Temper yourself.** Haku manages the shared Temper instance. When you want your app loaded, write a signal to `shared-context/signals/for-haku/` with your app name and spec path. Haku restarts with your `--app` flag added. Don't try to find credentials or run the binary yourself.
 
 ---
 
