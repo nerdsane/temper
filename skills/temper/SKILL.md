@@ -340,49 +340,44 @@ if __name__ == "__main__":
 
 ### Exposing — Tunnel
 
-**Primary: Tailscale Serve** (stable URL, survives restarts)
+**The URL changes on restart. That's fine — the agent always DMs the human the current URL.**
+The pattern below handles this. Pick whatever tunnel works for your setup.
+
+**Option 1: Cloudflare Quick Tunnel** (no account, no login, works anywhere)
 
 ```bash
-# One-time setup (Mac)
-brew install tailscale
-tailscale up   # authenticate in browser once
+brew install cloudflared   # one-time
 
-# Expose your proxy — URL is permanent, never changes
-tailscale serve http://localhost:8080
-
-# Get the URL (same every time — derived from machine name)
-tailscale status --json | python3 -c "
-import sys, json
-s = json.load(sys.stdin)
-name = s['Self']['DNSName'].rstrip('.')
-print(f'https://{name}')
-"
-```
-
-The URL is `https://{machine-name}.{tailnet}.ts.net` — stable across restarts, reboots, anything. An agent can always compute it without reading tunnel output.
-
-For access from outside the tailnet (public internet), use `tailscale funnel` instead of `tailscale serve`.
-
-**Fallback: Cloudflare Quick Tunnel** (no account, ephemeral — URL changes on restart)
-
-```bash
-brew install cloudflared
+# Start tunnel, grab URL, store it
 nohup cloudflared tunnel --url http://localhost:8080 > /tmp/tunnel.log 2>&1 &
-sleep 5 && grep -o 'https://[^ ]*trycloudflare.com' /tmp/tunnel.log | tail -1
+sleep 5
+URL=$(grep -o 'https://[^ ]*trycloudflare.com' /tmp/tunnel.log | tail -1)
+echo "Dashboard: $URL"
 ```
 
-Works instantly but the URL changes every restart — you have to re-notify your human each time.
+URL changes on restart — the agent re-runs this and sends the new URL each time.
 
-**LAN only** (simplest, no third party)
-
-Bind serve.py to `0.0.0.0` and access via local IP. Set a static IP on the machine and the URL never changes on your network:
+**Option 2: localhost.run** (no install at all — uses SSH, which is always available)
 
 ```bash
-ipconfig getifaddr en0   # get your local IP — e.g. 192.168.1.42
-# Access: http://192.168.1.42:8080
+ssh -R 80:localhost:8080 nokey@localhost.run 2>/dev/null &
+sleep 3
+# URL is in the SSH output — parse it or just check manually
 ```
 
-The serve.py in this skill binds to `0.0.0.0` by default, so LAN access works out of the box.
+**Option 3: LAN direct** (zero setup — human on same network)
+
+serve.py binds to `0.0.0.0` by default. Human accesses via local IP:
+
+```bash
+# Get LAN IP
+python3 -c "import socket; s=socket.socket(); s.connect(('8.8.8.8',80)); print(s.getsockname()[0])"
+# → http://192.168.1.42:8080
+```
+
+Set a static DHCP reservation on your router and this URL never changes.
+
+**Use whatever tunnel your setup already has.** The right tunnel is the one that's already installed. None of these require the human to install anything — they just open a URL in a browser.
 
 ---
 
