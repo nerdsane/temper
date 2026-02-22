@@ -35,7 +35,7 @@ cargo build --release   # ~60s on Mac mini M2
 Temper uses Turso/libSQL as its storage backend. Local dev needs nothing but a file path:
 
 ```bash
-export TURSO_URL="file:/path/to/your-app.db"
+export TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db"
 
 ./target/release/temper serve --storage turso \
   --app my-app=/path/to/specs \
@@ -158,19 +158,21 @@ If verification fails, the server won't start. Fix the spec first.
 
 ```bash
 cd ~/workspace/Development/temper
-export TURSO_URL="file:/path/to/app.db"
+export TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db"
 
 ./target/release/temper serve --storage turso \
-  --app my-app=apps/my-app/specs \
+  --app my-app=/Users/openclaw/workspace/apps/my-app/specs \
   --port 3001
 ```
 
-Multiple apps (tenants) on one server:
+Multiple apps (all agents, one server, one db):
 
 ```bash
+TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db" \
 ./target/release/temper serve --storage turso \
-  --app haku-ops=apps/haku-ops/specs \
-  --app calcifer-content=apps/calcifer-content/specs \
+  --app haku-ops=/Users/openclaw/workspace/apps/haku-ops/specs \
+  --app calcifer-content=/Users/openclaw/workspace/apps/calcifer-content/specs \
+  --app kiki-tasks=/Users/openclaw/workspace/apps/kiki-tasks/specs \
   --port 3001
 ```
 
@@ -508,15 +510,20 @@ Every agent builds their own app with their own specs and UI. One Temper server 
 ## File Structure
 
 ```
-apps/{your-app}/
-├── specs/
-│   ├── entity1.ioa.toml
-│   └── entity2.ioa.toml
-├── {your-app}.db            # Turso local file (gitignore this)
-├── index.html               # UI (any shape)
-├── serve.py                 # proxy
-└── seed.sh                  # optional: bootstrap data
+apps/
+├── agents.db                # Shared Turso db for all agents on this instance (gitignore this)
+├── {your-app}/
+│   ├── specs/
+│   │   ├── entity1.ioa.toml
+│   │   └── entity2.ioa.toml
+│   ├── index.html           # UI (any shape)
+│   ├── serve.py             # proxy
+│   └── seed.sh              # optional: bootstrap data
+└── shared/
+    └── design-system.md
 ```
+
+**One db, many apps.** All agent apps share a single Turso db file (`agents.db` at the workspace root). Multi-tenancy means the data is isolated by `X-Tenant-Id` at the row level — Haku's proposals never mix with Calcifer's posts. Don't create a separate `.db` per app; put them all on the same instance.
 
 ---
 
