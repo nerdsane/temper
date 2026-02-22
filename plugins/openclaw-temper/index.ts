@@ -1,4 +1,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { writeFileSync, mkdirSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 
 type TemperOperation = "list" | "get" | "create" | "action" | "patch";
 
@@ -327,65 +330,86 @@ const createSseService = (api: OpenClawPluginApi, config: TemperPluginConfig) =>
       }, delayMs);
     });
 
-  const postWake = async (appName: string, appConfig: TemperAppConfig, text: string): Promise<void> => {
-    const useAgentHook = appConfig.agent.trim().length > 0;
-    const endpoint = useAgentHook ? "agent" : "wake";
-    const wakeUrl = `${hooksBaseUrl}/${endpoint}`;
+  // Debounce: track last wake time per app so rapid events fire only one wake
+  const lastWakeMs: Record<string, number> = {};
+  const DEBOUNCE_MS = 30_000; // 30 seconds
 
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
+  const writeSignalFile = (agentId: string, event: TemperEvent, appName: string, text: string): void => {
+    try {
+      const signalDir = join(homedir(), "workspace", "shared-context", "signals", `for-${agentId}`);
+      mkdirSync(signalDir, { recursive: true });
+      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const entityId = typeof event.entity_id === "string" ? event.entity_id.slice(0, 12) : "unknown";
+      const action = typeof event.action === "string" ? event.action : "event";
+      const filename = `${ts}-${action}-${entityId}.md`;
+      const content = [
+        `# Temper Signal — ${new Date().toISOString()}`,
+        ``,
+        `**App:** ${appName}`,
+        `**Event:** ${text}`,
+        `**Entity ID:** ${event.entity_id ?? "unknown"}`,
+        `**Entity Type:** ${event.entity_type ?? "unknown"}`,
+        `**Action:** ${event.action ?? "unknown"}`,
+        `**Transition:** ${event.from_status ?? "?"} → ${event.to_status ?? "?"}`,
+        ``,
+        `Pull entity details: temper.get("${event.entity_type}", "${event.entity_id}")`,
+      ].join("\n");
+      writeFileSync(join(signalDir, filename), content, "utf-8");
+    } catch (err) {
+      api.logger.warn(`[temper] Failed to write signal file: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const postWake = async (text: string): Promise<void> => {
+    const wakeUrl = `${hooksBaseUrl}/wake`;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (config.hooksToken) {
       headers.Authorization = `Bearer ${config.hooksToken}`;
     }
-
-    const payload = useAgentHook
-      ? {
-          message: text,
-          name: `Temper/${appName}`,
-          agentId: appConfig.agent,
-          wakeMode: "now",
-        }
-      : {
-          text,
-          mode: "now",
-        };
-
     const response = await fetch(wakeUrl, {
       method: "POST",
       headers,
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ text, mode: "now" }),
     });
-
     if (!response.ok) {
       const errorBody = await response.text();
-      throw new Error(
-        `wake post failed (${response.status} ${response.statusText}): ${errorBody || "<empty body>"}`,
-      );
+      throw new Error(`wake post failed (${response.status} ${response.statusText}): ${errorBody || "<empty body>"}`);
     }
   };
 
   const handleTemperEvent = async (event: TemperEvent): Promise<void> => {
     const entityType = typeof event.entity_type === "string" ? event.entity_type : "";
-    if (!entityType) {
-      return;
-    }
+    if (!entityType) return;
 
     for (const [appName, appConfig] of Object.entries(config.apps)) {
       const subscriptions = appConfig.subscribe ?? [];
-      if (!subscriptions.includes(entityType) && !subscriptions.includes("*")) {
-        continue;
+      if (!subscriptions.includes(entityType) && !subscriptions.includes("*")) continue;
+
+      const agentId = appConfig.agent.trim();
+      const text = formatWakeText(event, appName);
+
+      // 1. Write signal file (zero cost, persistent, always runs)
+      if (agentId) {
+        writeSignalFile(agentId, event, appName, text);
       }
 
-      const text = formatWakeText(event, appName);
-      try {
-        await postWake(appName, appConfig, text);
-      } catch (error) {
-        api.logger.warn(
-          `[temper] Failed to wake agent "${appConfig.agent}" for app "${appName}": ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+      // 2. Fire wake — debounced per app (best-effort, one per 30s batch)
+      const now = Date.now();
+      const lastWake = lastWakeMs[appName] ?? 0;
+      if (now - lastWake >= DEBOUNCE_MS) {
+        lastWakeMs[appName] = now;
+        try {
+          await postWake(text);
+          api.logger.info(`[temper] Wake sent for ${appName}: ${text}`);
+        } catch (error) {
+          api.logger.warn(
+            `[temper] Wake failed for "${appName}" (signal file written, will be picked up on next heartbeat): ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      } else {
+        api.logger.info(`[temper] Wake debounced for "${appName}" (${Math.round((DEBOUNCE_MS - (now - lastWake)) / 1000)}s remaining) — signal file written`);
       }
     }
   };
