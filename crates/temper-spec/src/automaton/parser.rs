@@ -721,4 +721,33 @@ trigger = "SubmitOrder"
         let automaton = parse_automaton(ORDER_IOA).expect("should parse");
         assert!(automaton.integrations.is_empty() || !automaton.integrations.is_empty());
     }
+
+    #[test]
+    fn test_valid_state_var_types_accepted() {
+        let spec = r#"
+[automaton]
+name = "Task"
+states = ["Open", "Done"]
+initial = "Open"
+
+[[state]]
+name = "is_done"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "attempt_count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Complete"
+kind = "input"
+from = ["Open"]
+to = "Done"
+effect = "set is_done true"
+"#;
+        let result = parse_automaton(spec);
+        assert!(result.is_ok(), "bool and counter types should be accepted: {:?}", result.err());
+    }
 }

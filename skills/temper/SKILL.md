@@ -212,31 +212,63 @@ nohup /Users/openclaw/workspace/Development/temper/target/release/temper serve \
 **Base URL:** `http://localhost:{port}/tdata`
 **Required header:** `X-Tenant-Id: {your-app}`
 
+### Action URL Format — Read This First
+
+Firing an action on an entity:
+
+```
+POST /tdata/{EntitySet}('{entity-id}')/Temper.{ActionName}
+```
+
+**The `Temper.` prefix is mandatory.** This is OData bound action syntax. Without it, you get 404.
+
+```bash
+# ✅ correct
+curl -X POST "http://localhost:3001/tdata/Tasks('abc-123')/Temper.Assign" \
+  -H "Content-Type: application/json" -H "X-Tenant-Id: my-app" \
+  -d '{"AssignedTo": "haku"}'
+
+# ❌ wrong — missing Temper. prefix
+curl -X POST "http://localhost:3001/tdata/Tasks('abc-123')/Assign" ...
+
+# ❌ wrong — action in query string
+curl -X POST "http://localhost:3001/tdata/Tasks('abc-123')?action=Assign" ...
+```
+
+The action name must match exactly what's in your IOA spec (`name = "Assign"`), case-sensitive.
+
+Illegal transitions return `409 Conflict`. Legal ones return the full entity with updated state, counters, booleans, and event log appended.
+
+### Full API Reference
+
 | Method | Path | What |
 |--------|------|------|
 | GET | `/{EntitySet}` | List all entities |
 | GET | `/{EntitySet}('{id}')` | Get one entity |
-| POST | `/{EntitySet}` | Create entity |
-| POST | `/{EntitySet}('{id}')/Temper.{Action}` | Fire action |
-| PATCH | `/{EntitySet}('{id}')` | Update fields (not state) |
+| POST | `/{EntitySet}` | Create entity (initial state set automatically) |
+| POST | `/{EntitySet}('{id}')/Temper.{ActionName}` | Fire action (state transition) |
+| PATCH | `/{EntitySet}('{id}')` | Update fields (not state — use actions for state) |
 
-The `Temper.` prefix is required on all action calls — it's OData bound action syntax.
-
-Illegal transitions return `409`. Legal ones return the full entity with updated state and event log.
+### Examples
 
 ```bash
 # Create
 curl -X POST http://localhost:3001/tdata/Tasks \
   -H "Content-Type: application/json" -H "X-Tenant-Id: my-app" \
   -d '{"Title": "Fix the login bug"}'
+# → returns entity with id, Status: "Open", event log
 
 # Fire action
-curl -X POST "http://localhost:3001/tdata/Tasks('task-id')/Temper.Assign" \
+curl -X POST "http://localhost:3001/tdata/Tasks('abc-123')/Temper.Assign" \
   -H "Content-Type: application/json" -H "X-Tenant-Id: my-app" \
   -d '{"AssignedTo": "haku"}'
+# → returns entity with Status: "InProgress", updated booleans, new event appended
 
-# Read state
+# Read all
 curl http://localhost:3001/tdata/Tasks -H "X-Tenant-Id: my-app"
+
+# Read one
+curl "http://localhost:3001/tdata/Tasks('abc-123')" -H "X-Tenant-Id: my-app"
 ```
 
 ---

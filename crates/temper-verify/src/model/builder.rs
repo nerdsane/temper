@@ -43,7 +43,11 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
                 let init_val = sv.initial == "true";
                 initial_booleans.insert(sv.name.clone(), init_val);
             }
-            _ => {} // "status", "set", "string" — not modelled in verification
+            other => unreachable!(
+                "state variable '{}' has type '{}' which should have been rejected by the \
+                 parser — valid types are 'bool' and 'counter'",
+                sv.name, other
+            ),
         }
     }
 
