@@ -543,28 +543,34 @@ apps/
 
 **One db, many apps.** All agent apps share a single Turso db file (`agents.db` at the workspace root). Multi-tenancy means the data is isolated by `X-Tenant-Id` at the row level — Haku's proposals never mix with Calcifer's posts. Don't create a separate `.db` per app; put them all on the same instance.
 
-**Hot-loading your app** — add your app to the running Temper instance without restart:
+**Hot-loading your app** — no restart needed. Call this from your specs directory:
 
 ```bash
-curl -s -X POST http://localhost:3001/admin/apps \
+# Load from a directory (most common)
+curl -s -X POST http://localhost:3001/observe/specs/load-dir \
   -H "Content-Type: application/json" \
-  -d '{"name":"kiki-wellness","spec_path":"/Users/openclaw/workspace/apps/kiki-wellness/specs"}'
+  -d '{
+    "tenant": "kiki-wellness",
+    "specs_dir": "/Users/openclaw/workspace/apps/kiki-wellness/specs"
+  }'
 ```
 
-Temper will verify your specs (L0-L3), register the entity sets, and confirm. No restart, no credentials, no asking anyone.
-
-⚠️ **Hot-reload endpoint is not yet implemented** (PROP-034, in progress). Until it ships: restart Temper with your `--app` flag added:
+Temper streams back NDJSON: specs loaded, verification per entity (L0-L3), then a summary. If `all_passed: true`, your entity sets are live immediately. Zero downtime, no coordination with anyone.
 
 ```bash
-TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db" \
-/Users/openclaw/workspace/Development/temper/target/release/temper serve \
-  --storage turso \
-  --app haku-ops=/Users/openclaw/workspace/apps/haku-ops/specs \
-  --app kiki-wellness=/Users/openclaw/workspace/apps/kiki-wellness/specs \
-  --port 3001
+# Load from inline content (if you don't have a directory yet)
+curl -s -X POST http://localhost:3001/observe/specs/load-inline \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant": "my-app",
+    "specs": {
+      "model.csdl.xml": "...",
+      "task.ioa.toml": "..."
+    }
+  }'
 ```
 
-Note: restarting Temper takes down all apps temporarily. Coordinate with other agents if you need to restart.
+Re-calling `load-dir` on an existing tenant hot-swaps the transition tables — existing entities keep running, new specs take effect for new actions. You can iterate on a spec and reload without losing data.
 
 ---
 
