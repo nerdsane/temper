@@ -131,9 +131,25 @@ assert = "is_assigned"
 
 **Actions** — `kind = "input"` (human/dashboard-triggerable) vs `kind = "internal"` (agent-only). Both are callable via the OData API; the distinction is primarily for dashboard button rendering.
 
+**State variable types** — only two are valid:
+- `bool` — `initial = "false"` or `initial = "true"`
+- `counter` — `initial = "0"` (integer, supports `increment`/`decrement` effects and `gt`/`lt` guards)
+
+`int`, `string`, `float`, and any other type will pass L0-L3 verification silently but the entity set **will not register at runtime**. Store text/numeric data via action `params` (they become entity fields automatically). Use state variables only for values that drive guards and invariants.
+
 **Guards** — conditions checked before transition fires:
 - `is_true var` / `is_false var` — boolean checks
 - `gt var N` / `lt var N` — counter comparisons
+
+**`to` is required on every action**, including self-loops. A self-loop that keeps the entity in the same state needs `to = "SameState"` explicitly:
+```toml
+[[action]]
+name = "AddItem"
+kind = "input"
+from = ["Active"]
+to = "Active"   # required — even for self-loops
+params = ["Item"]
+```
 
 **Effects** — state variable mutations on success:
 - `set var true/false` — set boolean
@@ -141,7 +157,7 @@ assert = "is_assigned"
 
 **Invariants** — assertions checked in every state listed under `when`. If any invariant fails at runtime, the transition is rejected.
 
-**Terminal states** — states with no outgoing actions. Entities in terminal states can't move. Design intentionally.
+**Terminal states** — states with no outgoing actions. Entities in terminal states can't move. Design intentionally. Don't write `assert = "no_further_transitions"` — that's not valid IOA syntax and will be silently ignored. Just don't define any `[[action]]` with `from = ["TerminalState"]`.
 
 ### L0–L3 Verification
 
