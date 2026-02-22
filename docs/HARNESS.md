@@ -585,8 +585,6 @@ Trace capture remains part of the harness and runs for all tool calls:
 
 All markers use TOML (`*.toml`) plus a backward-compatible plain marker file.
 
-The previous PoW pipeline (`pow-agent-claims`, `pow-compare`, `pow-generate-proof`) has been extracted from this repository.
-
 ## Portability
 
 The portable output contract for this harness is `verification.v1`.
