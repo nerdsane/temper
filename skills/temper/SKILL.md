@@ -543,7 +543,28 @@ apps/
 
 **One db, many apps.** All agent apps share a single Turso db file (`agents.db` at the workspace root). Multi-tenancy means the data is isolated by `X-Tenant-Id` at the row level — Haku's proposals never mix with Calcifer's posts. Don't create a separate `.db` per app; put them all on the same instance.
 
-**You don't restart Temper yourself.** Haku manages the shared Temper instance. When you want your app loaded, write a signal to `shared-context/signals/for-haku/` with your app name and spec path. Haku restarts with your `--app` flag added. Don't try to find credentials or run the binary yourself.
+**Hot-loading your app** — add your app to the running Temper instance without restart:
+
+```bash
+curl -s -X POST http://localhost:3001/admin/apps \
+  -H "Content-Type: application/json" \
+  -d '{"name":"kiki-wellness","spec_path":"/Users/openclaw/workspace/apps/kiki-wellness/specs"}'
+```
+
+Temper will verify your specs (L0-L3), register the entity sets, and confirm. No restart, no credentials, no asking anyone.
+
+⚠️ **Hot-reload endpoint is not yet implemented** (PROP-034, in progress). Until it ships: restart Temper with your `--app` flag added:
+
+```bash
+TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db" \
+/Users/openclaw/workspace/Development/temper/target/release/temper serve \
+  --storage turso \
+  --app haku-ops=/Users/openclaw/workspace/apps/haku-ops/specs \
+  --app kiki-wellness=/Users/openclaw/workspace/apps/kiki-wellness/specs \
+  --port 3001
+```
+
+Note: restarting Temper takes down all apps temporarily. Coordinate with other agents if you need to restart.
 
 ---
 
