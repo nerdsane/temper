@@ -593,18 +593,10 @@ mod tests {
         let r2 = r2.unwrap();
 
         // Exactly one should succeed, the other should get a ConcurrencyViolation.
-        let successes = [r1.is_ok(), r2.is_ok()]
-            .iter()
-            .filter(|&&ok| ok)
-            .count();
+        let successes = [r1.is_ok(), r2.is_ok()].iter().filter(|&&ok| ok).count();
         let conflicts = [&r1, &r2]
             .iter()
-            .filter(|r| {
-                matches!(
-                    r,
-                    Err(PersistenceError::ConcurrencyViolation { .. })
-                )
-            })
+            .filter(|r| matches!(r, Err(PersistenceError::ConcurrencyViolation { .. })))
             .count();
 
         assert_eq!(successes, 1, "exactly one writer should succeed");

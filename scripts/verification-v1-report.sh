@@ -114,6 +114,16 @@ marker_exists() {
     [ -f "$MARKER_DIR/$NAME" ] || [ -f "$MARKER_DIR/$NAME.toml" ]
 }
 
+find_commit_marker_writers() {
+    local PATTERN='(touch .*commit-pending|touch .*sim-changed|> .*commit-pending|> .*sim-changed|write-marker\.sh.*commit-pending|write-marker\.sh.*sim-changed)'
+    if command -v rg >/dev/null 2>&1; then
+        rg -n --hidden -S "$PATTERN" "$WORKSPACE_ROOT/.claude" "$WORKSPACE_ROOT/scripts" 2>/dev/null || true
+    else
+        # CI images may not include ripgrep; fall back to grep.
+        grep -R -n -E "$PATTERN" "$WORKSPACE_ROOT/.claude" "$WORKSPACE_ROOT/scripts" 2>/dev/null || true
+    fi
+}
+
 check_hook_config() {
     local ID="$1"
     local NAME="$2"
@@ -237,7 +247,7 @@ fi
 
 # Wiring check: stop-gate commit markers are checked but currently unwritten.
 # Only count concrete write operations (redirection/touch/write-marker), not generic mentions.
-COMMIT_MARKER_WRITERS="$(rg -n --hidden -S '(touch .*commit-pending|touch .*sim-changed|> .*commit-pending|> .*sim-changed|write-marker\.sh.*commit-pending|write-marker\.sh.*sim-changed)' "$WORKSPACE_ROOT/.claude" "$WORKSPACE_ROOT/scripts" 2>/dev/null \
+COMMIT_MARKER_WRITERS="$(find_commit_marker_writers \
     | grep -v '/.claude/hooks/stop-verify.sh:' \
     | grep -v '/scripts/verification-v1-report.sh:' || true)"
 if [ -n "$COMMIT_MARKER_WRITERS" ]; then

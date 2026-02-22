@@ -406,7 +406,9 @@ impl ServerState {
             turso
                 .upsert_spec(tenant, entity_type, ioa_source, csdl_xml)
                 .await
-                .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in turso: {e}"))?;
+                .map_err(|e| {
+                    format!("failed to upsert spec {tenant}/{entity_type} in turso: {e}")
+                })?;
             return Ok(());
         }
 
@@ -607,9 +609,8 @@ impl ServerState {
 
         // Fall back to Redis (capped list).
         if let Some(redis) = store.redis_store() {
-            let entry_json = serde_json::to_string(entry).map_err(|e| {
-                format!("failed to serialize trajectory entry: {e}")
-            })?;
+            let entry_json = serde_json::to_string(entry)
+                .map_err(|e| format!("failed to serialize trajectory entry: {e}"))?;
             redis
                 .persist_trajectory(&entry.tenant, &entry_json, TRAJECTORY_LOG_CAPACITY as i64)
                 .await
@@ -964,7 +965,8 @@ impl ServerState {
         if let Some(ref dispatcher) = self.webhook_dispatcher {
             let dispatcher = Arc::clone(dispatcher);
             let entry = trajectory_entry;
-            tokio::spawn(async move { // determinism-ok: external side-effect, no simulation-visible state
+            tokio::spawn(async move {
+                // determinism-ok: external side-effect, no simulation-visible state
                 dispatcher.dispatch(&entry);
             });
         }

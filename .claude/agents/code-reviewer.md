@@ -22,7 +22,7 @@ Review ALL code changes before committing. This is mandatory — the pre-commit 
 - **No silent failures**: Every error path logged or propagated
 
 ### 3. Rust Conventions
-- Edition 2024, rust-version 1.85
+- Edition 2024, rust-version 1.92
 - `gen` is a reserved keyword — never used as variable name
 - Files > 500 lines split into directory modules
 - All `pub` items have doc comments

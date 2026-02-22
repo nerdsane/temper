@@ -815,18 +815,14 @@ async fn load_registry_from_turso(
 }
 
 /// Convert a Turso spec row's verification status to a registry VerificationStatus.
-fn turso_status_to_registry_status(
-    row: &temper_store_turso::TursoSpecRow,
-) -> VerificationStatus {
+fn turso_status_to_registry_status(row: &temper_store_turso::TursoSpecRow) -> VerificationStatus {
     let status = row.verification_status.to_lowercase();
     match status.as_str() {
         "pending" => VerificationStatus::Pending,
         "running" => VerificationStatus::Running,
         _ => {
             if let Some(ref json_str) = row.verification_result {
-                if let Ok(result) =
-                    serde_json::from_str::<EntityVerificationResult>(json_str)
-                {
+                if let Ok(result) = serde_json::from_str::<EntityVerificationResult>(json_str) {
                     return VerificationStatus::Completed(result);
                 }
             }
@@ -836,8 +832,7 @@ fn turso_status_to_registry_status(
                 .levels_passed
                 .unwrap_or(if all_passed { 1 } else { 0 })
                 .max(0) as usize;
-            let levels_total =
-                row.levels_total.unwrap_or(levels_passed as i32).max(0) as usize;
+            let levels_total = row.levels_total.unwrap_or(levels_passed as i32).max(0) as usize;
             let levels = if levels_total > 0 {
                 (0..levels_total)
                     .map(|idx| EntityLevelSummary {
@@ -878,7 +873,9 @@ async fn upsert_loaded_specs_to_turso(
         turso
             .upsert_spec(tenant, entity_type, ioa_source, &loaded.csdl_xml)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to persist spec {tenant}/{entity_type} in Turso: {e}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to persist spec {tenant}/{entity_type} in Turso: {e}")
+            })?;
     }
     Ok(())
 }
@@ -905,7 +902,18 @@ async fn hydrate_trajectory_log(
         if let Ok(rows) = rows {
             if let Ok(mut log) = server.trajectory_log.write() {
                 // Insert oldest-first (rows are newest-first from query).
-                for (tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at) in rows.into_iter().rev() {
+                for (
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    action,
+                    success,
+                    from_status,
+                    to_status,
+                    error,
+                    created_at,
+                ) in rows.into_iter().rev()
+                {
                     log.push(TrajectoryEntry {
                         timestamp: created_at.to_rfc3339(),
                         tenant,
@@ -973,7 +981,9 @@ async fn hydrate_trajectory_log(
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: failed to load trajectories from Redis for tenant {tenant}: {e}");
+                    eprintln!(
+                        "Warning: failed to load trajectories from Redis for tenant {tenant}: {e}"
+                    );
                 }
             }
         }

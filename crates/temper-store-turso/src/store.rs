@@ -136,9 +136,7 @@ impl TursoEventStore {
     }
 
     /// Load all persisted specs (for startup recovery).
-    pub async fn load_specs(
-        &self,
-    ) -> Result<Vec<TursoSpecRow>, PersistenceError> {
+    pub async fn load_specs(&self) -> Result<Vec<TursoSpecRow>, PersistenceError> {
         let conn = self.connection()?;
         let mut rows = conn
             .query(
@@ -160,8 +158,14 @@ impl TursoEventStore {
                 csdl_xml: row.get::<Option<String>>(3).map_err(storage_error)?,
                 verification_status: row.get::<String>(4).map_err(storage_error)?,
                 verified: row.get::<i64>(5).map_err(storage_error)? != 0,
-                levels_passed: row.get::<Option<i64>>(6).map_err(storage_error)?.map(|v| v as i32),
-                levels_total: row.get::<Option<i64>>(7).map_err(storage_error)?.map(|v| v as i32),
+                levels_passed: row
+                    .get::<Option<i64>>(6)
+                    .map_err(storage_error)?
+                    .map(|v| v as i32),
+                levels_total: row
+                    .get::<Option<i64>>(7)
+                    .map_err(storage_error)?
+                    .map(|v| v as i32),
                 verification_result: row.get::<Option<String>>(8).map_err(storage_error)?,
                 updated_at: row.get::<String>(9).map_err(storage_error)?,
             });
