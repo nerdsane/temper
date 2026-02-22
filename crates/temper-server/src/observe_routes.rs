@@ -16,6 +16,7 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::sim_now;
+use temper_spec::automaton::{LintSeverity, lint_automaton};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
@@ -315,6 +316,135 @@ fn to_pascal_case(s: &str) -> String {
         .collect()
 }
 
+#[derive(Debug, Clone)]
+struct EntityLintFinding {
+    entity: String,
+    code: String,
+    severity: LintSeverity,
+    message: String,
+}
+
+fn lint_loaded_specs(
+    csdl: &temper_spec::csdl::CsdlDocument,
+    ioa_sources: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<EntityLintFinding>, (StatusCode, String)> {
+    let mut findings = Vec::new();
+    let mut entity_set_types = std::collections::BTreeSet::new();
+
+    for schema in &csdl.schemas {
+        for container in &schema.entity_containers {
+            for entity_set in &container.entity_sets {
+                let type_name = entity_set
+                    .entity_type
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(&entity_set.entity_type);
+                entity_set_types.insert(type_name.to_string());
+            }
+        }
+    }
+
+    for (entity_name, source) in ioa_sources {
+        let automaton = temper_spec::automaton::parse_automaton(source).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to parse IOA spec for {entity_name}: {e}"),
+            )
+        })?;
+
+        for finding in lint_automaton(&automaton) {
+            findings.push(EntityLintFinding {
+                entity: entity_name.clone(),
+                code: finding.code,
+                severity: finding.severity,
+                message: finding.message,
+            });
+        }
+
+        if !entity_set_types.contains(entity_name) {
+            findings.push(EntityLintFinding {
+                entity: entity_name.clone(),
+                code: "ioa_missing_entity_set".to_string(),
+                severity: LintSeverity::Warning,
+                message: "spec has no corresponding entity set in model.csdl.xml".to_string(),
+            });
+        }
+    }
+
+    for entity_type in &entity_set_types {
+        if !ioa_sources.contains_key(entity_type) {
+            findings.push(EntityLintFinding {
+                entity: entity_type.clone(),
+                code: "csdl_missing_ioa_spec".to_string(),
+                severity: LintSeverity::Warning,
+                message: "entity set has no corresponding IOA spec".to_string(),
+            });
+        }
+    }
+
+    findings.sort_by(|a, b| {
+        let key_a = (
+            &a.entity,
+            matches!(a.severity, LintSeverity::Warning),
+            &a.code,
+            &a.message,
+        );
+        let key_b = (
+            &b.entity,
+            matches!(b.severity, LintSeverity::Warning),
+            &b.code,
+            &b.message,
+        );
+        key_a.cmp(&key_b)
+    });
+
+    Ok(findings)
+}
+
+fn lint_ndjson_line(finding: &EntityLintFinding) -> serde_json::Value {
+    serde_json::json!({
+        "type": match finding.severity {
+            LintSeverity::Error => "lint_error",
+            LintSeverity::Warning => "lint_warning",
+        },
+        "severity": match finding.severity {
+            LintSeverity::Error => "error",
+            LintSeverity::Warning => "warning",
+        },
+        "entity": &finding.entity,
+        "code": &finding.code,
+        "message": &finding.message,
+    })
+}
+
+fn build_ndjson_response(
+    status: StatusCode,
+    lines: Vec<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let mut body = String::new();
+    for line in lines {
+        let encoded = serde_json::to_string(&line).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to encode NDJSON response: {e}"),
+            )
+        })?;
+        body.push_str(&encoded);
+        body.push('\n');
+    }
+
+    axum::response::Response::builder()
+        .status(status)
+        .header("content-type", "application/x-ndjson")
+        .body(axum::body::Body::from(body))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to build NDJSON response: {e}"),
+            )
+        })
+}
+
 /// POST /observe/specs/load-dir -- hot-load specs from a directory into the running server.
 ///
 /// Reads CSDL and IOA files from `specs_dir`, registers them under `tenant`,
@@ -399,6 +529,37 @@ async fn handle_load_dir(
         ));
     }
 
+    let lint_findings = lint_loaded_specs(&csdl, &ioa_sources)?;
+    let lint_errors = lint_findings
+        .iter()
+        .filter(|f| matches!(f.severity, LintSeverity::Error))
+        .count();
+    let lint_warnings = lint_findings
+        .iter()
+        .filter(|f| matches!(f.severity, LintSeverity::Warning))
+        .count();
+
+    // Register names once so both failure and success paths can report them.
+    let entity_names: Vec<String> = ioa_sources.keys().cloned().collect();
+
+    // Abort early on lint errors (no persistence, no registry registration).
+    if lint_errors > 0 {
+        let mut lines = vec![serde_json::json!({
+            "type": "specs_loaded",
+            "tenant": &body.tenant,
+            "entities": &entity_names,
+        })];
+        lines.extend(lint_findings.iter().map(lint_ndjson_line));
+        lines.push(serde_json::json!({
+            "type": "summary",
+            "tenant": &body.tenant,
+            "all_passed": false,
+            "lint_errors": lint_errors,
+            "lint_warnings": lint_warnings,
+        }));
+        return build_ndjson_response(StatusCode::BAD_REQUEST, lines);
+    }
+
     // Persist loaded specs first when Postgres is configured.
     let csdl_xml_for_db = csdl_xml.clone();
     for (entity_type, ioa_source) in &ioa_sources {
@@ -409,7 +570,6 @@ async fn handle_load_dir(
     }
 
     // Register into shared registry after persistence succeeds.
-    let entity_names: Vec<String> = ioa_sources.keys().cloned().collect();
     let ioa_pairs: Vec<(&str, &str)> = ioa_sources
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -425,6 +585,10 @@ async fn handle_load_dir(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, Infallible>>(100);
     let tenant = body.tenant.clone();
     let state_for_task = state.clone();
+    let lint_warnings_for_stream: Vec<EntityLintFinding> = lint_findings
+        .into_iter()
+        .filter(|f| matches!(f.severity, LintSeverity::Warning))
+        .collect();
 
     tokio::spawn(async move {
         // determinism-ok: HTTP handler streams verification results inline
@@ -440,6 +604,14 @@ async fn handle_load_dir(
                 .unwrap() // ci-ok: infallible serialization
                     + "\n"))
             .await;
+
+        for finding in &lint_warnings_for_stream {
+            let _ = tx
+                .send(Ok(serde_json::to_string(&lint_ndjson_line(finding))
+                    .unwrap() // ci-ok: infallible serialization
+                    + "\n"))
+                .await;
+        }
 
         let mut entity_results: std::collections::BTreeMap<String, bool> =
             std::collections::BTreeMap::new();
@@ -3695,6 +3867,81 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_load_dir_lint_error_aborts_registration() {
+        let system = ActorSystem::new("test-load-dir-lint-error");
+        let registry = SpecRegistry::new();
+        let state = ServerState::from_registry(system, registry);
+
+        let app = Router::new()
+            .nest("/observe", build_observe_router())
+            .with_state(state.clone());
+
+        let temp_specs =
+            std::env::temp_dir().join(format!("temper-load-dir-lint-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_specs).expect("create temp specs dir");
+        std::fs::write(
+            temp_specs.join("model.csdl.xml"),
+            include_str!("../../../test-fixtures/specs/model.csdl.xml"),
+        )
+        .expect("write csdl");
+        std::fs::write(
+            temp_specs.join("order.ioa.toml"),
+            r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Done"]
+initial = "Draft"
+
+[[action]]
+name = "Complete"
+from = ["Draft"]
+to = "Done"
+effect = "set phantom true"
+"#,
+        )
+        .expect("write ioa");
+
+        let body = serde_json::json!({
+            "tenant": "lint-tenant",
+            "specs_dir": temp_specs.to_str().unwrap(),
+        });
+
+        let response = app
+            .oneshot(
+                Request::post("/observe/specs/load-dir")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(&temp_specs);
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body_str = std::str::from_utf8(&body).unwrap();
+        let lines: Vec<serde_json::Value> = body_str
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        assert_eq!(lines[0]["type"], "specs_loaded");
+        assert!(lines.iter().any(|l| l["type"] == "lint_error"));
+        assert!(!lines.iter().any(|l| l["type"] == "verification_started"));
+
+        let registry = state.registry.read().unwrap();
+        let tenant_id: temper_runtime::tenant::TenantId = "lint-tenant".into();
+        assert!(
+            registry.get_tenant(&tenant_id).is_none(),
+            "tenant should not be registered when lint errors exist"
+        );
     }
 
     #[tokio::test]

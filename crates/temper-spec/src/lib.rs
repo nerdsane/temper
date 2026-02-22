@@ -16,7 +16,9 @@ pub mod model;
 pub mod tlaplus;
 
 // Re-export primary public API at crate root.
-pub use automaton::{Automaton, parse_automaton, to_state_machine};
+pub use automaton::{
+    Automaton, LintFinding, LintSeverity, lint_automaton, parse_automaton, to_state_machine,
+};
 pub use csdl::{CsdlDocument, CsdlParseError, parse_csdl};
 pub use model::{SpecModel, SpecSource, build_spec_model, build_spec_model_mixed};
 pub use tlaplus::{Invariant, StateMachine, Transition, extract_state_machine};

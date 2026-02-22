@@ -25,7 +25,8 @@ use temper_server::registry::{
 };
 use temper_server::state::DesignTimeEvent;
 use temper_server::webhooks::WebhookDispatcher;
-use temper_spec::csdl::parse_csdl;
+use temper_spec::automaton::{LintSeverity, lint_automaton, parse_automaton};
+use temper_spec::csdl::{CsdlDocument, parse_csdl};
 use temper_store_postgres::PostgresEventStore;
 use temper_store_redis::RedisEventStore;
 use temper_store_turso::TursoEventStore;
@@ -51,6 +52,14 @@ struct PersistedSpecRow {
     levels_total: Option<i32>,
     verification_result: Option<serde_json::Value>,
     updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct TenantLintFinding {
+    entity: String,
+    code: String,
+    severity: LintSeverity,
+    message: String,
 }
 
 /// Run the `temper serve` command.
@@ -260,6 +269,77 @@ fn redact_connection_url(url: &str) -> String {
     }
 }
 
+fn lint_tenant_specs(
+    csdl: &CsdlDocument,
+    ioa_sources: &HashMap<String, String>,
+) -> Result<Vec<TenantLintFinding>> {
+    let mut findings = Vec::new();
+    let mut entity_set_types = std::collections::BTreeSet::new();
+
+    for schema in &csdl.schemas {
+        for container in &schema.entity_containers {
+            for entity_set in &container.entity_sets {
+                let type_name = entity_set
+                    .entity_type
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(&entity_set.entity_type);
+                entity_set_types.insert(type_name.to_string());
+            }
+        }
+    }
+
+    for (entity, source) in ioa_sources {
+        let automaton = parse_automaton(source)
+            .with_context(|| format!("failed to parse IOA spec for {entity}"))?;
+        for finding in lint_automaton(&automaton) {
+            findings.push(TenantLintFinding {
+                entity: entity.clone(),
+                code: finding.code,
+                severity: finding.severity,
+                message: finding.message,
+            });
+        }
+        if !entity_set_types.contains(entity) {
+            findings.push(TenantLintFinding {
+                entity: entity.clone(),
+                code: "ioa_missing_entity_set".to_string(),
+                severity: LintSeverity::Warning,
+                message: "spec has no corresponding entity set in model.csdl.xml".to_string(),
+            });
+        }
+    }
+
+    for entity_type in &entity_set_types {
+        if !ioa_sources.contains_key(entity_type) {
+            findings.push(TenantLintFinding {
+                entity: entity_type.clone(),
+                code: "csdl_missing_ioa_spec".to_string(),
+                severity: LintSeverity::Warning,
+                message: "entity set has no corresponding IOA spec".to_string(),
+            });
+        }
+    }
+
+    findings.sort_by(|a, b| {
+        let key_a = (
+            &a.entity,
+            matches!(a.severity, LintSeverity::Warning),
+            &a.code,
+            &a.message,
+        );
+        let key_b = (
+            &b.entity,
+            matches!(b.severity, LintSeverity::Warning),
+            &b.code,
+            &b.message,
+        );
+        key_a.cmp(&key_b)
+    });
+
+    Ok(findings)
+}
+
 /// Load specs from a directory into an existing SpecRegistry WITHOUT running verification.
 ///
 /// All entities start with `VerificationStatus::Pending`. The observe UI
@@ -292,8 +372,30 @@ fn load_into_registry(
     // Read IOA TOML specs
     let ioa_sources = read_ioa_sources(specs_path)?;
 
+    let lint_findings = lint_tenant_specs(&csdl, &ioa_sources)?;
+    let mut lint_errors = Vec::new();
+    for finding in &lint_findings {
+        match finding.severity {
+            LintSeverity::Error => lint_errors.push(format!(
+                "    [lint:error:{}] {}: {}",
+                finding.code, finding.entity, finding.message
+            )),
+            LintSeverity::Warning => eprintln!(
+                "    [lint:warning:{}] {}: {}",
+                finding.code, finding.entity, finding.message
+            ),
+        }
+    }
+    if !lint_errors.is_empty() {
+        anyhow::bail!(
+            "Semantic lint failed for tenant '{}':\n{}",
+            tenant,
+            lint_errors.join("\n")
+        );
+    }
+
     for entity_name in ioa_sources.keys() {
-        println!("    Loaded spec: {entity_name} (verification pending)");
+        println!("    Loaded spec: {entity_name} (verification pending, lint clean)");
     }
 
     let ioa_pairs: Vec<(&str, &str)> = ioa_sources
@@ -995,5 +1097,80 @@ async fn hydrate_trajectory_log(
         if count > 0 {
             println!("  Restored {count} trajectory entries from Redis.");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_CSDL: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
+
+    #[test]
+    fn lint_tenant_specs_flags_unknown_variables() {
+        let csdl = parse_csdl(TEST_CSDL).expect("CSDL should parse");
+        let mut ioa_sources = HashMap::new();
+        ioa_sources.insert(
+            "Order".to_string(),
+            r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Done"]
+initial = "Draft"
+
+[[state]]
+name = "items"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Complete"
+from = ["Draft"]
+to = "Done"
+effect = "set phantom true"
+"#
+            .to_string(),
+        );
+
+        let findings = lint_tenant_specs(&csdl, &ioa_sources).expect("lint should run");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "effect_unknown_var" && f.severity == LintSeverity::Error)
+        );
+    }
+
+    #[test]
+    fn load_into_registry_rejects_lint_errors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("model.csdl.xml"), TEST_CSDL).expect("write csdl");
+        std::fs::write(
+            tmp.path().join("order.ioa.toml"),
+            r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Done"]
+initial = "Draft"
+
+[[action]]
+name = "Complete"
+from = ["Draft"]
+to = "Done"
+effect = "set phantom true"
+"#,
+        )
+        .expect("write ioa");
+
+        let mut registry = SpecRegistry::new();
+        let err = match load_into_registry(
+            &mut registry,
+            tmp.path().to_str().expect("utf8 path"),
+            "lint-tenant",
+        ) {
+            Ok(_) => panic!("lint errors should abort loading"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("Semantic lint failed"));
+        assert!(registry.get_tenant(&TenantId::new("lint-tenant")).is_none());
     }
 }

@@ -12,8 +12,10 @@
 //!
 //! TLA+ remains available for humans who want temporal reasoning.
 
+mod lint;
 pub mod parser;
 mod types;
 
+pub use lint::{LintFinding, LintSeverity, lint_automaton};
 pub use parser::{parse_automaton, to_state_machine};
 pub use types::*;
