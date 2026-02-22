@@ -362,7 +362,7 @@ impl ServerState {
         self
     }
 
-    /// Upsert a spec source into Postgres when persistence is configured.
+    /// Upsert a spec source into the persistence backend (Postgres or Turso).
     pub async fn upsert_spec_source(
         &self,
         tenant: &str,
@@ -370,39 +370,51 @@ impl ServerState {
         ioa_source: &str,
         csdl_xml: &str,
     ) -> Result<(), String> {
-        let Some(pool) = self
-            .event_store
-            .as_ref()
-            .and_then(|store| store.postgres_pool())
-        else {
+        let Some(store) = self.event_store.as_ref() else {
             return Ok(());
         };
-        sqlx::query(
-            "INSERT INTO specs \
-             (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, updated_at) \
-             VALUES ($1, $2, $3, $4, 1, false, 'pending', now()) \
-             ON CONFLICT (tenant, entity_type) DO UPDATE SET \
-                 ioa_source = EXCLUDED.ioa_source, \
-                 csdl_xml = EXCLUDED.csdl_xml, \
-                 version = specs.version + 1, \
-                 verified = false, \
-                 verification_status = 'pending', \
-                 levels_passed = NULL, \
-                 levels_total = NULL, \
-                 verification_result = NULL, \
-                 updated_at = now()",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(ioa_source)
-        .bind(csdl_xml)
-        .execute(pool)
-        .await
-        .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in postgres: {e}"))?;
+
+        // Try Postgres first.
+        if let Some(pool) = store.postgres_pool() {
+            sqlx::query(
+                "INSERT INTO specs \
+                 (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, updated_at) \
+                 VALUES ($1, $2, $3, $4, 1, false, 'pending', now()) \
+                 ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+                     ioa_source = EXCLUDED.ioa_source, \
+                     csdl_xml = EXCLUDED.csdl_xml, \
+                     version = specs.version + 1, \
+                     verified = false, \
+                     verification_status = 'pending', \
+                     levels_passed = NULL, \
+                     levels_total = NULL, \
+                     verification_result = NULL, \
+                     updated_at = now()",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(ioa_source)
+            .bind(csdl_xml)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in postgres: {e}"))?;
+            return Ok(());
+        }
+
+        // Fall back to Turso.
+        if let Some(turso) = store.turso_store() {
+            turso
+                .upsert_spec(tenant, entity_type, ioa_source, csdl_xml)
+                .await
+                .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in turso: {e}"))?;
+            return Ok(());
+        }
+
+        // Redis: not suited for relational metadata — silently skip.
         Ok(())
     }
 
-    /// Persist verification summary for a spec when Postgres is configured.
+    /// Persist verification summary for a spec (Postgres, Turso, or skip for Redis).
     pub async fn persist_spec_verification(
         &self,
         tenant: &str,
@@ -410,13 +422,10 @@ impl ServerState {
         status: &str,
         result: Option<&EntityVerificationResult>,
     ) -> Result<(), String> {
-        let Some(pool) = self
-            .event_store
-            .as_ref()
-            .and_then(|store| store.postgres_pool())
-        else {
+        let Some(store) = self.event_store.as_ref() else {
             return Ok(());
         };
+
         let (verified, levels_passed, levels_total, verification_result) = match result {
             Some(r) => {
                 let passed = r.levels.iter().filter(|l| l.passed).count() as i32;
@@ -426,30 +435,61 @@ impl ServerState {
             }
             None => (false, None, None, None),
         };
-        sqlx::query(
-            "UPDATE specs SET \
-                 verified = $3, \
-                 verification_status = $4, \
-                 levels_passed = $5, \
-                 levels_total = $6, \
-                 verification_result = $7, \
-                 updated_at = now() \
-             WHERE tenant = $1 AND entity_type = $2",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(verified)
-        .bind(status)
-        .bind(levels_passed)
-        .bind(levels_total)
-        .bind(verification_result.map(Json))
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            format!(
-                "failed to persist spec verification status for {tenant}/{entity_type} ({status}): {e}"
+
+        // Try Postgres first.
+        if let Some(pool) = store.postgres_pool() {
+            sqlx::query(
+                "UPDATE specs SET \
+                     verified = $3, \
+                     verification_status = $4, \
+                     levels_passed = $5, \
+                     levels_total = $6, \
+                     verification_result = $7, \
+                     updated_at = now() \
+                 WHERE tenant = $1 AND entity_type = $2",
             )
-        })?;
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(verified)
+            .bind(status)
+            .bind(levels_passed)
+            .bind(levels_total)
+            .bind(verification_result.map(Json))
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to persist spec verification status for {tenant}/{entity_type} ({status}): {e}"
+                )
+            })?;
+            return Ok(());
+        }
+
+        // Fall back to Turso.
+        if let Some(turso) = store.turso_store() {
+            let result_json = verification_result
+                .as_ref()
+                .and_then(|v| serde_json::to_string(v).ok());
+            turso
+                .persist_spec_verification(
+                    tenant,
+                    entity_type,
+                    status,
+                    verified,
+                    levels_passed,
+                    levels_total,
+                    result_json.as_deref(),
+                )
+                .await
+                .map_err(|e| {
+                    format!(
+                        "failed to persist spec verification status for {tenant}/{entity_type} ({status}) in turso: {e}"
+                    )
+                })?;
+            return Ok(());
+        }
+
+        // Redis: not suited for relational metadata — silently skip.
         Ok(())
     }
 
@@ -505,40 +545,82 @@ impl ServerState {
         Ok(())
     }
 
-    /// Persist a trajectory entry when Postgres is configured.
+    /// Persist a trajectory entry (Postgres, Turso, or Redis).
     pub async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
-        let Some(pool) = self
-            .event_store
-            .as_ref()
-            .and_then(|store| store.postgres_pool())
-        else {
+        let Some(store) = self.event_store.as_ref() else {
             return Ok(());
         };
-        let created_at = chrono::DateTime::parse_from_rfc3339(&entry.timestamp)
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|_| sim_now());
-        sqlx::query(
-            "INSERT INTO trajectories \
-             (tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        )
-        .bind(&entry.tenant)
-        .bind(&entry.entity_type)
-        .bind(&entry.entity_id)
-        .bind(&entry.action)
-        .bind(entry.success)
-        .bind(entry.from_status.as_deref())
-        .bind(entry.to_status.as_deref())
-        .bind(entry.error.as_deref())
-        .bind(created_at)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            format!(
-                "failed to persist trajectory entry for {}/{}/{} action {}: {e}",
-                entry.tenant, entry.entity_type, entry.entity_id, entry.action
+
+        // Try Postgres first.
+        if let Some(pool) = store.postgres_pool() {
+            let created_at = chrono::DateTime::parse_from_rfc3339(&entry.timestamp)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| sim_now());
+            sqlx::query(
+                "INSERT INTO trajectories \
+                 (tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             )
-        })?;
+            .bind(&entry.tenant)
+            .bind(&entry.entity_type)
+            .bind(&entry.entity_id)
+            .bind(&entry.action)
+            .bind(entry.success)
+            .bind(entry.from_status.as_deref())
+            .bind(entry.to_status.as_deref())
+            .bind(entry.error.as_deref())
+            .bind(created_at)
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to persist trajectory entry for {}/{}/{} action {}: {e}",
+                    entry.tenant, entry.entity_type, entry.entity_id, entry.action
+                )
+            })?;
+            return Ok(());
+        }
+
+        // Fall back to Turso.
+        if let Some(turso) = store.turso_store() {
+            turso
+                .persist_trajectory(
+                    &entry.tenant,
+                    &entry.entity_type,
+                    &entry.entity_id,
+                    &entry.action,
+                    entry.success,
+                    entry.from_status.as_deref(),
+                    entry.to_status.as_deref(),
+                    entry.error.as_deref(),
+                    &entry.timestamp,
+                )
+                .await
+                .map_err(|e| {
+                    format!(
+                        "failed to persist trajectory entry for {}/{}/{} action {} in turso: {e}",
+                        entry.tenant, entry.entity_type, entry.entity_id, entry.action
+                    )
+                })?;
+            return Ok(());
+        }
+
+        // Fall back to Redis (capped list).
+        if let Some(redis) = store.redis_store() {
+            let entry_json = serde_json::to_string(entry).map_err(|e| {
+                format!("failed to serialize trajectory entry: {e}")
+            })?;
+            redis
+                .persist_trajectory(&entry.tenant, &entry_json, TRAJECTORY_LOG_CAPACITY as i64)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "failed to persist trajectory entry for {}/{}/{} action {} in redis: {e}",
+                        entry.tenant, entry.entity_type, entry.entity_id, entry.action
+                    )
+                })?;
+        }
+
         Ok(())
     }
 
@@ -882,8 +964,7 @@ impl ServerState {
         if let Some(ref dispatcher) = self.webhook_dispatcher {
             let dispatcher = Arc::clone(dispatcher);
             let entry = trajectory_entry;
-            tokio::spawn(async move {
-                // determinism-ok: external side-effect, no simulation-visible state
+            tokio::spawn(async move { // determinism-ok: external side-effect, no simulation-visible state
                 dispatcher.dispatch(&entry);
             });
         }

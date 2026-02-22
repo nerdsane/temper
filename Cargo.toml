@@ -55,7 +55,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json", "chrono", "uuid"] }
-fred = { version = "10", features = ["subscriber-client"] }
+fred = { version = "10", features = ["subscriber-client", "i-scripts", "sha-1"] }
 
 # Auth
 cedar-policy = "4"

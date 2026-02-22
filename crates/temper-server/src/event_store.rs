@@ -34,6 +34,22 @@ impl ServerEventStore {
             Self::Turso(_) | Self::Redis(_) => None,
         }
     }
+
+    /// Return the Turso store when using the Turso backend.
+    pub fn turso_store(&self) -> Option<&TursoEventStore> {
+        match self {
+            Self::Turso(store) => Some(store),
+            Self::Postgres(_) | Self::Redis(_) => None,
+        }
+    }
+
+    /// Return the Redis store when using the Redis backend.
+    pub fn redis_store(&self) -> Option<&RedisEventStore> {
+        match self {
+            Self::Redis(store) => Some(store),
+            Self::Postgres(_) | Self::Turso(_) => None,
+        }
+    }
 }
 
 impl EventStore for ServerEventStore {

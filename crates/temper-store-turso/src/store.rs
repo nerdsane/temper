@@ -54,10 +54,200 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_SNAPSHOTS_TABLE, ())
             .await
             .map_err(storage_error)?;
+        conn.execute(schema::CREATE_SPECS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_TRAJECTORIES_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_TRAJECTORIES_SUCCESS_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_TRAJECTORIES_ENTITY_ACTION_INDEX, ())
+            .await
+            .map_err(storage_error)?;
 
         Ok(())
     }
 
+    /// Upsert a spec source (IOA + CSDL) for a tenant/entity_type.
+    pub async fn upsert_spec(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        ioa_source: &str,
+        csdl_xml: &str,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT INTO specs (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 1, 0, 'pending', datetime('now'))
+             ON CONFLICT (tenant, entity_type) DO UPDATE SET
+                 ioa_source = excluded.ioa_source,
+                 csdl_xml = excluded.csdl_xml,
+                 version = specs.version + 1,
+                 verified = 0,
+                 verification_status = 'pending',
+                 levels_passed = NULL,
+                 levels_total = NULL,
+                 verification_result = NULL,
+                 updated_at = datetime('now')",
+            params![tenant, entity_type, ioa_source, csdl_xml],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Persist verification result for a spec.
+    pub async fn persist_spec_verification(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        status: &str,
+        verified: bool,
+        levels_passed: Option<i32>,
+        levels_total: Option<i32>,
+        verification_result_json: Option<&str>,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE specs SET
+                 verified = ?3,
+                 verification_status = ?4,
+                 levels_passed = ?5,
+                 levels_total = ?6,
+                 verification_result = ?7,
+                 updated_at = datetime('now')
+             WHERE tenant = ?1 AND entity_type = ?2",
+            params![
+                tenant,
+                entity_type,
+                verified as i64,
+                status,
+                levels_passed,
+                levels_total,
+                verification_result_json
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Load all persisted specs (for startup recovery).
+    pub async fn load_specs(
+        &self,
+    ) -> Result<Vec<TursoSpecRow>, PersistenceError> {
+        let conn = self.connection()?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
+                        levels_passed, levels_total, verification_result, updated_at \
+                 FROM specs \
+                 ORDER BY tenant, entity_type",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(TursoSpecRow {
+                tenant: row.get::<String>(0).map_err(storage_error)?,
+                entity_type: row.get::<String>(1).map_err(storage_error)?,
+                ioa_source: row.get::<String>(2).map_err(storage_error)?,
+                csdl_xml: row.get::<Option<String>>(3).map_err(storage_error)?,
+                verification_status: row.get::<String>(4).map_err(storage_error)?,
+                verified: row.get::<i64>(5).map_err(storage_error)? != 0,
+                levels_passed: row.get::<Option<i64>>(6).map_err(storage_error)?.map(|v| v as i32),
+                levels_total: row.get::<Option<i64>>(7).map_err(storage_error)?.map(|v| v as i32),
+                verification_result: row.get::<Option<String>>(8).map_err(storage_error)?,
+                updated_at: row.get::<String>(9).map_err(storage_error)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Persist a trajectory entry.
+    pub async fn persist_trajectory(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        action: &str,
+        success: bool,
+        from_status: Option<&str>,
+        to_status: Option<&str>,
+        error: Option<&str>,
+        created_at: &str,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT INTO trajectories \
+             (tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                tenant,
+                entity_type,
+                entity_id,
+                action,
+                success as i64,
+                from_status,
+                to_status,
+                error,
+                created_at
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Load recent trajectory entries (newest first, up to `limit`).
+    pub async fn load_recent_trajectories(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
+        let conn = self.connection()?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at \
+                 FROM trajectories \
+                 ORDER BY created_at DESC \
+                 LIMIT ?1",
+                params![limit],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(TursoTrajectoryRow {
+                tenant: row.get::<String>(0).map_err(storage_error)?,
+                entity_type: row.get::<String>(1).map_err(storage_error)?,
+                entity_id: row.get::<String>(2).map_err(storage_error)?,
+                action: row.get::<String>(3).map_err(storage_error)?,
+                success: row.get::<i64>(4).map_err(storage_error)? != 0,
+                from_status: row.get::<Option<String>>(5).map_err(storage_error)?,
+                to_status: row.get::<Option<String>>(6).map_err(storage_error)?,
+                error: row.get::<Option<String>>(7).map_err(storage_error)?,
+                created_at: row.get::<String>(8).map_err(storage_error)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Obtain a connection handle to the underlying database.
+    ///
+    /// `Database::connect()` returns a lightweight handle, **not** a fresh TCP
+    /// connection each time:
+    /// - **Local SQLite** (`file:` URLs): a handle to the same underlying
+    ///   database file — no network overhead.
+    /// - **Remote Turso** (`libsql://` URLs): a handle drawn from an internal
+    ///   HTTP/gRPC connection pool managed by the `libsql` crate.
+    ///
+    /// It is safe (and cheap) to call this at the start of every method.
     fn connection(&self) -> Result<libsql::Connection, PersistenceError> {
         self.db.connect().map_err(storage_error)
     }
@@ -307,6 +497,54 @@ impl EventStore for TursoEventStore {
         }
         Ok(out)
     }
+}
+
+/// Row returned by [`TursoEventStore::load_specs()`].
+#[derive(Debug, Clone)]
+pub struct TursoSpecRow {
+    /// Tenant name.
+    pub tenant: String,
+    /// Entity type name.
+    pub entity_type: String,
+    /// IOA TOML source.
+    pub ioa_source: String,
+    /// CSDL XML (may be absent for old rows).
+    pub csdl_xml: Option<String>,
+    /// Verification status string (pending/running/passed/failed/partial).
+    pub verification_status: String,
+    /// Whether the spec has been verified.
+    pub verified: bool,
+    /// Number of verification levels that passed.
+    pub levels_passed: Option<i32>,
+    /// Total number of verification levels.
+    pub levels_total: Option<i32>,
+    /// Serialized verification result JSON.
+    pub verification_result: Option<String>,
+    /// ISO-8601 updated_at timestamp.
+    pub updated_at: String,
+}
+
+/// Row returned by [`TursoEventStore::load_recent_trajectories()`].
+#[derive(Debug, Clone)]
+pub struct TursoTrajectoryRow {
+    /// Tenant name.
+    pub tenant: String,
+    /// Entity type name.
+    pub entity_type: String,
+    /// Entity ID.
+    pub entity_id: String,
+    /// Action name.
+    pub action: String,
+    /// Whether the action succeeded.
+    pub success: bool,
+    /// Status before the action.
+    pub from_status: Option<String>,
+    /// Status after the action.
+    pub to_status: Option<String>,
+    /// Error description (for failed intents).
+    pub error: Option<String>,
+    /// ISO-8601 timestamp.
+    pub created_at: String,
 }
 
 #[cfg(test)]

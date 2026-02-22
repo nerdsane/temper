@@ -115,12 +115,17 @@ pub async fn run(
         }
     };
 
-    // Build initial registry from Postgres (recovery), then override with disk apps if provided.
+    // Build initial registry from Postgres or Turso (recovery), then override with disk apps.
     let mut registry = SpecRegistry::new();
     if let Some(pool) = pg_pool.as_ref() {
         let restored = load_registry_from_postgres(&mut registry, pool).await?;
         if restored > 0 {
             println!("  Restored {restored} specs from Postgres.");
+        }
+    } else if let Some(ServerEventStore::Turso(ref turso)) = event_store {
+        let restored = load_registry_from_turso(&mut registry, turso).await?;
+        if restored > 0 {
+            println!("  Restored {restored} specs from Turso.");
         }
     }
 
@@ -129,6 +134,8 @@ pub async fn run(
         let loaded = load_into_registry(&mut registry, specs_dir, tenant)?;
         if let Some(pool) = pg_pool.as_ref() {
             upsert_loaded_specs_to_postgres(pool, tenant, &loaded).await?;
+        } else if let Some(ServerEventStore::Turso(ref turso)) = event_store {
+            upsert_loaded_specs_to_turso(turso, tenant, &loaded).await?;
         }
     }
 
@@ -175,6 +182,11 @@ pub async fn run(
             let tenant_id = temper_runtime::tenant::TenantId::new(tenant.as_str());
             state.server.hydrate_from_store(&tenant_id).await;
         }
+    }
+
+    // Hydrate trajectory log from persistent backend (Postgres, Turso, or Redis).
+    if let Some(ref store) = state.server.event_store {
+        hydrate_trajectory_log(&state.server, store, &apps).await;
     }
 
     println!("Starting Temper platform server...");
@@ -744,4 +756,234 @@ fn to_pascal_case(s: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Load specs from Turso into a registry (mirrors `load_registry_from_postgres`).
+async fn load_registry_from_turso(
+    registry: &mut SpecRegistry,
+    turso: &TursoEventStore,
+) -> Result<usize> {
+    let rows = turso
+        .load_specs()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read specs from Turso: {e}"))?;
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut grouped: BTreeMap<String, Vec<temper_store_turso::TursoSpecRow>> = BTreeMap::new();
+    for row in rows {
+        grouped.entry(row.tenant.clone()).or_default().push(row);
+    }
+
+    let mut restored_specs = 0usize;
+    for (tenant, tenant_rows) in grouped {
+        let csdl_xml = tenant_rows
+            .iter()
+            .find_map(|row| row.csdl_xml.clone())
+            .unwrap_or_default();
+        if csdl_xml.trim().is_empty() {
+            eprintln!("Warning: skipping restored tenant '{tenant}' due to missing CSDL");
+            continue;
+        }
+        let csdl = parse_csdl(&csdl_xml)
+            .with_context(|| format!("Failed to parse restored CSDL for tenant '{tenant}'"))?;
+
+        let ioa_owned: Vec<(String, String)> = tenant_rows
+            .iter()
+            .map(|row| (row.entity_type.clone(), row.ioa_source.clone()))
+            .collect();
+        let ioa_pairs: Vec<(&str, &str)> = ioa_owned
+            .iter()
+            .map(|(entity_type, ioa)| (entity_type.as_str(), ioa.as_str()))
+            .collect();
+
+        registry.register_tenant(tenant.as_str(), csdl, csdl_xml, &ioa_pairs);
+        let tenant_id = TenantId::new(&tenant);
+        for row in &tenant_rows {
+            registry.set_verification_status(
+                &tenant_id,
+                &row.entity_type,
+                turso_status_to_registry_status(row),
+            );
+            restored_specs += 1;
+        }
+    }
+
+    Ok(restored_specs)
+}
+
+/// Convert a Turso spec row's verification status to a registry VerificationStatus.
+fn turso_status_to_registry_status(
+    row: &temper_store_turso::TursoSpecRow,
+) -> VerificationStatus {
+    let status = row.verification_status.to_lowercase();
+    match status.as_str() {
+        "pending" => VerificationStatus::Pending,
+        "running" => VerificationStatus::Running,
+        _ => {
+            if let Some(ref json_str) = row.verification_result {
+                if let Ok(result) =
+                    serde_json::from_str::<EntityVerificationResult>(json_str)
+                {
+                    return VerificationStatus::Completed(result);
+                }
+            }
+
+            let all_passed = status == "passed" || row.verified;
+            let levels_passed = row
+                .levels_passed
+                .unwrap_or(if all_passed { 1 } else { 0 })
+                .max(0) as usize;
+            let levels_total =
+                row.levels_total.unwrap_or(levels_passed as i32).max(0) as usize;
+            let levels = if levels_total > 0 {
+                (0..levels_total)
+                    .map(|idx| EntityLevelSummary {
+                        level: format!("L{idx}"),
+                        passed: idx < levels_passed,
+                        summary: if idx < levels_passed {
+                            "Restored from Turso verification summary".to_string()
+                        } else {
+                            "Restored failed verification level".to_string()
+                        },
+                        details: None,
+                    })
+                    .collect()
+            } else {
+                vec![EntityLevelSummary {
+                    level: "Persisted".to_string(),
+                    passed: all_passed,
+                    summary: format!("Restored status '{}'", row.verification_status),
+                    details: None,
+                }]
+            };
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed,
+                levels,
+                verified_at: row.updated_at.clone(),
+            })
+        }
+    }
+}
+
+/// Upsert loaded specs to Turso (mirrors `upsert_loaded_specs_to_postgres`).
+async fn upsert_loaded_specs_to_turso(
+    turso: &TursoEventStore,
+    tenant: &str,
+    loaded: &LoadedTenantSpecs,
+) -> Result<()> {
+    for (entity_type, ioa_source) in &loaded.ioa_sources {
+        turso
+            .upsert_spec(tenant, entity_type, ioa_source, &loaded.csdl_xml)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to persist spec {tenant}/{entity_type} in Turso: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Hydrate the in-memory trajectory log from the persistent backend.
+async fn hydrate_trajectory_log(
+    server: &temper_server::state::ServerState,
+    store: &std::sync::Arc<ServerEventStore>,
+    apps: &[(String, String)],
+) {
+    use temper_server::state::TrajectoryEntry;
+
+    // Try Postgres first (uses the trajectories table directly via sqlx).
+    if let Some(pool) = store.postgres_pool() {
+        let rows: Result<Vec<(String, String, String, String, bool, Option<String>, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>)>, _> = sqlx::query_as(
+            "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at \
+             FROM trajectories \
+             ORDER BY created_at DESC \
+             LIMIT 10000",
+        )
+        .fetch_all(pool)
+        .await;
+
+        if let Ok(rows) = rows {
+            if let Ok(mut log) = server.trajectory_log.write() {
+                // Insert oldest-first (rows are newest-first from query).
+                for (tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at) in rows.into_iter().rev() {
+                    log.push(TrajectoryEntry {
+                        timestamp: created_at.to_rfc3339(),
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        action,
+                        success,
+                        from_status,
+                        to_status,
+                        error,
+                    });
+                }
+                let count = log.entries().len();
+                if count > 0 {
+                    println!("  Restored {count} trajectory entries from Postgres.");
+                }
+            }
+        }
+        return;
+    }
+
+    // Try Turso.
+    if let Some(turso) = store.turso_store() {
+        match turso.load_recent_trajectories(10_000).await {
+            Ok(rows) => {
+                if let Ok(mut log) = server.trajectory_log.write() {
+                    // Rows come newest-first, insert oldest-first.
+                    for row in rows.into_iter().rev() {
+                        log.push(TrajectoryEntry {
+                            timestamp: row.created_at,
+                            tenant: row.tenant,
+                            entity_type: row.entity_type,
+                            entity_id: row.entity_id,
+                            action: row.action,
+                            success: row.success,
+                            from_status: row.from_status,
+                            to_status: row.to_status,
+                            error: row.error,
+                        });
+                    }
+                    let count = log.entries().len();
+                    if count > 0 {
+                        println!("  Restored {count} trajectory entries from Turso.");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to load trajectories from Turso: {e}");
+            }
+        }
+        return;
+    }
+
+    // Try Redis (per-tenant capped lists).
+    if let Some(redis) = store.redis_store() {
+        for (tenant, _dir) in apps {
+            match redis.load_recent_trajectories(tenant, 10_000).await {
+                Ok(entries) => {
+                    if let Ok(mut log) = server.trajectory_log.write() {
+                        for json_str in entries {
+                            if let Ok(entry) = serde_json::from_str::<TrajectoryEntry>(&json_str) {
+                                log.push(entry);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to load trajectories from Redis for tenant {tenant}: {e}");
+                }
+            }
+        }
+        let count = server
+            .trajectory_log
+            .read()
+            .map(|log| log.entries().len())
+            .unwrap_or(0);
+        if count > 0 {
+            println!("  Restored {count} trajectory entries from Redis.");
+        }
+    }
 }

@@ -8,4 +8,4 @@
 pub mod schema;
 pub mod store;
 
-pub use store::TursoEventStore;
+pub use store::{TursoEventStore, TursoSpecRow, TursoTrajectoryRow};
