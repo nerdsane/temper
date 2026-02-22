@@ -83,8 +83,8 @@ PROJECT_HASH="$(echo "$WORKSPACE_ROOT" | shasum -a 256 | cut -c1-12)"
 MARKER_DIR="/tmp/temper-harness/${PROJECT_HASH}"
 
 # Use the shared TOML marker writer if available
-if [ -x "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" ]; then
-    bash "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" "code-reviewed" "pass" \
+if [ -x "$WORKSPACE_ROOT/scripts/write-marker.sh" ]; then
+    bash "$WORKSPACE_ROOT/scripts/write-marker.sh" "code-reviewed" "pass" \
         "plan_file=<path to plan file>" \
         "plan_alignment=<ALIGNED or DEVIATION>" \
         "files_reviewed=<comma-separated list of reviewed files>" \

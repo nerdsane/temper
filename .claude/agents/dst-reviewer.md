@@ -167,8 +167,8 @@ PROJECT_HASH="$(echo "$WORKSPACE_ROOT" | shasum -a 256 | cut -c1-12)"
 MARKER_DIR="/tmp/temper-harness/${PROJECT_HASH}"
 
 # Use the shared TOML marker writer if available
-if [ -x "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" ]; then
-    bash "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" "dst-reviewed" "pass" \
+if [ -x "$WORKSPACE_ROOT/scripts/write-marker.sh" ]; then
+    bash "$WORKSPACE_ROOT/scripts/write-marker.sh" "dst-reviewed" "pass" \
         "files_reviewed=<comma-separated list of reviewed files>" \
         "findings_count=<number>" \
         "architecture_assessment=<CLEAN or LEAKY>"

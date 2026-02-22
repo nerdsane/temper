@@ -15,8 +15,8 @@ TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "${HEAD_SHA} ${TIMESTAMP}" > "$MARKER_DIR/commit-pending"
 
 # Structured marker for downstream tooling.
-if [ -x "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" ]; then
-    bash "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" "commit-pending" "pass" \
+if [ -x "$WORKSPACE_ROOT/scripts/write-marker.sh" ]; then
+    bash "$WORKSPACE_ROOT/scripts/write-marker.sh" "commit-pending" "pass" \
         "head_sha=${HEAD_SHA}" \
         "source=git-post-commit" >/dev/null 2>&1 || true
 fi
@@ -26,8 +26,8 @@ CHANGED_FILES="$(git -C "$WORKSPACE_ROOT" show --name-only --pretty=format: HEAD
 if echo "$CHANGED_FILES" | grep -qE '^crates/(temper-runtime|temper-jit|temper-server)/.*\.rs$'; then
     echo "${HEAD_SHA} ${TIMESTAMP}" > "$MARKER_DIR/sim-changed"
 
-    if [ -x "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" ]; then
-        bash "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" "sim-changed" "pass" \
+    if [ -x "$WORKSPACE_ROOT/scripts/write-marker.sh" ]; then
+        bash "$WORKSPACE_ROOT/scripts/write-marker.sh" "sim-changed" "pass" \
             "head_sha=${HEAD_SHA}" \
             "source=git-post-commit" >/dev/null 2>&1 || true
     fi

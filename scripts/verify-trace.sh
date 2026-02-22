@@ -1,6 +1,6 @@
 #!/bin/bash
-# pow-verify-trace.sh — Verify hash chain integrity of a trace file
-# Usage: pow-verify-trace.sh [trace-file]
+# verify-trace.sh — Verify hash chain integrity of a trace file
+# Usage: verify-trace.sh [trace-file]
 # If no file specified, uses the current session's trace.
 set -euo pipefail
 

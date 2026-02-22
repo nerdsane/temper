@@ -98,13 +98,12 @@ This harness enforces quality for **agents developing Temper itself** (the frame
 | 8 | DST Compliance Review | Agent | Claude Code (manual invoke) | Before commit (mandatory) | **YES** (via markers) |
 | 9 | Code Quality Review | Agent | Claude Code (manual invoke) | Before commit (mandatory) | **YES** (via markers) |
 | 10 | Trace Capture | Shell hook | Claude Code PostToolUse | All tools (`.*`) | No (advisory) |
-| 11 | PoW Comparison Engine | Script | Manual invoke (mandatory) | Before commit | **YES** (via markers) |
-| 12 | Alignment Review | Agent | Claude Code (manual invoke) | Before commit (mandatory) | **YES** (via markers) |
-| 13 | Integrity Check | Git hook | pre-commit | `git commit` | **YES** |
-| 14 | Spec Syntax | Git hook | pre-commit | `git commit` | **YES** |
-| 15 | Dep Audit | Git hook | pre-commit | `git commit` | **YES** |
-| 16 | Full Test Suite | Git hook | pre-push | `git push` | **YES** |
-| 17 | Commit Marker Writer | Git hook | post-commit | `git commit` | **YES** (for stop-gate wiring) |
+| 11 | Alignment Review | Agent | Claude Code (manual invoke) | Before commit (mandatory) | **YES** (via markers) |
+| 12 | Integrity Check | Git hook | pre-commit | `git commit` | **YES** |
+| 13 | Spec Syntax | Git hook | pre-commit | `git commit` | **YES** |
+| 14 | Dep Audit | Git hook | pre-commit | `git commit` | **YES** |
+| 15 | Full Test Suite | Git hook | pre-push | `git push` | **YES** |
+| 16 | Commit Marker Writer | Git hook | post-commit | `git commit` | **YES** (for stop-gate wiring) |
 
 ---
 
@@ -576,137 +575,19 @@ Claude Code hooks **cannot be bypassed** — they're enforced by the tool itself
 
 ---
 
-## Agent Proof of Work System
+## Trace + Marker Utilities
 
-The Proof of Work (PoW) system verifies alignment between what an agent was **asked** to do (intent), what it **actually did** (action), and what it **says it did** (claim). It plugs into the existing harness via hooks and markers.
+Trace capture remains part of the harness and runs for all tool calls:
 
-```
-         INTENT (plan file)
-          /          \
-    LLM review    LLM review
-        /              \
-  ACTION ─────────── CLAIM
- (trace)  mechanical  (certificate)
-          comparison
-```
+- Trace hook: `.claude/hooks/trace-capture.sh`
+- Trace verifier: `scripts/verify-trace.sh`
+- Marker writer: `scripts/write-marker.sh`
 
-### Components
+All markers use TOML (`*.toml`) plus a backward-compatible plain marker file.
 
-| # | Component | Type | Purpose |
-|---|-----------|------|---------|
-| 1 | Trace Capture | PostToolUse hook | Records every tool call to hash-chained JSONL (with mkdir lock for concurrency) |
-| 2 | TOML Markers | Shared utility | Structured evidence in marker files |
-| 3 | Agent Claims | Script | Agent writes self-reported claims (what it believes it did) |
-| 4 | Evidence Extractor | Script | Extracts ground truth from trace + git (for debugging) |
-| 5 | Comparison Engine | Script | Cross-references agent claims vs trace evidence |
-| 6 | Alignment Reviewer | Agent | Three-way semantic alignment check (LLM) |
-| 7 | Proof Generator | Script | Human-readable markdown proof document |
+The previous PoW pipeline (`pow-agent-claims`, `pow-compare`, `pow-generate-proof`) has been extracted from this repository.
 
-### Trace Capture (`.claude/hooks/trace-capture.sh`)
-
-PostToolUse hook that fires for ALL tools (`".*"` matcher). Appends one hash-chained JSON line per tool call:
-
-- **Categories**: `mutation` (Write/Edit), `read` (Read/Grep/Glob), `control` (Task/LSP/Bash)
-- **Hash chain**: each entry's `prev_hash` = previous entry's `entry_hash`. Tamper-evident.
-- **Concurrency**: Uses `mkdir`-based lock (atomic on all POSIX systems) to prevent hash chain breaks from concurrent agents (e.g., background Task tool agents sharing the same session ID). Spin-waits with 2s timeout; skips trace rather than blocking the agent.
-- **Stored at**: `/tmp/temper-harness/{project_hash}/trace-{session}.jsonl`
-
-### Verification Flow
-
-```
-  1. Agent works on task (trace is captured automatically)
-          │
-          ▼
-  2. Agent writes claims via pow-agent-claims.sh (self-report)
-     The agent declares what it believes it did — intent, files
-     modified, tests ran, scope description. This is NOT derived
-     from the trace; it is the agent's own assertion.
-          │
-          ▼
-  3. pow-compare.sh — cross-references agent claims vs trace evidence
-     ├── Trace integrity (hash chain)
-     ├── Files modified match claims
-     ├── Git diff alignment
-     ├── Tests actually ran
-     ├── Harness markers present
-     └── Suspicious patterns
-          │
-          ▼ (writes pow-verified marker on PASS)
-  4. Alignment reviewer agent — three-way semantic check
-     ├── Edge 1: Intent ↔ Action
-     ├── Edge 2: Action ↔ Claim (now meaningful: self-report vs evidence)
-     └── Edge 3: Intent ↔ Claim
-          │
-          ▼ (writes alignment-reviewed marker on PASS)
-  5. pow-generate-proof.sh — renders human-readable proof document
-          │
-          ▼
-  6. Pre-commit gate checks pow-verified + alignment-reviewed markers
-```
-
-### Producing Non-Empty Proofs
-
-`pow-generate-proof.sh` now skips generation when core evidence is missing, so it does not emit empty template docs.
-
-To generate a proper proof document:
-
-```bash
-# 1) Write self-claims for this session
-scripts/pow-agent-claims.sh \
-  intent="..." \
-  plan_file=".progress/NNN_....md" \
-  files_modified="a.rs,b.rs" \
-  tests_ran=true \
-  tests_added=0 \
-  scope="..."
-
-# 2) Mechanical verification (writes pow-verified marker on pass)
-scripts/pow-compare.sh
-
-# 3) Run semantic reviewers (write markers on pass)
-#    - code-reviewer
-#    - dst-reviewer (if sim-visible code changed)
-#    - alignment-reviewer
-
-# 4) Generate proof (strict mode requires evidence + markers)
-scripts/pow-generate-proof.sh --strict
-```
-
-`stop-verify.sh` also calls proof generation in strict mode, so session exit no longer creates empty `.proof` artifacts.
-
-**Why agent-generated claims matter:** Previously, claims were mechanically extracted FROM the trace, making `pow-compare.sh` a tautological self-check. Now the agent self-reports what it did, and mechanical verification independently checks that self-report against trace + git evidence. This gives the PoW triangle actual teeth.
-
-### Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `scripts/pow-write-marker.sh` | Shared TOML marker writer |
-| `scripts/pow-verify-trace.sh` | Hash chain integrity verification |
-| `scripts/pow-agent-claims.sh` | Agent writes self-reported claims |
-| `scripts/pow-extract-evidence.sh` | Extracts ground truth from trace + git (debugging) |
-| `scripts/pow-compare.sh` | Cross-references agent claims vs trace evidence |
-| `scripts/pow-generate-proof.sh` | Markdown proof document generator |
-
-### Marker Schema
-
-All markers use structured TOML with `[marker]` and `[evidence]` sections:
-
-```toml
-[marker]
-type = "pow-verified"
-verdict = "pass"
-timestamp = "2026-02-12T15:17:00Z"
-session_id = "abc123"
-
-[evidence]
-checks_passed = 6
-checks_warned = 0
-checks_failed = 0
-```
-
-Backward-compatible plain markers are also written for existing gate compatibility.
-
-### Portability
+## Portability
 
 The portable output contract for this harness is `verification.v1`.
 

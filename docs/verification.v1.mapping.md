@@ -35,10 +35,9 @@ Scores are normalized to `[0.0, 1.0]`.
 | `install.git_hook.pre_commit` | `.git/hooks/pre-commit` wrapper | `git` | Yes | `mechanical` | useful | 0.82 | 0.50 | 0.80 | Catches non-Claude commit paths. |
 | `install.git_hook.pre_push` | `.git/hooks/pre-push` wrapper | `git` | Yes | `mechanical` | useful | 0.80 | 0.48 | 0.80 | Catches non-Claude push paths. |
 | `install.git_hook.post_commit` | `.git/hooks/post-commit` wrapper | `git` | Yes | `mechanical` | useful | 0.74 | 0.42 | 0.82 | Wires stop-gate commit lifecycle markers. |
-| `evidence.trace.integrity` | `trace-*.jsonl` + `pow-verify-trace.sh` | `trace` | No | `mechanical` | useful | 0.65 | 0.55 | 0.85 | Hash chain on selected fields. |
+| `evidence.trace.integrity` | `trace-*.jsonl` + `verify-trace.sh` | `trace` | No | `mechanical` | useful | 0.65 | 0.55 | 0.85 | Hash chain on selected fields. |
 | `evidence.marker.review.dst` | `dst-reviewed(.toml)` marker | `review` | Conditional | `attestation` | limited | 0.55 | 0.20 | 0.75 | Presence-only unless freshness checked. |
 | `evidence.marker.review.code` | `code-reviewed(.toml)` marker | `review` | Conditional | `attestation` | limited | 0.55 | 0.20 | 0.75 | Presence-only unless freshness checked. |
-| `evidence.marker.pow_verified` | `pow-verified(.toml)` marker | `pow` | Yes | `mechanical` | useful | 0.72 | 0.42 | 0.75 | Depends on trace/claim quality. |
 | `evidence.marker.alignment_reviewed` | `alignment-reviewed(.toml)` marker | `review` | Yes | `attestation` | limited | 0.60 | 0.25 | 0.70 | Semantic review, still marker-based gating. |
 | `evidence.push_post_verify` | `push-pending-*` vs `test-verified-*` markers | `push` | Yes | `mechanical` | useful | 0.68 | 0.30 | 0.75 | Effective when marker lifecycle is intact. |
 | `wiring.exit_gate.commit_markers` | `stop-verify.sh` plus post-commit marker writers | `wiring` | Yes | `mechanical` | useful | 0.72 | 0.35 | 0.82 | `commit-pending`/`sim-changed` are written by git post-commit hook. |

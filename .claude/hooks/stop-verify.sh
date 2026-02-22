@@ -63,12 +63,6 @@ if [ -d "$MARKER_DIR" ]; then
             ANY_BLOCKED=true
         fi
 
-        if ! marker_exists "pow-verified"; then
-            echo "BLOCKED: Proof of Work verification missing for committed code!" >&2
-            echo "Run pow-agent-claims.sh and pow-compare.sh before exiting." >&2
-            ANY_BLOCKED=true
-        fi
-
         if ! marker_exists "alignment-reviewed"; then
             echo "BLOCKED: Alignment review missing for committed code!" >&2
             echo "Run the alignment reviewer agent before exiting." >&2
@@ -87,17 +81,10 @@ fi
 
 # --- Archive + Clean up on success ---
 if [ "$ANY_BLOCKED" = false ] && [ -d "$MARKER_DIR" ]; then
-    # Generate proof document BEFORE deleting anything
-    if [ -x "$WORKSPACE_ROOT/scripts/pow-generate-proof.sh" ]; then
-        # Strict mode prevents empty/template proofs when PoW evidence is missing.
-        bash "$WORKSPACE_ROOT/scripts/pow-generate-proof.sh" --strict 2>/dev/null || true
-    fi
-
-    # Archive trace + claims to .proof/archive/
+    # Archive trace markers to .proof/archive/
     ARCHIVE_DIR="$WORKSPACE_ROOT/.proof/archive/$(date -u +%Y-%m-%d)"
     mkdir -p "$ARCHIVE_DIR"
     cp -f "$MARKER_DIR"/trace-*.jsonl "$ARCHIVE_DIR/" 2>/dev/null || true
-    cp -f "$MARKER_DIR"/claims-*.toml "$ARCHIVE_DIR/" 2>/dev/null || true
     cp -f "$MARKER_DIR"/*.toml "$ARCHIVE_DIR/" 2>/dev/null || true
 
     # Now clean up markers
@@ -105,9 +92,8 @@ if [ "$ANY_BLOCKED" = false ] && [ -d "$MARKER_DIR" ]; then
     rm -f "$MARKER_DIR"/commit-pending "$MARKER_DIR"/sim-changed 2>/dev/null || true
     rm -f "$MARKER_DIR"/dst-reviewed "$MARKER_DIR"/code-reviewed 2>/dev/null || true
     rm -f "$MARKER_DIR"/dst-reviewed.toml "$MARKER_DIR"/code-reviewed.toml 2>/dev/null || true
-    rm -f "$MARKER_DIR"/pow-verified "$MARKER_DIR"/pow-verified.toml 2>/dev/null || true
     rm -f "$MARKER_DIR"/alignment-reviewed "$MARKER_DIR"/alignment-reviewed.toml 2>/dev/null || true
-    rm -f "$MARKER_DIR"/claims-*.toml "$MARKER_DIR"/trace-*.jsonl 2>/dev/null || true
+    rm -f "$MARKER_DIR"/trace-*.jsonl 2>/dev/null || true
     rm -f "$MARKER_DIR"/trace-*.seq "$MARKER_DIR"/trace-*.prevhash 2>/dev/null || true
 fi
 

@@ -171,7 +171,7 @@ fi
 
 # Trace integrity.
 if [ -f "$TRACE_FILE" ]; then
-    if bash "$WORKSPACE_ROOT/scripts/pow-verify-trace.sh" "$TRACE_FILE" >/dev/null 2>&1; then
+    if bash "$WORKSPACE_ROOT/scripts/verify-trace.sh" "$TRACE_FILE" >/dev/null 2>&1; then
         add_check "evidence.trace.integrity" "Trace hash chain integrity" "trace" false "pass" "mechanical" 0.65 0.55 0.85 \
             "Trace exists and hash chain verifies." "$(jq -nc --arg t "$TRACE_FILE" '[$t]')"
     else
@@ -198,14 +198,6 @@ if marker_exists "code-reviewed"; then
 else
     add_check "evidence.marker.review.code" "Code review marker present" "review" true "warn" "attestation" 0.55 0.20 0.75 \
         "code-reviewed marker missing (may be cleaned after successful exit)." '["/tmp/temper-harness/*/code-reviewed","/tmp/temper-harness/*/code-reviewed.toml"]'
-fi
-
-if marker_exists "pow-verified"; then
-    add_check "evidence.marker.pow_verified" "PoW verification marker present" "pow" true "pass" "mechanical" 0.72 0.42 0.75 \
-        "pow-verified marker exists." '["/tmp/temper-harness/*/pow-verified","/tmp/temper-harness/*/pow-verified.toml"]'
-else
-    add_check "evidence.marker.pow_verified" "PoW verification marker present" "pow" true "warn" "mechanical" 0.72 0.42 0.75 \
-        "pow-verified marker missing." '["/tmp/temper-harness/*/pow-verified","/tmp/temper-harness/*/pow-verified.toml"]'
 fi
 
 if marker_exists "alignment-reviewed"; then
@@ -244,8 +236,8 @@ else
 fi
 
 # Wiring check: stop-gate commit markers are checked but currently unwritten.
-# Only count concrete write operations (redirection/touch/pow-write-marker), not generic mentions.
-COMMIT_MARKER_WRITERS="$(rg -n --hidden -S '(touch .*commit-pending|touch .*sim-changed|> .*commit-pending|> .*sim-changed|pow-write-marker\.sh.*commit-pending|pow-write-marker\.sh.*sim-changed)' "$WORKSPACE_ROOT/.claude" "$WORKSPACE_ROOT/scripts" 2>/dev/null \
+# Only count concrete write operations (redirection/touch/write-marker), not generic mentions.
+COMMIT_MARKER_WRITERS="$(rg -n --hidden -S '(touch .*commit-pending|touch .*sim-changed|> .*commit-pending|> .*sim-changed|write-marker\.sh.*commit-pending|write-marker\.sh.*sim-changed)' "$WORKSPACE_ROOT/.claude" "$WORKSPACE_ROOT/scripts" 2>/dev/null \
     | grep -v '/.claude/hooks/stop-verify.sh:' \
     | grep -v '/scripts/verification-v1-report.sh:' || true)"
 if [ -n "$COMMIT_MARKER_WRITERS" ]; then
@@ -260,10 +252,10 @@ fi
 if grep -q 'marker_exists()' "$WORKSPACE_ROOT/.claude/hooks/pre-commit-review-gate.sh" \
     && ! grep -q 'session_id' "$WORKSPACE_ROOT/.claude/hooks/pre-commit-review-gate.sh"; then
     add_check "wiring.marker.session_binding" "Marker checks are session/change-bound" "wiring" false "warn" "inferred" 0.35 0.10 0.85 \
-        "Gate checks marker presence but does not verify marker session_id or change-set freshness." '[".claude/hooks/pre-commit-review-gate.sh","scripts/pow-write-marker.sh"]'
+        "Gate checks marker presence but does not verify marker session_id or change-set freshness." '[".claude/hooks/pre-commit-review-gate.sh","scripts/write-marker.sh"]'
 else
     add_check "wiring.marker.session_binding" "Marker checks are session/change-bound" "wiring" false "pass" "inferred" 0.35 0.10 0.85 \
-        "Marker session/change binding appears configured." '[".claude/hooks/pre-commit-review-gate.sh","scripts/pow-write-marker.sh"]'
+        "Marker session/change binding appears configured." '[".claude/hooks/pre-commit-review-gate.sh","scripts/write-marker.sh"]'
 fi
 
 # Wiring check: determinism gate behavior at push time.

@@ -44,8 +44,8 @@ case "${CMD:-}" in
             TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "$TIMESTAMP" > "$MARKER_DIR/test-verified-${SESSION_ID}"
             # Write TOML marker with test output summary
-            if [ -x "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" ]; then
-                bash "$WORKSPACE_ROOT/scripts/pow-write-marker.sh" "test-verified-${SESSION_ID}" "pass" \
+            if [ -x "$WORKSPACE_ROOT/scripts/write-marker.sh" ]; then
+                bash "$WORKSPACE_ROOT/scripts/write-marker.sh" "test-verified-${SESSION_ID}" "pass" \
                     "trigger=post-push"
             fi
             echo "Post-push verification: ALL TESTS PASSED" >&2

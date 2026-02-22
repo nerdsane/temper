@@ -1,13 +1,13 @@
 #!/bin/bash
-# pow-write-marker.sh — Write structured TOML marker
-# Usage: pow-write-marker.sh <type> <verdict> [key=value ...]
+# write-marker.sh — Write structured TOML marker
+# Usage: write-marker.sh <type> <verdict> [key=value ...]
 #
 # Writes a TOML marker file to /tmp/temper-harness/{project_hash}/
-# Example: pow-write-marker.sh dst-reviewed pass files_reviewed="a.rs,b.rs" findings_count=0
+# Example: write-marker.sh dst-reviewed pass files_reviewed="a.rs,b.rs" findings_count=0
 set -euo pipefail
 
-TYPE="${1:?Usage: pow-write-marker.sh <type> <verdict> [key=value ...]}"
-VERDICT="${2:?Usage: pow-write-marker.sh <type> <verdict> [key=value ...]}"
+TYPE="${1:?Usage: write-marker.sh <type> <verdict> [key=value ...]}"
+VERDICT="${2:?Usage: write-marker.sh <type> <verdict> [key=value ...]}"
 shift 2
 
 WORKSPACE_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
