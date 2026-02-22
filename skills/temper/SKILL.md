@@ -245,9 +245,20 @@ curl http://localhost:3001/tdata/Tasks -H "X-Tenant-Id: my-app"
 
 Build a single-file HTML served via a proxy. **Any shape** — dashboard, kanban, timeline, form, graph, chart, wizard, anything.
 
-### Design System
+### Design System — Pluggable
 
-**Always read `apps/shared/design-system.md` before generating any UI.** It defines tokens (colors, spacing, typography, glass surfaces), layout rules, and component atoms. Every Temper UI uses this system so they feel cohesive regardless of agent or use case.
+**Always read `apps/shared/design-system.md` before generating any UI.**
+
+This file ships with the Temper skill as the default aesthetic (violet/dark glass, Space Mono + Space Grotesk, highlight as design tool, gradient dividers). Every generated UI reads it for palette names, font rules, and component patterns so all apps feel cohesive.
+
+**It's pluggable.** If you want a different aesthetic for your agent or project:
+1. Write your own `design-system.md` in `apps/shared/` (same file, different content)
+2. Define your palette, fonts, and component atoms using the same section structure
+3. Every UI you generate from then on follows yours
+
+The contract: the skill says "read that file before building." What's in the file is up to whoever owns the workspace. You can replace it with your own brand system, a client's style guide, or a completely different aesthetic. The only requirement is that it contains: palette, font rules, glass/card pattern, and component examples.
+
+If no file exists, use the default from this skill as the fallback.
 
 ### Visual Elements — No Limits
 
@@ -321,7 +332,7 @@ class ThreadedServer(ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
 
 if __name__ == "__main__":
-    s = ThreadedServer(("", PORT), Handler)
+    s = ThreadedServer(("0.0.0.0", PORT), Handler)  # 0.0.0.0 = LAN accessible
     s.socket.setsockopt(1, 2, 1)  # SO_REUSEADDR
     print(f"Serving :{PORT} → {TEMPER}")
     s.serve_forever()
@@ -329,16 +340,49 @@ if __name__ == "__main__":
 
 ### Exposing — Tunnel
 
+**Primary: Tailscale Serve** (stable URL, survives restarts)
+
 ```bash
-# Cloudflare (free, ephemeral — URL changes on restart)
-nohup cloudflared tunnel --url http://localhost:8080 > /tmp/tunnel.log 2>&1 &
-# Wait ~5s, then grab the URL:
-grep -o 'https://[^ ]*trycloudflare.com' /tmp/tunnel.log | tail -1
+# One-time setup (Mac)
+brew install tailscale
+tailscale up   # authenticate in browser once
+
+# Expose your proxy — URL is permanent, never changes
+tailscale serve http://localhost:8080
+
+# Get the URL (same every time — derived from machine name)
+tailscale status --json | python3 -c "
+import sys, json
+s = json.load(sys.stdin)
+name = s['Self']['DNSName'].rstrip('.')
+print(f'https://{name}')
+"
 ```
 
-**Ephemeral URLs change on every restart.** That's fine — see "Notifying Your Human" below.
+The URL is `https://{machine-name}.{tailnet}.ts.net` — stable across restarts, reboots, anything. An agent can always compute it without reading tunnel output.
 
-For persistent access without URL changes, use **Tailscale Funnel**: install on your machine and your human's phone, and the proxy is accessible at a permanent URL within your tailnet. Zero third-party routing.
+For access from outside the tailnet (public internet), use `tailscale funnel` instead of `tailscale serve`.
+
+**Fallback: Cloudflare Quick Tunnel** (no account, ephemeral — URL changes on restart)
+
+```bash
+brew install cloudflared
+nohup cloudflared tunnel --url http://localhost:8080 > /tmp/tunnel.log 2>&1 &
+sleep 5 && grep -o 'https://[^ ]*trycloudflare.com' /tmp/tunnel.log | tail -1
+```
+
+Works instantly but the URL changes every restart — you have to re-notify your human each time.
+
+**LAN only** (simplest, no third party)
+
+Bind serve.py to `0.0.0.0` and access via local IP. Set a static IP on the machine and the URL never changes on your network:
+
+```bash
+ipconfig getifaddr en0   # get your local IP — e.g. 192.168.1.42
+# Access: http://192.168.1.42:8080
+```
+
+The serve.py in this skill binds to `0.0.0.0` by default, so LAN access works out of the box.
 
 ---
 
