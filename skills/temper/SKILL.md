@@ -292,18 +292,23 @@ Build a single-file HTML served via a proxy. **Any shape** — dashboard, kanban
 
 ### Design System — Pluggable
 
-**Always read `apps/shared/design-system.md` before generating any UI.**
+**Always read `~/workspace/apps/shared/design-system.md` before generating any UI.**
 
-This file ships with the Temper skill as the default aesthetic (violet/dark glass, Space Mono + Space Grotesk, highlight as design tool, gradient dividers). Every generated UI reads it for palette names, font rules, and component patterns so all apps feel cohesive.
+The default design system ships alongside this skill at `skills/temper/design-system.md`. On first use, copy it to the shared location:
+
+```bash
+mkdir -p ~/workspace/apps/shared
+cp ~/workspace/Development/temper/skills/temper/design-system.md ~/workspace/apps/shared/design-system.md
+```
+
+The default aesthetic: violet/dark glass, Space Mono + Space Grotesk, highlight as primary design tool, gradient dividers. Every generated UI reads it for palette names, font rules, and component patterns so all apps feel cohesive across agents.
 
 **It's pluggable.** If you want a different aesthetic for your agent or project:
 1. Write your own `design-system.md` in `apps/shared/` (same file, different content)
 2. Define your palette, fonts, and component atoms using the same section structure
 3. Every UI you generate from then on follows yours
 
-The contract: the skill says "read that file before building." What's in the file is up to whoever owns the workspace. You can replace it with your own brand system, a client's style guide, or a completely different aesthetic. The only requirement is that it contains: palette, font rules, glass/card pattern, and component examples.
-
-If no file exists, use the default from this skill as the fallback.
+The contract: read that file before building. What's in it is up to whoever owns the workspace — your own brand system, a client's style guide, a completely different aesthetic. The only requirement is that it contains: palette, font rules, glass/card pattern, and component examples.
 
 ### Visual Elements — No Limits
 
