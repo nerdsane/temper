@@ -328,7 +328,17 @@ You are not limited to lists and cards. Build whatever the data needs:
 
 ### Proxy Pattern
 
-Minimal `serve.py` that serves the HTML and forwards `/tdata` to Temper:
+`serve.py` ships with this skill. Copy it to your app directory:
+
+```bash
+cp ~/workspace/Development/temper/skills/temper/serve.py \
+   ~/workspace/apps/your-app/serve.py
+```
+
+It serves `index.html` on port 8080, forwards `/tdata` to Temper, and streams SSE correctly. Override with env vars: `PORT=9090 TEMPER_URL=http://localhost:3002 python3 serve.py`.
+
+<details>
+<summary>serve.py source</summary>
 
 ```python
 #!/usr/bin/env python3
@@ -411,6 +421,8 @@ if __name__ == "__main__":
     print(f"Serving :{PORT} → {TEMPER}")
     s.serve_forever()
 ```
+
+</details>
 
 ### Exposing — Tunnel
 
