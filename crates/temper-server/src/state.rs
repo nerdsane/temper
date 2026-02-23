@@ -181,6 +181,8 @@ pub struct ServerState {
     pub actor_registry: Arc<RwLock<BTreeMap<String, ActorRef<EntityMsg>>>>,
     /// Optional runtime event store backend for persistence.
     pub event_store: Option<Arc<ServerEventStore>>,
+    /// Runtime data directory for persisted local metadata (e.g. specs registry).
+    pub data_dir: std::path::PathBuf,
     /// Agent hints learned from trajectory analysis, keyed by action name.
     pub agent_hints: Arc<RwLock<BTreeMap<String, String>>>,
     /// Cedar ABAC authorization engine.
@@ -242,6 +244,7 @@ impl ServerState {
             transition_tables: Arc::new(BTreeMap::new()),
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             event_store: None,
+            data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
             registry: Arc::new(RwLock::new(SpecRegistry::new())),
@@ -326,6 +329,7 @@ impl ServerState {
             transition_tables: Arc::new(BTreeMap::new()),
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             event_store: None,
+            data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
             registry,
