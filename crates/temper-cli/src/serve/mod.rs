@@ -104,13 +104,28 @@ pub async fn run(
             }
         }
         StorageBackend::Turso => {
-            let turso_url = std::env::var("TURSO_URL")
-                .context("TURSO_URL is required when --storage turso is selected")?;
+            let turso_url = match std::env::var("TURSO_URL") {
+                Ok(url) => url,
+                Err(_) => {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                    let db_path = Path::new(&home).join(".local/share/temper/agents.db");
+                    let parent_dir = db_path.parent().context(
+                        "Failed to determine parent directory for default Turso DB path",
+                    )?;
+                    fs::create_dir_all(parent_dir).with_context(|| {
+                        format!(
+                            "Failed to create default Turso DB directory: {}",
+                            parent_dir.display()
+                        )
+                    })?;
+                    format!("file:{}", db_path.display())
+                }
+            };
             let turso_token = std::env::var("TURSO_AUTH_TOKEN").ok();
             let store = TursoEventStore::new(&turso_url, turso_token.as_deref())
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to connect to Turso/libSQL: {e}"))?;
-            println!("  Storage: turso ({})", redact_connection_url(&turso_url));
+            println!("  Storage: turso ({})", turso_url);
             Some(ServerEventStore::Turso(store))
         }
         StorageBackend::Redis => {

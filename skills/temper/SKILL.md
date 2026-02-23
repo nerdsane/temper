@@ -39,23 +39,25 @@ export LIBRARY_PATH="/opt/homebrew/lib"
 cargo build --release   # ~60s on Mac mini M2
 ```
 
-### Storage — Turso (local file, no account needed)
+### Storage — Turso (local file, zero config)
 
-Temper uses Turso/libSQL as its storage backend. **For local use, you need exactly one env var and zero credentials:**
+Temper uses Turso/libSQL as its storage backend. **For local use, no env vars are needed.** Temper defaults to `~/.local/share/temper/agents.db` and creates it on first run:
 
 ```bash
-export TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db"
-# That's it. No TURSO_AUTH_TOKEN. No account. No cloud.
-
-./target/release/temper serve --storage turso \
-  --app my-app=/path/to/specs \
-  --port 3001
+./target/release/temper serve --storage turso --port 3001
+# Storage: turso (~/.local/share/temper/agents.db)
 ```
 
-`TURSO_AUTH_TOKEN` is only needed when pointing at a remote Turso cloud database:
+That's it. No credentials, no account, no config file.
 
+**Override the path** if you want a different location (e.g. a shared workspace db):
 ```bash
-# Remote Turso only — not needed for local
+TURSO_URL="file:$HOME/workspace/apps/agents.db" \
+  ./target/release/temper serve --storage turso --port 3001
+```
+
+**Remote Turso** (cloud, optional) requires both vars:
+```bash
 export TURSO_URL="libsql://your-db.turso.io"
 export TURSO_AUTH_TOKEN="your-token"
 ```
@@ -183,36 +185,34 @@ If verification fails, the server won't start. Fix the spec first.
 
 ## 2. Start or Join the Server
 
-**Every session — two steps, in order:**
+**Every session — two steps:**
 
 ### Step 1: Ensure Temper is running
 
-Use the shared startup script. It's idempotent — safe to run whether Temper is up or down:
+Check first — only start if it's down:
 
 ```bash
-bash ~/workspace/apps/start-temper.sh
+curl -sf http://localhost:3001/tdata -H "X-Tenant-Id: _" > /dev/null 2>&1 \
+  && echo "Temper already running" \
+  || { nohup ./target/release/temper serve --storage turso --port 3001 \
+         > /tmp/temper.log 2>&1 & sleep 4 && echo "Temper started"; }
 ```
 
-This script:
-- Does nothing if Temper is already running on `:3001`
-- Starts it with the correct DB (`agents.db`) if not
-- Never passes `--app` flags — app loading is each agent's responsibility (Step 2)
+Uses the default DB (`~/.local/share/temper/agents.db`). No env vars. Safe to run whether Temper is up or down.
 
-**Do not start Temper manually with ad-hoc commands.** The script is the single source of truth for the DB path. If you start Temper yourself and get the path wrong, every other agent's data disappears.
+### Step 2: Load your app specs
 
-### Step 2: Hot-load your app specs
-
-After the script confirms Temper is running, load your entity types:
+After Temper is running, register your entity types:
 
 ```bash
 curl -s -X POST http://localhost:3001/observe/specs/load-dir \
   -H "Content-Type: application/json" \
-  -d '{"tenant": "your-app-name", "specs_dir": "/Users/openclaw/workspace/apps/your-app/specs"}'
+  -d '{"tenant": "your-app-name", "specs_dir": "$HOME/workspace/apps/your-app/specs"}'
 ```
 
-This is instant, non-destructive, and doesn't affect other agents. Data persists in the DB across restarts — only the in-memory actor registration needs restoring after a restart.
+Instant, non-destructive, doesn't affect other agents. **Your data is already in the DB** — this just restores the in-memory actor registration after a restart.
 
-Verify your entity types loaded:
+Verify:
 ```bash
 curl -s http://localhost:3001/tdata -H "X-Tenant-Id: your-app-name" | \
   python3 -c "import sys,json; print([v['name'] for v in json.load(sys.stdin)['value']])"
@@ -298,7 +298,8 @@ The default design system ships alongside this skill at `skills/temper/design-sy
 
 ```bash
 mkdir -p ~/workspace/apps/shared
-cp ~/workspace/Development/temper/skills/temper/design-system.md ~/workspace/apps/shared/design-system.md
+# TEMPER_DIR is wherever you cloned the repo
+cp $TEMPER_DIR/skills/temper/design-system.md ~/workspace/apps/shared/design-system.md
 ```
 
 The default aesthetic: violet/dark glass, Space Mono + Space Grotesk, highlight as primary design tool, gradient dividers. Every generated UI reads it for palette names, font rules, and component patterns so all apps feel cohesive across agents.
@@ -380,10 +381,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 class ThreadedServer(ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+    allow_reuse_address = True  # SO_REUSEADDR — no "address already in use" on restart
 
 if __name__ == "__main__":
     s = ThreadedServer(("0.0.0.0", PORT), Handler)  # 0.0.0.0 = LAN accessible
-    s.socket.setsockopt(1, 2, 1)  # SO_REUSEADDR
     print(f"Serving :{PORT} → {TEMPER}")
     s.serve_forever()
 ```
@@ -626,68 +627,36 @@ Every agent builds their own app with their own specs and UI. One Temper server 
 ## File Structure
 
 ```
-apps/
-├── agents.db                # Shared Turso db for all agents on this instance (gitignore this)
+~/.local/share/temper/
+└── agents.db               # Default shared db — all agents, all apps (gitignore if in repo)
+
+~/workspace/apps/           # Recommended location for app files (adjust to your setup)
 ├── {your-app}/
 │   ├── specs/
 │   │   ├── entity1.ioa.toml
 │   │   └── entity2.ioa.toml
 │   ├── index.html           # UI (any shape)
 │   ├── serve.py             # proxy
-│   └── seed.sh              # optional: bootstrap data
+│   └── seed.sh              # optional: one-time bootstrap data (not a persistence workaround)
 └── shared/
     └── design-system.md
 ```
 
-**One db, many apps.** All agent apps share a single Turso db file (`agents.db` at the workspace root). Multi-tenancy means the data is isolated by `X-Tenant-Id` at the row level — Haku's proposals never mix with Calcifer's posts. Don't create a separate `.db` per app; put them all on the same instance.
+**One db, many apps.** All agents share the default db. Multi-tenancy isolates data by `X-Tenant-Id` at the row level — no app sees another's entities. Don't create a separate `.db` per app.
 
-**Hot-loading your app** — no restart needed. Any agent can call this at any time:
+**`seed.sh` is optional bootstrap** — useful for populating initial reference data (world names, config entries, etc.). Because Temper persists, you run it once, not on every restart. If you're reseeding every session, something else is wrong.
+
+**Hot-loading your app** — no restart needed. Any agent calls this once per session:
 
 ```bash
-# Load from a directory (most common) — runs L0-L3 verification inline
 curl -s -X POST http://localhost:3001/observe/specs/load-dir \
   -H "Content-Type: application/json" \
-  -d '{
-    "tenant": "my-app",
-    "specs_dir": "/Users/openclaw/workspace/apps/my-app/specs"
-  }'
+  -d '{"tenant": "my-app", "specs_dir": "$HOME/workspace/apps/my-app/specs"}'
 ```
 
-Temper streams NDJSON back: specs loaded → verification per entity → summary. If the last line says `"all_passed":true`, your entity sets are live. Zero downtime, no coordination with anyone.
+Temper streams NDJSON back. Last line has `"all_passed":true` if everything verified. Re-calling `load-dir` **hot-swaps** specs — existing entities keep running with the new spec immediately. Iterate freely without losing data.
 
-```bash
-# Or load from inline content (no spec files needed yet)
-curl -s -X POST http://localhost:3001/observe/specs/load-inline \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant": "my-app",
-    "specs": {
-      "model.csdl.xml": "...",
-      "task.ioa.toml": "..."
-    }
-  }'
-```
-
-Re-calling `load-dir` on an existing tenant **hot-swaps** the transition tables — existing entities keep running, new spec takes effect immediately. Iterate freely without losing data.
-
-**Check if Temper is running:**
-```bash
-curl -s http://localhost:3001/tdata -H "X-Tenant-Id: my-app" | python3 -c "import sys,json; print('UP:', len(json.load(sys.stdin).get('value',[])),'entity sets')"
-```
-
-**If Temper is down — start it yourself:**
-```bash
-TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db" \
-nohup /Users/openclaw/workspace/Development/temper/target/release/temper serve \
-  --storage turso \
-  --app my-app=/Users/openclaw/workspace/apps/my-app/specs \
-  --port 3001 > /tmp/temper.log 2>&1 &
-
-# Verify it started:
-sleep 5 && curl -s http://localhost:3001/tdata -H "X-Tenant-Id: my-app"
-```
-
-Add `--app other-app=...` for each app that should be loaded at startup. **After restarting, every agent whose app wasn't in the launch command should call `load-dir` to re-register their specs.** The db retains all data — only the in-memory actor registration is lost on restart.
+**One DB, all agents.** All agents share the default `~/.local/share/temper/agents.db`. Multi-tenancy isolates data by `X-Tenant-Id` at the row level — Haku's proposals never mix with Calcifer's posts. Override with `TURSO_URL` if your workspace uses a different path.
 
 ---
 
