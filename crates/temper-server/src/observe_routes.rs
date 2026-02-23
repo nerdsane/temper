@@ -580,6 +580,30 @@ async fn handle_load_dir(
         registry.register_tenant(body.tenant.as_str(), csdl, csdl_xml, &ioa_pairs);
     }
 
+    if !state.data_dir.as_os_str().is_empty() {
+        let registry_path = state.data_dir.join("specs-registry.json");
+        let mut specs_registry = std::collections::BTreeMap::<String, String>::new();
+
+        if let Ok(content) = std::fs::read_to_string(&registry_path) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(obj) = value.as_object() {
+                    for (tenant, specs_dir) in obj {
+                        if let Some(specs_dir) = specs_dir.as_str() {
+                            specs_registry.insert(tenant.clone(), specs_dir.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        specs_registry.insert(body.tenant.clone(), body.specs_dir.clone());
+
+        if let Ok(encoded) = serde_json::to_string_pretty(&specs_registry) {
+            let _ = std::fs::create_dir_all(&state.data_dir);
+            let _ = std::fs::write(registry_path, encoded);
+        }
+    }
+
     // Stream NDJSON response: verification runs inline and results are streamed per-entity.
     // Any agent calling this endpoint gets verification results without polling.
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, Infallible>>(100);

@@ -164,6 +164,43 @@ pub async fn run(
     }
 
     let mut state = PlatformState::with_registry(registry, api_key);
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let data_dir = Path::new(&home).join(".local/share/temper");
+    state.server.data_dir = data_dir.clone();
+
+    let specs_registry_path = data_dir.join("specs-registry.json");
+    let mut auto_reloaded = 0usize;
+    if let Ok(content) = fs::read_to_string(&specs_registry_path) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(entries) = value.as_object() {
+                for (tenant, specs_dir) in entries {
+                    let Some(specs_dir) = specs_dir.as_str() else {
+                        continue;
+                    };
+
+                    let loaded = {
+                        let mut guard = state.registry.write().unwrap(); // ci-ok: infallible lock
+                        load_into_registry(&mut guard, specs_dir, tenant)
+                    };
+
+                    match loaded {
+                        Ok(_) => {
+                            auto_reloaded += 1;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  Warning: failed to auto-reload app {tenant} from {specs_dir}: {e}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "  Auto-reloaded {auto_reloaded} specs entries from {}",
+        specs_registry_path.display()
+    );
 
     // Load webhooks.toml from each app directory and build a merged dispatcher.
     {
