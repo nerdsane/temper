@@ -59,6 +59,13 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), PersistenceError> {
             PersistenceError::Storage(format!("failed to create design_time_events table: {e}"))
         })?;
 
+    sqlx::query(schema::CREATE_TENANT_CONSTRAINTS_TABLE)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PersistenceError::Storage(format!("failed to create tenant_constraints table: {e}"))
+        })?;
+
     sqlx::query(schema::CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX)
         .execute(pool)
         .await
@@ -104,6 +111,10 @@ mod tests {
         assert!(
             schema::CREATE_DESIGN_TIME_EVENTS_TABLE.contains("IF NOT EXISTS"),
             "design_time_events DDL must be idempotent"
+        );
+        assert!(
+            schema::CREATE_TENANT_CONSTRAINTS_TABLE.contains("IF NOT EXISTS"),
+            "tenant_constraints DDL must be idempotent"
         );
         assert!(
             schema::CREATE_ENTITY_LISTING_INDEX.contains("IF NOT EXISTS"),

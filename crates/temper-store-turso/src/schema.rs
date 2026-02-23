@@ -67,6 +67,14 @@ pub const CREATE_TRAJECTORIES_ENTITY_ACTION_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_trajectories_entity_action
     ON trajectories(tenant, entity_type, action);";
 
+pub const CREATE_TENANT_CONSTRAINTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS tenant_constraints (
+    tenant TEXT NOT NULL PRIMARY KEY,
+    cross_invariants_toml TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +88,6 @@ mod tests {
         assert!(CREATE_TRAJECTORIES_TABLE.contains("IF NOT EXISTS"));
         assert!(CREATE_TRAJECTORIES_SUCCESS_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_TRAJECTORIES_ENTITY_ACTION_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_TENANT_CONSTRAINTS_TABLE.contains("IF NOT EXISTS"));
     }
 }

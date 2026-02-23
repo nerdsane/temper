@@ -112,6 +112,15 @@ CREATE TABLE IF NOT EXISTS design_time_events (
 pub const CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_dt_events_tenant ON design_time_events (tenant, created_at DESC);";
 
+/// CREATE TABLE statement for tenant-level cross-entity constraint definitions.
+pub const CREATE_TENANT_CONSTRAINTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS tenant_constraints (
+    tenant                TEXT         NOT NULL PRIMARY KEY,
+    cross_invariants_toml TEXT         NOT NULL,
+    version               INT          NOT NULL DEFAULT 1,
+    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT now()
+);";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +242,10 @@ mod tests {
         assert!(
             CREATE_DESIGN_TIME_EVENTS_TABLE.contains("IF NOT EXISTS"),
             "design_time_events schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_TENANT_CONSTRAINTS_TABLE.contains("IF NOT EXISTS"),
+            "tenant_constraints schema should use IF NOT EXISTS"
         );
     }
 

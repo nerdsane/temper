@@ -14,6 +14,10 @@ use temper_odata::query::parse_query_options;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
+use crate::constraint_engine::{
+    ConstraintViolation, post_write_invariant_checks, pre_delete_relation_checks,
+    pre_upsert_relation_checks,
+};
 use crate::query_eval::{apply_query_options, expand_entity, select_fields};
 use crate::response::{ODataResponse, ODataXmlResponse, odata_error};
 use crate::state::{ServerState, VerificationGateError};
@@ -109,6 +113,29 @@ fn verification_gate_response(err: VerificationGateError) -> axum::response::Res
         }
     });
     (StatusCode::LOCKED, axum::Json(body)).into_response()
+}
+
+fn constraint_violation_response(err: ConstraintViolation) -> axum::response::Response {
+    let violation_type = match err.violation_type {
+        crate::constraint_engine::ConstraintViolationType::RelationIntegrity => {
+            "relation_integrity"
+        }
+        crate::constraint_engine::ConstraintViolationType::CrossInvariant => "cross_invariant",
+    };
+    let body = serde_json::json!({
+        "error": {
+            "code": "ConstraintViolation",
+            "message": err.message,
+            "details": {
+                "type": violation_type,
+                "invariant": err.invariant,
+                "entity_type": err.entity_type,
+                "entity_id": err.entity_id,
+                "operation": err.operation,
+            }
+        }
+    });
+    (StatusCode::CONFLICT, axum::Json(body)).into_response()
 }
 
 /// Handle GET requests.
@@ -310,6 +337,31 @@ pub async fn handle_odata_post(
 
             // Pass body fields as initial_fields for the entity actor
             let initial_fields = body_json.clone();
+            if let Err(v) = pre_upsert_relation_checks(
+                &state,
+                &tenant,
+                &entity_type,
+                &entity_id,
+                "create",
+                &initial_fields,
+            )
+            .await
+            {
+                return constraint_violation_response(v);
+            }
+            if let Err(v) = post_write_invariant_checks(
+                &state,
+                &tenant,
+                &entity_type,
+                &entity_id,
+                "Create",
+                &initial_fields,
+                "create",
+            )
+            .await
+            {
+                return constraint_violation_response(v);
+            }
 
             match state
                 .get_or_create_tenant_entity(&tenant, &entity_type, &entity_id, initial_fields)
@@ -407,6 +459,55 @@ pub async fn handle_odata_post(
                 http_span.end_with_timestamp(end_time);
                 return odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason)
                     .into_response();
+            }
+
+            let current_state = match state
+                .get_tenant_entity_state(&tenant, &entity_type, &key_str)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    http_span.set_status(Status::error(e.clone()));
+                    http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
+                    let end_time: std::time::SystemTime = sim_now().into();
+                    http_span.end_with_timestamp(end_time);
+                    return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &e)
+                        .into_response();
+                }
+            };
+            let current_fields = current_state.state.fields.clone();
+            if let Err(v) = pre_upsert_relation_checks(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                "bound_action",
+                &current_fields,
+            )
+            .await
+            {
+                http_span.set_status(Status::error(v.message.clone()));
+                http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
+                let end_time: std::time::SystemTime = sim_now().into();
+                http_span.end_with_timestamp(end_time);
+                return constraint_violation_response(v);
+            }
+            if let Err(v) = post_write_invariant_checks(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                &action,
+                &current_fields,
+                "bound_action",
+            )
+            .await
+            {
+                http_span.set_status(Status::error(v.message.clone()));
+                http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
+                let end_time: std::time::SystemTime = sim_now().into();
+                http_span.end_with_timestamp(end_time);
+                return constraint_violation_response(v);
             }
 
             let result = state
@@ -521,6 +622,51 @@ pub async fn handle_odata_patch(
                     .into_response();
                 }
             };
+            let current_state = match state
+                .get_tenant_entity_state(&tenant, &entity_type, &key_str)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &e)
+                        .into_response();
+                }
+            };
+            let mut prospective_fields = current_state.state.fields.clone();
+            if let (Some(dst), Some(src)) =
+                (prospective_fields.as_object_mut(), body_json.as_object())
+            {
+                for (k, v) in src {
+                    dst.insert(k.clone(), v.clone());
+                }
+            } else {
+                prospective_fields = body_json.clone();
+            }
+            if let Err(v) = pre_upsert_relation_checks(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                "patch",
+                &prospective_fields,
+            )
+            .await
+            {
+                return constraint_violation_response(v);
+            }
+            if let Err(v) = post_write_invariant_checks(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                "Patch",
+                &prospective_fields,
+                "patch",
+            )
+            .await
+            {
+                return constraint_violation_response(v);
+            }
 
             match state
                 .update_tenant_entity_fields(&tenant, &entity_type, &key_str, body_json, false)
@@ -614,6 +760,31 @@ pub async fn handle_odata_put(
                     .into_response();
                 }
             };
+            if let Err(v) = pre_upsert_relation_checks(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                "put",
+                &body_json,
+            )
+            .await
+            {
+                return constraint_violation_response(v);
+            }
+            if let Err(v) = post_write_invariant_checks(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                "Put",
+                &body_json,
+                "put",
+            )
+            .await
+            {
+                return constraint_violation_response(v);
+            }
 
             match state
                 .update_tenant_entity_fields(&tenant, &entity_type, &key_str, body_json, true)
@@ -693,6 +864,34 @@ pub async fn handle_odata_delete(
                     &format!("Entity '{set_name}' with key '{key_str}' not found"),
                 )
                 .into_response();
+            }
+            if let Err(v) =
+                pre_delete_relation_checks(&state, &tenant, &entity_type, &key_str, "delete").await
+            {
+                return constraint_violation_response(v);
+            }
+            let current_state = match state
+                .get_tenant_entity_state(&tenant, &entity_type, &key_str)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &e)
+                        .into_response();
+                }
+            };
+            if let Err(v) = post_write_invariant_checks(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                "Delete",
+                &current_state.state.fields,
+                "delete",
+            )
+            .await
+            {
+                return constraint_violation_response(v);
             }
 
             match state

@@ -4,6 +4,7 @@
 //! The entity actor uses JIT TransitionTables for state machine transitions,
 //! ensuring the same logic verified by DST runs in production.
 
+mod constraint_engine;
 mod dispatch;
 pub mod entity_actor;
 pub mod event_store;

@@ -9,6 +9,7 @@
 //! representation, which feeds the verification cascade and runtime.
 
 pub mod automaton;
+pub mod cross_invariant;
 pub mod csdl;
 pub mod model;
 
@@ -18,6 +19,11 @@ pub mod tlaplus;
 // Re-export primary public API at crate root.
 pub use automaton::{
     Automaton, LintFinding, LintSeverity, lint_automaton, parse_automaton, to_state_machine,
+};
+pub use cross_invariant::{
+    CrossInvariant, CrossInvariantLintFinding, CrossInvariantLintSeverity,
+    CrossInvariantParseError, CrossInvariantSpec, DeletePolicy, InvariantKind, RelationOverride,
+    lint_cross_invariants, parse_cross_invariants, parse_related_status_in_assert,
 };
 pub use csdl::{CsdlDocument, CsdlParseError, parse_csdl};
 pub use model::{SpecModel, SpecSource, build_spec_model, build_spec_model_mixed};

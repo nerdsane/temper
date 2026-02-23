@@ -12,6 +12,7 @@ use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::{self, Automaton, Integration};
+use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy, parse_cross_invariants};
 use temper_spec::csdl::CsdlDocument;
 
 use crate::reaction::ReactionRegistry;
@@ -67,6 +68,34 @@ pub struct VerificationDetail {
     pub actor_id: Option<String>,
 }
 
+/// A compiled relation edge from CSDL navigation metadata.
+#[derive(Debug, Clone)]
+pub struct RelationEdge {
+    /// Source entity type that owns the FK field.
+    pub from_entity: String,
+    /// Navigation property name on the source entity.
+    pub navigation_property: String,
+    /// Target entity type.
+    pub to_entity: String,
+    /// FK field on source entity (e.g. `OrderId`).
+    pub source_field: String,
+    /// Referenced key on target entity (usually `Id`).
+    pub target_field: String,
+    /// Whether the relationship allows null references.
+    pub nullable: bool,
+    /// Delete policy applied to this edge.
+    pub delete_policy: DeletePolicy,
+}
+
+/// Tenant-scoped relation graph compiled from CSDL.
+#[derive(Debug, Clone, Default)]
+pub struct RelationGraph {
+    /// Outgoing edges keyed by source entity type.
+    pub outgoing: BTreeMap<String, Vec<RelationEdge>>,
+    /// Incoming edges keyed by target entity type.
+    pub incoming: BTreeMap<String, Vec<RelationEdge>>,
+}
+
 /// A registered tenant with its specs and entity configuration.
 #[derive(Debug, Clone)]
 pub struct TenantConfig {
@@ -81,6 +110,12 @@ pub struct TenantConfig {
     /// Reaction rules for cross-entity coordination.
     #[allow(dead_code)]
     pub reactions: Vec<ReactionRule>,
+    /// Tenant relation graph compiled from CSDL.
+    pub relation_graph: RelationGraph,
+    /// Optional parsed cross-entity invariant spec.
+    pub cross_invariants: Option<CrossInvariantSpec>,
+    /// Raw `cross-invariants.toml` source, if provided.
+    pub cross_invariants_source: Option<String>,
     /// Per-entity verification status (design-time observation).
     pub verification: BTreeMap<String, VerificationStatus>,
 }
@@ -164,7 +199,37 @@ impl SpecRegistry {
         csdl_xml: String,
         ioa_sources: &[(&str, &str)],
     ) {
+        self.register_tenant_with_reactions_and_constraints(
+            tenant,
+            csdl,
+            csdl_xml,
+            ioa_sources,
+            Vec::new(),
+            None,
+        );
+    }
+
+    /// Register a tenant with CSDL, IOA specs, reaction rules, and optional
+    /// cross-entity invariant definitions.
+    pub fn register_tenant_with_reactions_and_constraints(
+        &mut self,
+        tenant: impl Into<TenantId>,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+        reactions: Vec<ReactionRule>,
+        cross_invariants_source: Option<String>,
+    ) {
         let tenant = tenant.into();
+        let relation_graph = build_relation_graph(&csdl, cross_invariants_source.as_deref());
+        let cross_invariants = cross_invariants_source
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| {
+                parse_cross_invariants(s).unwrap_or_else(|e| {
+                    panic!("failed to parse cross-invariants for tenant '{tenant}': {e}")
+                })
+            });
 
         // Build entity set map from CSDL
         let mut entity_set_map = BTreeMap::new();
@@ -186,6 +251,10 @@ impl SpecRegistry {
             existing_config.csdl = Arc::new(csdl);
             existing_config.csdl_xml = Arc::new(csdl_xml);
             existing_config.entity_set_map = entity_set_map;
+            existing_config.reactions = reactions;
+            existing_config.relation_graph = relation_graph;
+            existing_config.cross_invariants = cross_invariants;
+            existing_config.cross_invariants_source = cross_invariants_source;
 
             for (entity_type, ioa_source) in ioa_sources {
                 let automaton = automaton::parse_automaton(ioa_source)
@@ -263,7 +332,10 @@ impl SpecRegistry {
                     csdl_xml: Arc::new(csdl_xml),
                     entity_set_map,
                     entities,
-                    reactions: Vec::new(),
+                    reactions,
+                    relation_graph,
+                    cross_invariants,
+                    cross_invariants_source,
                     verification,
                 },
             );
@@ -279,11 +351,14 @@ impl SpecRegistry {
         ioa_sources: &[(&str, &str)],
         reactions: Vec<ReactionRule>,
     ) {
-        let tenant_id: TenantId = tenant.into();
-        self.register_tenant(tenant_id.clone(), csdl, csdl_xml, ioa_sources);
-        if let Some(config) = self.tenants.get_mut(&tenant_id) {
-            config.reactions = reactions;
-        }
+        self.register_tenant_with_reactions_and_constraints(
+            tenant,
+            csdl,
+            csdl_xml,
+            ioa_sources,
+            reactions,
+            None,
+        );
     }
 
     /// Build a [`ReactionRegistry`] from all tenants' reaction rules.
@@ -393,6 +468,63 @@ impl SpecRegistry {
     ) -> Option<&BTreeMap<String, VerificationStatus>> {
         self.tenants.get(tenant).map(|tc| &tc.verification)
     }
+}
+
+fn build_relation_graph(
+    csdl: &CsdlDocument,
+    cross_invariants_source: Option<&str>,
+) -> RelationGraph {
+    let mut overrides = BTreeMap::<(String, String), DeletePolicy>::new();
+    let default_policy = cross_invariants_source
+        .and_then(|src| parse_cross_invariants(src).ok())
+        .map(|s| {
+            for ov in s.relation_overrides {
+                overrides.insert((ov.from_entity, ov.navigation_property), ov.delete_policy);
+            }
+            s.default_delete_policy
+        })
+        .unwrap_or(DeletePolicy::Restrict);
+
+    let mut graph = RelationGraph::default();
+    for schema in &csdl.schemas {
+        for et in &schema.entity_types {
+            for nav in &et.navigation_properties {
+                let target = nav_target_entity(&nav.type_name);
+                for rc in &nav.referential_constraints {
+                    let delete_policy = overrides
+                        .get(&(et.name.clone(), nav.name.clone()))
+                        .copied()
+                        .unwrap_or(default_policy);
+                    let edge = RelationEdge {
+                        from_entity: et.name.clone(),
+                        navigation_property: nav.name.clone(),
+                        to_entity: target.clone(),
+                        source_field: rc.property.clone(),
+                        target_field: rc.referenced_property.clone(),
+                        nullable: nav.nullable,
+                        delete_policy,
+                    };
+                    graph
+                        .outgoing
+                        .entry(et.name.clone())
+                        .or_default()
+                        .push(edge.clone());
+                    graph.incoming.entry(target.clone()).or_default().push(edge);
+                }
+            }
+        }
+    }
+    graph
+}
+
+fn nav_target_entity(type_name: &str) -> String {
+    let raw = type_name.trim();
+    let inner = if raw.starts_with("Collection(") && raw.ends_with(')') {
+        &raw[11..raw.len() - 1]
+    } else {
+        raw
+    };
+    inner.rsplit('.').next().unwrap_or(inner).to_string()
 }
 
 #[cfg(test)]

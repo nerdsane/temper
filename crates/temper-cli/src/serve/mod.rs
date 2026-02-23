@@ -20,12 +20,16 @@ use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
 use temper_server::event_store::ServerEventStore;
+use temper_server::reaction::registry::parse_reactions;
 use temper_server::registry::{
     EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
 };
 use temper_server::state::DesignTimeEvent;
 use temper_server::webhooks::WebhookDispatcher;
 use temper_spec::automaton::{LintSeverity, lint_automaton, parse_automaton};
+use temper_spec::cross_invariant::{
+    CrossInvariantLintSeverity, lint_cross_invariants, parse_cross_invariants,
+};
 use temper_spec::csdl::{CsdlDocument, parse_csdl};
 use temper_store_postgres::PostgresEventStore;
 use temper_store_redis::RedisEventStore;
@@ -38,6 +42,7 @@ use crate::StorageBackend;
 struct LoadedTenantSpecs {
     csdl_xml: String,
     ioa_sources: HashMap<String, String>,
+    cross_invariants_toml: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -52,6 +57,12 @@ struct PersistedSpecRow {
     levels_total: Option<i32>,
     verification_result: Option<serde_json::Value>,
     updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PersistedTenantConstraintRow {
+    tenant: String,
+    cross_invariants_toml: String,
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +212,9 @@ pub async fn run(
         "  Auto-reloaded {auto_reloaded} specs entries from {}",
         specs_registry_path.display()
     );
+
+    // Build reaction dispatcher from tenant reaction specs.
+    state.server.rebuild_reaction_dispatcher();
 
     // Load webhooks.toml from each app directory and build a merged dispatcher.
     {
@@ -423,6 +437,8 @@ fn load_into_registry(
 
     // Read IOA TOML specs
     let ioa_sources = read_ioa_sources(specs_path)?;
+    let reactions = read_reactions(specs_path)?;
+    let cross_invariants_toml = read_cross_invariants_toml(specs_path)?;
 
     let lint_findings = lint_tenant_specs(&csdl, &ioa_sources)?;
     let mut lint_errors = Vec::new();
@@ -438,6 +454,28 @@ fn load_into_registry(
             ),
         }
     }
+
+    if let Some(source) = cross_invariants_toml.as_deref() {
+        let parsed = parse_cross_invariants(source).with_context(|| {
+            format!(
+                "Failed to parse cross-invariants.toml for tenant '{}'",
+                tenant
+            )
+        })?;
+        let xinv_findings = lint_cross_invariants(&parsed);
+        for finding in xinv_findings {
+            match finding.severity {
+                CrossInvariantLintSeverity::Error => lint_errors.push(format!(
+                    "    [xinv:error:{}] {}",
+                    finding.code, finding.message
+                )),
+                CrossInvariantLintSeverity::Warning => {
+                    eprintln!("    [xinv:warning:{}] {}", finding.code, finding.message)
+                }
+            }
+        }
+    }
+
     if !lint_errors.is_empty() {
         anyhow::bail!(
             "Semantic lint failed for tenant '{}':\n{}",
@@ -455,7 +493,14 @@ fn load_into_registry(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    registry.register_tenant(tenant, csdl, csdl_xml, &ioa_pairs);
+    registry.register_tenant_with_reactions_and_constraints(
+        tenant,
+        csdl,
+        csdl_xml,
+        &ioa_pairs,
+        reactions,
+        cross_invariants_toml.clone(),
+    );
 
     Ok(LoadedTenantSpecs {
         csdl_xml: registry
@@ -463,6 +508,7 @@ fn load_into_registry(
             .map(|cfg| cfg.csdl_xml.as_ref().clone())
             .unwrap_or_default(),
         ioa_sources,
+        cross_invariants_toml,
     })
 }
 
@@ -494,6 +540,27 @@ async fn upsert_loaded_specs_to_postgres(
         .execute(pool)
         .await
         .with_context(|| format!("Failed to persist spec {tenant}/{entity_type}"))?;
+    }
+    if let Some(source) = loaded.cross_invariants_toml.as_deref() {
+        sqlx::query(
+            "INSERT INTO tenant_constraints (tenant, cross_invariants_toml, version, updated_at) \
+             VALUES ($1, $2, 1, now()) \
+             ON CONFLICT (tenant) DO UPDATE SET \
+                 cross_invariants_toml = EXCLUDED.cross_invariants_toml, \
+                 version = tenant_constraints.version + 1, \
+                 updated_at = now()",
+        )
+        .bind(tenant)
+        .bind(source)
+        .execute(pool)
+        .await
+        .with_context(|| format!("Failed to persist tenant constraints for {tenant}"))?;
+    } else {
+        sqlx::query("DELETE FROM tenant_constraints WHERE tenant = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .with_context(|| format!("Failed to clear tenant constraints for {tenant}"))?;
     }
     Ok(())
 }
@@ -560,6 +627,20 @@ async fn load_registry_from_postgres(
     .await
     .context("Failed to read specs from Postgres")?;
 
+    let constraints_rows: Vec<PersistedTenantConstraintRow> = sqlx::query_as(
+        "SELECT tenant, cross_invariants_toml \
+         FROM tenant_constraints \
+         ORDER BY tenant",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to read tenant constraints from Postgres")?;
+
+    let mut constraints_by_tenant: BTreeMap<String, String> = constraints_rows
+        .into_iter()
+        .map(|row| (row.tenant, row.cross_invariants_toml))
+        .collect();
+
     if rows.is_empty() {
         return Ok(0);
     }
@@ -591,7 +672,15 @@ async fn load_registry_from_postgres(
             .map(|(entity_type, ioa)| (entity_type.as_str(), ioa.as_str()))
             .collect();
 
-        registry.register_tenant(tenant.as_str(), csdl, csdl_xml, &ioa_pairs);
+        let cross_invariants_toml = constraints_by_tenant.remove(&tenant);
+        registry.register_tenant_with_reactions_and_constraints(
+            tenant.as_str(),
+            csdl,
+            csdl_xml,
+            &ioa_pairs,
+            Vec::new(),
+            cross_invariants_toml,
+        );
         let tenant_id = TenantId::new(&tenant);
         for row in &tenant_rows {
             registry.set_verification_status(
@@ -896,6 +985,30 @@ fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
     Ok(sources)
 }
 
+/// Read optional `reactions.toml` and parse it into reaction rules.
+fn read_reactions(specs_dir: &Path) -> Result<Vec<temper_server::reaction::ReactionRule>> {
+    let reactions_path = specs_dir.join("reactions.toml");
+    if !reactions_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let source = fs::read_to_string(&reactions_path)
+        .with_context(|| format!("Failed to read {}", reactions_path.display()))?;
+    parse_reactions(&source)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {e}", reactions_path.display()))
+}
+
+/// Read optional `cross-invariants.toml` source from a specs directory.
+fn read_cross_invariants_toml(specs_dir: &Path) -> Result<Option<String>> {
+    let path = specs_dir.join("cross-invariants.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let source =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    Ok(Some(source))
+}
+
 /// Convert a string to PascalCase.
 fn to_pascal_case(s: &str) -> String {
     s.split(['_', '-'])
@@ -921,6 +1034,15 @@ async fn load_registry_from_turso(
         .load_specs()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to read specs from Turso: {e}"))?;
+    let constraints_rows = turso
+        .load_tenant_constraints()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read tenant constraints from Turso: {e}"))?;
+
+    let mut constraints_by_tenant: BTreeMap<String, String> = constraints_rows
+        .into_iter()
+        .map(|row| (row.tenant, row.cross_invariants_toml))
+        .collect();
 
     if rows.is_empty() {
         return Ok(0);
@@ -953,7 +1075,15 @@ async fn load_registry_from_turso(
             .map(|(entity_type, ioa)| (entity_type.as_str(), ioa.as_str()))
             .collect();
 
-        registry.register_tenant(tenant.as_str(), csdl, csdl_xml, &ioa_pairs);
+        let cross_invariants_toml = constraints_by_tenant.remove(&tenant);
+        registry.register_tenant_with_reactions_and_constraints(
+            tenant.as_str(),
+            csdl,
+            csdl_xml,
+            &ioa_pairs,
+            Vec::new(),
+            cross_invariants_toml,
+        );
         let tenant_id = TenantId::new(&tenant);
         for row in &tenant_rows {
             registry.set_verification_status(
@@ -1030,6 +1160,18 @@ async fn upsert_loaded_specs_to_turso(
             .map_err(|e| {
                 anyhow::anyhow!("Failed to persist spec {tenant}/{entity_type} in Turso: {e}")
             })?;
+    }
+    if let Some(source) = loaded.cross_invariants_toml.as_deref() {
+        turso
+            .upsert_tenant_constraints(tenant, source)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to persist tenant constraints for {tenant} in Turso: {e}")
+            })?;
+    } else {
+        turso.delete_tenant_constraints(tenant).await.map_err(|e| {
+            anyhow::anyhow!("Failed to clear tenant constraints for {tenant} in Turso: {e}")
+        })?;
     }
     Ok(())
 }

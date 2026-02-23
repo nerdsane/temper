@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::sim_now;
 use temper_spec::automaton::{LintSeverity, lint_automaton};
+use temper_spec::cross_invariant::{
+    CrossInvariantLintSeverity, lint_cross_invariants, parse_cross_invariants,
+};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
@@ -26,6 +29,7 @@ use temper_evolution::{
 
 use crate::dispatch::extract_tenant;
 use crate::entity_actor::{EntityEvent, EntityMsg, EntityResponse};
+use crate::reaction::registry::parse_reactions;
 use crate::registry::VerificationStatus;
 use crate::sentinel;
 use crate::state::{ServerState, TrajectoryEntry};
@@ -298,6 +302,9 @@ struct LoadInlineRequest {
     tenant: String,
     /// Map of filename → content. Must include `model.csdl.xml` and at least one `*.ioa.toml`.
     specs: std::collections::BTreeMap<String, String>,
+    /// Optional inline `cross-invariants.toml` source.
+    #[serde(default)]
+    cross_invariants_toml: Option<String>,
 }
 
 /// Convert a string to PascalCase (e.g. "my_entity" -> "MyEntity").
@@ -417,6 +424,24 @@ fn lint_ndjson_line(finding: &EntityLintFinding) -> serde_json::Value {
     })
 }
 
+fn cross_lint_ndjson_line(
+    finding: &temper_spec::cross_invariant::CrossInvariantLintFinding,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": match finding.severity {
+            CrossInvariantLintSeverity::Error => "cross_invariant_lint_error",
+            CrossInvariantLintSeverity::Warning => "cross_invariant_lint_warning",
+        },
+        "severity": match finding.severity {
+            CrossInvariantLintSeverity::Error => "error",
+            CrossInvariantLintSeverity::Warning => "warning",
+        },
+        "invariant": &finding.invariant,
+        "code": &finding.code,
+        "message": &finding.message,
+    })
+}
+
 fn build_ndjson_response(
     status: StatusCode,
     lines: Vec<serde_json::Value>,
@@ -529,15 +554,73 @@ async fn handle_load_dir(
         ));
     }
 
+    // Optional reactions.toml.
+    let reactions = {
+        let path = specs_path.join("reactions.toml");
+        if path.exists() {
+            let source = std::fs::read_to_string(&path).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read {}: {e}", path.display()),
+                )
+            })?;
+            parse_reactions(&source).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to parse {}: {e}", path.display()),
+                )
+            })?
+        } else {
+            Vec::new()
+        }
+    };
+
+    // Optional cross-invariants.toml.
+    let cross_invariants_toml = {
+        let path = specs_path.join("cross-invariants.toml");
+        if path.exists() {
+            Some(std::fs::read_to_string(&path).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read {}: {e}", path.display()),
+                )
+            })?)
+        } else {
+            None
+        }
+    };
+
     let lint_findings = lint_loaded_specs(&csdl, &ioa_sources)?;
-    let lint_errors = lint_findings
+    let cross_lint_findings = if let Some(source) = cross_invariants_toml.as_deref() {
+        let spec = parse_cross_invariants(source).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to parse cross-invariants.toml: {e}"),
+            )
+        })?;
+        lint_cross_invariants(&spec)
+    } else {
+        Vec::new()
+    };
+
+    let ioa_lint_errors = lint_findings
         .iter()
         .filter(|f| matches!(f.severity, LintSeverity::Error))
         .count();
-    let lint_warnings = lint_findings
+    let ioa_lint_warnings = lint_findings
         .iter()
         .filter(|f| matches!(f.severity, LintSeverity::Warning))
         .count();
+    let cross_lint_errors = cross_lint_findings
+        .iter()
+        .filter(|f| matches!(f.severity, CrossInvariantLintSeverity::Error))
+        .count();
+    let cross_lint_warnings = cross_lint_findings
+        .iter()
+        .filter(|f| matches!(f.severity, CrossInvariantLintSeverity::Warning))
+        .count();
+    let lint_errors = ioa_lint_errors + cross_lint_errors;
+    let lint_warnings = ioa_lint_warnings + cross_lint_warnings;
 
     // Register names once so both failure and success paths can report them.
     let entity_names: Vec<String> = ioa_sources.keys().cloned().collect();
@@ -550,12 +633,17 @@ async fn handle_load_dir(
             "entities": &entity_names,
         })];
         lines.extend(lint_findings.iter().map(lint_ndjson_line));
+        lines.extend(cross_lint_findings.iter().map(cross_lint_ndjson_line));
         lines.push(serde_json::json!({
             "type": "summary",
             "tenant": &body.tenant,
             "all_passed": false,
             "lint_errors": lint_errors,
             "lint_warnings": lint_warnings,
+            "ioa_lint_errors": ioa_lint_errors,
+            "ioa_lint_warnings": ioa_lint_warnings,
+            "cross_lint_errors": cross_lint_errors,
+            "cross_lint_warnings": cross_lint_warnings,
         }));
         return build_ndjson_response(StatusCode::BAD_REQUEST, lines);
     }
@@ -568,6 +656,10 @@ async fn handle_load_dir(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
+    state
+        .upsert_tenant_constraints(&body.tenant, cross_invariants_toml.as_deref())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     // Register into shared registry after persistence succeeds.
     let ioa_pairs: Vec<(&str, &str)> = ioa_sources
@@ -577,8 +669,16 @@ async fn handle_load_dir(
 
     {
         let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
-        registry.register_tenant(body.tenant.as_str(), csdl, csdl_xml, &ioa_pairs);
+        registry.register_tenant_with_reactions_and_constraints(
+            body.tenant.as_str(),
+            csdl,
+            csdl_xml,
+            &ioa_pairs,
+            reactions,
+            cross_invariants_toml.clone(),
+        );
     }
+    state.rebuild_reaction_dispatcher();
 
     if !state.data_dir.as_os_str().is_empty() {
         let registry_path = state.data_dir.join("specs-registry.json");
@@ -613,6 +713,10 @@ async fn handle_load_dir(
         .into_iter()
         .filter(|f| matches!(f.severity, LintSeverity::Warning))
         .collect();
+    let cross_lint_warnings_for_stream: Vec<_> = cross_lint_findings
+        .into_iter()
+        .filter(|f| matches!(f.severity, CrossInvariantLintSeverity::Warning))
+        .collect();
 
     tokio::spawn(async move {
         // determinism-ok: HTTP handler streams verification results inline
@@ -632,6 +736,13 @@ async fn handle_load_dir(
         for finding in &lint_warnings_for_stream {
             let _ = tx
                 .send(Ok(serde_json::to_string(&lint_ndjson_line(finding))
+                    .unwrap() // ci-ok: infallible serialization
+                    + "\n"))
+                .await;
+        }
+        for finding in &cross_lint_warnings_for_stream {
+            let _ = tx
+                .send(Ok(serde_json::to_string(&cross_lint_ndjson_line(finding))
                     .unwrap() // ci-ok: infallible serialization
                     + "\n"))
                 .await;
@@ -1052,8 +1163,9 @@ async fn handle_load_inline(
     State(state): State<ServerState>,
     Json(body): Json<LoadInlineRequest>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
+    let tenant = body.tenant.clone();
     // Write specs to a temp directory
-    let tmp_dir = std::env::temp_dir().join(format!("temper-inline-{}", body.tenant)); // determinism-ok: HTTP handler writes user specs to temp dir for loading
+    let tmp_dir = std::env::temp_dir().join(format!("temper-inline-{}", tenant)); // determinism-ok: HTTP handler writes user specs to temp dir for loading
     let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans previous temp dir
     std::fs::create_dir_all(&tmp_dir).map_err(|e| {
         // determinism-ok: HTTP handler creates temp dir for inline specs
@@ -1074,9 +1186,18 @@ async fn handle_load_inline(
         })?;
     }
 
+    if let Some(source) = body.cross_invariants_toml.as_deref() {
+        std::fs::write(tmp_dir.join("cross-invariants.toml"), source).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to write cross-invariants.toml: {e}"),
+            )
+        })?;
+    }
+
     // Delegate to load-dir logic
     let dir_request = LoadDirRequest {
-        tenant: body.tenant,
+        tenant,
         specs_dir: tmp_dir.to_string_lossy().to_string(),
     };
     handle_load_dir(State(state), Json(dir_request)).await
@@ -2045,6 +2166,8 @@ async fn handle_health(State(state): State<ServerState>) -> Json<serde_json::Val
         "transitions_total": transitions_total,
         "errors_total": errors_total,
         "event_store": event_store_type,
+        "cross_invariant_enforce": state.cross_invariant_enforce,
+        "cross_invariant_eventual_enforce": state.cross_invariant_eventual_enforce,
     }))
 }
 
@@ -2106,6 +2229,84 @@ async fn handle_metrics(
             }
         }
     }
+
+    // -- temper_cross_invariant_checks_total --
+    lines.push(
+        "# HELP temper_cross_invariant_checks_total Total cross-invariant checks.".to_string(),
+    );
+    lines.push("# TYPE temper_cross_invariant_checks_total counter".to_string());
+    if let Ok(map) = state.metrics.cross_invariant_checks.read() {
+        for (key, count) in map.iter() {
+            let parts: Vec<&str> = key.splitn(3, ':').collect();
+            if parts.len() == 3 {
+                lines.push(format!(
+                    "temper_cross_invariant_checks_total{{tenant=\"{}\",entity_type=\"{}\",result=\"{}\"}} {}",
+                    parts[0], parts[1], parts[2], count
+                ));
+            }
+        }
+    }
+
+    // -- temper_cross_invariant_violations_total --
+    lines.push(
+        "# HELP temper_cross_invariant_violations_total Total cross-invariant violations."
+            .to_string(),
+    );
+    lines.push("# TYPE temper_cross_invariant_violations_total counter".to_string());
+    if let Ok(map) = state.metrics.cross_invariant_violations.read() {
+        for (key, count) in map.iter() {
+            let parts: Vec<&str> = key.splitn(3, ':').collect();
+            if parts.len() == 3 {
+                lines.push(format!(
+                    "temper_cross_invariant_violations_total{{tenant=\"{}\",invariant=\"{}\",kind=\"{}\"}} {}",
+                    parts[0], parts[1], parts[2], count
+                ));
+            }
+        }
+    }
+
+    // -- temper_relation_integrity_violations_total --
+    lines.push(
+        "# HELP temper_relation_integrity_violations_total Total relation integrity violations."
+            .to_string(),
+    );
+    lines.push("# TYPE temper_relation_integrity_violations_total counter".to_string());
+    if let Ok(map) = state.metrics.relation_integrity_violations.read() {
+        for (key, count) in map.iter() {
+            let parts: Vec<&str> = key.splitn(3, ':').collect();
+            if parts.len() == 3 {
+                lines.push(format!(
+                    "temper_relation_integrity_violations_total{{tenant=\"{}\",entity_type=\"{}\",operation=\"{}\"}} {}",
+                    parts[0], parts[1], parts[2], count
+                ));
+            }
+        }
+    }
+
+    // -- temper_cross_invariant_eval_duration_ms_bucket --
+    lines.push("# HELP temper_cross_invariant_eval_duration_ms_bucket Cross-invariant evaluation latency histogram buckets.".to_string());
+    lines.push("# TYPE temper_cross_invariant_eval_duration_ms_bucket histogram".to_string());
+    if let Ok(map) = state.metrics.cross_invariant_eval_duration_ms_bucket.read() {
+        for (bucket, count) in map.iter() {
+            lines.push(format!(
+                "temper_cross_invariant_eval_duration_ms_bucket{{le=\"{}\"}} {}",
+                bucket, count
+            ));
+        }
+    }
+
+    // -- temper_cross_invariant_bypass_total --
+    lines.push(
+        "# HELP temper_cross_invariant_bypass_total Total cross-invariant bypass uses.".to_string(),
+    );
+    lines.push("# TYPE temper_cross_invariant_bypass_total counter".to_string());
+    lines.push(format!(
+        "temper_cross_invariant_bypass_total {}",
+        state
+            .metrics
+            .cross_invariant_bypass_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
 
     lines.push(String::new()); // trailing newline
     let body = lines.join("\n");

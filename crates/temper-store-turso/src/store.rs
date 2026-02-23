@@ -95,6 +95,9 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_TRAJECTORIES_ENTITY_ACTION_INDEX, ())
             .await
             .map_err(storage_error)?;
+        conn.execute(schema::CREATE_TENANT_CONSTRAINTS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
 
         Ok(())
     }
@@ -266,6 +269,66 @@ impl TursoEventStore {
                 to_status: row.get::<Option<String>>(6).map_err(storage_error)?,
                 error: row.get::<Option<String>>(7).map_err(storage_error)?,
                 created_at: row.get::<String>(8).map_err(storage_error)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Upsert tenant-level cross-entity constraint definitions.
+    pub async fn upsert_tenant_constraints(
+        &self,
+        tenant: &str,
+        cross_invariants_toml: &str,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.configured_connection().await?;
+        conn.execute(
+            "INSERT INTO tenant_constraints (tenant, cross_invariants_toml, version, updated_at)
+             VALUES (?1, ?2, 1, datetime('now'))
+             ON CONFLICT (tenant) DO UPDATE SET
+                 cross_invariants_toml = excluded.cross_invariants_toml,
+                 version = tenant_constraints.version + 1,
+                 updated_at = datetime('now')",
+            params![tenant, cross_invariants_toml],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Delete tenant-level cross-entity constraint definitions.
+    pub async fn delete_tenant_constraints(&self, tenant: &str) -> Result<(), PersistenceError> {
+        let conn = self.configured_connection().await?;
+        conn.execute(
+            "DELETE FROM tenant_constraints WHERE tenant = ?1",
+            params![tenant],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Load all tenant-level cross-entity constraint definitions.
+    pub async fn load_tenant_constraints(
+        &self,
+    ) -> Result<Vec<TursoTenantConstraintRow>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, cross_invariants_toml, version, updated_at \
+                 FROM tenant_constraints \
+                 ORDER BY tenant",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(TursoTenantConstraintRow {
+                tenant: row.get::<String>(0).map_err(storage_error)?,
+                cross_invariants_toml: row.get::<String>(1).map_err(storage_error)?,
+                version: row.get::<i64>(2).map_err(storage_error)? as i32,
+                updated_at: row.get::<String>(3).map_err(storage_error)?,
             });
         }
         Ok(out)
@@ -578,6 +641,19 @@ pub struct TursoTrajectoryRow {
     pub error: Option<String>,
     /// ISO-8601 timestamp.
     pub created_at: String,
+}
+
+/// Row returned by [`TursoEventStore::load_tenant_constraints()`].
+#[derive(Debug, Clone)]
+pub struct TursoTenantConstraintRow {
+    /// Tenant name.
+    pub tenant: String,
+    /// Raw `cross-invariants.toml` source.
+    pub cross_invariants_toml: String,
+    /// Monotonic version counter.
+    pub version: i32,
+    /// ISO-8601 updated_at timestamp.
+    pub updated_at: String,
 }
 
 #[cfg(test)]

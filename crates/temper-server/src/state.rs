@@ -63,6 +63,16 @@ pub struct MetricsCollector {
     pub transitions_total: AtomicU64,
     /// Total failed transitions (guard not met, unknown action).
     pub errors_total: AtomicU64,
+    /// Cross-invariant check outcomes: key = "tenant:entity_type:result".
+    pub cross_invariant_checks: RwLock<BTreeMap<String, u64>>,
+    /// Cross-invariant violations: key = "tenant:invariant:kind".
+    pub cross_invariant_violations: RwLock<BTreeMap<String, u64>>,
+    /// Relation integrity violations: key = "tenant:entity_type:operation".
+    pub relation_integrity_violations: RwLock<BTreeMap<String, u64>>,
+    /// Cross-invariant evaluation latency histogram buckets (ms).
+    pub cross_invariant_eval_duration_ms_bucket: RwLock<BTreeMap<String, u64>>,
+    /// Enforcement bypass count.
+    pub cross_invariant_bypass_total: AtomicU64,
 }
 
 impl Default for MetricsCollector {
@@ -78,6 +88,11 @@ impl MetricsCollector {
             transitions: RwLock::new(BTreeMap::new()),
             transitions_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
+            cross_invariant_checks: RwLock::new(BTreeMap::new()),
+            cross_invariant_violations: RwLock::new(BTreeMap::new()),
+            relation_integrity_violations: RwLock::new(BTreeMap::new()),
+            cross_invariant_eval_duration_ms_bucket: RwLock::new(BTreeMap::new()),
+            cross_invariant_bypass_total: AtomicU64::new(0),
         }
     }
 
@@ -96,12 +111,71 @@ impl MetricsCollector {
             self.errors_total.fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    /// Record outcome of a cross-invariant check.
+    pub fn record_cross_invariant_check(&self, tenant: &str, entity_type: &str, result: &str) {
+        let key = format!("{tenant}:{entity_type}:{result}");
+        if let Ok(mut map) = self.cross_invariant_checks.write() {
+            *map.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    /// Record a cross-invariant violation.
+    pub fn record_cross_invariant_violation(&self, tenant: &str, invariant: &str, kind: &str) {
+        let key = format!("{tenant}:{invariant}:{kind}");
+        if let Ok(mut map) = self.cross_invariant_violations.write() {
+            *map.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    /// Record a relation integrity violation.
+    pub fn record_relation_integrity_violation(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        operation: &str,
+    ) {
+        let key = format!("{tenant}:{entity_type}:{operation}");
+        if let Ok(mut map) = self.relation_integrity_violations.write() {
+            *map.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    /// Record cross-invariant evaluation latency into Prometheus-style buckets.
+    pub fn record_cross_eval_duration_ms(&self, duration_ms: u64) {
+        const BUCKETS: &[u64] = &[1, 2, 5, 10, 20, 50, 100, 250, 500, 1000, 2500, 5000];
+        let bucket = BUCKETS
+            .iter()
+            .find(|&&b| duration_ms <= b)
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "+Inf".to_string());
+        if let Ok(mut map) = self.cross_invariant_eval_duration_ms_bucket.write() {
+            *map.entry(bucket).or_insert(0) += 1;
+        }
+    }
+
+    /// Record enforcement bypass usage.
+    pub fn record_cross_bypass(&self) {
+        self.cross_invariant_bypass_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Maximum number of trajectory entries retained in the bounded log.
 const TRAJECTORY_LOG_CAPACITY: usize = 10_000;
 /// Maximum number of design-time events retained in memory.
 const DESIGN_TIME_LOG_CAPACITY: usize = 10_000;
+
+fn env_bool(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "0" | "false" | "off" | "no" => false,
+            "1" | "true" | "on" | "yes" => true,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
 
 /// A single trajectory entry recording the outcome of a dispatched action.
 ///
@@ -204,9 +278,15 @@ pub struct ServerState {
     /// Optional Postgres evolution record store (source of truth when configured).
     pub pg_record_store: Option<Arc<PostgresRecordStore>>,
     /// Optional reaction dispatcher for cross-entity coordination.
-    pub reaction_dispatcher: Option<Arc<ReactionDispatcher>>,
+    ///
+    /// Wrapped in `RwLock` so hot-loaded specs can refresh reaction rules at runtime.
+    pub reaction_dispatcher: Arc<RwLock<Option<Arc<ReactionDispatcher>>>>,
     /// Optional webhook dispatcher for external system notifications.
     pub webhook_dispatcher: Option<Arc<WebhookDispatcher>>,
+    /// Global cross-entity invariant enforcement toggle.
+    pub cross_invariant_enforce: bool,
+    /// Whether eventual invariants should block writes.
+    pub cross_invariant_eventual_enforce: bool,
     /// Broadcast channel for design-time events (spec loading, verification progress).
     pub design_time_tx: Arc<tokio::sync::broadcast::Sender<DesignTimeEvent>>,
     /// In-memory log of design-time events for workflow history (append-only, bounded).
@@ -255,8 +335,10 @@ impl ServerState {
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
-            reaction_dispatcher: None,
+            reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
+            cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
+            cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
             design_time_log: Arc::new(RwLock::new(Vec::new())),
             entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
@@ -340,8 +422,10 @@ impl ServerState {
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
-            reaction_dispatcher: None,
+            reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
+            cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
+            cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
             design_time_log: Arc::new(RwLock::new(Vec::new())),
             entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
@@ -349,14 +433,39 @@ impl ServerState {
     }
 
     /// Attach a reaction dispatcher for cross-entity coordination.
-    pub fn with_reaction_dispatcher(mut self, dispatcher: Arc<ReactionDispatcher>) -> Self {
-        self.reaction_dispatcher = Some(dispatcher);
+    pub fn with_reaction_dispatcher(self, dispatcher: Arc<ReactionDispatcher>) -> Self {
+        if let Ok(mut slot) = self.reaction_dispatcher.write() {
+            *slot = Some(dispatcher);
+        }
         self
+    }
+
+    /// Rebuild and install reaction dispatcher from the current spec registry.
+    pub fn rebuild_reaction_dispatcher(&self) {
+        let reaction_registry = {
+            let registry = self.registry.read().unwrap();
+            registry.build_reaction_registry()
+        };
+        let dispatcher = Arc::new(ReactionDispatcher::new(Arc::new(reaction_registry)));
+        if let Ok(mut slot) = self.reaction_dispatcher.write() {
+            *slot = Some(dispatcher);
+        }
     }
 
     /// Attach a webhook dispatcher for external system notifications.
     pub fn with_webhook_dispatcher(mut self, dispatcher: Arc<WebhookDispatcher>) -> Self {
         self.webhook_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Override cross-invariant enforcement mode.
+    pub fn with_cross_invariant_enforcement(
+        mut self,
+        enforce: bool,
+        eventual_enforce: bool,
+    ) -> Self {
+        self.cross_invariant_enforce = enforce;
+        self.cross_invariant_eventual_enforce = eventual_enforce;
         self
     }
 
@@ -413,6 +522,63 @@ impl ServerState {
                 .map_err(|e| {
                     format!("failed to upsert spec {tenant}/{entity_type} in turso: {e}")
                 })?;
+            return Ok(());
+        }
+
+        // Redis: not suited for relational metadata — silently skip.
+        Ok(())
+    }
+
+    /// Upsert tenant-level cross-invariant definitions.
+    pub async fn upsert_tenant_constraints(
+        &self,
+        tenant: &str,
+        cross_invariants_toml: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(store) = self.event_store.as_ref() else {
+            return Ok(());
+        };
+
+        // Postgres path.
+        if let Some(pool) = store.postgres_pool() {
+            if let Some(source) = cross_invariants_toml {
+                sqlx::query(
+                    "INSERT INTO tenant_constraints (tenant, cross_invariants_toml, version, updated_at) \
+                     VALUES ($1, $2, 1, now()) \
+                     ON CONFLICT (tenant) DO UPDATE SET \
+                        cross_invariants_toml = EXCLUDED.cross_invariants_toml, \
+                        version = tenant_constraints.version + 1, \
+                        updated_at = now()",
+                )
+                .bind(tenant)
+                .bind(source)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("failed to upsert tenant constraints for {tenant}: {e}"))?;
+            } else {
+                sqlx::query("DELETE FROM tenant_constraints WHERE tenant = $1")
+                    .bind(tenant)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| format!("failed to clear tenant constraints for {tenant}: {e}"))?;
+            }
+            return Ok(());
+        }
+
+        // Turso path.
+        if let Some(turso) = store.turso_store() {
+            if let Some(source) = cross_invariants_toml {
+                turso
+                    .upsert_tenant_constraints(tenant, source)
+                    .await
+                    .map_err(|e| {
+                        format!("failed to upsert tenant constraints for {tenant} in turso: {e}")
+                    })?;
+            } else {
+                turso.delete_tenant_constraints(tenant).await.map_err(|e| {
+                    format!("failed to clear tenant constraints for {tenant} in turso: {e}")
+                })?;
+            }
             return Ok(());
         }
 
@@ -830,7 +996,12 @@ impl ServerState {
 
         // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)
         if response.success {
-            if let Some(ref dispatcher) = self.reaction_dispatcher {
+            let dispatcher = self
+                .reaction_dispatcher
+                .read()
+                .ok()
+                .and_then(|slot| slot.clone());
+            if let Some(dispatcher) = dispatcher {
                 let fields = serde_json::to_value(&response.state.fields).unwrap_or_default();
                 dispatcher
                     .dispatch_reactions(
@@ -1096,6 +1267,57 @@ impl ServerState {
         index
             .get(&index_key)
             .is_some_and(|ids| ids.contains(entity_id))
+    }
+
+    /// Ensure an entity is present in memory by lazily hydrating from the
+    /// event store when needed.
+    pub async fn ensure_entity_loaded(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> bool {
+        if self.entity_exists(tenant, entity_type, entity_id) {
+            return true;
+        }
+
+        let Some(store) = self.event_store.as_ref() else {
+            return false;
+        };
+
+        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        match store.read_events(&persistence_id, 0).await {
+            Ok(events) if !events.is_empty() => {
+                // Best effort: if spec exists, spawn actor and populate index.
+                let _ = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// List entity IDs from in-memory index, lazily hydrating from the event
+    /// store if the index is cold.
+    pub async fn list_entity_ids_lazy(&self, tenant: &TenantId, entity_type: &str) -> Vec<String> {
+        let ids = self.list_entity_ids(tenant, entity_type);
+        if !ids.is_empty() {
+            return ids;
+        }
+
+        let Some(store) = self.event_store.as_ref() else {
+            return ids;
+        };
+
+        if let Ok(all_entities) = store.list_entity_ids(tenant.as_str()).await {
+            for (et, eid) in all_entities {
+                if et == entity_type {
+                    // Best effort: this also backfills entity_index.
+                    let _ = self.get_or_spawn_tenant_actor(tenant, &et, &eid);
+                }
+            }
+        }
+
+        self.list_entity_ids(tenant, entity_type)
     }
 
     /// Update Agent.Hint annotations based on trajectory analysis.
