@@ -30,14 +30,21 @@ cd ~/workspace/Development/temper
 
 ### Build
 
+Z3 must be on the linker path or the final link fails. Set these before building:
+
 ```bash
 . "$HOME/.cargo/env"
-export Z3_SYS_Z3_HEADER="/opt/homebrew/include/z3.h"          # macOS (brew)
+
+# macOS (brew) — required, no exceptions
+export Z3_SYS_Z3_HEADER="/opt/homebrew/include/z3.h"
 export BINDGEN_EXTRA_CLANG_ARGS="-I/opt/homebrew/include"
+export Z3_LIB_DIR="/opt/homebrew/lib"
 export LIBRARY_PATH="/opt/homebrew/lib"
 
 cargo build --release   # ~60s on Mac mini M2
 ```
+
+If you see `ld: library 'z3' not found` — you skipped the env vars. Set them and retry.
 
 ### Storage — Turso (local file, zero config)
 
@@ -69,9 +76,9 @@ No Postgres to manage. No Redis to manage. Just a file.
 ```bash
 cargo test  # 647 tests
 
-./target/release/temper serve --storage turso \
-  --app my-app=apps/my-app/specs --port 3001
+./target/release/temper serve --storage turso --port 3001
 # OData API at http://localhost:3001/tdata
+# (--app flag is optional: use it only to load specs at startup before first load-dir call)
 ```
 
 ---
@@ -183,13 +190,9 @@ If verification fails, the server won't start. Fix the spec first.
 
 ---
 
-## 2. Start or Join the Server
+## 2. Start the Server
 
-**Every session — two steps:**
-
-### Step 1: Ensure Temper is running
-
-Check first — only start if it's down:
+**One step, every session:**
 
 ```bash
 curl -sf http://localhost:3001/tdata -H "X-Tenant-Id: _" > /dev/null 2>&1 \
@@ -198,25 +201,27 @@ curl -sf http://localhost:3001/tdata -H "X-Tenant-Id: _" > /dev/null 2>&1 \
          > /tmp/temper.log 2>&1 & sleep 4 && echo "Temper started"; }
 ```
 
-Uses the default DB (`~/.local/share/temper/agents.db`). No env vars. Safe to run whether Temper is up or down.
+**That's it.** Temper auto-reloads your specs on startup — if you've called `load-dir` before, your entity types come back automatically. Your data was never gone (it's in the DB). No extra steps.
 
-### Step 2: Load your app specs
-
-After Temper is running, register your entity types:
-
-```bash
-curl -s -X POST http://localhost:3001/observe/specs/load-dir \
-  -H "Content-Type: application/json" \
-  -d '{"tenant": "your-app-name", "specs_dir": "$HOME/workspace/apps/your-app/specs"}'
-```
-
-Instant, non-destructive, doesn't affect other agents. **Your data is already in the DB** — this just restores the in-memory actor registration after a restart.
-
-Verify:
+Verify it's serving your app:
 ```bash
 curl -s http://localhost:3001/tdata -H "X-Tenant-Id: your-app-name" | \
   python3 -c "import sys,json; print([v['name'] for v in json.load(sys.stdin)['value']])"
 ```
+
+### First Time Only — Register Your App
+
+The first time you run (new machine, new app), register your specs once:
+
+```bash
+curl -s -X POST http://localhost:3001/observe/specs/load-dir \
+  -H "Content-Type: application/json" \
+  -d "{\"tenant\": \"your-app-name\", \"specs_dir\": \"$HOME/workspace/apps/your-app/specs\"}"
+```
+
+Temper persists this mapping to `~/.local/share/temper/specs-registry.json`. After that, every restart auto-loads — you never call this again unless you're adding a new app or changing your specs on disk.
+
+Re-calling `load-dir` is safe and **hot-swaps** specs — existing entities keep their current state, the new spec takes effect immediately. Use it to iterate on specs without losing data.
 
 ---
 
@@ -298,8 +303,8 @@ The default design system ships alongside this skill at `skills/temper/design-sy
 
 ```bash
 mkdir -p ~/workspace/apps/shared
-# TEMPER_DIR is wherever you cloned the repo
-cp $TEMPER_DIR/skills/temper/design-system.md ~/workspace/apps/shared/design-system.md
+cp ~/workspace/Development/temper/skills/temper/design-system.md \
+   ~/workspace/apps/shared/design-system.md
 ```
 
 The default aesthetic: violet/dark glass, Space Mono + Space Grotesk, highlight as primary design tool, gradient dividers. Every generated UI reads it for palette names, font rules, and component patterns so all apps feel cohesive across agents.
@@ -327,8 +332,13 @@ Minimal `serve.py` that serves the HTML and forwards `/tdata` to Temper:
 
 ```python
 #!/usr/bin/env python3
-"""Lightweight proxy: serves UI + forwards /tdata to Temper."""
-import http.server, urllib.request, urllib.error, json, os
+"""Lightweight proxy: serves UI + forwards /tdata to Temper.
+
+SSE-aware: EventSource connections (/tdata/$events) are streamed through
+chunk-by-chunk so real-time updates reach the browser. All other requests
+are buffered normally.
+"""
+import http.server, urllib.request, urllib.error, os
 from socketserver import ThreadingMixIn
 
 TEMPER = os.environ.get("TEMPER_URL", "http://localhost:3001")
@@ -363,12 +373,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
         try:
             with urllib.request.urlopen(req) as resp:
-                data = resp.read()
+                ct = resp.headers.get("Content-Type", "")
                 self.send_response(resp.status)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", ct)
                 self.send_header("Access-Control-Allow-Origin", "*")
+                if "text/event-stream" in ct:
+                    # SSE: must stream — never buffer. urlopen reads lazily per-chunk.
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
-                self.wfile.write(data)
+                if "text/event-stream" in ct:
+                    # Stream SSE lines as they arrive — flush after every write
+                    try:
+                        while chunk := resp.read(256):
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass  # client disconnected — normal SSE lifecycle
+                else:
+                    self.wfile.write(resp.read())
         except urllib.error.HTTPError as e:
             self.send_response(e.code)
             self.end_headers()
@@ -467,6 +490,12 @@ ln -s ~/workspace/Development/temper/plugins/openclaw-temper \
 
 Add to `~/.openclaw/openclaw.json`:
 
+```bash
+# Get your token and port first:
+jq -r '.gateway.token' ~/.openclaw/openclaw.json
+jq -r '.gateway.port'  ~/.openclaw/openclaw.json
+```
+
 ```json5
 {
   plugins: {
@@ -477,8 +506,8 @@ Add to `~/.openclaw/openclaw.json`:
         enabled: true,
         config: {
           url: "http://127.0.0.1:3001",
-          hooksToken: "YOUR_OPENCLAW_HOOKS_TOKEN",  // find in openclaw.json > gateway.token
-          hooksPort: 18789,                          // find in openclaw.json > gateway.port
+          hooksToken: "<gateway.token from above>",
+          hooksPort: 18789,   // or whatever gateway.port shows
           apps: {
             "my-app": {
               agent: "your-agent-id",   // e.g. "haku", "calcifer", "main"
@@ -646,17 +675,7 @@ Every agent builds their own app with their own specs and UI. One Temper server 
 
 **`seed.sh` is optional bootstrap** — useful for populating initial reference data (world names, config entries, etc.). Because Temper persists, you run it once, not on every restart. If you're reseeding every session, something else is wrong.
 
-**Hot-loading your app** — no restart needed. Any agent calls this once per session:
-
-```bash
-curl -s -X POST http://localhost:3001/observe/specs/load-dir \
-  -H "Content-Type: application/json" \
-  -d '{"tenant": "my-app", "specs_dir": "$HOME/workspace/apps/my-app/specs"}'
-```
-
-Temper streams NDJSON back. Last line has `"all_passed":true` if everything verified. Re-calling `load-dir` **hot-swaps** specs — existing entities keep running with the new spec immediately. Iterate freely without losing data.
-
-**One DB, all agents.** All agents share the default `~/.local/share/temper/agents.db`. Multi-tenancy isolates data by `X-Tenant-Id` at the row level — Haku's proposals never mix with Calcifer's posts. Override with `TURSO_URL` if your workspace uses a different path.
+**Updating your specs** — if you edit an `.ioa.toml` file, re-run `load-dir` to hot-swap it in. Existing entities keep their state; the new spec takes effect immediately. No restart, no data loss.
 
 ---
 
