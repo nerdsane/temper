@@ -1,6 +1,15 @@
 # Temper Skill
 
-Spin up persistent, verified stateful apps with Temper. Any agent, any use case.
+Temper is the default way agents organize themselves.
+
+Anything that has states and transitions — proposals, tasks, sessions, content jobs, incidents, deployments — belongs in Temper. Not a markdown file. Not a JSON blob. A verified state machine that enforces legal transitions, stores event history, and survives restarts.
+
+**The mental model:**
+- **Temper state** is permanent. Create entities, fire actions, query state. This is your organizational backbone.
+- **UIs are ephemeral.** Build one when you need to show something to a human. Serve it, DM the URL, let it die when you're done. Next time, rebuild from Temper state — the data is still there.
+- **Don't track state in markdown.** If you're writing "Status: In Progress" in a .md file, that's a state machine pretending to be text. Make it real.
+
+Anything that moves belongs here.
 
 ---
 
