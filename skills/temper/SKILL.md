@@ -183,35 +183,39 @@ If verification fails, the server won't start. Fix the spec first.
 
 ## 2. Start or Join the Server
 
-**Check if Temper is already running first:**
+**Every session — two steps, in order:**
+
+### Step 1: Ensure Temper is running
+
+Use the shared startup script. It's idempotent — safe to run whether Temper is up or down:
+
 ```bash
-curl -s http://localhost:3001/tdata -H "X-Tenant-Id: test" 2>/dev/null && echo "RUNNING" || echo "DOWN"
+bash ~/workspace/apps/start-temper.sh
 ```
 
-If it's running: **skip to hot-load** (see File Structure section). Your app loads in seconds without disturbing other agents.
+This script:
+- Does nothing if Temper is already running on `:3001`
+- Starts it with the correct DB (`agents.db`) if not
+- Never passes `--app` flags — app loading is each agent's responsibility (Step 2)
 
-If it's down — start it:
+**Do not start Temper manually with ad-hoc commands.** The script is the single source of truth for the DB path. If you start Temper yourself and get the path wrong, every other agent's data disappears.
+
+### Step 2: Hot-load your app specs
+
+After the script confirms Temper is running, load your entity types:
+
 ```bash
-TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db" \
-nohup /Users/openclaw/workspace/Development/temper/target/release/temper serve \
-  --storage turso \
-  --app my-app=/Users/openclaw/workspace/apps/my-app/specs \
-  --port 3001 > /tmp/temper.log 2>&1 &
-
-sleep 5 && grep "Listening\|Error" /tmp/temper.log | head -3
+curl -s -X POST http://localhost:3001/observe/specs/load-dir \
+  -H "Content-Type: application/json" \
+  -d '{"tenant": "your-app-name", "specs_dir": "/Users/openclaw/workspace/apps/your-app/specs"}'
 ```
 
-After restart, any agent whose app wasn't in the launch args should hot-load their specs to re-register (data persists in the db, only in-memory actor registration needs restoring).
+This is instant, non-destructive, and doesn't affect other agents. Data persists in the DB across restarts — only the in-memory actor registration needs restoring after a restart.
 
-**Running multiple apps** — just add `--app` flags:
+Verify your entity types loaded:
 ```bash
-TURSO_URL="file:/Users/openclaw/workspace/apps/agents.db" \
-nohup /Users/openclaw/workspace/Development/temper/target/release/temper serve \
-  --storage turso \
-  --app haku-ops=/Users/openclaw/workspace/apps/haku-ops/specs \
-  --app calcifer-content=/Users/openclaw/workspace/apps/calcifer-content/specs \
-  --app kiki-wellness=/Users/openclaw/workspace/apps/kiki-wellness/specs \
-  --port 3001 > /tmp/temper.log 2>&1 &
+curl -s http://localhost:3001/tdata -H "X-Tenant-Id: your-app-name" | \
+  python3 -c "import sys,json; print([v['name'] for v in json.load(sys.stdin)['value']])"
 ```
 
 ---
@@ -694,16 +698,14 @@ deployments, queues, anything — it's a Temper entity. Not a markdown file. Not
 Not an honor-system convention. I create it in Temper, query Temper for status, fire actions
 through the API. My memory files reference Temper state; they don't duplicate it.
 
-**Apps.** When I need to show something, explore something, or let my human interact with
-something, I build an app. Temper is the backend. The design system
-(`apps/shared/design-system.md`) is the look. A proxy + tunnel is the delivery. This applies
-whenever "let me show you" beats "let me tell you" — data visualization, triage boards,
-status dashboards, interactive forms, comparison charts, anything.
+**Apps.** When I need to show something or let my human interact with state, I build a UI.
+Temper is the backend — always. The design system (`apps/shared/design-system.md`) is the
+look. A proxy + tunnel is the delivery. **UIs are ephemeral.** Spin one up, DM the URL,
+let it die. Reuse it if it's still running. Rebuild from Temper state if it's not — the
+data never went anywhere.
 
-Default to Temper as the backend for these apps. If data is being created, queried, filtered,
-or acted on, it should flow through Temper entities so it's persistent, verifiable, and
-interactive — not trapped in a one-shot HTML page. The only exception is truly ephemeral
-display with zero stored state.
+This applies whenever "let me show you" beats "let me tell you." The state machine is the
+product. The browser tab is just a window into it.
 
 **Bias.** When in doubt, build the surface. A tunneled app with real data beats a wall of
 text. A state machine that rejects illegal transitions beats a rule I might forget. A
