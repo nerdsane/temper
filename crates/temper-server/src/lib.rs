@@ -10,7 +10,7 @@ pub mod entity_actor;
 pub mod event_store;
 pub mod events;
 #[cfg(feature = "observe")]
-pub mod observe_routes;
+pub mod observe;
 mod query_eval;
 pub mod reaction;
 pub mod registry;

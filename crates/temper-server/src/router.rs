@@ -61,7 +61,7 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/static/temper-client.js", get(serve_temper_client));
 
     #[cfg(feature = "observe")]
-    let router = router.nest("/observe", crate::observe_routes::build_observe_router());
+    let router = router.nest("/observe", crate::observe::build_observe_router());
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

@@ -1,0 +1,64 @@
+//! Trajectory log types for tracking entity action outcomes.
+
+use std::collections::VecDeque;
+
+/// A single trajectory entry recording the outcome of a dispatched action.
+///
+/// Captures both successful transitions and failed intents (guard rejection,
+/// unknown action, actor timeout) so the Evolution Engine can analyse gaps.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TrajectoryEntry {
+    /// ISO-8601 timestamp (DST-safe: uses sim_now()).
+    pub timestamp: String,
+    /// Tenant that owns the entity.
+    pub tenant: String,
+    /// Entity type targeted by the action.
+    pub entity_type: String,
+    /// Entity ID targeted by the action.
+    pub entity_id: String,
+    /// Action name that was dispatched.
+    pub action: String,
+    /// Whether the action succeeded.
+    pub success: bool,
+    /// Entity status before the action (if known).
+    pub from_status: Option<String>,
+    /// Entity status after the action (if known).
+    pub to_status: Option<String>,
+    /// Error description for failed intents.
+    pub error: Option<String>,
+}
+
+/// Bounded, append-only trajectory log.
+///
+/// Uses `VecDeque` with a fixed capacity. When the log is full, the oldest
+/// entry is evicted (ring-buffer semantics). Protected by `RwLock` for
+/// concurrent access from multiple request handlers.
+pub struct TrajectoryLog {
+    /// The bounded deque of trajectory entries.
+    entries: VecDeque<TrajectoryEntry>,
+    /// Maximum capacity.
+    capacity: usize,
+}
+
+impl TrajectoryLog {
+    /// Create a new trajectory log with the given capacity.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Append an entry, evicting the oldest if at capacity.
+    pub fn push(&mut self, entry: TrajectoryEntry) {
+        if self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(entry);
+    }
+
+    /// Read-only access to all entries (oldest first).
+    pub fn entries(&self) -> &VecDeque<TrajectoryEntry> {
+        &self.entries
+    }
+}
