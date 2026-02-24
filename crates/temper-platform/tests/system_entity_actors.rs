@@ -7,44 +7,19 @@
 //! Combined with the DST tests in `system_entity_dst.rs` (which prove invariant
 //! correctness under fault injection), these tests verify the production wiring.
 
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_server::{EntityActor, EntityMsg, EntityResponse};
 
-const PROJECT_IOA: &str = include_str!("../src/specs/Project.ioa.toml");
-const TENANT_IOA: &str = include_str!("../src/specs/Tenant.ioa.toml");
-const CATALOG_ENTRY_IOA: &str = include_str!("../src/specs/CatalogEntry.ioa.toml");
-const COLLABORATOR_IOA: &str = include_str!("../src/specs/Collaborator.ioa.toml");
-const VERSION_IOA: &str = include_str!("../src/specs/Version.ioa.toml");
+mod common;
+
+use common::specs::{
+    SYSTEM_MODEL_CSDL_XML, catalog_table_rw, collaborator_table_rw, project_table_rw,
+    tenant_table_rw, version_table_rw,
+};
 
 const TIMEOUT: Duration = Duration::from_secs(2);
-
-fn project_table() -> Arc<RwLock<TransitionTable>> {
-    Arc::new(RwLock::new(TransitionTable::from_ioa_source(PROJECT_IOA)))
-}
-
-fn tenant_table() -> Arc<RwLock<TransitionTable>> {
-    Arc::new(RwLock::new(TransitionTable::from_ioa_source(TENANT_IOA)))
-}
-
-fn catalog_table() -> Arc<RwLock<TransitionTable>> {
-    Arc::new(RwLock::new(TransitionTable::from_ioa_source(
-        CATALOG_ENTRY_IOA,
-    )))
-}
-
-fn collaborator_table() -> Arc<RwLock<TransitionTable>> {
-    Arc::new(RwLock::new(TransitionTable::from_ioa_source(
-        COLLABORATOR_IOA,
-    )))
-}
-
-fn version_table() -> Arc<RwLock<TransitionTable>> {
-    Arc::new(RwLock::new(TransitionTable::from_ioa_source(VERSION_IOA)))
-}
 
 // =========================================================================
 // PROJECT — Production EntityActor
@@ -53,7 +28,7 @@ fn version_table() -> Arc<RwLock<TransitionTable>> {
 #[tokio::test]
 async fn actor_project_starts_in_created() {
     let system = ActorSystem::new("test-project");
-    let actor = EntityActor::new("Project", "p-1", project_table(), serde_json::json!({}));
+    let actor = EntityActor::new("Project", "p-1", project_table_rw(), serde_json::json!({}));
     let actor_ref = system.spawn(actor, "p-1");
 
     let r: EntityResponse = actor_ref.ask(EntityMsg::GetState, TIMEOUT).await.unwrap();
@@ -65,7 +40,7 @@ async fn actor_project_starts_in_created() {
 #[tokio::test]
 async fn actor_project_full_lifecycle() {
     let system = ActorSystem::new("test-project-lifecycle");
-    let actor = EntityActor::new("Project", "p-2", project_table(), serde_json::json!({}));
+    let actor = EntityActor::new("Project", "p-2", project_table_rw(), serde_json::json!({}));
     let actor_ref = system.spawn(actor, "p-2");
 
     // Created → Building
@@ -115,7 +90,7 @@ async fn actor_project_full_lifecycle() {
 #[tokio::test]
 async fn actor_project_verify_requires_building_state() {
     let system = ActorSystem::new("test-project-guard");
-    let actor = EntityActor::new("Project", "p-3", project_table(), serde_json::json!({}));
+    let actor = EntityActor::new("Project", "p-3", project_table_rw(), serde_json::json!({}));
     let actor_ref = system.spawn(actor, "p-3");
 
     // Created → cannot Verify directly
@@ -140,7 +115,7 @@ async fn actor_project_verify_requires_building_state() {
 #[tokio::test]
 async fn actor_tenant_full_lifecycle() {
     let system = ActorSystem::new("test-tenant");
-    let actor = EntityActor::new("Tenant", "t-1", tenant_table(), serde_json::json!({}));
+    let actor = EntityActor::new("Tenant", "t-1", tenant_table_rw(), serde_json::json!({}));
     let actor_ref = system.spawn(actor, "t-1");
 
     let r: EntityResponse = actor_ref.ask(EntityMsg::GetState, TIMEOUT).await.unwrap();
@@ -206,7 +181,7 @@ async fn actor_tenant_full_lifecycle() {
 #[tokio::test]
 async fn actor_tenant_cannot_deploy_archived() {
     let system = ActorSystem::new("test-tenant-guard");
-    let actor = EntityActor::new("Tenant", "t-2", tenant_table(), serde_json::json!({}));
+    let actor = EntityActor::new("Tenant", "t-2", tenant_table_rw(), serde_json::json!({}));
     let actor_ref = system.spawn(actor, "t-2");
 
     // Pending → Active → Archived
@@ -256,7 +231,7 @@ async fn actor_catalog_publish_and_fork() {
     let actor = EntityActor::new(
         "CatalogEntry",
         "cat-1",
-        catalog_table(),
+        catalog_table_rw(),
         serde_json::json!({}),
     );
     let actor_ref = system.spawn(actor, "cat-1");
@@ -317,7 +292,7 @@ async fn actor_collaborator_invite_accept_remove() {
     let actor = EntityActor::new(
         "Collaborator",
         "col-1",
-        collaborator_table(),
+        collaborator_table_rw(),
         serde_json::json!({}),
     );
     let actor_ref = system.spawn(actor, "col-1");
@@ -373,7 +348,7 @@ async fn actor_collaborator_invite_accept_remove() {
 #[tokio::test]
 async fn actor_version_lifecycle() {
     let system = ActorSystem::new("test-version");
-    let actor = EntityActor::new("Version", "v-1", version_table(), serde_json::json!({}));
+    let actor = EntityActor::new("Version", "v-1", version_table_rw(), serde_json::json!({}));
     let actor_ref = system.spawn(actor, "v-1");
 
     let r: EntityResponse = actor_ref.ask(EntityMsg::GetState, TIMEOUT).await.unwrap();
@@ -415,18 +390,28 @@ async fn actor_multiple_system_entities_independent() {
     let system = ActorSystem::new("test-multi");
 
     let p = system.spawn(
-        EntityActor::new("Project", "proj-1", project_table(), serde_json::json!({})),
+        EntityActor::new(
+            "Project",
+            "proj-1",
+            project_table_rw(),
+            serde_json::json!({}),
+        ),
         "proj-1",
     );
     let t = system.spawn(
-        EntityActor::new("Tenant", "tenant-1", tenant_table(), serde_json::json!({})),
+        EntityActor::new(
+            "Tenant",
+            "tenant-1",
+            tenant_table_rw(),
+            serde_json::json!({}),
+        ),
         "tenant-1",
     );
     let c = system.spawn(
         EntityActor::new(
             "CatalogEntry",
             "cat-1",
-            catalog_table(),
+            catalog_table_rw(),
             serde_json::json!({}),
         ),
         "cat-1",
@@ -484,7 +469,7 @@ fn codegen_system_entities_produce_valid_modules() {
     use temper_spec::csdl::parse_csdl;
     use temper_spec::model::build_spec_model;
 
-    let csdl_xml = include_str!("../src/specs/model.csdl.xml");
+    let csdl_xml = SYSTEM_MODEL_CSDL_XML;
     let csdl = parse_csdl(csdl_xml).expect("system CSDL should parse");
 
     let spec = build_spec_model(csdl, std::collections::HashMap::new());
@@ -531,7 +516,7 @@ fn codegen_project_has_typed_fields() {
     use temper_spec::csdl::parse_csdl;
     use temper_spec::model::build_spec_model;
 
-    let csdl_xml = include_str!("../src/specs/model.csdl.xml");
+    let csdl_xml = SYSTEM_MODEL_CSDL_XML;
     let csdl = parse_csdl(csdl_xml).unwrap();
     let spec = build_spec_model(csdl, std::collections::HashMap::new());
 
@@ -566,7 +551,7 @@ fn codegen_tenant_has_project_reference() {
     use temper_spec::csdl::parse_csdl;
     use temper_spec::model::build_spec_model;
 
-    let csdl_xml = include_str!("../src/specs/model.csdl.xml");
+    let csdl_xml = SYSTEM_MODEL_CSDL_XML;
     let csdl = parse_csdl(csdl_xml).unwrap();
     let spec = build_spec_model(csdl, std::collections::HashMap::new());
 

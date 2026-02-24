@@ -14,6 +14,7 @@ pub mod events;
 pub mod eventual_invariants;
 #[cfg(feature = "observe")]
 pub mod observe;
+mod odata;
 mod query_eval;
 pub mod reaction;
 pub mod registry;

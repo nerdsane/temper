@@ -17,32 +17,36 @@ use std::sync::Arc;
 use temper_jit::table::TransitionTable;
 use temper_runtime::scheduler::{FaultConfig, RunRecord, SimActorSystem, SimActorSystemConfig};
 use temper_server::entity_actor::sim_handler::EntityActorHandler;
+mod common;
 
-// Embed system specs at compile time (same as bootstrap.rs).
-const PROJECT_IOA: &str = include_str!("../src/specs/Project.ioa.toml");
-const TENANT_IOA: &str = include_str!("../src/specs/Tenant.ioa.toml");
-const CATALOG_ENTRY_IOA: &str = include_str!("../src/specs/CatalogEntry.ioa.toml");
-const COLLABORATOR_IOA: &str = include_str!("../src/specs/Collaborator.ioa.toml");
-const VERSION_IOA: &str = include_str!("../src/specs/Version.ioa.toml");
+use common::dst::{
+    new_sim, register_all_system_entities, register_catalog_entries, register_catalog_entry,
+    register_collaborator, register_collaborators, register_project, register_projects,
+    register_tenant, register_tenants, register_version, register_versions,
+};
+use common::specs::{
+    PROJECT_IOA, catalog_table_arc, collaborator_table_arc, project_table_arc, tenant_table_arc,
+    version_table_arc,
+};
 
 fn project_table() -> Arc<TransitionTable> {
-    Arc::new(TransitionTable::from_ioa_source(PROJECT_IOA))
+    project_table_arc()
 }
 
 fn tenant_table() -> Arc<TransitionTable> {
-    Arc::new(TransitionTable::from_ioa_source(TENANT_IOA))
+    tenant_table_arc()
 }
 
 fn catalog_table() -> Arc<TransitionTable> {
-    Arc::new(TransitionTable::from_ioa_source(CATALOG_ENTRY_IOA))
+    catalog_table_arc()
 }
 
 fn collaborator_table() -> Arc<TransitionTable> {
-    Arc::new(TransitionTable::from_ioa_source(COLLABORATOR_IOA))
+    collaborator_table_arc()
 }
 
 fn version_table() -> Arc<TransitionTable> {
-    Arc::new(TransitionTable::from_ioa_source(VERSION_IOA))
+    version_table_arc()
 }
 
 // =========================================================================
@@ -350,18 +354,11 @@ fn scripted_platform_control_plane_scenario() {
     let mut sim = SimActorSystem::new(config);
 
     // Register all system entity types
-    let proj = EntityActorHandler::new("Project", "proj-1", project_table())
-        .with_ioa_invariants(PROJECT_IOA);
-    let tenant = EntityActorHandler::new("Tenant", "tenant-prod", tenant_table());
-    let collab = EntityActorHandler::new("Collaborator", "dev-alice", collaborator_table());
-    let ver = EntityActorHandler::new("Version", "v1", version_table());
-    let cat = EntityActorHandler::new("CatalogEntry", "catalog-1", catalog_table());
-
-    sim.register_actor("proj-1", Box::new(proj));
-    sim.register_actor("tenant-prod", Box::new(tenant));
-    sim.register_actor("dev-alice", Box::new(collab));
-    sim.register_actor("v1", Box::new(ver));
-    sim.register_actor("catalog-1", Box::new(cat));
+    register_project(&mut sim, "proj-1");
+    register_tenant(&mut sim, "tenant-prod");
+    register_collaborator(&mut sim, "dev-alice");
+    register_version(&mut sim, "v1");
+    register_catalog_entry(&mut sim, "catalog-1");
 
     // 1. Alice accepts collaboration invite
     sim.step("dev-alice", "Accept", "{}").unwrap();
@@ -397,19 +394,9 @@ fn scripted_platform_control_plane_scenario() {
 
 #[test]
 fn random_project_no_faults_seed_42() {
-    let config = SimActorSystemConfig {
-        seed: 42,
-        max_ticks: 200,
-        faults: FaultConfig::none(),
-        max_actions_per_actor: 30,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(42, 200, FaultConfig::none(), 30);
 
-    for i in 0..3 {
-        let handler = EntityActorHandler::new("Project", format!("p-{i}"), project_table())
-            .with_ioa_invariants(PROJECT_IOA);
-        sim.register_actor(&format!("p-{i}"), Box::new(handler));
-    }
+    register_projects(&mut sim, 3);
 
     let result = sim.run_random();
 
@@ -426,18 +413,9 @@ fn random_project_no_faults_seed_42() {
 
 #[test]
 fn random_tenant_no_faults_seed_42() {
-    let config = SimActorSystemConfig {
-        seed: 42,
-        max_ticks: 200,
-        faults: FaultConfig::none(),
-        max_actions_per_actor: 30,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(42, 200, FaultConfig::none(), 30);
 
-    for i in 0..3 {
-        let handler = EntityActorHandler::new("Tenant", format!("t-{i}"), tenant_table());
-        sim.register_actor(&format!("t-{i}"), Box::new(handler));
-    }
+    register_tenants(&mut sim, 3);
 
     let result = sim.run_random();
     assert!(
@@ -450,45 +428,9 @@ fn random_tenant_no_faults_seed_42() {
 
 #[test]
 fn random_all_system_entities_no_faults() {
-    let config = SimActorSystemConfig {
-        seed: 77,
-        max_ticks: 500,
-        faults: FaultConfig::none(),
-        max_actions_per_actor: 30,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(77, 500, FaultConfig::none(), 30);
 
-    sim.register_actor(
-        "p1",
-        Box::new(
-            EntityActorHandler::new("Project", "p1", project_table())
-                .with_ioa_invariants(PROJECT_IOA),
-        ),
-    );
-    sim.register_actor(
-        "t1",
-        Box::new(EntityActorHandler::new("Tenant", "t1", tenant_table())),
-    );
-    sim.register_actor(
-        "cat1",
-        Box::new(EntityActorHandler::new(
-            "CatalogEntry",
-            "cat1",
-            catalog_table(),
-        )),
-    );
-    sim.register_actor(
-        "col1",
-        Box::new(EntityActorHandler::new(
-            "Collaborator",
-            "col1",
-            collaborator_table(),
-        )),
-    );
-    sim.register_actor(
-        "v1",
-        Box::new(EntityActorHandler::new("Version", "v1", version_table())),
-    );
+    register_all_system_entities(&mut sim);
 
     let result = sim.run_random();
     assert!(
@@ -505,19 +447,9 @@ fn random_all_system_entities_no_faults() {
 
 #[test]
 fn random_project_light_faults() {
-    let config = SimActorSystemConfig {
-        seed: 99,
-        max_ticks: 300,
-        faults: FaultConfig::light(),
-        max_actions_per_actor: 40,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(99, 300, FaultConfig::light(), 40);
 
-    for i in 0..3 {
-        let handler = EntityActorHandler::new("Project", format!("p-{i}"), project_table())
-            .with_ioa_invariants(PROJECT_IOA);
-        sim.register_actor(&format!("p-{i}"), Box::new(handler));
-    }
+    register_projects(&mut sim, 3);
 
     let result = sim.run_random();
     assert!(
@@ -529,45 +461,9 @@ fn random_project_light_faults() {
 
 #[test]
 fn random_all_entities_heavy_faults() {
-    let config = SimActorSystemConfig {
-        seed: 1337,
-        max_ticks: 500,
-        faults: FaultConfig::heavy(),
-        max_actions_per_actor: 30,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(1337, 500, FaultConfig::heavy(), 30);
 
-    sim.register_actor(
-        "p1",
-        Box::new(
-            EntityActorHandler::new("Project", "p1", project_table())
-                .with_ioa_invariants(PROJECT_IOA),
-        ),
-    );
-    sim.register_actor(
-        "t1",
-        Box::new(EntityActorHandler::new("Tenant", "t1", tenant_table())),
-    );
-    sim.register_actor(
-        "cat1",
-        Box::new(EntityActorHandler::new(
-            "CatalogEntry",
-            "cat1",
-            catalog_table(),
-        )),
-    );
-    sim.register_actor(
-        "col1",
-        Box::new(EntityActorHandler::new(
-            "Collaborator",
-            "col1",
-            collaborator_table(),
-        )),
-    );
-    sim.register_actor(
-        "v1",
-        Box::new(EntityActorHandler::new("Version", "v1", version_table())),
-    );
+    register_all_system_entities(&mut sim);
 
     let result = sim.run_random();
     assert!(
@@ -583,18 +479,9 @@ fn random_all_entities_heavy_faults() {
 
 #[test]
 fn random_tenant_light_faults() {
-    let config = SimActorSystemConfig {
-        seed: 101,
-        max_ticks: 300,
-        faults: FaultConfig::light(),
-        max_actions_per_actor: 40,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(101, 300, FaultConfig::light(), 40);
 
-    for i in 0..3 {
-        let handler = EntityActorHandler::new("Tenant", format!("t-{i}"), tenant_table());
-        sim.register_actor(&format!("t-{i}"), Box::new(handler));
-    }
+    register_tenants(&mut sim, 3);
 
     let result = sim.run_random();
     assert!(
@@ -606,18 +493,9 @@ fn random_tenant_light_faults() {
 
 #[test]
 fn random_tenant_heavy_faults() {
-    let config = SimActorSystemConfig {
-        seed: 102,
-        max_ticks: 500,
-        faults: FaultConfig::heavy(),
-        max_actions_per_actor: 30,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(102, 500, FaultConfig::heavy(), 30);
 
-    for i in 0..3 {
-        let handler = EntityActorHandler::new("Tenant", format!("t-{i}"), tenant_table());
-        sim.register_actor(&format!("t-{i}"), Box::new(handler));
-    }
+    register_tenants(&mut sim, 3);
 
     let result = sim.run_random();
     assert!(
@@ -629,19 +507,9 @@ fn random_tenant_heavy_faults() {
 
 #[test]
 fn random_project_heavy_faults() {
-    let config = SimActorSystemConfig {
-        seed: 103,
-        max_ticks: 500,
-        faults: FaultConfig::heavy(),
-        max_actions_per_actor: 30,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(103, 500, FaultConfig::heavy(), 30);
 
-    for i in 0..3 {
-        let handler = EntityActorHandler::new("Project", format!("p-{i}"), project_table())
-            .with_ioa_invariants(PROJECT_IOA);
-        sim.register_actor(&format!("p-{i}"), Box::new(handler));
-    }
+    register_projects(&mut sim, 3);
 
     let result = sim.run_random();
     assert!(
@@ -653,18 +521,9 @@ fn random_project_heavy_faults() {
 
 #[test]
 fn random_catalog_heavy_faults() {
-    let config = SimActorSystemConfig {
-        seed: 104,
-        max_ticks: 500,
-        faults: FaultConfig::heavy(),
-        max_actions_per_actor: 30,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(104, 500, FaultConfig::heavy(), 30);
 
-    for i in 0..3 {
-        let handler = EntityActorHandler::new("CatalogEntry", format!("cat-{i}"), catalog_table());
-        sim.register_actor(&format!("cat-{i}"), Box::new(handler));
-    }
+    register_catalog_entries(&mut sim, 3);
 
     let result = sim.run_random();
     assert!(
@@ -676,19 +535,9 @@ fn random_catalog_heavy_faults() {
 
 #[test]
 fn random_collaborator_heavy_faults() {
-    let config = SimActorSystemConfig {
-        seed: 105,
-        max_ticks: 500,
-        faults: FaultConfig::heavy(),
-        max_actions_per_actor: 30,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(105, 500, FaultConfig::heavy(), 30);
 
-    for i in 0..3 {
-        let handler =
-            EntityActorHandler::new("Collaborator", format!("col-{i}"), collaborator_table());
-        sim.register_actor(&format!("col-{i}"), Box::new(handler));
-    }
+    register_collaborators(&mut sim, 3);
 
     let result = sim.run_random();
     assert!(
@@ -700,18 +549,9 @@ fn random_collaborator_heavy_faults() {
 
 #[test]
 fn random_version_heavy_faults() {
-    let config = SimActorSystemConfig {
-        seed: 106,
-        max_ticks: 500,
-        faults: FaultConfig::heavy(),
-        max_actions_per_actor: 30,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(106, 500, FaultConfig::heavy(), 30);
 
-    for i in 0..3 {
-        let handler = EntityActorHandler::new("Version", format!("v-{i}"), version_table());
-        sim.register_actor(&format!("v-{i}"), Box::new(handler));
-    }
+    register_versions(&mut sim, 3);
 
     let result = sim.run_random();
     assert!(
@@ -728,45 +568,9 @@ fn random_version_heavy_faults() {
 #[test]
 fn random_all_entities_heavy_faults_multi_seed() {
     for seed in [200, 201, 202, 203, 204] {
-        let config = SimActorSystemConfig {
-            seed,
-            max_ticks: 500,
-            faults: FaultConfig::heavy(),
-            max_actions_per_actor: 30,
-        };
-        let mut sim = SimActorSystem::new(config);
+        let mut sim = new_sim(seed, 500, FaultConfig::heavy(), 30);
 
-        sim.register_actor(
-            "p1",
-            Box::new(
-                EntityActorHandler::new("Project", "p1", project_table())
-                    .with_ioa_invariants(PROJECT_IOA),
-            ),
-        );
-        sim.register_actor(
-            "t1",
-            Box::new(EntityActorHandler::new("Tenant", "t1", tenant_table())),
-        );
-        sim.register_actor(
-            "cat1",
-            Box::new(EntityActorHandler::new(
-                "CatalogEntry",
-                "cat1",
-                catalog_table(),
-            )),
-        );
-        sim.register_actor(
-            "col1",
-            Box::new(EntityActorHandler::new(
-                "Collaborator",
-                "col1",
-                collaborator_table(),
-            )),
-        );
-        sim.register_actor(
-            "v1",
-            Box::new(EntityActorHandler::new("Version", "v1", version_table())),
-        );
+        register_all_system_entities(&mut sim);
 
         let result = sim.run_random();
         assert!(
@@ -780,45 +584,9 @@ fn random_all_entities_heavy_faults_multi_seed() {
 #[test]
 fn random_all_entities_light_faults_multi_seed() {
     for seed in [300, 301, 302, 303, 304] {
-        let config = SimActorSystemConfig {
-            seed,
-            max_ticks: 300,
-            faults: FaultConfig::light(),
-            max_actions_per_actor: 30,
-        };
-        let mut sim = SimActorSystem::new(config);
+        let mut sim = new_sim(seed, 300, FaultConfig::light(), 30);
 
-        sim.register_actor(
-            "p1",
-            Box::new(
-                EntityActorHandler::new("Project", "p1", project_table())
-                    .with_ioa_invariants(PROJECT_IOA),
-            ),
-        );
-        sim.register_actor(
-            "t1",
-            Box::new(EntityActorHandler::new("Tenant", "t1", tenant_table())),
-        );
-        sim.register_actor(
-            "cat1",
-            Box::new(EntityActorHandler::new(
-                "CatalogEntry",
-                "cat1",
-                catalog_table(),
-            )),
-        );
-        sim.register_actor(
-            "col1",
-            Box::new(EntityActorHandler::new(
-                "Collaborator",
-                "col1",
-                collaborator_table(),
-            )),
-        );
-        sim.register_actor(
-            "v1",
-            Box::new(EntityActorHandler::new("Version", "v1", version_table())),
-        );
+        register_all_system_entities(&mut sim);
 
         let result = sim.run_random();
         assert!(
@@ -834,45 +602,9 @@ fn random_all_entities_light_faults_multi_seed() {
 // =========================================================================
 
 fn run_determinism_trial(seed: u64) -> Vec<(String, String, usize, usize)> {
-    let config = SimActorSystemConfig {
-        seed,
-        max_ticks: 300,
-        faults: FaultConfig::light(),
-        max_actions_per_actor: 30,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(seed, 300, FaultConfig::light(), 30);
 
-    sim.register_actor(
-        "p1",
-        Box::new(
-            EntityActorHandler::new("Project", "p1", project_table())
-                .with_ioa_invariants(PROJECT_IOA),
-        ),
-    );
-    sim.register_actor(
-        "t1",
-        Box::new(EntityActorHandler::new("Tenant", "t1", tenant_table())),
-    );
-    sim.register_actor(
-        "cat1",
-        Box::new(EntityActorHandler::new(
-            "CatalogEntry",
-            "cat1",
-            catalog_table(),
-        )),
-    );
-    sim.register_actor(
-        "col1",
-        Box::new(EntityActorHandler::new(
-            "Collaborator",
-            "col1",
-            collaborator_table(),
-        )),
-    );
-    sim.register_actor(
-        "v1",
-        Box::new(EntityActorHandler::new("Version", "v1", version_table())),
-    );
+    register_all_system_entities(&mut sim);
 
     let result = sim.run_random();
     assert!(result.all_invariants_held);
@@ -918,17 +650,8 @@ fn determinism_proof_different_seeds_differ() {
 #[test]
 fn multi_seed_sweep_projects() {
     for seed in 0..20 {
-        let config = SimActorSystemConfig {
-            seed,
-            max_ticks: 100,
-            faults: FaultConfig::light(),
-            max_actions_per_actor: 20,
-        };
-        let mut sim = SimActorSystem::new(config);
-
-        let handler = EntityActorHandler::new("Project", "p", project_table())
-            .with_ioa_invariants(PROJECT_IOA);
-        sim.register_actor("p", Box::new(handler));
+        let mut sim = new_sim(seed, 100, FaultConfig::light(), 20);
+        register_project(&mut sim, "p");
 
         let result = sim.run_random();
         assert!(
@@ -942,16 +665,8 @@ fn multi_seed_sweep_projects() {
 #[test]
 fn multi_seed_sweep_tenants() {
     for seed in 0..20 {
-        let config = SimActorSystemConfig {
-            seed,
-            max_ticks: 100,
-            faults: FaultConfig::light(),
-            max_actions_per_actor: 20,
-        };
-        let mut sim = SimActorSystem::new(config);
-
-        let handler = EntityActorHandler::new("Tenant", "t", tenant_table());
-        sim.register_actor("t", Box::new(handler));
+        let mut sim = new_sim(seed, 100, FaultConfig::light(), 20);
+        register_tenant(&mut sim, "t");
 
         let result = sim.run_random();
         assert!(
@@ -968,45 +683,9 @@ fn multi_seed_sweep_tenants() {
 
 /// Run a full canary trial with all 5 system entity types and return the RunRecord.
 fn run_canary_trial(seed: u64, faults: FaultConfig) -> RunRecord {
-    let config = SimActorSystemConfig {
-        seed,
-        max_ticks: 300,
-        faults,
-        max_actions_per_actor: 30,
-    };
-    let mut sim = SimActorSystem::new(config);
+    let mut sim = new_sim(seed, 300, faults, 30);
 
-    sim.register_actor(
-        "p1",
-        Box::new(
-            EntityActorHandler::new("Project", "p1", project_table())
-                .with_ioa_invariants(PROJECT_IOA),
-        ),
-    );
-    sim.register_actor(
-        "t1",
-        Box::new(EntityActorHandler::new("Tenant", "t1", tenant_table())),
-    );
-    sim.register_actor(
-        "cat1",
-        Box::new(EntityActorHandler::new(
-            "CatalogEntry",
-            "cat1",
-            catalog_table(),
-        )),
-    );
-    sim.register_actor(
-        "col1",
-        Box::new(EntityActorHandler::new(
-            "Collaborator",
-            "col1",
-            collaborator_table(),
-        )),
-    );
-    sim.register_actor(
-        "v1",
-        Box::new(EntityActorHandler::new("Version", "v1", version_table())),
-    );
+    register_all_system_entities(&mut sim);
 
     let (result, record) = sim.run_random_recorded();
     assert!(

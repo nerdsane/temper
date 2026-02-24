@@ -6,25 +6,10 @@
 
 use stateright::{Model, Property};
 
+use super::semantics::{apply_effects, evaluate_guard};
 use super::types::{
-    InvariantKind, LivenessKind, ModelEffect, ModelGuard, TemperModel, TemperModelAction,
-    TemperModelState,
+    InvariantKind, LivenessKind, ModelEffect, TemperModel, TemperModelAction, TemperModelState,
 };
-
-// -- Guard evaluation --------------------------------------------------------
-
-/// Evaluate a model guard against the current state.
-fn evaluate_guard(guard: &ModelGuard, state: &TemperModelState) -> bool {
-    match guard {
-        ModelGuard::Always => true,
-        ModelGuard::CounterMin { var, min } => {
-            let val = state.counters.get(var).copied().unwrap_or(0);
-            val >= *min
-        }
-        ModelGuard::BoolTrue(var) => state.booleans.get(var).copied().unwrap_or(false),
-        ModelGuard::And(guards) => guards.iter().all(|g| evaluate_guard(g, state)),
-    }
-}
 
 // -- Property condition functions (bare fn pointers) -------------------------
 
@@ -183,6 +168,7 @@ impl Model for TemperModel {
             status: self.initial_status.clone(),
             counters: self.initial_counters.clone(),
             booleans: self.initial_booleans.clone(),
+            lists: self.initial_lists.clone(),
         }]
     }
 
@@ -215,9 +201,9 @@ impl Model for TemperModel {
                         break;
                     }
                 }
-                if let ModelEffect::DecrementCounter(var) = effect {
-                    let current = state.counters.get(var).copied().unwrap_or(0);
-                    if current == 0 {
+                if let ModelEffect::ListAppend(var) = effect {
+                    let current_len = state.lists.get(var).map_or(0, Vec::len);
+                    if current_len >= self.default_max_counter {
                         within_bounds = false;
                         break;
                     }
@@ -238,31 +224,10 @@ impl Model for TemperModel {
         let resolved = self.transitions.iter().find(|t| t.name == action.name)?;
 
         let new_status = action.target_state.unwrap_or_else(|| state.status.clone());
-
-        let mut new_counters = state.counters.clone();
-        let mut new_booleans = state.booleans.clone();
-
-        for effect in &resolved.effects {
-            match effect {
-                ModelEffect::IncrementCounter(var) => {
-                    let entry = new_counters.entry(var.clone()).or_insert(0);
-                    *entry += 1;
-                }
-                ModelEffect::DecrementCounter(var) => {
-                    let entry = new_counters.entry(var.clone()).or_insert(0);
-                    *entry = entry.saturating_sub(1);
-                }
-                ModelEffect::SetBool { var, value } => {
-                    new_booleans.insert(var.clone(), *value);
-                }
-            }
-        }
-
-        Some(TemperModelState {
-            status: new_status,
-            counters: new_counters,
-            booleans: new_booleans,
-        })
+        let mut next = state.clone();
+        next.status = new_status;
+        apply_effects(&resolved.effects, &mut next, &action.name);
+        Some(next)
     }
 
     fn properties(&self) -> Vec<Property<Self>> {

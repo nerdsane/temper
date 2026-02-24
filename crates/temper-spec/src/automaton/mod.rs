@@ -12,10 +12,14 @@
 //!
 //! TLA+ remains available for humans who want temporal reasoning.
 
+mod initial;
 mod lint;
 pub mod parser;
 mod types;
 
+pub use initial::{
+    parse_bool_initial, parse_counter_initial_usize, parse_list_initial, parse_var_initial_json,
+};
 pub use lint::{LintFinding, LintSeverity, lint_automaton};
 pub use parser::{parse_automaton, to_state_machine};
 pub use types::*;

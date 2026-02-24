@@ -13,6 +13,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+mod common;
+
+use common::http::{body_json, body_string};
 use temper_platform::bootstrap::bootstrap_system_tenant;
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
@@ -76,22 +79,6 @@ const TASK_CSDL_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     </Schema>
   </edmx:DataServices>
 </edmx:Edmx>"#;
-
-/// Helper to read a response body as JSON.
-async fn body_json(response: axum::http::Response<Body>) -> serde_json::Value {
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    serde_json::from_slice(&body).unwrap()
-}
-
-/// Helper to read a response body as string.
-async fn body_string(response: axum::http::Response<Body>) -> String {
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    String::from_utf8(body.to_vec()).unwrap()
-}
 
 /// Build a SpecRegistry with a single user tenant.
 ///
