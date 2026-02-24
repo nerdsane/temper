@@ -134,6 +134,9 @@ pub enum Effect {
     /// Remove a value from a list variable by index (index from action params).
     #[serde(rename = "list_remove_at")]
     ListRemoveAt { var: String },
+    /// Trigger a named WASM integration (post-transition async execution).
+    #[serde(rename = "trigger")]
+    Trigger { name: String },
 }
 
 /// A safety invariant.
@@ -171,17 +174,26 @@ pub struct Liveness {
 /// An integration declaration (external system trigger).
 ///
 /// Integrations declare that a state machine event should trigger an external
-/// action (e.g., a webhook call). They are metadata only — they do not affect
-/// state transitions or verification.
+/// action (e.g., a webhook call or WASM module invocation). They are metadata
+/// only — they do not affect state transitions or verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Integration {
-    /// Integration name (e.g., "notify_fulfillment").
+    /// Integration name (e.g., "notify_fulfillment", "charge_payment").
     pub name: String,
-    /// The event that triggers this integration (action name from EmitEvent).
+    /// The event that triggers this integration (action name or trigger name).
     pub trigger: String,
-    /// Integration type: "webhook" (extensible to other types later).
+    /// Integration type: "webhook" or "wasm".
     #[serde(rename = "type", default = "default_webhook")]
     pub integration_type: String,
+    /// WASM module name (required when `type = "wasm"`).
+    #[serde(default)]
+    pub module: Option<String>,
+    /// Action to dispatch on successful WASM execution (required when `type = "wasm"`).
+    #[serde(default)]
+    pub on_success: Option<String>,
+    /// Action to dispatch on failed WASM execution (required when `type = "wasm"`).
+    #[serde(default)]
+    pub on_failure: Option<String>,
 }
 
 fn default_webhook() -> String {

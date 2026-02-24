@@ -94,4 +94,14 @@ pub trait SimActorHandler: Send {
     fn spec_invariants(&self) -> &[SpecInvariant] {
         &[]
     }
+
+    /// Custom effects (integration triggers) emitted by the last action.
+    ///
+    /// After each successful `handle_message()`, the simulation system calls
+    /// this to discover WASM integration triggers. The system then schedules
+    /// configured callback actions (success or failure) on the next tick.
+    /// Returns empty by default (no integrations).
+    fn pending_callbacks(&self) -> Vec<String> {
+        Vec::new()
+    }
 }

@@ -128,6 +128,7 @@ fn format_effects(effects: &[Effect]) -> String {
             Effect::Emit { event } => format!("emit({event})"),
             Effect::ListAppend { var } => format!("{var}'.append(param)"),
             Effect::ListRemoveAt { var } => format!("{var}'.remove_at(param)"),
+            Effect::Trigger { name } => format!("trigger({name})"),
         })
         .collect::<Vec<_>>()
         .join(" /\\ ")
@@ -145,6 +146,7 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     }
 
     // All action from/to states must be in the state set
+    let action_names: Vec<&str> = automaton.actions.iter().map(|a| a.name.as_str()).collect();
     for action in &automaton.actions {
         for from in &action.from {
             if !states.contains(from) {
@@ -160,6 +162,34 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
                     "action '{}' references unknown to-state '{}'",
                     action.name, to
                 )));
+            }
+        }
+    }
+
+    // Validate WASM integrations
+    for integration in &automaton.integrations {
+        if integration.integration_type == "wasm" {
+            if integration.module.is_none() {
+                return Err(AutomatonParseError::Validation(format!(
+                    "integration '{}' has type 'wasm' but missing 'module' field",
+                    integration.name
+                )));
+            }
+            if let Some(ref on_success) = integration.on_success {
+                if !action_names.contains(&on_success.as_str()) {
+                    return Err(AutomatonParseError::Validation(format!(
+                        "integration '{}' on_success action '{}' not found in spec actions",
+                        integration.name, on_success
+                    )));
+                }
+            }
+            if let Some(ref on_failure) = integration.on_failure {
+                if !action_names.contains(&on_failure.as_str()) {
+                    return Err(AutomatonParseError::Validation(format!(
+                        "integration '{}' on_failure action '{}' not found in spec actions",
+                        integration.name, on_failure
+                    )));
+                }
             }
         }
     }
@@ -323,6 +353,9 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                 name: String::new(),
                 trigger: String::new(),
                 integration_type: "webhook".to_string(),
+                module: None,
+                on_success: None,
+                on_failure: None,
             });
             current_section = "integration";
             continue;
@@ -430,6 +463,17 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                                         a.effect.push(Effect::Emit { event });
                                     }
                                 }
+                                // Format: "trigger integration_name" → Trigger
+                                else if value.starts_with("trigger ") {
+                                    let name = value
+                                        .strip_prefix("trigger ")
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_string();
+                                    if !name.is_empty() {
+                                        a.effect.push(Effect::Trigger { name });
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -462,6 +506,9 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                             "name" => ig.name = value.clone(),
                             "trigger" => ig.trigger = value.clone(),
                             "type" => ig.integration_type = value.clone(),
+                            "module" => ig.module = Some(value.clone()),
+                            "on_success" => ig.on_success = Some(value.clone()),
+                            "on_failure" => ig.on_failure = Some(value.clone()),
                             _ => {}
                         }
                     }
@@ -723,6 +770,142 @@ trigger = "SubmitOrder"
     }
 
     #[test]
+    fn test_trigger_effect_parsed() {
+        let toml = r#"
+[automaton]
+name = "Order"
+states = ["Submitted", "ChargePending", "Confirmed", "PaymentFailed"]
+initial = "Submitted"
+
+[[action]]
+name = "ChargePayment"
+from = ["Submitted"]
+to = "ChargePending"
+effect = "trigger charge_payment"
+
+[[action]]
+name = "ChargeSucceeded"
+kind = "input"
+from = ["ChargePending"]
+to = "Confirmed"
+
+[[action]]
+name = "ChargeFailed"
+kind = "input"
+from = ["ChargePending"]
+to = "PaymentFailed"
+"#;
+        let automaton = parse_automaton(toml).expect("should parse");
+        let charge = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "ChargePayment")
+            .unwrap();
+        assert_eq!(charge.effect.len(), 1);
+        match &charge.effect[0] {
+            Effect::Trigger { name } => assert_eq!(name, "charge_payment"),
+            other => panic!("expected Trigger effect, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wasm_integration_parsed() {
+        let toml = r#"
+[automaton]
+name = "Order"
+states = ["Submitted", "ChargePending", "Confirmed", "PaymentFailed"]
+initial = "Submitted"
+
+[[action]]
+name = "ChargePayment"
+from = ["Submitted"]
+to = "ChargePending"
+effect = "trigger charge_payment"
+
+[[action]]
+name = "ChargeSucceeded"
+kind = "input"
+from = ["ChargePending"]
+to = "Confirmed"
+
+[[action]]
+name = "ChargeFailed"
+kind = "input"
+from = ["ChargePending"]
+to = "PaymentFailed"
+
+[[integration]]
+name = "charge_payment"
+trigger = "charge_payment"
+type = "wasm"
+module = "stripe_charge"
+on_success = "ChargeSucceeded"
+on_failure = "ChargeFailed"
+"#;
+        let automaton = parse_automaton(toml).expect("should parse");
+        assert_eq!(automaton.integrations.len(), 1);
+        let ig = &automaton.integrations[0];
+        assert_eq!(ig.name, "charge_payment");
+        assert_eq!(ig.integration_type, "wasm");
+        assert_eq!(ig.module.as_deref(), Some("stripe_charge"));
+        assert_eq!(ig.on_success.as_deref(), Some("ChargeSucceeded"));
+        assert_eq!(ig.on_failure.as_deref(), Some("ChargeFailed"));
+    }
+
+    #[test]
+    fn test_wasm_integration_missing_module_rejected() {
+        let toml = r#"
+[automaton]
+name = "Order"
+states = ["Submitted", "ChargePending"]
+initial = "Submitted"
+
+[[action]]
+name = "ChargePayment"
+from = ["Submitted"]
+to = "ChargePending"
+
+[[integration]]
+name = "charge_payment"
+trigger = "charge_payment"
+type = "wasm"
+"#;
+        let result = parse_automaton(toml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("missing 'module'"), "got: {err}");
+    }
+
+    #[test]
+    fn test_wasm_integration_unknown_callback_rejected() {
+        let toml = r#"
+[automaton]
+name = "Order"
+states = ["Submitted", "ChargePending", "Confirmed"]
+initial = "Submitted"
+
+[[action]]
+name = "ChargePayment"
+from = ["Submitted"]
+to = "ChargePending"
+
+[[integration]]
+name = "charge_payment"
+trigger = "charge_payment"
+type = "wasm"
+module = "stripe_charge"
+on_success = "NonExistentAction"
+"#;
+        let result = parse_automaton(toml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("NonExistentAction"),
+            "should mention missing action, got: {err}"
+        );
+    }
+
+    #[test]
     fn test_valid_state_var_types_accepted() {
         let spec = r#"
 [automaton]
@@ -748,6 +931,10 @@ to = "Done"
 effect = "set is_done true"
 "#;
         let result = parse_automaton(spec);
-        assert!(result.is_ok(), "bool and counter types should be accepted: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "bool and counter types should be accepted: {:?}",
+            result.err()
+        );
     }
 }

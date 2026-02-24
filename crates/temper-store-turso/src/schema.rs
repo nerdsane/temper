@@ -75,6 +75,22 @@ CREATE TABLE IF NOT EXISTS tenant_constraints (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );";
 
+/// CREATE TABLE statement for WASM module storage.
+///
+/// Stores compiled WASM binaries for agent-generated integration handlers.
+/// Keyed by (tenant, module_name) with version tracking and SHA-256 integrity.
+pub const CREATE_WASM_MODULES_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS wasm_modules (
+    tenant TEXT NOT NULL,
+    module_name TEXT NOT NULL,
+    wasm_bytes BLOB NOT NULL,
+    sha256_hash TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    size_bytes INTEGER NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(tenant, module_name)
+);";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +105,14 @@ mod tests {
         assert!(CREATE_TRAJECTORIES_SUCCESS_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_TRAJECTORIES_ENTITY_ACTION_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_TENANT_CONSTRAINTS_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_WASM_MODULES_TABLE.contains("IF NOT EXISTS"));
+    }
+
+    #[test]
+    fn wasm_modules_table_has_required_columns() {
+        let sql = CREATE_WASM_MODULES_TABLE.to_uppercase();
+        for col in &["TENANT", "MODULE_NAME", "WASM_BYTES", "SHA256_HASH", "VERSION", "SIZE_BYTES"] {
+            assert!(sql.contains(col), "wasm_modules schema missing column: {col}");
+        }
     }
 }

@@ -106,6 +106,9 @@ impl TransitionTable {
                             automaton::Effect::ListRemoveAt { var } => {
                                 effects.push(Effect::ListRemoveAt(var.clone()));
                             }
+                            automaton::Effect::Trigger { name } => {
+                                effects.push(Effect::Custom(name.clone()));
+                            }
                         }
                     }
                 } else {

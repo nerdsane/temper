@@ -22,6 +22,8 @@ pub struct EntityActorHandler {
     table: Arc<TransitionTable>,
     state: EntityState,
     invariants: Vec<SpecInvariant>,
+    /// Custom effects from the last successful action (integration triggers).
+    last_custom_effects: Vec<String>,
 }
 
 impl EntityActorHandler {
@@ -51,6 +53,7 @@ impl EntityActorHandler {
             table,
             state,
             invariants: Vec::new(),
+            last_custom_effects: Vec::new(),
         }
     }
 
@@ -178,11 +181,14 @@ impl SimActorHandler for EntityActorHandler {
             super::effects::process_action(&mut self.state, &self.table, action, &params_value);
 
         if result.success {
+            // Capture custom effects for integration callback scheduling
+            self.last_custom_effects = result.custom_effects;
             if let Some(event) = result.event {
                 self.state.events.push(event);
             }
             Ok(serde_json::to_value(&self.state).unwrap_or_default())
         } else {
+            self.last_custom_effects.clear();
             Err(result.error.unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
@@ -222,6 +228,10 @@ impl SimActorHandler for EntityActorHandler {
 
     fn spec_invariants(&self) -> &[SpecInvariant] {
         &self.invariants
+    }
+
+    fn pending_callbacks(&self) -> Vec<String> {
+        self.last_custom_effects.clone()
     }
 }
 

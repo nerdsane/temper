@@ -19,6 +19,7 @@ mod router;
 #[cfg(feature = "observe")]
 pub mod sentinel;
 pub mod state;
+pub mod wasm_registry;
 pub mod webhooks;
 
 pub use entity_actor::{EntityActor, EntityActorHandler, EntityMsg, EntityResponse, EntityState};

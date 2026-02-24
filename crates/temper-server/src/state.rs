@@ -24,6 +24,7 @@ use crate::reaction::ReactionDispatcher;
 use crate::registry::{
     EntityVerificationResult, SpecRegistry, VerificationDetail, VerificationStatus,
 };
+use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
 
 /// A design-time event emitted during spec loading and verification.
@@ -167,7 +168,7 @@ const TRAJECTORY_LOG_CAPACITY: usize = 10_000;
 const DESIGN_TIME_LOG_CAPACITY: usize = 10_000;
 
 fn env_bool(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
+    match std::env::var(name) { // determinism-ok: read once at startup, not per simulation step
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "0" | "false" | "off" | "no" => false,
             "1" | "true" | "on" | "yes" => true,
@@ -283,6 +284,8 @@ pub struct ServerState {
     pub reaction_dispatcher: Arc<RwLock<Option<Arc<ReactionDispatcher>>>>,
     /// Optional webhook dispatcher for external system notifications.
     pub webhook_dispatcher: Option<Arc<WebhookDispatcher>>,
+    /// WASM module registry: maps (tenant, module_name) → sha256_hash.
+    pub wasm_module_registry: Arc<RwLock<WasmModuleRegistry>>,
     /// Global cross-entity invariant enforcement toggle.
     pub cross_invariant_enforce: bool,
     /// Whether eventual invariants should block writes.
@@ -337,6 +340,7 @@ impl ServerState {
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
+            wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
@@ -424,6 +428,7 @@ impl ServerState {
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
+            wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
@@ -456,6 +461,221 @@ impl ServerState {
     pub fn with_webhook_dispatcher(mut self, dispatcher: Arc<WebhookDispatcher>) -> Self {
         self.webhook_dispatcher = Some(dispatcher);
         self
+    }
+
+    /// Upsert a WASM module in the persistence backend (Postgres or Turso).
+    pub async fn upsert_wasm_module(
+        &self,
+        tenant: &str,
+        module_name: &str,
+        wasm_bytes: &[u8],
+        sha256_hash: &str,
+    ) -> Result<(), String> {
+        let Some(store) = self.event_store.as_ref() else {
+            return Ok(());
+        };
+
+        // Postgres path.
+        if let Some(pool) = store.postgres_pool() {
+            sqlx::query(
+                "INSERT INTO wasm_modules (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at) \
+                 VALUES ($1, $2, $3, $4, 1, $5, now()) \
+                 ON CONFLICT (tenant, module_name) DO UPDATE SET \
+                     wasm_bytes = EXCLUDED.wasm_bytes, \
+                     sha256_hash = EXCLUDED.sha256_hash, \
+                     version = wasm_modules.version + 1, \
+                     size_bytes = EXCLUDED.size_bytes, \
+                     updated_at = now()",
+            )
+            .bind(tenant)
+            .bind(module_name)
+            .bind(wasm_bytes)
+            .bind(sha256_hash)
+            .bind(wasm_bytes.len() as i32)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("failed to upsert WASM module {tenant}/{module_name}: {e}"))?;
+            return Ok(());
+        }
+
+        // Turso path.
+        if let Some(turso) = store.turso_store() {
+            turso
+                .upsert_wasm_module(tenant, module_name, wasm_bytes, sha256_hash)
+                .await
+                .map_err(|e| {
+                    format!("failed to upsert WASM module {tenant}/{module_name} in turso: {e}")
+                })?;
+            return Ok(());
+        }
+
+        Ok(())
+    }
+
+    /// Delete a WASM module from persistence.
+    pub async fn delete_wasm_module(
+        &self,
+        tenant: &str,
+        module_name: &str,
+    ) -> Result<bool, String> {
+        let Some(store) = self.event_store.as_ref() else {
+            return Ok(false);
+        };
+
+        if let Some(pool) = store.postgres_pool() {
+            let result = sqlx::query(
+                "DELETE FROM wasm_modules WHERE tenant = $1 AND module_name = $2",
+            )
+            .bind(tenant)
+            .bind(module_name)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("failed to delete WASM module {tenant}/{module_name}: {e}"))?;
+            return Ok(result.rows_affected() > 0);
+        }
+
+        if let Some(turso) = store.turso_store() {
+            return turso
+                .delete_wasm_module(tenant, module_name)
+                .await
+                .map_err(|e| {
+                    format!("failed to delete WASM module {tenant}/{module_name} in turso: {e}")
+                });
+        }
+
+        Ok(false)
+    }
+
+    /// Dispatch WASM integrations for custom effects produced by a transition.
+    ///
+    /// For each custom effect matching a WASM integration, this method:
+    /// 1. Looks up the integration config from the spec
+    /// 2. Looks up the module hash from the WASM registry
+    /// 3. Dispatches the callback action (on_success or on_failure) back to the entity
+    ///
+    /// In production, this would invoke the WASM module via `WasmEngine`.
+    /// For now, this records the integration trigger in the trajectory log.
+    /// The actual WASM invocation is wired when `temper-wasm` is integrated.
+    pub fn dispatch_wasm_integrations(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        _action: &str,
+        custom_effects: &[String],
+        _entity_state: &crate::entity_actor::EntityState,
+    ) {
+        // Look up integrations for this entity type
+        let integrations = {
+            let registry = self.registry.read().unwrap();
+            registry
+                .get_spec(tenant, entity_type)
+                .map(|spec| spec.integrations.clone())
+                .unwrap_or_default()
+        };
+
+        for effect_name in custom_effects {
+            // Find matching WASM integration
+            let matching = integrations.iter().find(|ig| {
+                ig.integration_type == "wasm" && ig.trigger == *effect_name
+            });
+
+            let Some(integration) = matching else {
+                continue;
+            };
+
+            let Some(ref module_name) = integration.module else {
+                tracing::warn!(
+                    tenant = %tenant,
+                    entity_type,
+                    integration = %integration.name,
+                    "WASM integration missing module name"
+                );
+                continue;
+            };
+
+            // Check if module is registered
+            let has_module = {
+                let wasm_reg = self.wasm_module_registry.read().unwrap();
+                wasm_reg.get_hash(tenant, module_name).is_some()
+            };
+
+            if !has_module {
+                tracing::warn!(
+                    tenant = %tenant,
+                    entity_type,
+                    module = %module_name,
+                    "WASM module not found in registry"
+                );
+
+                // Dispatch failure callback asynchronously (fire-and-forget)
+                if let Some(ref on_failure) = integration.on_failure {
+                    let state = self.clone();
+                    let t = tenant.clone();
+                    let et = entity_type.to_string();
+                    let eid = entity_id.to_string();
+                    let cb = on_failure.clone();
+                    let int_name = integration.name.clone();
+                    let mod_name = module_name.clone();
+                    tokio::spawn(async move { // determinism-ok: async callback delivery
+                        let fail_params = serde_json::json!({
+                            "error": format!("WASM module '{}' not found", mod_name),
+                            "integration": int_name,
+                        });
+                        if let Err(e) = state
+                            .dispatch_tenant_action(&t, &et, &eid, &cb, fail_params)
+                            .await
+                        {
+                            tracing::error!(
+                                callback = %cb,
+                                error = %e,
+                                "failed to dispatch WASM failure callback"
+                            );
+                        }
+                    });
+                }
+                continue;
+            }
+
+            tracing::info!(
+                tenant = %tenant,
+                entity_type,
+                entity_id,
+                integration = %integration.name,
+                module = %module_name,
+                "WASM integration triggered (module invocation pending temper-wasm integration)"
+            );
+
+            // Phase 1: dispatch success callback directly (module invocation deferred).
+            // When temper-wasm engine is wired in, this block will build a
+            // WasmInvocationContext, call engine.invoke(), and choose on_success
+            // or on_failure based on the result.
+            if let Some(ref on_success) = integration.on_success {
+                let state = self.clone();
+                let t = tenant.clone();
+                let et = entity_type.to_string();
+                let eid = entity_id.to_string();
+                let cb = on_success.clone();
+                let int_name = integration.name.clone();
+                let mod_name = module_name.clone();
+                tokio::spawn(async move { // determinism-ok: async callback delivery
+                    let success_params = serde_json::json!({
+                        "integration": int_name,
+                        "module": mod_name,
+                    });
+                    if let Err(e) = state
+                        .dispatch_tenant_action(&t, &et, &eid, &cb, success_params)
+                        .await
+                    {
+                        tracing::error!(
+                            callback = %cb,
+                            error = %e,
+                            "failed to dispatch WASM success callback"
+                        );
+                    }
+                });
+            }
+        }
     }
 
     /// Override cross-invariant enforcement mode.
@@ -1140,10 +1360,23 @@ impl ServerState {
         if let Some(ref dispatcher) = self.webhook_dispatcher {
             let dispatcher = Arc::clone(dispatcher);
             let entry = trajectory_entry;
-            tokio::spawn(async move {
-                // determinism-ok: external side-effect, no simulation-visible state
+            tokio::spawn(async move { // determinism-ok: external side-effect, no simulation-visible state
                 dispatcher.dispatch(&entry);
             });
+        }
+
+        // Dispatch WASM integrations for custom effects (async post-transition).
+        // Each integration callback is spawned as a background task internally.
+        // This matches the IOA model: output action → environment → input action.
+        if response.success && !response.custom_effects.is_empty() {
+            self.dispatch_wasm_integrations(
+                tenant,
+                entity_type,
+                entity_id,
+                action,
+                &response.custom_effects,
+                &response.state,
+            );
         }
 
         Ok(response)

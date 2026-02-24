@@ -1,0 +1,21 @@
+[package]
+name = "temper-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WASM sandboxed integration runtime for Temper"
+
+[dependencies]
+wasmtime = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

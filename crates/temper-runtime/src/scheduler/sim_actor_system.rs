@@ -19,6 +19,41 @@ use super::id_gen::DeterministicIdGen;
 use super::sim_handler::SimActorHandler;
 use super::{DeterministicRng, FaultConfig, SimScheduler};
 
+/// Configures how integration callbacks are delivered in simulation.
+///
+/// Maps `(entity_type, trigger_name)` → callback action name. When a simulated
+/// entity emits a custom effect matching a trigger, the system auto-schedules
+/// the configured callback action on the next tick. This lets DST explore both
+/// success and failure paths without executing real WASM modules.
+#[derive(Debug, Clone, Default)]
+pub struct SimIntegrationResponses {
+    /// Maps (entity_type, trigger_name) → callback action name.
+    responses: BTreeMap<(String, String), String>,
+}
+
+impl SimIntegrationResponses {
+    /// Create an empty integration response map.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Configure a success callback for a trigger.
+    pub fn on_trigger(mut self, entity_type: &str, trigger: &str, callback_action: &str) -> Self {
+        self.responses.insert(
+            (entity_type.to_string(), trigger.to_string()),
+            callback_action.to_string(),
+        );
+        self
+    }
+
+    /// Look up the callback action for a trigger.
+    pub fn get_callback(&self, entity_type: &str, trigger: &str) -> Option<&str> {
+        self.responses
+            .get(&(entity_type.to_string(), trigger.to_string()))
+            .map(|s| s.as_str())
+    }
+}
+
 /// Configuration for a [`SimActorSystem`] run.
 #[derive(Debug, Clone)]
 pub struct SimActorSystemConfig {
@@ -123,6 +158,10 @@ pub struct SimActorSystem {
     recorded_transitions: Vec<(u64, String, String, String, String)>,
     /// Recorded invariant results for RunRecord: (actor_id, invariant_name, passed).
     recorded_invariants: Vec<(String, String, bool)>,
+    /// Integration callback configuration for WASM trigger simulation.
+    integration_responses: SimIntegrationResponses,
+    /// Pending integration callbacks to deliver: (actor_id, callback_action).
+    pending_integration_callbacks: Vec<(String, String)>,
 }
 
 impl SimActorSystem {
@@ -149,6 +188,8 @@ impl SimActorSystem {
             total_messages: 0,
             recorded_transitions: Vec::new(),
             recorded_invariants: Vec::new(),
+            integration_responses: SimIntegrationResponses::new(),
+            pending_integration_callbacks: Vec::new(),
         }
     }
 
@@ -166,6 +207,16 @@ impl SimActorSystem {
     /// `Some(description)` if an invariant is violated.
     pub fn set_invariant_checker(&mut self, checker: InvariantChecker) {
         self.invariant_checker = Some(checker);
+    }
+
+    /// Configure integration callback responses for WASM trigger simulation.
+    ///
+    /// When an actor emits a custom effect (trigger), the simulation system
+    /// looks up the configured callback and auto-schedules it on the next tick.
+    /// This lets DST explore both success and failure paths without executing
+    /// real WASM modules.
+    pub fn set_integration_responses(&mut self, responses: SimIntegrationResponses) {
+        self.integration_responses = responses;
     }
 
     // ===================================================================
@@ -221,10 +272,18 @@ impl SimActorSystem {
                     item_count,
                     tick,
                 );
+
+                // Schedule integration callbacks for any custom effects
+                self.schedule_integration_callbacks(actor_id);
             }
             Err(_) => {
                 // Failed action — invariants should still hold on unchanged state
             }
+        }
+
+        // Deliver any pending integration callbacks
+        if !self.pending_integration_callbacks.is_empty() {
+            self.deliver_integration_callbacks();
         }
 
         result
@@ -368,12 +427,20 @@ impl SimActorSystem {
                                 item_count,
                                 tick,
                             );
+
+                            // Schedule integration callbacks for any custom effects
+                            self.schedule_integration_callbacks(&msg.to);
                         }
                         Err(_) => {
                             // Action failed — expected for invalid transitions
                         }
                     }
                 }
+            }
+
+            // Deliver any pending integration callbacks
+            if !self.pending_integration_callbacks.is_empty() {
+                self.deliver_integration_callbacks();
             }
 
             // Drain any remaining scheduled messages
@@ -455,6 +522,54 @@ impl SimActorSystem {
         };
 
         (result, record)
+    }
+
+    // ===================================================================
+    // Integration callback scheduling
+    // ===================================================================
+
+    /// Check for pending integration callbacks and schedule them.
+    ///
+    /// After a successful action, the handler may have emitted custom effects
+    /// (integration triggers). This method looks up configured callbacks and
+    /// queues them for delivery on the next tick.
+    fn schedule_integration_callbacks(&mut self, actor_id: &str) {
+        let handler = match self.actors.get(actor_id) {
+            Some(h) => h,
+            None => return,
+        };
+
+        let callbacks = handler.pending_callbacks();
+        if callbacks.is_empty() {
+            return;
+        }
+
+        // Derive entity_type from actor_id (convention: "EntityType:EntityId" or just id)
+        // For simplicity, check against all registered entity_type patterns.
+        for trigger in &callbacks {
+            // Try matching with the actor_id as-is for the entity_type lookup
+            if let Some(callback_action) = self.integration_responses.get_callback(actor_id, trigger) {
+                self.pending_integration_callbacks
+                    .push((actor_id.to_string(), callback_action.to_string()));
+            }
+            // Also try splitting on ':' (e.g., "Order:o1" → entity_type = "Order")
+            else if let Some(colon_pos) = actor_id.find(':') {
+                let entity_type = &actor_id[..colon_pos];
+                if let Some(callback_action) = self.integration_responses.get_callback(entity_type, trigger) {
+                    self.pending_integration_callbacks
+                        .push((actor_id.to_string(), callback_action.to_string()));
+                }
+            }
+        }
+    }
+
+    /// Deliver any pending integration callbacks by executing them as actions.
+    fn deliver_integration_callbacks(&mut self) {
+        let callbacks: Vec<(String, String)> = self.pending_integration_callbacks.drain(..).collect();
+        for (actor_id, callback_action) in callbacks {
+            // Execute the callback as a regular step (this checks invariants too)
+            let _ = self.step(&actor_id, &callback_action, "{}");
+        }
     }
 
     // ===================================================================

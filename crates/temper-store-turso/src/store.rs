@@ -98,6 +98,9 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_TENANT_CONSTRAINTS_TABLE, ())
             .await
             .map_err(storage_error)?;
+        conn.execute(schema::CREATE_WASM_MODULES_TABLE, ())
+            .await
+            .map_err(storage_error)?;
 
         Ok(())
     }
@@ -332,6 +335,115 @@ impl TursoEventStore {
             });
         }
         Ok(out)
+    }
+
+    /// Upsert a WASM module binary for a tenant.
+    ///
+    /// If the module already exists, its version is incremented and the binary
+    /// is replaced. Returns the SHA-256 hash of the stored module.
+    pub async fn upsert_wasm_module(
+        &self,
+        tenant: &str,
+        module_name: &str,
+        wasm_bytes: &[u8],
+        sha256_hash: &str,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.configured_connection().await?;
+        conn.execute(
+            "INSERT INTO wasm_modules (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, datetime('now'))
+             ON CONFLICT (tenant, module_name) DO UPDATE SET
+                 wasm_bytes = excluded.wasm_bytes,
+                 sha256_hash = excluded.sha256_hash,
+                 version = wasm_modules.version + 1,
+                 size_bytes = excluded.size_bytes,
+                 updated_at = datetime('now')",
+            params![tenant, module_name, wasm_bytes.to_vec(), sha256_hash, wasm_bytes.len() as i64],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Load a WASM module by tenant and name.
+    pub async fn load_wasm_module(
+        &self,
+        tenant: &str,
+        module_name: &str,
+    ) -> Result<Option<TursoWasmModuleRow>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at \
+                 FROM wasm_modules \
+                 WHERE tenant = ?1 AND module_name = ?2",
+                params![tenant, module_name],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let Some(row) = rows.next().await.map_err(storage_error)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(TursoWasmModuleRow {
+            tenant: row.get::<String>(0).map_err(storage_error)?,
+            module_name: row.get::<String>(1).map_err(storage_error)?,
+            wasm_bytes: row.get::<Vec<u8>>(2).map_err(storage_error)?,
+            sha256_hash: row.get::<String>(3).map_err(storage_error)?,
+            version: row.get::<i64>(4).map_err(storage_error)? as i32,
+            size_bytes: row.get::<i64>(5).map_err(storage_error)? as i32,
+            updated_at: row.get::<String>(6).map_err(storage_error)?,
+        }))
+    }
+
+    /// Load all WASM modules for a tenant.
+    pub async fn load_all_wasm_modules(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<TursoWasmModuleRow>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at \
+                 FROM wasm_modules \
+                 WHERE tenant = ?1 \
+                 ORDER BY module_name",
+                params![tenant],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(TursoWasmModuleRow {
+                tenant: row.get::<String>(0).map_err(storage_error)?,
+                module_name: row.get::<String>(1).map_err(storage_error)?,
+                wasm_bytes: row.get::<Vec<u8>>(2).map_err(storage_error)?,
+                sha256_hash: row.get::<String>(3).map_err(storage_error)?,
+                version: row.get::<i64>(4).map_err(storage_error)? as i32,
+                size_bytes: row.get::<i64>(5).map_err(storage_error)? as i32,
+                updated_at: row.get::<String>(6).map_err(storage_error)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Delete a WASM module.
+    pub async fn delete_wasm_module(
+        &self,
+        tenant: &str,
+        module_name: &str,
+    ) -> Result<bool, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let affected = conn
+            .execute(
+                "DELETE FROM wasm_modules WHERE tenant = ?1 AND module_name = ?2",
+                params![tenant, module_name],
+            )
+            .await
+            .map_err(storage_error)?;
+        Ok(affected > 0)
     }
 
     /// Obtain a connection handle to the underlying database.
@@ -641,6 +753,25 @@ pub struct TursoTrajectoryRow {
     pub error: Option<String>,
     /// ISO-8601 timestamp.
     pub created_at: String,
+}
+
+/// Row returned by WASM module queries.
+#[derive(Debug, Clone)]
+pub struct TursoWasmModuleRow {
+    /// Tenant name.
+    pub tenant: String,
+    /// Module name.
+    pub module_name: String,
+    /// Raw WASM binary.
+    pub wasm_bytes: Vec<u8>,
+    /// SHA-256 hash of the WASM binary.
+    pub sha256_hash: String,
+    /// Monotonic version counter.
+    pub version: i32,
+    /// Module size in bytes.
+    pub size_bytes: i32,
+    /// ISO-8601 updated_at timestamp.
+    pub updated_at: String,
 }
 
 /// Row returned by [`TursoEventStore::load_tenant_constraints()`].

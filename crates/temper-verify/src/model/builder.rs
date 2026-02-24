@@ -154,6 +154,7 @@ fn translate_effects(effects: &[automaton::Effect]) -> Vec<ModelEffect> {
             }),
             automaton::Effect::Emit { .. } => None, // Emit is runtime-only
             automaton::Effect::ListAppend { .. } | automaton::Effect::ListRemoveAt { .. } => None, // List effects are runtime-only
+            automaton::Effect::Trigger { .. } => None, // Trigger is runtime-only (WASM dispatch)
         })
         .collect()
 }

@@ -38,6 +38,9 @@ pub struct DeployInput {
     pub csdl_xml: String,
     /// Pre-authored entity specs.
     pub entities: Vec<EntitySpecSource>,
+    /// WASM modules for integration handlers: module_name → wasm_bytes.
+    #[allow(dead_code)]
+    pub wasm_modules: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 /// Result of a verify-and-deploy operation.
@@ -131,6 +134,45 @@ impl DeployPipeline {
                 });
                 all_passed = false;
                 continue;
+            }
+
+            // Validate WASM integration modules: every type="wasm" integration
+            // must reference a module present in `input.wasm_modules`.
+            if let Ok(ref automaton) = parse_result {
+                let mut wasm_ok = true;
+                for integration in &automaton.integrations {
+                    if integration.integration_type == "wasm" {
+                        if let Some(ref module_name) = integration.module {
+                            if !input.wasm_modules.contains_key(module_name) {
+                                state.broadcast(PlatformEvent::VerifyStatus {
+                                    tenant: input.tenant_name.clone(),
+                                    level: format!("{} WASM", entity.entity_type),
+                                    status: VerifyStepStatus::Failed,
+                                    summary: format!(
+                                        "WASM module '{}' required by integration '{}' not found in deploy input",
+                                        module_name, integration.name,
+                                    ),
+                                });
+                                wasm_ok = false;
+                            }
+                        }
+                    }
+                }
+                if !wasm_ok {
+                    entity_span.set_status(Status::Error {
+                        description: "missing WASM modules".into(),
+                    });
+                    entity_span.set_attribute(KeyValue::new("temper.cascade_passed", false));
+                    entity_span.end();
+                    entity_results.push(EntityDeployResult {
+                        entity_name: entity.entity_type.clone(),
+                        verified: false,
+                        ioa_source: entity.ioa_source.clone(),
+                        cascade: None,
+                    });
+                    all_passed = false;
+                    continue;
+                }
             }
 
             // Run verification cascade
@@ -327,6 +369,7 @@ kind = "internal"
                 entity_type: "Task".into(),
                 ioa_source: TASK_IOA.into(),
             }],
+            wasm_modules: std::collections::BTreeMap::new(),
         }
     }
 
@@ -377,6 +420,7 @@ kind = "internal"
             tenant_name: "empty-tenant".into(),
             csdl_xml: TASK_CSDL.into(),
             entities: vec![],
+            wasm_modules: std::collections::BTreeMap::new(),
         };
         let result = DeployPipeline::verify_and_deploy(&state, &input);
 
@@ -465,6 +509,7 @@ kind = "internal"
                     ioa_source: TASK_IOA.replace("Task", "Bug"),
                 },
             ],
+            wasm_modules: std::collections::BTreeMap::new(),
         };
 
         let result = DeployPipeline::verify_and_deploy(&state, &input);
@@ -493,6 +538,7 @@ kind = "internal"
                 entity_type: "Bad".into(),
                 ioa_source: "this is not valid TOML".into(),
             }],
+            wasm_modules: std::collections::BTreeMap::new(),
         };
 
         let result = DeployPipeline::verify_and_deploy(&state, &input);

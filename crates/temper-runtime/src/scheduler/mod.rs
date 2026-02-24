@@ -32,6 +32,7 @@ pub use context::{
 pub use id_gen::{DeterministicIdGen, RealIdGen, SimIdGen};
 pub use sim_actor_system::{
     ActorInvariantViolation, RunRecord, SimActorResult, SimActorSystem, SimActorSystemConfig,
+    SimIntegrationResponses,
 };
 pub use sim_handler::{CompareOp, SimActorHandler, SpecAssert, SpecInvariant};
 
