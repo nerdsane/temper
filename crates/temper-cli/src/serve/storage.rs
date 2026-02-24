@@ -36,7 +36,9 @@ struct PersistedTenantConstraintRow {
     cross_invariants_toml: String,
 }
 
-pub(super) async fn connect_postgres_store(database_url: &str) -> Result<(ServerEventStore, sqlx::PgPool)> {
+pub(super) async fn connect_postgres_store(
+    database_url: &str,
+) -> Result<(ServerEventStore, sqlx::PgPool)> {
     println!("  Connecting to Postgres...");
     let pool = sqlx::PgPool::connect(database_url)
         .await

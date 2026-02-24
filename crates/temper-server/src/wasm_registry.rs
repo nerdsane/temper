@@ -23,12 +23,7 @@ impl WasmModuleRegistry {
     }
 
     /// Register a module hash for a tenant.
-    pub fn register(
-        &mut self,
-        tenant: &TenantId,
-        module_name: &str,
-        sha256_hash: &str,
-    ) {
+    pub fn register(&mut self, tenant: &TenantId, module_name: &str, sha256_hash: &str) {
         self.modules.insert(
             (tenant.to_string(), module_name.to_string()),
             sha256_hash.to_string(),

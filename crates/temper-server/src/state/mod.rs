@@ -11,8 +11,8 @@ pub use metrics::MetricsCollector;
 pub use trajectory::{TrajectoryEntry, TrajectoryLog};
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use temper_authz::AuthzEngine;
 use temper_evolution::{PostgresRecordStore, RecordStore};
 use temper_jit::table::TransitionTable;
@@ -63,7 +63,8 @@ pub(crate) const TRAJECTORY_LOG_CAPACITY: usize = 10_000;
 const DESIGN_TIME_LOG_CAPACITY: usize = 10_000;
 
 fn env_bool(name: &str, default: bool) -> bool {
-    match std::env::var(name) { // determinism-ok: read once at startup, not per simulation step
+    match std::env::var(name) {
+        // determinism-ok: read once at startup, not per simulation step
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "0" | "false" | "off" | "no" => false,
             "1" | "true" | "on" | "yes" => true,
@@ -197,7 +198,9 @@ impl ServerState {
             design_time_log: Arc::new(RwLock::new(Vec::new())),
             entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
             action_dispatch_timeout: env_timeout(),
-            eventual_tracker: Arc::new(RwLock::new(crate::eventual_invariants::EventualInvariantTracker::new())),
+            eventual_tracker: Arc::new(RwLock::new(
+                crate::eventual_invariants::EventualInvariantTracker::new(),
+            )),
         }
     }
 
@@ -288,7 +291,9 @@ impl ServerState {
             design_time_log: Arc::new(RwLock::new(Vec::new())),
             entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
             action_dispatch_timeout: env_timeout(),
-            eventual_tracker: Arc::new(RwLock::new(crate::eventual_invariants::EventualInvariantTracker::new())),
+            eventual_tracker: Arc::new(RwLock::new(
+                crate::eventual_invariants::EventualInvariantTracker::new(),
+            )),
         }
     }
 

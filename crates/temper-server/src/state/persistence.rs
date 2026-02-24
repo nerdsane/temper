@@ -3,8 +3,8 @@
 use sqlx::types::Json;
 use temper_runtime::scheduler::sim_now;
 
-use super::{ServerState, DESIGN_TIME_LOG_CAPACITY, DesignTimeEvent};
 use super::trajectory::TrajectoryEntry;
+use super::{DESIGN_TIME_LOG_CAPACITY, DesignTimeEvent, ServerState};
 use crate::registry::EntityVerificationResult;
 
 impl ServerState {
@@ -68,14 +68,15 @@ impl ServerState {
         };
 
         if let Some(pool) = store.postgres_pool() {
-            let result = sqlx::query(
-                "DELETE FROM wasm_modules WHERE tenant = $1 AND module_name = $2",
-            )
-            .bind(tenant)
-            .bind(module_name)
-            .execute(pool)
-            .await
-            .map_err(|e| format!("failed to delete WASM module {tenant}/{module_name}: {e}"))?;
+            let result =
+                sqlx::query("DELETE FROM wasm_modules WHERE tenant = $1 AND module_name = $2")
+                    .bind(tenant)
+                    .bind(module_name)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| {
+                        format!("failed to delete WASM module {tenant}/{module_name}: {e}")
+                    })?;
             return Ok(result.rows_affected() > 0);
         }
 

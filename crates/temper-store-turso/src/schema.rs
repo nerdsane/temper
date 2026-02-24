@@ -111,8 +111,18 @@ mod tests {
     #[test]
     fn wasm_modules_table_has_required_columns() {
         let sql = CREATE_WASM_MODULES_TABLE.to_uppercase();
-        for col in &["TENANT", "MODULE_NAME", "WASM_BYTES", "SHA256_HASH", "VERSION", "SIZE_BYTES"] {
-            assert!(sql.contains(col), "wasm_modules schema missing column: {col}");
+        for col in &[
+            "TENANT",
+            "MODULE_NAME",
+            "WASM_BYTES",
+            "SHA256_HASH",
+            "VERSION",
+            "SIZE_BYTES",
+        ] {
+            assert!(
+                sql.contains(col),
+                "wasm_modules schema missing column: {col}"
+            );
         }
     }
 }

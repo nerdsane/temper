@@ -63,10 +63,12 @@ pub async fn upload_wasm_module(
     }
 
     // Compile and cache
-    let hash = state
-        .wasm_engine
-        .compile_and_cache(&body)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("WASM compilation failed: {e}")))?;
+    let hash = state.wasm_engine.compile_and_cache(&body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("WASM compilation failed: {e}"),
+        )
+    })?;
 
     // Register in module registry
     {

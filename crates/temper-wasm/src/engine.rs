@@ -10,7 +10,9 @@ use sha2::{Digest, Sha256};
 use wasmtime::{Caller, Config, Engine, Linker, Module, Store};
 
 use crate::host_trait::WasmHost;
-use crate::types::{WasmInvocationContext, WasmInvocationResult, WasmResourceLimits, MAX_MODULE_SIZE};
+use crate::types::{
+    MAX_MODULE_SIZE, WasmInvocationContext, WasmInvocationResult, WasmResourceLimits,
+};
 
 /// Errors from the WASM engine.
 #[derive(Debug, thiserror::Error)]
@@ -167,9 +169,9 @@ impl WasmEngine {
             limits: limits.clone(),
         };
         let mut store = Store::new(&self.engine, host_state);
-        store.set_fuel(limits.max_fuel).map_err(|e| {
-            WasmError::Invocation(format!("failed to set fuel: {e}"))
-        })?;
+        store
+            .set_fuel(limits.max_fuel)
+            .map_err(|e| WasmError::Invocation(format!("failed to set fuel: {e}")))?;
 
         // Link host functions
         let mut linker = Linker::new(&self.engine);
@@ -192,9 +194,9 @@ impl WasmEngine {
 
         let ctx_bytes = context_json.as_bytes();
         let ctx_ptr = 1024_usize; // Fixed offset for context data
-        memory
-            .write(&mut store, ctx_ptr, ctx_bytes)
-            .map_err(|e| WasmError::Invocation(format!("failed to write context to memory: {e}")))?;
+        memory.write(&mut store, ctx_ptr, ctx_bytes).map_err(|e| {
+            WasmError::Invocation(format!("failed to write context to memory: {e}"))
+        })?;
 
         // Call run(ptr, len) -> result_ptr
         let result_ptr = run_fn
@@ -242,9 +244,8 @@ impl WasmEngine {
             });
         }
 
-        let parsed: serde_json::Value = serde_json::from_str(&result_json).map_err(|e| {
-            WasmError::Invocation(format!("failed to parse result JSON: {e}"))
-        })?;
+        let parsed: serde_json::Value = serde_json::from_str(&result_json)
+            .map_err(|e| WasmError::Invocation(format!("failed to parse result JSON: {e}")))?;
 
         Ok(WasmInvocationResult {
             callback_action: parsed
@@ -439,7 +440,8 @@ fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmError> 
 
                 // Bridge async -> sync
                 let host = caller.data().host.clone();
-                let result = tokio::task::block_in_place(|| { // determinism-ok: blocking bridge for WASM host call
+                let result = tokio::task::block_in_place(|| {
+                    // determinism-ok: blocking bridge for WASM host call
                     tokio::runtime::Handle::current()
                         .block_on(host.http_call(&method, &url, &headers, &body))
                 });

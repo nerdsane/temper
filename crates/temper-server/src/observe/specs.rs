@@ -278,7 +278,8 @@ pub(crate) async fn handle_load_dir(
         ));
     }
 
-    let csdl_xml = std::fs::read_to_string(&csdl_path).map_err(|e| { // determinism-ok: HTTP handler reads spec files
+    let csdl_xml = std::fs::read_to_string(&csdl_path).map_err(|e| {
+        // determinism-ok: HTTP handler reads spec files
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to read CSDL: {e}"),
@@ -294,7 +295,8 @@ pub(crate) async fn handle_load_dir(
     // Read all *.ioa.toml files
     let mut ioa_sources: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
-    let entries = std::fs::read_dir(specs_path).map_err(|e| { // determinism-ok: HTTP handler reads spec directory
+    let entries = std::fs::read_dir(specs_path).map_err(|e| {
+        // determinism-ok: HTTP handler reads spec directory
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to read specs directory: {e}"),
@@ -315,7 +317,8 @@ pub(crate) async fn handle_load_dir(
         if file_name.ends_with(".ioa.toml") {
             let entity_name = file_name.strip_suffix(".ioa.toml").unwrap_or_default();
             let entity_name = to_pascal_case(entity_name);
-            let source = std::fs::read_to_string(&path).map_err(|e| { // determinism-ok: HTTP handler reads spec files
+            let source = std::fs::read_to_string(&path).map_err(|e| {
+                // determinism-ok: HTTP handler reads spec files
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to read {}: {e}", path.display()),
@@ -336,7 +339,8 @@ pub(crate) async fn handle_load_dir(
     let reactions = {
         let path = specs_path.join("reactions.toml");
         if path.exists() {
-            let source = std::fs::read_to_string(&path).map_err(|e| { // determinism-ok: HTTP handler reads reactions file
+            let source = std::fs::read_to_string(&path).map_err(|e| {
+                // determinism-ok: HTTP handler reads reactions file
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to read {}: {e}", path.display()),
@@ -357,7 +361,8 @@ pub(crate) async fn handle_load_dir(
     let cross_invariants_toml = {
         let path = specs_path.join("cross-invariants.toml");
         if path.exists() {
-            Some(std::fs::read_to_string(&path).map_err(|e| { // determinism-ok: HTTP handler reads cross-invariants
+            Some(std::fs::read_to_string(&path).map_err(|e| {
+                // determinism-ok: HTTP handler reads cross-invariants
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to read {}: {e}", path.display()),
@@ -462,7 +467,8 @@ pub(crate) async fn handle_load_dir(
         let registry_path = state.data_dir.join("specs-registry.json");
         let mut specs_registry = std::collections::BTreeMap::<String, String>::new();
 
-        if let Ok(content) = std::fs::read_to_string(&registry_path) { // determinism-ok: HTTP handler reads specs registry
+        if let Ok(content) = std::fs::read_to_string(&registry_path) {
+            // determinism-ok: HTTP handler reads specs registry
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
                 if let Some(obj) = value.as_object() {
                     for (tenant, specs_dir) in obj {
@@ -496,7 +502,8 @@ pub(crate) async fn handle_load_dir(
         .filter(|f| matches!(f.severity, CrossInvariantLintSeverity::Warning))
         .collect();
 
-    tokio::spawn(async move { // determinism-ok: HTTP handler streams verification results inline
+    tokio::spawn(async move {
+        // determinism-ok: HTTP handler streams verification results inline
         let now = sim_now();
 
         // Emit specs_loaded line
@@ -619,7 +626,8 @@ pub(crate) async fn handle_load_dir(
 
             // Run verification (blocking, sequential per entity)
             let ioa_source = ioa_sources[entity_name].clone();
-            let result = tokio::task::spawn_blocking(move || { // determinism-ok: HTTP handler offloads CPU-intensive verification
+            let result = tokio::task::spawn_blocking(move || {
+                // determinism-ok: HTTP handler offloads CPU-intensive verification
                 temper_verify::VerificationCascade::from_ioa(&ioa_source)
                     .with_sim_seeds(5)
                     .with_prop_test_cases(100)
@@ -943,7 +951,8 @@ pub(crate) async fn handle_load_inline(
     // Write specs to a temp directory
     let tmp_dir = std::env::temp_dir().join(format!("temper-inline-{}", tenant)); // determinism-ok: HTTP handler writes user specs to temp dir for loading
     let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans previous temp dir
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| { // determinism-ok: HTTP handler creates temp dir for inline specs
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| {
+        // determinism-ok: HTTP handler creates temp dir for inline specs
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to create temp dir: {e}"),
@@ -952,7 +961,8 @@ pub(crate) async fn handle_load_inline(
 
     for (filename, content) in &body.specs {
         let path = tmp_dir.join(filename);
-        std::fs::write(&path, content).map_err(|e| { // determinism-ok: HTTP handler writes user specs to temp dir
+        std::fs::write(&path, content).map_err(|e| {
+            // determinism-ok: HTTP handler writes user specs to temp dir
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to write {filename}: {e}"),
@@ -961,7 +971,8 @@ pub(crate) async fn handle_load_inline(
     }
 
     if let Some(source) = body.cross_invariants_toml.as_deref() {
-        std::fs::write(tmp_dir.join("cross-invariants.toml"), source).map_err(|e| { // determinism-ok: HTTP handler writes cross-invariants
+        std::fs::write(tmp_dir.join("cross-invariants.toml"), source).map_err(|e| {
+            // determinism-ok: HTTP handler writes cross-invariants
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to write cross-invariants.toml: {e}"),

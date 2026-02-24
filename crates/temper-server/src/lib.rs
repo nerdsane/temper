@@ -5,11 +5,11 @@
 //! ensuring the same logic verified by DST runs in production.
 
 mod constraint_engine;
-pub mod eventual_invariants;
 mod dispatch;
 pub mod entity_actor;
 pub mod event_store;
 pub mod events;
+pub mod eventual_invariants;
 #[cfg(feature = "observe")]
 pub mod observe;
 mod query_eval;

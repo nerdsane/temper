@@ -131,7 +131,8 @@ pub fn spawn_eventual_recheck(
     state: crate::state::ServerState,
     interval: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move { // determinism-ok: background convergence task
+    tokio::spawn(async move {
+        // determinism-ok: background convergence task
         let mut ticker = tokio::time::interval(interval); // determinism-ok: convergence polling
         loop {
             ticker.tick().await;
@@ -151,9 +152,11 @@ pub fn spawn_eventual_recheck(
                     if let Ok(mut tracker) = state.eventual_tracker.write() {
                         tracker.resolve(&key);
                     }
-                    state
-                        .metrics
-                        .record_cross_invariant_check(&inv.tenant, &inv.entity_type, "eventual_converged");
+                    state.metrics.record_cross_invariant_check(
+                        &inv.tenant,
+                        &inv.entity_type,
+                        "eventual_converged",
+                    );
                     tracing::info!(
                         invariant = %inv.name,
                         tenant = %inv.tenant,
@@ -177,9 +180,11 @@ pub fn spawn_eventual_recheck(
                 if let Ok(mut tracker) = state.eventual_tracker.write() {
                     tracker.resolve(&key);
                 }
-                state
-                    .metrics
-                    .record_cross_invariant_violation(&inv.tenant, &inv.name, "eventual_convergence_failed");
+                state.metrics.record_cross_invariant_violation(
+                    &inv.tenant,
+                    &inv.name,
+                    "eventual_convergence_failed",
+                );
                 tracing::error!(
                     invariant = %inv.name,
                     tenant = %inv.tenant,
@@ -205,7 +210,10 @@ async fn check_invariant_convergence(
         let tc = registry.get_tenant(tenant);
         tc.and_then(|tc| {
             tc.cross_invariants.as_ref().and_then(|ci| {
-                ci.invariants.iter().find(|i| i.name == inv.name).map(|i| i.assertion.clone())
+                ci.invariants
+                    .iter()
+                    .find(|i| i.name == inv.name)
+                    .map(|i| i.assertion.clone())
             })
         })
     };
@@ -215,7 +223,9 @@ async fn check_invariant_convergence(
         return true;
     };
 
-    let Some(assertion) = temper_spec::cross_invariant::parse_related_status_in_assert(&assertion_str) else {
+    let Some(assertion) =
+        temper_spec::cross_invariant::parse_related_status_in_assert(&assertion_str)
+    else {
         return true; // Invalid assertion — skip
     };
 
@@ -231,7 +241,11 @@ async fn check_invariant_convergence(
     // Extract the target ID from the entity fields
     let Some(target_id) = fields
         .get(&assertion.source_field)
-        .or_else(|| fields.get("fields").and_then(|f| f.get(&assertion.source_field)))
+        .or_else(|| {
+            fields
+                .get("fields")
+                .and_then(|f| f.get(&assertion.source_field))
+        })
         .and_then(|v| v.as_str())
     else {
         return false;

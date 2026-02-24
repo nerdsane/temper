@@ -9,6 +9,5 @@ pub mod schema;
 pub mod store;
 
 pub use store::{
-    TursoEventStore, TursoSpecRow, TursoTenantConstraintRow, TursoTrajectoryRow,
-    TursoWasmModuleRow,
+    TursoEventStore, TursoSpecRow, TursoTenantConstraintRow, TursoTrajectoryRow, TursoWasmModuleRow,
 };

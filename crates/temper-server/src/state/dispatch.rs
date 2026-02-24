@@ -3,13 +3,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use temper_runtime::scheduler::sim_now;
-use temper_runtime::tenant::TenantId;
-use temper_wasm::{ProductionWasmHost, WasmHost, WasmInvocationContext, WasmResourceLimits};
 use super::ServerState;
 use super::trajectory::TrajectoryEntry;
 use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
+use temper_runtime::scheduler::sim_now;
+use temper_runtime::tenant::TenantId;
+use temper_wasm::{ProductionWasmHost, WasmHost, WasmInvocationContext, WasmResourceLimits};
 
 impl ServerState {
     /// Dispatch WASM integrations for custom effects produced by a transition.
@@ -39,9 +39,9 @@ impl ServerState {
 
         for effect_name in custom_effects {
             // Find matching WASM integration
-            let matching = integrations.iter().find(|ig| {
-                ig.integration_type == "wasm" && ig.trigger == *effect_name
-            });
+            let matching = integrations
+                .iter()
+                .find(|ig| ig.integration_type == "wasm" && ig.trigger == *effect_name);
 
             let Some(integration) = matching else {
                 continue;
@@ -80,7 +80,8 @@ impl ServerState {
                     let cb = on_failure.clone();
                     let int_name = integration.name.clone();
                     let mod_name = module_name.clone();
-                    tokio::spawn(async move { // determinism-ok: async callback delivery
+                    tokio::spawn(async move {
+                        // determinism-ok: async callback delivery
                         let fail_params = serde_json::json!({
                             "error": format!("WASM module '{}' not found", mod_name),
                             "integration": int_name,
@@ -113,7 +114,9 @@ impl ServerState {
             // Look up module hash
             let module_hash = {
                 let wasm_reg = self.wasm_module_registry.read().unwrap();
-                wasm_reg.get_hash(tenant, module_name).map(|s| s.to_string())
+                wasm_reg
+                    .get_hash(tenant, module_name)
+                    .map(|s| s.to_string())
             };
             let Some(hash) = module_hash else {
                 // Already checked has_module above — should not happen
@@ -141,7 +144,8 @@ impl ServerState {
             let on_fail = integration.on_failure.clone();
             let int_name = integration.name.clone();
 
-            tokio::spawn(async move { // determinism-ok: async WASM invocation
+            tokio::spawn(async move {
+                // determinism-ok: async WASM invocation
                 match engine.invoke(&hash, &ctx, host, &limits).await {
                     Ok(result) if result.success => {
                         tracing::info!(
@@ -378,7 +382,8 @@ impl ServerState {
         if let Some(ref dispatcher) = self.webhook_dispatcher {
             let dispatcher = Arc::clone(dispatcher);
             let entry = trajectory_entry;
-            tokio::spawn(async move { // determinism-ok: external side-effect, no simulation-visible state
+            tokio::spawn(async move {
+                // determinism-ok: external side-effect, no simulation-visible state
                 dispatcher.dispatch(&entry);
             });
         }

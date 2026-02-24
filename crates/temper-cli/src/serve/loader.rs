@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use temper_runtime::tenant::TenantId;
 use temper_server::event_store::ServerEventStore;
 use temper_server::reaction::registry::parse_reactions;
 use temper_server::registry::SpecRegistry;
@@ -14,7 +15,6 @@ use temper_spec::cross_invariant::{
     CrossInvariantLintSeverity, lint_cross_invariants, parse_cross_invariants,
 };
 use temper_spec::csdl::{CsdlDocument, parse_csdl};
-use temper_runtime::tenant::TenantId;
 
 use super::LoadedTenantSpecs;
 
@@ -233,7 +233,9 @@ pub(super) fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, Strin
 }
 
 /// Read optional `reactions.toml` and parse it into reaction rules.
-pub(super) fn read_reactions(specs_dir: &Path) -> Result<Vec<temper_server::reaction::ReactionRule>> {
+pub(super) fn read_reactions(
+    specs_dir: &Path,
+) -> Result<Vec<temper_server::reaction::ReactionRule>> {
     let reactions_path = specs_dir.join("reactions.toml");
     if !reactions_path.exists() {
         return Ok(Vec::new());
@@ -434,7 +436,8 @@ effect = "set phantom true"
     fn load_into_registry_rejects_lint_errors() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmp.path().join("model.csdl.xml"), TEST_CSDL).expect("write csdl"); // determinism-ok: test-only
-        std::fs::write( // determinism-ok: test-only
+        std::fs::write(
+            // determinism-ok: test-only
             tmp.path().join("order.ioa.toml"),
             r#"
 [automaton]

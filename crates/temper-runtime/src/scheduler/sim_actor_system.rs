@@ -548,14 +548,19 @@ impl SimActorSystem {
         // For simplicity, check against all registered entity_type patterns.
         for trigger in &callbacks {
             // Try matching with the actor_id as-is for the entity_type lookup
-            if let Some(callback_action) = self.integration_responses.get_callback(actor_id, trigger) {
+            if let Some(callback_action) =
+                self.integration_responses.get_callback(actor_id, trigger)
+            {
                 self.pending_integration_callbacks
                     .push((actor_id.to_string(), callback_action.to_string()));
             }
             // Also try splitting on ':' (e.g., "Order:o1" → entity_type = "Order")
             else if let Some(colon_pos) = actor_id.find(':') {
                 let entity_type = &actor_id[..colon_pos];
-                if let Some(callback_action) = self.integration_responses.get_callback(entity_type, trigger) {
+                if let Some(callback_action) = self
+                    .integration_responses
+                    .get_callback(entity_type, trigger)
+                {
                     self.pending_integration_callbacks
                         .push((actor_id.to_string(), callback_action.to_string()));
                 }
@@ -565,7 +570,8 @@ impl SimActorSystem {
 
     /// Deliver any pending integration callbacks by executing them as actions.
     fn deliver_integration_callbacks(&mut self) {
-        let callbacks: Vec<(String, String)> = self.pending_integration_callbacks.drain(..).collect();
+        let callbacks: Vec<(String, String)> =
+            self.pending_integration_callbacks.drain(..).collect();
         for (actor_id, callback_action) in callbacks {
             // Execute the callback as a regular step (this checks invariants too)
             let _ = self.step(&actor_id, &callback_action, "{}");
