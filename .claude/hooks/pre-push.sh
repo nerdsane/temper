@@ -5,11 +5,14 @@
 # This script is installed into .git/hooks/pre-push by scripts/setup-hooks.sh
 # Bypass with: git push --no-verify (for emergencies only)
 #
-# Runs four gates in order:
+# Runs seven gates in order:
 # 1. Integrity check (no TODO/unwrap/hacks in production code)
 # 2. Readability ratchet (no readability debt regressions)
-# 3. Determinism audit (no HashMap/SystemTime in simulation code)
-# 4. Full test suite (cargo test --workspace)
+# 3. Rust formatting check (cargo fmt --check)
+# 4. Rust compile check (cargo check --workspace)
+# 5. Rust lint check (cargo clippy --workspace -- -D warnings)
+# 6. Determinism audit (no HashMap/SystemTime in simulation code, advisory)
+# 7. Full test suite (cargo test --workspace)
 set -euo pipefail
 
 WORKSPACE_ROOT="$(git rev-parse --show-toplevel)"
@@ -19,7 +22,7 @@ echo "Bypass with --no-verify for emergencies." >&2
 
 # --- Gate 1: Integrity check (fast — grep scan) ---
 echo "" >&2
-echo "Gate 1/4: Integrity check..." >&2
+echo "Gate 1/7: Integrity check..." >&2
 if ! "$WORKSPACE_ROOT/scripts/integrity-check.sh" >&2; then
     echo "" >&2
     echo "BLOCKED: Integrity check failed! Push rejected." >&2
@@ -29,7 +32,7 @@ fi
 
 # --- Gate 2: Readability ratchet (fast — structural checks) ---
 echo "" >&2
-echo "Gate 2/4: Readability ratchet..." >&2
+echo "Gate 2/7: Readability ratchet..." >&2
 if ! "$WORKSPACE_ROOT/scripts/readability-ratchet.sh" check ".ci/readability-baseline.env" >&2; then
     echo "" >&2
     echo "BLOCKED: Readability regression detected. Push rejected." >&2
@@ -37,15 +40,43 @@ if ! "$WORKSPACE_ROOT/scripts/readability-ratchet.sh" check ".ci/readability-bas
     exit 1
 fi
 
-# --- Gate 3: Determinism audit (fast — grep scan) ---
+# --- Gate 3: rustfmt check ---
 echo "" >&2
-echo "Gate 3/4: Determinism audit..." >&2
+echo "Gate 3/7: rustfmt check..." >&2
+if ! (cd "$WORKSPACE_ROOT" && cargo fmt --check 2>&1 >&2); then
+    echo "" >&2
+    echo "BLOCKED: Formatting check failed! Push rejected." >&2
+    echo "Run: cargo fmt --all" >&2
+    exit 1
+fi
+
+# --- Gate 4: Compile check ---
+echo "" >&2
+echo "Gate 4/7: cargo check..." >&2
+if ! (cd "$WORKSPACE_ROOT" && cargo check --workspace 2>&1 >&2); then
+    echo "" >&2
+    echo "BLOCKED: Compile check failed! Push rejected." >&2
+    exit 1
+fi
+
+# --- Gate 5: Lint check ---
+echo "" >&2
+echo "Gate 5/7: cargo clippy..." >&2
+if ! (cd "$WORKSPACE_ROOT" && cargo clippy --workspace -- -D warnings 2>&1 >&2); then
+    echo "" >&2
+    echo "BLOCKED: Clippy check failed! Push rejected." >&2
+    exit 1
+fi
+
+# --- Gate 6: Determinism audit (fast — grep scan) ---
+echo "" >&2
+echo "Gate 6/7: Determinism audit..." >&2
 "$WORKSPACE_ROOT/scripts/check-determinism.sh" >&2
 # Determinism is advisory — doesn't block push, but output is visible
 
-# --- Gate 4: Full test suite ---
+# --- Gate 7: Full test suite ---
 echo "" >&2
-echo "Gate 4/4: Full test suite..." >&2
+echo "Gate 7/7: Full test suite..." >&2
 if ! (cd "$WORKSPACE_ROOT" && cargo test --workspace 2>&1 >&2); then
     echo "" >&2
     echo "BLOCKED: Test suite failed! Push rejected." >&2
