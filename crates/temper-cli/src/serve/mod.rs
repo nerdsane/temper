@@ -296,7 +296,10 @@ fn spawn_optimization_loop(state: &PlatformState) {
             ticker.tick().await;
             let applied = run_optimization_cycle(&store, &state).await;
             if !applied.is_empty() {
-                println!("  [opt] applied {} recommendations", applied.len());
+                tracing::info!(
+                    applied = applied.len(),
+                    "optimization cycle applied recommendations"
+                );
             }
         }
     });
