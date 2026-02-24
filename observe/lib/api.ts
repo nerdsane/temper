@@ -12,6 +12,8 @@ import type {
   EvolutionRecordsResponse,
   EvolutionInsightsResponse,
   SentinelCheckResponse,
+  WasmModulesResponse,
+  WasmInvocationsResponse,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -192,6 +194,30 @@ export async function fetchMetricsText(): Promise<string> {
   const res = await fetchWithRetry(`${API_BASE}/observe/metrics`, { cache: "no-store" });
   if (!res.ok) throw new ApiError(`Failed to fetch metrics: ${res.status}`, res.status);
   return res.text();
+}
+
+/** Fetch WASM modules with stats */
+export async function fetchWasmModules(): Promise<WasmModulesResponse> {
+  const res = await fetchWithRetry(`${API_BASE}/observe/wasm/modules`, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch WASM modules: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Fetch WASM invocation history */
+export async function fetchWasmInvocations(params?: {
+  module_name?: string;
+  success?: boolean;
+  limit?: number;
+}): Promise<WasmInvocationsResponse> {
+  const query = new URLSearchParams();
+  if (params?.module_name) query.set("module_name", params.module_name);
+  if (params?.success !== undefined) query.set("success", String(params.success));
+  if (params?.limit) query.set("limit", String(params.limit));
+  const qs = query.toString();
+  const url = `${API_BASE}/observe/wasm/invocations${qs ? `?${qs}` : ""}`;
+  const res = await fetchWithRetry(url, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch WASM invocations: ${res.status}`, res.status);
+  return res.json();
 }
 
 /** Check if the API server is reachable */

@@ -174,6 +174,7 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/skills/builder", get(serve_builder_skill))
         .route("/skills/user", get(serve_user_skill))
         .route("/wasm/modules", get(wasm::list_wasm_modules))
+        .route("/wasm/invocations", get(wasm::list_wasm_invocations))
         .route(
             "/wasm/modules/{module_name}",
             post(wasm::upload_wasm_module)

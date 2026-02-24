@@ -148,6 +148,7 @@ export default function Sidebar() {
     { href: "/workflows", label: "Workflows", icon: "workflow" },
     { href: "/activity", label: "Activity", icon: "activity" },
     { href: "/evolution", label: "Evolution", icon: "dna" },
+    { href: "/integrations", label: "Integrations", icon: "box" },
   ];
 
   // Group specs by tenant/app (hide internal platform tenant)

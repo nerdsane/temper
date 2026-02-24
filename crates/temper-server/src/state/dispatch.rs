@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use super::ServerState;
 use super::trajectory::TrajectoryEntry;
+use super::wasm_invocation_log::WasmInvocationEntry;
 use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
 use temper_runtime::scheduler::sim_now;
@@ -70,6 +71,23 @@ impl ServerState {
                     module = %module_name,
                     "WASM module not found in registry"
                 );
+
+                // Record invocation log entry for module-not-found
+                let log_entry = WasmInvocationEntry {
+                    timestamp: sim_now().to_rfc3339(),
+                    tenant: tenant.to_string(),
+                    entity_type: entity_type.to_string(),
+                    entity_id: entity_id.to_string(),
+                    module_name: module_name.clone(),
+                    trigger_action: _action.to_string(),
+                    callback_action: integration.on_failure.clone(),
+                    success: false,
+                    error: Some(format!("WASM module '{}' not found", module_name)),
+                    duration_ms: 0,
+                };
+                if let Ok(mut log) = self.wasm_invocation_log.write() {
+                    log.push(log_entry);
+                }
 
                 // Dispatch failure callback asynchronously (fire-and-forget)
                 if let Some(ref on_failure) = integration.on_failure {
@@ -143,6 +161,9 @@ impl ServerState {
             let on_ok = integration.on_success.clone();
             let on_fail = integration.on_failure.clone();
             let int_name = integration.name.clone();
+            let invocation_log = self.wasm_invocation_log.clone();
+            let trigger_action = _action.to_string();
+            let log_module_name = module_name.clone();
 
             tokio::spawn(async move {
                 // determinism-ok: async WASM invocation
@@ -154,6 +175,21 @@ impl ServerState {
                             duration_ms = result.duration_ms,
                             "WASM integration succeeded"
                         );
+                        let log_entry = WasmInvocationEntry {
+                            timestamp: sim_now().to_rfc3339(),
+                            tenant: t.to_string(),
+                            entity_type: et.clone(),
+                            entity_id: eid.clone(),
+                            module_name: log_module_name.clone(),
+                            trigger_action: trigger_action.clone(),
+                            callback_action: Some(result.callback_action.clone()),
+                            success: true,
+                            error: None,
+                            duration_ms: result.duration_ms,
+                        };
+                        if let Ok(mut log) = invocation_log.write() {
+                            log.push(log_entry);
+                        }
                         if let Some(cb) = on_ok {
                             let params = result.callback_params;
                             if let Err(e) = state
@@ -171,6 +207,21 @@ impl ServerState {
                             duration_ms = result.duration_ms,
                             "WASM integration returned failure"
                         );
+                        let log_entry = WasmInvocationEntry {
+                            timestamp: sim_now().to_rfc3339(),
+                            tenant: t.to_string(),
+                            entity_type: et.clone(),
+                            entity_id: eid.clone(),
+                            module_name: log_module_name.clone(),
+                            trigger_action: trigger_action.clone(),
+                            callback_action: result.error.as_ref().and(on_fail.clone()),
+                            success: false,
+                            error: result.error.clone(),
+                            duration_ms: result.duration_ms,
+                        };
+                        if let Ok(mut log) = invocation_log.write() {
+                            log.push(log_entry);
+                        }
                         if let Some(cb) = on_fail {
                             let params = serde_json::json!({
                                 "error": result.error.unwrap_or_default(),
@@ -190,6 +241,21 @@ impl ServerState {
                             error = %e,
                             "WASM module invocation error"
                         );
+                        let log_entry = WasmInvocationEntry {
+                            timestamp: sim_now().to_rfc3339(),
+                            tenant: t.to_string(),
+                            entity_type: et.clone(),
+                            entity_id: eid.clone(),
+                            module_name: log_module_name.clone(),
+                            trigger_action: trigger_action.clone(),
+                            callback_action: on_fail.clone(),
+                            success: false,
+                            error: Some(e.to_string()),
+                            duration_ms: 0,
+                        };
+                        if let Ok(mut log) = invocation_log.write() {
+                            log.push(log_entry);
+                        }
                         if let Some(cb) = on_fail {
                             let params = serde_json::json!({
                                 "error": e.to_string(),

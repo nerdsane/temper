@@ -5,10 +5,12 @@ mod entity_ops;
 pub mod metrics;
 mod persistence;
 pub mod trajectory;
+pub mod wasm_invocation_log;
 
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use metrics::MetricsCollector;
 pub use trajectory::{TrajectoryEntry, TrajectoryLog};
+pub use wasm_invocation_log::{WasmInvocationEntry, WasmInvocationLog};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
@@ -61,6 +63,8 @@ pub struct DesignTimeEvent {
 pub(crate) const TRAJECTORY_LOG_CAPACITY: usize = 10_000;
 /// Maximum number of design-time events retained in memory.
 const DESIGN_TIME_LOG_CAPACITY: usize = 10_000;
+/// Maximum number of WASM invocation entries retained in the bounded log.
+const WASM_INVOCATION_LOG_CAPACITY: usize = 500;
 
 fn env_bool(name: &str, default: bool) -> bool {
     match std::env::var(name) {
@@ -132,6 +136,8 @@ pub struct ServerState {
     pub wasm_module_registry: Arc<RwLock<WasmModuleRegistry>>,
     /// WASM execution engine: compiles, caches, and invokes sandboxed modules.
     pub wasm_engine: Arc<WasmEngine>,
+    /// Bounded WASM invocation log for observability.
+    pub wasm_invocation_log: Arc<RwLock<WasmInvocationLog>>,
     /// Global cross-entity invariant enforcement toggle.
     pub cross_invariant_enforce: bool,
     /// Whether eventual invariants should block writes.
@@ -192,6 +198,9 @@ impl ServerState {
             webhook_dispatcher: None,
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
             wasm_engine: Arc::new(WasmEngine::default()),
+            wasm_invocation_log: Arc::new(RwLock::new(WasmInvocationLog::new(
+                WASM_INVOCATION_LOG_CAPACITY,
+            ))),
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
@@ -285,6 +294,9 @@ impl ServerState {
             webhook_dispatcher: None,
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
             wasm_engine: Arc::new(WasmEngine::default()),
+            wasm_invocation_log: Arc::new(RwLock::new(WasmInvocationLog::new(
+                WASM_INVOCATION_LOG_CAPACITY,
+            ))),
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),

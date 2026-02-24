@@ -302,3 +302,38 @@ export interface SentinelCheckResponse {
   alerts_count: number;
   alerts: SentinelAlert[];
 }
+
+// --- WASM integration types ---
+export interface WasmModule {
+  module_name: string;
+  sha256_hash: string;
+  cached: boolean;
+  total_invocations: number;
+  success_count: number;
+  success_rate: number;
+  last_invoked_at: string | null;
+}
+
+export interface WasmModulesResponse {
+  tenant: string;
+  modules: WasmModule[];
+  total: number;
+}
+
+export interface WasmInvocation {
+  timestamp: string;
+  tenant: string;
+  entity_type: string;
+  entity_id: string;
+  module_name: string;
+  trigger_action: string;
+  callback_action: string | null;
+  success: boolean;
+  error: string | null;
+  duration_ms: number;
+}
+
+export interface WasmInvocationsResponse {
+  invocations: WasmInvocation[];
+  total: number;
+}
