@@ -146,6 +146,7 @@ fn effect_var(effect: &Effect) -> Option<&str> {
         Effect::Emit { .. } => None,
         Effect::ListAppend { var } => Some(var.as_str()),
         Effect::ListRemoveAt { var } => Some(var.as_str()),
+        Effect::Trigger { .. } => None,
     }
 }
 
@@ -168,6 +169,7 @@ fn render_effect(effect: &Effect) -> String {
         Effect::Emit { event } => format!("emit {event}"),
         Effect::ListAppend { var } => format!("list_append {var}"),
         Effect::ListRemoveAt { var } => format!("list_remove_at {var}"),
+        Effect::Trigger { name } => format!("trigger {name}"),
     }
 }
 

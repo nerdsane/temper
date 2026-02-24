@@ -27,6 +27,9 @@ credentials.json
 *.log
 .z3-trace
 
+# Generated assets
+generated_imgs/
+
 # Harness
 .cascade-results/
 .proof/archive/
