@@ -110,10 +110,10 @@ async fn main() -> anyhow::Result<()> {
                     anyhow::bail!("Invalid --app format: '{entry}'. Expected name=specs-dir");
                 }
             }
-            if apps.is_empty() {
-                if let Some(ref dir) = specs_dir {
-                    apps.push((tenant.clone(), dir.clone()));
-                }
+            if apps.is_empty()
+                && let Some(ref dir) = specs_dir
+            {
+                apps.push((tenant.clone(), dir.clone()));
             }
             serve::run(port, apps, storage, storage_explicit).await?
         }

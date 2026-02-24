@@ -469,12 +469,12 @@ pub(crate) async fn handle_load_dir(
 
         if let Ok(content) = std::fs::read_to_string(&registry_path) {
             // determinism-ok: HTTP handler reads specs registry
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(obj) = value.as_object() {
-                    for (tenant, specs_dir) in obj {
-                        if let Some(specs_dir) = specs_dir.as_str() {
-                            specs_registry.insert(tenant.clone(), specs_dir.to_string());
-                        }
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
+                && let Some(obj) = value.as_object()
+            {
+                for (tenant, specs_dir) in obj {
+                    if let Some(specs_dir) = specs_dir.as_str() {
+                        specs_registry.insert(tenant.clone(), specs_dir.to_string());
                     }
                 }
             }
@@ -725,8 +725,8 @@ pub(crate) async fn handle_load_dir(
                                         });
                                     }
                                 }
-                                if let Some(pt) = &l.prop_test {
-                                    if let Some(failure) = &pt.failure {
+                                if let Some(pt) = &l.prop_test
+                                    && let Some(failure) = &pt.failure {
                                         dets.push(crate::registry::VerificationDetail {
                                             kind: "proptest_failure".into(),
                                             property: failure.invariant.clone(),
@@ -737,7 +737,6 @@ pub(crate) async fn handle_load_dir(
                                             actor_id: None,
                                         });
                                     }
-                                }
                                 if dets.is_empty() { None } else { Some(dets) }
                             } else {
                                 None

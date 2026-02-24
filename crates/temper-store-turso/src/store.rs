@@ -14,6 +14,28 @@ pub struct TursoEventStore {
     db: Arc<Database>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct TursoSpecVerificationUpdate<'a> {
+    pub status: &'a str,
+    pub verified: bool,
+    pub levels_passed: Option<i32>,
+    pub levels_total: Option<i32>,
+    pub verification_result_json: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TursoTrajectoryInsert<'a> {
+    pub tenant: &'a str,
+    pub entity_type: &'a str,
+    pub entity_id: &'a str,
+    pub action: &'a str,
+    pub success: bool,
+    pub from_status: Option<&'a str>,
+    pub to_status: Option<&'a str>,
+    pub error: Option<&'a str>,
+    pub created_at: &'a str,
+}
+
 impl TursoEventStore {
     /// Connect to a Turso database.
     ///
@@ -139,11 +161,7 @@ impl TursoEventStore {
         &self,
         tenant: &str,
         entity_type: &str,
-        status: &str,
-        verified: bool,
-        levels_passed: Option<i32>,
-        levels_total: Option<i32>,
-        verification_result_json: Option<&str>,
+        update: TursoSpecVerificationUpdate<'_>,
     ) -> Result<(), PersistenceError> {
         let conn = self.configured_connection().await?;
         conn.execute(
@@ -158,11 +176,11 @@ impl TursoEventStore {
             params![
                 tenant,
                 entity_type,
-                verified as i64,
-                status,
-                levels_passed,
-                levels_total,
-                verification_result_json
+                update.verified as i64,
+                update.status,
+                update.levels_passed,
+                update.levels_total,
+                update.verification_result_json
             ],
         )
         .await
@@ -211,15 +229,7 @@ impl TursoEventStore {
     /// Persist a trajectory entry.
     pub async fn persist_trajectory(
         &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        success: bool,
-        from_status: Option<&str>,
-        to_status: Option<&str>,
-        error: Option<&str>,
-        created_at: &str,
+        entry: TursoTrajectoryInsert<'_>,
     ) -> Result<(), PersistenceError> {
         let conn = self.configured_connection().await?;
         conn.execute(
@@ -227,15 +237,15 @@ impl TursoEventStore {
              (tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                tenant,
-                entity_type,
-                entity_id,
-                action,
-                success as i64,
-                from_status,
-                to_status,
-                error,
-                created_at
+                entry.tenant,
+                entry.entity_type,
+                entry.entity_id,
+                entry.action,
+                entry.success as i64,
+                entry.from_status,
+                entry.to_status,
+                entry.error,
+                entry.created_at
             ],
         )
         .await

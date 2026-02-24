@@ -69,32 +69,30 @@ pub(crate) async fn get_entity_history(
         registry.get(&actor_key).cloned()
     };
 
-    if let Some(actor_ref) = actor_ref {
-        if let Ok(response) = actor_ref
+    if let Some(actor_ref) = actor_ref
+        && let Ok(response) = actor_ref
             .ask::<EntityResponse>(EntityMsg::GetState, state.action_dispatch_timeout)
             .await
-        {
-            let mut json =
-                format_history_response(&entity_type, &entity_id, &response.state.events);
-            // Include entity properties from in-memory state.
-            if let Some(obj) = json.as_object_mut() {
-                obj.insert(
-                    "current_state".to_string(),
-                    serde_json::json!(response.state.status),
-                );
-                obj.insert("fields".to_string(), response.state.fields.clone());
-                obj.insert(
-                    "counters".to_string(),
-                    serde_json::json!(response.state.counters),
-                );
-                obj.insert(
-                    "booleans".to_string(),
-                    serde_json::json!(response.state.booleans),
-                );
-                obj.insert("lists".to_string(), serde_json::json!(response.state.lists));
-            }
-            return Json(json);
+    {
+        let mut json = format_history_response(&entity_type, &entity_id, &response.state.events);
+        // Include entity properties from in-memory state.
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert(
+                "current_state".to_string(),
+                serde_json::json!(response.state.status),
+            );
+            obj.insert("fields".to_string(), response.state.fields.clone());
+            obj.insert(
+                "counters".to_string(),
+                serde_json::json!(response.state.counters),
+            );
+            obj.insert(
+                "booleans".to_string(),
+                serde_json::json!(response.state.booleans),
+            );
+            obj.insert("lists".to_string(), serde_json::json!(response.state.lists));
         }
+        return Json(json);
     }
 
     // Path 2: Query event store directly (for inactive entities).
@@ -181,15 +179,15 @@ pub(crate) async fn handle_event_stream(
         match result {
             Ok(change) => {
                 // Apply filters.
-                if let Some(ref ft) = filter_type {
-                    if change.entity_type != *ft {
-                        return None;
-                    }
+                if let Some(ref ft) = filter_type
+                    && change.entity_type != *ft
+                {
+                    return None;
                 }
-                if let Some(ref fi) = filter_id {
-                    if change.entity_id != *fi {
-                        return None;
-                    }
+                if let Some(ref fi) = filter_id
+                    && change.entity_id != *fi
+                {
+                    return None;
                 }
                 let data = serde_json::to_string(&change).unwrap_or_default();
                 Some(Ok(Event::default().event("state_change").data(data)))

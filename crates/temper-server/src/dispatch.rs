@@ -27,12 +27,11 @@ use crate::state::{ServerState, VerificationGateError};
 /// Checks `X-Tenant-Id` header first. Falls back to the first registered
 /// tenant in the SpecRegistry, or `TenantId::default()` if empty.
 pub(crate) fn extract_tenant(headers: &HeaderMap, state: &ServerState) -> TenantId {
-    if let Some(val) = headers.get("x-tenant-id") {
-        if let Ok(s) = val.to_str() {
-            if !s.is_empty() {
-                return TenantId::new(s);
-            }
-        }
+    if let Some(val) = headers.get("x-tenant-id")
+        && let Ok(s) = val.to_str()
+        && !s.is_empty()
+    {
+        return TenantId::new(s);
     }
 
     // Fall back to the first registered tenant

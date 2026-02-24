@@ -178,10 +178,7 @@ impl WebhookDispatcher {
 fn expand_env_vars(s: &str) -> String {
     let mut result = s.to_string();
     let mut cursor = 0;
-    loop {
-        let Some(rel_start) = result[cursor..].find("${") else {
-            break;
-        };
+    while let Some(rel_start) = result[cursor..].find("${") {
         let abs_start = cursor + rel_start;
         let Some(rel_end) = result[abs_start..].find('}') else {
             break;

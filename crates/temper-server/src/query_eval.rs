@@ -390,20 +390,20 @@ async fn expand_entity_recursive(
         }
 
         // Recursively expand nested $expand on related entities
-        if let Some(ref nested_opts) = item.options {
-            if let Some(ref nested_expand) = nested_opts.expand {
-                for related in &mut related_entities {
-                    Box::pin(expand_entity_recursive(
-                        related,
-                        nested_expand,
-                        &info.target_type,
-                        state,
-                        tenant,
-                        depth + 1,
-                        visited,
-                    ))
-                    .await;
-                }
+        if let Some(ref nested_opts) = item.options
+            && let Some(ref nested_expand) = nested_opts.expand
+        {
+            for related in &mut related_entities {
+                Box::pin(expand_entity_recursive(
+                    related,
+                    nested_expand,
+                    &info.target_type,
+                    state,
+                    tenant,
+                    depth + 1,
+                    visited,
+                ))
+                .await;
             }
         }
 
@@ -431,18 +431,18 @@ fn find_nav_target(
     nav_prop: &str,
 ) -> Option<String> {
     for schema in &csdl.schemas {
-        if let Some(et) = schema.entity_type(entity_type) {
-            if let Some(np) = et.navigation_properties.iter().find(|n| n.name == nav_prop) {
-                // Type name is like "Collection(Namespace.EntityType)" or "Namespace.EntityType"
-                let type_name = np.type_name.trim();
-                let inner = if type_name.starts_with("Collection(") && type_name.ends_with(')') {
-                    &type_name[11..type_name.len() - 1]
-                } else {
-                    type_name
-                };
-                // Extract simple name from qualified name
-                return Some(inner.rsplit('.').next().unwrap_or(inner).to_string());
-            }
+        if let Some(et) = schema.entity_type(entity_type)
+            && let Some(np) = et.navigation_properties.iter().find(|n| n.name == nav_prop)
+        {
+            // Type name is like "Collection(Namespace.EntityType)" or "Namespace.EntityType"
+            let type_name = np.type_name.trim();
+            let inner = if type_name.starts_with("Collection(") && type_name.ends_with(')') {
+                &type_name[11..type_name.len() - 1]
+            } else {
+                type_name
+            };
+            // Extract simple name from qualified name
+            return Some(inner.rsplit('.').next().unwrap_or(inner).to_string());
         }
     }
     None
@@ -455,10 +455,10 @@ fn is_collection_nav(
     nav_prop: &str,
 ) -> bool {
     for schema in &csdl.schemas {
-        if let Some(et) = schema.entity_type(entity_type) {
-            if let Some(np) = et.navigation_properties.iter().find(|n| n.name == nav_prop) {
-                return np.type_name.starts_with("Collection(");
-            }
+        if let Some(et) = schema.entity_type(entity_type)
+            && let Some(np) = et.navigation_properties.iter().find(|n| n.name == nav_prop)
+        {
+            return np.type_name.starts_with("Collection(");
         }
     }
     false

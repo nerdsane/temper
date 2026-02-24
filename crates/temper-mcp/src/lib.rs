@@ -72,27 +72,25 @@ impl RuntimeContext {
             .start(vec![input], tracker, &mut print)
             .map_err(|e| anyhow!(format_monty_exception(&e)))?;
 
-        loop {
-            match progress {
-                RunProgress::Complete(result) => {
-                    let value = monty_object_to_json(&result);
-                    return serde_json::to_string(&value)
-                        .context("failed to serialize search output as JSON string");
-                }
-                RunProgress::FunctionCall { function_name, .. } => {
-                    bail!(
-                        "search sandbox denied external function call '{}'. Only `spec` is available",
-                        function_name
-                    );
-                }
-                RunProgress::ResolveFutures(_) => {
-                    bail!("search sandbox entered unexpected async pending state");
-                }
-                RunProgress::OsCall { function, .. } => {
-                    bail!(
-                        "search sandbox blocked OS access ({function:?}). Filesystem/network/env access is disabled"
-                    );
-                }
+        match progress {
+            RunProgress::Complete(result) => {
+                let value = monty_object_to_json(&result);
+                serde_json::to_string(&value)
+                    .context("failed to serialize search output as JSON string")
+            }
+            RunProgress::FunctionCall { function_name, .. } => {
+                bail!(
+                    "search sandbox denied external function call '{}'. Only `spec` is available",
+                    function_name
+                );
+            }
+            RunProgress::ResolveFutures(_) => {
+                bail!("search sandbox entered unexpected async pending state");
+            }
+            RunProgress::OsCall { function, .. } => {
+                bail!(
+                    "search sandbox blocked OS access ({function:?}). Filesystem/network/env access is disabled"
+                );
             }
         }
     }

@@ -78,32 +78,32 @@ pub fn lint_automaton(automaton: &Automaton) -> Vec<LintFinding> {
         }
 
         for guard in &action.guard {
-            if let Some(var) = guard_var(guard) {
-                if !vars.contains(var) {
-                    findings.push(LintFinding::error(
-                        "guard_unknown_var",
-                        format!(
-                            "guard '{}' references unknown variable '{}'",
-                            render_guard(guard),
-                            var
-                        ),
-                    ));
-                }
+            if let Some(var) = guard_var(guard)
+                && !vars.contains(var)
+            {
+                findings.push(LintFinding::error(
+                    "guard_unknown_var",
+                    format!(
+                        "guard '{}' references unknown variable '{}'",
+                        render_guard(guard),
+                        var
+                    ),
+                ));
             }
         }
 
         for effect in &action.effect {
-            if let Some(var) = effect_var(effect) {
-                if !vars.contains(var) {
-                    findings.push(LintFinding::error(
-                        "effect_unknown_var",
-                        format!(
-                            "effect '{}' references unknown variable '{}'",
-                            render_effect(effect),
-                            var
-                        ),
-                    ));
-                }
+            if let Some(var) = effect_var(effect)
+                && !vars.contains(var)
+            {
+                findings.push(LintFinding::error(
+                    "effect_unknown_var",
+                    format!(
+                        "effect '{}' references unknown variable '{}'",
+                        render_effect(effect),
+                        var
+                    ),
+                ));
             }
         }
     }

@@ -196,14 +196,13 @@ impl EntityActor {
                     // Replay effects own their projected keys, so only fill gaps.
                     if let Some(created_event) =
                         state.events.first().filter(|e| e.action == "Created")
-                    {
-                        if let (Some(fields_obj), Some(params_obj)) = (
+                        && let (Some(fields_obj), Some(params_obj)) = (
                             state.fields.as_object_mut(),
                             created_event.params.as_object(),
-                        ) {
-                            for (k, v) in params_obj {
-                                fields_obj.entry(k.clone()).or_insert_with(|| v.clone());
-                            }
+                        )
+                    {
+                        for (k, v) in params_obj {
+                            fields_obj.entry(k.clone()).or_insert_with(|| v.clone());
                         }
                     }
 

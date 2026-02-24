@@ -144,13 +144,12 @@ impl PlacementStore for RedisPlacement {
                                 crate::error::RedisStoreError::Command(e.to_string())
                             },
                         )?;
-                    if let Some(json) = value {
-                        if let Ok(placement) = serde_json::from_str::<Placement>(&json) {
-                            if placement.shard_id == shard_id {
-                                let key_str = key.into_string().unwrap_or_default();
-                                result.push((key_str, placement));
-                            }
-                        }
+                    if let Some(json) = value
+                        && let Ok(placement) = serde_json::from_str::<Placement>(&json)
+                        && placement.shard_id == shard_id
+                    {
+                        let key_str = key.into_string().unwrap_or_default();
+                        result.push((key_str, placement));
                     }
                 }
                 Some(Err(e)) => {

@@ -143,18 +143,18 @@ pub(crate) async fn run_verification(
                             });
                         }
                     }
-                    if let Some(pt) = &l.prop_test {
-                        if let Some(failure) = &pt.failure {
-                            dets.push(crate::registry::VerificationDetail {
-                                kind: "proptest_failure".into(),
-                                property: failure.invariant.clone(),
-                                description: format!(
-                                    "Property test failed after sequence: {}",
-                                    failure.action_sequence.join(" → ")
-                                ),
-                                actor_id: None,
-                            });
-                        }
+                    if let Some(pt) = &l.prop_test
+                        && let Some(failure) = &pt.failure
+                    {
+                        dets.push(crate::registry::VerificationDetail {
+                            kind: "proptest_failure".into(),
+                            property: failure.invariant.clone(),
+                            description: format!(
+                                "Property test failed after sequence: {}",
+                                failure.action_sequence.join(" → ")
+                            ),
+                            actor_id: None,
+                        });
                     }
                     if dets.is_empty() { None } else { Some(dets) }
                 } else {

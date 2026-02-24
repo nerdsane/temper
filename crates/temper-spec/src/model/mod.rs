@@ -127,17 +127,17 @@ pub fn build_spec_model_mixed(
 
         // Validate action valid-from states against specification transitions
         for action in &schema.actions {
-            if let Some(from_states) = action.valid_from_states() {
-                if let Some(binding_type) = action.binding_type() {
-                    let entity_name = binding_type.rsplit('.').next().unwrap_or(binding_type);
-                    if let Some(sm) = state_machines.get(entity_name) {
-                        for state in &from_states {
-                            if !sm.states.contains(state) {
-                                validation.errors.push(format!(
+            if let Some(from_states) = action.valid_from_states()
+                && let Some(binding_type) = action.binding_type()
+            {
+                let entity_name = binding_type.rsplit('.').next().unwrap_or(binding_type);
+                if let Some(sm) = state_machines.get(entity_name) {
+                    for state in &from_states {
+                        if !sm.states.contains(state) {
+                            validation.errors.push(format!(
                                     "Action {}: ValidFromStates contains '{}' which is not in {}'s specification states",
                                     action.name, state, entity_name
                                 ));
-                            }
                         }
                     }
                 }

@@ -669,17 +669,17 @@ impl SimActorSystem {
         }
 
         // 2. Check manual invariant checker (backward-compatible).
-        if let Some(ref checker) = self.invariant_checker {
-            if let Some(desc) = checker(actor_id, action, status_after, item_count) {
-                self.violations.push(ActorInvariantViolation {
-                    actor_id: actor_id.to_string(),
-                    action: action.to_string(),
-                    status_before: status_before.to_string(),
-                    status_after: status_after.to_string(),
-                    description: desc,
-                    tick,
-                });
-            }
+        if let Some(ref checker) = self.invariant_checker
+            && let Some(desc) = checker(actor_id, action, status_after, item_count)
+        {
+            self.violations.push(ActorInvariantViolation {
+                actor_id: actor_id.to_string(),
+                action: action.to_string(),
+                status_before: status_before.to_string(),
+                status_after: status_after.to_string(),
+                description: desc,
+                tick,
+            });
         }
     }
 }

@@ -141,10 +141,11 @@ impl DeployPipeline {
             if let Ok(ref automaton) = parse_result {
                 let mut wasm_ok = true;
                 for integration in &automaton.integrations {
-                    if integration.integration_type == "wasm" {
-                        if let Some(ref module_name) = integration.module {
-                            if !input.wasm_modules.contains_key(module_name) {
-                                state.broadcast(PlatformEvent::VerifyStatus {
+                    if integration.integration_type == "wasm"
+                        && let Some(ref module_name) = integration.module
+                        && !input.wasm_modules.contains_key(module_name)
+                    {
+                        state.broadcast(PlatformEvent::VerifyStatus {
                                     tenant: input.tenant_name.clone(),
                                     level: format!("{} WASM", entity.entity_type),
                                     status: VerifyStepStatus::Failed,
@@ -153,9 +154,7 @@ impl DeployPipeline {
                                         module_name, integration.name,
                                     ),
                                 });
-                                wasm_ok = false;
-                            }
-                        }
+                        wasm_ok = false;
                     }
                 }
                 if !wasm_ok {

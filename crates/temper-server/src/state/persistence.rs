@@ -2,6 +2,7 @@
 
 use sqlx::types::Json;
 use temper_runtime::scheduler::sim_now;
+use temper_store_turso::store::{TursoSpecVerificationUpdate, TursoTrajectoryInsert};
 
 use super::trajectory::TrajectoryEntry;
 use super::{DESIGN_TIME_LOG_CAPACITY, DesignTimeEvent, ServerState};
@@ -263,11 +264,13 @@ impl ServerState {
                 .persist_spec_verification(
                     tenant,
                     entity_type,
-                    status,
-                    verified,
-                    levels_passed,
-                    levels_total,
-                    result_json.as_deref(),
+                    TursoSpecVerificationUpdate {
+                        status,
+                        verified,
+                        levels_passed,
+                        levels_total,
+                        verification_result_json: result_json.as_deref(),
+                    },
                 )
                 .await
                 .map_err(|e| {
@@ -373,17 +376,17 @@ impl ServerState {
         // Fall back to Turso.
         if let Some(turso) = store.turso_store() {
             turso
-                .persist_trajectory(
-                    &entry.tenant,
-                    &entry.entity_type,
-                    &entry.entity_id,
-                    &entry.action,
-                    entry.success,
-                    entry.from_status.as_deref(),
-                    entry.to_status.as_deref(),
-                    entry.error.as_deref(),
-                    &entry.timestamp,
-                )
+                .persist_trajectory(TursoTrajectoryInsert {
+                    tenant: &entry.tenant,
+                    entity_type: &entry.entity_type,
+                    entity_id: &entry.entity_id,
+                    action: &entry.action,
+                    success: entry.success,
+                    from_status: entry.from_status.as_deref(),
+                    to_status: entry.to_status.as_deref(),
+                    error: entry.error.as_deref(),
+                    created_at: &entry.timestamp,
+                })
                 .await
                 .map_err(|e| {
                     format!(

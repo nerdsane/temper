@@ -156,13 +156,13 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
                 )));
             }
         }
-        if let Some(ref to) = action.to {
-            if !states.contains(to) {
-                return Err(AutomatonParseError::Validation(format!(
-                    "action '{}' references unknown to-state '{}'",
-                    action.name, to
-                )));
-            }
+        if let Some(ref to) = action.to
+            && !states.contains(to)
+        {
+            return Err(AutomatonParseError::Validation(format!(
+                "action '{}' references unknown to-state '{}'",
+                action.name, to
+            )));
         }
     }
 
@@ -175,21 +175,21 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
                     integration.name
                 )));
             }
-            if let Some(ref on_success) = integration.on_success {
-                if !action_names.contains(&on_success.as_str()) {
-                    return Err(AutomatonParseError::Validation(format!(
-                        "integration '{}' on_success action '{}' not found in spec actions",
-                        integration.name, on_success
-                    )));
-                }
+            if let Some(ref on_success) = integration.on_success
+                && !action_names.contains(&on_success.as_str())
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "integration '{}' on_success action '{}' not found in spec actions",
+                    integration.name, on_success
+                )));
             }
-            if let Some(ref on_failure) = integration.on_failure {
-                if !action_names.contains(&on_failure.as_str()) {
-                    return Err(AutomatonParseError::Validation(format!(
-                        "integration '{}' on_failure action '{}' not found in spec actions",
-                        integration.name, on_failure
-                    )));
-                }
+            if let Some(ref on_failure) = integration.on_failure
+                && !action_names.contains(&on_failure.as_str())
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "integration '{}' on_failure action '{}' not found in spec actions",
+                    integration.name, on_failure
+                )));
             }
         }
     }
@@ -319,10 +319,10 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                 &mut current_liveness,
                 &mut liveness_props,
             );
-            if let Some(ig) = current_integration.take() {
-                if !ig.name.is_empty() {
-                    integrations.push(ig);
-                }
+            if let Some(ig) = current_integration.take()
+                && !ig.name.is_empty()
+            {
+                integrations.push(ig);
             }
             current_liveness = Some(Liveness {
                 name: String::new(),
@@ -344,10 +344,10 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                 &mut current_liveness,
                 &mut liveness_props,
             );
-            if let Some(ig) = current_integration.take() {
-                if !ig.name.is_empty() {
-                    integrations.push(ig);
-                }
+            if let Some(ig) = current_integration.take()
+                && !ig.name.is_empty()
+            {
+                integrations.push(ig);
             }
             current_integration = Some(Integration {
                 name: String::new(),
@@ -528,10 +528,10 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
         &mut current_liveness,
         &mut liveness_props,
     );
-    if let Some(ig) = current_integration.take() {
-        if !ig.name.is_empty() {
-            integrations.push(ig);
-        }
+    if let Some(ig) = current_integration.take()
+        && !ig.name.is_empty()
+    {
+        integrations.push(ig);
     }
 
     Ok(Automaton {
@@ -559,25 +559,25 @@ fn flush_all(
     liveness: &mut Option<Liveness>,
     liveness_props: &mut Vec<Liveness>,
 ) {
-    if let Some(a) = action.take() {
-        if !a.name.is_empty() {
-            actions.push(a);
-        }
+    if let Some(a) = action.take()
+        && !a.name.is_empty()
+    {
+        actions.push(a);
     }
-    if let Some(inv) = invariant.take() {
-        if !inv.name.is_empty() {
-            invariants.push(inv);
-        }
+    if let Some(inv) = invariant.take()
+        && !inv.name.is_empty()
+    {
+        invariants.push(inv);
     }
-    if let Some(sv) = state_var.take() {
-        if !sv.name.is_empty() {
-            state_vars.push(sv);
-        }
+    if let Some(sv) = state_var.take()
+        && !sv.name.is_empty()
+    {
+        state_vars.push(sv);
     }
-    if let Some(l) = liveness.take() {
-        if !l.name.is_empty() {
-            liveness_props.push(l);
-        }
+    if let Some(l) = liveness.take()
+        && !l.name.is_empty()
+    {
+        liveness_props.push(l);
     }
 }
 

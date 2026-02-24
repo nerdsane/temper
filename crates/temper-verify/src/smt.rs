@@ -263,10 +263,10 @@ fn check_bool_required_induction_z3(
         // Compute post-state based on effects
         let mut bool_post = bool_pre.clone();
         for effect in &t.effects {
-            if let ModelEffect::SetBool { var: v, value } = effect {
-                if v == var {
-                    bool_post = Bool::from_bool(*value);
-                }
+            if let ModelEffect::SetBool { var: v, value } = effect
+                && v == var
+            {
+                bool_post = Bool::from_bool(*value);
             }
         }
 
@@ -368,12 +368,11 @@ fn check_unreachable_states(model: &TemperModel) -> Vec<String> {
         for t in &model.transitions {
             let can_fire_from =
                 t.from_states.is_empty() || t.from_states.iter().any(|s| s == state);
-            if can_fire_from {
-                if let Some(to) = &t.to_state {
-                    if !reachable.contains(to.as_str()) {
-                        queue.push(to);
-                    }
-                }
+            if can_fire_from
+                && let Some(to) = &t.to_state
+                && !reachable.contains(to.as_str())
+            {
+                queue.push(to);
             }
         }
     }

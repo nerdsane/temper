@@ -133,10 +133,10 @@ fn persisted_status_to_registry_status(row: &PersistedSpecRow) -> VerificationSt
         "pending" => VerificationStatus::Pending,
         "running" => VerificationStatus::Running,
         _ => {
-            if let Some(value) = row.verification_result.clone() {
-                if let Ok(result) = serde_json::from_value::<EntityVerificationResult>(value) {
-                    return VerificationStatus::Completed(result);
-                }
+            if let Some(value) = row.verification_result.clone()
+                && let Ok(result) = serde_json::from_value::<EntityVerificationResult>(value)
+            {
+                return VerificationStatus::Completed(result);
             }
 
             let all_passed = status == "passed" || row.verified;
@@ -337,10 +337,10 @@ fn turso_status_to_registry_status(row: &temper_store_turso::TursoSpecRow) -> Ve
         "pending" => VerificationStatus::Pending,
         "running" => VerificationStatus::Running,
         _ => {
-            if let Some(ref json_str) = row.verification_result {
-                if let Ok(result) = serde_json::from_str::<EntityVerificationResult>(json_str) {
-                    return VerificationStatus::Completed(result);
-                }
+            if let Some(ref json_str) = row.verification_result
+                && let Ok(result) = serde_json::from_str::<EntityVerificationResult>(json_str)
+            {
+                return VerificationStatus::Completed(result);
             }
 
             let all_passed = status == "passed" || row.verified;

@@ -126,21 +126,21 @@ fn check_implications(model: &TemperModel, state: &TemperModelState) -> bool {
 /// (Deadlock freedom expressed as a safety property.)
 fn check_no_deadlock(model: &TemperModel, state: &TemperModelState) -> bool {
     for live in &model.liveness {
-        if let LivenessKind::NoDeadlock { ref from } = live.kind {
-            if from.contains(&state.status) {
-                // Must have at least one enabled action
-                let mut has_action = false;
-                for t in &model.transitions {
-                    let status_ok = t.from_states.is_empty()
-                        || t.from_states.iter().any(|s| s == &state.status);
-                    if status_ok && evaluate_guard(&t.guard, state) {
-                        has_action = true;
-                        break;
-                    }
+        if let LivenessKind::NoDeadlock { ref from } = live.kind
+            && from.contains(&state.status)
+        {
+            // Must have at least one enabled action
+            let mut has_action = false;
+            for t in &model.transitions {
+                let status_ok =
+                    t.from_states.is_empty() || t.from_states.iter().any(|s| s == &state.status);
+                if status_ok && evaluate_guard(&t.guard, state) {
+                    has_action = true;
+                    break;
                 }
-                if !has_action {
-                    return false;
-                }
+            }
+            if !has_action {
+                return false;
             }
         }
     }
@@ -158,10 +158,11 @@ fn check_no_deadlock(model: &TemperModel, state: &TemperModelState) -> bool {
 /// reaches any target" is verified.
 fn check_reaches_state(model: &TemperModel, state: &TemperModelState) -> bool {
     for live in &model.liveness {
-        if let LivenessKind::ReachesState { targets, .. } = &live.kind {
-            if !targets.is_empty() && targets.contains(&state.status) {
-                return true;
-            }
+        if let LivenessKind::ReachesState { targets, .. } = &live.kind
+            && !targets.is_empty()
+            && targets.contains(&state.status)
+        {
+            return true;
         }
     }
     // No target state reached yet.

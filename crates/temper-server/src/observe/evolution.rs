@@ -168,20 +168,20 @@ pub(crate) async fn handle_trajectories(
         .entries()
         .iter()
         .filter(|e| {
-            if let Some(ref ft) = params.entity_type {
-                if e.entity_type != *ft {
-                    return false;
-                }
+            if let Some(ref ft) = params.entity_type
+                && e.entity_type != *ft
+            {
+                return false;
             }
-            if let Some(ref fa) = params.action {
-                if e.action != *fa {
-                    return false;
-                }
+            if let Some(ref fa) = params.action
+                && e.action != *fa
+            {
+                return false;
             }
-            if let Some(sf) = success_filter {
-                if e.success != sf {
-                    return false;
-                }
+            if let Some(sf) = success_filter
+                && e.success != sf
+            {
+                return false;
             }
             true
         })
@@ -367,39 +367,39 @@ pub(crate) async fn list_evolution_records(
         let type_filter = params.record_type.as_deref();
         let status_filter = params.status.as_deref().and_then(parse_record_status);
 
-        if type_filter.is_none() || type_filter == Some("observation") {
-            if let Ok(observations) = pg_store.open_observations().await {
-                for obs in observations {
-                    if matches_status_filter(&obs.header.status, &status_filter) {
-                        records.push(serde_json::json!({
-                            "id": obs.header.id,
-                            "record_type": "Observation",
-                            "status": format!("{:?}", obs.header.status),
-                            "created_by": obs.header.created_by,
-                            "timestamp": obs.header.timestamp.to_rfc3339(),
-                            "source": obs.source,
-                            "classification": obs.classification,
-                        }));
-                    }
+        if (type_filter.is_none() || type_filter == Some("observation"))
+            && let Ok(observations) = pg_store.open_observations().await
+        {
+            for obs in observations {
+                if matches_status_filter(&obs.header.status, &status_filter) {
+                    records.push(serde_json::json!({
+                        "id": obs.header.id,
+                        "record_type": "Observation",
+                        "status": format!("{:?}", obs.header.status),
+                        "created_by": obs.header.created_by,
+                        "timestamp": obs.header.timestamp.to_rfc3339(),
+                        "source": obs.source,
+                        "classification": obs.classification,
+                    }));
                 }
             }
         }
 
-        if type_filter.is_none() || type_filter == Some("insight") {
-            if let Ok(insights) = pg_store.ranked_insights().await {
-                for insight in insights {
-                    if matches_status_filter(&insight.header.status, &status_filter) {
-                        records.push(serde_json::json!({
-                            "id": insight.header.id,
-                            "record_type": "Insight",
-                            "status": format!("{:?}", insight.header.status),
-                            "created_by": insight.header.created_by,
-                            "timestamp": insight.header.timestamp.to_rfc3339(),
-                            "category": insight.category,
-                            "priority_score": insight.priority_score,
-                            "recommendation": insight.recommendation,
-                        }));
-                    }
+        if (type_filter.is_none() || type_filter == Some("insight"))
+            && let Ok(insights) = pg_store.ranked_insights().await
+        {
+            for insight in insights {
+                if matches_status_filter(&insight.header.status, &status_filter) {
+                    records.push(serde_json::json!({
+                        "id": insight.header.id,
+                        "record_type": "Insight",
+                        "status": format!("{:?}", insight.header.status),
+                        "created_by": insight.header.created_by,
+                        "timestamp": insight.header.timestamp.to_rfc3339(),
+                        "category": insight.category,
+                        "priority_score": insight.priority_score,
+                        "recommendation": insight.recommendation,
+                    }));
                 }
             }
         }

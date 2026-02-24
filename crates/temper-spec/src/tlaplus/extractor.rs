@@ -119,12 +119,11 @@ fn extract_states(source: &str) -> Result<Vec<String>, TlaExtractError> {
         // Fallback: look for status = "xxx" patterns in Init and transitions
         for line in source.lines() {
             let trimmed = line.trim();
-            if trimmed.contains("status =") || trimmed.contains("status' =") {
-                if let Some(s) = extract_quoted_string(trimmed) {
-                    if !states.contains(&s) {
-                        states.push(s);
-                    }
-                }
+            if (trimmed.contains("status =") || trimmed.contains("status' ="))
+                && let Some(s) = extract_quoted_string(trimmed)
+                && !states.contains(&s)
+            {
+                states.push(s);
             }
             if trimmed.contains("status \\in") {
                 states.extend(extract_inline_set(trimmed));
@@ -352,12 +351,13 @@ fn extract_from_states(guard: &str, states: &[String]) -> Vec<String> {
     for line in guard.lines() {
         let trimmed = line.trim();
 
-        if trimmed.contains("status =") && !trimmed.contains("status' =") {
-            if let Some(s) = extract_quoted_string(trimmed) {
-                if states.contains(&s) && !result.contains(&s) {
-                    result.push(s);
-                }
-            }
+        if trimmed.contains("status =")
+            && !trimmed.contains("status' =")
+            && let Some(s) = extract_quoted_string(trimmed)
+            && states.contains(&s)
+            && !result.contains(&s)
+        {
+            result.push(s);
         }
 
         if trimmed.contains("status \\in") {
@@ -379,12 +379,12 @@ fn extract_to_state(effect: &str, states: &[String]) -> Option<String> {
     // Pattern: status' = "Xxx"
     for line in effect.lines() {
         let trimmed = line.trim();
-        if trimmed.contains("status'") && trimmed.contains('=') {
-            if let Some(s) = extract_quoted_string(trimmed) {
-                if states.contains(&s) {
-                    return Some(s);
-                }
-            }
+        if trimmed.contains("status'")
+            && trimmed.contains('=')
+            && let Some(s) = extract_quoted_string(trimmed)
+            && states.contains(&s)
+        {
+            return Some(s);
         }
     }
     None

@@ -274,6 +274,18 @@ pub(super) fn to_pascal_case(s: &str) -> String {
         .collect()
 }
 
+type PostgresTrajectoryRow = (
+    String,
+    String,
+    String,
+    String,
+    bool,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    chrono::DateTime<chrono::Utc>,
+);
+
 /// Hydrate the in-memory trajectory log from the persistent backend.
 pub(super) async fn hydrate_trajectory_log(
     server: &temper_server::state::ServerState,
@@ -284,7 +296,7 @@ pub(super) async fn hydrate_trajectory_log(
 
     // Try Postgres first (uses the trajectories table directly via sqlx).
     if let Some(pool) = store.postgres_pool() {
-        let rows: Result<Vec<(String, String, String, String, bool, Option<String>, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>)>, _> = sqlx::query_as(
+        let rows: Result<Vec<PostgresTrajectoryRow>, _> = sqlx::query_as(
             "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at \
              FROM trajectories \
              ORDER BY created_at DESC \
@@ -293,10 +305,24 @@ pub(super) async fn hydrate_trajectory_log(
         .fetch_all(pool)
         .await;
 
-        if let Ok(rows) = rows {
-            if let Ok(mut log) = server.trajectory_log.write() {
-                // Insert oldest-first (rows are newest-first from query).
-                for (
+        if let Ok(rows) = rows
+            && let Ok(mut log) = server.trajectory_log.write()
+        {
+            // Insert oldest-first (rows are newest-first from query).
+            for (
+                tenant,
+                entity_type,
+                entity_id,
+                action,
+                success,
+                from_status,
+                to_status,
+                error,
+                created_at,
+            ) in rows.into_iter().rev()
+            {
+                log.push(TrajectoryEntry {
+                    timestamp: created_at.to_rfc3339(),
                     tenant,
                     entity_type,
                     entity_id,
@@ -305,25 +331,11 @@ pub(super) async fn hydrate_trajectory_log(
                     from_status,
                     to_status,
                     error,
-                    created_at,
-                ) in rows.into_iter().rev()
-                {
-                    log.push(TrajectoryEntry {
-                        timestamp: created_at.to_rfc3339(),
-                        tenant,
-                        entity_type,
-                        entity_id,
-                        action,
-                        success,
-                        from_status,
-                        to_status,
-                        error,
-                    });
-                }
-                let count = log.entries().len();
-                if count > 0 {
-                    println!("  Restored {count} trajectory entries from Postgres.");
-                }
+                });
+            }
+            let count = log.entries().len();
+            if count > 0 {
+                println!("  Restored {count} trajectory entries from Postgres.");
             }
         }
         return;

@@ -41,7 +41,7 @@ use storage::{
 };
 
 /// Parsed specs loaded from disk for a tenant.
-pub(self) struct LoadedTenantSpecs {
+struct LoadedTenantSpecs {
     pub csdl_xml: String,
     pub ioa_sources: HashMap<String, String>,
     pub cross_invariants_toml: Option<String>,
@@ -155,29 +155,28 @@ pub async fn run(
 
     let specs_registry_path = data_dir.join("specs-registry.json");
     let mut auto_reloaded = 0usize;
-    if let Ok(content) = fs::read_to_string(&specs_registry_path) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(entries) = value.as_object() {
-                for (tenant, specs_dir) in entries {
-                    let Some(specs_dir) = specs_dir.as_str() else {
-                        continue;
-                    };
+    if let Ok(content) = fs::read_to_string(&specs_registry_path)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
+        && let Some(entries) = value.as_object()
+    {
+        for (tenant, specs_dir) in entries {
+            let Some(specs_dir) = specs_dir.as_str() else {
+                continue;
+            };
 
-                    let loaded = {
-                        let mut guard = state.registry.write().unwrap(); // ci-ok: infallible lock
-                        load_into_registry(&mut guard, specs_dir, tenant)
-                    };
+            let loaded = {
+                let mut guard = state.registry.write().unwrap(); // ci-ok: infallible lock
+                load_into_registry(&mut guard, specs_dir, tenant)
+            };
 
-                    match loaded {
-                        Ok(_) => {
-                            auto_reloaded += 1;
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "  Warning: failed to auto-reload app {tenant} from {specs_dir}: {e}"
-                            );
-                        }
-                    }
+            match loaded {
+                Ok(_) => {
+                    auto_reloaded += 1;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  Warning: failed to auto-reload app {tenant} from {specs_dir}: {e}"
+                    );
                 }
             }
         }
