@@ -1,37 +1,28 @@
-PASS 2026-02-19
-Plan: staged changes (139 files, +7344/-2593)
+PASS 2026-02-24
+Plan: Fix 6 Audit Issues (snazzy-beaming-bird.md)
 Reviewer: claude-opus-4-6
-Date: 2026-02-19
-Scope: Full workspace staged changes - Postgres persistence, hot-swap tables, observe UX, CLI recovery
+Date: 2026-02-24
+Scope: 14 files across temper-jit, temper-server, temper-platform — 6 audit issues
 Files reviewed:
-  - crates/temper-server/src/observe_routes.rs (1494+ lines added)
-  - crates/temper-server/src/state.rs (405+ lines added)
-  - crates/temper-server/src/dispatch.rs (338+ lines reformatted/enhanced)
-  - crates/temper-server/src/entity_actor/actor.rs (hot-swap RwLock refactor)
-  - crates/temper-server/src/entity_actor/sim_handler.rs
-  - crates/temper-server/src/registry.rs (get_table_live, hot-swap support)
-  - crates/temper-server/src/router.rs
-  - crates/temper-cli/src/serve/mod.rs (Postgres recovery, background verification)
-  - crates/temper-store-postgres/src/schema.rs (specs, trajectories, design_time_events DDL)
-  - crates/temper-store-postgres/src/migration.rs (new table migrations)
-  - crates/temper-runtime/src/scheduler/mod.rs
-  - crates/temper-jit/src/ (multiple files)
-  - crates/temper-spec/src/ (parser, csdl, model)
-  - crates/temper-verify/src/ (cascade, simulation, smt)
-  - crates/temper-evolution/src/ (chain, store, records)
-  - crates/temper-platform/src/ (bootstrap, deploy, evolution, protocol)
-  - observe/ (StateMachineGraph, EntityDetailPanel, activity, verify pages)
-  - reference-apps/ (ecommerce, oncall tests and benchmarks)
+  - crates/temper-jit/src/shadow.rs (Issue 3: EvalContext upgrade)
+  - crates/temper-server/src/state/mod.rs (Issue 6+4: action_dispatch_timeout, eventual_tracker)
+  - crates/temper-server/src/state/dispatch.rs (Issue 6: timeout replacement)
+  - crates/temper-server/src/state/entity_ops.rs (Issue 6: 4 timeout replacements)
+  - crates/temper-server/src/observe/entities.rs (Issue 6: timeout replacement)
+  - crates/temper-server/src/constraint_engine.rs (Issue 4: defer_eventual_invariant)
+  - crates/temper-server/src/eventual_invariants.rs (Issue 4: EventualInvariantTracker + background task)
+  - crates/temper-server/src/lib.rs (Issue 4: pub mod eventual_invariants)
+  - crates/temper-server/src/dispatch.rs (Issue 1: BoundFunction implementation)
+  - crates/temper-server/src/query_eval.rs (Issue 5: nested $expand with depth/cycle guards)
+  - crates/temper-platform/src/hooks.rs (Issue 2: deploy pipeline wiring)
+  - crates/temper-platform/src/state.rs (Issue 2: spec_store field)
+  - crates/temper-platform/src/lib.rs (Issue 2: pub mod spec_store)
+  - crates/temper-platform/src/spec_store.rs (Issue 2: SpecStore bounded storage)
 Checks:
-  sql_safety: PASS (all queries use parameterized bindings, no interpolation)
+  plan_alignment: PASS (all 6 issues implemented exactly as planned, no deviations)
+  tigerstyle: PASS (bounded budgets: MAX_TENANTS=1000, MAX_PENDING=10000, MAX_EXPAND_DEPTH=3, MAX_RECHECK_ATTEMPTS=5; debug_assert on timeout bounds; fail-fast on invariant violations)
+  dst_compliance: PASS (BTreeMap/BTreeSet throughout, sim_now() for timestamps, determinism-ok annotations on tokio::spawn and env reads, no HashMap/HashSet)
+  error_handling: PASS (all error paths logged via tracing::warn/error, no silent failures, lock unwraps annotated ci-ok)
   doc_comments: PASS (all new pub items documented)
-  tigerstyle: PASS (pre/post assertions, bounded budgets, fail-fast)
-  dst_compliance: PASS (BTreeMap/BTreeSet, sim_now/sim_uuid, determinism-ok annotations)
-  error_handling: PASS (persistence errors logged and propagated, no silent failures)
-  security: PASS (no SQL injection, parameterized queries throughout)
-  schema_idempotency: PASS (IF NOT EXISTS on all DDL, verified by tests)
-Issues: 0 Critical, 0 Important, 3 Advisory (non-blocking)
-Advisory:
-  - push_design_time_event uses Vec::remove(0) O(n) eviction; VecDeque would be O(1)
-  - handle_load_inline uses unsanitized tenant name in filesystem path (low risk)
-  - observe_routes.rs exceeds 500-line limit (pre-existing, grew further)
+  test_coverage: PASS (new tests for shadow boolean guard, tracker record/resolve/exhaust, spec store CRUD, deploy hook dispatch)
+Issues: 0 Critical, 0 Important, 0 Advisory

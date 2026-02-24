@@ -10,6 +10,7 @@
 //!   via the Deploy action. Runs the verify-and-deploy pipeline and
 //!   registers the tenant's specs in the SpecRegistry.
 
+use crate::deploy::pipeline::{DeployInput, DeployPipeline, EntitySpecSource};
 use crate::state::PlatformState;
 
 /// Dispatch a custom effect from a system entity transition.
@@ -38,32 +39,81 @@ pub fn dispatch_custom_effect(
 }
 
 /// Handle the DeploySpecs effect: verify and register tenant specs.
+///
+/// Reads specs from the [`SpecStore`], builds a [`DeployInput`], and runs
+/// the verify-and-deploy pipeline. On success, removes specs from the store.
 fn handle_deploy_specs(
     _entity_type: &str,
     entity_id: &str,
-    _state: &PlatformState,
+    state: &PlatformState,
 ) -> Result<(), String> {
     tracing::info!(
         tenant = entity_id,
         "DeploySpecs hook: running verify-and-deploy pipeline"
     );
 
-    // In a full implementation, this would:
-    // 1. Read the tenant's specs from the Project entity's stored state
-    // 2. Build a DeployInput from those specs
-    // 3. Run DeployPipeline::verify_and_deploy()
-    // 4. The pipeline handles SpecRegistry registration internally
-    //
-    // For now, this is a dispatch stub that logs the intent.
-    // The actual spec source would come from the Project entity's state
-    // or from a spec storage system.
+    // Read specs from the store using entity_id as tenant key.
+    let tenant_specs = {
+        let store = state.spec_store.read().unwrap(); // ci-ok: infallible lock
+        store.get(entity_id).cloned()
+    };
 
-    tracing::info!(
-        tenant = entity_id,
-        "DeploySpecs hook: tenant deploy would be triggered here"
-    );
+    let Some(specs) = tenant_specs else {
+        tracing::warn!(
+            tenant = entity_id,
+            "DeploySpecs hook: no specs found in store for tenant"
+        );
+        return Err(format!(
+            "no specs found in spec store for tenant '{entity_id}'"
+        ));
+    };
 
-    Ok(())
+    // Build DeployInput from stored specs.
+    let entities: Vec<EntitySpecSource> = specs
+        .ioa_sources
+        .iter()
+        .map(|(entity_type, ioa_source)| EntitySpecSource {
+            entity_type: entity_type.clone(),
+            ioa_source: ioa_source.clone(),
+        })
+        .collect();
+
+    let input = DeployInput {
+        tenant_name: entity_id.to_string(),
+        csdl_xml: specs.csdl_xml.clone(),
+        entities,
+        wasm_modules: specs.wasm_modules.clone(),
+    };
+
+    // Run the verify-and-deploy pipeline.
+    let result = DeployPipeline::verify_and_deploy(state, &input);
+
+    if result.success {
+        tracing::info!(
+            tenant = entity_id,
+            "DeploySpecs hook: pipeline succeeded"
+        );
+        // Remove specs from store on success.
+        let mut store = state.spec_store.write().unwrap(); // ci-ok: infallible lock
+        store.remove(entity_id);
+        Ok(())
+    } else {
+        let failures: Vec<String> = result
+            .entity_results
+            .iter()
+            .filter(|r| !r.verified)
+            .map(|r| format!("{}: verification failed", r.entity_name))
+            .collect();
+        let summary = failures.join("; ");
+        tracing::error!(
+            tenant = entity_id,
+            summary = %summary,
+            "DeploySpecs hook: pipeline failed"
+        );
+        Err(format!(
+            "deploy pipeline failed for tenant '{entity_id}': {summary}"
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -84,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_deploy_specs_effect() {
+    fn test_dispatch_deploy_specs_no_store_entry() {
         let state = PlatformState::new(None);
         let result = dispatch_custom_effect(
             "DeploySpecs",
@@ -93,6 +143,8 @@ mod tests {
             &serde_json::json!({}),
             &state,
         );
-        assert!(result.is_ok());
+        // No specs in store → error
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no specs found"));
     }
 }

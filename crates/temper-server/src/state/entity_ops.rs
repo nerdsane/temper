@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use temper_runtime::persistence::EventStore;
 use temper_runtime::tenant::TenantId;
@@ -234,7 +233,7 @@ impl ServerState {
             })?;
 
         actor_ref
-            .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(5))
+            .ask::<EntityResponse>(EntityMsg::GetState, self.action_dispatch_timeout)
             .await
             .map_err(|e| format!("Actor query failed: {e}"))
     }
@@ -254,7 +253,7 @@ impl ServerState {
             })?;
 
         let response = actor_ref
-            .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(5))
+            .ask::<EntityResponse>(EntityMsg::GetState, self.action_dispatch_timeout)
             .await
             .map_err(|e| format!("Actor query failed: {e}"))?;
 
@@ -288,7 +287,7 @@ impl ServerState {
         actor_ref
             .ask::<EntityResponse>(
                 EntityMsg::UpdateFields { fields, replace },
-                Duration::from_secs(5),
+                self.action_dispatch_timeout,
             )
             .await
             .map_err(|e| format!("Actor update failed: {e}"))
@@ -308,7 +307,7 @@ impl ServerState {
             })?;
 
         let response = actor_ref
-            .ask::<EntityResponse>(EntityMsg::Delete, Duration::from_secs(5))
+            .ask::<EntityResponse>(EntityMsg::Delete, self.action_dispatch_timeout)
             .await
             .map_err(|e| format!("Actor delete failed: {e}"))?;
 

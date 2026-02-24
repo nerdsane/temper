@@ -11,6 +11,7 @@ pub use metrics::MetricsCollector;
 pub use trajectory::{TrajectoryEntry, TrajectoryLog};
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 use std::sync::{Arc, RwLock};
 use temper_authz::AuthzEngine;
 use temper_evolution::{PostgresRecordStore, RecordStore};
@@ -70,6 +71,15 @@ fn env_bool(name: &str, default: bool) -> bool {
         },
         Err(_) => default,
     }
+}
+
+fn env_timeout() -> Duration {
+    let secs: u64 = std::env::var("TEMPER_ACTION_TIMEOUT_SECS") // determinism-ok: read once at startup
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(5);
+    debug_assert!(secs > 0 && secs <= 300, "action timeout must be 1-300s");
+    Duration::from_secs(secs)
 }
 
 /// Shared state for the Temper HTTP server.
@@ -133,6 +143,10 @@ pub struct ServerState {
     /// Key: "{tenant}:{entity_type}:{entity_id}", Value: (current_state, last_updated).
     #[allow(clippy::type_complexity)]
     pub entity_state_cache: Arc<RwLock<BTreeMap<String, (String, chrono::DateTime<chrono::Utc>)>>>,
+    /// Configurable timeout for actor ask operations (default: 5s).
+    pub action_dispatch_timeout: Duration,
+    /// Eventual invariant convergence tracker.
+    pub eventual_tracker: Arc<RwLock<crate::eventual_invariants::EventualInvariantTracker>>,
 }
 
 impl ServerState {
@@ -182,6 +196,8 @@ impl ServerState {
             design_time_tx: Arc::new(design_time_tx),
             design_time_log: Arc::new(RwLock::new(Vec::new())),
             entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
+            action_dispatch_timeout: env_timeout(),
+            eventual_tracker: Arc::new(RwLock::new(crate::eventual_invariants::EventualInvariantTracker::new())),
         }
     }
 
@@ -271,6 +287,8 @@ impl ServerState {
             design_time_tx: Arc::new(design_time_tx),
             design_time_log: Arc::new(RwLock::new(Vec::new())),
             entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
+            action_dispatch_timeout: env_timeout(),
+            eventual_tracker: Arc::new(RwLock::new(crate::eventual_invariants::EventualInvariantTracker::new())),
         }
     }
 

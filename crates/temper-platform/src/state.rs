@@ -14,6 +14,7 @@ use temper_server::ServerState;
 use temper_server::registry::SpecRegistry;
 
 use crate::protocol::PlatformEvent;
+use crate::spec_store::SpecStore;
 
 /// Shared state for the Temper hosting platform.
 ///
@@ -32,6 +33,8 @@ pub struct PlatformState {
     pub record_store: RecordStore,
     /// Anthropic API key for Claude-powered evolution agents.
     pub api_key: Option<String>,
+    /// In-memory spec storage for pending tenant deployments.
+    pub spec_store: Arc<RwLock<SpecStore>>,
 }
 
 /// Default broadcast channel capacity.
@@ -51,6 +54,7 @@ impl PlatformState {
             broadcast_tx,
             record_store: RecordStore::new(),
             api_key,
+            spec_store: Arc::new(RwLock::new(SpecStore::new())),
         }
     }
 
@@ -67,6 +71,7 @@ impl PlatformState {
             broadcast_tx,
             record_store: RecordStore::new(),
             api_key,
+            spec_store: Arc::new(RwLock::new(SpecStore::new())),
         }
     }
 

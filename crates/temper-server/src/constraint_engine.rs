@@ -225,7 +225,7 @@ pub async fn post_write_invariant_checks(
         return Ok(());
     }
 
-    let start = Instant::now();
+    let start = Instant::now(); // determinism-ok: scoped duration measurement, not simulation-visible state
     let (tenant_name, invariants): (String, Vec<CrossInvariant>) = {
         let registry = state.registry.read().unwrap();
         let Some(tc) = registry.get_tenant(tenant) else {
@@ -299,7 +299,8 @@ pub async fn post_write_invariant_checks(
                 entity_id,
                 operation,
             );
-            if inv.kind == InvariantKind::Eventual && !state.cross_invariant_eventual_enforce {
+            if inv.kind == InvariantKind::Eventual {
+                defer_eventual_invariant(state, &inv, &tenant_name, entity_type, entity_id);
                 continue;
             }
             return Err(violation);
@@ -323,7 +324,8 @@ pub async fn post_write_invariant_checks(
                     entity_id,
                     operation,
                 );
-                if inv.kind == InvariantKind::Eventual && !state.cross_invariant_eventual_enforce {
+                if inv.kind == InvariantKind::Eventual {
+                    defer_eventual_invariant(state, &inv, &tenant_name, entity_type, entity_id);
                     continue;
                 }
                 return Err(violation);
@@ -346,7 +348,8 @@ pub async fn post_write_invariant_checks(
                 entity_id,
                 operation,
             );
-            if inv.kind == InvariantKind::Eventual && !state.cross_invariant_eventual_enforce {
+            if inv.kind == InvariantKind::Eventual {
+                defer_eventual_invariant(state, &inv, &tenant_name, entity_type, entity_id);
                 continue;
             }
             return Err(violation);
@@ -357,6 +360,31 @@ pub async fn post_write_invariant_checks(
         .metrics
         .record_cross_eval_duration_ms(start.elapsed().as_millis() as u64);
     Ok(())
+}
+
+/// Defer an eventual invariant to the background convergence tracker.
+fn defer_eventual_invariant(
+    state: &ServerState,
+    inv: &CrossInvariant,
+    tenant_name: &str,
+    entity_type: &str,
+    entity_id: &str,
+) {
+    let window = inv.window_ms.unwrap_or(5000);
+    let tracker_ok = state
+        .eventual_tracker
+        .write()
+        .unwrap() // ci-ok: infallible lock
+        .record(&inv.name, tenant_name, entity_type, entity_id, window);
+    if !tracker_ok {
+        tracing::warn!(
+            invariant = %inv.name,
+            "eventual invariant tracker budget exhausted"
+        );
+    }
+    state
+        .metrics
+        .record_cross_invariant_check(tenant_name, entity_type, "eventual_deferred");
 }
 
 fn trigger_matches(on: &str, entity_type: &str, action: &str) -> bool {

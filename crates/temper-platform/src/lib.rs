@@ -13,6 +13,7 @@
 pub mod agent;
 pub mod bootstrap;
 pub mod deploy;
+pub mod spec_store;
 pub mod evolution;
 pub mod hooks;
 pub mod integration;

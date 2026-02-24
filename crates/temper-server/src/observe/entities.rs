@@ -1,7 +1,6 @@
 //! Entity instance endpoints: list, history, and SSE event stream.
 
 use std::convert::Infallible;
-use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
@@ -70,7 +69,7 @@ pub(crate) async fn get_entity_history(
 
     if let Some(actor_ref) = actor_ref {
         if let Ok(response) = actor_ref
-            .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(5))
+            .ask::<EntityResponse>(EntityMsg::GetState, state.action_dispatch_timeout)
             .await
         {
             let mut json =

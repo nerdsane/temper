@@ -1,7 +1,6 @@
 //! Action dispatch and WASM integration methods for ServerState.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
@@ -239,7 +238,7 @@ impl ServerState {
                     name: action.to_string(),
                     params,
                 },
-                Duration::from_secs(5),
+                self.action_dispatch_timeout,
             )
             .await
         {

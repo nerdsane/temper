@@ -269,11 +269,77 @@ pub async fn handle_odata_get(
             }
         }
 
-        ODataPath::BoundFunction { parent: _, function } => {
-            ODataResponse {
-                status: StatusCode::OK,
-                body: serde_json::json!({"@odata.context": "$metadata#Edm.Untyped", "function": function}),
-            }.into_response()
+        ODataPath::BoundFunction { parent, function } => {
+            // Extract parent entity set + key from the parent path.
+            let (parent_set, parent_key) = match *parent {
+                ODataPath::Entity(ref set_name, ref key) => {
+                    (set_name.clone(), extract_key(key))
+                }
+                _ => {
+                    return odata_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidPath",
+                        "Bound function requires an entity key parent path",
+                    ).into_response();
+                }
+            };
+
+            let entity_type = match resolve_entity_type(&state, &tenant, &parent_set) {
+                Some(et) => et,
+                None => {
+                    return odata_error(
+                        StatusCode::NOT_FOUND,
+                        "ResourceNotFound",
+                        &format!("Entity set '{}' not found", parent_set),
+                    ).into_response();
+                }
+            };
+
+            if !state.entity_exists(&tenant, &entity_type, &parent_key) {
+                return odata_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFound",
+                    &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
+                ).into_response();
+            }
+
+            match state.get_tenant_entity_state(&tenant, &entity_type, &parent_key).await {
+                Ok(response) => {
+                    let mut body = serde_json::to_value(&response.state).unwrap_or_default();
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.insert(
+                            "@odata.context".to_string(),
+                            serde_json::json!(format!("$metadata#{entity_type}")),
+                        );
+                        obj.insert(
+                            "@odata.function".to_string(),
+                            serde_json::json!(function),
+                        );
+                    }
+
+                    // Apply $select and $expand from query options.
+                    if let Some(ref select) = query_options.select {
+                        let selected = crate::query_eval::select_fields(vec![body.clone()], select);
+                        if let Some(first) = selected.into_iter().next() {
+                            body = first;
+                        }
+                    }
+                    if let Some(ref expand_items) = query_options.expand {
+                        crate::query_eval::expand_entity(
+                            &mut body, expand_items, &entity_type, &state, &tenant,
+                        ).await;
+                    }
+
+                    ODataResponse { status: StatusCode::OK, body }.into_response()
+                }
+                Err(_) => {
+                    odata_error(
+                        StatusCode::NOT_FOUND,
+                        "ResourceNotFound",
+                        &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
+                    ).into_response()
+                }
+            }
         }
 
         _ => odata_error(StatusCode::NOT_IMPLEMENTED, "NotImplemented", "This path pattern is not yet supported").into_response(),
@@ -333,7 +399,7 @@ pub async fn handle_odata_post(
                 .get("id")
                 .and_then(|v| v.as_str())
                 .map(String::from)
-                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+                .unwrap_or_else(|| temper_runtime::scheduler::sim_uuid().to_string());
 
             // Pass body fields as initial_fields for the entity actor
             let initial_fields = body_json.clone();

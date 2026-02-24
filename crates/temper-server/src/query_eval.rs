@@ -7,6 +7,9 @@ use temper_odata::query::types::{
     BinaryOperator, FilterExpr, ODataValue, OrderByClause, OrderDirection, QueryOptions,
 };
 
+/// Maximum nesting depth for recursive $expand (prevents infinite loops).
+const MAX_EXPAND_DEPTH: u8 = 3;
+
 /// Apply all query options to a collection of entity JSON values.
 ///
 /// Order of operations follows OData v4 spec:
@@ -266,7 +269,7 @@ struct NavExpansionInfo {
 /// to determine the target entity type, then queries related entities
 /// (by convention: entities with a matching parent reference).
 ///
-/// This is single-level expansion only (nested $expand is not yet supported).
+/// Supports nested $expand up to [`MAX_EXPAND_DEPTH`] levels with cycle detection.
 pub async fn expand_entity(
     entity: &mut serde_json::Value,
     expand_items: &[temper_odata::query::types::ExpandItem],
@@ -274,6 +277,26 @@ pub async fn expand_entity(
     state: &crate::state::ServerState,
     tenant: &temper_runtime::tenant::TenantId,
 ) {
+    expand_entity_recursive(entity, expand_items, entity_type, state, tenant, 0, &mut vec![]).await;
+}
+
+/// Recursive implementation of $expand with depth and cycle guards.
+async fn expand_entity_recursive(
+    entity: &mut serde_json::Value,
+    expand_items: &[temper_odata::query::types::ExpandItem],
+    entity_type: &str,
+    state: &crate::state::ServerState,
+    tenant: &temper_runtime::tenant::TenantId,
+    depth: u8,
+    visited: &mut Vec<String>,
+) {
+    if depth >= MAX_EXPAND_DEPTH {
+        return;
+    }
+    if visited.contains(&entity_type.to_string()) {
+        return;
+    }
+    visited.push(entity_type.to_string());
     // Resolve all navigation targets up front (while holding registry lock briefly)
     let nav_infos: Vec<(
         &temper_odata::query::types::ExpandItem,
@@ -347,7 +370,7 @@ pub async fn expand_entity(
             let nested_query = QueryOptions {
                 filter: nested_opts.filter.clone(),
                 select: nested_opts.select.clone(),
-                expand: None,
+                expand: nested_opts.expand.clone(),
                 orderby: nested_opts.orderby.clone(),
                 top: nested_opts.top,
                 skip: nested_opts.skip,
@@ -355,6 +378,24 @@ pub async fn expand_entity(
             };
             let (filtered, _) = apply_query_options(related_entities, &nested_query);
             related_entities = filtered;
+        }
+
+        // Recursively expand nested $expand on related entities
+        if let Some(ref nested_opts) = item.options {
+            if let Some(ref nested_expand) = nested_opts.expand {
+                for related in &mut related_entities {
+                    Box::pin(expand_entity_recursive(
+                        related,
+                        nested_expand,
+                        &info.target_type,
+                        state,
+                        tenant,
+                        depth + 1,
+                        visited,
+                    ))
+                    .await;
+                }
+            }
         }
 
         if let Some(obj) = entity.as_object_mut() {
@@ -371,6 +412,7 @@ pub async fn expand_entity(
             }
         }
     }
+    visited.pop();
 }
 
 /// Find the target entity type name for a navigation property.
