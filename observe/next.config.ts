@@ -9,6 +9,10 @@ const nextConfig: NextConfig = {
         source: "/observe/:path*",
         destination: `${TEMPER_API}/observe/:path*`,
       },
+      {
+        source: "/api/:path*",
+        destination: `${TEMPER_API}/api/:path*`,
+      },
     ];
   },
 };

@@ -169,11 +169,47 @@ Use these insights to proactively improve the app, even before users report issu
 
 ---
 
+## WASM Integration Modules
+
+When a spec needs external API calls (payments, email, notifications), use WASM integrations — **not webhooks**.
+
+### In the IOA spec
+
+```toml
+[[integration]]
+name = "stripe_charge"
+trigger = "stripe_charge"
+type = "wasm"
+module = "stripe_charge"
+on_success = "ChargeSucceeded"
+on_failure = "ChargeFailed"
+```
+
+The `trigger` matches an action's `effect = "trigger stripe_charge"`. When that action fires, the engine invokes the named WASM module. The module calls the external API and returns a result that dispatches either the `on_success` or `on_failure` callback action.
+
+### Upload a WASM module
+
+```bash
+curl -X POST {base_url}/api/wasm/modules/{module_name} \
+  -H "X-Tenant-Id: {tenant}" \
+  -H "Content-Type: application/wasm" \
+  --data-binary @path/to/module.wasm
+```
+
+### List / delete modules
+
+- `GET /observe/wasm/modules` — list uploaded modules
+- `DELETE /api/wasm/modules/{name}` — remove a module
+- `GET /observe/wasm/invocations` — invocation history
+
+---
+
 ## API Reference
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
 | `POST` | `/api/specs/load-dir` | Load specs from directory |
+| `POST` | `/api/specs/load-inline` | Load specs inline (JSON body) |
 | `GET` | `/observe/specs` | List loaded specs |
 | `GET` | `/observe/specs/{entity}` | Get spec detail |
 | `POST` | `/observe/verify/{entity}` | Run verification cascade |
@@ -183,6 +219,10 @@ Use these insights to proactively improve the app, even before users report issu
 | `GET` | `/observe/evolution/insights` | Ranked evolution recommendations |
 | `GET` | `/observe/evolution/records` | O-P-A-D-I record chain |
 | `POST` | `/api/evolution/sentinel/check` | Trigger health check |
+| `POST` | `/api/wasm/modules/{name}` | Upload WASM module |
+| `DELETE`| `/api/wasm/modules/{name}` | Delete WASM module |
+| `GET` | `/observe/wasm/modules` | List WASM modules |
+| `GET` | `/observe/wasm/invocations` | WASM invocation history |
 
 ---
 

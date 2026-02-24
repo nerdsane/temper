@@ -94,8 +94,13 @@ reaches = ["State3"]
 [[integration]]
 name = "notify_service"
 trigger = "ActionName"
-type = "webhook"
+type = "wasm"
+module = "notify_service"
+on_success = "NotifySucceeded"
+on_failure = "NotifyFailed"
 ```
+
+**IMPORTANT: Integrations use WASM modules, NOT webhooks.** If the app needs external API calls (payments, notifications, email, etc.), you MUST generate a WASM module. See "Generate WASM Integration Modules" below — do NOT skip that section.
 
 ### Write CSDL
 
@@ -153,11 +158,63 @@ When the app needs external API calls (payments, email, notifications, etc.):
    on_failure = "ChargeFailed"
    ```
 
-2. **Generate WASM module source** — create a Rust `cdylib` project under `examples/wasm-modules/`:
+2. **Generate WASM module source** — create a Rust `cdylib` project:
    ```bash
-   mkdir -p examples/wasm-modules/<module_name>/src
+   mkdir -p wasm-modules/<module_name>/src
    ```
-   See `examples/wasm-modules/echo-integration/` for a complete working reference.
+
+   **Create `wasm-modules/<module_name>/Cargo.toml`:**
+   ```toml
+   [package]
+   name = "<module_name>"
+   version = "0.1.0"
+   edition = "2021"
+
+   [lib]
+   crate-type = ["cdylib"]
+   ```
+
+   **Create `wasm-modules/<module_name>/src/lib.rs`:**
+   ```rust
+   extern "C" {
+       fn host_get_context(buf_ptr: i32, buf_len: i32) -> i32;
+       fn host_set_result(ptr: i32, len: i32);
+       fn host_http_call(
+           method_ptr: i32, method_len: i32,
+           url_ptr: i32, url_len: i32,
+           body_ptr: i32, body_len: i32,
+           resp_ptr: i32, resp_len: i32,
+       ) -> i32;
+       fn host_log(level_ptr: i32, level_len: i32, msg_ptr: i32, msg_len: i32);
+   }
+
+   #[unsafe(no_mangle)]
+   pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
+       // 1. Read invocation context
+       let mut ctx_buf = [0u8; 4096];
+       let ctx_len = unsafe { host_get_context(ctx_buf.as_mut_ptr() as i32, ctx_buf.len() as i32) };
+       let _ctx = &ctx_buf[..ctx_len as usize];
+
+       // 2. Make your API call via host_http_call
+       let method = b"POST";
+       let url = b"https://api.example.com/action";
+       let body = b"{}";
+       let mut resp_buf = [0u8; 8192];
+       let _status = unsafe {
+           host_http_call(
+               method.as_ptr() as i32, method.len() as i32,
+               url.as_ptr() as i32, url.len() as i32,
+               body.as_ptr() as i32, body.len() as i32,
+               resp_buf.as_mut_ptr() as i32, resp_buf.len() as i32,
+           )
+       };
+
+       // 3. Return result — "action" should match on_success/on_failure from the integration
+       let result = br#"{"action":"CallbackName","params":{},"success":true}"#;
+       unsafe { host_set_result(result.as_ptr() as i32, result.len() as i32) };
+       0 // return 0 for success
+   }
+   ```
 
    **Host functions available to WASM modules:**
    | Function | Signature | Purpose |
@@ -184,7 +241,7 @@ When the app needs external API calls (payments, email, notifications, etc.):
 3. **Compile to WASM**:
    ```bash
    rustup target add wasm32-unknown-unknown  # one-time
-   cd examples/wasm-modules/<module_name>
+   cd wasm-modules/<module_name>
    cargo build --target wasm32-unknown-unknown --release
    ```
 
@@ -394,11 +451,14 @@ name = "EventuallyResolved"
 from = ["State1"]
 reaches = ["State3"]
 
-# Integrations
+# Integrations (WASM modules — NOT webhooks)
 [[integration]]
 name = "notify_service"
 trigger = "ActionName"
-type = "webhook"
+type = "wasm"
+module = "notify_service"
+on_success = "NotifySucceeded"
+on_failure = "NotifyFailed"
 ```
 
 ### IOA-to-CSDL Mapping Rules

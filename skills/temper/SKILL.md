@@ -175,6 +175,36 @@ params = ["Item"]
 
 **Invariants** — assertions checked in every state listed under `when`. If any invariant fails at runtime, the transition is rejected.
 
+**Integrations (WASM)** — when your app needs external API calls (payments, email, notifications), add an `[[integration]]` block with `type = "wasm"`:
+```toml
+[[action]]
+name = "ChargeCard"
+from = ["Pending"]
+to = "Charging"
+effect = "trigger stripe_charge"
+
+[[action]]
+name = "ChargeSucceeded"
+kind = "input"
+from = ["Charging"]
+to = "Paid"
+
+[[action]]
+name = "ChargeFailed"
+kind = "input"
+from = ["Charging"]
+to = "PaymentFailed"
+
+[[integration]]
+name = "stripe_charge"
+trigger = "stripe_charge"
+type = "wasm"
+module = "stripe_charge"
+on_success = "ChargeSucceeded"
+on_failure = "ChargeFailed"
+```
+The WASM module is a Rust `cdylib` compiled to `wasm32-unknown-unknown` and uploaded via `POST /api/wasm/modules/{name}`. See the main Temper builder skill (`.claude/skills/temper.md`) for the full WASM module template.
+
 **Terminal states** — states with no outgoing actions. Entities in terminal states can't move. Design intentionally. Don't write `assert = "no_further_transitions"` — that's not valid IOA syntax and will be silently ignored. Just don't define any `[[action]]` with `from = ["TerminalState"]`.
 
 ### L0–L3 Verification
