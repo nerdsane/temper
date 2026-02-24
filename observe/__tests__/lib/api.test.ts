@@ -200,7 +200,7 @@ describe("triggerSentinelCheck", () => {
     const { triggerSentinelCheck } = await import("@/lib/api");
     const result = await triggerSentinelCheck();
     expect(result).toEqual(data);
-    expect(mockFetch).toHaveBeenCalledWith("/observe/sentinel/check", {
+    expect(mockFetch).toHaveBeenCalledWith("/api/evolution/sentinel/check", {
       method: "POST",
       cache: "no-store",
     });

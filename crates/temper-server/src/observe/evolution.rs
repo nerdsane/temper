@@ -245,7 +245,7 @@ pub(crate) async fn handle_trajectories(
     }))
 }
 
-/// POST /observe/trajectories/unmet -- record an unmet user intent.
+/// POST /api/evolution/trajectories/unmet -- record an unmet user intent.
 ///
 /// Called by the production chat proxy when a user asks for something
 /// that doesn't map to any available action. This feeds the Evolution Engine.
@@ -300,7 +300,7 @@ pub(crate) async fn handle_unmet_intent(
 // Phase 4: Sentinel Anomaly Detection
 // ---------------------------------------------------------------------------
 
-/// POST /observe/sentinel/check -- trigger sentinel rule evaluation.
+/// POST /api/evolution/sentinel/check -- trigger sentinel rule evaluation.
 ///
 /// Evaluates all default sentinel rules against current server state.
 /// Any triggered rules generate O-Records and store them in the RecordStore.
@@ -660,7 +660,7 @@ pub(crate) struct DecideRequest {
     pub rationale: String,
 }
 
-/// POST /observe/evolution/records/{id}/decide -- create a D-Record for a record.
+/// POST /api/evolution/records/{id}/decide -- create a D-Record for a record.
 ///
 /// The target record (by ID) must exist. Creates a DecisionRecord derived from it.
 pub(crate) async fn handle_decide(

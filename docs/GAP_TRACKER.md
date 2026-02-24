@@ -53,7 +53,7 @@
 | 30 | No observability provider adapters beyond ClickHouse | temper-observe | OPEN | Prometheus metrics now available at `GET /observe/metrics` (text format). |
 | 31 | Legacy TLA+ extractor is brittle | temper-spec | OPEN | |
 | 32 | Generated code not validated | temper-codegen | OPEN | |
-| 33 | No developer approval UI | temper-platform | **PARTIALLY RESOLVED** | Evolution API endpoints added: `GET /observe/evolution/records`, `GET /observe/evolution/records/{id}`, `POST /observe/evolution/records/{id}/decide`, `GET /observe/evolution/insights`. Dashboard page deferred. |
+| 33 | No developer approval UI | temper-platform | **PARTIALLY RESOLVED** | Evolution API endpoints added: `GET /observe/evolution/records`, `GET /observe/evolution/records/{id}`, `POST /api/evolution/records/{id}/decide`, `GET /observe/evolution/insights`. Dashboard page deferred. |
 | 34 | Proc macros limited to marker traits | temper-macros | OPEN | |
 | 35 | No Sentinel anomaly detection | temper-evolution, temper-observe | **RESOLVED** | `SentinelActor` with 3 default rules: error rate spike, guard rejection rate, no activity. Auto-generates O-Records via `RecordStore`. Uses `sim_now()`/`sim_uuid()`. |
 | 36 | IncrementItems/DecrementItems legacy aliases | temper-jit | OPEN | |

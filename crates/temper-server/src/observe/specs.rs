@@ -71,18 +71,18 @@ pub(crate) async fn list_specs(State(state): State<ServerState>) -> Json<Vec<Spe
     Json(specs)
 }
 
-/// Request body for POST /observe/specs/load-dir.
+/// Request body for POST /api/specs/load-dir.
 #[derive(Deserialize)]
-pub(super) struct LoadDirRequest {
+pub(crate) struct LoadDirRequest {
     /// Tenant name to register specs under.
     tenant: String,
     /// Path to the specs directory containing model.csdl.xml and *.ioa.toml files.
     specs_dir: String,
 }
 
-/// Request body for POST /observe/specs/load-inline.
+/// Request body for POST /api/specs/load-inline.
 #[derive(Deserialize)]
-pub(super) struct LoadInlineRequest {
+pub(crate) struct LoadInlineRequest {
     /// Tenant name to register specs under.
     tenant: String,
     /// Map of filename -> content. Must include `model.csdl.xml` and at least one `*.ioa.toml`.
@@ -92,8 +92,7 @@ pub(super) struct LoadInlineRequest {
     cross_invariants_toml: Option<String>,
 }
 
-/// POST /observe/specs/load-dir -- hot-load specs from a directory into the running server.
-///
+/// POST /api/specs/load-dir -- hot-load specs from a directory into the running server.///
 /// Reads CSDL and IOA files from `specs_dir`, registers them under `tenant`,
 /// emits design-time SSE events for each entity, and spawns background
 /// verification tasks that stream progress via SSE.
@@ -786,7 +785,7 @@ pub(crate) async fn handle_load_dir(
         .unwrap()) // ci-ok: Response::builder with valid headers is infallible
 }
 
-/// POST /observe/specs/load-inline -- load specs from inline content.
+/// POST /api/specs/load-inline -- load specs from inline content.
 ///
 /// Accepts a JSON body with `tenant` and `specs` (map of filename -> content).
 /// Writes them to a temp directory and delegates to the same logic as load-dir.

@@ -181,7 +181,7 @@ export async function fetchEvolutionInsights(): Promise<EvolutionInsightsRespons
 
 /** Trigger sentinel health check */
 export async function triggerSentinelCheck(): Promise<SentinelCheckResponse> {
-  const res = await fetchWithRetry(`${API_BASE}/observe/sentinel/check`, {
+  const res = await fetchWithRetry(`${API_BASE}/api/evolution/sentinel/check`, {
     method: "POST",
     cache: "no-store",
   });

@@ -72,7 +72,7 @@ pub struct WasmInvocationResponse {
     pub total: usize,
 }
 
-/// POST /observe/wasm/modules/{module_name} — upload a WASM binary.
+/// POST /api/wasm/modules/{module_name} — upload a WASM binary.
 pub async fn upload_wasm_module(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -162,7 +162,7 @@ pub async fn get_wasm_module_info(
     }))
 }
 
-/// DELETE /observe/wasm/modules/{module_name} — remove a module.
+/// DELETE /api/wasm/modules/{module_name} — remove a module.
 pub async fn delete_wasm_module(
     State(state): State<ServerState>,
     headers: HeaderMap,

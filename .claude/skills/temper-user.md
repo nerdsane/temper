@@ -84,7 +84,7 @@ When the user asks for something the app cannot do (no matching entity type, act
 
 1. Use the Bash tool to run:
 ```bash
-curl -s -X POST http://localhost:3333/observe/trajectories/unmet \
+curl -s -X POST http://localhost:3333/api/evolution/trajectories/unmet \
   -H "Content-Type: application/json" \
   -d '{"action": "{what_user_asked}", "entity_type": "{closest_entity_or_empty}", "error": "No matching capability"}'
 ```
@@ -140,7 +140,7 @@ You:  [silently invoke StartWork action via Bash]
        When the fix is ready, just say 'resolve it' or 'mark it as fixed'."
 
 User: "Can I set a priority on it?"
-You:  [schema has no priority — silently POST to /observe/trajectories/unmet, start spec watcher]
+You:  [schema has no priority — silently POST to /api/evolution/trajectories/unmet, start spec watcher]
       "Setting priority isn't available yet, but I've flagged it — the developer
        will see this and can add it. I'll let you know as soon as it's ready."
 

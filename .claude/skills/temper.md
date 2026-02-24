@@ -157,10 +157,29 @@ When the app needs external API calls (payments, email, notifications, etc.):
    ```bash
    mkdir -p examples/wasm-modules/<module_name>/src
    ```
-   - Declare host function externs (`host_log`, `host_get_context`, `host_set_result`, `host_http_call`, `host_get_secret`)
-   - Implement `run(ctx_ptr, ctx_len) -> i32` export that: reads context → calls API via `host_http_call` → parses response → sets result
-   - Return JSON: `{"action": "CallbackName", "params": {...}, "success": true/false}`
-   - See `examples/wasm-modules/echo-integration/` for a complete reference
+   See `examples/wasm-modules/echo-integration/` for a complete working reference.
+
+   **Host functions available to WASM modules:**
+   | Function | Signature | Purpose |
+   |---|---|---|
+   | `host_get_context` | `(buf_ptr, buf_len) -> actual_len` | Read invocation context JSON (tenant, entity, trigger action, state) |
+   | `host_set_result` | `(ptr, len)` | Return result JSON to the host |
+   | `host_http_call` | `(method_ptr, method_len, url_ptr, url_len, body_ptr, body_len, resp_ptr, resp_len) -> status` | Make an HTTP request (GET/POST/etc.) |
+   | `host_log` | `(level_ptr, level_len, msg_ptr, msg_len)` | Emit structured log (levels: "info", "warn", "error") |
+
+   > **Note:** `host_get_secret` exists in the ABI but secret management is not yet supported. Do not use it — it will return empty results.
+
+   **Result JSON format** — set via `host_set_result`:
+   ```json
+   {"action": "CallbackName", "params": {"key": "value"}, "success": true}
+   ```
+   - `action`: the callback action name (should match `on_success` or `on_failure` in the integration)
+   - `params`: arbitrary JSON passed as parameters to the callback action
+   - `success`: `true` triggers `on_success`, `false` triggers `on_failure`
+
+   **Implement the required export:**
+   - `pub extern "C" fn run(ctx_ptr: i32, ctx_len: i32) -> i32` — entry point called by the engine
+   - Return `0` for success, non-zero for engine-level error (distinct from `success: false` in result JSON)
 
 3. **Compile to WASM**:
    ```bash
@@ -171,7 +190,7 @@ When the app needs external API calls (payments, email, notifications, etc.):
 
 4. **Upload module** before deploying the spec:
    ```bash
-   curl -X POST http://localhost:3333/observe/wasm/modules/<module_name> \
+   curl -X POST http://localhost:3333/api/wasm/modules/<module_name> \
      -H "X-Tenant-Id: default" \
      -H "Content-Type: application/wasm" \
      --data-binary @target/wasm32-unknown-unknown/release/<module_name>.wasm
@@ -212,14 +231,14 @@ The endpoint streams newline-delimited JSON (NDJSON). It loads specs, runs verif
 
 **Option A — Local specs directory** (if you have file access to the server machine):
 ```bash
-curl -s -N -X POST http://localhost:3333/observe/specs/load-dir \
+curl -s -N -X POST http://localhost:3333/api/specs/load-dir \
   -H "Content-Type: application/json" \
   -d '{"tenant":"<app-name>","specs_dir":"./specs"}'
 ```
 
 **Option B — Inline specs over HTTP** (if the server is remote):
 ```bash
-curl -s -N -X POST http://localhost:3333/observe/specs/load-inline \
+curl -s -N -X POST http://localhost:3333/api/specs/load-inline \
   -H "Content-Type: application/json" \
   -d '{
     "tenant": "<app-name>",
@@ -288,7 +307,7 @@ The API is at `/tdata` (not `/odata`). Invalid actions return 409 Conflict. Unve
 
 When the user wants to modify the app, edit the spec files directly with the Edit tool, then push again:
 ```bash
-curl -s -X POST http://localhost:3333/observe/specs/load-dir \
+curl -s -X POST http://localhost:3333/api/specs/load-dir \
   -H "Content-Type: application/json" \
   -d '{"tenant":"<app-name>","specs_dir":"./specs"}'
 ```
@@ -430,7 +449,7 @@ temper init <project-name>                    # Scaffold project
 temper serve --port 3333 &                    # Start empty server (Observe UI at :3001)
 temper verify --specs-dir specs/              # Run verification cascade (L0-L3) locally
 # Push specs + verify (streams NDJSON with verification results):
-curl -s -N -X POST http://localhost:3333/observe/specs/load-dir \
+curl -s -N -X POST http://localhost:3333/api/specs/load-dir \
   -H "Content-Type: application/json" \
   -d '{"tenant":"<name>","specs_dir":"./specs"}'
 curl http://localhost:3333/tdata              # Service document

@@ -229,7 +229,7 @@ export default function IntegrationsPage() {
         <div className="glass rounded p-8 text-center mb-6">
           <div className="text-zinc-500 text-sm">No WASM modules uploaded yet.</div>
           <p className="text-zinc-600 text-xs mt-1">
-            Upload modules via POST /observe/wasm/modules/:name
+            Upload modules via POST /api/wasm/modules/:name
           </p>
         </div>
       )}

@@ -62,7 +62,8 @@ pub fn build_router(state: ServerState) -> Router {
 
     #[cfg(feature = "observe")]
     let router = router.nest("/observe", crate::observe::build_observe_router());
-
+    #[cfg(feature = "observe")]
+    let router = router.nest("/api", crate::api::build_api_router());
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([

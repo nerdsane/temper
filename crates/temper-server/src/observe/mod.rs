@@ -4,12 +4,12 @@
 //! They are only available when the `observe` feature is enabled.
 
 mod entities;
-mod evolution;
+pub(crate) mod evolution;
 mod metrics;
-mod specs;
+pub(crate) mod specs;
 mod specs_helpers;
 mod verification;
-mod wasm;
+pub(crate) mod wasm;
 use axum::Router;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
@@ -130,11 +130,12 @@ pub struct EventStreamParams {
 }
 
 /// Build the observe router (mounted at /observe).
+///
+/// Read-only observation routes. Data-mutating endpoints live under `/api`.
+/// Exception: POST /observe/verify/{entity} triggers computation but does not mutate state.
 pub fn build_observe_router() -> Router<ServerState> {
     Router::new()
         .route("/specs", get(specs::list_specs))
-        .route("/specs/load-dir", post(specs::handle_load_dir))
-        .route("/specs/load-inline", post(specs::handle_load_inline))
         .route("/specs/{entity}", get(specs::get_spec_detail))
         .route("/entities", get(entities::list_entities))
         .route("/verify/{entity}", post(verification::run_verification))
@@ -156,16 +157,10 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/health", get(metrics::handle_health))
         .route("/metrics", get(metrics::handle_metrics))
         .route("/trajectories", get(evolution::handle_trajectories))
-        .route("/trajectories/unmet", post(evolution::handle_unmet_intent))
-        .route("/sentinel/check", post(evolution::handle_sentinel_check))
         .route("/evolution/records", get(evolution::list_evolution_records))
         .route(
             "/evolution/records/{id}",
             get(evolution::get_evolution_record),
-        )
-        .route(
-            "/evolution/records/{id}/decide",
-            post(evolution::handle_decide),
         )
         .route(
             "/evolution/insights",
@@ -177,12 +172,9 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/wasm/invocations", get(wasm::list_wasm_invocations))
         .route(
             "/wasm/modules/{module_name}",
-            post(wasm::upload_wasm_module)
-                .get(wasm::get_wasm_module_info)
-                .delete(wasm::delete_wasm_module),
+            get(wasm::get_wasm_module_info),
         )
 }
-
 /// GET /observe/skills/builder -- serve the Builder Agent skill file with dynamic base URL.
 async fn serve_builder_skill(
     headers: HeaderMap,
@@ -278,6 +270,7 @@ mod tests {
         let state = test_state_with_registry();
         Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state)
     }
 
@@ -391,6 +384,7 @@ mod tests {
 
         let app = Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state);
 
         let response = app
@@ -481,6 +475,7 @@ mod tests {
 
         let app = Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state);
 
         let response = app
@@ -526,6 +521,7 @@ mod tests {
 
         let app = Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state);
 
         let response = app
@@ -593,6 +589,7 @@ mod tests {
 
         let app = Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state);
 
         let response = app
@@ -642,6 +639,7 @@ mod tests {
 
         let app = Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state);
 
         // Filter for entity_type=Order should find our entry.
@@ -710,7 +708,7 @@ mod tests {
 
         let response = app
             .oneshot(
-                Request::post("/observe/sentinel/check")
+                Request::post("/api/evolution/sentinel/check")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -757,11 +755,12 @@ mod tests {
 
         let app = Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state);
 
         let response = app
             .oneshot(
-                Request::post("/observe/sentinel/check")
+                Request::post("/api/evolution/sentinel/check")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -826,13 +825,14 @@ mod tests {
 
         let app = Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state);
 
         // Trigger sentinel first.
         let _ = app
             .clone()
             .oneshot(
-                Request::post("/observe/sentinel/check")
+                Request::post("/api/evolution/sentinel/check")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -899,12 +899,13 @@ mod tests {
 
         let app = Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state);
 
         // Create a D-Record decision.
         let response = app.clone()
             .oneshot(
-                Request::post("/observe/evolution/records/O-test-decide/decide")
+                Request::post("/api/evolution/records/O-test-decide/decide")
                     .header("Content-Type", "application/json")
                     .body(Body::from(r#"{"decision":"approved","decided_by":"alice@example.com","rationale":"Looks good"}"#))
                     .unwrap(),
@@ -928,7 +929,7 @@ mod tests {
 
         let response = app
             .oneshot(
-                Request::post("/observe/evolution/records/O-nonexistent/decide")
+                Request::post("/api/evolution/records/O-nonexistent/decide")
                     .header("Content-Type", "application/json")
                     .body(Body::from(
                         r#"{"decision":"rejected","decided_by":"bob","rationale":"nope"}"#,
@@ -989,6 +990,7 @@ mod tests {
 
         let app = Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state.clone());
 
         // Use the test-fixtures/specs directory which has valid specs
@@ -1002,7 +1004,7 @@ mod tests {
 
         let response = app
             .oneshot(
-                Request::post("/observe/specs/load-dir")
+                Request::post("/api/specs/load-dir")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
                     .unwrap(),
@@ -1054,6 +1056,7 @@ mod tests {
 
         let app = Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state);
 
         let body = serde_json::json!({
@@ -1063,7 +1066,7 @@ mod tests {
 
         let response = app
             .oneshot(
-                Request::post("/observe/specs/load-dir")
+                Request::post("/api/specs/load-dir")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
                     .unwrap(),
@@ -1082,6 +1085,7 @@ mod tests {
 
         let app = Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state.clone());
 
         let temp_specs =
@@ -1118,7 +1122,7 @@ effect = "set phantom true"
 
         let response = app
             .oneshot(
-                Request::post("/observe/specs/load-dir")
+                Request::post("/api/specs/load-dir")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
                     .unwrap(),
@@ -1159,6 +1163,7 @@ effect = "set phantom true"
 
         let app = Router::new()
             .nest("/observe", build_observe_router())
+            .nest("/api", crate::api::build_api_router())
             .with_state(state.clone());
 
         let specs_dir =
@@ -1171,7 +1176,7 @@ effect = "set phantom true"
 
         let response = app
             .oneshot(
-                Request::post("/observe/specs/load-dir")
+                Request::post("/api/specs/load-dir")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
                     .unwrap(),

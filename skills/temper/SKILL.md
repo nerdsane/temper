@@ -214,7 +214,7 @@ curl -s http://localhost:3001/tdata -H "X-Tenant-Id: your-app-name" | \
 The first time you run (new machine, new app), register your specs once:
 
 ```bash
-curl -s -X POST http://localhost:3001/observe/specs/load-dir \
+curl -s -X POST http://localhost:3001/api/specs/load-dir \
   -H "Content-Type: application/json" \
   -d "{\"tenant\": \"your-app-name\", \"specs_dir\": \"$HOME/workspace/apps/your-app/specs\"}"
 ```
