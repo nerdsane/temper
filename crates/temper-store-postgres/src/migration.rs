@@ -82,6 +82,47 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), PersistenceError> {
             PersistenceError::Storage(format!("failed to create entity listing index: {e}"))
         })?;
 
+    sqlx::query(schema::CREATE_WASM_MODULES_TABLE)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PersistenceError::Storage(format!("failed to create wasm_modules table: {e}"))
+        })?;
+
+    sqlx::query(schema::CREATE_WASM_INVOCATION_LOGS_TABLE)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PersistenceError::Storage(format!("failed to create wasm_invocation_logs table: {e}"))
+        })?;
+
+    sqlx::query(schema::CREATE_WASM_INVOCATION_LOGS_TENANT_INDEX)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PersistenceError::Storage(format!(
+                "failed to create wasm_invocation_logs tenant index: {e}"
+            ))
+        })?;
+
+    sqlx::query(schema::CREATE_WASM_INVOCATION_LOGS_MODULE_INDEX)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PersistenceError::Storage(format!(
+                "failed to create wasm_invocation_logs module index: {e}"
+            ))
+        })?;
+
+    sqlx::query(schema::CREATE_WASM_INVOCATION_LOGS_CREATED_INDEX)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PersistenceError::Storage(format!(
+                "failed to create wasm_invocation_logs created index: {e}"
+            ))
+        })?;
+
     Ok(())
 }
 
@@ -119,6 +160,14 @@ mod tests {
         assert!(
             schema::CREATE_ENTITY_LISTING_INDEX.contains("IF NOT EXISTS"),
             "entity listing index DDL must be idempotent"
+        );
+        assert!(
+            schema::CREATE_WASM_MODULES_TABLE.contains("IF NOT EXISTS"),
+            "wasm_modules DDL must be idempotent"
+        );
+        assert!(
+            schema::CREATE_WASM_INVOCATION_LOGS_TABLE.contains("IF NOT EXISTS"),
+            "wasm_invocation_logs DDL must be idempotent"
         );
     }
 }

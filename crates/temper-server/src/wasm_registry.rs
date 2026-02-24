@@ -63,6 +63,14 @@ impl WasmModuleRegistry {
     pub fn is_empty(&self) -> bool {
         self.modules.is_empty()
     }
+
+    /// List all modules across all tenants (for observe cross-tenant views).
+    pub fn all_modules(&self) -> Vec<(&str, &str, &str)> {
+        self.modules
+            .iter()
+            .map(|((tenant, name), hash)| (tenant.as_str(), name.as_str(), hash.as_str()))
+            .collect()
+    }
 }
 
 #[cfg(test)]

@@ -8,7 +8,9 @@ use temper_runtime::persistence::{
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
-use crate::{TursoSpecVerificationUpdate, TursoTrajectoryInsert, schema};
+use crate::{
+    TursoSpecVerificationUpdate, TursoTrajectoryInsert, TursoWasmInvocationInsert, schema,
+};
 
 #[derive(Clone, Debug)]
 pub struct TursoEventStore {
@@ -100,6 +102,18 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_WASM_MODULES_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_WASM_INVOCATION_LOGS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_WASM_INVOCATION_LOGS_TENANT_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_WASM_INVOCATION_LOGS_MODULE_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_WASM_INVOCATION_LOGS_CREATED_INDEX, ())
             .await
             .map_err(storage_error)?;
 
@@ -413,6 +427,102 @@ impl TursoEventStore {
                 version: row.get::<i64>(4).map_err(storage_error)? as i32,
                 size_bytes: row.get::<i64>(5).map_err(storage_error)? as i32,
                 updated_at: row.get::<String>(6).map_err(storage_error)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Load all WASM modules across all tenants (for startup recovery).
+    pub async fn load_wasm_modules_all_tenants(
+        &self,
+    ) -> Result<Vec<TursoWasmModuleRow>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at \
+                 FROM wasm_modules \
+                 ORDER BY tenant, module_name",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(TursoWasmModuleRow {
+                tenant: row.get::<String>(0).map_err(storage_error)?,
+                module_name: row.get::<String>(1).map_err(storage_error)?,
+                wasm_bytes: row.get::<Vec<u8>>(2).map_err(storage_error)?,
+                sha256_hash: row.get::<String>(3).map_err(storage_error)?,
+                version: row.get::<i64>(4).map_err(storage_error)? as i32,
+                size_bytes: row.get::<i64>(5).map_err(storage_error)? as i32,
+                updated_at: row.get::<String>(6).map_err(storage_error)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Persist a WASM invocation log entry.
+    pub async fn persist_wasm_invocation(
+        &self,
+        entry: &TursoWasmInvocationInsert<'_>,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let success_val: i64 = if entry.success { 1 } else { 0 };
+        let duration_val: i64 = entry.duration_ms as i64;
+        conn.execute(
+            "INSERT INTO wasm_invocation_logs \
+             (tenant, entity_type, entity_id, module_name, trigger_action, callback_action, success, error, duration_ms, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                entry.tenant,
+                entry.entity_type,
+                entry.entity_id,
+                entry.module_name,
+                entry.trigger_action,
+                entry.callback_action,
+                success_val,
+                entry.error,
+                duration_val,
+                entry.created_at
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Load recent WASM invocation log entries (newest first, up to `limit`).
+    pub async fn load_recent_wasm_invocations(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<TursoWasmInvocationRow>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, entity_type, entity_id, module_name, trigger_action, \
+                        callback_action, success, error, duration_ms, created_at \
+                 FROM wasm_invocation_logs \
+                 ORDER BY created_at DESC \
+                 LIMIT ?1",
+                params![limit],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(TursoWasmInvocationRow {
+                tenant: row.get::<String>(0).map_err(storage_error)?,
+                entity_type: row.get::<String>(1).map_err(storage_error)?,
+                entity_id: row.get::<String>(2).map_err(storage_error)?,
+                module_name: row.get::<String>(3).map_err(storage_error)?,
+                trigger_action: row.get::<String>(4).map_err(storage_error)?,
+                callback_action: row.get::<Option<String>>(5).map_err(storage_error)?,
+                success: row.get::<i64>(6).map_err(storage_error)? != 0,
+                error: row.get::<Option<String>>(7).map_err(storage_error)?,
+                duration_ms: row.get::<i64>(8).map_err(storage_error)? as u64,
+                created_at: row.get::<String>(9).map_err(storage_error)?,
             });
         }
         Ok(out)
@@ -735,6 +845,31 @@ pub struct TursoWasmModuleRow {
     pub size_bytes: i32,
     /// ISO-8601 updated_at timestamp.
     pub updated_at: String,
+}
+
+/// Row returned by WASM invocation log queries.
+#[derive(Debug, Clone)]
+pub struct TursoWasmInvocationRow {
+    /// Tenant name.
+    pub tenant: String,
+    /// Entity type that triggered the invocation.
+    pub entity_type: String,
+    /// Entity ID that triggered the invocation.
+    pub entity_id: String,
+    /// WASM module name invoked.
+    pub module_name: String,
+    /// Action that triggered the integration.
+    pub trigger_action: String,
+    /// Callback action dispatched (if any).
+    pub callback_action: Option<String>,
+    /// Whether the invocation succeeded.
+    pub success: bool,
+    /// Error description (for failures).
+    pub error: Option<String>,
+    /// Invocation duration in milliseconds.
+    pub duration_ms: u64,
+    /// ISO-8601 timestamp.
+    pub created_at: String,
 }
 
 /// Row returned by [`TursoEventStore::load_tenant_constraints()`].

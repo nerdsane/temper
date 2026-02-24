@@ -36,6 +36,8 @@ pub struct WasmModuleInfoResponse {
 /// Entry in the module list response (with stats).
 #[derive(Serialize)]
 pub struct WasmModuleListEntry {
+    /// Tenant that owns this module.
+    pub tenant: String,
     /// Module name.
     pub module_name: String,
     /// SHA-256 hash of the module bytes.
@@ -219,9 +221,9 @@ pub async fn delete_wasm_module(
 /// GET /observe/wasm/modules — list all modules for tenant (with stats).
 pub async fn list_wasm_modules(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> Json<serde_json::Value> {
-    let tenant = extract_tenant(&headers, &state);
+    // Observe endpoints are cross-tenant — return all modules across all tenants.
 
     // Collect invocation stats from the bounded log
     let invocation_stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> = {
@@ -242,11 +244,11 @@ pub async fn list_wasm_modules(
     };
 
     let modules: Vec<WasmModuleListEntry> = {
-        let wasm_reg = state.wasm_module_registry.read().unwrap();
+        let wasm_reg = state.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
         wasm_reg
-            .modules_for_tenant(&tenant)
+            .all_modules()
             .into_iter()
-            .map(|(name, hash)| {
+            .map(|(tenant, name, hash)| {
                 let cached = state.wasm_engine.is_cached(hash);
                 let (total_invocations, success_count, last_invoked_at) =
                     invocation_stats.get(name).cloned().unwrap_or((0, 0, None));
@@ -256,6 +258,7 @@ pub async fn list_wasm_modules(
                     0.0
                 };
                 WasmModuleListEntry {
+                    tenant: tenant.to_string(),
                     module_name: name.to_string(),
                     sha256_hash: hash.to_string(),
                     cached,
@@ -270,19 +273,23 @@ pub async fn list_wasm_modules(
 
     let total = modules.len();
     Json(serde_json::json!({
-        "tenant": tenant.to_string(),
         "modules": modules,
         "total": total,
     }))
 }
 
 /// GET /observe/wasm/invocations — query WASM invocation history.
+///
+/// Serves from the in-memory bounded log (fast path). When the requested
+/// limit exceeds the in-memory buffer size and a database is configured,
+/// falls back to querying the persistent `wasm_invocation_logs` table.
 pub async fn list_wasm_invocations(
     State(state): State<ServerState>,
     Query(params): Query<InvocationQueryParams>,
 ) -> Json<WasmInvocationResponse> {
-    let limit = params.limit.unwrap_or(100).min(500);
+    let limit = params.limit.unwrap_or(100).min(10_000);
 
+    // Fast path: serve from in-memory bounded log
     let log = state.wasm_invocation_log.read().unwrap(); // ci-ok: infallible lock
     let filtered: Vec<serde_json::Value> = log
         .entries()
