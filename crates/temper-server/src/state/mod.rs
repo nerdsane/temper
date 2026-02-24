@@ -21,7 +21,6 @@ use temper_runtime::actor::ActorRef;
 use temper_runtime::scheduler::sim_now;
 use temper_spec::csdl::CsdlDocument;
 use temper_store_postgres::PostgresEventStore;
-use temper_wasm::WasmEngine;
 
 use crate::entity_actor::EntityMsg;
 use crate::event_store::ServerEventStore;
@@ -120,8 +119,6 @@ pub struct ServerState {
     pub webhook_dispatcher: Option<Arc<WebhookDispatcher>>,
     /// WASM module registry: maps (tenant, module_name) → sha256_hash.
     pub wasm_module_registry: Arc<RwLock<WasmModuleRegistry>>,
-    /// WASM engine: compile, cache, and invoke integration modules.
-    pub wasm_engine: Arc<WasmEngine>,
     /// Global cross-entity invariant enforcement toggle.
     pub cross_invariant_enforce: bool,
     /// Whether eventual invariants should block writes.
@@ -177,7 +174,6 @@ impl ServerState {
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
-            wasm_engine: Arc::new(WasmEngine::default()),
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
@@ -266,7 +262,6 @@ impl ServerState {
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
-            wasm_engine: Arc::new(WasmEngine::default()),
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),

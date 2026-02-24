@@ -8,7 +8,6 @@ mod evolution;
 mod metrics;
 mod specs;
 mod verification;
-mod wasm;
 
 use axum::Router;
 use axum::http::{HeaderMap, StatusCode};
@@ -179,13 +178,6 @@ pub fn build_observe_router() -> Router<ServerState> {
         )
         .route("/skills/builder", get(serve_builder_skill))
         .route("/skills/user", get(serve_user_skill))
-        .route("/wasm/modules", get(wasm::list_wasm_modules))
-        .route(
-            "/wasm/modules/{module_name}",
-            post(wasm::upload_wasm_module)
-                .get(wasm::get_wasm_module_info)
-                .delete(wasm::delete_wasm_module),
-        )
 }
 
 /// GET /observe/skills/builder -- serve the Builder Agent skill file with dynamic base URL.

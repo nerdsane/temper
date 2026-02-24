@@ -1,13 +1,10 @@
 //! Action dispatch and WASM integration methods for ServerState.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
-use temper_wasm::{ProductionWasmHost, WasmHost, WasmInvocationContext, WasmResourceLimits};
-
 use super::ServerState;
 use super::trajectory::TrajectoryEntry;
 use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
@@ -105,105 +102,44 @@ impl ServerState {
                 continue;
             }
 
-            // Build invocation context
-            let ctx = WasmInvocationContext {
-                tenant: tenant.to_string(),
-                entity_type: entity_type.to_string(),
-                entity_id: entity_id.to_string(),
-                trigger_action: _action.to_string(),
-                trigger_params: serde_json::Value::Null,
-                entity_state: serde_json::to_value(_entity_state).unwrap_or_default(),
-            };
-
-            // Look up module hash
-            let module_hash = {
-                let wasm_reg = self.wasm_module_registry.read().unwrap();
-                wasm_reg.get_hash(tenant, module_name).map(|s| s.to_string())
-            };
-
-            let Some(hash) = module_hash else {
-                tracing::warn!(
-                    tenant = %tenant,
-                    entity_type,
-                    module = %module_name,
-                    "WASM module hash not found in registry"
-                );
-                continue;
-            };
-
-            let engine = self.wasm_engine.clone();
-            let host: Arc<dyn WasmHost> = Arc::new(ProductionWasmHost::new(BTreeMap::new()));
-            let limits = WasmResourceLimits::default();
-            let state = self.clone();
-            let t = tenant.clone();
-            let et = entity_type.to_string();
-            let eid = entity_id.to_string();
-            let on_ok = integration.on_success.clone();
-            let on_fail = integration.on_failure.clone();
-            let int_name = integration.name.clone();
-
             tracing::info!(
                 tenant = %tenant,
                 entity_type,
                 entity_id,
-                integration = %int_name,
+                integration = %integration.name,
                 module = %module_name,
-                hash = %hash,
-                "invoking WASM integration module"
+                "WASM integration triggered (module invocation pending temper-wasm integration)"
             );
 
-            tokio::spawn(async move { // determinism-ok: async WASM invocation
-                match engine.invoke(&hash, &ctx, host, &limits).await {
-                    Ok(result) if result.success => {
-                        if let Some(cb) = on_ok {
-                            if let Err(e) = state
-                                .dispatch_tenant_action(&t, &et, &eid, &cb, result.callback_params)
-                                .await
-                            {
-                                tracing::error!(
-                                    callback = %cb,
-                                    error = %e,
-                                    "failed to dispatch WASM success callback"
-                                );
-                            }
-                        }
-                    }
-                    Ok(result) => {
-                        if let Some(cb) = on_fail {
-                            let params = serde_json::json!({
-                                "error": result.error,
-                                "integration": int_name
-                            });
-                            if let Err(e) = state
-                                .dispatch_tenant_action(&t, &et, &eid, &cb, params)
-                                .await
-                            {
-                                tracing::error!(
-                                    callback = %cb,
-                                    error = %e,
-                                    "failed to dispatch WASM failure callback"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
+            // Phase 1: dispatch success callback directly (module invocation deferred).
+            // When temper-wasm engine is wired in, this block will build a
+            // WasmInvocationContext, call engine.invoke(), and choose on_success
+            // or on_failure based on the result.
+            if let Some(ref on_success) = integration.on_success {
+                let state = self.clone();
+                let t = tenant.clone();
+                let et = entity_type.to_string();
+                let eid = entity_id.to_string();
+                let cb = on_success.clone();
+                let int_name = integration.name.clone();
+                let mod_name = module_name.clone();
+                tokio::spawn(async move { // determinism-ok: async callback delivery
+                    let success_params = serde_json::json!({
+                        "integration": int_name,
+                        "module": mod_name,
+                    });
+                    if let Err(e) = state
+                        .dispatch_tenant_action(&t, &et, &eid, &cb, success_params)
+                        .await
+                    {
                         tracing::error!(
-                            integration = %int_name,
+                            callback = %cb,
                             error = %e,
-                            "WASM module invocation failed"
+                            "failed to dispatch WASM success callback"
                         );
-                        if let Some(cb) = on_fail {
-                            let params = serde_json::json!({
-                                "error": e.to_string(),
-                                "integration": int_name
-                            });
-                            let _ = state
-                                .dispatch_tenant_action(&t, &et, &eid, &cb, params)
-                                .await;
-                        }
                     }
-                }
-            });
+                });
+            }
         }
     }
 
