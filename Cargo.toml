@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["examples/wasm-modules/echo-integration"]
 members = [
     "crates/temper-macros",
     "crates/temper-runtime",
@@ -19,6 +20,7 @@ members = [
     "crates/temper-jit",
     "crates/temper-optimize",
     "crates/temper-platform",
+    "crates/temper-wasm",
     "reference-apps/ecommerce",
     "reference-apps/oncall",
 ]
@@ -114,6 +116,12 @@ temper-evolution = { path = "crates/temper-evolution" }
 temper-jit = { path = "crates/temper-jit" }
 temper-optimize = { path = "crates/temper-optimize" }
 temper-platform = { path = "crates/temper-platform" }
+temper-wasm = { path = "crates/temper-wasm" }
+
+# WASM runtime
+wasmtime = { version = "29", features = ["component-model"] }
+sha2 = "0.10"
+async-trait = "0.1"
 
 [profile.release]
 lto = true

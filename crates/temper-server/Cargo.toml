@@ -21,6 +21,7 @@ temper-store-redis = { workspace = true }
 temper-observe = { workspace = true }
 temper-authz = { workspace = true }
 temper-evolution = { workspace = true }
+temper-wasm = { workspace = true }
 temper-verify = { workspace = true, optional = true }
 axum = { workspace = true }
 hyper = { workspace = true }

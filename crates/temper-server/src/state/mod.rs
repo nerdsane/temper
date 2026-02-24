@@ -12,7 +12,6 @@ pub use trajectory::{TrajectoryEntry, TrajectoryLog};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
-
 use temper_authz::AuthzEngine;
 use temper_evolution::{PostgresRecordStore, RecordStore};
 use temper_jit::table::TransitionTable;
@@ -29,6 +28,7 @@ use crate::reaction::ReactionDispatcher;
 use crate::registry::SpecRegistry;
 use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
+use temper_wasm::WasmEngine;
 
 /// A design-time event emitted during spec loading and verification.
 ///
@@ -119,6 +119,8 @@ pub struct ServerState {
     pub webhook_dispatcher: Option<Arc<WebhookDispatcher>>,
     /// WASM module registry: maps (tenant, module_name) → sha256_hash.
     pub wasm_module_registry: Arc<RwLock<WasmModuleRegistry>>,
+    /// WASM execution engine: compiles, caches, and invokes sandboxed modules.
+    pub wasm_engine: Arc<WasmEngine>,
     /// Global cross-entity invariant enforcement toggle.
     pub cross_invariant_enforce: bool,
     /// Whether eventual invariants should block writes.
@@ -174,6 +176,7 @@ impl ServerState {
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
+            wasm_engine: Arc::new(WasmEngine::default()),
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
@@ -262,6 +265,7 @@ impl ServerState {
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
+            wasm_engine: Arc::new(WasmEngine::default()),
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),

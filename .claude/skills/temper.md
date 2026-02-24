@@ -120,6 +120,65 @@ permit(principal is User, action == Action::"read", resource is Order)
 when { resource.ownerId == principal.id };
 ```
 
+### Generate WASM Integration Modules (if app needs external APIs)
+
+When the app needs external API calls (payments, email, notifications, etc.):
+
+1. **Add integration actions to the spec** — use the `trigger` effect pattern:
+   ```toml
+   [[action]]
+   name = "ChargeCard"
+   from = ["Pending"]
+   to = "Charging"
+   effect = "trigger stripe_charge"
+
+   [[action]]
+   name = "ChargeSucceeded"
+   kind = "input"
+   from = ["Charging"]
+   to = "Paid"
+
+   [[action]]
+   name = "ChargeFailed"
+   kind = "input"
+   from = ["Charging"]
+   to = "PaymentFailed"
+
+   [[integration]]
+   name = "stripe_charge"
+   trigger = "stripe_charge"
+   type = "wasm"
+   module = "stripe_charge"
+   on_success = "ChargeSucceeded"
+   on_failure = "ChargeFailed"
+   ```
+
+2. **Generate WASM module source** — create a Rust `cdylib` project under `examples/wasm-modules/`:
+   ```bash
+   mkdir -p examples/wasm-modules/<module_name>/src
+   ```
+   - Declare host function externs (`host_log`, `host_get_context`, `host_set_result`, `host_http_call`, `host_get_secret`)
+   - Implement `run(ctx_ptr, ctx_len) -> i32` export that: reads context → calls API via `host_http_call` → parses response → sets result
+   - Return JSON: `{"action": "CallbackName", "params": {...}, "success": true/false}`
+   - See `examples/wasm-modules/echo-integration/` for a complete reference
+
+3. **Compile to WASM**:
+   ```bash
+   rustup target add wasm32-unknown-unknown  # one-time
+   cd examples/wasm-modules/<module_name>
+   cargo build --target wasm32-unknown-unknown --release
+   ```
+
+4. **Upload module** before deploying the spec:
+   ```bash
+   curl -X POST http://localhost:3333/observe/wasm/modules/<module_name> \
+     -H "X-Tenant-Id: default" \
+     -H "Content-Type: application/wasm" \
+     --data-binary @target/wasm32-unknown-unknown/release/<module_name>.wasm
+   ```
+
+5. **Deploy spec** as usual — the integration will invoke the WASM module when the trigger action fires.
+
 ## Start Server (Before Specs)
 
 **ALWAYS use port 3333.** Check if a server is already running before starting a new one:
