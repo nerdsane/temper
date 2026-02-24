@@ -7,33 +7,11 @@ use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
 };
 
-use crate::schema;
+use crate::{TursoSpecVerificationUpdate, TursoTrajectoryInsert, schema};
 
 #[derive(Clone, Debug)]
 pub struct TursoEventStore {
     db: Arc<Database>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct TursoSpecVerificationUpdate<'a> {
-    pub status: &'a str,
-    pub verified: bool,
-    pub levels_passed: Option<i32>,
-    pub levels_total: Option<i32>,
-    pub verification_result_json: Option<&'a str>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct TursoTrajectoryInsert<'a> {
-    pub tenant: &'a str,
-    pub entity_type: &'a str,
-    pub entity_id: &'a str,
-    pub action: &'a str,
-    pub success: bool,
-    pub from_status: Option<&'a str>,
-    pub to_status: Option<&'a str>,
-    pub error: Option<&'a str>,
-    pub created_at: &'a str,
 }
 
 impl TursoEventStore {

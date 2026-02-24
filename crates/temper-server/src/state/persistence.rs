@@ -2,7 +2,7 @@
 
 use sqlx::types::Json;
 use temper_runtime::scheduler::sim_now;
-use temper_store_turso::store::{TursoSpecVerificationUpdate, TursoTrajectoryInsert};
+use temper_store_turso::{TursoSpecVerificationUpdate, TursoTrajectoryInsert};
 
 use super::trajectory::TrajectoryEntry;
 use super::{DESIGN_TIME_LOG_CAPACITY, DesignTimeEvent, ServerState};
