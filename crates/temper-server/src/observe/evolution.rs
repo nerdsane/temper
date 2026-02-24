@@ -770,7 +770,9 @@ pub(crate) async fn handle_decide(
 }
 
 /// GET /observe/evolution/insights -- list ranked insights (I-Records).
-pub(crate) async fn list_evolution_insights(State(state): State<ServerState>) -> Json<serde_json::Value> {
+pub(crate) async fn list_evolution_insights(
+    State(state): State<ServerState>,
+) -> Json<serde_json::Value> {
     let insights = if let Some(ref pg_store) = state.pg_record_store {
         match pg_store.ranked_insights().await {
             Ok(items) => items,

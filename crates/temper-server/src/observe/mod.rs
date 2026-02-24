@@ -157,14 +157,8 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/metrics", get(metrics::handle_metrics))
         .route("/trajectories", get(evolution::handle_trajectories))
         .route("/trajectories/unmet", post(evolution::handle_unmet_intent))
-        .route(
-            "/sentinel/check",
-            post(evolution::handle_sentinel_check),
-        )
-        .route(
-            "/evolution/records",
-            get(evolution::list_evolution_records),
-        )
+        .route("/sentinel/check", post(evolution::handle_sentinel_check))
+        .route("/evolution/records", get(evolution::list_evolution_records))
         .route(
             "/evolution/records/{id}",
             get(evolution::get_evolution_record),
@@ -939,7 +933,7 @@ mod tests {
                         r#"{"decision":"rejected","decided_by":"bob","rationale":"nope"}"#,
                     ))
                     .unwrap(),
-                )
+            )
             .await
             .unwrap();
 
@@ -1092,12 +1086,14 @@ mod tests {
         let temp_specs =
             std::env::temp_dir().join(format!("temper-load-dir-lint-{}", uuid::Uuid::new_v4())); // determinism-ok: test-only temp dir
         std::fs::create_dir_all(&temp_specs).expect("create temp specs dir"); // determinism-ok: test-only
-        std::fs::write( // determinism-ok: test-only
+        std::fs::write(
+            // determinism-ok: test-only
             temp_specs.join("model.csdl.xml"),
             include_str!("../../../../test-fixtures/specs/model.csdl.xml"),
         )
         .expect("write csdl");
-        std::fs::write( // determinism-ok: test-only
+        std::fs::write(
+            // determinism-ok: test-only
             temp_specs.join("order.ioa.toml"),
             r#"
 [automaton]

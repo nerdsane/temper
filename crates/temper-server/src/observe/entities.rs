@@ -19,7 +19,9 @@ use super::{EntityInstanceSummary, EventStreamParams};
 /// GET /observe/entities -- list active entity instances from the actor registry.
 ///
 /// Returns deduplicated entities with their current state, sorted newest first.
-pub(crate) async fn list_entities(State(state): State<ServerState>) -> Json<Vec<EntityInstanceSummary>> {
+pub(crate) async fn list_entities(
+    State(state): State<ServerState>,
+) -> Json<Vec<EntityInstanceSummary>> {
     let registry = state.actor_registry.read().unwrap(); // ci-ok: infallible lock
     let cache = state.entity_state_cache.read().unwrap(); // ci-ok: infallible lock
     let mut entities: Vec<EntityInstanceSummary> = registry

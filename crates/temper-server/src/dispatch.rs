@@ -169,9 +169,10 @@ pub async fn handle_odata_get(
     };
 
     match odata_path {
-        ODataPath::Metadata => {
-            ODataXmlResponse { body: tenant_csdl_xml(&state, &tenant) }.into_response()
+        ODataPath::Metadata => ODataXmlResponse {
+            body: tenant_csdl_xml(&state, &tenant),
         }
+        .into_response(),
 
         ODataPath::ServiceDocument => {
             let entity_sets: Vec<serde_json::Value> = tenant_entity_sets(&state, &tenant)
@@ -181,23 +182,37 @@ pub async fn handle_odata_get(
             ODataResponse {
                 status: StatusCode::OK,
                 body: serde_json::json!({"@odata.context": "$metadata", "value": entity_sets}),
-            }.into_response()
+            }
+            .into_response()
         }
 
         ODataPath::EntitySet(name) => {
             let entity_type = match resolve_entity_type(&state, &tenant, &name) {
                 Some(t) => t,
-                None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{name}' not found")).into_response(),
+                None => {
+                    return odata_error(
+                        StatusCode::NOT_FOUND,
+                        "EntitySetNotFound",
+                        &format!("Entity set '{name}' not found"),
+                    )
+                    .into_response();
+                }
             };
 
             // Enumerate all entities of this type
             let entity_ids = state.list_entity_ids(&tenant, &entity_type);
             let mut entities = Vec::new();
             for id in &entity_ids {
-                if let Ok(response) = state.get_tenant_entity_state(&tenant, &entity_type, id).await {
+                if let Ok(response) = state
+                    .get_tenant_entity_state(&tenant, &entity_type, id)
+                    .await
+                {
                     let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
                     if let Some(obj) = entity.as_object_mut() {
-                        obj.insert("@odata.id".into(), serde_json::json!(format!("{name}('{id}')")));
+                        obj.insert(
+                            "@odata.id".into(),
+                            serde_json::json!(format!("{name}('{id}')")),
+                        );
                     }
                     entities.push(entity);
                 }
@@ -220,13 +235,24 @@ pub async fn handle_odata_get(
             if let Some(c) = count {
                 body["@odata.count"] = serde_json::json!(c);
             }
-            ODataResponse { status: StatusCode::OK, body }.into_response()
+            ODataResponse {
+                status: StatusCode::OK,
+                body,
+            }
+            .into_response()
         }
 
         ODataPath::Entity(set_name, key) => {
             let entity_type = match resolve_entity_type(&state, &tenant, &set_name) {
                 Some(t) => t,
-                None => return odata_error(StatusCode::NOT_FOUND, "EntitySetNotFound", &format!("Entity set '{set_name}' not found")).into_response(),
+                None => {
+                    return odata_error(
+                        StatusCode::NOT_FOUND,
+                        "EntitySetNotFound",
+                        &format!("Entity set '{set_name}' not found"),
+                    )
+                    .into_response();
+                }
             };
             let key_str = extract_key(&key);
 
@@ -236,15 +262,25 @@ pub async fn handle_odata_get(
                     StatusCode::NOT_FOUND,
                     "ResourceNotFound",
                     &format!("Entity '{set_name}' with key '{key_str}' not found"),
-                ).into_response();
+                )
+                .into_response();
             }
 
-            match state.get_tenant_entity_state(&tenant, &entity_type, &key_str).await {
+            match state
+                .get_tenant_entity_state(&tenant, &entity_type, &key_str)
+                .await
+            {
                 Ok(response) => {
                     let mut body = serde_json::to_value(&response.state).unwrap_or_default();
                     if let Some(obj) = body.as_object_mut() {
-                        obj.insert("@odata.context".into(), serde_json::json!(format!("$metadata#{set_name}/$entity")));
-                        obj.insert("@odata.id".into(), serde_json::json!(format!("{set_name}('{key_str}')")));
+                        obj.insert(
+                            "@odata.context".into(),
+                            serde_json::json!(format!("$metadata#{set_name}/$entity")),
+                        );
+                        obj.insert(
+                            "@odata.id".into(),
+                            serde_json::json!(format!("{set_name}('{key_str}')")),
+                        );
                     }
 
                     // Apply $expand to the single entity
@@ -257,30 +293,32 @@ pub async fn handle_odata_get(
                         body = select_fields(vec![body], select).pop().unwrap_or_default();
                     }
 
-                    ODataResponse { status: StatusCode::OK, body }.into_response()
+                    ODataResponse {
+                        status: StatusCode::OK,
+                        body,
+                    }
+                    .into_response()
                 }
-                Err(_) => {
-                    odata_error(
-                        StatusCode::NOT_FOUND,
-                        "ResourceNotFound",
-                        &format!("Entity '{set_name}' with key '{key_str}' not found"),
-                    ).into_response()
-                }
+                Err(_) => odata_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFound",
+                    &format!("Entity '{set_name}' with key '{key_str}' not found"),
+                )
+                .into_response(),
             }
         }
 
         ODataPath::BoundFunction { parent, function } => {
             // Extract parent entity set + key from the parent path.
             let (parent_set, parent_key) = match *parent {
-                ODataPath::Entity(ref set_name, ref key) => {
-                    (set_name.clone(), extract_key(key))
-                }
+                ODataPath::Entity(ref set_name, ref key) => (set_name.clone(), extract_key(key)),
                 _ => {
                     return odata_error(
                         StatusCode::BAD_REQUEST,
                         "InvalidPath",
                         "Bound function requires an entity key parent path",
-                    ).into_response();
+                    )
+                    .into_response();
                 }
             };
 
@@ -291,7 +329,8 @@ pub async fn handle_odata_get(
                         StatusCode::NOT_FOUND,
                         "ResourceNotFound",
                         &format!("Entity set '{}' not found", parent_set),
-                    ).into_response();
+                    )
+                    .into_response();
                 }
             };
 
@@ -300,10 +339,14 @@ pub async fn handle_odata_get(
                     StatusCode::NOT_FOUND,
                     "ResourceNotFound",
                     &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
-                ).into_response();
+                )
+                .into_response();
             }
 
-            match state.get_tenant_entity_state(&tenant, &entity_type, &parent_key).await {
+            match state
+                .get_tenant_entity_state(&tenant, &entity_type, &parent_key)
+                .await
+            {
                 Ok(response) => {
                     let mut body = serde_json::to_value(&response.state).unwrap_or_default();
                     if let Some(obj) = body.as_object_mut() {
@@ -311,10 +354,7 @@ pub async fn handle_odata_get(
                             "@odata.context".to_string(),
                             serde_json::json!(format!("$metadata#{entity_type}")),
                         );
-                        obj.insert(
-                            "@odata.function".to_string(),
-                            serde_json::json!(function),
-                        );
+                        obj.insert("@odata.function".to_string(), serde_json::json!(function));
                     }
 
                     // Apply $select and $expand from query options.
@@ -326,23 +366,36 @@ pub async fn handle_odata_get(
                     }
                     if let Some(ref expand_items) = query_options.expand {
                         crate::query_eval::expand_entity(
-                            &mut body, expand_items, &entity_type, &state, &tenant,
-                        ).await;
+                            &mut body,
+                            expand_items,
+                            &entity_type,
+                            &state,
+                            &tenant,
+                        )
+                        .await;
                     }
 
-                    ODataResponse { status: StatusCode::OK, body }.into_response()
+                    ODataResponse {
+                        status: StatusCode::OK,
+                        body,
+                    }
+                    .into_response()
                 }
-                Err(_) => {
-                    odata_error(
-                        StatusCode::NOT_FOUND,
-                        "ResourceNotFound",
-                        &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
-                    ).into_response()
-                }
+                Err(_) => odata_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFound",
+                    &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
+                )
+                .into_response(),
             }
         }
 
-        _ => odata_error(StatusCode::NOT_IMPLEMENTED, "NotImplemented", "This path pattern is not yet supported").into_response(),
+        _ => odata_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "NotImplemented",
+            "This path pattern is not yet supported",
+        )
+        .into_response(),
     }
 }
 

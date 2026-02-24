@@ -133,8 +133,7 @@ impl SimWasmHost {
 
     /// Add a canned secret.
     pub fn with_secret(mut self, key: &str, value: &str) -> Self {
-        self.secrets
-            .insert(key.to_string(), value.to_string());
+        self.secrets.insert(key.to_string(), value.to_string());
         self
     }
 

@@ -277,7 +277,16 @@ pub async fn expand_entity(
     state: &crate::state::ServerState,
     tenant: &temper_runtime::tenant::TenantId,
 ) {
-    expand_entity_recursive(entity, expand_items, entity_type, state, tenant, 0, &mut vec![]).await;
+    expand_entity_recursive(
+        entity,
+        expand_items,
+        entity_type,
+        state,
+        tenant,
+        0,
+        &mut vec![],
+    )
+    .await;
 }
 
 /// Recursive implementation of $expand with depth and cycle guards.

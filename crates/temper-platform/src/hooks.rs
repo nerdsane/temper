@@ -89,10 +89,7 @@ fn handle_deploy_specs(
     let result = DeployPipeline::verify_and_deploy(state, &input);
 
     if result.success {
-        tracing::info!(
-            tenant = entity_id,
-            "DeploySpecs hook: pipeline succeeded"
-        );
+        tracing::info!(tenant = entity_id, "DeploySpecs hook: pipeline succeeded");
         // Remove specs from store on success.
         let mut store = state.spec_store.write().unwrap(); // ci-ok: infallible lock
         store.remove(entity_id);

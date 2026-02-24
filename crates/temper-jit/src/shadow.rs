@@ -256,9 +256,7 @@ mod tests {
         new.rules[0].guard = Guard::BoolTrue("ready".into());
 
         let mut ctx_not_ready = EvalContext::default();
-        ctx_not_ready
-            .booleans
-            .insert("ready".to_string(), false);
+        ctx_not_ready.booleans.insert("ready".to_string(), false);
 
         let cases = vec![TestCase {
             state: "Draft".into(),
@@ -271,7 +269,17 @@ mod tests {
         // New table: BoolTrue("ready") checks booleans["ready"] = false → guard fails (success=false)
         assert!(!result.is_equivalent());
         assert_eq!(result.mismatches.len(), 1);
-        assert!(result.mismatches[0].old_result.as_ref().is_some_and(|r| r.success));
-        assert!(result.mismatches[0].new_result.as_ref().is_some_and(|r| !r.success));
+        assert!(
+            result.mismatches[0]
+                .old_result
+                .as_ref()
+                .is_some_and(|r| r.success)
+        );
+        assert!(
+            result.mismatches[0]
+                .new_result
+                .as_ref()
+                .is_some_and(|r| !r.success)
+        );
     }
 }

@@ -1,13 +1,15 @@
 //! Action dispatch and WASM integration methods for ServerState.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use temper_runtime::scheduler::sim_now;
-use temper_runtime::tenant::TenantId;
 use super::ServerState;
 use super::trajectory::TrajectoryEntry;
 use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
+use temper_runtime::scheduler::sim_now;
+use temper_runtime::tenant::TenantId;
+use temper_wasm::{ProductionWasmHost, WasmHost, WasmInvocationContext, WasmResourceLimits};
 
 impl ServerState {
     /// Dispatch WASM integrations for custom effects produced by a transition.
@@ -15,11 +17,8 @@ impl ServerState {
     /// For each custom effect matching a WASM integration, this method:
     /// 1. Looks up the integration config from the spec
     /// 2. Looks up the module hash from the WASM registry
-    /// 3. Dispatches the callback action (on_success or on_failure) back to the entity
-    ///
-    /// In production, this would invoke the WASM module via `WasmEngine`.
-    /// For now, this records the integration trigger in the trajectory log.
-    /// The actual WASM invocation is wired when `temper-wasm` is integrated.
+    /// 3. Invokes the WASM module via `WasmEngine`
+    /// 4. Dispatches the callback action (on_success or on_failure) based on the result
     pub fn dispatch_wasm_integrations(
         &self,
         tenant: &TenantId,
@@ -40,9 +39,9 @@ impl ServerState {
 
         for effect_name in custom_effects {
             // Find matching WASM integration
-            let matching = integrations.iter().find(|ig| {
-                ig.integration_type == "wasm" && ig.trigger == *effect_name
-            });
+            let matching = integrations
+                .iter()
+                .find(|ig| ig.integration_type == "wasm" && ig.trigger == *effect_name);
 
             let Some(integration) = matching else {
                 continue;
@@ -81,7 +80,8 @@ impl ServerState {
                     let cb = on_failure.clone();
                     let int_name = integration.name.clone();
                     let mod_name = module_name.clone();
-                    tokio::spawn(async move { // determinism-ok: async callback delivery
+                    tokio::spawn(async move {
+                        // determinism-ok: async callback delivery
                         let fail_params = serde_json::json!({
                             "error": format!("WASM module '{}' not found", mod_name),
                             "integration": int_name,
@@ -101,44 +101,110 @@ impl ServerState {
                 continue;
             }
 
+            // Build invocation context
+            let ctx = WasmInvocationContext {
+                tenant: tenant.to_string(),
+                entity_type: entity_type.to_string(),
+                entity_id: entity_id.to_string(),
+                trigger_action: _action.to_string(),
+                trigger_params: serde_json::Value::Null,
+                entity_state: serde_json::to_value(_entity_state).unwrap_or_default(),
+            };
+
+            // Look up module hash
+            let module_hash = {
+                let wasm_reg = self.wasm_module_registry.read().unwrap();
+                wasm_reg
+                    .get_hash(tenant, module_name)
+                    .map(|s| s.to_string())
+            };
+            let Some(hash) = module_hash else {
+                // Already checked has_module above — should not happen
+                continue;
+            };
+
             tracing::info!(
                 tenant = %tenant,
                 entity_type,
                 entity_id,
                 integration = %integration.name,
                 module = %module_name,
-                "WASM integration triggered (module invocation pending temper-wasm integration)"
+                hash = %hash,
+                "invoking WASM integration module"
             );
 
-            // Phase 1: dispatch success callback directly (module invocation deferred).
-            // When temper-wasm engine is wired in, this block will build a
-            // WasmInvocationContext, call engine.invoke(), and choose on_success
-            // or on_failure based on the result.
-            if let Some(ref on_success) = integration.on_success {
-                let state = self.clone();
-                let t = tenant.clone();
-                let et = entity_type.to_string();
-                let eid = entity_id.to_string();
-                let cb = on_success.clone();
-                let int_name = integration.name.clone();
-                let mod_name = module_name.clone();
-                tokio::spawn(async move { // determinism-ok: async callback delivery
-                    let success_params = serde_json::json!({
-                        "integration": int_name,
-                        "module": mod_name,
-                    });
-                    if let Err(e) = state
-                        .dispatch_tenant_action(&t, &et, &eid, &cb, success_params)
-                        .await
-                    {
-                        tracing::error!(
-                            callback = %cb,
-                            error = %e,
-                            "failed to dispatch WASM success callback"
+            let engine = self.wasm_engine.clone();
+            let host: Arc<dyn WasmHost> = Arc::new(ProductionWasmHost::new(BTreeMap::new()));
+            let limits = WasmResourceLimits::default();
+            let state = self.clone();
+            let t = tenant.clone();
+            let et = entity_type.to_string();
+            let eid = entity_id.to_string();
+            let on_ok = integration.on_success.clone();
+            let on_fail = integration.on_failure.clone();
+            let int_name = integration.name.clone();
+
+            tokio::spawn(async move {
+                // determinism-ok: async WASM invocation
+                match engine.invoke(&hash, &ctx, host, &limits).await {
+                    Ok(result) if result.success => {
+                        tracing::info!(
+                            integration = %int_name,
+                            callback_action = %result.callback_action,
+                            duration_ms = result.duration_ms,
+                            "WASM integration succeeded"
                         );
+                        if let Some(cb) = on_ok {
+                            let params = result.callback_params;
+                            if let Err(e) = state
+                                .dispatch_tenant_action(&t, &et, &eid, &cb, params)
+                                .await
+                            {
+                                tracing::error!(callback = %cb, error = %e, "failed to dispatch WASM success callback");
+                            }
+                        }
                     }
-                });
-            }
+                    Ok(result) => {
+                        tracing::warn!(
+                            integration = %int_name,
+                            error = ?result.error,
+                            duration_ms = result.duration_ms,
+                            "WASM integration returned failure"
+                        );
+                        if let Some(cb) = on_fail {
+                            let params = serde_json::json!({
+                                "error": result.error.unwrap_or_default(),
+                                "integration": int_name,
+                            });
+                            if let Err(e) = state
+                                .dispatch_tenant_action(&t, &et, &eid, &cb, params)
+                                .await
+                            {
+                                tracing::error!(callback = %cb, error = %e, "failed to dispatch WASM failure callback");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            integration = %int_name,
+                            error = %e,
+                            "WASM module invocation error"
+                        );
+                        if let Some(cb) = on_fail {
+                            let params = serde_json::json!({
+                                "error": e.to_string(),
+                                "integration": int_name,
+                            });
+                            if let Err(e) = state
+                                .dispatch_tenant_action(&t, &et, &eid, &cb, params)
+                                .await
+                            {
+                                tracing::error!(callback = %cb, error = %e, "failed to dispatch WASM error callback");
+                            }
+                        }
+                    }
+                }
+            });
         }
     }
 
@@ -316,7 +382,8 @@ impl ServerState {
         if let Some(ref dispatcher) = self.webhook_dispatcher {
             let dispatcher = Arc::clone(dispatcher);
             let entry = trajectory_entry;
-            tokio::spawn(async move { // determinism-ok: external side-effect, no simulation-visible state
+            tokio::spawn(async move {
+                // determinism-ok: external side-effect, no simulation-visible state
                 dispatcher.dispatch(&entry);
             });
         }
