@@ -452,14 +452,21 @@ pub(crate) async fn handle_load_dir(
 
     {
         let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
-        registry.register_tenant_with_reactions_and_constraints(
-            body.tenant.as_str(),
-            csdl,
-            csdl_xml,
-            &ioa_pairs,
-            reactions,
-            cross_invariants_toml.clone(),
-        );
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                body.tenant.as_str(),
+                csdl,
+                csdl_xml,
+                &ioa_pairs,
+                reactions,
+                cross_invariants_toml.clone(),
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to register specs: {e}"),
+                )
+            })?;
     }
     state.rebuild_reaction_dispatcher();
 

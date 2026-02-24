@@ -163,7 +163,7 @@ async fn e2e_compile_first_order_lifecycle() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Orders('{entity_id}')/Temper.Example.CancelOrder"
             ))
             .header("Content-Type", "application/json")
@@ -181,7 +181,7 @@ async fn e2e_compile_first_order_lifecycle() {
     let response = app
         .clone()
         .oneshot(
-            Request::get(&format!("/tdata/Orders('{entity_id}')"))
+            Request::get(format!("/tdata/Orders('{entity_id}')"))
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::empty())
                 .unwrap(),
@@ -309,7 +309,7 @@ async fn e2e_compile_first_two_tenants() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Orders('{alpha_id}')/Temper.Example.CancelOrder"
             ))
             .header("Content-Type", "application/json")
@@ -351,7 +351,7 @@ async fn e2e_compile_first_two_tenants() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Tasks('{beta_id}')/Temper.Example.StartWork"
             ))
             .header("Content-Type", "application/json")
@@ -482,7 +482,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Orders('{order_id}')/Temper.Example.CancelOrder"
             ))
             .header("Content-Type", "application/json")
@@ -523,7 +523,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Projects('{proj_id}')/Temper.System.UpdateSpecs"
             ))
             .header("Content-Type", "application/json")

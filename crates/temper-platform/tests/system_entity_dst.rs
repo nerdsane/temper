@@ -406,7 +406,7 @@ fn random_project_no_faults_seed_42() {
     let mut sim = SimActorSystem::new(config);
 
     for i in 0..3 {
-        let handler = EntityActorHandler::new("Project", &format!("p-{i}"), project_table())
+        let handler = EntityActorHandler::new("Project", format!("p-{i}"), project_table())
             .with_ioa_invariants(PROJECT_IOA);
         sim.register_actor(&format!("p-{i}"), Box::new(handler));
     }
@@ -435,7 +435,7 @@ fn random_tenant_no_faults_seed_42() {
     let mut sim = SimActorSystem::new(config);
 
     for i in 0..3 {
-        let handler = EntityActorHandler::new("Tenant", &format!("t-{i}"), tenant_table());
+        let handler = EntityActorHandler::new("Tenant", format!("t-{i}"), tenant_table());
         sim.register_actor(&format!("t-{i}"), Box::new(handler));
     }
 
@@ -514,7 +514,7 @@ fn random_project_light_faults() {
     let mut sim = SimActorSystem::new(config);
 
     for i in 0..3 {
-        let handler = EntityActorHandler::new("Project", &format!("p-{i}"), project_table())
+        let handler = EntityActorHandler::new("Project", format!("p-{i}"), project_table())
             .with_ioa_invariants(PROJECT_IOA);
         sim.register_actor(&format!("p-{i}"), Box::new(handler));
     }
@@ -592,7 +592,7 @@ fn random_tenant_light_faults() {
     let mut sim = SimActorSystem::new(config);
 
     for i in 0..3 {
-        let handler = EntityActorHandler::new("Tenant", &format!("t-{i}"), tenant_table());
+        let handler = EntityActorHandler::new("Tenant", format!("t-{i}"), tenant_table());
         sim.register_actor(&format!("t-{i}"), Box::new(handler));
     }
 
@@ -615,7 +615,7 @@ fn random_tenant_heavy_faults() {
     let mut sim = SimActorSystem::new(config);
 
     for i in 0..3 {
-        let handler = EntityActorHandler::new("Tenant", &format!("t-{i}"), tenant_table());
+        let handler = EntityActorHandler::new("Tenant", format!("t-{i}"), tenant_table());
         sim.register_actor(&format!("t-{i}"), Box::new(handler));
     }
 
@@ -638,7 +638,7 @@ fn random_project_heavy_faults() {
     let mut sim = SimActorSystem::new(config);
 
     for i in 0..3 {
-        let handler = EntityActorHandler::new("Project", &format!("p-{i}"), project_table())
+        let handler = EntityActorHandler::new("Project", format!("p-{i}"), project_table())
             .with_ioa_invariants(PROJECT_IOA);
         sim.register_actor(&format!("p-{i}"), Box::new(handler));
     }
@@ -662,7 +662,7 @@ fn random_catalog_heavy_faults() {
     let mut sim = SimActorSystem::new(config);
 
     for i in 0..3 {
-        let handler = EntityActorHandler::new("CatalogEntry", &format!("cat-{i}"), catalog_table());
+        let handler = EntityActorHandler::new("CatalogEntry", format!("cat-{i}"), catalog_table());
         sim.register_actor(&format!("cat-{i}"), Box::new(handler));
     }
 
@@ -686,7 +686,7 @@ fn random_collaborator_heavy_faults() {
 
     for i in 0..3 {
         let handler =
-            EntityActorHandler::new("Collaborator", &format!("col-{i}"), collaborator_table());
+            EntityActorHandler::new("Collaborator", format!("col-{i}"), collaborator_table());
         sim.register_actor(&format!("col-{i}"), Box::new(handler));
     }
 
@@ -709,7 +709,7 @@ fn random_version_heavy_faults() {
     let mut sim = SimActorSystem::new(config);
 
     for i in 0..3 {
-        let handler = EntityActorHandler::new("Version", &format!("v-{i}"), version_table());
+        let handler = EntityActorHandler::new("Version", format!("v-{i}"), version_table());
         sim.register_actor(&format!("v-{i}"), Box::new(handler));
     }
 

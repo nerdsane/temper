@@ -609,7 +609,7 @@ mod tests {
         let actor_ref = system.spawn(actor, "order-4");
 
         // Draft -> AddItem -> SubmitOrder -> ConfirmOrder -> ProcessOrder -> ShipOrder -> DeliverOrder
-        let actions = vec![
+        let actions = [
             ("AddItem", serde_json::json!({})),
             ("SubmitOrder", serde_json::json!({})),
             ("ConfirmOrder", serde_json::json!({})),
@@ -618,7 +618,7 @@ mod tests {
             ("DeliverOrder", serde_json::json!({})),
         ];
 
-        let expected_states = vec![
+        let expected_states = [
             "Draft",      // after AddItem
             "Submitted",  // after SubmitOrder
             "Confirmed",  // after ConfirmOrder

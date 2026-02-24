@@ -184,14 +184,16 @@ pub(super) fn load_into_registry(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    registry.register_tenant_with_reactions_and_constraints(
-        tenant,
-        csdl,
-        csdl_xml,
-        &ioa_pairs,
-        reactions,
-        cross_invariants_toml.clone(),
-    );
+    registry
+        .try_register_tenant_with_reactions_and_constraints(
+            tenant,
+            csdl,
+            csdl_xml,
+            &ioa_pairs,
+            reactions,
+            cross_invariants_toml.clone(),
+        )
+        .with_context(|| format!("Failed to register tenant '{tenant}'"))?;
 
     Ok(LoadedTenantSpecs {
         csdl_xml: registry

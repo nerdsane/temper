@@ -353,7 +353,7 @@ async fn e2e_http_project_lifecycle() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Projects('{entity_id}')/Temper.System.UpdateSpecs"
             ))
             .header("Content-Type", "application/json")
@@ -370,7 +370,7 @@ async fn e2e_http_project_lifecycle() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Projects('{entity_id}')/Temper.System.Verify"
             ))
             .header("Content-Type", "application/json")
@@ -404,7 +404,7 @@ async fn e2e_http_project_lifecycle() {
     let response = app
         .clone()
         .oneshot(
-            Request::get(&format!("/tdata/Projects('{entity_id}')"))
+            Request::get(format!("/tdata/Projects('{entity_id}')"))
                 .body(Body::empty())
                 .unwrap(),
         )

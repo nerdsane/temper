@@ -67,6 +67,41 @@ impl From<String> for TenantId {
     }
 }
 
+/// Parse a persistence ID into `(tenant, entity_type, entity_id)` parts.
+///
+/// Accepts both the new 3-segment format (`tenant:type:id`) and the
+/// legacy 2-segment format (`type:id`) for backward compatibility.
+/// Legacy IDs are assigned to the `"default"` tenant.
+pub fn parse_persistence_id_parts(persistence_id: &str) -> Result<(&str, &str, &str), String> {
+    let segments: Vec<&str> = persistence_id.splitn(3, ':').collect();
+    match segments.len() {
+        3 => {
+            let tenant = segments[0];
+            let entity_type = segments[1];
+            let entity_id = segments[2];
+            if tenant.is_empty() || entity_type.is_empty() || entity_id.is_empty() {
+                return Err(format!(
+                    "invalid persistence_id (empty segment): {persistence_id}"
+                ));
+            }
+            Ok((tenant, entity_type, entity_id))
+        }
+        2 => {
+            let entity_type = segments[0];
+            let entity_id = segments[1];
+            if entity_type.is_empty() || entity_id.is_empty() {
+                return Err(format!(
+                    "invalid persistence_id (empty segment): {persistence_id}"
+                ));
+            }
+            Ok(("default", entity_type, entity_id))
+        }
+        _ => Err(format!(
+            "invalid persistence_id (expected 'tenant:type:id' or 'type:id'): {persistence_id}"
+        )),
+    }
+}
+
 /// The globally unique identity of an entity in the platform.
 ///
 /// Format: `tenant:entity_type:entity_id` (e.g., `"my-app:Order:abc-123"`).
@@ -110,42 +145,12 @@ impl QualifiedEntityId {
     /// legacy 2-segment format (`type:id`) for backward compatibility.
     /// Legacy IDs are assigned to the `"default"` tenant.
     pub fn parse(persistence_id: &str) -> Result<Self, String> {
-        let segments: Vec<&str> = persistence_id.splitn(3, ':').collect();
-        match segments.len() {
-            3 => {
-                let tenant = segments[0];
-                let entity_type = segments[1];
-                let entity_id = segments[2];
-                if tenant.is_empty() || entity_type.is_empty() || entity_id.is_empty() {
-                    return Err(format!(
-                        "invalid persistence_id (empty segment): {persistence_id}"
-                    ));
-                }
-                Ok(Self {
-                    tenant: TenantId::new(tenant),
-                    entity_type: entity_type.to_string(),
-                    entity_id: entity_id.to_string(),
-                })
-            }
-            2 => {
-                // Legacy format: entity_type:entity_id → default tenant
-                let entity_type = segments[0];
-                let entity_id = segments[1];
-                if entity_type.is_empty() || entity_id.is_empty() {
-                    return Err(format!(
-                        "invalid persistence_id (empty segment): {persistence_id}"
-                    ));
-                }
-                Ok(Self {
-                    tenant: TenantId::default(),
-                    entity_type: entity_type.to_string(),
-                    entity_id: entity_id.to_string(),
-                })
-            }
-            _ => Err(format!(
-                "invalid persistence_id (expected 'tenant:type:id' or 'type:id'): {persistence_id}"
-            )),
-        }
+        let (tenant, entity_type, entity_id) = parse_persistence_id_parts(persistence_id)?;
+        Ok(Self {
+            tenant: TenantId::new(tenant),
+            entity_type: entity_type.to_string(),
+            entity_id: entity_id.to_string(),
+        })
     }
 
     /// Actor registry key: `tenant:entity_type:entity_id`.

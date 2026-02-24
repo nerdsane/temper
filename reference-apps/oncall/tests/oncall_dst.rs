@@ -410,9 +410,10 @@ fn random_page_light_faults() {
     let mut sim = SimActorSystem::new(config);
 
     for i in 0..3 {
-        let handler = EntityActorHandler::new("Page", &format!("page-{i}"), page_table())
+        let actor_id = format!("page-{i}");
+        let handler = EntityActorHandler::new("Page", actor_id.clone(), page_table())
             .with_ioa_invariants(PAGE_IOA);
-        sim.register_actor(&format!("page-{i}"), Box::new(handler));
+        sim.register_actor(&actor_id, Box::new(handler));
     }
 
     let result = sim.run_random();

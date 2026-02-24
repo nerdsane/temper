@@ -235,14 +235,16 @@ pub(super) async fn load_registry_from_postgres(
             .collect();
 
         let cross_invariants_toml = constraints_by_tenant.remove(&tenant);
-        registry.register_tenant_with_reactions_and_constraints(
-            tenant.as_str(),
-            csdl,
-            csdl_xml,
-            &ioa_pairs,
-            Vec::new(),
-            cross_invariants_toml,
-        );
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                tenant.as_str(),
+                csdl,
+                csdl_xml,
+                &ioa_pairs,
+                Vec::new(),
+                cross_invariants_toml,
+            )
+            .with_context(|| format!("Failed to restore tenant '{tenant}' into registry"))?;
         let tenant_id = TenantId::new(&tenant);
         for row in &tenant_rows {
             registry.set_verification_status(
@@ -308,14 +310,16 @@ pub(super) async fn load_registry_from_turso(
             .collect();
 
         let cross_invariants_toml = constraints_by_tenant.remove(&tenant);
-        registry.register_tenant_with_reactions_and_constraints(
-            tenant.as_str(),
-            csdl,
-            csdl_xml,
-            &ioa_pairs,
-            Vec::new(),
-            cross_invariants_toml,
-        );
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                tenant.as_str(),
+                csdl,
+                csdl_xml,
+                &ioa_pairs,
+                Vec::new(),
+                cross_invariants_toml,
+            )
+            .with_context(|| format!("Failed to restore tenant '{tenant}' into registry"))?;
         let tenant_id = TenantId::new(&tenant);
         for row in &tenant_rows {
             registry.set_verification_status(

@@ -253,13 +253,14 @@ fn interactive_full_pipeline() {
     let mut sim = SimActorSystem::new(config);
 
     for i in 0..3 {
+        let actor_id = format!("ord-{i}");
         let handler = EntityActorHandler::new(
             "Order",
-            &format!("ord-{}", i),
+            actor_id.clone(),
             Arc::new(TransitionTable::from_ioa_source(ORDER_IOA)),
         )
         .with_ioa_invariants(ORDER_IOA);
-        sim.register_actor(&format!("ord-{}", i), Box::new(handler));
+        sim.register_actor(&actor_id, Box::new(handler));
     }
 
     let result = sim.run_random();

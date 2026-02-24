@@ -13,7 +13,7 @@
 //!   cargo bench -p ecommerce-reference --bench agent_checkout
 //!   DATABASE_URL=postgres://... cargo bench -p ecommerce-reference --bench agent_checkout
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use hyper::{Request, StatusCode};
@@ -40,8 +40,8 @@ fn run_prefix() -> String {
     format!("b{ts}")
 }
 
-fn ecommerce_sources() -> HashMap<String, String> {
-    let mut m = HashMap::new();
+fn ecommerce_sources() -> BTreeMap<String, String> {
+    let mut m = BTreeMap::new();
     m.insert("Order".to_string(), ORDER_IOA.to_string());
     m.insert("Payment".to_string(), PAYMENT_IOA.to_string());
     m.insert("Shipment".to_string(), SHIPMENT_IOA.to_string());

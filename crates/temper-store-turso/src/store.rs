@@ -6,6 +6,7 @@ use libsql::{Builder, Database, TransactionBehavior, params};
 use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
 };
+use temper_runtime::tenant::parse_persistence_id_parts;
 
 use crate::{TursoSpecVerificationUpdate, TursoTrajectoryInsert, schema};
 
@@ -458,33 +459,7 @@ fn storage_error(err: impl std::fmt::Display) -> PersistenceError {
 /// Accepts both the new 3-segment format (`tenant:type:id`) and the legacy
 /// 2-segment format (`type:id`) mapped to the `"default"` tenant.
 fn parse_persistence_id(persistence_id: &str) -> Result<(&str, &str, &str), PersistenceError> {
-    let parts: Vec<&str> = persistence_id.splitn(3, ':').collect();
-    match parts.len() {
-        3 => {
-            let tenant = parts[0];
-            let entity_type = parts[1];
-            let entity_id = parts[2];
-            if tenant.is_empty() || entity_type.is_empty() || entity_id.is_empty() {
-                return Err(PersistenceError::Storage(format!(
-                    "invalid persistence_id (empty segment): {persistence_id}"
-                )));
-            }
-            Ok((tenant, entity_type, entity_id))
-        }
-        2 => {
-            let entity_type = parts[0];
-            let entity_id = parts[1];
-            if entity_type.is_empty() || entity_id.is_empty() {
-                return Err(PersistenceError::Storage(format!(
-                    "invalid persistence_id (empty segment): {persistence_id}"
-                )));
-            }
-            Ok(("default", entity_type, entity_id))
-        }
-        _ => Err(PersistenceError::Storage(format!(
-            "invalid persistence_id (expected 'tenant:type:id' or 'type:id'): {persistence_id}"
-        ))),
-    }
+    parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)
 }
 
 impl EventStore for TursoEventStore {

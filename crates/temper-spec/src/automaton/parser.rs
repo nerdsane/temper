@@ -390,35 +390,7 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                             "params" => a.params = parse_string_array(&value),
                             "hint" => a.hint = Some(value.clone()),
                             "guard" => {
-                                // Format: "items > 0" → MinCount
-                                if value.contains('>') {
-                                    let parts: Vec<&str> = value.split('>').collect();
-                                    if parts.len() == 2 {
-                                        let var = parts[0].trim().to_string();
-                                        let min: usize = parts[1].trim().parse().unwrap_or(1);
-                                        a.guard.push(Guard::MinCount { var, min: min + 1 });
-                                    }
-                                }
-                                // Format: "min var n" → MinCount
-                                else if value.starts_with("min ") {
-                                    let parts: Vec<&str> = value.splitn(3, ' ').collect();
-                                    if parts.len() == 3 {
-                                        let var = parts[1].to_string();
-                                        let min: usize = parts[2].parse().unwrap_or(1);
-                                        a.guard.push(Guard::MinCount { var, min });
-                                    }
-                                }
-                                // Format: "is_true var" → IsTrue
-                                else if value.starts_with("is_true ") {
-                                    let var = value
-                                        .strip_prefix("is_true ")
-                                        .unwrap_or("")
-                                        .trim()
-                                        .to_string();
-                                    if !var.is_empty() {
-                                        a.guard.push(Guard::IsTrue { var });
-                                    }
-                                }
+                                a.guard.push(parse_guard_clause(&value)?);
                             }
                             "effect" => {
                                 // Format: "increment var" → Increment
@@ -578,6 +550,136 @@ fn flush_all(
         && !l.name.is_empty()
     {
         liveness_props.push(l);
+    }
+}
+
+fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseError> {
+    let trimmed = value.trim();
+
+    // Infix forms: "<var> > <n>" and "<var> < <n>".
+    if let Some((lhs, rhs)) = trimmed.split_once('>') {
+        let var = lhs.trim();
+        let raw = rhs.trim();
+        if var.is_empty() || raw.is_empty() {
+            return Err(AutomatonParseError::Validation(format!(
+                "invalid guard '{trimmed}' (expected '<var> > <n>')"
+            )));
+        }
+        let n: usize = raw.parse().map_err(|_| {
+            AutomatonParseError::Validation(format!(
+                "invalid guard '{trimmed}' (right side must be an integer)"
+            ))
+        })?;
+        return Ok(Guard::MinCount {
+            var: var.to_string(),
+            min: n + 1,
+        });
+    }
+    if let Some((lhs, rhs)) = trimmed.split_once('<') {
+        let var = lhs.trim();
+        let raw = rhs.trim();
+        if var.is_empty() || raw.is_empty() {
+            return Err(AutomatonParseError::Validation(format!(
+                "invalid guard '{trimmed}' (expected '<var> < <n>')"
+            )));
+        }
+        let max: usize = raw.parse().map_err(|_| {
+            AutomatonParseError::Validation(format!(
+                "invalid guard '{trimmed}' (right side must be an integer)"
+            ))
+        })?;
+        return Ok(Guard::MaxCount {
+            var: var.to_string(),
+            max,
+        });
+    }
+
+    // Prefix forms:
+    // - "min <var> <n>"
+    // - "max <var> <n>"
+    // - "is_true <var>"
+    // - "list_contains <var> <value>"
+    // - "list_length_min <var> <n>"
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err(AutomatonParseError::Validation(
+            "empty guard clause".to_string(),
+        ));
+    }
+
+    match parts[0] {
+        "min" => {
+            if parts.len() != 3 {
+                return Err(AutomatonParseError::Validation(format!(
+                    "invalid guard '{trimmed}' (expected 'min <var> <n>')"
+                )));
+            }
+            let min: usize = parts[2].parse().map_err(|_| {
+                AutomatonParseError::Validation(format!(
+                    "invalid guard '{trimmed}' (min must be an integer)"
+                ))
+            })?;
+            Ok(Guard::MinCount {
+                var: parts[1].to_string(),
+                min,
+            })
+        }
+        "max" => {
+            if parts.len() != 3 {
+                return Err(AutomatonParseError::Validation(format!(
+                    "invalid guard '{trimmed}' (expected 'max <var> <n>')"
+                )));
+            }
+            let max: usize = parts[2].parse().map_err(|_| {
+                AutomatonParseError::Validation(format!(
+                    "invalid guard '{trimmed}' (max must be an integer)"
+                ))
+            })?;
+            Ok(Guard::MaxCount {
+                var: parts[1].to_string(),
+                max,
+            })
+        }
+        "is_true" => {
+            if parts.len() != 2 {
+                return Err(AutomatonParseError::Validation(format!(
+                    "invalid guard '{trimmed}' (expected 'is_true <var>')"
+                )));
+            }
+            Ok(Guard::IsTrue {
+                var: parts[1].to_string(),
+            })
+        }
+        "list_contains" => {
+            if parts.len() < 3 {
+                return Err(AutomatonParseError::Validation(format!(
+                    "invalid guard '{trimmed}' (expected 'list_contains <var> <value>')"
+                )));
+            }
+            Ok(Guard::ListContains {
+                var: parts[1].to_string(),
+                value: parts[2..].join(" "),
+            })
+        }
+        "list_length_min" => {
+            if parts.len() != 3 {
+                return Err(AutomatonParseError::Validation(format!(
+                    "invalid guard '{trimmed}' (expected 'list_length_min <var> <n>')"
+                )));
+            }
+            let min: usize = parts[2].parse().map_err(|_| {
+                AutomatonParseError::Validation(format!(
+                    "invalid guard '{trimmed}' (min must be an integer)"
+                ))
+            })?;
+            Ok(Guard::ListLengthMin {
+                var: parts[1].to_string(),
+                min,
+            })
+        }
+        _ => Err(AutomatonParseError::Validation(format!(
+            "unsupported guard syntax '{trimmed}'"
+        ))),
     }
 }
 
@@ -936,5 +1038,83 @@ effect = "set is_done true"
             "bool and counter types should be accepted: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_extended_guard_syntax_parsed() {
+        let spec = r#"
+[automaton]
+name = "Ticket"
+states = ["Open", "Queued", "Closed"]
+initial = "Open"
+
+[[action]]
+name = "Queue"
+from = ["Open"]
+to = "Queued"
+guard = "max retries 3"
+
+[[action]]
+name = "Escalate"
+from = ["Queued"]
+to = "Queued"
+guard = "list_contains labels urgent"
+
+[[action]]
+name = "Close"
+from = ["Queued"]
+to = "Closed"
+guard = "list_length_min labels 1"
+"#;
+
+        let automaton = parse_automaton(spec).expect("extended guard forms should parse");
+        let queue = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "Queue")
+            .unwrap();
+        assert!(matches!(
+            queue.guard.as_slice(),
+            [Guard::MaxCount { var, max }] if var == "retries" && *max == 3
+        ));
+
+        let escalate = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "Escalate")
+            .unwrap();
+        assert!(matches!(
+            escalate.guard.as_slice(),
+            [Guard::ListContains { var, value }] if var == "labels" && value == "urgent"
+        ));
+
+        let close = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "Close")
+            .unwrap();
+        assert!(matches!(
+            close.guard.as_slice(),
+            [Guard::ListLengthMin { var, min }] if var == "labels" && *min == 1
+        ));
+    }
+
+    #[test]
+    fn test_invalid_guard_number_rejected() {
+        let spec = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Submitted"]
+initial = "Draft"
+
+[[action]]
+name = "SubmitOrder"
+from = ["Draft"]
+to = "Submitted"
+guard = "items > nope"
+"#;
+
+        let err = parse_automaton(spec).expect_err("invalid numeric guard should fail");
+        assert!(err.to_string().contains("right side must be an integer"));
     }
 }

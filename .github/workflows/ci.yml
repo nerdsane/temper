@@ -86,8 +86,11 @@ jobs:
       - name: cargo check --workspace
         run: cargo check --workspace
 
-      - name: cargo clippy --workspace
-        run: cargo clippy --workspace -- -D warnings
+      - name: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo bench --workspace --no-run
+        run: cargo bench --workspace --no-run
 
   # ─────────────────────────────────────────────────────
   # Gate 2: Integrity checks (seconds)

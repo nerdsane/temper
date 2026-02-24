@@ -202,7 +202,7 @@ mod tests {
 
         assert!(!result.is_equivalent());
         // The first test case (Draft -> SubmitOrder) should mismatch.
-        assert!(result.mismatches.len() >= 1);
+        assert!(!result.mismatches.is_empty());
 
         let mm = &result.mismatches[0];
         assert_eq!(mm.test_case.action, "SubmitOrder");
