@@ -84,6 +84,8 @@ pub enum Guard {
     ItemCountMin(usize),
     /// A named counter must be >= N.
     CounterMin { var: String, min: usize },
+    /// A named counter must be < N.
+    CounterMax { var: String, max: usize },
     /// A named boolean variable must be true.
     BoolTrue(String),
     /// A named list variable must contain a specific value.
@@ -186,6 +188,7 @@ impl Guard {
             Guard::StateIn(states) => states.iter().any(|s| s == current_state),
             Guard::ItemCountMin(n) => ctx.counters.get("items").copied().unwrap_or(0) >= *n,
             Guard::CounterMin { var, min } => ctx.counters.get(var).copied().unwrap_or(0) >= *min,
+            Guard::CounterMax { var, max } => ctx.counters.get(var).copied().unwrap_or(0) < *max,
             Guard::BoolTrue(var) => ctx.booleans.get(var).copied().unwrap_or(false),
             Guard::ListContains { var, value } => {
                 ctx.lists.get(var).is_some_and(|list| list.contains(value))

@@ -39,7 +39,6 @@ pub struct DeployInput {
     /// Pre-authored entity specs.
     pub entities: Vec<EntitySpecSource>,
     /// WASM modules for integration handlers: module_name → wasm_bytes.
-    #[allow(dead_code)]
     pub wasm_modules: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
@@ -237,31 +236,46 @@ impl DeployPipeline {
                         .map(|r| (r.entity_name.as_str(), r.ioa_source.as_str()))
                         .collect();
 
-                    // Register tenant in the live registry
-                    {
+                    // Register tenant in the live registry.
+                    let register_result = {
                         let mut registry = state.registry.write().unwrap();
-                        registry.register_tenant(
+                        registry.try_register_tenant(
                             TenantId::new(&input.tenant_name),
                             csdl,
                             input.csdl_xml.clone(),
                             &ioa_pairs,
-                        );
+                        )
+                    };
+
+                    match register_result {
+                        Ok(()) => {
+                            state.broadcast(PlatformEvent::DeployStatus {
+                                tenant: input.tenant_name.clone(),
+                                success: true,
+                                summary: format!(
+                                    "Deployed {} entities for tenant '{}'",
+                                    input.entities.len(),
+                                    input.tenant_name,
+                                ),
+                            });
+
+                            state.broadcast(PlatformEvent::TenantRegistered {
+                                tenant: input.tenant_name.clone(),
+                                entity_count: input.entities.len(),
+                            });
+                        }
+                        Err(e) => {
+                            all_passed = false;
+                            deploy_span.set_status(Status::Error {
+                                description: format!("registry registration failed: {e}").into(),
+                            });
+                            state.broadcast(PlatformEvent::DeployStatus {
+                                tenant: input.tenant_name.clone(),
+                                success: false,
+                                summary: format!("Tenant registration failed: {e}"),
+                            });
+                        }
                     }
-
-                    state.broadcast(PlatformEvent::DeployStatus {
-                        tenant: input.tenant_name.clone(),
-                        success: true,
-                        summary: format!(
-                            "Deployed {} entities for tenant '{}'",
-                            input.entities.len(),
-                            input.tenant_name,
-                        ),
-                    });
-
-                    state.broadcast(PlatformEvent::TenantRegistered {
-                        tenant: input.tenant_name.clone(),
-                        entity_count: input.entities.len(),
-                    });
                 }
                 Err(e) => {
                     all_passed = false;

@@ -145,6 +145,19 @@ mod tests {
     }
 
     #[test]
+    fn guard_counter_max() {
+        let guard = Guard::CounterMax {
+            var: "retries".into(),
+            max: 3,
+        };
+        let mut ctx = EvalContext::default();
+        ctx.counters.insert("retries".into(), 2);
+        assert!(guard.check("Draft", &ctx));
+        ctx.counters.insert("retries".into(), 3);
+        assert!(!guard.check("Draft", &ctx));
+    }
+
+    #[test]
     fn guard_and_combinator() {
         let guard = Guard::And(vec![
             Guard::StateIn(vec!["Draft".into()]),

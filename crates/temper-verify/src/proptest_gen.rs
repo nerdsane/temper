@@ -315,9 +315,7 @@ fn replay_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{
-        InvariantKind, ModelEffect, ModelGuard, ResolvedInvariant, ResolvedTransition,
-    };
+    use crate::model::{InvariantKind, ModelGuard, ResolvedInvariant, ResolvedTransition};
     use std::collections::BTreeMap;
 
     const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
@@ -415,7 +413,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn build_broken_model() -> TemperModel {
-        let mut model = TemperModel {
+        TemperModel {
             states: vec!["A".to_string(), "B".to_string()],
             transitions: vec![ResolvedTransition {
                 name: "GoB".to_string(),
@@ -444,8 +442,6 @@ mod tests {
             initial_booleans: BTreeMap::new(),
             counter_bounds: BTreeMap::new(),
             default_max_counter: 2,
-        };
-
-        model
+        }
     }
 }

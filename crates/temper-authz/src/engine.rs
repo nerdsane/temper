@@ -261,14 +261,6 @@ mod tests {
         ])
     }
 
-    fn agent_context(role: &str) -> SecurityContext {
-        SecurityContext::from_headers(&[
-            ("X-Temper-Principal-Id".to_string(), "agent-1".to_string()),
-            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-            ("X-Temper-Agent-Role".to_string(), role.to_string()),
-        ])
-    }
-
     #[test]
     fn test_permissive_engine_denies_by_default() {
         // No policies = no permits = deny

@@ -18,7 +18,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use temper_evolution::PostgresRecordStore;
+use temper_observe::ClickHouseStore;
 use temper_observe::otel::init_tracing;
+use temper_platform::optimization::run_optimization_cycle;
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
@@ -263,6 +265,7 @@ pub async fn run(
     for (tenant, dir) in &apps {
         spawn_background_verification(&state, dir, tenant).await;
     }
+    spawn_optimization_loop(&state);
 
     println!("Listening on http://0.0.0.0:{port}");
     axum::serve(listener, router)
@@ -270,6 +273,30 @@ pub async fn run(
         .context("Server error")?;
 
     Ok(())
+}
+
+fn spawn_optimization_loop(state: &PlatformState) {
+    let Some(store_url) = std::env::var("TEMPER_OPTIMIZE_STORE_URL").ok() else {
+        return;
+    };
+    let interval_secs = std::env::var("TEMPER_OPTIMIZE_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(300)
+        .clamp(1, 86_400);
+
+    let state = state.clone();
+    tokio::spawn(async move {
+        let store = ClickHouseStore::new(&store_url);
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await; // consume immediate tick
+
+        loop {
+            ticker.tick().await;
+            let _ = run_optimization_cycle(&store, &state).await;
+        }
+    });
 }
 
 /// Spawn background verification tasks for each entity in the specs directory.

@@ -7,9 +7,9 @@ mod entities;
 mod evolution;
 mod metrics;
 mod specs;
+mod specs_helpers;
 mod verification;
 mod wasm;
-
 use axum::Router;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};

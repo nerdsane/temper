@@ -1,6 +1,6 @@
 //! temper-odata: OData v4 protocol implementation for Temper.
 //!
-//! Provides OData-compliant query parsing, response formatting, batch operations,
+//! Provides OData-compliant query parsing, response formatting,
 //! and entity routing for Temper entity services.
 //!
 //! # Key modules

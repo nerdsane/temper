@@ -13,7 +13,7 @@
 //!   cargo bench -p oncall-reference --bench agent_triage
 //!   DATABASE_URL=postgres://... cargo bench -p oncall-reference --bench agent_triage
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use hyper::{Request, StatusCode};
@@ -41,8 +41,8 @@ fn run_prefix() -> String {
     format!("b{ts}")
 }
 
-fn oncall_sources() -> HashMap<String, String> {
-    let mut m = HashMap::new();
+fn oncall_sources() -> BTreeMap<String, String> {
+    let mut m = BTreeMap::new();
     m.insert("Page".to_string(), PAGE_IOA.to_string());
     m.insert(
         "EscalationPolicy".to_string(),

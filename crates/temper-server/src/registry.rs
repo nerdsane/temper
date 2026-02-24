@@ -68,6 +68,44 @@ pub struct VerificationDetail {
     pub actor_id: Option<String>,
 }
 
+/// Errors raised while registering tenant specifications.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryError {
+    /// cross-invariants TOML failed to parse.
+    CrossInvariantParse { tenant: String, source: String },
+    /// An IOA source failed to parse.
+    IoaParse {
+        tenant: String,
+        entity_type: String,
+        source: String,
+    },
+}
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CrossInvariantParse { tenant, source } => {
+                write!(
+                    f,
+                    "failed to parse cross-invariants for tenant '{tenant}': {source}"
+                )
+            }
+            Self::IoaParse {
+                tenant,
+                entity_type,
+                source,
+            } => {
+                write!(
+                    f,
+                    "failed to parse IOA for tenant '{tenant}', entity '{entity_type}': {source}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
 /// A compiled relation edge from CSDL navigation metadata.
 #[derive(Debug, Clone)]
 pub struct RelationEdge {
@@ -108,7 +146,6 @@ pub struct TenantConfig {
     /// Per-entity-type specs.
     pub entities: BTreeMap<String, EntitySpec>,
     /// Reaction rules for cross-entity coordination.
-    #[allow(dead_code)]
     pub reactions: Vec<ReactionRule>,
     /// Tenant relation graph compiled from CSDL.
     pub relation_graph: RelationGraph,
@@ -199,14 +236,33 @@ impl SpecRegistry {
         csdl_xml: String,
         ioa_sources: &[(&str, &str)],
     ) {
-        self.register_tenant_with_reactions_and_constraints(
+        self.try_register_tenant_with_reactions_and_constraints(
             tenant,
             csdl,
             csdl_xml,
             ioa_sources,
             Vec::new(),
             None,
-        );
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible variant of [`register_tenant`](Self::register_tenant).
+    pub fn try_register_tenant(
+        &mut self,
+        tenant: impl Into<TenantId>,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+    ) -> Result<(), RegistryError> {
+        self.try_register_tenant_with_reactions_and_constraints(
+            tenant,
+            csdl,
+            csdl_xml,
+            ioa_sources,
+            Vec::new(),
+            None,
+        )
     }
 
     /// Register a tenant with CSDL, IOA specs, reaction rules, and optional
@@ -220,16 +276,40 @@ impl SpecRegistry {
         reactions: Vec<ReactionRule>,
         cross_invariants_source: Option<String>,
     ) {
+        self.try_register_tenant_with_reactions_and_constraints(
+            tenant,
+            csdl,
+            csdl_xml,
+            ioa_sources,
+            reactions,
+            cross_invariants_source,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible variant of [`register_tenant_with_reactions_and_constraints`](Self::register_tenant_with_reactions_and_constraints).
+    pub fn try_register_tenant_with_reactions_and_constraints(
+        &mut self,
+        tenant: impl Into<TenantId>,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+        reactions: Vec<ReactionRule>,
+        cross_invariants_source: Option<String>,
+    ) -> Result<(), RegistryError> {
         let tenant = tenant.into();
-        let relation_graph = build_relation_graph(&csdl, cross_invariants_source.as_deref());
+        let tenant_name = tenant.to_string();
         let cross_invariants = cross_invariants_source
             .as_ref()
             .filter(|s| !s.trim().is_empty())
             .map(|s| {
-                parse_cross_invariants(s).unwrap_or_else(|e| {
-                    panic!("failed to parse cross-invariants for tenant '{tenant}': {e}")
+                parse_cross_invariants(s).map_err(|e| RegistryError::CrossInvariantParse {
+                    tenant: tenant_name.clone(),
+                    source: e.to_string(),
                 })
-            });
+            })
+            .transpose()?;
+        let relation_graph = build_relation_graph(&csdl, cross_invariants.as_ref());
 
         // Build entity set map from CSDL
         let mut entity_set_map = BTreeMap::new();
@@ -257,8 +337,13 @@ impl SpecRegistry {
             existing_config.cross_invariants_source = cross_invariants_source;
 
             for (entity_type, ioa_source) in ioa_sources {
-                let automaton = automaton::parse_automaton(ioa_source)
-                    .unwrap_or_else(|e| panic!("failed to parse IOA for {entity_type}: {e}"));
+                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
+                    RegistryError::IoaParse {
+                        tenant: tenant_name.clone(),
+                        entity_type: (*entity_type).to_string(),
+                        source: e.to_string(),
+                    }
+                })?;
                 let table = TransitionTable::from_automaton(&automaton);
                 let integrations = automaton.integrations.clone();
 
@@ -305,8 +390,13 @@ impl SpecRegistry {
             // First registration: create new TenantConfig.
             let mut entities = BTreeMap::new();
             for (entity_type, ioa_source) in ioa_sources {
-                let automaton = automaton::parse_automaton(ioa_source)
-                    .unwrap_or_else(|e| panic!("failed to parse IOA for {entity_type}: {e}"));
+                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
+                    RegistryError::IoaParse {
+                        tenant: tenant_name.clone(),
+                        entity_type: (*entity_type).to_string(),
+                        source: e.to_string(),
+                    }
+                })?;
                 let table = TransitionTable::from_automaton(&automaton);
                 let integrations = automaton.integrations.clone();
                 entities.insert(
@@ -340,6 +430,8 @@ impl SpecRegistry {
                 },
             );
         }
+
+        Ok(())
     }
 
     /// Register a tenant with CSDL, IOA specs, and reaction rules.
@@ -351,14 +443,34 @@ impl SpecRegistry {
         ioa_sources: &[(&str, &str)],
         reactions: Vec<ReactionRule>,
     ) {
-        self.register_tenant_with_reactions_and_constraints(
+        self.try_register_tenant_with_reactions_and_constraints(
             tenant,
             csdl,
             csdl_xml,
             ioa_sources,
             reactions,
             None,
-        );
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible variant of [`register_tenant_with_reactions`](Self::register_tenant_with_reactions).
+    pub fn try_register_tenant_with_reactions(
+        &mut self,
+        tenant: impl Into<TenantId>,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+        reactions: Vec<ReactionRule>,
+    ) -> Result<(), RegistryError> {
+        self.try_register_tenant_with_reactions_and_constraints(
+            tenant,
+            csdl,
+            csdl_xml,
+            ioa_sources,
+            reactions,
+            None,
+        )
     }
 
     /// Build a [`ReactionRegistry`] from all tenants' reaction rules.
@@ -472,16 +584,18 @@ impl SpecRegistry {
 
 fn build_relation_graph(
     csdl: &CsdlDocument,
-    cross_invariants_source: Option<&str>,
+    cross_invariants: Option<&CrossInvariantSpec>,
 ) -> RelationGraph {
     let mut overrides = BTreeMap::<(String, String), DeletePolicy>::new();
-    let default_policy = cross_invariants_source
-        .and_then(|src| parse_cross_invariants(src).ok())
-        .map(|s| {
-            for ov in s.relation_overrides {
-                overrides.insert((ov.from_entity, ov.navigation_property), ov.delete_policy);
+    let default_policy = cross_invariants
+        .map(|spec| {
+            for ov in &spec.relation_overrides {
+                overrides.insert(
+                    (ov.from_entity.clone(), ov.navigation_property.clone()),
+                    ov.delete_policy,
+                );
             }
-            s.default_delete_policy
+            spec.default_delete_policy
         })
         .unwrap_or(DeletePolicy::Restrict);
 

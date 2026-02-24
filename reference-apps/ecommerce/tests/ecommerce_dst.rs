@@ -411,9 +411,10 @@ fn random_order_no_faults() {
     let mut sim = SimActorSystem::new(config);
 
     for i in 0..3 {
-        let handler = EntityActorHandler::new("Order", &format!("ord-{i}"), order_table())
+        let actor_id = format!("ord-{i}");
+        let handler = EntityActorHandler::new("Order", actor_id.clone(), order_table())
             .with_ioa_invariants(ORDER_IOA);
-        sim.register_actor(&format!("ord-{i}"), Box::new(handler));
+        sim.register_actor(&actor_id, Box::new(handler));
     }
 
     let result = sim.run_random();

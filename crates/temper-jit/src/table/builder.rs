@@ -44,10 +44,19 @@ impl TransitionTable {
                 }
                 for g in &a.guard {
                     match g {
+                        automaton::Guard::StateIn { values } => {
+                            guards.push(Guard::StateIn(values.clone()));
+                        }
                         automaton::Guard::MinCount { var, min } => {
                             guards.push(Guard::CounterMin {
                                 var: var.clone(),
                                 min: *min,
+                            });
+                        }
+                        automaton::Guard::MaxCount { var, max } => {
+                            guards.push(Guard::CounterMax {
+                                var: var.clone(),
+                                max: *max,
                             });
                         }
                         automaton::Guard::IsTrue { var } => {
@@ -65,7 +74,6 @@ impl TransitionTable {
                                 min: *min,
                             });
                         }
-                        _ => {}
                     }
                 }
 
