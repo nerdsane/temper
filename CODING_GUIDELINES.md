@@ -482,3 +482,77 @@ Agents MUST use `TransitionTable::from_tla_source()` in production code.
 `from_state_machine()` does not resolve `CanXxx` guard predicates and will
 silently produce incorrect guard constraints. This was discovered through
 DST and is documented in the paper (Section 11.5).
+
+---
+
+## 11. External Rust Baseline
+
+Temper-specific TigerStyle rules build on core Rust standards:
+
+1. Rust Style Guide: <https://doc.rust-lang.org/style-guide/index.html>
+2. rustfmt (canonical formatter): <https://github.com/rust-lang/rustfmt>
+3. clippy lint catalog: <https://doc.rust-lang.org/clippy/lints.html>
+4. Rust API Guidelines: <https://rust-lang.github.io/api-guidelines/>
+
+### 11.1 Formatting Is Non-Negotiable
+
+`cargo fmt --check` must pass in CI and pre-merge. Style drift is a failed build,
+not a review suggestion.
+
+### 11.2 Lints Are Build-Level Feedback
+
+`cargo clippy --workspace -- -D warnings` is mandatory in CI.
+If a lint must be suppressed, add `#[allow(...)]` only with a comment that
+explains:
+- why the suppression is needed
+- why the code is still safe/readable
+- when it should be removed
+
+### 11.3 Public API Documentation
+
+Public APIs should follow Rust API Guidelines (`# Errors`, examples, typed errors).
+If `missing_docs` is not enabled for a crate, treat documentation coverage as a
+review checklist item until it is enabled.
+
+---
+
+## 12. Continuous Enforcement (No Manual Cleanup Cycles)
+
+### 12.1 Readability Ratchet
+
+Readability debt is measured and ratcheted with:
+
+```bash
+bash scripts/readability-ratchet.sh check .ci/readability-baseline.env
+```
+
+Baseline updates are explicit and versioned:
+
+```bash
+bash scripts/readability-ratchet.sh snapshot .ci/readability-baseline.env
+```
+
+CI rejects regressions in:
+- oversized production files (`>500`, `>1000`)
+- max production file size
+- count of `#[allow(clippy::...)]`
+- count of `#[allow(dead_code)]`
+- count of `println!/eprintln!` in production files
+- count of `unwrap()` exceptions marked with `// ci-ok`
+
+`>300` file count is tracked as advisory (non-blocking) to avoid penalizing
+healthy file splits that reduce very large modules.
+
+### 12.2 Review Policy for Baseline Changes
+
+If a baseline file is increased, the PR must explain:
+1. why growth is unavoidable
+2. how and when debt will be reduced
+3. owner of follow-up split/refactor work
+
+### 12.3 Keep PRs Readability-Positive
+
+Prefer "leave it better" behavior:
+- touch a file, improve structure where feasible
+- split large files while implementing feature work
+- avoid adding new suppression attributes unless justified

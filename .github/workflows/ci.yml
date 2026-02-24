@@ -144,6 +144,9 @@ jobs:
           if [ "$FOUND" = true ]; then exit 1; fi
           echo "No unwrap: OK"
 
+      - name: Readability ratchet
+        run: bash scripts/readability-ratchet.sh check .ci/readability-baseline.env
+
       # DST pattern scan DISABLED (2026-02-17)
       # Reason: Grep-based pattern matching is too brittle and caused 5+ consecutive
       # CI failures from false positives. The DST reviewer agent (.claude/agents/dst-reviewer.md)
