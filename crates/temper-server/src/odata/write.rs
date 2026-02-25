@@ -1,5 +1,6 @@
 //! OData write handlers (`POST`, `PATCH`, `PUT`, `DELETE`).
 
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -15,6 +16,7 @@ use super::response::annotate_entity;
 use crate::constraint_engine::{
     post_write_invariant_checks, pre_delete_relation_checks, pre_upsert_relation_checks,
 };
+use crate::dispatch::extract_agent_context;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
 
@@ -94,9 +96,20 @@ pub async fn handle_odata_post(
     State(state): State<ServerState>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
+    Query(query_params): Query<std::collections::BTreeMap<String, String>>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let tenant = extract_tenant(&headers, &state);
+    let agent_ctx = extract_agent_context(&headers);
+    let await_integration = query_params
+        .get("await_integration")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     let odata_path = match parse_odata_path_or_400(&path) {
         Ok(p) => p,
         Err(resp) => return *resp,
@@ -202,6 +215,9 @@ pub async fn handle_odata_post(
                 &key_str,
                 &action,
                 body_json,
+                &agent_ctx,
+                await_integration,
+                idempotency_key.clone(),
             )
             .await
         }

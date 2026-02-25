@@ -121,6 +121,7 @@ temper-wasm = { path = "crates/temper-wasm" }
 # WASM runtime
 wasmtime = { version = "29", features = ["component-model"] }
 sha2 = "0.10"
+aes-gcm = "0.10"
 async-trait = "0.1"
 
 [profile.release]

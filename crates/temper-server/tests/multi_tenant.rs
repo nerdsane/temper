@@ -10,6 +10,7 @@
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
+use temper_server::dispatch::AgentContext;
 use temper_server::registry::{
     EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
 };
@@ -177,6 +178,7 @@ async fn actions_on_one_tenant_dont_affect_another() {
             "shared-id",
             "CancelOrder",
             serde_json::json!({"Reason": "changed mind"}),
+            &AgentContext::default(),
         )
         .await
         .unwrap();
@@ -226,7 +228,14 @@ async fn same_entity_type_different_tenants() {
         .await
         .unwrap();
     let r = state
-        .dispatch_tenant_action(&a, "Order", "o1", "CancelOrder", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &a,
+            "Order",
+            "o1",
+            "CancelOrder",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert_eq!(r.state.status, "Cancelled");
@@ -400,6 +409,7 @@ async fn operations_blocked_after_verification_fails() {
             "order-1",
             "SubmitOrder",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await;
     // dispatch_tenant_action bypasses the gate (it's at HTTP layer), but still succeeds

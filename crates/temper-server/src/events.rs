@@ -25,6 +25,12 @@ pub struct EntityStateChange {
     pub status: String,
     /// The tenant that owns the entity.
     pub tenant: String,
+    /// Agent that performed the action (if known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Session in which the action was performed (if known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// SSE endpoint handler: streams entity state changes to connected clients.
@@ -61,9 +67,13 @@ mod tests {
             action: "SubmitOrder".into(),
             status: "Submitted".into(),
             tenant: "default".into(),
+            agent_id: Some("agent-1".into()),
+            session_id: None,
         };
         let json = serde_json::to_string(&change).unwrap();
         assert!(json.contains("\"entity_type\":\"Order\""));
         assert!(json.contains("\"action\":\"SubmitOrder\""));
+        assert!(json.contains("\"agent_id\":\"agent-1\""));
+        assert!(!json.contains("session_id"));
     }
 }

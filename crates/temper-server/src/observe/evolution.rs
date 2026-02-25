@@ -279,6 +279,8 @@ pub(crate) async fn handle_unmet_intent(
         success: false,
         from_status: None,
         to_status: None,
+        agent_id: None,
+        session_id: None,
         error: Some(if error_msg.is_empty() {
             format!("Unmet intent: {intent}")
         } else {

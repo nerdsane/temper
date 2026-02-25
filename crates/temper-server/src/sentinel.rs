@@ -191,6 +191,7 @@ pub fn check_rules(rules: &[SentinelRule], state: &ServerState) -> Vec<SentinelA
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch::AgentContext;
     use crate::registry::SpecRegistry;
     use crate::state::ServerState;
     use temper_runtime::ActorSystem;
@@ -233,6 +234,7 @@ mod tests {
                     &format!("sentinel-err-{i}"),
                     "SubmitOrder",
                     serde_json::json!({}),
+                    &AgentContext::default(),
                 )
                 .await;
         }
@@ -245,6 +247,7 @@ mod tests {
                     &format!("sentinel-ok-{i}"),
                     "AddItem",
                     serde_json::json!({"ProductId": "p1"}),
+                    &AgentContext::default(),
                 )
                 .await;
         }

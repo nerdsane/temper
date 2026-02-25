@@ -7,6 +7,7 @@
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
+use temper_server::dispatch::AgentContext;
 use temper_server::registry::SpecRegistry;
 use temper_spec::csdl::parse_csdl;
 
@@ -109,6 +110,7 @@ async fn wasm_integration_dispatches_callback() {
             "echo-1",
             "TriggerEcho",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await
         .expect("TriggerEcho should succeed");
@@ -163,6 +165,7 @@ async fn wasm_missing_module_dispatches_failure_callback() {
             "echo-missing",
             "TriggerEcho",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await
         .expect("TriggerEcho should succeed (transition is valid)");

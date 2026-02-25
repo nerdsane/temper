@@ -1,6 +1,7 @@
 //! Server state shared across all request handlers.
 
 mod dispatch;
+mod dispatch_blocking;
 mod entity_ops;
 pub mod metrics;
 mod persistence;
@@ -27,8 +28,10 @@ use temper_store_postgres::PostgresEventStore;
 use crate::entity_actor::EntityMsg;
 use crate::event_store::ServerEventStore;
 use crate::events::EntityStateChange;
+use crate::idempotency::IdempotencyCache;
 use crate::reaction::ReactionDispatcher;
 use crate::registry::SpecRegistry;
+use crate::secrets_vault::SecretsVault;
 use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
 use temper_wasm::WasmEngine;
@@ -154,6 +157,10 @@ pub struct ServerState {
     pub action_dispatch_timeout: Duration,
     /// Eventual invariant convergence tracker.
     pub eventual_tracker: Arc<RwLock<crate::eventual_invariants::EventualInvariantTracker>>,
+    /// Idempotency cache for deduplicating agent retries.
+    pub idempotency_cache: Arc<IdempotencyCache>,
+    /// Optional encrypted secrets vault for per-tenant secret management.
+    pub secrets_vault: Option<Arc<SecretsVault>>,
 }
 
 impl ServerState {
@@ -210,6 +217,8 @@ impl ServerState {
             eventual_tracker: Arc::new(RwLock::new(
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
+            idempotency_cache: Arc::new(IdempotencyCache::new()),
+            secrets_vault: None,
         }
     }
 
@@ -306,6 +315,8 @@ impl ServerState {
             eventual_tracker: Arc::new(RwLock::new(
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
+            idempotency_cache: Arc::new(IdempotencyCache::new()),
+            secrets_vault: None,
         }
     }
 
@@ -349,6 +360,12 @@ impl ServerState {
     /// Attach a Postgres-backed evolution record store.
     pub fn with_pg_record_store(mut self, store: PostgresRecordStore) -> Self {
         self.pg_record_store = Some(Arc::new(store));
+        self
+    }
+
+    /// Attach an encrypted secrets vault.
+    pub fn with_secrets_vault(mut self, vault: SecretsVault) -> Self {
+        self.secrets_vault = Some(Arc::new(vault));
         self
     }
 }

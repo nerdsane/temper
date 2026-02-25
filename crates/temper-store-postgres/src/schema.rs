@@ -82,6 +82,8 @@ CREATE TABLE IF NOT EXISTS trajectories (
     from_status   TEXT,
     to_status     TEXT,
     error         TEXT,
+    agent_id      TEXT,
+    session_id    TEXT,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
 );";
 
@@ -170,6 +172,21 @@ CREATE INDEX IF NOT EXISTS idx_wasm_invocation_logs_module
 pub const CREATE_WASM_INVOCATION_LOGS_CREATED_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_wasm_invocation_logs_created
     ON wasm_invocation_logs (created_at DESC);";
+
+/// CREATE TABLE statement for per-tenant encrypted secrets.
+///
+/// Stores AES-256-GCM encrypted secret values keyed by (tenant, key_name).
+/// The master key is held in memory only; ciphertext + nonce are persisted.
+pub const CREATE_TENANT_SECRETS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS tenant_secrets (
+    tenant      TEXT         NOT NULL,
+    key_name    TEXT         NOT NULL,
+    ciphertext  BYTEA        NOT NULL,
+    nonce       BYTEA        NOT NULL,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, key_name)
+);";
 
 #[cfg(test)]
 mod tests {
@@ -304,6 +321,10 @@ mod tests {
         assert!(
             CREATE_WASM_INVOCATION_LOGS_TABLE.contains("IF NOT EXISTS"),
             "wasm_invocation_logs schema should use IF NOT EXISTS"
+        );
+        assert!(
+            CREATE_TENANT_SECRETS_TABLE.contains("IF NOT EXISTS"),
+            "tenant_secrets schema should use IF NOT EXISTS"
         );
     }
 

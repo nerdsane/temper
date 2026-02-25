@@ -10,9 +10,11 @@ use temper_runtime::tenant::TenantId;
 use super::common::constraint_violation_response;
 use super::response::annotate_entity;
 use crate::constraint_engine::{post_write_invariant_checks, pre_upsert_relation_checks};
+use crate::dispatch::AgentContext;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_bound_action(
     state: &ServerState,
     tenant: &TenantId,
@@ -21,6 +23,9 @@ pub(super) async fn dispatch_bound_action(
     key_str: &str,
     action: &str,
     body_json: serde_json::Value,
+    agent_ctx: &AgentContext,
+    await_integration: bool,
+    idempotency_key: Option<String>,
 ) -> axum::response::Response {
     let http_start = sim_now();
     let tracer = opentelemetry::global::tracer("temper");
@@ -37,6 +42,13 @@ pub(super) async fn dispatch_bound_action(
             OtelKeyValue::new("tenant", tenant.as_str().to_string()),
         ])
         .start(&tracer);
+
+    if let Some(ref aid) = agent_ctx.agent_id {
+        http_span.set_attribute(OtelKeyValue::new("agent.id", aid.clone()));
+    }
+    if let Some(ref sid) = agent_ctx.session_id {
+        http_span.set_attribute(OtelKeyValue::new("session.id", sid.clone()));
+    }
 
     let authz_result =
         state.authorize(&[], action, entity_type, &std::collections::BTreeMap::new());
@@ -95,14 +107,51 @@ pub(super) async fn dispatch_bound_action(
         return constraint_violation_response(v);
     }
 
+    // Idempotency cache check
+    let actor_key = format!("{entity_type}:{key_str}");
+    if let Some(ref idem_key) = idempotency_key
+        && let Some(cached) = state.idempotency_cache.get(&actor_key, idem_key)
+    {
+        let body = annotate_entity(
+            serde_json::to_value(&cached.state).unwrap_or_default(),
+            format!("$metadata#{set_name}/$entity"),
+            None,
+        );
+        http_span.set_attribute(OtelKeyValue::new("idempotency.hit", true));
+        http_span.set_status(Status::Ok);
+        http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
+        let end_time: std::time::SystemTime = sim_now().into();
+        http_span.end_with_timestamp(end_time);
+        return ODataResponse {
+            status: StatusCode::OK,
+            body,
+        }
+        .into_response();
+    }
+
     let result = state
-        .dispatch_tenant_action(tenant, entity_type, key_str, action, body_json)
+        .dispatch_tenant_action_ext(
+            tenant,
+            entity_type,
+            key_str,
+            action,
+            body_json,
+            agent_ctx,
+            await_integration,
+        )
         .await;
 
     let http_end: std::time::SystemTime = sim_now().into();
     let response = match result {
         Ok(response) => {
             if response.success {
+                // Cache for idempotency
+                if let Some(ref idem_key) = idempotency_key {
+                    state
+                        .idempotency_cache
+                        .put(&actor_key, idem_key, response.clone());
+                }
+
                 http_span.set_status(Status::Ok);
                 http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
                 let body = annotate_entity(

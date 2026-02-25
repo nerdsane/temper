@@ -17,6 +17,12 @@ pub struct WasmInvocationContext {
     pub trigger_params: serde_json::Value,
     /// Current entity state snapshot (fields JSON).
     pub entity_state: serde_json::Value,
+    /// Agent that triggered this invocation (if known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Session that triggered this invocation (if known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// Result returned from a WASM module invocation.

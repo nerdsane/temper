@@ -26,6 +26,12 @@ pub struct TrajectoryEntry {
     pub to_status: Option<String>,
     /// Error description for failed intents.
     pub error: Option<String>,
+    /// Agent that performed the action (if known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Session in which the action was performed (if known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// Bounded, append-only trajectory log.

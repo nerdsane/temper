@@ -38,6 +38,7 @@ chrono = { workspace = true }
 opentelemetry = { workspace = true }
 reqwest = { workspace = true }
 sqlx = { workspace = true }
+aes-gcm = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

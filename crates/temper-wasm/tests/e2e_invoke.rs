@@ -18,6 +18,8 @@ fn build_context() -> WasmInvocationContext {
         trigger_action: "TriggerEcho".to_string(),
         trigger_params: serde_json::json!({}),
         entity_state: serde_json::json!({"status": "Pending"}),
+        agent_id: None,
+        session_id: None,
     }
 }
 

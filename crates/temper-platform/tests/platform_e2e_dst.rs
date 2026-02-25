@@ -19,6 +19,7 @@ mod common;
 use common::http::{body_json, body_string};
 use common::platform::{bootstrapped_router, bootstrapped_state};
 use temper_platform::bootstrap::SYSTEM_TENANT;
+use temper_server::dispatch::AgentContext;
 
 // =========================================================================
 // Dispatch-level tests — prove shared registry
@@ -42,6 +43,7 @@ async fn e2e_bootstrap_visible_to_dispatch() {
             "p1",
             "UpdateSpecs",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await
         .expect("dispatch should find temper-system tenant in registry");
@@ -70,6 +72,7 @@ async fn e2e_project_lifecycle_via_dispatch() {
             "p2",
             "UpdateSpecs",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await
         .unwrap();
@@ -79,7 +82,14 @@ async fn e2e_project_lifecycle_via_dispatch() {
     // Building → Verified
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Project", "p2", "Verify", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Project",
+            "p2",
+            "Verify",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "Verify: {:?}", r.error);
@@ -88,7 +98,14 @@ async fn e2e_project_lifecycle_via_dispatch() {
     // Verified → Archived
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Project", "p2", "Archive", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Project",
+            "p2",
+            "Archive",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "Archive: {:?}", r.error);
@@ -113,7 +130,14 @@ async fn e2e_tenant_lifecycle_via_dispatch() {
     // Pending → Active
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Tenant", "t1", "Deploy", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Tenant",
+            "t1",
+            "Deploy",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "Deploy: {:?}", r.error);
@@ -122,7 +146,14 @@ async fn e2e_tenant_lifecycle_via_dispatch() {
     // Active → Suspended
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Tenant", "t1", "Suspend", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Tenant",
+            "t1",
+            "Suspend",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "Suspend: {:?}", r.error);
@@ -131,7 +162,14 @@ async fn e2e_tenant_lifecycle_via_dispatch() {
     // Suspended → Active
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Tenant", "t1", "Reactivate", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Tenant",
+            "t1",
+            "Reactivate",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "Reactivate: {:?}", r.error);
@@ -140,7 +178,14 @@ async fn e2e_tenant_lifecycle_via_dispatch() {
     // Active → Archived
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Tenant", "t1", "Archive", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Tenant",
+            "t1",
+            "Archive",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "Archive: {:?}", r.error);
@@ -163,6 +208,7 @@ async fn e2e_full_platform_scenario() {
             "proj-1",
             "UpdateSpecs",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await
         .unwrap();
@@ -175,6 +221,7 @@ async fn e2e_full_platform_scenario() {
             "proj-1",
             "Verify",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await
         .unwrap();
@@ -190,6 +237,7 @@ async fn e2e_full_platform_scenario() {
             "col-1",
             "Accept",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await
         .unwrap();
@@ -203,6 +251,7 @@ async fn e2e_full_platform_scenario() {
             "col-1",
             "ChangeRole",
             serde_json::json!({"role": "editor"}),
+            &AgentContext::default(),
         )
         .await
         .unwrap();
@@ -218,6 +267,7 @@ async fn e2e_full_platform_scenario() {
             "tenant-1",
             "Deploy",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await
         .unwrap();
@@ -233,6 +283,7 @@ async fn e2e_full_platform_scenario() {
             "v-1",
             "MarkDeployed",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await
         .unwrap();
@@ -248,6 +299,7 @@ async fn e2e_full_platform_scenario() {
             "cat-1",
             "Publish",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await
         .unwrap();

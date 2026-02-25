@@ -229,6 +229,8 @@ mod tests {
             from_status: from.map(String::from),
             to_status: to.map(String::from),
             error: None,
+            agent_id: None,
+            session_id: None,
         }
     }
 

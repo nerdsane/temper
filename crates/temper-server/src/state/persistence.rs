@@ -606,8 +606,8 @@ impl ServerState {
                 .unwrap_or_else(|_| sim_now());
             sqlx::query(
                 "INSERT INTO trajectories \
-                 (tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                 (tenant, entity_type, entity_id, action, success, from_status, to_status, error, agent_id, session_id, created_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             )
             .bind(&entry.tenant)
             .bind(&entry.entity_type)
@@ -617,6 +617,8 @@ impl ServerState {
             .bind(entry.from_status.as_deref())
             .bind(entry.to_status.as_deref())
             .bind(entry.error.as_deref())
+            .bind(entry.agent_id.as_deref())
+            .bind(entry.session_id.as_deref())
             .bind(created_at)
             .execute(pool)
             .await
@@ -673,5 +675,101 @@ impl ServerState {
         }
 
         Ok(())
+    }
+
+    /// Upsert an encrypted secret in the persistence backend.
+    pub async fn upsert_secret(
+        &self,
+        tenant: &str,
+        key_name: &str,
+        ciphertext: &[u8],
+        nonce: &[u8],
+    ) -> Result<(), String> {
+        let Some(store) = self.event_store.as_ref() else {
+            return Ok(());
+        };
+
+        if let Some(pool) = store.postgres_pool() {
+            sqlx::query(
+                "INSERT INTO tenant_secrets (tenant, key_name, ciphertext, nonce, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, now(), now()) \
+                 ON CONFLICT (tenant, key_name) DO UPDATE SET \
+                     ciphertext = EXCLUDED.ciphertext, \
+                     nonce = EXCLUDED.nonce, \
+                     updated_at = now()",
+            )
+            .bind(tenant)
+            .bind(key_name)
+            .bind(ciphertext)
+            .bind(nonce)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("failed to upsert secret {tenant}/{key_name}: {e}"))?;
+        }
+
+        Ok(())
+    }
+
+    /// Delete a secret from the persistence backend.
+    pub async fn delete_secret(&self, tenant: &str, key_name: &str) -> Result<bool, String> {
+        let Some(store) = self.event_store.as_ref() else {
+            return Ok(false);
+        };
+
+        if let Some(pool) = store.postgres_pool() {
+            let result =
+                sqlx::query("DELETE FROM tenant_secrets WHERE tenant = $1 AND key_name = $2")
+                    .bind(tenant)
+                    .bind(key_name)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| format!("failed to delete secret {tenant}/{key_name}: {e}"))?;
+            return Ok(result.rows_affected() > 0);
+        }
+
+        Ok(false)
+    }
+
+    /// Load all secrets for a tenant from persistence, decrypt, and cache.
+    pub async fn load_tenant_secrets(&self, tenant: &str) -> Result<usize, String> {
+        let Some(vault) = self.secrets_vault.as_ref() else {
+            return Ok(0);
+        };
+        let Some(store) = self.event_store.as_ref() else {
+            return Ok(0);
+        };
+
+        if let Some(pool) = store.postgres_pool() {
+            let rows: Vec<(String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+                "SELECT key_name, ciphertext, nonce FROM tenant_secrets WHERE tenant = $1",
+            )
+            .bind(tenant)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("failed to load secrets for tenant {tenant}: {e}"))?;
+
+            let mut count = 0;
+            for (key_name, ciphertext, nonce) in &rows {
+                match vault.decrypt(ciphertext, nonce) {
+                    Ok(plaintext) => {
+                        let value = String::from_utf8(plaintext)
+                            .map_err(|e| format!("secret {key_name} is not valid UTF-8: {e}"))?;
+                        vault.cache_secret(tenant, key_name, value)?;
+                        count += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            tenant,
+                            key_name,
+                            error = %e,
+                            "failed to decrypt secret, skipping"
+                        );
+                    }
+                }
+            }
+            return Ok(count);
+        }
+
+        Ok(0)
     }
 }

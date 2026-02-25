@@ -77,6 +77,9 @@ pub fn build_router(state: ServerState) -> Router {
             CONTENT_TYPE,
             AUTHORIZATION,
             HeaderName::from_static("x-tenant-id"),
+            HeaderName::from_static("x-agent-id"),
+            HeaderName::from_static("x-session-id"),
+            HeaderName::from_static("idempotency-key"),
         ]);
 
     router

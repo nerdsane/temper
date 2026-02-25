@@ -7,6 +7,7 @@ use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
 use tower::ServiceExt;
 
+use crate::dispatch::AgentContext;
 use crate::registry::SpecRegistry;
 
 const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
@@ -126,6 +127,7 @@ async fn test_entity_history_returns_events() {
             "order-hist-1",
             "AddItem",
             serde_json::json!({"ProductId": "p1"}),
+            &AgentContext::default(),
         )
         .await;
     assert!(r.is_ok(), "AddItem failed: {r:?}");
@@ -137,6 +139,7 @@ async fn test_entity_history_returns_events() {
             "order-hist-1",
             "SubmitOrder",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await;
     assert!(r.is_ok(), "SubmitOrder failed: {r:?}");
@@ -228,6 +231,7 @@ async fn test_health_counts_entities_and_transitions() {
             "health-test-1",
             "AddItem",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await;
     assert!(r.is_ok());
@@ -265,6 +269,7 @@ async fn test_metrics_returns_prometheus_format() {
             "metrics-1",
             "AddItem",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await;
     // SubmitOrder with 0 items should fail.
@@ -275,6 +280,7 @@ async fn test_metrics_returns_prometheus_format() {
             "metrics-2",
             "SubmitOrder",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await;
 
@@ -331,6 +337,7 @@ async fn test_trajectories_records_success_and_failure() {
             "traj-1",
             "AddItem",
             serde_json::json!({"ProductId": "p1"}),
+            &AgentContext::default(),
         )
         .await;
     assert!(r.is_ok());
@@ -343,6 +350,7 @@ async fn test_trajectories_records_success_and_failure() {
             "traj-2",
             "SubmitOrder",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await;
 
@@ -393,6 +401,7 @@ async fn test_trajectories_filters_by_entity_type() {
             "traj-f1",
             "AddItem",
             serde_json::json!({"ProductId": "p1"}),
+            &AgentContext::default(),
         )
         .await;
 
@@ -497,6 +506,7 @@ async fn test_sentinel_check_detects_error_spike() {
                 &format!("sentinel-fail-{i}"),
                 "SubmitOrder",
                 serde_json::json!({}),
+                &AgentContext::default(),
             )
             .await;
     }
@@ -508,6 +518,7 @@ async fn test_sentinel_check_detects_error_spike() {
                 &format!("sentinel-pass-{i}"),
                 "AddItem",
                 serde_json::json!({"ProductId": "p1"}),
+                &AgentContext::default(),
             )
             .await;
     }
@@ -578,6 +589,7 @@ async fn test_evolution_records_after_sentinel() {
                 &format!("evo-fail-{i}"),
                 "SubmitOrder",
                 serde_json::json!({}),
+                &AgentContext::default(),
             )
             .await;
     }

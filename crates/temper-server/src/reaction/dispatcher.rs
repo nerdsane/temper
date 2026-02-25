@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::dispatch::AgentContext;
 use temper_runtime::tenant::TenantId;
 use tracing;
 
@@ -108,6 +109,8 @@ impl ReactionDispatcher {
                     &target_entity_id,
                     &rule.then.action,
                     rule.then.params.clone(),
+                    &AgentContext::default(),
+                    false,
                 )
                 .await;
 

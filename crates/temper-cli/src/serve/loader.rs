@@ -333,6 +333,8 @@ pub(super) async fn hydrate_trajectory_log(
                     from_status,
                     to_status,
                     error,
+                    agent_id: None,
+                    session_id: None,
                 });
             }
             let count = log.entries().len();
@@ -360,6 +362,8 @@ pub(super) async fn hydrate_trajectory_log(
                             from_status: row.from_status,
                             to_status: row.to_status,
                             error: row.error,
+                            agent_id: None,
+                            session_id: None,
                         });
                     }
                     let count = log.entries().len();

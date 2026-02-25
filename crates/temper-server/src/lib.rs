@@ -7,11 +7,12 @@
 #[cfg(feature = "observe")]
 mod api;
 mod constraint_engine;
-mod dispatch;
+pub mod dispatch;
 pub mod entity_actor;
 pub mod event_store;
 pub mod events;
 pub mod eventual_invariants;
+pub mod idempotency;
 #[cfg(feature = "observe")]
 pub mod observe;
 mod odata;
@@ -20,6 +21,7 @@ pub mod reaction;
 pub mod registry;
 mod response;
 mod router;
+pub mod secrets_vault;
 #[cfg(feature = "observe")]
 pub mod sentinel;
 pub mod state;

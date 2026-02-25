@@ -1,11 +1,11 @@
 //! Action dispatch and WASM integration methods for ServerState.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::ServerState;
 use super::trajectory::TrajectoryEntry;
 use super::wasm_invocation_log::WasmInvocationEntry;
+use crate::dispatch::AgentContext;
 use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
 use temper_runtime::scheduler::sim_now;
@@ -113,7 +113,14 @@ impl ServerState {
                             "integration": int_name,
                         });
                         if let Err(e) = state
-                            .dispatch_tenant_action(&t, &et, &eid, &cb, fail_params)
+                            .dispatch_tenant_action(
+                                &t,
+                                &et,
+                                &eid,
+                                &cb,
+                                fail_params,
+                                &AgentContext::default(),
+                            )
                             .await
                         {
                             tracing::error!(
@@ -135,6 +142,8 @@ impl ServerState {
                 trigger_action: _action.to_string(),
                 trigger_params: serde_json::Value::Null,
                 entity_state: serde_json::to_value(_entity_state).unwrap_or_default(),
+                agent_id: None,
+                session_id: None,
             };
 
             // Look up module hash
@@ -159,8 +168,13 @@ impl ServerState {
                 "invoking WASM integration module"
             );
 
+            let tenant_secrets = self
+                .secrets_vault
+                .as_ref()
+                .map(|v| v.get_tenant_secrets(&tenant.to_string()))
+                .unwrap_or_default();
             let engine = self.wasm_engine.clone();
-            let host: Arc<dyn WasmHost> = Arc::new(ProductionWasmHost::new(BTreeMap::new()));
+            let host: Arc<dyn WasmHost> = Arc::new(ProductionWasmHost::new(tenant_secrets));
             let limits = WasmResourceLimits::default();
             let state = self.clone();
             let t = tenant.clone();
@@ -205,7 +219,14 @@ impl ServerState {
                         if let Some(cb) = on_ok {
                             let params = result.callback_params;
                             if let Err(e) = state
-                                .dispatch_tenant_action(&t, &et, &eid, &cb, params)
+                                .dispatch_tenant_action(
+                                    &t,
+                                    &et,
+                                    &eid,
+                                    &cb,
+                                    params,
+                                    &AgentContext::default(),
+                                )
                                 .await
                             {
                                 tracing::error!(callback = %cb, error = %e, "failed to dispatch WASM success callback");
@@ -244,7 +265,14 @@ impl ServerState {
                                 "integration": int_name,
                             });
                             if let Err(e) = state
-                                .dispatch_tenant_action(&t, &et, &eid, &cb, params)
+                                .dispatch_tenant_action(
+                                    &t,
+                                    &et,
+                                    &eid,
+                                    &cb,
+                                    params,
+                                    &AgentContext::default(),
+                                )
                                 .await
                             {
                                 tracing::error!(callback = %cb, error = %e, "failed to dispatch WASM failure callback");
@@ -282,7 +310,14 @@ impl ServerState {
                                 "integration": int_name,
                             });
                             if let Err(e) = state
-                                .dispatch_tenant_action(&t, &et, &eid, &cb, params)
+                                .dispatch_tenant_action(
+                                    &t,
+                                    &et,
+                                    &eid,
+                                    &cb,
+                                    params,
+                                    &AgentContext::default(),
+                                )
                                 .await
                             {
                                 tracing::error!(callback = %cb, error = %e, "failed to dispatch WASM error callback");
@@ -302,8 +337,15 @@ impl ServerState {
         action: &str,
         params: serde_json::Value,
     ) -> Result<EntityResponse, String> {
-        self.dispatch_tenant_action(&TenantId::default(), entity_type, entity_id, action, params)
-            .await
+        self.dispatch_tenant_action(
+            &TenantId::default(),
+            entity_type,
+            entity_id,
+            action,
+            params,
+            &AgentContext::default(),
+        )
+        .await
     }
 
     /// Dispatch an action to an entity actor for a specific tenant.
@@ -317,9 +359,42 @@ impl ServerState {
         entity_id: &str,
         action: &str,
         params: serde_json::Value,
+        agent_ctx: &AgentContext,
+    ) -> Result<EntityResponse, String> {
+        self.dispatch_tenant_action_ext(
+            tenant,
+            entity_type,
+            entity_id,
+            action,
+            params,
+            agent_ctx,
+            false,
+        )
+        .await
+    }
+
+    /// Dispatch with optional blocking integration await.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_tenant_action_ext(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        action: &str,
+        params: serde_json::Value,
+        agent_ctx: &AgentContext,
+        await_integration: bool,
     ) -> Result<EntityResponse, String> {
         let response = self
-            .dispatch_tenant_action_core(tenant, entity_type, entity_id, action, params)
+            .dispatch_tenant_action_core(
+                tenant,
+                entity_type,
+                entity_id,
+                action,
+                params,
+                agent_ctx,
+                await_integration,
+            )
             .await?;
 
         // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)
@@ -351,6 +426,7 @@ impl ServerState {
 
     /// Core dispatch without reaction cascade (used by ReactionDispatcher to
     /// avoid infinite async recursion).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn dispatch_tenant_action_core(
         &self,
         tenant: &TenantId,
@@ -358,6 +434,8 @@ impl ServerState {
         entity_id: &str,
         action: &str,
         params: serde_json::Value,
+        agent_ctx: &AgentContext,
+        await_integration: bool,
     ) -> Result<EntityResponse, String> {
         let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
             // Record a trajectory entry for the "no transition table" failure.
@@ -373,6 +451,8 @@ impl ServerState {
                 error: Some(format!(
                     "No transition table for tenant '{tenant}', entity type '{entity_type}'"
                 )),
+                agent_id: agent_ctx.agent_id.clone(),
+                session_id: agent_ctx.session_id.clone(),
             };
             if let Err(e) = self.persist_trajectory_entry(&entry).await {
                 tracing::error!(error = %e, "failed to persist trajectory entry");
@@ -407,6 +487,8 @@ impl ServerState {
                     from_status: None,
                     to_status: None,
                     error: Some(format!("Actor dispatch failed: {e}")),
+                    agent_id: agent_ctx.agent_id.clone(),
+                    session_id: agent_ctx.session_id.clone(),
                 };
                 if let Err(persist_err) = self.persist_trajectory_entry(&entry).await {
                     tracing::error!(error = %persist_err, "failed to persist trajectory entry");
@@ -441,6 +523,8 @@ impl ServerState {
                         .unwrap_or_else(|| "guard not met".to_string()),
                 )
             },
+            agent_id: agent_ctx.agent_id.clone(),
+            session_id: agent_ctx.session_id.clone(),
         };
         if let Err(e) = self.persist_trajectory_entry(&trajectory_entry).await {
             tracing::error!(error = %e, "failed to persist trajectory entry");
@@ -456,6 +540,8 @@ impl ServerState {
                 action: action.to_string(),
                 status: response.state.status.clone(),
                 tenant: tenant.to_string(),
+                agent_id: agent_ctx.agent_id.clone(),
+                session_id: agent_ctx.session_id.clone(),
             });
             // Update entity state cache for /observe/entities
             let cache_key = format!("{tenant}:{entity_type}:{entity_id}");
@@ -478,14 +564,31 @@ impl ServerState {
         // Each integration callback is spawned as a background task internally.
         // This matches the IOA model: output action → environment → input action.
         if response.success && !response.custom_effects.is_empty() {
-            self.dispatch_wasm_integrations(
-                tenant,
-                entity_type,
-                entity_id,
-                action,
-                &response.custom_effects,
-                &response.state,
-            );
+            if await_integration {
+                if let Ok(Some(final_response)) = self
+                    .dispatch_wasm_integrations_blocking(
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        action,
+                        &response.custom_effects,
+                        &response.state,
+                        agent_ctx,
+                    )
+                    .await
+                {
+                    return Ok(final_response);
+                }
+            } else {
+                self.dispatch_wasm_integrations(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    action,
+                    &response.custom_effects,
+                    &response.state,
+                );
+            }
         }
 
         Ok(response)

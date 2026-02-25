@@ -264,6 +264,8 @@ impl ServerState {
             action: "Created".to_string(),
             status: response.state.status.clone(),
             tenant: tenant.to_string(),
+            agent_id: None,
+            session_id: None,
         });
 
         Ok(response)
