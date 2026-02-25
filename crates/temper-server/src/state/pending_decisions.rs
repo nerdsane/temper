@@ -78,6 +78,7 @@ pub struct PendingDecision {
 
 impl PendingDecision {
     /// Create a new pending decision from a denial.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_denial(
         tenant: &str,
         agent_id: &str,
@@ -148,6 +149,12 @@ pub struct PendingDecisionLog {
     dedup_keys: BTreeMap<String, String>,
 }
 
+impl Default for PendingDecisionLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PendingDecisionLog {
     /// Create a new empty log.
     pub fn new() -> Self {
@@ -173,10 +180,10 @@ impl PendingDecisionLog {
         }
 
         // Evict oldest if at capacity
-        if self.entries.len() >= PENDING_DECISION_CAPACITY {
-            if let Some(evicted) = self.entries.pop_front() {
-                self.dedup_keys.remove(&evicted.dedup_key());
-            }
+        if self.entries.len() >= PENDING_DECISION_CAPACITY
+            && let Some(evicted) = self.entries.pop_front()
+        {
+            self.dedup_keys.remove(&evicted.dedup_key());
         }
 
         self.dedup_keys.insert(key, decision.id.clone());

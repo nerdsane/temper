@@ -94,10 +94,10 @@ pub(crate) async fn list_agents(
         };
 
         // Apply tenant filter
-        if let Some(ref tenant_filter) = params.tenant {
-            if entry.tenant != *tenant_filter {
-                continue;
-            }
+        if let Some(ref tenant_filter) = params.tenant
+            && entry.tenant != *tenant_filter
+        {
+            continue;
         }
 
         let summary = agents
@@ -128,7 +128,7 @@ pub(crate) async fn list_agents(
         if summary
             .last_active_at
             .as_ref()
-            .map_or(true, |t| entry.timestamp > *t)
+            .is_none_or(|t| entry.timestamp > *t)
         {
             summary.last_active_at = Some(entry.timestamp.clone());
         }
@@ -184,15 +184,15 @@ pub(crate) async fn get_agent_history(
         }
 
         // Apply filters
-        if let Some(ref tenant_filter) = params.tenant {
-            if entry.tenant != *tenant_filter {
-                continue;
-            }
+        if let Some(ref tenant_filter) = params.tenant
+            && entry.tenant != *tenant_filter
+        {
+            continue;
         }
-        if let Some(ref et_filter) = params.entity_type {
-            if entry.entity_type != *et_filter {
-                continue;
-            }
+        if let Some(ref et_filter) = params.entity_type
+            && entry.entity_type != *et_filter
+        {
+            continue;
         }
 
         history.push(AgentHistoryEntry {
