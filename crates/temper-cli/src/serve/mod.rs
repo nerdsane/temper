@@ -239,6 +239,30 @@ pub async fn run(
         hydrate_trajectory_log(&state.server, store, &apps).await;
     }
 
+    // Recover WASM modules from persistent backend (Postgres or Turso).
+    if state.server.event_store.is_some() {
+        match state.server.load_wasm_modules().await {
+            Ok(count) if count > 0 => {
+                println!("  Recovered {count} WASM modules from database.");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("  Warning: failed to recover WASM modules: {e}");
+            }
+        }
+
+        // Recover recent WASM invocation history.
+        match state.server.load_recent_wasm_invocations(500).await {
+            Ok(count) if count > 0 => {
+                println!("  Restored {count} WASM invocation entries from database.");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("  Warning: failed to recover WASM invocations: {e}");
+            }
+        }
+    }
+
     println!("Starting Temper platform server...");
     println!();
     println!("  Temper Data API: http://localhost:{port}/tdata");

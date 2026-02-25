@@ -86,8 +86,16 @@ impl ServerState {
                     duration_ms: 0,
                 };
                 if let Ok(mut log) = self.wasm_invocation_log.write() {
-                    log.push(log_entry);
+                    log.push(log_entry.clone());
                 }
+                // Persist to DB (fire-and-forget)
+                let persist_state = self.clone();
+                tokio::spawn(async move {
+                    // determinism-ok: async persistence, no simulation-visible state
+                    if let Err(e) = persist_state.persist_wasm_invocation(&log_entry).await {
+                        tracing::warn!(error = %e, "failed to persist WASM invocation log");
+                    }
+                });
 
                 // Dispatch failure callback asynchronously (fire-and-forget)
                 if let Some(ref on_failure) = integration.on_failure {
@@ -188,7 +196,11 @@ impl ServerState {
                             duration_ms: result.duration_ms,
                         };
                         if let Ok(mut log) = invocation_log.write() {
-                            log.push(log_entry);
+                            log.push(log_entry.clone());
+                        }
+                        // Persist to DB (fire-and-forget)
+                        if let Err(e) = state.persist_wasm_invocation(&log_entry).await {
+                            tracing::warn!(error = %e, "failed to persist WASM invocation log");
                         }
                         if let Some(cb) = on_ok {
                             let params = result.callback_params;
@@ -220,7 +232,11 @@ impl ServerState {
                             duration_ms: result.duration_ms,
                         };
                         if let Ok(mut log) = invocation_log.write() {
-                            log.push(log_entry);
+                            log.push(log_entry.clone());
+                        }
+                        // Persist to DB (fire-and-forget)
+                        if let Err(e) = state.persist_wasm_invocation(&log_entry).await {
+                            tracing::warn!(error = %e, "failed to persist WASM invocation log");
                         }
                         if let Some(cb) = on_fail {
                             let params = serde_json::json!({
@@ -254,7 +270,11 @@ impl ServerState {
                             duration_ms: 0,
                         };
                         if let Ok(mut log) = invocation_log.write() {
-                            log.push(log_entry);
+                            log.push(log_entry.clone());
+                        }
+                        // Persist to DB (fire-and-forget)
+                        if let Err(e) = state.persist_wasm_invocation(&log_entry).await {
+                            tracing::warn!(error = %e, "failed to persist WASM invocation log");
                         }
                         if let Some(cb) = on_fail {
                             let params = serde_json::json!({

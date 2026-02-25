@@ -91,6 +91,40 @@ CREATE TABLE IF NOT EXISTS wasm_modules (
     UNIQUE(tenant, module_name)
 );";
 
+/// CREATE TABLE statement for WASM invocation logs.
+///
+/// Records every WASM integration invocation for observability and
+/// persistence across server restarts.
+pub const CREATE_WASM_INVOCATION_LOGS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS wasm_invocation_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    module_name TEXT NOT NULL,
+    trigger_action TEXT NOT NULL,
+    callback_action TEXT,
+    success INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    duration_ms INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);";
+
+/// CREATE INDEX for filtering invocation logs by tenant.
+pub const CREATE_WASM_INVOCATION_LOGS_TENANT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_wasm_invocation_logs_tenant
+    ON wasm_invocation_logs(tenant);";
+
+/// CREATE INDEX for filtering invocation logs by module name.
+pub const CREATE_WASM_INVOCATION_LOGS_MODULE_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_wasm_invocation_logs_module
+    ON wasm_invocation_logs(module_name);";
+
+/// CREATE INDEX for ordering invocation logs by creation time (newest first).
+pub const CREATE_WASM_INVOCATION_LOGS_CREATED_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_wasm_invocation_logs_created
+    ON wasm_invocation_logs(created_at DESC);";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +140,10 @@ mod tests {
         assert!(CREATE_TRAJECTORIES_ENTITY_ACTION_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_TENANT_CONSTRAINTS_TABLE.contains("IF NOT EXISTS"));
         assert!(CREATE_WASM_MODULES_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_WASM_INVOCATION_LOGS_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_WASM_INVOCATION_LOGS_TENANT_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_WASM_INVOCATION_LOGS_MODULE_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_WASM_INVOCATION_LOGS_CREATED_INDEX.contains("IF NOT EXISTS"));
     }
 
     #[test]
