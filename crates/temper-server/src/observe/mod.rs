@@ -3,6 +3,7 @@
 //! These endpoints expose internal Temper state for the observability frontend.
 //! They are only available when the `observe` feature is enabled.
 
+mod agents;
 mod entities;
 pub(crate) mod evolution;
 mod metrics;
@@ -10,7 +11,6 @@ pub(crate) mod specs;
 mod specs_helpers;
 mod verification;
 pub(crate) mod wasm;
-mod agents;
 use axum::Router;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};

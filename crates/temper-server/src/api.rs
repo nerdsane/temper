@@ -70,10 +70,7 @@ pub fn build_api_router() -> Router<ServerState> {
             post(handle_add_policy_rule),
         )
         // Decision approve/deny (Phase 4)
-        .route(
-            "/tenants/{tenant}/decisions",
-            get(handle_list_decisions),
-        )
+        .route("/tenants/{tenant}/decisions", get(handle_list_decisions))
         .route(
             "/tenants/{tenant}/decisions/stream",
             get(handle_decision_stream),
@@ -210,7 +207,6 @@ async fn handle_list_secrets(
         .into_response()
 }
 
-
 // ---------------------------------------------------------------------------
 // Phase 3: Policy CRUD handlers
 // ---------------------------------------------------------------------------
@@ -222,7 +218,10 @@ async fn handle_get_policies(
 ) -> impl IntoResponse {
     let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
     let text = policies.get(&tenant).cloned().unwrap_or_default();
-    (StatusCode::OK, axum::Json(serde_json::json!({"tenant": tenant, "policy_text": text})))
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({"tenant": tenant, "policy_text": text})),
+    )
         .into_response()
 }
 
@@ -278,7 +277,10 @@ async fn handle_put_policies(
         policies.insert(tenant.clone(), policy_text);
     }
 
-    (StatusCode::OK, axum::Json(serde_json::json!({"tenant": tenant, "status": "loaded"})))
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({"tenant": tenant, "status": "loaded"})),
+    )
         .into_response()
 }
 
@@ -391,7 +393,11 @@ async fn handle_list_decisions(
         .cloned()
         .collect();
 
-    (StatusCode::OK, axum::Json(serde_json::json!({"decisions": entries}))).into_response()
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({"decisions": entries})),
+    )
+        .into_response()
 }
 
 /// Body for approve request.

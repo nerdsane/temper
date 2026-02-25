@@ -3,10 +3,10 @@
 //! Provides per-agent action history and summary statistics derived
 //! from the trajectory log.
 
-use std::collections::BTreeMap;
 use axum::extract::{Path, Query, State};
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::state::ServerState;
 
@@ -100,17 +100,19 @@ pub(crate) async fn list_agents(
             }
         }
 
-        let summary = agents.entry(agent_id.to_string()).or_insert_with(|| AgentSummary {
-            agent_id: agent_id.to_string(),
-            total_actions: 0,
-            success_count: 0,
-            error_count: 0,
-            denial_count: 0,
-            success_rate: 0.0,
-            last_active_at: None,
-            entity_types: Vec::new(),
-            tenants: Vec::new(),
-        });
+        let summary = agents
+            .entry(agent_id.to_string())
+            .or_insert_with(|| AgentSummary {
+                agent_id: agent_id.to_string(),
+                total_actions: 0,
+                success_count: 0,
+                error_count: 0,
+                denial_count: 0,
+                success_rate: 0.0,
+                last_active_at: None,
+                entity_types: Vec::new(),
+                tenants: Vec::new(),
+            });
 
         summary.total_actions += 1;
         if entry.success {
@@ -123,7 +125,11 @@ pub(crate) async fn list_agents(
         }
 
         // Track latest timestamp
-        if summary.last_active_at.as_ref().map_or(true, |t| entry.timestamp > *t) {
+        if summary
+            .last_active_at
+            .as_ref()
+            .map_or(true, |t| entry.timestamp > *t)
+        {
             summary.last_active_at = Some(entry.timestamp.clone());
         }
 

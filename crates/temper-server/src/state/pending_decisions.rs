@@ -163,7 +163,11 @@ impl PendingDecisionLog {
         // Check for existing pending decision with same key
         if let Some(existing_id) = self.dedup_keys.get(&key) {
             // Check if the existing decision is still pending
-            if self.entries.iter().any(|d| d.id == *existing_id && d.status == DecisionStatus::Pending) {
+            if self
+                .entries
+                .iter()
+                .any(|d| d.id == *existing_id && d.status == DecisionStatus::Pending)
+            {
                 return false;
             }
         }

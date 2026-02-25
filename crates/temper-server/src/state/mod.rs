@@ -4,15 +4,15 @@ mod dispatch;
 mod dispatch_blocking;
 mod entity_ops;
 pub mod metrics;
+pub mod pending_decisions;
 mod persistence;
 pub mod trajectory;
-pub mod pending_decisions;
 pub mod wasm_invocation_log;
 
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use metrics::MetricsCollector;
-pub use trajectory::{TrajectoryEntry, TrajectoryLog};
 pub use pending_decisions::{DecisionStatus, PendingDecision, PendingDecisionLog, PolicyScope};
+pub use trajectory::{TrajectoryEntry, TrajectoryLog};
 pub use wasm_invocation_log::{WasmInvocationEntry, WasmInvocationLog};
 
 use std::collections::{BTreeMap, BTreeSet};
