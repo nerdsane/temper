@@ -14,6 +14,11 @@ import type {
   SentinelCheckResponse,
   WasmModulesResponse,
   WasmInvocationsResponse,
+  PendingDecision,
+  DecisionsResponse,
+  PolicyScope,
+  AgentsResponse,
+  AgentHistoryResponse,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -228,4 +233,83 @@ export async function checkConnection(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** Fetch pending/resolved decisions for a tenant */
+export async function fetchDecisions(tenant: string, params?: {
+  status?: string;
+}): Promise<DecisionsResponse> {
+  const query = new URLSearchParams();
+  if (params?.status) query.set("status", params.status);
+  const qs = query.toString();
+  const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions${qs ? `?${qs}` : ""}`;
+  const res = await fetchWithRetry(url, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch decisions: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Approve a pending decision */
+export async function approveDecision(tenant: string, decisionId: string, scope: PolicyScope): Promise<void> {
+  const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions/${encodeURIComponent(decisionId)}/approve`;
+  const res = await fetchWithRetry(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope }),
+  });
+  if (!res.ok) throw new ApiError(`Failed to approve decision: ${res.status}`, res.status);
+}
+
+/** Deny a pending decision */
+export async function denyDecision(tenant: string, decisionId: string): Promise<void> {
+  const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions/${encodeURIComponent(decisionId)}/deny`;
+  const res = await fetchWithRetry(url, { method: "POST" });
+  if (!res.ok) throw new ApiError(`Failed to deny decision: ${res.status}`, res.status);
+}
+
+/** Subscribe to pending decision SSE stream */
+export function subscribePendingDecisions(tenant: string, onEvent: (decision: PendingDecision) => void): () => void {
+  const source = new EventSource(`${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions/stream`);
+  source.addEventListener("pending_decision", (e) => {
+    try {
+      const data = JSON.parse((e as MessageEvent).data) as PendingDecision;
+      onEvent(data);
+    } catch { /* ignore parse errors */ }
+  });
+  return () => source.close();
+}
+
+/** Fetch agent list with stats */
+export async function fetchAgents(params?: { tenant?: string }): Promise<AgentsResponse> {
+  const query = new URLSearchParams();
+  if (params?.tenant) query.set("tenant", params.tenant);
+  const qs = query.toString();
+  const url = `${API_BASE}/observe/agents${qs ? `?${qs}` : ""}`;
+  const res = await fetchWithRetry(url, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch agents: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Fetch agent action history */
+export async function fetchAgentHistory(agentId: string, params?: {
+  tenant?: string;
+  entity_type?: string;
+  limit?: number;
+}): Promise<AgentHistoryResponse> {
+  const query = new URLSearchParams();
+  if (params?.tenant) query.set("tenant", params.tenant);
+  if (params?.entity_type) query.set("entity_type", params.entity_type);
+  if (params?.limit) query.set("limit", String(params.limit));
+  const qs = query.toString();
+  const url = `${API_BASE}/observe/agents/${encodeURIComponent(agentId)}/history${qs ? `?${qs}` : ""}`;
+  const res = await fetchWithRetry(url, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch agent history: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Fetch Cedar policies for a tenant */
+export async function fetchPolicies(tenant: string): Promise<{ policy_text: string; policy_count: number }> {
+  const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/policies`;
+  const res = await fetchWithRetry(url, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch policies: ${res.status}`, res.status);
+  return res.json();
 }

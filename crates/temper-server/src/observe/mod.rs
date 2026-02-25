@@ -10,6 +10,7 @@ pub(crate) mod specs;
 mod specs_helpers;
 mod verification;
 pub(crate) mod wasm;
+mod agents;
 use axum::Router;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
@@ -168,6 +169,8 @@ pub fn build_observe_router() -> Router<ServerState> {
         )
         .route("/skills/builder", get(serve_builder_skill))
         .route("/skills/user", get(serve_user_skill))
+        .route("/agents", get(agents::list_agents))
+        .route("/agents/{agent_id}/history", get(agents::get_agent_history))
         .route("/wasm/modules", get(wasm::list_wasm_modules))
         .route("/wasm/invocations", get(wasm::list_wasm_invocations))
         .route(

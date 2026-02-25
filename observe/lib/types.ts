@@ -305,6 +305,7 @@ export interface SentinelCheckResponse {
 
 // --- WASM integration types ---
 export interface WasmModule {
+  tenant: string;
   module_name: string;
   sha256_hash: string;
   cached: boolean;
@@ -315,7 +316,6 @@ export interface WasmModule {
 }
 
 export interface WasmModulesResponse {
-  tenant: string;
   modules: WasmModule[];
   total: number;
 }
@@ -335,5 +335,73 @@ export interface WasmInvocation {
 
 export interface WasmInvocationsResponse {
   invocations: WasmInvocation[];
+  total: number;
+}
+
+// --- Pending Decision types ---
+export type DecisionStatus = "pending" | "approved" | "denied" | "expired";
+export type PolicyScope = "narrow" | "medium" | "broad";
+
+export interface PendingDecision {
+  id: string;
+  tenant: string;
+  agent_id: string;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  resource_attrs: Record<string, unknown>;
+  denial_reason: string;
+  module_name?: string;
+  created_at: string;
+  status: DecisionStatus;
+  decided_by?: string;
+  decided_at?: string;
+  generated_policy?: string;
+  approved_scope?: PolicyScope;
+}
+
+export interface DecisionsResponse {
+  decisions: PendingDecision[];
+  total: number;
+  pending_count: number;
+  approved_count: number;
+  denied_count: number;
+}
+
+// --- Agent types ---
+export interface AgentSummary {
+  agent_id: string;
+  total_actions: number;
+  success_count: number;
+  error_count: number;
+  denial_count: number;
+  success_rate: number;
+  last_active_at: string | null;
+  entity_types: string[];
+  tenants: string[];
+}
+
+export interface AgentHistoryEntry {
+  timestamp: string;
+  tenant: string;
+  entity_type: string;
+  entity_id: string;
+  action: string;
+  success: boolean;
+  from_status: string | null;
+  to_status: string | null;
+  error: string | null;
+  authz_denied: boolean;
+  denied_resource: string | null;
+}
+
+export interface AgentsResponse {
+  agents: AgentSummary[];
+  total: number;
+}
+
+export interface AgentHistoryResponse {
+  agent_id: string;
+  history: AgentHistoryEntry[];
   total: number;
 }
