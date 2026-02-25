@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.WeatherTracker" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <!-- ========== Location ========== -->
+      <EntityType Name="Location">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="state" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String"/>
+        <Property Name="Latitude" Type="Edm.String"/>
+        <Property Name="Longitude" Type="Edm.String"/>
+        <Annotation Term="Temper.Vocab.StateMachine.Spec" String="location.ioa.toml"/>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+            <String>Paused</String>
+            <String>Removed</String>
+          </Collection>
+        </Annotation>
+      </EntityType>
+
+      <Action Name="PauseTracking" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.Location"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Active</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Paused"/>
+      </Action>
+
+      <Action Name="ResumeTracking" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.Location"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Paused</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Active"/>
+      </Action>
+
+      <Action Name="RemoveLocation" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.Location"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Active</String>
+            <String>Paused</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Removed"/>
+      </Action>
+
+      <!-- ========== WeatherAlert ========== -->
+      <EntityType Name="WeatherAlert">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="state" Type="Edm.String" Nullable="false"/>
+        <Property Name="LocationId" Type="Edm.String"/>
+        <Property Name="AlertType" Type="Edm.String"/>
+        <Property Name="Severity" Type="Edm.String"/>
+        <Property Name="Message" Type="Edm.String"/>
+        <Annotation Term="Temper.Vocab.StateMachine.Spec" String="weather_alert.ioa.toml"/>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Pending"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Pending</String>
+            <String>Acknowledged</String>
+            <String>Resolved</String>
+            <String>Expired</String>
+          </Collection>
+        </Annotation>
+      </EntityType>
+
+      <Action Name="AcknowledgeAlert" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherAlert"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Pending</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Acknowledged"/>
+      </Action>
+
+      <Action Name="ResolveAlert" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherAlert"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Pending</String>
+            <String>Acknowledged</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Resolved"/>
+      </Action>
+
+      <Action Name="ExpireAlert" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherAlert"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Pending</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Expired"/>
+      </Action>
+
+      <!-- ========== WeatherReport ========== -->
+      <EntityType Name="WeatherReport">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="state" Type="Edm.String" Nullable="false"/>
+        <Property Name="LocationId" Type="Edm.String"/>
+        <Property Name="Latitude" Type="Edm.String"/>
+        <Property Name="Longitude" Type="Edm.String"/>
+        <Property Name="Temperature" Type="Edm.String"/>
+        <Property Name="Humidity" Type="Edm.String"/>
+        <Property Name="WindSpeed" Type="Edm.String"/>
+        <Property Name="Precipitation" Type="Edm.String"/>
+        <Property Name="Conditions" Type="Edm.String"/>
+        <Annotation Term="Temper.Vocab.StateMachine.Spec" String="weather_report.ioa.toml"/>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Collecting"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Collecting</String>
+            <String>Fetching</String>
+            <String>Ready</String>
+            <String>Archived</String>
+          </Collection>
+        </Annotation>
+      </EntityType>
+
+      <Action Name="FetchWeatherData" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherReport"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Collecting</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Fetching"/>
+      </Action>
+
+      <Action Name="FetchSucceeded" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherReport"/>
+        <Parameter Name="Temperature" Type="Edm.String"/>
+        <Parameter Name="Humidity" Type="Edm.String"/>
+        <Parameter Name="WindSpeed" Type="Edm.String"/>
+        <Parameter Name="Precipitation" Type="Edm.String"/>
+        <Parameter Name="Conditions" Type="Edm.String"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Fetching</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Ready"/>
+      </Action>
+
+      <Action Name="FetchFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherReport"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Fetching</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Collecting"/>
+      </Action>
+
+      <Action Name="ArchiveReport" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherReport"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Ready</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
+      </Action>
+
+      <!-- ========== EntityContainer ========== -->
+      <EntityContainer Name="WeatherTrackerService">
+        <EntitySet Name="Locations" EntityType="Temper.WeatherTracker.Location"/>
+        <EntitySet Name="WeatherAlerts" EntityType="Temper.WeatherTracker.WeatherAlert"/>
+        <EntitySet Name="WeatherReports" EntityType="Temper.WeatherTracker.WeatherReport"/>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>
