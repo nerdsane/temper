@@ -303,6 +303,13 @@ fn is_ephemeral_metadata_error(err: &str) -> bool {
     err.contains("explicit ephemeral mode")
 }
 
+fn emit_ephemeral_info(message: &str) {
+    use std::io::Write as _;
+
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "{message}");
+}
+
 /// Spawn background verification tasks for each entity in the specs directory.
 ///
 /// For each entity, runs the verification cascade in a blocking task and
@@ -356,7 +363,9 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                 .await
             {
                 if is_ephemeral_metadata_error(&e) {
-                    eprintln!("Info: {tenant}/{entity} verification status is in-memory only: {e}");
+                    emit_ephemeral_info(&format!(
+                        "Info: {tenant}/{entity} verification status is in-memory only: {e}"
+                    ));
                 } else {
                     eprintln!(
                         "Warning: failed to persist running verification status for {tenant}/{entity}: {e}"
@@ -469,9 +478,9 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                         .await
                     {
                         if is_ephemeral_metadata_error(&e) {
-                            eprintln!(
+                            emit_ephemeral_info(&format!(
                                 "Info: {tenant}/{entity} final verification status is in-memory only: {e}"
-                            );
+                            ));
                         } else {
                             eprintln!(
                                 "Warning: failed to persist final verification status for {tenant}/{entity}: {e}"
@@ -537,9 +546,9 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                         .await
                     {
                         if is_ephemeral_metadata_error(&persist_err) {
-                            eprintln!(
+                            emit_ephemeral_info(&format!(
                                 "Info: {tenant}/{entity_clone} failed verification status is in-memory only: {persist_err}"
-                            );
+                            ));
                         } else {
                             eprintln!(
                                 "Warning: failed to persist failed verification status for {tenant}/{entity_clone}: {persist_err}"
