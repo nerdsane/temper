@@ -158,7 +158,7 @@ async fn test_unknown_entity_set_returns_404() {
 
 #[tokio::test]
 async fn test_post_entity_creation() {
-    let app = build_router(test_state());
+    let app = build_router(test_state_with_ioa());
     let response = app
         .oneshot(
             Request::post("/tdata/Orders")
