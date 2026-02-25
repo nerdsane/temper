@@ -18,22 +18,26 @@ use crate::constraint_engine::{
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
 
-fn parse_odata_path_or_400(path: &str) -> Result<ODataPath, axum::response::Response> {
+type ODataWriteError = Box<axum::response::Response>;
+
+fn parse_odata_path_or_400(path: &str) -> Result<ODataPath, ODataWriteError> {
     parse_path(&format!("/{path}")).map_err(|e| {
-        odata_error(StatusCode::BAD_REQUEST, "InvalidPath", &e.to_string()).into_response()
+        Box::new(
+            odata_error(StatusCode::BAD_REQUEST, "InvalidPath", &e.to_string()).into_response(),
+        )
     })
 }
 
-fn parse_json_body_or_400(
-    body: &axum::body::Bytes,
-) -> Result<serde_json::Value, axum::response::Response> {
+fn parse_json_body_or_400(body: &axum::body::Bytes) -> Result<serde_json::Value, ODataWriteError> {
     serde_json::from_slice(body).map_err(|e| {
-        odata_error(
-            StatusCode::BAD_REQUEST,
-            "InvalidBody",
-            &format!("Invalid JSON body: {e}"),
+        Box::new(
+            odata_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidBody",
+                &format!("Invalid JSON body: {e}"),
+            )
+            .into_response(),
         )
-        .into_response()
     })
 }
 
@@ -41,14 +45,16 @@ fn resolve_entity_type_or_404(
     state: &ServerState,
     tenant: &TenantId,
     set_name: &str,
-) -> Result<String, axum::response::Response> {
+) -> Result<String, ODataWriteError> {
     resolve_entity_type(state, tenant, set_name).ok_or_else(|| {
-        odata_error(
-            StatusCode::NOT_FOUND,
-            "EntitySetNotFound",
-            &format!("Entity set '{set_name}' not found"),
+        Box::new(
+            odata_error(
+                StatusCode::NOT_FOUND,
+                "EntitySetNotFound",
+                &format!("Entity set '{set_name}' not found"),
+            )
+            .into_response(),
         )
-        .into_response()
     })
 }
 
@@ -56,10 +62,10 @@ fn check_verification_gate_or_423(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
-) -> Result<(), axum::response::Response> {
+) -> Result<(), ODataWriteError> {
     state
         .check_verification_gate(tenant, entity_type)
-        .map_err(verification_gate_response)
+        .map_err(|e| Box::new(verification_gate_response(e)))
 }
 
 fn ensure_entity_exists_or_404(
@@ -68,16 +74,18 @@ fn ensure_entity_exists_or_404(
     entity_type: &str,
     set_name: &str,
     key: &str,
-) -> Result<(), axum::response::Response> {
+) -> Result<(), ODataWriteError> {
     if state.entity_exists(tenant, entity_type, key) {
         Ok(())
     } else {
-        Err(odata_error(
-            StatusCode::NOT_FOUND,
-            "ResourceNotFound",
-            &format!("Entity '{set_name}' with key '{key}' not found"),
-        )
-        .into_response())
+        Err(Box::new(
+            odata_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                &format!("Entity '{set_name}' with key '{key}' not found"),
+            )
+            .into_response(),
+        ))
     }
 }
 
@@ -91,22 +99,22 @@ pub async fn handle_odata_post(
     let tenant = extract_tenant(&headers, &state);
     let odata_path = match parse_odata_path_or_400(&path) {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     match odata_path {
         ODataPath::EntitySet(name) => {
             let entity_type = match resolve_entity_type_or_404(&state, &tenant, &name) {
                 Ok(t) => t,
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             };
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
-                return resp;
+                return *resp;
             }
 
             let body_json = match parse_json_body_or_400(&body) {
                 Ok(v) => v,
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             };
 
             let entity_id = body_json
@@ -180,11 +188,11 @@ pub async fn handle_odata_post(
 
             let entity_type = match resolve_entity_type_or_404(&state, &tenant, &set_name) {
                 Ok(t) => t,
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             };
 
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
-                return resp;
+                return *resp;
             }
             dispatch_bound_action(
                 &state,
@@ -217,29 +225,29 @@ pub async fn handle_odata_patch(
     let tenant = extract_tenant(&headers, &state);
     let odata_path = match parse_odata_path_or_400(&path) {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
             let entity_type = match resolve_entity_type_or_404(&state, &tenant, &set_name) {
                 Ok(t) => t,
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             };
             let key_str = extract_key(&key);
 
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
-                return resp;
+                return *resp;
             }
             if let Err(resp) =
                 ensure_entity_exists_or_404(&state, &tenant, &entity_type, &set_name, &key_str)
             {
-                return resp;
+                return *resp;
             }
 
             let body_json = match parse_json_body_or_400(&body) {
                 Ok(v) => v,
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             };
             let current_state = match state
                 .get_tenant_entity_state(&tenant, &entity_type, &key_str)
@@ -328,29 +336,29 @@ pub async fn handle_odata_put(
     let tenant = extract_tenant(&headers, &state);
     let odata_path = match parse_odata_path_or_400(&path) {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
             let entity_type = match resolve_entity_type_or_404(&state, &tenant, &set_name) {
                 Ok(t) => t,
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             };
             let key_str = extract_key(&key);
 
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
-                return resp;
+                return *resp;
             }
             if let Err(resp) =
                 ensure_entity_exists_or_404(&state, &tenant, &entity_type, &set_name, &key_str)
             {
-                return resp;
+                return *resp;
             }
 
             let body_json = match parse_json_body_or_400(&body) {
                 Ok(v) => v,
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             };
 
             if let Err(v) = pre_upsert_relation_checks(
@@ -417,24 +425,24 @@ pub async fn handle_odata_delete(
     let tenant = extract_tenant(&headers, &state);
     let odata_path = match parse_odata_path_or_400(&path) {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
             let entity_type = match resolve_entity_type_or_404(&state, &tenant, &set_name) {
                 Ok(t) => t,
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             };
             let key_str = extract_key(&key);
 
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
-                return resp;
+                return *resp;
             }
             if let Err(resp) =
                 ensure_entity_exists_or_404(&state, &tenant, &entity_type, &set_name, &key_str)
             {
-                return resp;
+                return *resp;
             }
             if let Err(v) =
                 pre_delete_relation_checks(&state, &tenant, &entity_type, &key_str, "delete").await

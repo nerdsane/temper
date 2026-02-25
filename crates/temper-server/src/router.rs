@@ -86,5 +86,5 @@ pub fn build_router(state: ServerState) -> Router {
 }
 
 #[cfg(test)]
-#[path = "router_tests.rs"]
+#[path = "router_test.rs"]
 mod tests;

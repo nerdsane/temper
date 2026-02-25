@@ -125,25 +125,25 @@ fn resolve_transitions(
 fn translate_guards(guards: &[automaton::Guard]) -> ModelGuard {
     let model_guards: Vec<ModelGuard> = guards
         .iter()
-        .filter_map(|g| match g {
-            automaton::Guard::StateIn { values } => Some(ModelGuard::StateIn(values.clone())),
-            automaton::Guard::MinCount { var, min } => Some(ModelGuard::CounterMin {
+        .map(|g| match g {
+            automaton::Guard::StateIn { values } => ModelGuard::StateIn(values.clone()),
+            automaton::Guard::MinCount { var, min } => ModelGuard::CounterMin {
                 var: var.clone(),
                 min: *min,
-            }),
-            automaton::Guard::MaxCount { var, max } => Some(ModelGuard::CounterMax {
+            },
+            automaton::Guard::MaxCount { var, max } => ModelGuard::CounterMax {
                 var: var.clone(),
                 max: *max,
-            }),
-            automaton::Guard::IsTrue { var } => Some(ModelGuard::BoolTrue(var.clone())),
-            automaton::Guard::ListContains { var, value } => Some(ModelGuard::ListContains {
+            },
+            automaton::Guard::IsTrue { var } => ModelGuard::BoolTrue(var.clone()),
+            automaton::Guard::ListContains { var, value } => ModelGuard::ListContains {
                 var: var.clone(),
                 value: value.clone(),
-            }),
-            automaton::Guard::ListLengthMin { var, min } => Some(ModelGuard::ListLengthMin {
+            },
+            automaton::Guard::ListLengthMin { var, min } => ModelGuard::ListLengthMin {
                 var: var.clone(),
                 min: *min,
-            }),
+            },
         })
         .collect();
 

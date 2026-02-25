@@ -238,5 +238,5 @@ fn extract_base_url(headers: &HeaderMap) -> String {
 }
 
 #[cfg(test)]
-#[path = "mod_tests.rs"]
+#[path = "mod_test.rs"]
 mod tests;
