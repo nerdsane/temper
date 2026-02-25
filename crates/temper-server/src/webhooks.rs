@@ -231,6 +231,9 @@ mod tests {
             error: None,
             agent_id: None,
             session_id: None,
+            authz_denied: None,
+            denied_resource: None,
+            denied_module: None,
         }
     }
 

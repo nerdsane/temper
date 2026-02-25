@@ -32,6 +32,15 @@ pub struct TrajectoryEntry {
     /// Session in which the action was performed (if known).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Whether this entry represents an authorization denial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authz_denied: Option<bool>,
+    /// Domain or resource that was denied (for WASM authz denials).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denied_resource: Option<String>,
+    /// WASM module that was denied (for WASM authz denials).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denied_module: Option<String>,
 }
 
 /// Bounded, append-only trajectory log.

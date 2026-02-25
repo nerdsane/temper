@@ -12,7 +12,10 @@ use crate::dispatch::AgentContext;
 use crate::entity_actor::{EntityResponse, EntityState};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
-use temper_wasm::{ProductionWasmHost, WasmHost, WasmInvocationContext, WasmResourceLimits};
+use temper_wasm::{
+    AuthorizedWasmHost, ProductionWasmHost, WasmAuthzContext, WasmHost, WasmInvocationContext,
+    WasmResourceLimits,
+};
 
 impl ServerState {
     /// Dispatch WASM integrations inline (blocking), returning the final
@@ -44,6 +47,7 @@ impl ServerState {
                     .unwrap_or_default()
             };
 
+            let gate = self.wasm_authz_gate();
             let mut last_response: Option<EntityResponse> = None;
 
             for effect_name in custom_effects {
@@ -126,6 +130,16 @@ impl ServerState {
                     continue;
                 };
 
+                // Build authorization context for the WASM gate
+                let authz_ctx = WasmAuthzContext {
+                    tenant: tenant.to_string(),
+                    module_name: module_name.clone(),
+                    agent_id: agent_ctx.agent_id.clone(),
+                    session_id: agent_ctx.session_id.clone(),
+                    entity_type: entity_type.to_string(),
+                    trigger_action: action.to_string(),
+                };
+
                 // Build invocation context.
                 let ctx = WasmInvocationContext {
                     tenant: tenant.to_string(),
@@ -138,12 +152,12 @@ impl ServerState {
                     session_id: agent_ctx.session_id.clone(),
                 };
 
-                let tenant_secrets = self
-                    .secrets_vault
-                    .as_ref()
-                    .map(|v| v.get_tenant_secrets(&tenant.to_string()))
-                    .unwrap_or_default();
-                let host: Arc<dyn WasmHost> = Arc::new(ProductionWasmHost::new(tenant_secrets));
+                // Phase 3: Pre-filter secrets through authorization gate
+                let tenant_secrets = self.get_authorized_wasm_secrets(tenant, &*gate, &authz_ctx);
+                let inner: Arc<dyn WasmHost> = Arc::new(ProductionWasmHost::new(tenant_secrets));
+                // Wrap with authorization decorator
+                let host: Arc<dyn WasmHost> =
+                    Arc::new(AuthorizedWasmHost::new(inner, gate.clone(), authz_ctx));
                 let limits = WasmResourceLimits::default();
 
                 tracing::info!(

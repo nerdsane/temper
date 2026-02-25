@@ -209,6 +209,33 @@ impl ServerState {
         }
     }
 
+    /// Check authorization using a pre-built `SecurityContext`.
+    ///
+    /// Unlike [`authorize`] which builds the context from raw headers, this
+    /// method accepts an already-constructed context enriched with agent
+    /// identity and resource attributes.
+    ///
+    /// Accepts `BTreeMap` for DST compliance; converts at the authz boundary.
+    pub fn authorize_with_context(
+        &self,
+        security_ctx: &SecurityContext,
+        action: &str,
+        resource_type: &str,
+        resource_attrs: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        let attrs: std::collections::HashMap<_, _> = resource_attrs // determinism-ok: Cedar API requires HashMap
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(); // determinism-ok
+        let decision = self
+            .authz
+            .authorize_or_bypass(security_ctx, action, resource_type, &attrs);
+        match decision {
+            AuthzDecision::Allow => Ok(()),
+            AuthzDecision::Deny(reason) => Err(format!("Authorization denied: {reason}")),
+        }
+    }
+
     /// Get the current state of an entity actor (legacy single-tenant).
     pub async fn get_entity_state(
         &self,

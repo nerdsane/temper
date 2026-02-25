@@ -1,9 +1,10 @@
 //! Bound action helpers for OData write handlers.
 
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use opentelemetry::KeyValue as OtelKeyValue;
 use opentelemetry::trace::{Span, Status, Tracer};
+use temper_authz::SecurityContext;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
@@ -13,6 +14,22 @@ use crate::constraint_engine::{post_write_invariant_checks, pre_upsert_relation_
 use crate::dispatch::AgentContext;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
+
+/// Extract `X-Temper-*` headers from an axum `HeaderMap` into `(key, value)` pairs
+/// suitable for `SecurityContext::from_headers`.
+fn extract_temper_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let key = name.as_str().to_lowercase();
+            if key.starts_with("x-temper-") {
+                value.to_str().ok().map(|v| (key, v.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_bound_action(
@@ -24,6 +41,7 @@ pub(super) async fn dispatch_bound_action(
     action: &str,
     body_json: serde_json::Value,
     agent_ctx: &AgentContext,
+    headers: &HeaderMap,
     await_integration: bool,
     idempotency_key: Option<String>,
 ) -> axum::response::Response {
@@ -50,15 +68,14 @@ pub(super) async fn dispatch_bound_action(
         http_span.set_attribute(OtelKeyValue::new("session.id", sid.clone()));
     }
 
-    let authz_result =
-        state.authorize(&[], action, entity_type, &std::collections::BTreeMap::new());
-    if let Err(reason) = authz_result {
-        http_span.set_status(Status::error(reason.clone()));
-        let end_time: std::time::SystemTime = sim_now().into();
-        http_span.end_with_timestamp(end_time);
-        return odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason).into_response();
-    }
+    // Build SecurityContext from X-Temper-* headers, enriched with agent identity.
+    let temper_headers = extract_temper_headers(headers);
+    let security_ctx = SecurityContext::from_headers(&temper_headers).with_agent_context(
+        agent_ctx.agent_id.as_deref(),
+        agent_ctx.session_id.as_deref(),
+    );
 
+    // Fetch entity state BEFORE authz check so resource attributes are available.
     let current_state = match state
         .get_tenant_entity_state(tenant, entity_type, key_str)
         .await
@@ -72,6 +89,33 @@ pub(super) async fn dispatch_bound_action(
             return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &e).into_response();
         }
     };
+
+    // Build resource attributes from current entity state for Cedar evaluation.
+    let mut resource_attrs = std::collections::BTreeMap::new();
+    resource_attrs.insert(
+        "id".to_string(),
+        serde_json::Value::String(key_str.to_string()),
+    );
+    resource_attrs.insert(
+        "status".to_string(),
+        serde_json::Value::String(current_state.state.status.clone()),
+    );
+    // Include entity fields as resource attributes.
+    if let serde_json::Value::Object(fields) = &current_state.state.fields {
+        for (k, v) in fields {
+            resource_attrs.insert(k.clone(), v.clone());
+        }
+    }
+
+    let authz_result =
+        state.authorize_with_context(&security_ctx, action, entity_type, &resource_attrs);
+    if let Err(reason) = authz_result {
+        http_span.set_status(Status::error(reason.clone()));
+        let end_time: std::time::SystemTime = sim_now().into();
+        http_span.end_with_timestamp(end_time);
+        return odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason).into_response();
+    }
+
     let current_fields = current_state.state.fields.clone();
     if let Err(v) = pre_upsert_relation_checks(
         state,

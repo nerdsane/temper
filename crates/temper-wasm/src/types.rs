@@ -66,3 +66,23 @@ impl Default for WasmResourceLimits {
 
 /// Maximum WASM module size (TigerStyle budget). 10 MB.
 pub const MAX_MODULE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Authorization context for WASM host function calls.
+///
+/// Carries identity and scope information so the authorization gate
+/// can make fine-grained decisions about HTTP calls and secret access.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmAuthzContext {
+    /// Tenant that owns the entity.
+    pub tenant: String,
+    /// WASM module name (used as Cedar principal ID).
+    pub module_name: String,
+    /// Agent that triggered this invocation (if known).
+    pub agent_id: Option<String>,
+    /// Session that triggered this invocation (if known).
+    pub session_id: Option<String>,
+    /// Entity type being operated on.
+    pub entity_type: String,
+    /// The action that triggered this WASM invocation.
+    pub trigger_action: String,
+}

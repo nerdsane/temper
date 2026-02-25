@@ -107,6 +107,8 @@ pub enum ObservationClass {
     Security,
     /// Trajectory pattern anomaly.
     Trajectory,
+    /// Authorization denial event (Cedar policy denied a WASM call).
+    AuthzDenied,
     /// Resource usage anomaly (CPU, memory, connections).
     ResourceUsage,
 }

@@ -281,6 +281,9 @@ pub(crate) async fn handle_unmet_intent(
         to_status: None,
         agent_id: None,
         session_id: None,
+        authz_denied: None,
+        denied_resource: None,
+        denied_module: None,
         error: Some(if error_msg.is_empty() {
             format!("Unmet intent: {intent}")
         } else {

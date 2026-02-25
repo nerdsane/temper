@@ -5,10 +5,14 @@
 //! cached by SHA-256 hash, and invoked with per-call fuel and memory
 //! budgets (TigerStyle).
 
+pub mod authorized_host;
 pub mod engine;
 pub mod host_trait;
 pub mod types;
 
+pub use authorized_host::{AuthorizedWasmHost, WasmAuthzDecision, WasmAuthzGate, extract_domain};
 pub use engine::{WasmEngine, WasmError};
 pub use host_trait::{ProductionWasmHost, SimWasmHost, WasmHost};
-pub use types::{WasmInvocationContext, WasmInvocationResult, WasmResourceLimits};
+pub use types::{
+    WasmAuthzContext, WasmInvocationContext, WasmInvocationResult, WasmResourceLimits,
+};

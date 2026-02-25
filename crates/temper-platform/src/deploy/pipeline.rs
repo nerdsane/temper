@@ -181,6 +181,29 @@ impl DeployPipeline {
                 summary: format!("Running model check for {}", entity.entity_type),
             });
 
+            // Generate suggested Cedar policies for WASM integrations (Tier 2).
+            // These are informational — the developer must approve before they take effect.
+            if let Ok(ref automaton) = parse_result {
+                let has_wasm = automaton
+                    .integrations
+                    .iter()
+                    .any(|i| i.integration_type == "wasm");
+                if has_wasm {
+                    let suggestions = suggest_cedar_policies(&[entity.clone()]);
+                    if !suggestions.is_empty() {
+                        state.broadcast(PlatformEvent::VerifyStatus {
+                            tenant: input.tenant_name.clone(),
+                            level: format!("{} Cedar", entity.entity_type),
+                            status: VerifyStepStatus::Passed,
+                            summary: format!(
+                                "Generated {} suggested Cedar policies for WASM integrations",
+                                suggestions.len()
+                            ),
+                        });
+                    }
+                }
+            }
+
             let cascade = VerificationCascade::from_ioa(&entity.ioa_source)
                 .with_sim_seeds(5)
                 .with_prop_test_cases(100);
@@ -325,6 +348,65 @@ impl DeployPipeline {
             summary,
         }
     }
+}
+
+/// Generate suggested Cedar policies for WASM integrations.
+///
+/// When an entity spec includes WASM integrations, this generates Cedar
+/// policy suggestions that the developer can approve, modify, or reject.
+/// These are Tier 2 policies in the policy lifecycle.
+pub fn suggest_cedar_policies(entities: &[EntitySpecSource]) -> Vec<String> {
+    let mut suggestions = Vec::new();
+
+    for entity in entities {
+        let parse_result = automaton::parse_automaton(&entity.ioa_source);
+        let Ok(automaton) = parse_result else {
+            continue;
+        };
+
+        for integration in &automaton.integrations {
+            if integration.integration_type != "wasm" {
+                continue;
+            }
+            let Some(ref module_name) = integration.module else {
+                continue;
+            };
+
+            // Suggest http_call policy for the module
+            suggestions.push(format!(
+                r#"// Suggested: Allow {module} to make outbound HTTP calls
+// Triggered by: {entity_type}.{trigger}
+permit(
+    principal is Agent,
+    action == Action::"http_call",
+    resource is HttpEndpoint
+) when {{
+    context.module == "{module}"
+}};"#,
+                module = module_name,
+                entity_type = entity.entity_type,
+                trigger = integration.trigger,
+            ));
+
+            // Suggest access_secret policy for the module
+            suggestions.push(format!(
+                r#"// Suggested: Allow {module} to access secrets
+// Triggered by: {entity_type}.{trigger}
+permit(
+    principal is Agent,
+    action == Action::"access_secret",
+    resource is Secret
+) when {{
+    context.module == "{module}"
+}};"#,
+                module = module_name,
+                entity_type = entity.entity_type,
+                trigger = integration.trigger,
+            ));
+        }
+    }
+
+    suggestions
 }
 
 #[cfg(test)]

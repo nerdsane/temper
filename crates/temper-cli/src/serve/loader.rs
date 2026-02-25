@@ -335,6 +335,9 @@ pub(super) async fn hydrate_trajectory_log(
                     error,
                     agent_id: None,
                     session_id: None,
+                    authz_denied: None,
+                    denied_resource: None,
+                    denied_module: None,
                 });
             }
             let count = log.entries().len();
@@ -364,6 +367,9 @@ pub(super) async fn hydrate_trajectory_log(
                             error: row.error,
                             agent_id: None,
                             session_id: None,
+                            authz_denied: None,
+                            denied_resource: None,
+                            denied_module: None,
                         });
                     }
                     let count = log.entries().len();

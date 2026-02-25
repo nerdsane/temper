@@ -216,6 +216,7 @@ pub async fn handle_odata_post(
                 &action,
                 body_json,
                 &agent_ctx,
+                &headers,
                 await_integration,
                 idempotency_key.clone(),
             )

@@ -8,11 +8,30 @@ use super::wasm_invocation_log::WasmInvocationEntry;
 use crate::dispatch::AgentContext;
 use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
+use crate::wasm_authz_gate::PermissiveWasmAuthzGate;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
-use temper_wasm::{ProductionWasmHost, WasmHost, WasmInvocationContext, WasmResourceLimits};
+use temper_wasm::{
+    AuthorizedWasmHost, ProductionWasmHost, WasmAuthzContext, WasmAuthzGate, WasmHost,
+    WasmInvocationContext, WasmResourceLimits,
+};
 
 impl ServerState {
+    /// Build a `WasmAuthzGate` for the current configuration.
+    ///
+    /// Returns `CedarWasmAuthzGate` if Cedar WASM gating is configured,
+    /// otherwise returns `PermissiveWasmAuthzGate` for backward compatibility.
+    pub(crate) fn wasm_authz_gate(&self) -> Arc<dyn WasmAuthzGate> {
+        // If the authz engine has policies loaded, use Cedar gate.
+        if self.authz.policy_count() > 0 {
+            Arc::new(crate::wasm_authz_gate::CedarWasmAuthzGate::new(
+                self.authz.clone(),
+            ))
+        } else {
+            Arc::new(PermissiveWasmAuthzGate)
+        }
+    }
+
     /// Dispatch WASM integrations for custom effects produced by a transition.
     ///
     /// For each custom effect matching a WASM integration, this method:
@@ -28,15 +47,18 @@ impl ServerState {
         _action: &str,
         custom_effects: &[String],
         _entity_state: &EntityState,
+        agent_ctx: &AgentContext,
     ) {
         // Look up integrations for this entity type
         let integrations = {
-            let registry = self.registry.read().unwrap();
+            let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
             registry
                 .get_spec(tenant, entity_type)
                 .map(|spec| spec.integrations.clone())
                 .unwrap_or_default()
         };
+
+        let gate = self.wasm_authz_gate();
 
         for effect_name in custom_effects {
             // Find matching WASM integration
@@ -60,7 +82,7 @@ impl ServerState {
 
             // Check if module is registered
             let has_module = {
-                let wasm_reg = self.wasm_module_registry.read().unwrap();
+                let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
                 wasm_reg.get_hash(tenant, module_name).is_some()
             };
 
@@ -134,6 +156,16 @@ impl ServerState {
                 continue;
             }
 
+            // Build authorization context for the WASM gate
+            let authz_ctx = WasmAuthzContext {
+                tenant: tenant.to_string(),
+                module_name: module_name.clone(),
+                agent_id: agent_ctx.agent_id.clone(),
+                session_id: agent_ctx.session_id.clone(),
+                entity_type: entity_type.to_string(),
+                trigger_action: _action.to_string(),
+            };
+
             // Build invocation context
             let ctx = WasmInvocationContext {
                 tenant: tenant.to_string(),
@@ -142,13 +174,13 @@ impl ServerState {
                 trigger_action: _action.to_string(),
                 trigger_params: serde_json::Value::Null,
                 entity_state: serde_json::to_value(_entity_state).unwrap_or_default(),
-                agent_id: None,
-                session_id: None,
+                agent_id: agent_ctx.agent_id.clone(),
+                session_id: agent_ctx.session_id.clone(),
             };
 
             // Look up module hash
             let module_hash = {
-                let wasm_reg = self.wasm_module_registry.read().unwrap();
+                let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
                 wasm_reg
                     .get_hash(tenant, module_name)
                     .map(|s| s.to_string())
@@ -168,14 +200,14 @@ impl ServerState {
                 "invoking WASM integration module"
             );
 
-            let tenant_secrets = self
-                .secrets_vault
-                .as_ref()
-                .map(|v| v.get_tenant_secrets(&tenant.to_string()))
-                .unwrap_or_default();
-            let engine = self.wasm_engine.clone();
-            let host: Arc<dyn WasmHost> = Arc::new(ProductionWasmHost::new(tenant_secrets));
+            // Phase 3: Pre-filter secrets through authorization gate
+            let tenant_secrets = self.get_authorized_wasm_secrets(tenant, &*gate, &authz_ctx);
+            let inner: Arc<dyn WasmHost> = Arc::new(ProductionWasmHost::new(tenant_secrets));
+            // Wrap with authorization decorator
+            let host: Arc<dyn WasmHost> =
+                Arc::new(AuthorizedWasmHost::new(inner, gate.clone(), authz_ctx));
             let limits = WasmResourceLimits::default();
+            let engine = self.wasm_engine.clone();
             let state = self.clone();
             let t = tenant.clone();
             let et = entity_type.to_string();
@@ -329,6 +361,32 @@ impl ServerState {
         }
     }
 
+    /// Get secrets filtered through the WASM authorization gate.
+    ///
+    /// Phase 3 defense-in-depth: only inject secrets that the gate authorizes
+    /// into the `ProductionWasmHost`. Even if the decorator is somehow
+    /// bypassed, unauthorized secrets aren't in memory.
+    pub(crate) fn get_authorized_wasm_secrets(
+        &self,
+        tenant: &TenantId,
+        gate: &dyn WasmAuthzGate,
+        authz_ctx: &WasmAuthzContext,
+    ) -> std::collections::BTreeMap<String, String> {
+        let all_secrets = self
+            .secrets_vault
+            .as_ref()
+            .map(|v| v.get_tenant_secrets(&tenant.to_string()))
+            .unwrap_or_default();
+
+        all_secrets
+            .into_iter()
+            .filter(|(key, _)| {
+                gate.authorize_secret_access(key, authz_ctx)
+                    == temper_wasm::WasmAuthzDecision::Allow
+            })
+            .collect()
+    }
+
     /// Dispatch an action to an entity actor (legacy single-tenant).
     pub async fn dispatch_action(
         &self,
@@ -453,6 +511,9 @@ impl ServerState {
                 )),
                 agent_id: agent_ctx.agent_id.clone(),
                 session_id: agent_ctx.session_id.clone(),
+                authz_denied: None,
+                denied_resource: None,
+                denied_module: None,
             };
             if let Err(e) = self.persist_trajectory_entry(&entry).await {
                 tracing::error!(error = %e, "failed to persist trajectory entry");
@@ -489,6 +550,9 @@ impl ServerState {
                     error: Some(format!("Actor dispatch failed: {e}")),
                     agent_id: agent_ctx.agent_id.clone(),
                     session_id: agent_ctx.session_id.clone(),
+                    authz_denied: None,
+                    denied_resource: None,
+                    denied_module: None,
                 };
                 if let Err(persist_err) = self.persist_trajectory_entry(&entry).await {
                     tracing::error!(error = %persist_err, "failed to persist trajectory entry");
@@ -525,6 +589,9 @@ impl ServerState {
             },
             agent_id: agent_ctx.agent_id.clone(),
             session_id: agent_ctx.session_id.clone(),
+            authz_denied: None,
+            denied_resource: None,
+            denied_module: None,
         };
         if let Err(e) = self.persist_trajectory_entry(&trajectory_entry).await {
             tracing::error!(error = %e, "failed to persist trajectory entry");
@@ -587,6 +654,7 @@ impl ServerState {
                     action,
                     &response.custom_effects,
                     &response.state,
+                    agent_ctx,
                 );
             }
         }
