@@ -256,7 +256,7 @@ mod tests {
     fn test_with_agent_context_none_values() {
         let ctx = SecurityContext::system().with_agent_context(None, None);
         assert_eq!(ctx.principal.id, "system");
-        assert!(ctx.context_attrs.get("agentId").is_none());
-        assert!(ctx.context_attrs.get("sessionId").is_none());
+        assert!(!ctx.context_attrs.contains_key("agentId"));
+        assert!(!ctx.context_attrs.contains_key("sessionId"));
     }
 }
