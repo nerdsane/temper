@@ -66,9 +66,7 @@ pub fn extract_domain(url: &str) -> &str {
         .map(|i| &after_scheme[i + 1..])
         .unwrap_or(after_scheme);
     // Take up to the first '/', '?', or ':' (port separator)
-    let end = after_auth
-        .find(|c: char| c == '/' || c == '?' || c == ':')
-        .unwrap_or(after_auth.len());
+    let end = after_auth.find(['/', '?', ':']).unwrap_or(after_auth.len());
     &after_auth[..end]
 }
 

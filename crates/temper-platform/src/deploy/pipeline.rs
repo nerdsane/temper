@@ -189,7 +189,7 @@ impl DeployPipeline {
                     .iter()
                     .any(|i| i.integration_type == "wasm");
                 if has_wasm {
-                    let suggestions = suggest_cedar_policies(&[entity.clone()]);
+                    let suggestions = suggest_cedar_policies(std::slice::from_ref(entity));
                     if !suggestions.is_empty() {
                         state.broadcast(PlatformEvent::VerifyStatus {
                             tenant: input.tenant_name.clone(),

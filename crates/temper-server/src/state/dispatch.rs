@@ -39,6 +39,7 @@ impl ServerState {
     /// 2. Looks up the module hash from the WASM registry
     /// 3. Invokes the WASM module via `WasmEngine`
     /// 4. Dispatches the callback action (on_success or on_failure) based on the result
+    #[allow(clippy::too_many_arguments)]
     pub fn dispatch_wasm_integrations(
         &self,
         tenant: &TenantId,
