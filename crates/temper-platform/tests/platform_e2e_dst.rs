@@ -14,9 +14,11 @@ use axum::http::{Request, StatusCode};
 use temper_runtime::tenant::TenantId;
 use tower::ServiceExt;
 
-use temper_platform::bootstrap::{SYSTEM_TENANT, bootstrap_system_tenant};
-use temper_platform::router::build_platform_router;
-use temper_platform::state::PlatformState;
+mod common;
+
+use common::http::{body_json, body_string};
+use common::platform::{bootstrapped_router, bootstrapped_state};
+use temper_platform::bootstrap::SYSTEM_TENANT;
 
 // =========================================================================
 // Dispatch-level tests — prove shared registry
@@ -26,8 +28,7 @@ use temper_platform::state::PlatformState;
 /// visible to `ServerState.dispatch_tenant_action()`.
 #[tokio::test]
 async fn e2e_bootstrap_visible_to_dispatch() {
-    let state = PlatformState::new(None);
-    bootstrap_system_tenant(&state);
+    let state = bootstrapped_state();
 
     let tenant = TenantId::new(SYSTEM_TENANT);
 
@@ -56,8 +57,7 @@ async fn e2e_bootstrap_visible_to_dispatch() {
 /// Full Project lifecycle through dispatch: Created → Building → Verified → Archived.
 #[tokio::test]
 async fn e2e_project_lifecycle_via_dispatch() {
-    let state = PlatformState::new(None);
-    bootstrap_system_tenant(&state);
+    let state = bootstrapped_state();
 
     let tenant = TenantId::new(SYSTEM_TENANT);
 
@@ -106,8 +106,7 @@ async fn e2e_project_lifecycle_via_dispatch() {
 /// Full Tenant lifecycle through dispatch: Pending → Active → Suspended → Active → Archived.
 #[tokio::test]
 async fn e2e_tenant_lifecycle_via_dispatch() {
-    let state = PlatformState::new(None);
-    bootstrap_system_tenant(&state);
+    let state = bootstrapped_state();
 
     let tenant = TenantId::new(SYSTEM_TENANT);
 
@@ -151,8 +150,7 @@ async fn e2e_tenant_lifecycle_via_dispatch() {
 /// Complete platform workflow — all 5 system entity types through dispatch.
 #[tokio::test]
 async fn e2e_full_platform_scenario() {
-    let state = PlatformState::new(None);
-    bootstrap_system_tenant(&state);
+    let state = bootstrapped_state();
 
     let tenant = TenantId::new(SYSTEM_TENANT);
 
@@ -302,28 +300,10 @@ async fn e2e_full_platform_scenario() {
 // HTTP-level tests — same production code through axum
 // =========================================================================
 
-/// Helper to read a response body as JSON.
-async fn body_json(response: axum::http::Response<Body>) -> serde_json::Value {
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    serde_json::from_slice(&body).unwrap()
-}
-
-/// Helper to read a response body as string.
-async fn body_string(response: axum::http::Response<Body>) -> String {
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    String::from_utf8(body.to_vec()).unwrap()
-}
-
 /// Full Project lifecycle through HTTP: POST create → POST UpdateSpecs → POST Verify → GET state.
 #[tokio::test]
 async fn e2e_http_project_lifecycle() {
-    let state = PlatformState::new(None);
-    bootstrap_system_tenant(&state);
-    let app = build_platform_router(state);
+    let app = bootstrapped_router();
 
     // POST /tdata/Projects → 201, creates a new Project entity
     let response = app
@@ -418,9 +398,7 @@ async fn e2e_http_project_lifecycle() {
 /// Metadata and service document show all system entity types after bootstrap.
 #[tokio::test]
 async fn e2e_http_metadata_shows_system_entities() {
-    let state = PlatformState::new(None);
-    bootstrap_system_tenant(&state);
-    let app = build_platform_router(state);
+    let app = bootstrapped_router();
 
     // GET /tdata/$metadata → body contains all 5 entity types
     let response = app

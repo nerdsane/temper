@@ -203,12 +203,17 @@ impl VerificationCascade {
             .collect();
 
         let summary = if passed {
-            format!(
+            let mut base = format!(
                 "L0 Symbolic PASSED: {} guards satisfiable, {} invariants inductive, {} unreachable",
                 result.guard_satisfiability.len(),
                 result.inductive_invariants.len(),
                 result.unreachable_states.len(),
-            )
+            );
+            if result.approximate {
+                base.push_str("; approximate model: ");
+                base.push_str(&result.approximation_notes.join(" | "));
+            }
+            base
         } else {
             let mut issues = Vec::new();
             if !dead_guards.is_empty() {
@@ -218,6 +223,12 @@ impl VerificationCascade {
                 issues.push(format!(
                     "non-inductive invariants: {}",
                     non_inductive.join(", ")
+                ));
+            }
+            if result.approximate {
+                issues.push(format!(
+                    "approximate model: {}",
+                    result.approximation_notes.join(" | ")
                 ));
             }
             format!("L0 Symbolic WARNINGS: {}", issues.join("; "))

@@ -12,6 +12,7 @@
 //! and is accessed via the `&TemperModel` reference in property conditions.
 
 pub mod builder;
+pub(crate) mod semantics;
 mod stateright_impl;
 pub mod types;
 

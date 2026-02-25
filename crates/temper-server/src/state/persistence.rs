@@ -1,15 +1,21 @@
 //! Persistence methods for ServerState (Postgres, Turso, Redis backends).
 
-use sqlx::types::Json;
+use sqlx::{PgPool, types::Json};
 use temper_runtime::scheduler::sim_now;
 use temper_store_turso::{
-    TursoSpecVerificationUpdate, TursoTrajectoryInsert, TursoWasmInvocationInsert,
+    TursoEventStore, TursoSpecVerificationUpdate, TursoTrajectoryInsert, TursoWasmInvocationInsert,
 };
 
 use super::trajectory::TrajectoryEntry;
 use super::wasm_invocation_log::WasmInvocationEntry;
 use super::{DESIGN_TIME_LOG_CAPACITY, DesignTimeEvent, ServerState};
 use crate::registry::EntityVerificationResult;
+
+enum MetadataBackend<'a> {
+    Postgres(&'a PgPool),
+    Turso(&'a TursoEventStore),
+    Redis,
+}
 
 /// Row type for WASM invocation log queries (avoids clippy::type_complexity).
 type WasmInvocationRow = (
@@ -26,6 +32,27 @@ type WasmInvocationRow = (
 );
 
 impl ServerState {
+    fn redis_ephemeral_error(operation: &str) -> String {
+        format!(
+            "{operation} is not supported on redis backend (explicit ephemeral mode: metadata is in-memory only)"
+        )
+    }
+
+    fn metadata_backend(&self) -> Option<MetadataBackend<'_>> {
+        let store = self.event_store.as_ref()?;
+        if let Some(pool) = store.postgres_pool() {
+            return Some(MetadataBackend::Postgres(pool));
+        }
+        if let Some(turso) = store.turso_store() {
+            return Some(MetadataBackend::Turso(turso));
+        }
+        if store.redis_store().is_some() {
+            Some(MetadataBackend::Redis)
+        } else {
+            None
+        }
+    }
+
     /// Upsert a WASM module in the persistence backend (Postgres or Turso).
     pub async fn upsert_wasm_module(
         &self,
@@ -34,45 +61,40 @@ impl ServerState {
         wasm_bytes: &[u8],
         sha256_hash: &str,
     ) -> Result<(), String> {
-        let Some(store) = self.event_store.as_ref() else {
+        let Some(backend) = self.metadata_backend() else {
             return Ok(());
         };
 
-        // Postgres path.
-        if let Some(pool) = store.postgres_pool() {
-            sqlx::query(
-                "INSERT INTO wasm_modules (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at) \
-                 VALUES ($1, $2, $3, $4, 1, $5, now()) \
-                 ON CONFLICT (tenant, module_name) DO UPDATE SET \
-                     wasm_bytes = EXCLUDED.wasm_bytes, \
-                     sha256_hash = EXCLUDED.sha256_hash, \
-                     version = wasm_modules.version + 1, \
-                     size_bytes = EXCLUDED.size_bytes, \
-                     updated_at = now()",
-            )
-            .bind(tenant)
-            .bind(module_name)
-            .bind(wasm_bytes)
-            .bind(sha256_hash)
-            .bind(wasm_bytes.len() as i32)
-            .execute(pool)
-            .await
-            .map_err(|e| format!("failed to upsert WASM module {tenant}/{module_name}: {e}"))?;
-            return Ok(());
-        }
-
-        // Turso path.
-        if let Some(turso) = store.turso_store() {
-            turso
+        match backend {
+            MetadataBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO wasm_modules (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at) \
+                     VALUES ($1, $2, $3, $4, 1, $5, now()) \
+                     ON CONFLICT (tenant, module_name) DO UPDATE SET \
+                         wasm_bytes = EXCLUDED.wasm_bytes, \
+                         sha256_hash = EXCLUDED.sha256_hash, \
+                         version = wasm_modules.version + 1, \
+                         size_bytes = EXCLUDED.size_bytes, \
+                         updated_at = now()",
+                )
+                .bind(tenant)
+                .bind(module_name)
+                .bind(wasm_bytes)
+                .bind(sha256_hash)
+                .bind(wasm_bytes.len() as i32)
+                .execute(pool)
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("failed to upsert WASM module {tenant}/{module_name}: {e}"))
+            }
+            MetadataBackend::Turso(turso) => turso
                 .upsert_wasm_module(tenant, module_name, wasm_bytes, sha256_hash)
                 .await
                 .map_err(|e| {
                     format!("failed to upsert WASM module {tenant}/{module_name} in turso: {e}")
-                })?;
-            return Ok(());
+                }),
+            MetadataBackend::Redis => Err(Self::redis_ephemeral_error("WASM module persistence")),
         }
-
-        Ok(())
     }
 
     /// Delete a WASM module from persistence.
@@ -81,33 +103,31 @@ impl ServerState {
         tenant: &str,
         module_name: &str,
     ) -> Result<bool, String> {
-        let Some(store) = self.event_store.as_ref() else {
+        let Some(backend) = self.metadata_backend() else {
             return Ok(false);
         };
 
-        if let Some(pool) = store.postgres_pool() {
-            let result =
-                sqlx::query("DELETE FROM wasm_modules WHERE tenant = $1 AND module_name = $2")
-                    .bind(tenant)
-                    .bind(module_name)
-                    .execute(pool)
-                    .await
-                    .map_err(|e| {
-                        format!("failed to delete WASM module {tenant}/{module_name}: {e}")
-                    })?;
-            return Ok(result.rows_affected() > 0);
-        }
-
-        if let Some(turso) = store.turso_store() {
-            return turso
+        match backend {
+            MetadataBackend::Postgres(pool) => {
+                let result =
+                    sqlx::query("DELETE FROM wasm_modules WHERE tenant = $1 AND module_name = $2")
+                        .bind(tenant)
+                        .bind(module_name)
+                        .execute(pool)
+                        .await
+                        .map_err(|e| {
+                            format!("failed to delete WASM module {tenant}/{module_name}: {e}")
+                        })?;
+                Ok(result.rows_affected() > 0)
+            }
+            MetadataBackend::Turso(turso) => turso
                 .delete_wasm_module(tenant, module_name)
                 .await
                 .map_err(|e| {
                     format!("failed to delete WASM module {tenant}/{module_name} in turso: {e}")
-                });
+                }),
+            MetadataBackend::Redis => Err(Self::redis_ephemeral_error("WASM module deletion")),
         }
-
-        Ok(false)
     }
 
     /// Persist a WASM invocation log entry (Postgres or Turso).
@@ -342,50 +362,42 @@ impl ServerState {
         ioa_source: &str,
         csdl_xml: &str,
     ) -> Result<(), String> {
-        let Some(store) = self.event_store.as_ref() else {
+        let Some(backend) = self.metadata_backend() else {
             return Ok(());
         };
 
-        // Try Postgres first.
-        if let Some(pool) = store.postgres_pool() {
-            sqlx::query(
-                "INSERT INTO specs \
-                 (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, updated_at) \
-                 VALUES ($1, $2, $3, $4, 1, false, 'pending', now()) \
-                 ON CONFLICT (tenant, entity_type) DO UPDATE SET \
-                     ioa_source = EXCLUDED.ioa_source, \
-                     csdl_xml = EXCLUDED.csdl_xml, \
-                     version = specs.version + 1, \
-                     verified = false, \
-                     verification_status = 'pending', \
-                     levels_passed = NULL, \
-                     levels_total = NULL, \
-                     verification_result = NULL, \
-                     updated_at = now()",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(ioa_source)
-            .bind(csdl_xml)
-            .execute(pool)
-            .await
-            .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in postgres: {e}"))?;
-            return Ok(());
-        }
-
-        // Fall back to Turso.
-        if let Some(turso) = store.turso_store() {
-            turso
+        match backend {
+            MetadataBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO specs \
+                     (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, updated_at) \
+                     VALUES ($1, $2, $3, $4, 1, false, 'pending', now()) \
+                     ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+                         ioa_source = EXCLUDED.ioa_source, \
+                         csdl_xml = EXCLUDED.csdl_xml, \
+                         version = specs.version + 1, \
+                         verified = false, \
+                         verification_status = 'pending', \
+                         levels_passed = NULL, \
+                         levels_total = NULL, \
+                         verification_result = NULL, \
+                         updated_at = now()",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(ioa_source)
+                .bind(csdl_xml)
+                .execute(pool)
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in postgres: {e}"))
+            }
+            MetadataBackend::Turso(turso) => turso
                 .upsert_spec(tenant, entity_type, ioa_source, csdl_xml)
                 .await
-                .map_err(|e| {
-                    format!("failed to upsert spec {tenant}/{entity_type} in turso: {e}")
-                })?;
-            return Ok(());
+                .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in turso: {e}")),
+            MetadataBackend::Redis => Err(Self::redis_ephemeral_error("Spec source persistence")),
         }
-
-        // Redis: not suited for relational metadata — silently skip.
-        Ok(())
     }
 
     /// Upsert tenant-level cross-invariant definitions.
@@ -394,55 +406,60 @@ impl ServerState {
         tenant: &str,
         cross_invariants_toml: Option<&str>,
     ) -> Result<(), String> {
-        let Some(store) = self.event_store.as_ref() else {
+        let Some(backend) = self.metadata_backend() else {
             return Ok(());
         };
 
-        // Postgres path.
-        if let Some(pool) = store.postgres_pool() {
-            if let Some(source) = cross_invariants_toml {
-                sqlx::query(
-                    "INSERT INTO tenant_constraints (tenant, cross_invariants_toml, version, updated_at) \
-                     VALUES ($1, $2, 1, now()) \
-                     ON CONFLICT (tenant) DO UPDATE SET \
-                        cross_invariants_toml = EXCLUDED.cross_invariants_toml, \
-                        version = tenant_constraints.version + 1, \
-                        updated_at = now()",
-                )
-                .bind(tenant)
-                .bind(source)
-                .execute(pool)
-                .await
-                .map_err(|e| format!("failed to upsert tenant constraints for {tenant}: {e}"))?;
-            } else {
-                sqlx::query("DELETE FROM tenant_constraints WHERE tenant = $1")
+        match backend {
+            MetadataBackend::Postgres(pool) => {
+                if let Some(source) = cross_invariants_toml {
+                    sqlx::query(
+                        "INSERT INTO tenant_constraints (tenant, cross_invariants_toml, version, updated_at) \
+                         VALUES ($1, $2, 1, now()) \
+                         ON CONFLICT (tenant) DO UPDATE SET \
+                            cross_invariants_toml = EXCLUDED.cross_invariants_toml, \
+                            version = tenant_constraints.version + 1, \
+                            updated_at = now()",
+                    )
                     .bind(tenant)
+                    .bind(source)
                     .execute(pool)
                     .await
-                    .map_err(|e| format!("failed to clear tenant constraints for {tenant}: {e}"))?;
-            }
-            return Ok(());
-        }
-
-        // Turso path.
-        if let Some(turso) = store.turso_store() {
-            if let Some(source) = cross_invariants_toml {
-                turso
-                    .upsert_tenant_constraints(tenant, source)
-                    .await
                     .map_err(|e| {
-                        format!("failed to upsert tenant constraints for {tenant} in turso: {e}")
+                        format!("failed to upsert tenant constraints for {tenant}: {e}")
                     })?;
-            } else {
-                turso.delete_tenant_constraints(tenant).await.map_err(|e| {
-                    format!("failed to clear tenant constraints for {tenant} in turso: {e}")
-                })?;
+                } else {
+                    sqlx::query("DELETE FROM tenant_constraints WHERE tenant = $1")
+                        .bind(tenant)
+                        .execute(pool)
+                        .await
+                        .map_err(|e| {
+                            format!("failed to clear tenant constraints for {tenant}: {e}")
+                        })?;
+                }
+                Ok(())
             }
-            return Ok(());
+            MetadataBackend::Turso(turso) => {
+                if let Some(source) = cross_invariants_toml {
+                    turso
+                        .upsert_tenant_constraints(tenant, source)
+                        .await
+                        .map_err(|e| {
+                            format!(
+                                "failed to upsert tenant constraints for {tenant} in turso: {e}"
+                            )
+                        })?;
+                } else {
+                    turso.delete_tenant_constraints(tenant).await.map_err(|e| {
+                        format!("failed to clear tenant constraints for {tenant} in turso: {e}")
+                    })?;
+                }
+                Ok(())
+            }
+            MetadataBackend::Redis => {
+                Err(Self::redis_ephemeral_error("Tenant constraint persistence"))
+            }
         }
-
-        // Redis: not suited for relational metadata — silently skip.
-        Ok(())
     }
 
     /// Persist verification summary for a spec (Postgres, Turso, or skip for Redis).
@@ -453,7 +470,7 @@ impl ServerState {
         status: &str,
         result: Option<&EntityVerificationResult>,
     ) -> Result<(), String> {
-        let Some(store) = self.event_store.as_ref() else {
+        let Some(backend) = self.metadata_backend() else {
             return Ok(());
         };
 
@@ -467,63 +484,61 @@ impl ServerState {
             None => (false, None, None, None),
         };
 
-        // Try Postgres first.
-        if let Some(pool) = store.postgres_pool() {
-            sqlx::query(
-                "UPDATE specs SET \
-                     verified = $3, \
-                     verification_status = $4, \
-                     levels_passed = $5, \
-                     levels_total = $6, \
-                     verification_result = $7, \
-                     updated_at = now() \
-                 WHERE tenant = $1 AND entity_type = $2",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(verified)
-            .bind(status)
-            .bind(levels_passed)
-            .bind(levels_total)
-            .bind(verification_result.map(Json))
-            .execute(pool)
-            .await
-            .map_err(|e| {
-                format!(
-                    "failed to persist spec verification status for {tenant}/{entity_type} ({status}): {e}"
+        match backend {
+            MetadataBackend::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE specs SET \
+                         verified = $3, \
+                         verification_status = $4, \
+                         levels_passed = $5, \
+                         levels_total = $6, \
+                         verification_result = $7, \
+                         updated_at = now() \
+                     WHERE tenant = $1 AND entity_type = $2",
                 )
-            })?;
-            return Ok(());
-        }
-
-        // Fall back to Turso.
-        if let Some(turso) = store.turso_store() {
-            let result_json = verification_result
-                .as_ref()
-                .and_then(|v| serde_json::to_string(v).ok());
-            turso
-                .persist_spec_verification(
-                    tenant,
-                    entity_type,
-                    TursoSpecVerificationUpdate {
-                        status,
-                        verified,
-                        levels_passed,
-                        levels_total,
-                        verification_result_json: result_json.as_deref(),
-                    },
-                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(verified)
+                .bind(status)
+                .bind(levels_passed)
+                .bind(levels_total)
+                .bind(verification_result.map(Json))
+                .execute(pool)
                 .await
+                .map(|_| ())
                 .map_err(|e| {
                     format!(
-                        "failed to persist spec verification status for {tenant}/{entity_type} ({status}) in turso: {e}"
+                        "failed to persist spec verification status for {tenant}/{entity_type} ({status}): {e}"
                     )
-                })?;
-            return Ok(());
+                })
+            }
+            MetadataBackend::Turso(turso) => {
+                let result_json = verification_result
+                    .as_ref()
+                    .and_then(|v| serde_json::to_string(v).ok());
+                turso
+                    .persist_spec_verification(
+                        tenant,
+                        entity_type,
+                        TursoSpecVerificationUpdate {
+                            status,
+                            verified,
+                            levels_passed,
+                            levels_total,
+                            verification_result_json: result_json.as_deref(),
+                        },
+                    )
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "failed to persist spec verification status for {tenant}/{entity_type} ({status}) in turso: {e}"
+                        )
+                    })
+            }
+            MetadataBackend::Redis => {
+                Err(Self::redis_ephemeral_error("Spec verification persistence"))
+            }
         }
-
-        // Redis: not suited for relational metadata — silently skip.
-        Ok(())
     }
 
     /// Append to in-memory design-time log with bounded capacity.

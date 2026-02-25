@@ -15,12 +15,13 @@
 //! 3. **Unreachable state detection** — BFS from initial state through
 //!    transition targets to find states that can never be reached.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
 use crate::model::builder::build_model_from_ioa;
+use crate::model::semantics::collect_list_contains_pairs;
 use crate::model::types::{InvariantKind, ModelEffect, ModelGuard, TemperModel};
 
 /// Result of symbolic verification.
@@ -32,6 +33,10 @@ pub struct SmtResult {
     pub inductive_invariants: Vec<(String, bool)>,
     /// States that cannot be reached from the initial state.
     pub unreachable_states: Vec<String>,
+    /// Whether symbolic checks rely on bounded/abstract encodings.
+    pub approximate: bool,
+    /// Human-readable approximation notes for downstream reporting.
+    pub approximation_notes: Vec<String>,
     /// Whether all checks passed (no dead guards, all invariants inductive).
     pub all_passed: bool,
 }
@@ -44,6 +49,8 @@ pub struct SmtResult {
 /// 3. Unreachable states: can each declared state be reached?
 pub fn verify_symbolic(ioa_toml: &str, max_counter: usize) -> SmtResult {
     let model = build_model_from_ioa(ioa_toml, max_counter);
+    let approximation_notes = approximation_notes();
+    let approximate = !approximation_notes.is_empty();
 
     let guard_sat = check_guard_satisfiability(&model, max_counter);
     let inductive = check_invariant_induction(&model, max_counter);
@@ -57,8 +64,15 @@ pub fn verify_symbolic(ioa_toml: &str, max_counter: usize) -> SmtResult {
         guard_satisfiability: guard_sat,
         inductive_invariants: inductive,
         unreachable_states: unreachable,
+        approximate,
+        approximation_notes,
         all_passed,
     }
+}
+
+fn approximation_notes() -> Vec<String> {
+    // L0 SMT now uses exact bounded semantics for supported guard forms.
+    Vec::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -87,9 +101,23 @@ fn check_guard_satisfiability(model: &TemperModel, max_counter: usize) -> Vec<(S
             // Create Z3 variables for each counter, bounded [0, max_counter]
             let counter_vars = make_counter_vars(model, &solver, max_counter);
             let bool_vars = make_bool_vars(model);
+            let list_vars = make_list_vars(model, &solver, max_counter);
+            let status_var = make_status_var(model, &solver);
+
+            if !t.from_states.is_empty() {
+                let from_formula = encode_state_membership(&status_var, &t.from_states, model);
+                solver.assert(&from_formula);
+            }
 
             // Encode the guard as a Z3 formula and assert it
-            let guard_formula = encode_guard(&t.guard, &counter_vars, &bool_vars);
+            let guard_formula = encode_guard(
+                &t.guard,
+                &counter_vars,
+                &bool_vars,
+                &list_vars,
+                &status_var,
+                model,
+            );
             solver.assert(&guard_formula);
 
             let sat = matches!(solver.check(), SatResult::Sat);
@@ -217,7 +245,9 @@ fn check_counter_positive_induction_z3(
                     counter_post = Int::add(&[&counter_post, &one]);
                 }
                 ModelEffect::DecrementCounter(v) if v == var => {
-                    counter_post = Int::sub(&[&counter_post, &one]);
+                    // Runtime semantics are saturating_sub(1): max(counter-1, 0)
+                    let dec = Int::sub(&[&counter_post, &one]);
+                    counter_post = counter_post.gt(&zero).ite(&dec, &zero);
                 }
                 _ => {}
             }
@@ -317,20 +347,148 @@ fn make_bool_vars(model: &TemperModel) -> Vec<(String, Bool)> {
         .collect()
 }
 
+#[derive(Default)]
+struct ListSymbolicVars {
+    len_vars: BTreeMap<String, Int>,
+    elem_vars: BTreeMap<String, Vec<Int>>,
+    value_atoms: BTreeMap<String, i64>,
+}
+
+/// Create exact bounded symbolic list variables:
+/// - `len` in `[0, max_counter]`
+/// - `elem_0..elem_{max_counter-1}` for position values
+fn make_list_vars(model: &TemperModel, solver: &Solver, max_counter: usize) -> ListSymbolicVars {
+    let zero = Int::from_i64(0);
+    let max_val = Int::from_i64(max_counter as i64);
+    let mut len_vars = BTreeMap::new();
+    let mut elem_vars = BTreeMap::new();
+
+    for name in model.initial_lists.keys() {
+        let len_var = Int::new_const(format!("{name}_len"));
+        solver.assert(len_var.ge(&zero));
+        solver.assert(len_var.le(&max_val));
+        len_vars.insert(name.clone(), len_var);
+
+        let elements = (0..max_counter)
+            .map(|idx| Int::new_const(format!("{name}_elem_{idx}")))
+            .collect::<Vec<_>>();
+        elem_vars.insert(name.clone(), elements);
+    }
+
+    let mut values = BTreeSet::new();
+    for t in &model.transitions {
+        let mut pairs = BTreeSet::new();
+        collect_list_contains_pairs(&t.guard, &mut pairs);
+        for (_, value) in pairs {
+            values.insert(value);
+        }
+    }
+    for list in model.initial_lists.values() {
+        for value in list {
+            values.insert(value.clone());
+        }
+    }
+
+    let value_atoms = values
+        .into_iter()
+        .enumerate()
+        .map(|(idx, value)| (value, idx as i64))
+        .collect::<BTreeMap<_, _>>();
+
+    ListSymbolicVars {
+        len_vars,
+        elem_vars,
+        value_atoms,
+    }
+}
+
+/// Create a symbolic status variable over `model.states` indices.
+fn make_status_var(model: &TemperModel, solver: &Solver) -> Int {
+    let var = Int::new_const("status_idx");
+    let zero = Int::from_i64(0);
+    if model.states.is_empty() {
+        solver.assert(var.eq(&zero));
+        return var;
+    }
+    let max = Int::from_i64((model.states.len() - 1) as i64);
+    solver.assert(var.ge(&zero));
+    solver.assert(var.le(&max));
+    var
+}
+
+/// Encode `status ∈ states` as a disjunction over symbolic status index.
+fn encode_state_membership(status_var: &Int, states: &[String], model: &TemperModel) -> Bool {
+    let disjuncts: Vec<Bool> = states
+        .iter()
+        .filter_map(|state| {
+            model
+                .states
+                .iter()
+                .position(|s| s == state)
+                .map(|idx| status_var.eq(Int::from_i64(idx as i64)))
+        })
+        .collect();
+    if disjuncts.is_empty() {
+        Bool::from_bool(false)
+    } else {
+        Bool::or(&disjuncts)
+    }
+}
+
+/// Encode exact bounded `contains(list, value)` over symbolic list slots.
+fn encode_list_contains(var: &str, value: &str, lists: &ListSymbolicVars) -> Bool {
+    let Some(len_var) = lists.len_vars.get(var) else {
+        return Bool::from_bool(false);
+    };
+    let Some(elements) = lists.elem_vars.get(var) else {
+        return Bool::from_bool(false);
+    };
+    let Some(atom_id) = lists.value_atoms.get(value) else {
+        return Bool::from_bool(false);
+    };
+
+    if elements.is_empty() {
+        return Bool::from_bool(false);
+    }
+
+    let atom = Int::from_i64(*atom_id);
+    let disjuncts: Vec<Bool> = elements
+        .iter()
+        .enumerate()
+        .map(|(idx, element)| {
+            let idx_int = Int::from_i64(idx as i64);
+            Bool::and(&[&len_var.gt(&idx_int), &element.eq(&atom)])
+        })
+        .collect();
+    Bool::or(&disjuncts)
+}
+
 /// Encode a `ModelGuard` as a Z3 boolean formula.
 fn encode_guard(
     guard: &ModelGuard,
     counter_vars: &[(String, Int)],
     bool_vars: &[(String, Bool)],
+    list_vars: &ListSymbolicVars,
+    status_var: &Int,
+    model: &TemperModel,
 ) -> Bool {
     match guard {
         ModelGuard::Always => Bool::from_bool(true),
+        ModelGuard::StateIn(states) => encode_state_membership(status_var, states, model),
         ModelGuard::CounterMin { var, min } => {
             let min_val = Int::from_i64(*min as i64);
             if let Some((_, z3_var)) = counter_vars.iter().find(|(n, _)| n == var) {
                 z3_var.ge(&min_val)
             } else {
                 // Unknown counter — unsatisfiable
+                Bool::from_bool(false)
+            }
+        }
+        ModelGuard::CounterMax { var, max } => {
+            let max_val = Int::from_i64(*max as i64);
+            if let Some((_, z3_var)) = counter_vars.iter().find(|(n, _)| n == var) {
+                z3_var.lt(&max_val)
+            } else {
                 Bool::from_bool(false)
             }
         }
@@ -342,10 +500,18 @@ fn encode_guard(
                 Bool::from_bool(false)
             }
         }
+        ModelGuard::ListContains { var, value } => encode_list_contains(var, value, list_vars),
+        ModelGuard::ListLengthMin { var, min } => {
+            if let Some(len_var) = list_vars.len_vars.get(var) {
+                len_var.ge(Int::from_i64(*min as i64))
+            } else {
+                Bool::from_bool(false)
+            }
+        }
         ModelGuard::And(guards) => {
             let formulas: Vec<Bool> = guards
                 .iter()
-                .map(|g| encode_guard(g, counter_vars, bool_vars))
+                .map(|g| encode_guard(g, counter_vars, bool_vars, list_vars, status_var, model))
                 .collect();
             Bool::and(&formulas)
         }
@@ -436,6 +602,43 @@ mod tests {
         let result = verify_symbolic(ORDER_IOA, 2);
         assert!(!result.guard_satisfiability.is_empty());
         assert!(!result.inductive_invariants.is_empty());
+        assert!(!result.approximate);
+        assert!(result.approximation_notes.is_empty());
+    }
+
+    #[test]
+    fn test_list_contains_exact_at_bound() {
+        let spec = r#"
+[automaton]
+name = "ListExact"
+states = ["S"]
+initial = "S"
+
+[[state]]
+name = "labels"
+type = "list"
+initial = "[]"
+
+[[action]]
+name = "ConflictingContains"
+from = ["S"]
+to = "S"
+guard = "list_contains labels urgent"
+guard = "list_contains labels normal"
+"#;
+
+        // With max_counter=1, a single-slot list cannot contain two distinct
+        // values simultaneously.
+        let result = verify_symbolic(spec, 1);
+        let guard = result
+            .guard_satisfiability
+            .iter()
+            .find(|(name, _)| name == "ConflictingContains");
+        assert!(guard.is_some());
+        assert!(
+            !guard.unwrap().1,
+            "single-slot exact list encoding should reject conflicting contains guards"
+        );
     }
 
     #[test]

@@ -19,6 +19,8 @@ pub struct TemperModelState {
     pub counters: BTreeMap<String, usize>,
     /// Named boolean variables (e.g. `has_address`, `payment_captured`).
     pub booleans: BTreeMap<String, bool>,
+    /// Named list variables (e.g. `tags`, `labels`).
+    pub lists: BTreeMap<String, Vec<String>>,
 }
 
 impl fmt::Display for TemperModelState {
@@ -42,6 +44,14 @@ impl fmt::Display for TemperModelState {
             if !pairs.is_empty() {
                 write!(f, "[{}]", pairs.join(","))?;
             }
+        }
+        if !self.lists.is_empty() {
+            let pairs: Vec<String> = self
+                .lists
+                .iter()
+                .map(|(k, v)| format!("{k}#{}", v.len()))
+                .collect();
+            write!(f, "{{{}}}", pairs.join(","))?;
         }
         Ok(())
     }
@@ -76,10 +86,18 @@ impl fmt::Display for TemperModelAction {
 pub enum ModelGuard {
     /// Always enabled (no guard).
     Always,
+    /// Current status must be in the given set.
+    StateIn(Vec<String>),
     /// A counter variable must be >= min.
     CounterMin { var: String, min: usize },
+    /// A counter variable must be < max.
+    CounterMax { var: String, max: usize },
     /// A boolean variable must be true.
     BoolTrue(String),
+    /// A list variable must contain a value.
+    ListContains { var: String, value: String },
+    /// A list variable must have at least N elements.
+    ListLengthMin { var: String, min: usize },
     /// All sub-guards must hold.
     And(Vec<ModelGuard>),
 }
@@ -93,6 +111,10 @@ pub enum ModelEffect {
     DecrementCounter(String),
     /// Set a boolean variable to a value.
     SetBool { var: String, value: bool },
+    /// Append a value to a list variable.
+    ListAppend(String),
+    /// Remove one value from a list variable.
+    ListRemoveAt(String),
 }
 
 /// A resolved transition used internally by the model, pre-computed from a
@@ -188,6 +210,8 @@ pub struct TemperModel {
     pub(crate) initial_counters: BTreeMap<String, usize>,
     /// Initial boolean values from [[state]] declarations.
     pub(crate) initial_booleans: BTreeMap<String, bool>,
+    /// Initial list values from [[state]] declarations.
+    pub(crate) initial_lists: BTreeMap<String, Vec<String>>,
     /// Per-counter upper bounds for bounded exploration.
     pub(crate) counter_bounds: BTreeMap<String, usize>,
     /// Default upper bound for counters not in counter_bounds.

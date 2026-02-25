@@ -440,6 +440,7 @@ mod tests {
             initial_status: "A".to_string(),
             initial_counters: BTreeMap::new(),
             initial_booleans: BTreeMap::new(),
+            initial_lists: BTreeMap::new(),
             counter_bounds: BTreeMap::new(),
             default_max_counter: 2,
         }

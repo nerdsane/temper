@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use temper_spec::automaton::{self, Automaton};
+use temper_spec::automaton::{
+    self, Automaton, parse_bool_initial, parse_counter_initial_usize, parse_list_initial,
+};
 
 use super::types::{
     InvariantKind, LivenessKind, ModelEffect, ModelGuard, ResolvedInvariant, ResolvedLiveness,
@@ -27,27 +29,30 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
     let states = automaton.automaton.states.clone();
     let initial_status = automaton.automaton.initial.clone();
 
-    // Extract initial counter and boolean values from [[state]] declarations.
+    // Extract initial values from [[state]] declarations.
     let mut initial_counters = BTreeMap::new();
     let mut initial_booleans = BTreeMap::new();
+    let mut initial_lists = BTreeMap::new();
     let mut counter_bounds = BTreeMap::new();
 
     for sv in &automaton.state {
         match sv.var_type.as_str() {
             "counter" => {
-                let init_val: usize = sv.initial.parse().unwrap_or(0);
+                let init_val = parse_counter_initial_usize(&sv.initial);
                 initial_counters.insert(sv.name.clone(), init_val);
                 counter_bounds.insert(sv.name.clone(), max_counter);
             }
             "bool" => {
-                let init_val = sv.initial == "true";
+                let init_val = parse_bool_initial(&sv.initial);
                 initial_booleans.insert(sv.name.clone(), init_val);
             }
-            other => unreachable!(
-                "state variable '{}' has type '{}' which should have been rejected by the \
-                 parser — valid types are 'bool' and 'counter'",
-                sv.name, other
-            ),
+            "list" | "set" => {
+                initial_lists.insert(sv.name.clone(), parse_list_initial(&sv.initial));
+            }
+            _ => {
+                // Keep verification robust against partially modeled types.
+                // Semantic linting reports unsupported state variable types.
+            }
         }
     }
 
@@ -63,6 +68,7 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
         initial_status,
         initial_counters,
         initial_booleans,
+        initial_lists,
         counter_bounds,
         default_max_counter: max_counter,
     }
@@ -119,14 +125,25 @@ fn resolve_transitions(
 fn translate_guards(guards: &[automaton::Guard]) -> ModelGuard {
     let model_guards: Vec<ModelGuard> = guards
         .iter()
-        .filter_map(|g| match g {
-            automaton::Guard::MinCount { var, min } => Some(ModelGuard::CounterMin {
+        .map(|g| match g {
+            automaton::Guard::StateIn { values } => ModelGuard::StateIn(values.clone()),
+            automaton::Guard::MinCount { var, min } => ModelGuard::CounterMin {
                 var: var.clone(),
                 min: *min,
-            }),
-            automaton::Guard::IsTrue { var } => Some(ModelGuard::BoolTrue(var.clone())),
-            // StateIn and MaxCount are handled by from_states and counter_bounds
-            _ => None,
+            },
+            automaton::Guard::MaxCount { var, max } => ModelGuard::CounterMax {
+                var: var.clone(),
+                max: *max,
+            },
+            automaton::Guard::IsTrue { var } => ModelGuard::BoolTrue(var.clone()),
+            automaton::Guard::ListContains { var, value } => ModelGuard::ListContains {
+                var: var.clone(),
+                value: value.clone(),
+            },
+            automaton::Guard::ListLengthMin { var, min } => ModelGuard::ListLengthMin {
+                var: var.clone(),
+                min: *min,
+            },
         })
         .collect();
 
@@ -152,8 +169,9 @@ fn translate_effects(effects: &[automaton::Effect]) -> Vec<ModelEffect> {
                 var: var.clone(),
                 value: *value,
             }),
+            automaton::Effect::ListAppend { var } => Some(ModelEffect::ListAppend(var.clone())),
+            automaton::Effect::ListRemoveAt { var } => Some(ModelEffect::ListRemoveAt(var.clone())),
             automaton::Effect::Emit { .. } => None, // Emit is runtime-only
-            automaton::Effect::ListAppend { .. } | automaton::Effect::ListRemoveAt { .. } => None, // List effects are runtime-only
             automaton::Effect::Trigger { .. } => None, // Trigger is runtime-only (WASM dispatch)
         })
         .collect()
@@ -317,6 +335,7 @@ mod tests {
             status: "Draft".to_string(),
             counters: BTreeMap::from([("items".to_string(), 0)]),
             booleans: BTreeMap::from([("has_address".to_string(), false)]),
+            lists: BTreeMap::new(),
         };
         let mut actions = Vec::new();
         model.actions(&state, &mut actions);
@@ -334,6 +353,7 @@ mod tests {
             status: "Submitted".to_string(),
             counters: BTreeMap::from([("items".to_string(), 1)]),
             booleans: BTreeMap::from([("has_address".to_string(), true)]),
+            lists: BTreeMap::new(),
         };
         let mut actions = Vec::new();
         model.actions(&state, &mut actions);
@@ -351,6 +371,7 @@ mod tests {
             status: "Draft".to_string(),
             counters: BTreeMap::from([("items".to_string(), 1)]),
             booleans: BTreeMap::from([("has_address".to_string(), false)]),
+            lists: BTreeMap::new(),
         };
         let action = super::super::types::TemperModelAction {
             name: "SubmitOrder".to_string(),
@@ -370,6 +391,7 @@ mod tests {
             status: "Draft".to_string(),
             counters: BTreeMap::from([("items".to_string(), 0)]),
             booleans: BTreeMap::from([("has_address".to_string(), false)]),
+            lists: BTreeMap::new(),
         };
         let action = super::super::types::TemperModelAction {
             name: "AddItem".to_string(),
