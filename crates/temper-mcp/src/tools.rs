@@ -203,7 +203,7 @@ impl RuntimeContext {
                 });
 
                 let app_names: Vec<String> = self.apps.iter().map(|a| a.name.clone()).collect();
-                let observe_url = format!("http://localhost:3001");
+                let observe_url = "http://localhost:3001".to_string();
                 Ok(serde_json::json!({
                     "port": port,
                     "storage": "turso",
