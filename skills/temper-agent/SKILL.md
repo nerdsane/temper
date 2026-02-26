@@ -147,7 +147,7 @@ All take `(tenant, entity_set, ...)`. The `entity_set` is the **plural collectio
 | Method | Signature | Returns |
 |--------|-----------|---------|
 | `get_decisions` | `await temper.get_decisions(tenant)` | Array of pending decisions |
-| `poll_decision` | `await temper.poll_decision(tenant, decision_id)` | Blocks until resolved (30s max) |
+| `poll_decision` | `await temper.poll_decision(tenant, decision_id)` | Blocks until resolved (120s max) |
 
 ### Search Tool (No Server Required)
 
@@ -355,6 +355,6 @@ For simple entities, a minimal CSDL works:
 - **No imports** — `import os`, `import requests`, etc. are blocked
 - **No filesystem** — `open()`, `os.path`, etc. are blocked
 - **No network** — `urllib`, `socket`, etc. are blocked
-- **2 second timeout** — code must complete within 2 seconds
+- **180 second timeout** — code must complete within 180 seconds (allows time for poll_decision)
 - **64 MB memory** — stay within bounds
 - Only `temper.*` and `spec.*` methods are available for I/O
