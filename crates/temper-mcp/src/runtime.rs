@@ -182,8 +182,7 @@ impl RuntimeContext {
             }
             "actions_from" => {
                 let tenant = expect_string_arg(args, 0, "tenant", "spec.actions_from")?;
-                let entity_type =
-                    expect_string_arg(args, 1, "entity_type", "spec.actions_from")?;
+                let entity_type = expect_string_arg(args, 1, "entity_type", "spec.actions_from")?;
                 let state = expect_string_arg(args, 2, "state", "spec.actions_from")?;
                 let filtered: Vec<Value> = self
                     .spec
@@ -198,9 +197,9 @@ impl RuntimeContext {
                                 // `from` can be a string or an array of strings
                                 match a.get("from") {
                                     Some(Value::String(s)) => s == &state,
-                                    Some(Value::Array(arr)) => arr
-                                        .iter()
-                                        .any(|v| v.as_str() == Some(state.as_str())),
+                                    Some(Value::Array(arr)) => {
+                                        arr.iter().any(|v| v.as_str() == Some(state.as_str()))
+                                    }
                                     _ => false,
                                 }
                             })

@@ -1,5 +1,5 @@
-use super::*;
 use super::sandbox::format_authz_denied;
+use super::*;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -493,7 +493,10 @@ async fn e2e_agent_denial_approve_retry() {
     )
     .await;
     let (_, is_error) = tool_text(&response);
-    assert!(!is_error, "create should succeed (no Cedar on create): {response:#}");
+    assert!(
+        !is_error,
+        "create should succeed (no Cedar on create): {response:#}"
+    );
 
     // Step 1: Agent tries a bound action — should be denied (403).
     let response = rpc(
@@ -515,18 +518,11 @@ async fn e2e_agent_denial_approve_retry() {
     // Step 2: Agent lists ALL decisions (no status filter) to debug.
     let response = rpc(
         &ctx,
-        call_tool_request(
-            22,
-            "execute",
-            "return await temper.get_decisions('demo')",
-        ),
+        call_tool_request(22, "execute", "return await temper.get_decisions('demo')"),
     )
     .await;
     let (text, is_error) = tool_text(&response);
-    assert!(
-        !is_error,
-        "get_decisions should succeed: {response:#}"
-    );
+    assert!(!is_error, "get_decisions should succeed: {response:#}");
     let decisions: Value = serde_json::from_str(text).expect("json");
     let decisions_arr = decisions
         .get("decisions")
@@ -549,16 +545,9 @@ async fn e2e_agent_denial_approve_retry() {
         "return await temper.approve_decision('demo', '{}', 'broad')",
         decision_id
     );
-    let response = rpc(
-        &ctx,
-        call_tool_request(23, "execute", &approve_code),
-    )
-    .await;
+    let response = rpc(&ctx, call_tool_request(23, "execute", &approve_code)).await;
     let (text, is_error) = tool_text(&response);
-    assert!(
-        !is_error,
-        "approve_decision should succeed: {response:#}"
-    );
+    assert!(!is_error, "approve_decision should succeed: {response:#}");
     let approval: Value = serde_json::from_str(text).expect("json");
     assert!(
         approval.get("generated_policy").is_some(),
@@ -625,10 +614,7 @@ return {
     .await;
 
     let (text, is_error) = tool_text(&response);
-    assert!(
-        !is_error,
-        "chained search should succeed: {response:#}"
-    );
+    assert!(!is_error, "chained search should succeed: {response:#}");
     let result: Value = serde_json::from_str(text).expect("json");
     assert_eq!(result["tenant"], "demo");
     assert_eq!(result["entity"], "Order");
@@ -653,11 +639,7 @@ async fn e2e_show_spec_matches_search_describe() {
     // Get spec via search (spec.describe)
     let search_resp = rpc(
         &ctx,
-        call_tool_request(
-            40,
-            "search",
-            "return await spec.describe('demo', 'Order')",
-        ),
+        call_tool_request(40, "search", "return await spec.describe('demo', 'Order')"),
     )
     .await;
     let (search_text, search_err) = tool_text(&search_resp);
@@ -689,7 +671,10 @@ async fn e2e_show_spec_matches_search_describe() {
 fn format_authz_denied_with_decision_id() {
     let body = r#"{"error":{"code":"AuthorizationDenied","message":"Authorization denied for AddItem on Order('order-123'). Decision PD-abc123 created."}}"#;
     let result = format_authz_denied(body).expect("should parse");
-    assert!(result.contains("AuthorizationDenied"), "should start with code");
+    assert!(
+        result.contains("AuthorizationDenied"),
+        "should start with code"
+    );
     assert!(result.contains("PD-abc123"), "should include decision ID");
     assert!(
         result.contains("temper.get_decisions()"),

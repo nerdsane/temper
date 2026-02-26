@@ -137,7 +137,5 @@ pub(super) fn format_authz_denied(body: &str) -> Option<String> {
         "\nUse temper.get_decisions() to check pending decisions.".to_string()
     };
 
-    Some(format!(
-        "AuthorizationDenied: {message}{decision_hint}"
-    ))
+    Some(format!("AuthorizationDenied: {message}{decision_hint}"))
 }

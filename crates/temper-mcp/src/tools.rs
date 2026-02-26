@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use super::runtime::RuntimeContext;
 use super::sandbox::{
-    escape_odata_key, expect_json_object_arg, expect_string_arg, format_http_error,
-    format_authz_denied,
+    escape_odata_key, expect_json_object_arg, expect_string_arg, format_authz_denied,
+    format_http_error,
 };
 
 impl RuntimeContext {
@@ -188,8 +188,7 @@ impl RuntimeContext {
                     if let Some(decisions) = result.as_array() {
                         for d in decisions {
                             if d.get("id").and_then(Value::as_str) == Some(&decision_id) {
-                                let status =
-                                    d.get("status").and_then(Value::as_str).unwrap_or("");
+                                let status = d.get("status").and_then(Value::as_str).unwrap_or("");
                                 if status != "Pending" {
                                     return Ok(d.clone());
                                 }
@@ -267,13 +266,13 @@ impl RuntimeContext {
             if text.trim().is_empty() {
                 return Ok(Value::Null);
             }
-            return serde_json::from_str(&text).or_else(|_| Ok(Value::String(text)));
+            return serde_json::from_str(&text).or(Ok(Value::String(text)));
         }
 
-        if status == reqwest::StatusCode::FORBIDDEN {
-            if let Some(rich) = format_authz_denied(&text) {
-                return Err(rich);
-            }
+        if status == reqwest::StatusCode::FORBIDDEN
+            && let Some(rich) = format_authz_denied(&text)
+        {
+            return Err(rich);
         }
 
         Err(format_http_error(status, &text))
@@ -320,7 +319,7 @@ impl RuntimeContext {
             if text.trim().is_empty() {
                 return Ok(Value::Null);
             }
-            return serde_json::from_str(&text).or_else(|_| Ok(Value::String(text)));
+            return serde_json::from_str(&text).or(Ok(Value::String(text)));
         }
 
         Err(format_http_error(status, &text))
