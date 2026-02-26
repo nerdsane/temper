@@ -12,7 +12,7 @@ mod specs_helpers;
 mod verification;
 pub(crate) mod wasm;
 use axum::Router;
-use axum::http::{HeaderMap, StatusCode};
+
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 
@@ -167,8 +167,6 @@ pub fn build_observe_router() -> Router<ServerState> {
             "/evolution/insights",
             get(evolution::list_evolution_insights),
         )
-        .route("/skills/builder", get(serve_builder_skill))
-        .route("/skills/user", get(serve_user_skill))
         .route("/agents", get(agents::list_agents))
         .route("/agents/{agent_id}/history", get(agents::get_agent_history))
         .route("/wasm/modules", get(wasm::list_wasm_modules))
@@ -177,67 +175,6 @@ pub fn build_observe_router() -> Router<ServerState> {
             "/wasm/modules/{module_name}",
             get(wasm::get_wasm_module_info),
         )
-}
-/// GET /observe/skills/builder -- serve the Builder Agent skill file with dynamic base URL.
-async fn serve_builder_skill(
-    headers: HeaderMap,
-) -> (
-    StatusCode,
-    [(axum::http::header::HeaderName, &'static str); 1],
-    String,
-) {
-    let base_url = extract_base_url(&headers);
-    let content = include_str!("../../../../.claude/skills/temper.md")
-        .replace("http://localhost:3333", &base_url)
-        .replace("http://127.0.0.1:3333", &base_url);
-    (
-        StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/markdown; charset=utf-8",
-        )],
-        content,
-    )
-}
-
-/// GET /observe/skills/user -- serve the User Agent skill file with dynamic base URL.
-async fn serve_user_skill(
-    headers: HeaderMap,
-) -> (
-    StatusCode,
-    [(axum::http::header::HeaderName, &'static str); 1],
-    String,
-) {
-    let base_url = extract_base_url(&headers);
-    let content = include_str!("../../../../.claude/skills/temper-user.md")
-        .replace("http://localhost:3333", &base_url)
-        .replace("http://127.0.0.1:3333", &base_url);
-    (
-        StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/markdown; charset=utf-8",
-        )],
-        content,
-    )
-}
-
-/// Extract base URL from request headers (uses X-Forwarded-Host/Proto for proxies like ngrok).
-fn extract_base_url(headers: &HeaderMap) -> String {
-    let host = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get("host"))
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost:3333");
-    let proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(if host.contains("ngrok") || host.contains("ts.net") {
-            "https"
-        } else {
-            "http"
-        });
-    format!("{proto}://{host}")
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 /// The Temper App Builder skill body, embedded at compile time.
-const SKILL_BODY: &str = include_str!("../../../../.claude/skills/temper-developer.md");
+const SKILL_BODY: &str = include_str!("../../../../skills/temper-developer/SKILL.md");
 
 /// YAML frontmatter required by Claude Code's skill loader.
 const SKILL_FRONTMATTER: &str = "\
@@ -20,7 +20,7 @@ description: \"You MUST use this skill when the user asks to build an app, creat
 ";
 
 /// The Temper User (production chat proxy) skill body, embedded at compile time.
-const USER_SKILL_BODY: &str = include_str!("../../../../.claude/skills/temper-user.md");
+const USER_SKILL_BODY: &str = include_str!("../../../../skills/temper-user/SKILL.md");
 
 /// YAML frontmatter for the temper-user skill.
 const USER_SKILL_FRONTMATTER: &str = "\
@@ -31,7 +31,7 @@ description: \"Production chat proxy for a running Temper application. Translate
 ";
 
 /// The Temper Agent skill body (MCP operations), embedded at compile time.
-const AGENT_SKILL_BODY: &str = include_str!("../../../../.claude/skills/temper-agent.md");
+const AGENT_SKILL_BODY: &str = include_str!("../../../../skills/temper-agent/SKILL.md");
 
 /// YAML frontmatter for the temper-agent skill.
 const AGENT_SKILL_FRONTMATTER: &str = "\
