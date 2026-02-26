@@ -26,8 +26,10 @@ pub(super) fn wrap_user_code(code: &str) -> String {
 }
 
 pub(super) fn default_limits() -> ResourceLimits {
+    // 180s allows time for governance operations like poll_decision,
+    // where the agent waits for human approval.
     ResourceLimits::new()
-        .max_duration(Duration::from_secs(2))
+        .max_duration(Duration::from_secs(180))
         .max_memory(64 * 1024 * 1024)
         .max_allocations(250_000)
 }

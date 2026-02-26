@@ -175,10 +175,19 @@ impl RuntimeContext {
                     .ok_or_else(|| "No stdout from child process".to_string())?;
                 let mut lines = tokio::io::BufReader::new(stdout).lines();
 
-                // Read lines until we find the listening port.
+                // Read lines until we find the listening port and observe URL.
+                let mut observe_url = String::new();
                 let port = tokio::time::timeout(std::time::Duration::from_secs(30), async {
                     while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
                         eprintln!("[temper serve] {line}");
+                        // Capture observe URL (printed before listening line)
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("Observe UI: ") {
+                            observe_url = trimmed
+                                .strip_prefix("Observe UI: ")
+                                .unwrap_or("")
+                                .to_string();
+                        }
                         if let Some(rest) = line.strip_prefix("Listening on http://0.0.0.0:") {
                             return rest
                                 .trim()
@@ -195,6 +204,11 @@ impl RuntimeContext {
                     .set(port)
                     .map_err(|_| "Server port already set (race condition)".to_string())?;
 
+                // Fallback if observe URL wasn't detected
+                if observe_url.is_empty() {
+                    observe_url = format!("http://localhost:{}", port + 1);
+                }
+
                 // Keep child alive and drain remaining stdout in background.
                 tokio::spawn(async move {
                     while let Ok(Some(line)) = lines.next_line().await {
@@ -204,7 +218,6 @@ impl RuntimeContext {
                 });
 
                 let app_names: Vec<String> = self.apps.iter().map(|a| a.name.clone()).collect();
-                let observe_url = "http://localhost:3001".to_string();
                 Ok(serde_json::json!({
                     "port": port,
                     "storage": "turso",
@@ -247,12 +260,13 @@ impl RuntimeContext {
                             }
                         }
                     }
-                    if start.elapsed() > std::time::Duration::from_secs(30) {
+                    if start.elapsed() > std::time::Duration::from_secs(120) {
                         return Err(format!(
-                            "poll_decision timed out after 30s: decision {decision_id} still pending"
+                            "poll_decision timed out after 120s: decision {decision_id} still pending. \
+                             Ask the human to approve via the Observe UI or `temper decide` CLI, then retry."
                         ));
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
                 }
             }
             "upload_wasm" => {

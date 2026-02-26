@@ -364,7 +364,10 @@ fn spawn_observe_ui(api_port: u16) {
         return;
     }
 
-    println!("  Observe UI: http://localhost:3001");
+    // Use a deterministic port for the Observe UI (API port + 1).
+    // Next.js respects the PORT env var.
+    let observe_port = api_port.saturating_add(1);
+    println!("  Observe UI: http://localhost:{observe_port}");
     println!();
 
     tokio::spawn(async move {
@@ -372,6 +375,7 @@ fn spawn_observe_ui(api_port: u16) {
             .arg("run")
             .arg("dev")
             .env("NEXT_PUBLIC_TEMPER_API_PORT", api_port.to_string())
+            .env("PORT", observe_port.to_string())
             .current_dir(&observe_dir)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
