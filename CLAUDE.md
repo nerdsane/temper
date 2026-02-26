@@ -8,6 +8,12 @@ Temper builds apps from specs, not from code. The workflow is: interview → gen
 
 Use `/temper` or read `.claude/skills/temper.md` and follow it step by step.
 
+## IMPORTANT: Using Temper MCP Tools
+
+**When calling `mcp__temper__execute` or `mcp__temper__search` — ALWAYS read `.claude/skills/temper-agent.md` first.** It has the exact Python API, spec format, and governance flow. Without it you will get spec parse errors and method signature mistakes.
+
+Use `/temper-agent` or read `.claude/skills/temper-agent.md` and follow its patterns.
+
 ## What is Temper?
 A conversational application platform. Developers describe what they want through conversation — the system generates specs, verifies them, and deploys entity actors. End users interact through a separate production chat. Unmet user intents feed back through the Evolution Engine for developer approval.
 
