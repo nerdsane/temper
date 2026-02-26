@@ -561,9 +561,8 @@ async fn e2e_agent_denial_human_approve_retry() {
 
     // Step 3: Human approves directly via HTTP (simulating Observe UI / temper decide).
     let http = reqwest::Client::new();
-    let approve_url = format!(
-        "http://127.0.0.1:{port}/api/tenants/demo/decisions/{decision_id}/approve"
-    );
+    let approve_url =
+        format!("http://127.0.0.1:{port}/api/tenants/demo/decisions/{decision_id}/approve");
     let approve_resp = http
         .post(&approve_url)
         .json(&json!({ "scope": "broad", "decided_by": "human-test" }))
@@ -701,11 +700,7 @@ async fn execute_without_server_returns_helpful_error() {
 
     let response = rpc(
         &ctx,
-        call_tool_request(
-            50,
-            "execute",
-            "return await temper.list('demo', 'Order')",
-        ),
+        call_tool_request(50, "execute", "return await temper.list('demo', 'Order')"),
     )
     .await;
 

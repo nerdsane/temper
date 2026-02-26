@@ -134,8 +134,7 @@ impl RuntimeContext {
             "start_server" => {
                 // If already started, return current info.
                 if let Some(&port) = self.server_port.get() {
-                    let app_names: Vec<String> =
-                        self.apps.iter().map(|a| a.name.clone()).collect();
+                    let app_names: Vec<String> = self.apps.iter().map(|a| a.name.clone()).collect();
                     return Ok(serde_json::json!({
                         "port": port,
                         "storage": "memory",
@@ -176,27 +175,18 @@ impl RuntimeContext {
                 let mut lines = tokio::io::BufReader::new(stdout).lines();
 
                 // Read lines until we find the listening port.
-                let port = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    async {
-                        while let Some(line) =
-                            lines.next_line().await.map_err(|e| e.to_string())?
-                        {
-                            eprintln!("[temper serve] {line}");
-                            if let Some(rest) =
-                                line.strip_prefix("Listening on http://0.0.0.0:")
-                            {
-                                return rest
-                                    .trim()
-                                    .parse::<u16>()
-                                    .map_err(|e| format!("invalid port: {e}"));
-                            }
+                let port = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
+                        eprintln!("[temper serve] {line}");
+                        if let Some(rest) = line.strip_prefix("Listening on http://0.0.0.0:") {
+                            return rest
+                                .trim()
+                                .parse::<u16>()
+                                .map_err(|e| format!("invalid port: {e}"));
                         }
-                        Err::<u16, String>(
-                            "Server exited before reporting listening port".to_string(),
-                        )
-                    },
-                )
+                    }
+                    Err::<u16, String>("Server exited before reporting listening port".to_string())
+                })
                 .await
                 .map_err(|_| "Timed out waiting for server to start (30s)".to_string())??;
 
@@ -212,8 +202,7 @@ impl RuntimeContext {
                     let _ = child.wait().await;
                 });
 
-                let app_names: Vec<String> =
-                    self.apps.iter().map(|a| a.name.clone()).collect();
+                let app_names: Vec<String> = self.apps.iter().map(|a| a.name.clone()).collect();
                 let observe_url = format!("http://localhost:3001");
                 Ok(serde_json::json!({
                     "port": port,

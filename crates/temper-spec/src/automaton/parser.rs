@@ -482,7 +482,9 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                             "module" => ig.module = Some(value.clone()),
                             "on_success" => ig.on_success = Some(value.clone()),
                             "on_failure" => ig.on_failure = Some(value.clone()),
-                            _ => { ig.config.insert(key.to_string(), value.clone()); }
+                            _ => {
+                                ig.config.insert(key.to_string(), value.clone());
+                            }
                         }
                     }
                 }
@@ -1142,7 +1144,10 @@ method = "GET"
         assert_eq!(ig.name, "fetch_weather");
         assert_eq!(ig.integration_type, "wasm");
         assert_eq!(ig.module.as_deref(), Some("http_fetch"));
-        assert_eq!(ig.config.get("url").map(String::as_str), Some("https://api.open-meteo.com/v1/forecast"));
+        assert_eq!(
+            ig.config.get("url").map(String::as_str),
+            Some("https://api.open-meteo.com/v1/forecast")
+        );
         assert_eq!(ig.config.get("method").map(String::as_str), Some("GET"));
         // Known keys should NOT be in config
         assert!(!ig.config.contains_key("name"));
