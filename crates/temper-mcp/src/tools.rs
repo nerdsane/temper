@@ -7,6 +7,7 @@ use serde_json::Value;
 use super::runtime::RuntimeContext;
 use super::sandbox::{
     escape_odata_key, expect_json_object_arg, expect_string_arg, format_http_error,
+    format_authz_denied,
 };
 
 impl RuntimeContext {
@@ -93,8 +94,120 @@ impl RuntimeContext {
                 )
                 .await
             }
+            // --- Developer methods ---
+            "show_spec" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let entity_type = expect_string_arg(args, 1, "entity_type", method)?;
+                self.spec
+                    .get(&tenant)
+                    .and_then(|v| v.get("entities"))
+                    .and_then(|v| v.get(&entity_type))
+                    .cloned()
+                    .ok_or_else(|| format!("No spec found for {tenant}/{entity_type}"))
+            }
+            "submit_specs" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let specs = expect_json_object_arg(args, 1, "specs", method)?;
+                let payload = serde_json::json!({ "tenant": tenant, "specs": specs });
+                self.temper_request(
+                    &tenant,
+                    Method::POST,
+                    "/api/specs/load-inline".to_string(),
+                    Some(payload),
+                )
+                .await
+            }
+            "set_policy" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let policy_text = expect_string_arg(args, 1, "policy_text", method)?;
+                self.temper_request_text(
+                    &tenant,
+                    Method::PUT,
+                    format!("/api/tenants/{tenant}/policies"),
+                    Some(policy_text),
+                )
+                .await
+            }
+            "get_policies" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                self.temper_request(
+                    &tenant,
+                    Method::GET,
+                    format!("/api/tenants/{tenant}/policies"),
+                    None,
+                )
+                .await
+            }
+            // --- Governance methods ---
+            "get_decisions" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let status = args.get(1).and_then(|a| String::try_from(a).ok());
+                let path = match status {
+                    Some(s) => format!("/api/tenants/{tenant}/decisions?status={s}"),
+                    None => format!("/api/tenants/{tenant}/decisions"),
+                };
+                self.temper_request(&tenant, Method::GET, path, None).await
+            }
+            "approve_decision" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let decision_id = expect_string_arg(args, 1, "decision_id", method)?;
+                let scope = expect_string_arg(args, 2, "scope", method)?;
+                let payload = serde_json::json!({ "scope": scope, "decided_by": "mcp-agent" });
+                self.temper_request(
+                    &tenant,
+                    Method::POST,
+                    format!("/api/tenants/{tenant}/decisions/{decision_id}/approve"),
+                    Some(payload),
+                )
+                .await
+            }
+            "deny_decision" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let decision_id = expect_string_arg(args, 1, "decision_id", method)?;
+                self.temper_request(
+                    &tenant,
+                    Method::POST,
+                    format!("/api/tenants/{tenant}/decisions/{decision_id}/deny"),
+                    None,
+                )
+                .await
+            }
+            "poll_decision" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let decision_id = expect_string_arg(args, 1, "decision_id", method)?;
+                let start = std::time::Instant::now(); // determinism-ok: wall-clock for MCP timeout only
+                loop {
+                    let result = self
+                        .temper_request(
+                            &tenant,
+                            Method::GET,
+                            format!("/api/tenants/{tenant}/decisions"),
+                            None,
+                        )
+                        .await?;
+                    if let Some(decisions) = result.as_array() {
+                        for d in decisions {
+                            if d.get("id").and_then(Value::as_str) == Some(&decision_id) {
+                                let status =
+                                    d.get("status").and_then(Value::as_str).unwrap_or("");
+                                if status != "Pending" {
+                                    return Ok(d.clone());
+                                }
+                            }
+                        }
+                    }
+                    if start.elapsed() > std::time::Duration::from_secs(30) {
+                        return Err(format!(
+                            "poll_decision timed out after 30s: decision {decision_id} still pending"
+                        ));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                }
+            }
             _ => Err(format!(
-                "unknown temper method '{method}'. Allowed methods: list, get, create, action, patch"
+                "unknown temper method '{method}'. Available: list, get, create, action, patch, \
+                 show_spec, submit_specs, set_policy, get_policies, \
+                 get_decisions, approve_decision, deny_decision, poll_decision"
             )),
         }
     }
@@ -129,8 +242,67 @@ impl RuntimeContext {
             .header("X-Tenant-Id", tenant)
             .header("Accept", "application/json");
 
+        if let Some(ref pid) = self.principal_id {
+            request = request
+                .header("X-Temper-Principal-Kind", "agent")
+                .header("X-Temper-Principal-Id", pid.as_str());
+        }
+
         if let Some(ref payload) = body {
             request = request.json(payload);
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("failed to call Temper at {url}: {e}"))?;
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| format!("failed to read Temper response body: {e}"))?;
+
+        if status.is_success() {
+            if text.trim().is_empty() {
+                return Ok(Value::Null);
+            }
+            return serde_json::from_str(&text).or_else(|_| Ok(Value::String(text)));
+        }
+
+        if status == reqwest::StatusCode::FORBIDDEN {
+            if let Some(rich) = format_authz_denied(&text) {
+                return Err(rich);
+            }
+        }
+
+        Err(format_http_error(status, &text))
+    }
+
+    /// Send a request with a plain-text body (e.g. Cedar policy text).
+    async fn temper_request_text(
+        &self,
+        tenant: &str,
+        method: Method,
+        path: String,
+        body: Option<String>,
+    ) -> std::result::Result<Value, String> {
+        let url = format!("http://127.0.0.1:{}{path}", self.temper_port);
+        let mut request = self
+            .http
+            .request(method, &url)
+            .header("X-Tenant-Id", tenant);
+
+        if let Some(ref pid) = self.principal_id {
+            request = request
+                .header("X-Temper-Principal-Kind", "agent")
+                .header("X-Temper-Principal-Id", pid.as_str());
+        }
+
+        if let Some(ref text) = body {
+            request = request
+                .header("Content-Type", "text/plain")
+                .body(text.clone());
         }
 
         let response = request

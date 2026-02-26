@@ -30,6 +30,9 @@ pub struct AppConfig {
 pub struct McpConfig {
     pub temper_port: u16,
     pub apps: Vec<AppConfig>,
+    /// Agent principal ID for `X-Temper-Principal-Id` header. When set, all
+    /// requests include agent identity headers for Cedar authorization.
+    pub principal_id: Option<String>,
 }
 
 #[cfg(test)]

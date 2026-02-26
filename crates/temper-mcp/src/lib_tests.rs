@@ -1,4 +1,5 @@
 use super::*;
+use super::sandbox::format_authz_denied;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -112,6 +113,7 @@ async fn mcp_initialize_handshake() {
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: 3001,
         apps: vec![],
+        principal_id: None,
     })
     .expect("ctx");
 
@@ -139,18 +141,20 @@ async fn search_returns_filtered_spec_data() {
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: 3001,
         apps: vec![app("demo", tmp.path())],
+        principal_id: None,
     })
     .expect("ctx");
 
+    // Use the new spec Dataclass API: spec.actions() returns action list (await required)
     let response = rpc(
-            &ctx,
-            call_tool_request(
-                2,
-                "search",
-                "return [a['name'] for e in spec['demo']['entities'].values() for a in e['actions'] if a['name'] == 'SubmitOrder']",
-            ),
-        )
-        .await;
+        &ctx,
+        call_tool_request(
+            2,
+            "search",
+            "actions = await spec.actions('demo', 'Order')\nreturn [a['name'] for a in actions if a['name'] == 'SubmitOrder']",
+        ),
+    )
+    .await;
 
     let (text, is_error) = tool_text(&response);
     assert!(!is_error, "search should succeed: {response:#}");
@@ -165,6 +169,7 @@ async fn execute_creates_entity_and_reads_it_back() {
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: port,
         apps: vec![app("demo", tmp.path())],
+        principal_id: None,
     })
     .expect("ctx");
 
@@ -197,6 +202,7 @@ async fn execute_invalid_action_returns_409_cleanly() {
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: port,
         apps: vec![app("demo", tmp.path())],
+        principal_id: None,
     })
     .expect("ctx");
 
@@ -230,6 +236,7 @@ async fn sandbox_blocks_filesystem_access() {
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: 3001,
         apps: vec![app("demo", tmp.path())],
+        principal_id: None,
     })
     .expect("ctx");
 
@@ -257,6 +264,7 @@ async fn execute_supports_compound_operation() {
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: port,
         apps: vec![app("demo", tmp.path())],
+        principal_id: None,
     })
     .expect("ctx");
 
@@ -281,4 +289,424 @@ return fetched['status']
     assert!(!is_error, "compound execute should succeed: {response:#}");
     let parsed: Value = serde_json::from_str(text).expect("tool text should be json");
     assert_eq!(parsed, Value::String("Cancelled".to_string()));
+}
+
+#[tokio::test]
+async fn search_spec_tenants() {
+    let tmp = write_temp_specs();
+    let ctx = RuntimeContext::from_config(&McpConfig {
+        temper_port: 3001,
+        apps: vec![app("demo", tmp.path())],
+        principal_id: None,
+    })
+    .expect("ctx");
+
+    let response = rpc(
+        &ctx,
+        call_tool_request(7, "search", "return await spec.tenants()"),
+    )
+    .await;
+
+    let (text, is_error) = tool_text(&response);
+    assert!(!is_error, "spec.tenants() should succeed: {response:#}");
+    let parsed: Value = serde_json::from_str(text).expect("json");
+    assert_eq!(parsed, json!(["demo"]));
+}
+
+#[tokio::test]
+async fn search_spec_entities() {
+    let tmp = write_temp_specs();
+    let ctx = RuntimeContext::from_config(&McpConfig {
+        temper_port: 3001,
+        apps: vec![app("demo", tmp.path())],
+        principal_id: None,
+    })
+    .expect("ctx");
+
+    let response = rpc(
+        &ctx,
+        call_tool_request(8, "search", "return await spec.entities('demo')"),
+    )
+    .await;
+
+    let (text, is_error) = tool_text(&response);
+    assert!(!is_error, "spec.entities() should succeed: {response:#}");
+    let parsed: Value = serde_json::from_str(text).expect("json");
+    let entities = parsed.as_array().expect("should be array");
+    assert!(
+        entities.contains(&json!("Order")),
+        "should include Order: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn search_spec_describe() {
+    let tmp = write_temp_specs();
+    let ctx = RuntimeContext::from_config(&McpConfig {
+        temper_port: 3001,
+        apps: vec![app("demo", tmp.path())],
+        principal_id: None,
+    })
+    .expect("ctx");
+
+    let response = rpc(
+        &ctx,
+        call_tool_request(
+            9,
+            "search",
+            "desc = await spec.describe('demo', 'Order')\nreturn list(desc.keys())",
+        ),
+    )
+    .await;
+
+    let (text, is_error) = tool_text(&response);
+    assert!(!is_error, "spec.describe() should succeed: {response:#}");
+    let parsed: Value = serde_json::from_str(text).expect("json");
+    let keys = parsed.as_array().expect("should be array");
+    assert!(keys.contains(&json!("states")), "should have states key");
+    assert!(keys.contains(&json!("actions")), "should have actions key");
+    assert!(keys.contains(&json!("vars")), "should have vars key");
+}
+
+#[tokio::test]
+async fn search_spec_actions_from() {
+    let tmp = write_temp_specs();
+    let ctx = RuntimeContext::from_config(&McpConfig {
+        temper_port: 3001,
+        apps: vec![app("demo", tmp.path())],
+        principal_id: None,
+    })
+    .expect("ctx");
+
+    let response = rpc(
+        &ctx,
+        call_tool_request(
+            10,
+            "search",
+            "actions = await spec.actions_from('demo', 'Order', 'Draft')\nreturn [a['name'] for a in actions]",
+        ),
+    )
+    .await;
+
+    let (text, is_error) = tool_text(&response);
+    assert!(
+        !is_error,
+        "spec.actions_from() should succeed: {response:#}"
+    );
+    let parsed: Value = serde_json::from_str(text).expect("json");
+    let action_names = parsed.as_array().expect("should be array");
+    // Draft state should have SubmitOrder and CancelOrder as available actions
+    assert!(
+        !action_names.is_empty(),
+        "should have actions available from Draft"
+    );
+}
+
+#[tokio::test]
+async fn tool_list_includes_loaded_summary() {
+    let tmp = write_temp_specs();
+    let ctx = RuntimeContext::from_config(&McpConfig {
+        temper_port: 3001,
+        apps: vec![app("demo", tmp.path())],
+        principal_id: None,
+    })
+    .expect("ctx");
+
+    let response = rpc(
+        &ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/list"
+        }),
+    )
+    .await;
+
+    let tools = response["result"]["tools"].as_array().expect("tools array");
+    let search_desc = tools[0]["description"].as_str().expect("search desc");
+    let execute_desc = tools[1]["description"].as_str().expect("execute desc");
+
+    assert!(
+        search_desc.contains("Loaded: demo"),
+        "search description should include loaded summary: {search_desc}"
+    );
+    assert!(
+        execute_desc.contains("Loaded: demo"),
+        "execute description should include loaded summary: {execute_desc}"
+    );
+    assert!(
+        search_desc.contains("Order"),
+        "search description should list entity types: {search_desc}"
+    );
+}
+
+#[tokio::test]
+async fn execute_show_spec_returns_spec_data() {
+    let tmp = write_temp_specs();
+    let ctx = RuntimeContext::from_config(&McpConfig {
+        temper_port: 3001,
+        apps: vec![app("demo", tmp.path())],
+        principal_id: None,
+    })
+    .expect("ctx");
+
+    let response = rpc(
+        &ctx,
+        call_tool_request(
+            12,
+            "execute",
+            "spec = await temper.show_spec('demo', 'Order')\nreturn list(spec.keys())",
+        ),
+    )
+    .await;
+
+    let (text, is_error) = tool_text(&response);
+    assert!(!is_error, "show_spec should succeed: {response:#}");
+    let parsed: Value = serde_json::from_str(text).expect("json");
+    let keys = parsed.as_array().expect("should be array");
+    assert!(keys.contains(&json!("states")), "should have states");
+    assert!(keys.contains(&json!("actions")), "should have actions");
+}
+
+/// End-to-end governance flow: agent denied → get decision → approve → retry succeeds.
+#[tokio::test]
+async fn e2e_agent_denial_approve_retry() {
+    let tmp = write_temp_specs();
+    let (port, shutdown) = start_test_temper_server().await;
+
+    // Use agent identity so Cedar authorization applies (default-deny for agents).
+    let ctx = RuntimeContext::from_config(&McpConfig {
+        temper_port: port,
+        apps: vec![app("demo", tmp.path())],
+        principal_id: Some("checkout-bot".to_string()),
+    })
+    .expect("ctx");
+
+    // Step 0: Create entity first (creation bypasses Cedar).
+    let response = rpc(
+        &ctx,
+        call_tool_request(
+            20,
+            "execute",
+            "return await temper.create('demo', 'Orders', {'id': 'agent-e2e-1', 'customer': 'Alice'})",
+        ),
+    )
+    .await;
+    let (_, is_error) = tool_text(&response);
+    assert!(!is_error, "create should succeed (no Cedar on create): {response:#}");
+
+    // Step 1: Agent tries a bound action — should be denied (403).
+    let response = rpc(
+        &ctx,
+        call_tool_request(
+            21,
+            "execute",
+            "return await temper.action('demo', 'Orders', 'agent-e2e-1', 'CancelOrder', {'Reason': 'test'})",
+        ),
+    )
+    .await;
+    let (text, is_error) = tool_text(&response);
+    assert!(is_error, "agent action should be denied: {response:#}");
+    assert!(
+        text.contains("AuthorizationDenied"),
+        "should get structured AuthorizationDenied, got: {text}"
+    );
+
+    // Step 2: Agent lists ALL decisions (no status filter) to debug.
+    let response = rpc(
+        &ctx,
+        call_tool_request(
+            22,
+            "execute",
+            "return await temper.get_decisions('demo')",
+        ),
+    )
+    .await;
+    let (text, is_error) = tool_text(&response);
+    assert!(
+        !is_error,
+        "get_decisions should succeed: {response:#}"
+    );
+    let decisions: Value = serde_json::from_str(text).expect("json");
+    let decisions_arr = decisions
+        .get("decisions")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("decisions should have 'decisions' array, got: {text}"));
+    assert!(
+        !decisions_arr.is_empty(),
+        "should have at least one pending decision"
+    );
+    let decision_id = decisions_arr[0]["id"]
+        .as_str()
+        .expect("decision should have id");
+    assert!(
+        decision_id.starts_with("PD-"),
+        "decision ID should start with PD-: {decision_id}"
+    );
+
+    // Step 3: Approve the decision with broad scope.
+    let approve_code = format!(
+        "return await temper.approve_decision('demo', '{}', 'broad')",
+        decision_id
+    );
+    let response = rpc(
+        &ctx,
+        call_tool_request(23, "execute", &approve_code),
+    )
+    .await;
+    let (text, is_error) = tool_text(&response);
+    assert!(
+        !is_error,
+        "approve_decision should succeed: {response:#}"
+    );
+    let approval: Value = serde_json::from_str(text).expect("json");
+    assert!(
+        approval.get("generated_policy").is_some(),
+        "approval should include generated policy: {approval}"
+    );
+
+    // Step 4: Retry the action — should now succeed (Cedar policy was hot-loaded).
+    let response = rpc(
+        &ctx,
+        call_tool_request(
+            24,
+            "execute",
+            r#"
+result = await temper.action('demo', 'Orders', 'agent-e2e-1', 'CancelOrder', {'Reason': 'approved'})
+return result['status']
+"#,
+        ),
+    )
+    .await;
+
+    let _ = shutdown.send(());
+
+    let (text, is_error) = tool_text(&response);
+    assert!(
+        !is_error,
+        "retry action after approval should succeed: {response:#}"
+    );
+    let parsed: Value = serde_json::from_str(text).expect("json");
+    assert_eq!(parsed, Value::String("Cancelled".to_string()));
+}
+
+/// Verify search spec methods work end-to-end with multiple chained calls.
+#[tokio::test]
+async fn e2e_search_chained_discovery() {
+    let tmp = write_temp_specs();
+    let ctx = RuntimeContext::from_config(&McpConfig {
+        temper_port: 3001,
+        apps: vec![app("demo", tmp.path())],
+        principal_id: None,
+    })
+    .expect("ctx");
+
+    // Chain: tenants → entities → describe → actions_from in one search call.
+    let response = rpc(
+        &ctx,
+        call_tool_request(
+            30,
+            "search",
+            r#"
+tenants = await spec.tenants()
+entities = await spec.entities(tenants[0])
+desc = await spec.describe(tenants[0], entities[0])
+draft_actions = await spec.actions_from(tenants[0], entities[0], desc['initial'])
+return {
+    'tenant': tenants[0],
+    'entity': entities[0],
+    'states': desc['states'],
+    'initial': desc['initial'],
+    'draft_action_count': len(draft_actions),
+}
+"#,
+        ),
+    )
+    .await;
+
+    let (text, is_error) = tool_text(&response);
+    assert!(
+        !is_error,
+        "chained search should succeed: {response:#}"
+    );
+    let result: Value = serde_json::from_str(text).expect("json");
+    assert_eq!(result["tenant"], "demo");
+    assert_eq!(result["entity"], "Order");
+    assert_eq!(result["initial"], "Draft");
+    assert!(
+        result["draft_action_count"].as_i64().unwrap_or(0) > 0,
+        "should have actions from Draft state: {result}"
+    );
+}
+
+/// Verify execute show_spec matches search describe for the same entity.
+#[tokio::test]
+async fn e2e_show_spec_matches_search_describe() {
+    let tmp = write_temp_specs();
+    let ctx = RuntimeContext::from_config(&McpConfig {
+        temper_port: 3001,
+        apps: vec![app("demo", tmp.path())],
+        principal_id: None,
+    })
+    .expect("ctx");
+
+    // Get spec via search (spec.describe)
+    let search_resp = rpc(
+        &ctx,
+        call_tool_request(
+            40,
+            "search",
+            "return await spec.describe('demo', 'Order')",
+        ),
+    )
+    .await;
+    let (search_text, search_err) = tool_text(&search_resp);
+    assert!(!search_err, "search describe failed: {search_resp:#}");
+
+    // Get spec via execute (temper.show_spec)
+    let exec_resp = rpc(
+        &ctx,
+        call_tool_request(
+            41,
+            "execute",
+            "return await temper.show_spec('demo', 'Order')",
+        ),
+    )
+    .await;
+    let (exec_text, exec_err) = tool_text(&exec_resp);
+    assert!(!exec_err, "show_spec failed: {exec_resp:#}");
+
+    // They should return the same data.
+    let search_val: Value = serde_json::from_str(search_text).expect("json");
+    let exec_val: Value = serde_json::from_str(exec_text).expect("json");
+    assert_eq!(
+        search_val, exec_val,
+        "spec.describe and temper.show_spec should return identical data"
+    );
+}
+
+#[test]
+fn format_authz_denied_with_decision_id() {
+    let body = r#"{"error":{"code":"AuthorizationDenied","message":"Authorization denied for AddItem on Order('order-123'). Decision PD-abc123 created."}}"#;
+    let result = format_authz_denied(body).expect("should parse");
+    assert!(result.contains("AuthorizationDenied"), "should start with code");
+    assert!(result.contains("PD-abc123"), "should include decision ID");
+    assert!(
+        result.contains("temper.get_decisions()"),
+        "should include guidance"
+    );
+}
+
+#[test]
+fn format_authz_denied_without_decision_id() {
+    let body = r#"{"error":{"code":"AuthorizationDenied","message":"Authorization denied: no matching permit policy"}}"#;
+    let result = format_authz_denied(body).expect("should parse");
+    assert!(result.contains("AuthorizationDenied"));
+    assert!(result.contains("temper.get_decisions()"));
+}
+
+#[test]
+fn format_authz_denied_non_matching_body() {
+    let body = r#"{"error":{"code":"NotFound","message":"Entity not found"}}"#;
+    assert!(format_authz_denied(body).is_none());
 }

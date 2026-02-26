@@ -106,3 +106,38 @@ pub(super) fn format_http_error(status: StatusCode, body: &str) -> String {
         details
     )
 }
+
+/// Parse a 403 Forbidden body for structured Cedar denial information.
+///
+/// Returns a rich error message with decision ID and guidance if the body
+/// matches the Temper AuthorizationDenied format.
+pub(super) fn format_authz_denied(body: &str) -> Option<String> {
+    let json: Value = serde_json::from_str(body).ok()?;
+    let code = json.pointer("/error/code").and_then(Value::as_str)?;
+    if code != "AuthorizationDenied" {
+        return None;
+    }
+
+    let message = json
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("Authorization denied");
+
+    // Look for decision ID in the message (format: "PD-<uuid>")
+    let decision_hint = if let Some(pos) = message.find("PD-") {
+        let id_end = message[pos..]
+            .find(|c: char| c.is_whitespace() || c == ')' || c == '"')
+            .unwrap_or(message.len() - pos);
+        let decision_id = &message[pos..pos + id_end];
+        format!(
+            "\nDecision: {decision_id} (pending human approval)\n\
+             Use temper.get_decisions() to check, or temper.approve_decision() if authorized."
+        )
+    } else {
+        "\nUse temper.get_decisions() to check pending decisions.".to_string()
+    };
+
+    Some(format!(
+        "AuthorizationDenied: {message}{decision_hint}"
+    ))
+}

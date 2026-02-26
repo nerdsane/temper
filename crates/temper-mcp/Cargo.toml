@@ -11,7 +11,7 @@ temper-spec = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "rt", "macros"] }
+tokio = { workspace = true, features = ["io-util", "rt", "macros", "time"] }
 reqwest = { workspace = true }
 thiserror = { workspace = true }
 
@@ -20,6 +20,6 @@ monty = { git = "https://github.com/pydantic/monty.git", package = "monty", rev 
 
 [dev-dependencies]
 axum = { workspace = true }
-temper-server = { workspace = true }
+temper-server = { workspace = true, features = ["observe"] }
 temper-runtime = { workspace = true }
 tempfile = "3"

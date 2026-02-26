@@ -106,6 +106,30 @@ fn automaton_to_json(automaton: &temper_spec::Automaton) -> Value {
         "vars": vars,
     })
 }
+/// Generate a one-liner summary of loaded specs for tool descriptions.
+///
+/// Example output: `"\n\nLoaded: ecommerce (Order, Payment, Shipment)"`
+pub(super) fn generate_loaded_summary(spec: &Value) -> String {
+    let Some(root) = spec.as_object() else {
+        return String::new();
+    };
+
+    let mut parts = Vec::new();
+    for (tenant, tenant_data) in root {
+        let entities = tenant_data
+            .get("entities")
+            .and_then(Value::as_object)
+            .map(|obj| obj.keys().cloned().collect::<Vec<_>>().join(", "))
+            .unwrap_or_default();
+        parts.push(format!("{tenant} ({entities})"));
+    }
+
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("\n\nLoaded: {}", parts.join("; "))
+}
+
 fn find_files_with_suffix(root: &Path, suffix: &str) -> Result<Vec<PathBuf>> {
     if !root.exists() {
         bail!("specs path does not exist: {}", root.display());
