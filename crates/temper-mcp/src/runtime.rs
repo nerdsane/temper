@@ -1,6 +1,7 @@
 //! MCP runtime context and stdio server loop.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use monty::{
@@ -26,7 +27,13 @@ pub(super) struct AppMetadata {
 pub(super) struct RuntimeContext {
     pub(super) spec: Value,
     pub(super) app_metadata: BTreeMap<String, AppMetadata>,
-    pub(super) temper_port: u16,
+    /// Port of the Temper HTTP server. Set at construction when an explicit
+    /// port is provided, or later by `start_server` in self-contained mode.
+    pub(super) server_port: Arc<std::sync::OnceLock<u16>>,
+    /// App configurations (used to build `--app` args when spawning server).
+    pub(super) apps: Vec<crate::AppConfig>,
+    /// Path to the temper binary (for spawning `temper serve`).
+    pub(super) binary_path: Option<std::path::PathBuf>,
     pub(super) http: reqwest::Client,
     pub(super) principal_id: Option<String>,
 }
@@ -34,10 +41,16 @@ pub(super) struct RuntimeContext {
 impl RuntimeContext {
     pub(super) fn from_config(config: &McpConfig) -> Result<Self> {
         let (spec, app_metadata) = load_apps(&config.apps)?;
+        let server_port = Arc::new(std::sync::OnceLock::new());
+        if let Some(p) = config.temper_port {
+            let _ = server_port.set(p);
+        }
         Ok(Self {
             spec,
             app_metadata,
-            temper_port: config.temper_port,
+            server_port,
+            apps: config.apps.clone(),
+            binary_path: std::env::current_exe().ok(),
             http: reqwest::Client::new(),
             principal_id: config.principal_id.clone(),
         })

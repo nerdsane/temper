@@ -16,6 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use tokio::io::AsyncBufReadExt;
 
 use temper_evolution::PostgresRecordStore;
 use temper_observe::ClickHouseStore;
@@ -61,6 +62,7 @@ pub async fn run(
     apps: Vec<(String, String)>,
     storage: StorageBackend,
     storage_explicit: bool,
+    observe: bool,
 ) -> Result<()> {
     // Initialize OTEL tracing if OTLP_ENDPOINT is set.
     // The guard must be held alive for the server's lifetime.
@@ -283,6 +285,15 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .with_context(|| format!("Failed to bind to port {port}"))?;
+    let actual_port = listener
+        .local_addr()
+        .context("Failed to get listener local address")?
+        .port();
+
+    // Optionally start the Observe UI (Next.js dev server).
+    if observe {
+        spawn_observe_ui(actual_port);
+    }
 
     // Spawn background verification AFTER the server is listening,
     // so the observe UI can connect and stream results.
@@ -291,7 +302,7 @@ pub async fn run(
     }
     spawn_optimization_loop(&state);
 
-    println!("Listening on http://0.0.0.0:{port}");
+    println!("Listening on http://0.0.0.0:{actual_port}");
     axum::serve(listener, router)
         .await
         .context("Server error")?;
@@ -319,6 +330,69 @@ fn spawn_optimization_loop(state: &PlatformState) {
         loop {
             ticker.tick().await;
             let _ = run_optimization_cycle(&store, &state).await;
+        }
+    });
+}
+
+/// Spawn the Observe UI (Next.js dev server) in the background.
+///
+/// Looks for the `observe/` directory relative to the binary or cwd.
+/// Falls back gracefully if npm/node_modules are unavailable.
+fn spawn_observe_ui(api_port: u16) {
+    // Try to find the observe directory relative to the binary, then cwd.
+    let observe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            let d = p.parent()?.parent()?.parent()?.join("observe");
+            if d.exists() { Some(d) } else { None }
+        })
+        .or_else(|| {
+            let d = std::env::current_dir().ok()?.join("observe");
+            if d.exists() { Some(d) } else { None }
+        });
+
+    let Some(observe_dir) = observe_dir else {
+        eprintln!("  Warning: observe/ directory not found, skipping Observe UI");
+        return;
+    };
+
+    if !observe_dir.join("node_modules").exists() {
+        eprintln!(
+            "  Warning: observe/node_modules not found. Run `npm install` in {} first.",
+            observe_dir.display()
+        );
+        return;
+    }
+
+    println!("  Observe UI: http://localhost:3001");
+    println!();
+
+    tokio::spawn(async move {
+        let result = tokio::process::Command::new("npm")
+            .arg("run")
+            .arg("dev")
+            .env("NEXT_PUBLIC_TEMPER_API_PORT", api_port.to_string())
+            .current_dir(&observe_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn();
+
+        match result {
+            Ok(mut child) => {
+                if let Some(stderr) = child.stderr.take() {
+                    let mut lines = tokio::io::BufReader::new(stderr).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if line.contains("error") || line.contains("Error") {
+                            eprintln!("  [observe] {line}");
+                        }
+                    }
+                }
+                let _ = child.wait().await;
+            }
+            Err(e) => {
+                eprintln!("  Warning: failed to start Observe UI: {e}");
+            }
         }
     });
 }

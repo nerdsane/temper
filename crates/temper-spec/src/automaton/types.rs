@@ -5,6 +5,7 @@
 //! effect (state change program).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// A complete I/O Automaton specification for a single entity type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +195,10 @@ pub struct Integration {
     /// Action to dispatch on failed WASM execution (required when `type = "wasm"`).
     #[serde(default)]
     pub on_failure: Option<String>,
+    /// Arbitrary config passed to the WASM module at invocation time.
+    /// Common keys: `url`, `method`, `headers`.
+    #[serde(flatten, default)]
+    pub config: BTreeMap<String, String>,
 }
 
 fn default_webhook() -> String {

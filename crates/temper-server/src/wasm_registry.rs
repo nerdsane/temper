@@ -14,6 +14,8 @@ use temper_runtime::tenant::TenantId;
 pub struct WasmModuleRegistry {
     /// Maps (tenant, module_name) → sha256_hash.
     modules: BTreeMap<(String, String), String>,
+    /// Built-in modules available to all tenants (module_name → sha256_hash).
+    builtins: BTreeMap<String, String>,
 }
 
 impl WasmModuleRegistry {
@@ -30,10 +32,17 @@ impl WasmModuleRegistry {
         );
     }
 
-    /// Look up the hash for a tenant's module.
+    /// Register a built-in module available to all tenants.
+    pub fn register_builtin(&mut self, module_name: &str, sha256_hash: &str) {
+        self.builtins
+            .insert(module_name.to_string(), sha256_hash.to_string());
+    }
+
+    /// Look up the hash for a tenant's module, falling back to built-in modules.
     pub fn get_hash(&self, tenant: &TenantId, module_name: &str) -> Option<&str> {
         self.modules
             .get(&(tenant.to_string(), module_name.to_string()))
+            .or_else(|| self.builtins.get(module_name))
             .map(|s| s.as_str())
     }
 

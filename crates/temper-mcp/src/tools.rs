@@ -1,8 +1,11 @@
 //! Temper tool dispatch for MCP execute sandbox calls.
 
+use std::process::Stdio;
+
 use monty::MontyObject;
 use reqwest::Method;
 use serde_json::Value;
+use tokio::io::AsyncBufReadExt;
 
 use super::runtime::RuntimeContext;
 use super::sandbox::{
@@ -117,17 +120,6 @@ impl RuntimeContext {
                 )
                 .await
             }
-            "set_policy" => {
-                let tenant = expect_string_arg(args, 0, "tenant", method)?;
-                let policy_text = expect_string_arg(args, 1, "policy_text", method)?;
-                self.temper_request_text(
-                    &tenant,
-                    Method::PUT,
-                    format!("/api/tenants/{tenant}/policies"),
-                    Some(policy_text),
-                )
-                .await
-            }
             "get_policies" => {
                 let tenant = expect_string_arg(args, 0, "tenant", method)?;
                 self.temper_request(
@@ -138,6 +130,100 @@ impl RuntimeContext {
                 )
                 .await
             }
+            // --- Lifecycle ---
+            "start_server" => {
+                // If already started, return current info.
+                if let Some(&port) = self.server_port.get() {
+                    let app_names: Vec<String> =
+                        self.apps.iter().map(|a| a.name.clone()).collect();
+                    return Ok(serde_json::json!({
+                        "port": port,
+                        "storage": "memory",
+                        "apps": app_names,
+                        "status": "already_running"
+                    }));
+                }
+
+                let binary = self.binary_path.clone().ok_or_else(|| {
+                    "Cannot determine temper binary path. \
+                     Ensure the MCP server is running from the temper CLI."
+                        .to_string()
+                })?;
+
+                let mut cmd = tokio::process::Command::new(&binary);
+                cmd.arg("serve")
+                    .arg("--port")
+                    .arg("0")
+                    .arg("--storage")
+                    .arg("turso")
+                    .arg("--observe");
+                for a in &self.apps {
+                    cmd.arg("--app")
+                        .arg(format!("{}={}", a.name, a.specs_dir.display()));
+                }
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::inherit());
+                cmd.kill_on_drop(true);
+
+                let mut child = cmd
+                    .spawn()
+                    .map_err(|e| format!("Failed to spawn temper serve: {e}"))?;
+
+                let stdout = child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| "No stdout from child process".to_string())?;
+                let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+                // Read lines until we find the listening port.
+                let port = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    async {
+                        while let Some(line) =
+                            lines.next_line().await.map_err(|e| e.to_string())?
+                        {
+                            eprintln!("[temper serve] {line}");
+                            if let Some(rest) =
+                                line.strip_prefix("Listening on http://0.0.0.0:")
+                            {
+                                return rest
+                                    .trim()
+                                    .parse::<u16>()
+                                    .map_err(|e| format!("invalid port: {e}"));
+                            }
+                        }
+                        Err::<u16, String>(
+                            "Server exited before reporting listening port".to_string(),
+                        )
+                    },
+                )
+                .await
+                .map_err(|_| "Timed out waiting for server to start (30s)".to_string())??;
+
+                self.server_port
+                    .set(port)
+                    .map_err(|_| "Server port already set (race condition)".to_string())?;
+
+                // Keep child alive and drain remaining stdout in background.
+                tokio::spawn(async move {
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        eprintln!("[temper serve] {line}");
+                    }
+                    let _ = child.wait().await;
+                });
+
+                let app_names: Vec<String> =
+                    self.apps.iter().map(|a| a.name.clone()).collect();
+                let observe_url = format!("http://localhost:3001");
+                Ok(serde_json::json!({
+                    "port": port,
+                    "storage": "turso",
+                    "observe_url": observe_url,
+                    "apps": app_names,
+                    "status": "started",
+                    "note": "Observe UI may be starting at the observe_url. Use it to approve/deny agent decisions."
+                }))
+            }
             // --- Governance methods ---
             "get_decisions" => {
                 let tenant = expect_string_arg(args, 0, "tenant", method)?;
@@ -147,30 +233,6 @@ impl RuntimeContext {
                     None => format!("/api/tenants/{tenant}/decisions"),
                 };
                 self.temper_request(&tenant, Method::GET, path, None).await
-            }
-            "approve_decision" => {
-                let tenant = expect_string_arg(args, 0, "tenant", method)?;
-                let decision_id = expect_string_arg(args, 1, "decision_id", method)?;
-                let scope = expect_string_arg(args, 2, "scope", method)?;
-                let payload = serde_json::json!({ "scope": scope, "decided_by": "mcp-agent" });
-                self.temper_request(
-                    &tenant,
-                    Method::POST,
-                    format!("/api/tenants/{tenant}/decisions/{decision_id}/approve"),
-                    Some(payload),
-                )
-                .await
-            }
-            "deny_decision" => {
-                let tenant = expect_string_arg(args, 0, "tenant", method)?;
-                let decision_id = expect_string_arg(args, 1, "decision_id", method)?;
-                self.temper_request(
-                    &tenant,
-                    Method::POST,
-                    format!("/api/tenants/{tenant}/decisions/{decision_id}/deny"),
-                    None,
-                )
-                .await
             }
             "poll_decision" => {
                 let tenant = expect_string_arg(args, 0, "tenant", method)?;
@@ -203,10 +265,34 @@ impl RuntimeContext {
                     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                 }
             }
+            "upload_wasm" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let module_name = expect_string_arg(args, 1, "module_name", method)?;
+                let wasm_path = expect_string_arg(args, 2, "wasm_path", method)?;
+
+                let bytes = tokio::fs::read(&wasm_path)
+                    .await
+                    .map_err(|e| format!("failed to read WASM file '{}': {}", wasm_path, e))?;
+
+                self.temper_request_bytes(
+                    &tenant,
+                    reqwest::Method::POST,
+                    format!("/api/wasm/modules/{module_name}"),
+                    bytes,
+                )
+                .await
+            }
+            "approve_decision" | "deny_decision" | "set_policy" => Err(format!(
+                "temper.{method}() is not available to agents. \
+                 Governance write operations (approve, deny, set_policy) \
+                 can only be performed by humans via the Observe UI or `temper decide` CLI."
+            )),
             _ => Err(format!(
-                "unknown temper method '{method}'. Available: list, get, create, action, patch, \
-                 show_spec, submit_specs, set_policy, get_policies, \
-                 get_decisions, approve_decision, deny_decision, poll_decision"
+                "unknown temper method '{method}'. Available: start_server, \
+                 list, get, create, action, patch, \
+                 show_spec, submit_specs, get_policies, \
+                 upload_wasm, \
+                 get_decisions, poll_decision"
             )),
         }
     }
@@ -234,7 +320,12 @@ impl RuntimeContext {
         path: String,
         body: Option<Value>,
     ) -> std::result::Result<Value, String> {
-        let url = format!("http://127.0.0.1:{}{path}", self.temper_port);
+        let port = self.server_port.get().ok_or_else(|| {
+            "Server not running. Call `await temper.start_server()` first, \
+             or restart MCP with --port to connect to an existing server."
+                .to_string()
+        })?;
+        let url = format!("http://127.0.0.1:{port}{path}");
         let mut request = self
             .http
             .request(method, &url)
@@ -278,19 +369,25 @@ impl RuntimeContext {
         Err(format_http_error(status, &text))
     }
 
-    /// Send a request with a plain-text body (e.g. Cedar policy text).
-    async fn temper_request_text(
+    /// Send a request with a raw binary body (e.g. WASM module bytes).
+    async fn temper_request_bytes(
         &self,
         tenant: &str,
         method: Method,
         path: String,
-        body: Option<String>,
+        body: Vec<u8>,
     ) -> std::result::Result<Value, String> {
-        let url = format!("http://127.0.0.1:{}{path}", self.temper_port);
+        let port = self.server_port.get().ok_or_else(|| {
+            "Server not running. Call `await temper.start_server()` first, \
+             or restart MCP with --port to connect to an existing server."
+                .to_string()
+        })?;
+        let url = format!("http://127.0.0.1:{port}{path}");
         let mut request = self
             .http
             .request(method, &url)
-            .header("X-Tenant-Id", tenant);
+            .header("X-Tenant-Id", tenant)
+            .header("Content-Type", "application/wasm");
 
         if let Some(ref pid) = self.principal_id {
             request = request
@@ -298,11 +395,7 @@ impl RuntimeContext {
                 .header("X-Temper-Principal-Id", pid.as_str());
         }
 
-        if let Some(ref text) = body {
-            request = request
-                .header("Content-Type", "text/plain")
-                .body(text.clone());
-        }
+        request = request.body(body);
 
         let response = request
             .send()

@@ -34,6 +34,7 @@ impl ServerState {
         custom_effects: &'a [String],
         entity_state: &'a EntityState,
         agent_ctx: &'a AgentContext,
+        action_params: &'a serde_json::Value,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Option<EntityResponse>, String>> + Send + 'a>,
     > {
@@ -146,10 +147,11 @@ impl ServerState {
                     entity_type: entity_type.to_string(),
                     entity_id: entity_id.to_string(),
                     trigger_action: action.to_string(),
-                    trigger_params: serde_json::Value::Null,
+                    trigger_params: action_params.clone(),
                     entity_state: serde_json::to_value(entity_state).unwrap_or_default(),
                     agent_id: agent_ctx.agent_id.clone(),
                     session_id: agent_ctx.session_id.clone(),
+                    integration_config: integration.config.clone(),
                 };
 
                 // Phase 3: Pre-filter secrets through authorization gate

@@ -49,6 +49,7 @@ impl ServerState {
         custom_effects: &[String],
         _entity_state: &EntityState,
         agent_ctx: &AgentContext,
+        action_params: &serde_json::Value,
     ) {
         // Look up integrations for this entity type
         let integrations = {
@@ -173,10 +174,11 @@ impl ServerState {
                 entity_type: entity_type.to_string(),
                 entity_id: entity_id.to_string(),
                 trigger_action: _action.to_string(),
-                trigger_params: serde_json::Value::Null,
+                trigger_params: action_params.clone(),
                 entity_state: serde_json::to_value(_entity_state).unwrap_or_default(),
                 agent_id: agent_ctx.agent_id.clone(),
                 session_id: agent_ctx.session_id.clone(),
+                integration_config: integration.config.clone(),
             };
 
             // Look up module hash
@@ -496,6 +498,7 @@ impl ServerState {
         agent_ctx: &AgentContext,
         await_integration: bool,
     ) -> Result<EntityResponse, String> {
+        let action_params = params.clone();
         let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
             // Record a trajectory entry for the "no transition table" failure.
             let entry = TrajectoryEntry {
@@ -645,6 +648,7 @@ impl ServerState {
                         &response.custom_effects,
                         &response.state,
                         agent_ctx,
+                        &action_params,
                     )
                     .await
                 {
@@ -659,6 +663,7 @@ impl ServerState {
                     &response.custom_effects,
                     &response.state,
                     agent_ctx,
+                    &action_params,
                 );
             }
         }

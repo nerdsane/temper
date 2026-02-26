@@ -111,7 +111,7 @@ async fn start_test_temper_server() -> (u16, oneshot::Sender<()>) {
 #[tokio::test]
 async fn mcp_initialize_handshake() {
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: 3001,
+        temper_port: Some(3001),
         apps: vec![],
         principal_id: None,
     })
@@ -124,7 +124,7 @@ async fn mcp_initialize_handshake() {
             "id": 1,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2025-11-05"
+                "protocolVersion": "2024-11-05"
             }
         }),
     )
@@ -139,7 +139,7 @@ async fn mcp_initialize_handshake() {
 async fn search_returns_filtered_spec_data() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: 3001,
+        temper_port: Some(3001),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -167,7 +167,7 @@ async fn execute_creates_entity_and_reads_it_back() {
     let tmp = write_temp_specs();
     let (port, shutdown) = start_test_temper_server().await;
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: port,
+        temper_port: Some(port),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -200,7 +200,7 @@ async fn execute_invalid_action_returns_409_cleanly() {
     let tmp = write_temp_specs();
     let (port, shutdown) = start_test_temper_server().await;
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: port,
+        temper_port: Some(port),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -234,7 +234,7 @@ return 'unreachable'
 async fn sandbox_blocks_filesystem_access() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: 3001,
+        temper_port: Some(3001),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -262,7 +262,7 @@ async fn execute_supports_compound_operation() {
     let tmp = write_temp_specs();
     let (port, shutdown) = start_test_temper_server().await;
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: port,
+        temper_port: Some(port),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -295,7 +295,7 @@ return fetched['status']
 async fn search_spec_tenants() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: 3001,
+        temper_port: Some(3001),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -317,7 +317,7 @@ async fn search_spec_tenants() {
 async fn search_spec_entities() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: 3001,
+        temper_port: Some(3001),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -343,7 +343,7 @@ async fn search_spec_entities() {
 async fn search_spec_describe() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: 3001,
+        temper_port: Some(3001),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -372,7 +372,7 @@ async fn search_spec_describe() {
 async fn search_spec_actions_from() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: 3001,
+        temper_port: Some(3001),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -406,7 +406,7 @@ async fn search_spec_actions_from() {
 async fn tool_list_includes_loaded_summary() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: 3001,
+        temper_port: Some(3001),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -444,7 +444,7 @@ async fn tool_list_includes_loaded_summary() {
 async fn execute_show_spec_returns_spec_data() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: 3001,
+        temper_port: Some(3001),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -468,15 +468,16 @@ async fn execute_show_spec_returns_spec_data() {
     assert!(keys.contains(&json!("actions")), "should have actions");
 }
 
-/// End-to-end governance flow: agent denied → get decision → approve → retry succeeds.
+/// End-to-end governance flow: agent denied → get decision → human approves
+/// directly (not via agent sandbox) → agent retries → success.
 #[tokio::test]
-async fn e2e_agent_denial_approve_retry() {
+async fn e2e_agent_denial_human_approve_retry() {
     let tmp = write_temp_specs();
     let (port, shutdown) = start_test_temper_server().await;
 
     // Use agent identity so Cedar authorization applies (default-deny for agents).
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: port,
+        temper_port: Some(port),
         apps: vec![app("demo", tmp.path())],
         principal_id: Some("checkout-bot".to_string()),
     })
@@ -514,6 +515,11 @@ async fn e2e_agent_denial_approve_retry() {
         text.contains("AuthorizationDenied"),
         "should get structured AuthorizationDenied, got: {text}"
     );
+    // Verify enhanced error message includes poll_decision guidance.
+    assert!(
+        text.contains("poll_decision"),
+        "denial error should mention poll_decision, got: {text}"
+    );
 
     // Step 2: Agent lists ALL decisions (no status filter) to debug.
     let response = rpc(
@@ -540,18 +546,34 @@ async fn e2e_agent_denial_approve_retry() {
         "decision ID should start with PD-: {decision_id}"
     );
 
-    // Step 3: Approve the decision with broad scope.
+    // Step 2b: Verify agent cannot self-approve.
     let approve_code = format!(
         "return await temper.approve_decision('demo', '{}', 'broad')",
         decision_id
     );
-    let response = rpc(&ctx, call_tool_request(23, "execute", &approve_code)).await;
+    let response = rpc(&ctx, call_tool_request(22, "execute", &approve_code)).await;
     let (text, is_error) = tool_text(&response);
-    assert!(!is_error, "approve_decision should succeed: {response:#}");
-    let approval: Value = serde_json::from_str(text).expect("json");
+    assert!(is_error, "approve_decision should be blocked: {response:#}");
     assert!(
-        approval.get("generated_policy").is_some(),
-        "approval should include generated policy: {approval}"
+        text.contains("not available to agents"),
+        "should get governance write blocked message, got: {text}"
+    );
+
+    // Step 3: Human approves directly via HTTP (simulating Observe UI / temper decide).
+    let http = reqwest::Client::new();
+    let approve_url = format!(
+        "http://127.0.0.1:{port}/api/tenants/demo/decisions/{decision_id}/approve"
+    );
+    let approve_resp = http
+        .post(&approve_url)
+        .json(&json!({ "scope": "broad", "decided_by": "human-test" }))
+        .send()
+        .await
+        .expect("approve request");
+    assert!(
+        approve_resp.status().is_success(),
+        "human approval should succeed: {:?}",
+        approve_resp.status()
     );
 
     // Step 4: Retry the action — should now succeed (Cedar policy was hot-loaded).
@@ -573,7 +595,7 @@ return result['status']
     let (text, is_error) = tool_text(&response);
     assert!(
         !is_error,
-        "retry action after approval should succeed: {response:#}"
+        "retry action after human approval should succeed: {response:#}"
     );
     let parsed: Value = serde_json::from_str(text).expect("json");
     assert_eq!(parsed, Value::String("Cancelled".to_string()));
@@ -584,7 +606,7 @@ return result['status']
 async fn e2e_search_chained_discovery() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: 3001,
+        temper_port: Some(3001),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -630,7 +652,7 @@ return {
 async fn e2e_show_spec_matches_search_describe() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: 3001,
+        temper_port: Some(3001),
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -667,6 +689,60 @@ async fn e2e_show_spec_matches_search_describe() {
     );
 }
 
+#[tokio::test]
+async fn execute_without_server_returns_helpful_error() {
+    let tmp = write_temp_specs();
+    let ctx = RuntimeContext::from_config(&McpConfig {
+        temper_port: None,
+        apps: vec![app("demo", tmp.path())],
+        principal_id: None,
+    })
+    .expect("ctx");
+
+    let response = rpc(
+        &ctx,
+        call_tool_request(
+            50,
+            "execute",
+            "return await temper.list('demo', 'Order')",
+        ),
+    )
+    .await;
+
+    let (text, is_error) = tool_text(&response);
+    assert!(is_error, "execute without server should fail");
+    assert!(
+        text.contains("Server not running"),
+        "should get helpful error message, got: {text}"
+    );
+    assert!(
+        text.contains("start_server"),
+        "should mention start_server, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn search_works_without_server() {
+    let tmp = write_temp_specs();
+    let ctx = RuntimeContext::from_config(&McpConfig {
+        temper_port: None,
+        apps: vec![app("demo", tmp.path())],
+        principal_id: None,
+    })
+    .expect("ctx");
+
+    let response = rpc(
+        &ctx,
+        call_tool_request(51, "search", "return await spec.tenants()"),
+    )
+    .await;
+
+    let (text, is_error) = tool_text(&response);
+    assert!(!is_error, "search should work without server: {response:#}");
+    let parsed: Value = serde_json::from_str(text).expect("json");
+    assert_eq!(parsed, json!(["demo"]));
+}
+
 #[test]
 fn format_authz_denied_with_decision_id() {
     let body = r#"{"error":{"code":"AuthorizationDenied","message":"Authorization denied for AddItem on Order('order-123'). Decision PD-abc123 created."}}"#;
@@ -677,8 +753,12 @@ fn format_authz_denied_with_decision_id() {
     );
     assert!(result.contains("PD-abc123"), "should include decision ID");
     assert!(
-        result.contains("temper.get_decisions()"),
-        "should include guidance"
+        result.contains("poll_decision"),
+        "should include poll_decision guidance"
+    );
+    assert!(
+        result.contains("not available"),
+        "should tell agent governance writes are not available"
     );
 }
 
@@ -687,7 +767,8 @@ fn format_authz_denied_without_decision_id() {
     let body = r#"{"error":{"code":"AuthorizationDenied","message":"Authorization denied: no matching permit policy"}}"#;
     let result = format_authz_denied(body).expect("should parse");
     assert!(result.contains("AuthorizationDenied"));
-    assert!(result.contains("temper.get_decisions()"));
+    assert!(result.contains("get_decisions"));
+    assert!(result.contains("poll_decision"));
 }
 
 #[test]

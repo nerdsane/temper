@@ -5071,6 +5071,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

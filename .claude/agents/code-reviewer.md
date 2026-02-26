@@ -8,10 +8,11 @@ Review ALL code changes before committing. This is mandatory — the pre-commit 
 
 ## What You Review
 
-### 1. Plan Alignment
+### 1. Plan & ADR Alignment
 - Read the current plan in `.progress/` (latest file by sequence number)
 - Does the code change match what the plan says should be done?
 - Are there deviations? If so, are they justified?
+- **ADR check**: If this is a new feature, architectural change, new integration, or multi-crate change — verify a corresponding ADR exists in `docs/adrs/`. If no ADR exists, this is a BLOCKING finding.
 
 ### 2. TigerStyle Compliance
 - **Bounded mailboxes**: Every actor mailbox has a capacity limit

@@ -15,7 +15,7 @@ pub use runtime::run_stdio_server;
 use protocol::dispatch_json_value;
 use runtime::RuntimeContext;
 
-const MCP_PROTOCOL_VERSION: &str = "2025-11-05";
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MCP_SERVER_NAME: &str = "temper-mcp";
 
 /// A single app spec source, loaded as `name=specs_dir` from CLI.
@@ -28,7 +28,7 @@ pub struct AppConfig {
 /// Runtime config for the stdio MCP server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpConfig {
-    pub temper_port: u16,
+    pub temper_port: Option<u16>,
     pub apps: Vec<AppConfig>,
     /// Agent principal ID for `X-Temper-Principal-Id` header. When set, all
     /// requests include agent identity headers for Cedar authorization.

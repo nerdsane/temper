@@ -37,6 +37,10 @@ Two separated contexts: Developer Chat (design-time, can modify specs) and Produ
 - **temper-store-postgres**: Event sourcing persistence (tenant-scoped)
 - **temper-store-redis**: Mailbox and placement cache (tenant-scoped)
 
+## Architecture Decision Records (ADRs)
+
+**Every significant implementation MUST start with an ADR as the first step.** Before writing any code, create `docs/adrs/NNNN-short-title.md` following the template at `docs/adrs/TEMPLATE.md`. Required for new features, architectural changes, new integrations, multi-crate changes, or new patterns. Not required for bug fixes, single-file refactors, doc changes, or test additions.
+
 ## Key Rules
 
 ### Platform Philosophy

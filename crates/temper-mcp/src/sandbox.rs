@@ -110,7 +110,8 @@ pub(super) fn format_http_error(status: StatusCode, body: &str) -> String {
 /// Parse a 403 Forbidden body for structured Cedar denial information.
 ///
 /// Returns a rich error message with decision ID and guidance if the body
-/// matches the Temper AuthorizationDenied format.
+/// matches the Temper AuthorizationDenied format. Instructs the agent to
+/// wait for human approval via `poll_decision` rather than self-approving.
 pub(super) fn format_authz_denied(body: &str) -> Option<String> {
     let json: Value = serde_json::from_str(body).ok()?;
     let code = json.pointer("/error/code").and_then(Value::as_str)?;
@@ -130,11 +131,16 @@ pub(super) fn format_authz_denied(body: &str) -> Option<String> {
             .unwrap_or(message.len() - pos);
         let decision_id = &message[pos..pos + id_end];
         format!(
-            "\nDecision: {decision_id} (pending human approval)\n\
-             Use temper.get_decisions() to check, or temper.approve_decision() if authorized."
+            "\n\nDecision: {decision_id} (pending human approval)\n\
+             A human must approve this action in the Observe UI or via `temper decide`.\n\
+             Use `await temper.poll_decision(tenant, '{decision_id}')` to wait for the decision.\n\
+             Do NOT attempt to approve this yourself — governance write methods are not available."
         )
     } else {
-        "\nUse temper.get_decisions() to check pending decisions.".to_string()
+        "\n\nThis action requires human approval. A decision has been created.\n\
+         Use `await temper.get_decisions(tenant)` to find the decision ID,\n\
+         then `await temper.poll_decision(tenant, decision_id)` to wait for approval."
+            .to_string()
     };
 
     Some(format!("AuthorizationDenied: {message}{decision_hint}"))

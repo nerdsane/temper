@@ -19,6 +19,7 @@ Before committing code changes. The pre-commit gate and session exit gate check 
 - Does the diff implement what the plan asked for?
 - Is there scope creep unrelated to the plan?
 - Are critical planned items missing?
+- **ADR check**: If the change is a new feature, architectural change, new integration, or multi-crate change — verify a corresponding ADR exists in `docs/adrs/`. Missing ADR is a FAIL.
 
 ### 2) Coverage + Completeness
 

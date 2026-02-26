@@ -1,4 +1,5 @@
 {
+  "enableAllProjectMcpServers": true,
   "hooks": {
     "PreToolUse": [
       {
@@ -60,6 +61,16 @@
             "type": "command",
             "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/hooks/post-push-verify.sh\"",
             "timeout": 300
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__temper__execute",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/hooks/postToolUse-temper-decide.sh\"",
+            "timeout": 10
           }
         ]
       }

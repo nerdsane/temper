@@ -11,7 +11,7 @@ temper-spec = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "rt", "macros", "time"] }
+tokio = { workspace = true, features = ["io-util", "rt", "macros", "time", "process"] }
 reqwest = { workspace = true }
 thiserror = { workspace = true }
 

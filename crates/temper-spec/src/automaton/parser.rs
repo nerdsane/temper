@@ -356,6 +356,7 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                 module: None,
                 on_success: None,
                 on_failure: None,
+                config: std::collections::BTreeMap::new(),
             });
             current_section = "integration";
             continue;
@@ -481,7 +482,7 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                             "module" => ig.module = Some(value.clone()),
                             "on_success" => ig.on_success = Some(value.clone()),
                             "on_failure" => ig.on_failure = Some(value.clone()),
-                            _ => {}
+                            _ => { ig.config.insert(key.to_string(), value.clone()); }
                         }
                     }
                 }
@@ -1097,6 +1098,57 @@ guard = "list_length_min labels 1"
             close.guard.as_slice(),
             [Guard::ListLengthMin { var, min }] if var == "labels" && *min == 1
         ));
+    }
+
+    #[test]
+    fn test_integration_config_captures_unknown_keys() {
+        let toml = r#"
+[automaton]
+name = "Weather"
+states = ["Idle", "Fetching", "Ready", "Failed"]
+initial = "Idle"
+
+[[action]]
+name = "FetchWeather"
+from = ["Idle"]
+to = "Fetching"
+effect = "trigger fetch_weather"
+
+[[action]]
+name = "FetchSucceeded"
+kind = "input"
+from = ["Fetching"]
+to = "Ready"
+
+[[action]]
+name = "FetchFailed"
+kind = "input"
+from = ["Fetching"]
+to = "Failed"
+
+[[integration]]
+name = "fetch_weather"
+trigger = "fetch_weather"
+type = "wasm"
+module = "http_fetch"
+on_success = "FetchSucceeded"
+on_failure = "FetchFailed"
+url = "https://api.open-meteo.com/v1/forecast"
+method = "GET"
+"#;
+        let automaton = parse_automaton(toml).expect("should parse");
+        assert_eq!(automaton.integrations.len(), 1);
+        let ig = &automaton.integrations[0];
+        assert_eq!(ig.name, "fetch_weather");
+        assert_eq!(ig.integration_type, "wasm");
+        assert_eq!(ig.module.as_deref(), Some("http_fetch"));
+        assert_eq!(ig.config.get("url").map(String::as_str), Some("https://api.open-meteo.com/v1/forecast"));
+        assert_eq!(ig.config.get("method").map(String::as_str), Some("GET"));
+        // Known keys should NOT be in config
+        assert!(!ig.config.contains_key("name"));
+        assert!(!ig.config.contains_key("trigger"));
+        assert!(!ig.config.contains_key("type"));
+        assert!(!ig.config.contains_key("module"));
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! running model checks, and managing Temper projects.
 
 mod codegen;
+mod decide;
 mod init;
 mod install;
 mod mcp;
@@ -47,6 +48,15 @@ enum Commands {
     },
     /// Install the Temper App Builder skill into Claude Code (global)
     Install,
+    /// Approve or deny pending governance decisions from the terminal
+    Decide {
+        /// Port where Temper HTTP server is running
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+        /// Tenant name to watch for decisions
+        #[arg(short, long, default_value = "default")]
+        tenant: String,
+    },
     /// Start the platform server
     Serve {
         /// Port to listen on
@@ -62,6 +72,9 @@ enum Commands {
         /// Load an app: --app name=specs-dir (repeatable)
         #[arg(long)]
         app: Vec<String>,
+        /// Also start the Observe UI (Next.js dev server in observe/)
+        #[arg(long)]
+        observe: bool,
         /// Directory containing IOA TOML and CSDL specs to load at startup (legacy, use --app)
         #[arg(long)]
         specs_dir: Option<String>,
@@ -71,9 +84,9 @@ enum Commands {
     },
     /// Start the stdio MCP server for Code Mode
     Mcp {
-        /// Port where Temper HTTP server is running
-        #[arg(short, long, default_value = "3000")]
-        port: u16,
+        /// Port where Temper HTTP server is running (omit for self-contained mode)
+        #[arg(short, long)]
+        port: Option<u16>,
         /// Load an app: --app name=specs-dir (repeatable)
         #[arg(long)]
         app: Vec<String>,
@@ -87,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { name } => init::run(&name)?,
         Commands::Install => install::run()?,
+        Commands::Decide { port, tenant } => decide::run(port, &tenant).await?,
         Commands::Codegen {
             specs_dir,
             output_dir,
@@ -96,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
             port,
             storage,
             app,
+            observe,
             specs_dir,
             tenant,
         } => {
@@ -115,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
             {
                 apps.push((tenant.clone(), dir.clone()));
             }
-            serve::run(port, apps, storage, storage_explicit).await?
+            serve::run(port, apps, storage, storage_explicit, observe).await?
         }
         Commands::Mcp { port, app } => {
             let mut apps: Vec<(String, String)> = Vec::new();
@@ -289,16 +304,16 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_parse_mcp_default_port() {
+    fn test_cli_parse_mcp_no_port() {
         let cli = Cli::parse_from(["temper", "mcp"]);
         match cli.command {
-            Commands::Mcp { port, .. } => assert_eq!(port, 3000),
+            Commands::Mcp { port, .. } => assert_eq!(port, None),
             _ => panic!("expected Mcp command"),
         }
     }
 
     #[test]
-    fn test_cli_parse_mcp_with_apps() {
+    fn test_cli_parse_mcp_with_port_and_apps() {
         let cli = Cli::parse_from([
             "temper",
             "mcp",
@@ -309,7 +324,7 @@ mod tests {
         ]);
         match cli.command {
             Commands::Mcp { port, app } => {
-                assert_eq!(port, 3001);
+                assert_eq!(port, Some(3001));
                 assert_eq!(app, vec!["haku-ops=apps/haku-ops/specs"]);
             }
             _ => panic!("expected Mcp command"),

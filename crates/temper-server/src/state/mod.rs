@@ -191,7 +191,7 @@ impl ServerState {
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         let (design_time_tx, _) = tokio::sync::broadcast::channel(256);
         let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256);
-        Self {
+        let state = Self {
             actor_system: Arc::new(system),
             csdl: Arc::new(csdl),
             csdl_xml: Arc::new(csdl_xml),
@@ -231,6 +231,29 @@ impl ServerState {
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             secrets_vault: None,
+        };
+
+        // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
+        state.register_builtin_wasm_modules();
+        state
+    }
+
+    /// Compile and register built-in WASM modules (e.g. http_fetch).
+    fn register_builtin_wasm_modules(&self) {
+        /// Embedded http_fetch WASM binary, compiled from examples/wasm-modules/http-fetch.
+        const HTTP_FETCH_WASM: &[u8] =
+            include_bytes!("../../../temper-wasm/modules/http_fetch.wasm");
+
+        match self.wasm_engine.compile_and_cache(HTTP_FETCH_WASM) {
+            Ok(hash) => {
+                if let Ok(mut registry) = self.wasm_module_registry.write() {
+                    registry.register_builtin("http_fetch", &hash);
+                    tracing::info!(module = "http_fetch", hash = %hash, "registered built-in WASM module");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to compile built-in http_fetch WASM module");
+            }
         }
     }
 
@@ -290,7 +313,7 @@ impl ServerState {
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         let (design_time_tx, _) = tokio::sync::broadcast::channel(256);
         let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256);
-        Self {
+        let state = Self {
             actor_system: Arc::new(system),
             csdl: Arc::new(CsdlDocument {
                 version: "4.0".into(),
@@ -333,7 +356,9 @@ impl ServerState {
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             secrets_vault: None,
-        }
+        };
+        state.register_builtin_wasm_modules();
+        state
     }
 
     /// Attach a reaction dispatcher for cross-entity coordination.

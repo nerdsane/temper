@@ -20,6 +20,7 @@ fn build_context() -> WasmInvocationContext {
         entity_state: serde_json::json!({"status": "Pending"}),
         agent_id: None,
         session_id: None,
+        integration_config: std::collections::BTreeMap::new(),
     }
 }
 

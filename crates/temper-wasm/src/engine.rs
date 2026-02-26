@@ -211,10 +211,12 @@ impl WasmEngine {
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        // Read result from module memory
-        // Convention: result is stored at result_ptr, length at result_ptr-4
-        let result_json = if result_ptr > 0 {
-            // Read length (4 bytes before result_ptr)
+        // Read result: prefer host_set_result (explicit API), fall back to memory pointer.
+        let result_json = if let Some(ref host_result) = store.data().result_json {
+            // Module used host_set_result — this is the preferred path.
+            host_result.clone()
+        } else if result_ptr > 0 {
+            // Legacy path: read from module memory at result_ptr with length at result_ptr-4.
             let mut len_bytes = [0u8; 4];
             memory
                 .read(&store, (result_ptr - 4) as usize, &mut len_bytes)
@@ -229,8 +231,8 @@ impl WasmEngine {
             String::from_utf8(result_bytes)
                 .map_err(|e| WasmError::Invocation(format!("result is not valid UTF-8: {e}")))?
         } else {
-            // Check host state for result
-            store.data().result_json.clone().unwrap_or_default()
+            // No result from either path.
+            String::new()
         };
 
         // Parse the result JSON
