@@ -594,9 +594,12 @@ impl ServerState {
             denied_resource: None,
             denied_module: None,
         };
+        // Best-effort persistence to event store.
         if let Err(e) = self.persist_trajectory_entry(&trajectory_entry).await {
             tracing::error!(error = %e, "failed to persist trajectory entry");
-        } else if let Ok(mut log) = self.trajectory_log.write() {
+        }
+        // Always push to in-memory log so /observe endpoints see it.
+        if let Ok(mut log) = self.trajectory_log.write() {
             log.push(trajectory_entry.clone());
         }
 

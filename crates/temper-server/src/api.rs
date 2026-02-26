@@ -4,13 +4,19 @@
 //! decisions.  They are separated from the read-only `/observe` router so that
 //! observe stays purely observational.
 
+use std::convert::Infallible;
+
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post, put};
+use temper_runtime::scheduler::sim_now;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
-use crate::state::ServerState;
+use crate::state::{DecisionStatus, PolicyScope, ServerState};
 
 /// Build the management API router (mounted at /api).
 ///
@@ -54,6 +60,29 @@ pub fn build_api_router() -> Router<ServerState> {
             put(handle_put_secret).delete(handle_delete_secret),
         )
         .route("/tenants/{tenant}/secrets", get(handle_list_secrets))
+        // Policy CRUD (Phase 3)
+        .route(
+            "/tenants/{tenant}/policies",
+            get(handle_get_policies).put(handle_put_policies),
+        )
+        .route(
+            "/tenants/{tenant}/policies/rules",
+            post(handle_add_policy_rule),
+        )
+        // Decision approve/deny (Phase 4)
+        .route("/tenants/{tenant}/decisions", get(handle_list_decisions))
+        .route(
+            "/tenants/{tenant}/decisions/stream",
+            get(handle_decision_stream),
+        )
+        .route(
+            "/tenants/{tenant}/decisions/{id}/approve",
+            post(handle_approve_decision),
+        )
+        .route(
+            "/tenants/{tenant}/decisions/{id}/deny",
+            post(handle_deny_decision),
+        )
 }
 
 /// PUT /api/tenants/{tenant}/secrets/{key_name} — encrypt and store a secret.
@@ -176,4 +205,350 @@ async fn handle_list_secrets(
         axum::Json(serde_json::json!({"keys": keys})),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: Policy CRUD handlers
+// ---------------------------------------------------------------------------
+
+/// GET /api/tenants/{tenant}/policies — return current Cedar policy text.
+async fn handle_get_policies(
+    State(state): State<ServerState>,
+    Path(tenant): Path<String>,
+) -> impl IntoResponse {
+    let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+    let text = policies.get(&tenant).cloned().unwrap_or_default();
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({"tenant": tenant, "policy_text": text})),
+    )
+        .into_response()
+}
+
+/// PUT /api/tenants/{tenant}/policies — replace all policies (validate then reload).
+async fn handle_put_policies(
+    State(state): State<ServerState>,
+    Path(tenant): Path<String>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let body_json: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("Invalid JSON: {e}")).into_response();
+        }
+    };
+
+    let policy_text = match body_json.get("policy_text").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing 'policy_text' field in request body",
+            )
+                .into_response();
+        }
+    };
+
+    // Validate by attempting to reload (dry-run combined text).
+    let combined = {
+        let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+        let mut all = String::new();
+        for (t, text) in policies.iter() {
+            if *t != tenant {
+                all.push_str(text);
+                all.push('\n');
+            }
+        }
+        all.push_str(&policy_text);
+        all
+    };
+
+    if let Err(e) = state.authz.reload_policies(&combined) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Policy validation failed: {e}"),
+        )
+            .into_response();
+    }
+
+    // Store the tenant policy.
+    {
+        let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        policies.insert(tenant.clone(), policy_text);
+    }
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({"tenant": tenant, "status": "loaded"})),
+    )
+        .into_response()
+}
+
+/// POST /api/tenants/{tenant}/policies/rules — append a single rule.
+async fn handle_add_policy_rule(
+    State(state): State<ServerState>,
+    Path(tenant): Path<String>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let body_json: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("Invalid JSON: {e}")).into_response();
+        }
+    };
+
+    let rule = match body_json.get("rule").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing 'rule' field in request body",
+            )
+                .into_response();
+        }
+    };
+
+    // Append and validate.
+    let combined = {
+        let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+        let mut all = String::new();
+        for (_t, text) in policies.iter() {
+            all.push_str(text);
+            all.push('\n');
+        }
+        // Append new rule to this tenant's existing text.
+        let existing = policies.get(&tenant).cloned().unwrap_or_default();
+        // We'll build combined of all other tenants + this tenant's text + new rule.
+        let mut combined = String::new();
+        for (t, text) in policies.iter() {
+            if *t != tenant {
+                combined.push_str(text);
+                combined.push('\n');
+            }
+        }
+        combined.push_str(&existing);
+        combined.push('\n');
+        combined.push_str(&rule);
+        combined
+    };
+
+    if let Err(e) = state.authz.reload_policies(&combined) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Rule validation failed: {e}"),
+        )
+            .into_response();
+    }
+
+    // Persist updated tenant policy.
+    {
+        let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        let entry = policies.entry(tenant.clone()).or_default();
+        if !entry.is_empty() {
+            entry.push('\n');
+        }
+        entry.push_str(&rule);
+    }
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({"tenant": tenant, "status": "rule_added"})),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: Decision approve/deny handlers
+// ---------------------------------------------------------------------------
+
+/// Query parameters for listing decisions.
+#[derive(serde::Deserialize)]
+struct DecisionListParams {
+    /// Optional status filter: "pending", "approved", "denied", "expired".
+    status: Option<String>,
+}
+
+/// GET /api/tenants/{tenant}/decisions — list decisions with optional status filter.
+async fn handle_list_decisions(
+    State(state): State<ServerState>,
+    Path(tenant): Path<String>,
+    Query(params): Query<DecisionListParams>,
+) -> impl IntoResponse {
+    let log = state.pending_decision_log.read().unwrap(); // ci-ok: infallible lock
+    let entries: Vec<_> = log
+        .entries()
+        .iter()
+        .filter(|d| d.tenant == tenant)
+        .filter(|d| {
+            if let Some(ref s) = params.status {
+                let status_str = serde_json::to_value(&d.status)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default();
+                status_str == *s
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({"decisions": entries})),
+    )
+        .into_response()
+}
+
+/// Body for approve request.
+#[derive(serde::Deserialize)]
+struct ApproveBody {
+    /// Scope: "narrow", "medium", or "broad".
+    scope: String,
+    /// Optional: who approved.
+    decided_by: Option<String>,
+}
+
+/// POST /api/tenants/{tenant}/decisions/{id}/approve — approve with scope.
+async fn handle_approve_decision(
+    State(state): State<ServerState>,
+    Path((tenant, id)): Path<(String, String)>,
+    axum::Json(body): axum::Json<ApproveBody>,
+) -> impl IntoResponse {
+    let scope: PolicyScope = match body.scope.as_str() {
+        "narrow" => PolicyScope::Narrow,
+        "medium" => PolicyScope::Medium,
+        "broad" => PolicyScope::Broad,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid scope: {other}. Must be narrow, medium, or broad."),
+            )
+                .into_response();
+        }
+    };
+
+    let generated_policy;
+    {
+        let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
+        let decision = match log.get_mut(&id) {
+            Some(d) if d.tenant == tenant => d,
+            _ => {
+                return (StatusCode::NOT_FOUND, "Decision not found").into_response();
+            }
+        };
+
+        if decision.status != DecisionStatus::Pending {
+            return (
+                StatusCode::CONFLICT,
+                format!("Decision already resolved as {:?}", decision.status),
+            )
+                .into_response();
+        }
+
+        generated_policy = decision.generate_policy(&scope);
+        decision.status = DecisionStatus::Approved;
+        decision.approved_scope = Some(scope);
+        decision.generated_policy = Some(generated_policy.clone());
+        decision.decided_by = body.decided_by.clone();
+        decision.decided_at = Some(sim_now().to_rfc3339());
+    }
+
+    // Append the generated policy to tenant policies and reload.
+    let combined = {
+        let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        let entry = policies.entry(tenant.clone()).or_default();
+        if !entry.is_empty() {
+            entry.push('\n');
+        }
+        entry.push_str(&generated_policy);
+
+        // Build combined text for reload.
+        let mut combined = String::new();
+        for (_t, text) in policies.iter() {
+            combined.push_str(text);
+            combined.push('\n');
+        }
+        combined
+    };
+
+    if let Err(e) = state.authz.reload_policies(&combined) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to reload policies: {e}"),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "id": id,
+            "status": "approved",
+            "generated_policy": generated_policy,
+        })),
+    )
+        .into_response()
+}
+
+/// POST /api/tenants/{tenant}/decisions/{id}/deny — mark as denied.
+async fn handle_deny_decision(
+    State(state): State<ServerState>,
+    Path((tenant, id)): Path<(String, String)>,
+    body: Option<axum::Json<serde_json::Value>>,
+) -> impl IntoResponse {
+    let decided_by = body
+        .as_ref()
+        .and_then(|b| b.get("decided_by"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
+    let decision = match log.get_mut(&id) {
+        Some(d) if d.tenant == tenant => d,
+        _ => {
+            return (StatusCode::NOT_FOUND, "Decision not found").into_response();
+        }
+    };
+
+    if decision.status != DecisionStatus::Pending {
+        return (
+            StatusCode::CONFLICT,
+            format!("Decision already resolved as {:?}", decision.status),
+        )
+            .into_response();
+    }
+
+    decision.status = DecisionStatus::Denied;
+    decision.decided_by = decided_by;
+    decision.decided_at = Some(sim_now().to_rfc3339());
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({"id": id, "status": "denied"})),
+    )
+        .into_response()
+}
+
+/// GET /api/tenants/{tenant}/decisions/stream — SSE for new pending decisions.
+async fn handle_decision_stream(
+    State(state): State<ServerState>,
+    Path(tenant): Path<String>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.pending_decision_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(move |result| {
+        match result {
+            Ok(pd) => {
+                if pd.tenant != tenant {
+                    return None;
+                }
+                let data = serde_json::to_string(&pd).unwrap_or_default();
+                Some(Ok(Event::default().event("pending_decision").data(data)))
+            }
+            // Lagged receiver: skip missed events and continue.
+            Err(_) => None,
+        }
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }

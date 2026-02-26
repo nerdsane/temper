@@ -3,6 +3,7 @@
 //! These endpoints expose internal Temper state for the observability frontend.
 //! They are only available when the `observe` feature is enabled.
 
+mod agents;
 mod entities;
 pub(crate) mod evolution;
 mod metrics;
@@ -168,6 +169,8 @@ pub fn build_observe_router() -> Router<ServerState> {
         )
         .route("/skills/builder", get(serve_builder_skill))
         .route("/skills/user", get(serve_user_skill))
+        .route("/agents", get(agents::list_agents))
+        .route("/agents/{agent_id}/history", get(agents::get_agent_history))
         .route("/wasm/modules", get(wasm::list_wasm_modules))
         .route("/wasm/invocations", get(wasm::list_wasm_invocations))
         .route(

@@ -110,6 +110,50 @@ pub(super) async fn dispatch_bound_action(
     let authz_result =
         state.authorize_with_context(&security_ctx, action, entity_type, &resource_attrs);
     if let Err(reason) = authz_result {
+        // Create a pending decision for the dashboard to review.
+        let principal_id = agent_ctx
+            .agent_id
+            .as_deref()
+            .unwrap_or(security_ctx.principal.id.as_str());
+        let pd = crate::state::PendingDecision::from_denial(
+            tenant.as_str(),
+            principal_id,
+            action,
+            entity_type,
+            key_str,
+            serde_json::to_value(&resource_attrs).unwrap_or_default(),
+            &reason,
+            None,
+        );
+        {
+            let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
+            if log.push(pd.clone()) {
+                let _ = state.pending_decision_tx.send(pd);
+            }
+        }
+
+        // Record the denial in the trajectory log.
+        let traj = crate::state::TrajectoryEntry {
+            timestamp: sim_now().to_rfc3339(),
+            tenant: tenant.as_str().to_string(),
+            entity_type: entity_type.to_string(),
+            entity_id: key_str.to_string(),
+            action: action.to_string(),
+            success: false,
+            from_status: Some(current_state.state.status.clone()),
+            to_status: None,
+            error: Some(reason.clone()),
+            agent_id: agent_ctx.agent_id.clone(),
+            session_id: agent_ctx.session_id.clone(),
+            authz_denied: Some(true),
+            denied_resource: Some(format!("{}:{}", entity_type, key_str)),
+            denied_module: None,
+        };
+        {
+            let mut tlog = state.trajectory_log.write().unwrap(); // ci-ok: infallible lock
+            tlog.push(traj);
+        }
+
         http_span.set_status(Status::error(reason.clone()));
         let end_time: std::time::SystemTime = sim_now().into();
         http_span.end_with_timestamp(end_time);

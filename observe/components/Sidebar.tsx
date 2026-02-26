@@ -58,6 +58,22 @@ function NavIcon({ icon }: { icon: string }) {
             d="M4 4v2m0 12v2m16-16v2m0 12v2M7.1 6h9.8M7.1 18h9.8M4.93 8.5h14.14M4.93 15.5h14.14M7.1 11h9.8M7.1 13h9.8" />
         </svg>
       );
+    case "eye":
+      return (
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+            d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+            d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+        </svg>
+      );
+    case "users":
+      return (
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+            d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+        </svg>
+      );
     default:
       return null;
   }
@@ -145,8 +161,11 @@ export default function Sidebar() {
 
   const staticItems = [
     { href: "/", label: "Dashboard", icon: "grid" },
+    { href: "/visualize", label: "Visualization", icon: "eye" },
     { href: "/workflows", label: "Workflows", icon: "workflow" },
     { href: "/activity", label: "Activity", icon: "activity" },
+    { href: "/decisions", label: "Decisions", icon: "shield" },
+    { href: "/agents", label: "Agents", icon: "users" },
     { href: "/evolution", label: "Evolution", icon: "dna" },
     { href: "/integrations", label: "Integrations", icon: "box" },
   ];

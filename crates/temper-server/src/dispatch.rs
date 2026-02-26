@@ -37,7 +37,16 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         .get("x-agent-id")
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
-        .map(String::from);
+        .map(String::from)
+        .or_else(|| {
+            // Fall back to X-Temper-Principal-Id for agents using the
+            // Cedar security context headers instead of X-Agent-Id.
+            headers
+                .get("x-temper-principal-id")
+                .and_then(|v| v.to_str().ok())
+                .filter(|s| !s.is_empty() && s != &"anonymous")
+                .map(String::from)
+        });
     let session_id = headers
         .get("x-session-id")
         .and_then(|v| v.to_str().ok())
@@ -80,5 +89,30 @@ mod tests {
         let ctx = extract_agent_context(&headers);
         assert!(ctx.agent_id.is_none());
         assert!(ctx.session_id.is_none());
+    }
+
+    #[test]
+    fn extract_agent_context_falls_back_to_temper_principal() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-temper-principal-id", "checkout-bot".parse().unwrap());
+        let ctx = extract_agent_context(&headers);
+        assert_eq!(ctx.agent_id.as_deref(), Some("checkout-bot"));
+    }
+
+    #[test]
+    fn extract_agent_context_prefers_x_agent_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-id", "agent-007".parse().unwrap());
+        headers.insert("x-temper-principal-id", "checkout-bot".parse().unwrap());
+        let ctx = extract_agent_context(&headers);
+        assert_eq!(ctx.agent_id.as_deref(), Some("agent-007"));
+    }
+
+    #[test]
+    fn extract_agent_context_ignores_anonymous_principal() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-temper-principal-id", "anonymous".parse().unwrap());
+        let ctx = extract_agent_context(&headers);
+        assert!(ctx.agent_id.is_none());
     }
 }

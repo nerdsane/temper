@@ -4,12 +4,14 @@ mod dispatch;
 mod dispatch_blocking;
 mod entity_ops;
 pub mod metrics;
+pub mod pending_decisions;
 mod persistence;
 pub mod trajectory;
 pub mod wasm_invocation_log;
 
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use metrics::MetricsCollector;
+pub use pending_decisions::{DecisionStatus, PendingDecision, PendingDecisionLog, PolicyScope};
 pub use trajectory::{TrajectoryEntry, TrajectoryLog};
 pub use wasm_invocation_log::{WasmInvocationEntry, WasmInvocationLog};
 
@@ -160,6 +162,12 @@ pub struct ServerState {
     /// Idempotency cache for deduplicating agent retries.
     pub idempotency_cache: Arc<IdempotencyCache>,
     /// Optional encrypted secrets vault for per-tenant secret management.
+    /// Bounded log of pending authorization decisions awaiting human review.
+    pub pending_decision_log: Arc<RwLock<PendingDecisionLog>>,
+    /// Broadcast channel for new pending decisions (SSE subscriptions).
+    pub pending_decision_tx: Arc<tokio::sync::broadcast::Sender<PendingDecision>>,
+    /// Per-tenant Cedar policy text (tenant -> policy text).
+    pub tenant_policies: Arc<RwLock<BTreeMap<String, String>>>,
     pub secrets_vault: Option<Arc<SecretsVault>>,
 }
 
@@ -182,6 +190,7 @@ impl ServerState {
 
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         let (design_time_tx, _) = tokio::sync::broadcast::channel(256);
+        let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             actor_system: Arc::new(system),
             csdl: Arc::new(csdl),
@@ -218,6 +227,9 @@ impl ServerState {
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
             idempotency_cache: Arc::new(IdempotencyCache::new()),
+            pending_decision_log: Arc::new(RwLock::new(PendingDecisionLog::new())),
+            pending_decision_tx: Arc::new(pending_decision_tx),
+            tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             secrets_vault: None,
         }
     }
@@ -277,6 +289,7 @@ impl ServerState {
     pub fn from_registry_shared(system: ActorSystem, registry: Arc<RwLock<SpecRegistry>>) -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         let (design_time_tx, _) = tokio::sync::broadcast::channel(256);
+        let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             actor_system: Arc::new(system),
             csdl: Arc::new(CsdlDocument {
@@ -316,6 +329,9 @@ impl ServerState {
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
             idempotency_cache: Arc::new(IdempotencyCache::new()),
+            pending_decision_log: Arc::new(RwLock::new(PendingDecisionLog::new())),
+            pending_decision_tx: Arc::new(pending_decision_tx),
+            tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             secrets_vault: None,
         }
     }

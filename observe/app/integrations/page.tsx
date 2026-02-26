@@ -33,6 +33,7 @@ export default function IntegrationsPage() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [initialError, setInitialError] = useState<string | null>(null);
   const [moduleFilter, setModuleFilter] = useState<string>("all");
+  const [expandedInvocation, setExpandedInvocation] = useState<number | null>(null);
 
   const loadInitial = useCallback(async () => {
     setInitialLoading(true);
@@ -144,7 +145,7 @@ export default function IntegrationsPage() {
         <StatCard label="Total Invocations" value={totalInvocations} />
         <StatCard
           label="Success Rate"
-          value={totalInvocations > 0 ? `${overallSuccessRate}%` : "–"}
+          value={totalInvocations > 0 ? `${overallSuccessRate}%` : "\u2013"}
           color={totalInvocations > 0 ? rateColor(overallSuccessRate) : undefined}
         />
       </div>
@@ -157,6 +158,7 @@ export default function IntegrationsPage() {
             <table className="w-full text-[13px]">
               <thead className="sticky top-0 bg-[#111115]/90 backdrop-blur-sm z-10">
                 <tr className="border-b border-white/[0.06]">
+                  <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">Tenant</th>
                   <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">Name</th>
                   <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">Hash</th>
                   <th className="text-center px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">Cached</th>
@@ -172,9 +174,10 @@ export default function IntegrationsPage() {
                     : 0;
                   return (
                     <tr
-                      key={mod_.module_name}
+                      key={`${mod_.tenant}-${mod_.module_name}`}
                       className={`border-b border-white/[0.03] ${i % 2 === 1 ? "bg-white/[0.01]" : ""}`}
                     >
+                      <td className="px-3.5 py-2.5 text-[11px] text-zinc-500">{mod_.tenant}</td>
                       <td className="px-3.5 py-2.5 font-mono text-zinc-300">{mod_.module_name}</td>
                       <td className="px-3.5 py-2.5 font-mono text-zinc-500 text-[11px]">
                         {mod_.sha256_hash.substring(0, 12)}...
@@ -207,13 +210,13 @@ export default function IntegrationsPage() {
                             </span>
                           </div>
                         ) : (
-                          <span className="text-[11px] text-zinc-600">–</span>
+                          <span className="text-[11px] text-zinc-600">{"\u2013"}</span>
                         )}
                       </td>
                       <td className="px-3.5 py-2.5 text-[11px] text-zinc-500 font-mono">
                         {mod_.last_invoked_at
                           ? new Date(mod_.last_invoked_at).toLocaleTimeString()
-                          : "–"}
+                          : "\u2013"}
                       </td>
                     </tr>
                   );
@@ -251,49 +254,67 @@ export default function IntegrationsPage() {
             {invocations.invocations.map((inv, i) => {
               const ts = new Date(inv.timestamp);
               const timeStr = ts.toLocaleTimeString();
+              const isExpanded = expandedInvocation === i;
+              const hasError = !inv.success && inv.error;
               return (
-                <div
-                  key={`${inv.timestamp}-${i}`}
-                  className="flex items-center gap-3 px-3.5 py-2.5 border-b border-white/[0.03] last:border-b-0"
-                >
-                  <span className="text-[11px] text-zinc-600 font-mono flex-shrink-0 w-20">
-                    {timeStr}
-                  </span>
-                  <span className="font-mono text-[11px] text-zinc-300 flex-shrink-0">
-                    {inv.module_name}
-                  </span>
-                  <span className="text-[10px] font-mono text-zinc-600 flex-shrink-0">
-                    {inv.entity_type}/{inv.entity_id}
-                  </span>
-                  <span className="text-[11px] text-zinc-500 font-mono flex-shrink-0">
-                    {inv.trigger_action}
-                  </span>
-                  {inv.callback_action && (
-                    <>
-                      <span className="text-zinc-700 text-[11px]">&rarr;</span>
-                      <span className="text-[11px] text-teal-400 font-mono flex-shrink-0">
-                        {inv.callback_action}
-                      </span>
-                    </>
-                  )}
-                  <span className="ml-auto flex-shrink-0">
-                    {inv.success ? (
-                      <span className="text-[10px] font-medium bg-teal-500/15 text-teal-400 px-1.5 py-0.5 rounded">
-                        ok
-                      </span>
-                    ) : (
-                      <span className="text-[10px] font-medium bg-pink-500/15 text-pink-400 px-1.5 py-0.5 rounded">
-                        fail
+                <div key={`${inv.timestamp}-${i}`}>
+                  <div
+                    className={`flex items-center gap-3 px-3.5 py-2.5 border-b border-white/[0.03] last:border-b-0 ${hasError ? "cursor-pointer hover:bg-white/[0.02]" : ""}`}
+                    onClick={() => hasError && setExpandedInvocation(isExpanded ? null : i)}
+                  >
+                    <span className="text-[11px] text-zinc-600 font-mono flex-shrink-0 w-20">
+                      {timeStr}
+                    </span>
+                    <span className="font-mono text-[11px] text-zinc-300 flex-shrink-0">
+                      {inv.module_name}
+                    </span>
+                    <span className="text-[10px] font-mono text-zinc-600 flex-shrink-0">
+                      {inv.entity_type}/{inv.entity_id.substring(0, 8)}
+                    </span>
+                    <span className="text-[11px] text-zinc-500 font-mono flex-shrink-0">
+                      {inv.trigger_action}
+                    </span>
+                    {inv.callback_action && (
+                      <>
+                        <span className="text-zinc-700 text-[11px]">&rarr;</span>
+                        <span className={`text-[11px] font-mono flex-shrink-0 ${inv.success ? "text-teal-400" : "text-pink-400"}`}>
+                          {inv.callback_action}
+                        </span>
+                      </>
+                    )}
+                    <span className="ml-auto flex-shrink-0">
+                      {inv.success ? (
+                        <span className="text-[10px] font-medium bg-teal-500/15 text-teal-400 px-1.5 py-0.5 rounded">
+                          ok
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-medium bg-pink-500/15 text-pink-400 px-1.5 py-0.5 rounded">
+                          fail
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-[10px] font-mono text-zinc-600 flex-shrink-0 w-12 text-right">
+                      {inv.duration_ms}ms
+                    </span>
+                    {hasError && (
+                      <span className="text-[11px] text-zinc-600 flex-shrink-0">
+                        {isExpanded ? "\u25B4" : "\u25BE"}
                       </span>
                     )}
-                  </span>
-                  <span className="text-[10px] font-mono text-zinc-600 flex-shrink-0 w-12 text-right">
-                    {inv.duration_ms}ms
-                  </span>
-                  {inv.error && (
-                    <span className="text-[11px] text-pink-400 truncate max-w-48" title={inv.error}>
-                      {inv.error}
-                    </span>
+                  </div>
+                  {isExpanded && hasError && (
+                    <div className="px-3.5 py-3 bg-pink-500/[0.04] border-b border-white/[0.03]">
+                      <div className="text-[10px] text-zinc-600 uppercase tracking-wider mb-1.5">Error Details</div>
+                      <pre className="text-[12px] text-pink-300 font-mono whitespace-pre-wrap break-all leading-relaxed">
+                        {inv.error}
+                      </pre>
+                      <div className="mt-2 flex gap-4 text-[10px] text-zinc-600">
+                        <span>Tenant: {inv.tenant}</span>
+                        <span>Entity: {inv.entity_type}/{inv.entity_id}</span>
+                        <span>Trigger: {inv.trigger_action}</span>
+                        <span>{ts.toLocaleString()}</span>
+                      </div>
+                    </div>
                   )}
                 </div>
               );
