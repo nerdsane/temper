@@ -2,11 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState, useMemo, useCallback } from "react";
-import { fetchSpecs, fetchEntities } from "@/lib/api";
 import { useConnection } from "@/lib/connection";
 import { useDecisionNotifier } from "@/lib/decision-notifier";
-import type { SpecSummary } from "@/lib/types";
 
 function NavIcon({ icon }: { icon: string }) {
   switch (icon) {
@@ -22,13 +19,6 @@ function NavIcon({ icon }: { icon: string }) {
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
             d="M13 10V3L4 14h7v7l9-11h-7z" />
-        </svg>
-      );
-    case "file-text":
-      return (
-        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
         </svg>
       );
     case "shield":
@@ -59,15 +49,6 @@ function NavIcon({ icon }: { icon: string }) {
             d="M4 4v2m0 12v2m16-16v2m0 12v2M7.1 6h9.8M7.1 18h9.8M4.93 8.5h14.14M4.93 15.5h14.14M7.1 11h9.8M7.1 13h9.8" />
         </svg>
       );
-    case "eye":
-      return (
-        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-            d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-            d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-        </svg>
-      );
     case "users":
       return (
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -80,109 +61,25 @@ function NavIcon({ icon }: { icon: string }) {
   }
 }
 
-function CollapsibleSection({
-  title,
-  storageKey,
-  children,
-  count,
-}: {
-  title: string;
-  storageKey: string;
-  children: React.ReactNode;
-  count?: number;
-}) {
-  const [isOpen, setIsOpen] = useState(() => {
-    if (typeof window === "undefined") return true;
-    const stored = localStorage.getItem(`sidebar-${storageKey}`);
-    return stored === null ? true : stored === "true";
-  });
-
-  const toggle = useCallback(() => {
-    setIsOpen((prev) => {
-      const next = !prev;
-      localStorage.setItem(`sidebar-${storageKey}`, String(next));
-      return next;
-    });
-  }, [storageKey]);
-
-  return (
-    <div className="mt-3">
-      <button
-        onClick={toggle}
-        className="flex items-center gap-1.5 px-2.5 py-1 w-full text-left text-[10px] font-medium text-zinc-600 uppercase tracking-widest hover:text-zinc-400 transition-colors group"
-      >
-        <svg
-          className={`w-3 h-3 text-zinc-700 transition-transform duration-150 ${isOpen ? "rotate-90" : ""}`}
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-        </svg>
-        <span>{title}</span>
-        {count !== undefined && (
-          <span className="text-zinc-700 group-hover:text-zinc-500">{count}</span>
-        )}
-      </button>
-      {isOpen && children}
-    </div>
-  );
-}
+const navItems = [
+  { href: "/", label: "Dashboard", icon: "grid" },
+  { href: "/workflows", label: "Workflows", icon: "workflow" },
+  { href: "/activity", label: "Activity", icon: "activity" },
+  { href: "/decisions", label: "Decisions", icon: "shield" },
+  { href: "/agents", label: "Agents", icon: "users" },
+  { href: "/evolution", label: "Evolution", icon: "dna" },
+  { href: "/integrations", label: "Integrations", icon: "box" },
+];
 
 export default function Sidebar() {
   const pathname = usePathname();
   const { connected, checking } = useConnection();
   const { pendingCount } = useDecisionNotifier();
-  const [specs, setSpecs] = useState<SpecSummary[]>([]);
-  const [entityCounts, setEntityCounts] = useState<Record<string, number>>({});
-
-  useEffect(() => {
-    async function loadNav() {
-      try {
-        const [specData, entityData] = await Promise.all([
-          fetchSpecs(),
-          fetchEntities(),
-        ]);
-        setSpecs(specData);
-        const counts: Record<string, number> = {};
-        for (const e of entityData) {
-          counts[e.entity_type] = (counts[e.entity_type] || 0) + 1;
-        }
-        setEntityCounts(counts);
-      } catch {
-        // Sidebar nav gracefully falls back to static items
-      }
-    }
-    loadNav();
-  }, []);
 
   const isActive = (href: string) => {
     if (href === "/") return pathname === "/";
-    return pathname.startsWith(href.split("/").slice(0, 3).join("/"));
+    return pathname.startsWith(href);
   };
-
-  const staticItems = [
-    { href: "/", label: "Dashboard", icon: "grid" },
-    { href: "/visualize", label: "Visualization", icon: "eye" },
-    { href: "/workflows", label: "Workflows", icon: "workflow" },
-    { href: "/activity", label: "Activity", icon: "activity" },
-    { href: "/decisions", label: "Decisions", icon: "shield" },
-    { href: "/agents", label: "Agents", icon: "users" },
-    { href: "/evolution", label: "Evolution", icon: "dna" },
-    { href: "/integrations", label: "Integrations", icon: "box" },
-  ];
-
-  // Group specs by tenant/app (hide internal platform tenant)
-  const specsByTenant = useMemo(() => {
-    const groups: Record<string, SpecSummary[]> = {};
-    for (const spec of specs) {
-      const tenant = spec.tenant || "default";
-      if (tenant === "temper-system") continue;
-      if (!groups[tenant]) groups[tenant] = [];
-      groups[tenant].push(spec);
-    }
-    return groups;
-  }, [specs]);
 
   return (
     <aside className="w-52 bg-[#0a0a0c]/80 backdrop-blur-xl border-r border-white/[0.06] flex flex-col h-screen">
@@ -198,8 +95,7 @@ export default function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
-        {/* Static nav */}
-        {staticItems.map((item) => (
+        {navItems.map((item) => (
           <Link
             key={item.href}
             href={item.href}
@@ -218,53 +114,6 @@ export default function Sidebar() {
             )}
           </Link>
         ))}
-
-        {/* Dynamic spec nav grouped by app/tenant */}
-        {Object.entries(specsByTenant).map(([tenant, tenantSpecs]) => (
-          <CollapsibleSection
-            key={tenant}
-            title={tenant}
-            storageKey={`tenant-${tenant}`}
-            count={tenantSpecs.length}
-          >
-            {tenantSpecs.map((spec) => (
-              <Link
-                key={`${tenant}:${spec.entity_type}`}
-                href={`/specs/${spec.entity_type}`}
-                className={`flex items-center justify-between px-2.5 py-1.5 rounded-sm text-[13px] font-display transition-colors ${
-                  isActive(`/specs/${spec.entity_type}`)
-                    ? "text-zinc-100 bg-white/[0.06]"
-                    : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
-                }`}
-              >
-                <div className="flex items-center gap-2.5">
-                  <NavIcon icon="file-text" />
-                  <span className="truncate">{spec.entity_type}</span>
-                </div>
-                {entityCounts[spec.entity_type] !== undefined && (
-                  <span className="text-[10px] font-mono bg-teal-500/10 text-teal-400 px-1.5 py-0.5 rounded-sm">
-                    {entityCounts[spec.entity_type]}
-                  </span>
-                )}
-              </Link>
-            ))}
-          </CollapsibleSection>
-        ))}
-
-        {/* Static verify / entities links */}
-        <CollapsibleSection title="Tools" storageKey="tools">
-          <Link
-            href={specs.length > 0 ? `/verify/${specs[0].entity_type}` : "/verify/Ticket"}
-            className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-sm text-[13px] font-display transition-colors ${
-              pathname.startsWith("/verify")
-                ? "text-zinc-100 bg-white/[0.06]"
-                : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
-            }`}
-          >
-            <NavIcon icon="shield" />
-            Verification
-          </Link>
-        </CollapsibleSection>
       </nav>
 
       {/* Connection Status + Footer */}
