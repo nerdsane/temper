@@ -240,7 +240,7 @@ impl ServerState {
 
     /// Compile and register built-in WASM modules (e.g. http_fetch).
     fn register_builtin_wasm_modules(&self) {
-        /// Embedded http_fetch WASM binary, compiled from examples/wasm-modules/http-fetch.
+        /// Embedded http_fetch WASM binary, compiled from wasm-modules/http-fetch.
         const HTTP_FETCH_WASM: &[u8] =
             include_bytes!("../../../temper-wasm/modules/http_fetch.wasm");
 

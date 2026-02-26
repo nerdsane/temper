@@ -1,7 +1,7 @@
 //! End-to-end integration tests for WasmEngine invoke.
 //!
 //! Exercises the full compile → instantiate → run path using a real WASM
-//! module (`echo_integration.wasm`) built from `examples/wasm-modules/echo-integration`.
+//! module (`echo_integration.wasm`) built from `crates/temper-wasm/tests/fixtures/echo-integration-src`.
 
 use std::sync::Arc;
 

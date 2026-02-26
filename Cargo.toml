@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["examples/wasm-modules/echo-integration", "examples/wasm-modules/http-fetch"]
+exclude = ["wasm-modules/http-fetch", "crates/temper-wasm/tests/fixtures/echo-integration-src"]
 members = [
     "crates/temper-macros",
     "crates/temper-runtime",
