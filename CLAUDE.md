@@ -2,11 +2,11 @@
 
 ## IMPORTANT: Building Apps
 
-**When the user asks to build an app, create an app, or says "build me a X" — ALWAYS use the Temper App Builder skill (`.claude/skills/temper.md`).** Do NOT treat this as a generic web development request. Do NOT use brainstorming, frontend-design, or other general-purpose skills for app creation.
+**When the user asks to build an app, create an app, or says "build me a X" — ALWAYS use the Temper App Builder skill (`.claude/skills/temper-developer.md`).** Do NOT treat this as a generic web development request. Do NOT use brainstorming, frontend-design, or other general-purpose skills for app creation.
 
 Temper builds apps from specs, not from code. The workflow is: interview → generate IOA specs + CSDL → verify → deploy. Follow the skill's Interview Protocol.
 
-Use `/temper` or read `.claude/skills/temper.md` and follow it step by step.
+Use `/temper-developer` or read `.claude/skills/temper-developer.md` and follow it step by step.
 
 ## IMPORTANT: Using Temper MCP Tools
 

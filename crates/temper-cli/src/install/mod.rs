@@ -9,12 +9,12 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 /// The Temper App Builder skill body, embedded at compile time.
-const SKILL_BODY: &str = include_str!("../../../../.claude/skills/temper.md");
+const SKILL_BODY: &str = include_str!("../../../../.claude/skills/temper-developer.md");
 
 /// YAML frontmatter required by Claude Code's skill loader.
 const SKILL_FRONTMATTER: &str = "\
 ---
-name: temper
+name: temper-developer
 description: \"You MUST use this skill when the user asks to build an app, create an application, make a tool, or says 'build me a X'. Temper builds apps from verified specs, not from code.\"
 ---
 ";
@@ -30,9 +30,19 @@ description: \"Production chat proxy for a running Temper application. Translate
 ---
 ";
 
+/// The Temper Agent skill body (MCP operations), embedded at compile time.
+const AGENT_SKILL_BODY: &str = include_str!("../../../../.claude/skills/temper-agent.md");
+
+/// YAML frontmatter for the temper-agent skill.
+const AGENT_SKILL_FRONTMATTER: &str = "\
+---
+name: temper-agent
+description: \"Governed MCP operations. Use when Claude Code needs to operate through mcp__temper__execute or mcp__temper__search. Teaches the Python sandbox API, IOA spec format, and governance flow.\"
+---
+";
 /// Install the skill to the given skills root directory (for testing with custom paths).
 fn install_to(skills_root: &Path) -> Result<()> {
-    let skill_dir = skills_root.join("temper");
+    let skill_dir = skills_root.join("temper-developer");
     fs::create_dir_all(&skill_dir)
         .with_context(|| format!("Failed to create directory: {}", skill_dir.display()))?;
 
@@ -51,6 +61,16 @@ fn install_to(skills_root: &Path) -> Result<()> {
     fs::write(&user_skill_path, &user_content)
         .with_context(|| format!("Failed to write {}", user_skill_path.display()))?;
 
+    // Install temper-agent skill (MCP governed operations)
+    let agent_skill_dir = skills_root.join("temper-agent");
+    fs::create_dir_all(&agent_skill_dir)
+        .with_context(|| format!("Failed to create directory: {}", agent_skill_dir.display()))?;
+
+    let agent_skill_path = agent_skill_dir.join("SKILL.md");
+    let agent_content = format!("{AGENT_SKILL_FRONTMATTER}{AGENT_SKILL_BODY}");
+    fs::write(&agent_skill_path, &agent_content)
+        .with_context(|| format!("Failed to write {}", agent_skill_path.display()))?;
+
     // Clean up legacy bare files from older installs
     let legacy_path = skills_root.join("temper.md");
     if legacy_path.is_file() {
@@ -60,13 +80,20 @@ fn install_to(skills_root: &Path) -> Result<()> {
     if legacy_user_path.is_file() {
         let _ = fs::remove_file(&legacy_user_path);
     }
+    // Clean up old "temper" directory (renamed to "temper-developer")
+    let legacy_dir = skills_root.join("temper");
+    if legacy_dir.is_dir() {
+        let _ = fs::remove_dir_all(&legacy_dir);
+    }
 
     println!("Installed Temper skills to {}", skills_root.display());
     println!("  - {}", skill_path.display());
     println!("  - {}", user_skill_path.display());
+    println!("  - {}", agent_skill_path.display());
     println!("\nYou can now open Claude Code in any directory and say:");
-    println!("  \"Build me a [your app idea]\"  (uses /temper)");
+    println!("  \"Build me a [your app idea]\"  (uses /temper-developer)");
     println!("  \"/temper-user\"                 (production chat proxy)");
+    println!("  \"/temper-agent\"                (MCP governed operations)");
 
     Ok(())
 }
@@ -115,7 +142,7 @@ mod tests {
 
         install_to(&skills_root).expect("install_to should succeed");
 
-        let skill_path = skills_root.join("temper").join("SKILL.md");
+        let skill_path = skills_root.join("temper-developer").join("SKILL.md");
         assert!(skill_path.is_file(), "SKILL.md should exist after install");
 
         let content = fs::read_to_string(&skill_path).unwrap();
@@ -124,7 +151,7 @@ mod tests {
             "installed file should start with YAML frontmatter"
         );
         assert!(
-            content.contains("name: temper"),
+            content.contains("name: temper-developer"),
             "installed file should have skill name in frontmatter"
         );
         assert!(
@@ -190,7 +217,7 @@ mod tests {
         fs::write(&legacy_user_path, "old bare user file").unwrap();
 
         // Create old directory-style file
-        let skill_dir = skills_root.join("temper");
+        let skill_dir = skills_root.join("temper-developer");
         fs::create_dir_all(&skill_dir).unwrap();
         let skill_path = skill_dir.join("SKILL.md");
         fs::write(&skill_path, "old content").unwrap();
