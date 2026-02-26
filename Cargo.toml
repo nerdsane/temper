@@ -21,6 +21,7 @@ members = [
     "crates/temper-optimize",
     "crates/temper-platform",
     "crates/temper-wasm",
+    "crates/temper-wasm-sdk",
     "reference-apps/ecommerce",
     "reference-apps/oncall",
 ]
@@ -117,6 +118,7 @@ temper-jit = { path = "crates/temper-jit" }
 temper-optimize = { path = "crates/temper-optimize" }
 temper-platform = { path = "crates/temper-platform" }
 temper-wasm = { path = "crates/temper-wasm" }
+temper-wasm-sdk = { path = "crates/temper-wasm-sdk" }
 
 # WASM runtime
 wasmtime = { version = "29", features = ["component-model"] }

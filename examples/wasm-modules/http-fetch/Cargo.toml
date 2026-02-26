@@ -5,3 +5,6 @@ edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
+
+[dependencies]
+temper-wasm-sdk = { path = "../../../crates/temper-wasm-sdk" }

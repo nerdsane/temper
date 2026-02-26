@@ -185,11 +185,15 @@ handles execution within governance boundaries.\n\n\
 METHOD REFERENCE:\n\
 \x20 Lifecycle:    start_server\n\
 \x20 Entity ops:   list, get, create, action, patch\n\
-\x20 Developer:    show_spec, submit_specs, get_policies, upload_wasm\n\
+\x20 Developer:    show_spec, submit_specs, get_policies, upload_wasm, compile_wasm\n\
 \x20 Governance:   get_decisions, poll_decision\n\n\
 BUILT-IN MODULE: The server ships with a pre-registered `http_fetch` WASM module.\n\
 Declare `module = \"http_fetch\"` in [[integration]] sections with `url` and `method`\n\
 config keys to call any HTTP API without uploading a custom module.\n\n\
+COMPILE_WASM: Use `await temper.compile_wasm(tenant, module_name, rust_source)` to compile\n\
+Rust source into a WASM module. Source should use `temper_wasm_sdk::prelude::*` and the\n\
+`temper_module!` macro. Returns {{\"status\":\"compiled\",\"module\":name,\"hash\":...,\"size\":...}}\n\
+on success, or compiler errors on failure for self-correction.\n\n\
 Call `await temper.start_server()` before entity/developer/governance methods \
 (unless MCP was started with --port).\n\
 CEDAR GOVERNANCE: actions may be denied by Cedar policy. Denied actions create\n\

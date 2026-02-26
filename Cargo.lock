@@ -5149,12 +5149,14 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "temper-runtime",
  "temper-server",
  "temper-spec",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -5365,6 +5367,13 @@ dependencies = [
  "tokio-test",
  "tracing",
  "wasmtime",
+]
+
+[[package]]
+name = "temper-wasm-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

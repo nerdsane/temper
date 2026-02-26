@@ -5,6 +5,7 @@ use std::process::Stdio;
 use monty::MontyObject;
 use reqwest::Method;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncBufReadExt;
 
 use super::runtime::RuntimeContext;
@@ -271,6 +272,14 @@ impl RuntimeContext {
                 )
                 .await
             }
+            "compile_wasm" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let module_name = expect_string_arg(args, 1, "module_name", method)?;
+                let rust_source = expect_string_arg(args, 2, "rust_source", method)?;
+
+                self.compile_and_upload_wasm(&tenant, &module_name, &rust_source)
+                    .await
+            }
             "approve_decision" | "deny_decision" | "set_policy" => Err(format!(
                 "temper.{method}() is not available to agents. \
                  Governance write operations (approve, deny, set_policy) \
@@ -280,7 +289,7 @@ impl RuntimeContext {
                 "unknown temper method '{method}'. Available: start_server, \
                  list, get, create, action, patch, \
                  show_spec, submit_specs, get_policies, \
-                 upload_wasm, \
+                 upload_wasm, compile_wasm, \
                  get_decisions, poll_decision"
             )),
         }
@@ -405,5 +414,152 @@ impl RuntimeContext {
         }
 
         Err(format_http_error(status, &text))
+    }
+
+    /// Compile Rust source into a WASM module and upload it to the server.
+    ///
+    /// Creates a temporary Cargo project with temper-wasm-sdk as a dependency,
+    /// compiles it to wasm32-unknown-unknown, and uploads the resulting binary.
+    async fn compile_and_upload_wasm(
+        &self,
+        tenant: &str,
+        module_name: &str,
+        rust_source: &str,
+    ) -> std::result::Result<Value, String> {
+        // Pre-assertion: check wasm32-unknown-unknown target is available
+        let rustup_check = tokio::process::Command::new("rustup")
+            .args(["target", "list", "--installed"])
+            .output()
+            .await
+            .map_err(|e| format!("failed to run rustup: {e}"))?;
+
+        let installed_targets = String::from_utf8_lossy(&rustup_check.stdout);
+        if !installed_targets.contains("wasm32-unknown-unknown") {
+            return Err("wasm32-unknown-unknown target not installed. \
+                 Run: rustup target add wasm32-unknown-unknown"
+                .to_string());
+        }
+
+        // Create temp build directory
+        let build_id = uuid::Uuid::new_v4();
+        let build_dir = std::path::PathBuf::from(format!("/tmp/temper-wasm-build-{build_id}"));
+        let src_dir = build_dir.join("src");
+        tokio::fs::create_dir_all(&src_dir)
+            .await
+            .map_err(|e| format!("failed to create build dir: {e}"))?;
+
+        // Resolve SDK path (relative to this binary's location or workspace root)
+        let sdk_path = self.resolve_sdk_path()?;
+
+        // Write Cargo.toml
+        let cargo_toml = format!(
+            r#"[package]
+name = "temper-user-module"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+temper-wasm-sdk = {{ path = "{sdk_path}" }}
+"#,
+        );
+
+        tokio::fs::write(build_dir.join("Cargo.toml"), &cargo_toml)
+            .await
+            .map_err(|e| format!("failed to write Cargo.toml: {e}"))?;
+
+        // Write user source
+        tokio::fs::write(src_dir.join("lib.rs"), rust_source)
+            .await
+            .map_err(|e| format!("failed to write lib.rs: {e}"))?;
+
+        // Run cargo build with timeout
+        let build_result = tokio::time::timeout(
+            std::time::Duration::from_secs(120), // determinism-ok: wall-clock timeout for build
+            tokio::process::Command::new("cargo")
+                .arg("build")
+                .arg("--target")
+                .arg("wasm32-unknown-unknown")
+                .arg("--release")
+                .current_dir(&build_dir)
+                .env("CARGO_TARGET_DIR", build_dir.join("target"))
+                .output(),
+        )
+        .await
+        .map_err(|_| "compilation timed out after 120 seconds".to_string())?
+        .map_err(|e| format!("failed to run cargo build: {e}"))?;
+
+        if !build_result.status.success() {
+            let stderr = String::from_utf8_lossy(&build_result.stderr);
+            // Clean up on failure
+            let _ = tokio::fs::remove_dir_all(&build_dir).await;
+            return Err(format!("compilation failed:\n{stderr}"));
+        }
+
+        // Read the compiled WASM binary
+        let wasm_path =
+            build_dir.join("target/wasm32-unknown-unknown/release/temper_user_module.wasm");
+        let wasm_bytes = tokio::fs::read(&wasm_path)
+            .await
+            .map_err(|e| format!("failed to read compiled WASM: {e}"))?;
+
+        let wasm_size = wasm_bytes.len();
+
+        // Compute hash for verification
+        let hash = format!("{:x}", Sha256::digest(&wasm_bytes));
+
+        // Upload to server
+        let upload_result = self
+            .temper_request_bytes(
+                tenant,
+                reqwest::Method::POST,
+                format!("/api/wasm/modules/{module_name}"),
+                wasm_bytes,
+            )
+            .await;
+
+        // Clean up build directory
+        let _ = tokio::fs::remove_dir_all(&build_dir).await;
+
+        match upload_result {
+            Ok(_) => Ok(serde_json::json!({
+                "status": "compiled",
+                "module": module_name,
+                "hash": hash,
+                "size": wasm_size,
+            })),
+            Err(e) => Err(format!("compiled successfully but upload failed: {e}")),
+        }
+    }
+
+    /// Resolve the path to the temper-wasm-sdk crate.
+    fn resolve_sdk_path(&self) -> Result<String, String> {
+        // Try to find SDK relative to the binary (workspace root / crates / temper-wasm-sdk)
+        if let Some(ref binary) = self.binary_path {
+            // Binary is at target/release/temper or target/debug/temper
+            // Walk up to find workspace root
+            let mut path = std::path::PathBuf::from(binary);
+            for _ in 0..5 {
+                path.pop();
+                let sdk_candidate = path.join("crates/temper-wasm-sdk");
+                if sdk_candidate.join("Cargo.toml").exists() {
+                    return Ok(sdk_candidate.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        // Fallback: check common development paths
+        let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+        let sdk_candidate = cwd.join("crates/temper-wasm-sdk");
+        if sdk_candidate.join("Cargo.toml").exists() {
+            return Ok(sdk_candidate.to_string_lossy().to_string());
+        }
+
+        Err(
+            "cannot find temper-wasm-sdk crate. Ensure you are running from the temper workspace."
+                .to_string(),
+        )
     }
 }
