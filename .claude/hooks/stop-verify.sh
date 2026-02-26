@@ -71,12 +71,24 @@ if [ -d "$MARKER_DIR" ]; then
     fi
 fi
 
-# --- Check 3: Workspace compilation ---
-echo "Running pre-exit workspace check..." >&2
-if ! (cd "$WORKSPACE_ROOT" && cargo check --workspace 2>&1 >&2); then
-    echo "BLOCKED: Workspace has compilation errors!" >&2
-    echo "Fix all compilation errors before exiting the session." >&2
-    ANY_BLOCKED=true
+# --- Check 3: Workspace compilation (only if this session changed code) ---
+SESSION_CHANGED=false
+if [ -d "$MARKER_DIR" ] && [ -f "$MARKER_DIR/commit-pending" ]; then
+    SESSION_CHANGED=true
+fi
+if (cd "$WORKSPACE_ROOT" && git diff --name-only 2>/dev/null | grep -q '\.rs$'); then
+    SESSION_CHANGED=true
+fi
+
+if [ "$SESSION_CHANGED" = true ]; then
+    echo "Running pre-exit workspace check..." >&2
+    if ! (cd "$WORKSPACE_ROOT" && cargo check --workspace 2>&1 >&2); then
+        echo "BLOCKED: Workspace has compilation errors!" >&2
+        echo "Fix all compilation errors before exiting the session." >&2
+        ANY_BLOCKED=true
+    fi
+else
+    echo "No code changes in this session — skipping compilation check." >&2
 fi
 
 # --- Archive + Clean up on success ---
