@@ -336,29 +336,29 @@ fn spawn_optimization_loop(state: &PlatformState) {
 
 /// Spawn the Observe UI (Next.js dev server) in the background.
 ///
-/// Looks for the `observe/` directory relative to the binary or cwd.
+/// Looks for the `ui/observe/` directory relative to the binary or cwd.
 /// Falls back gracefully if npm/node_modules are unavailable.
 fn spawn_observe_ui(api_port: u16) {
     // Try to find the observe directory relative to the binary, then cwd.
     let observe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| {
-            let d = p.parent()?.parent()?.parent()?.join("observe");
+            let d = p.parent()?.parent()?.parent()?.join("ui/observe");
             if d.exists() { Some(d) } else { None }
         })
         .or_else(|| {
-            let d = std::env::current_dir().ok()?.join("observe");
+            let d = std::env::current_dir().ok()?.join("ui/observe");
             if d.exists() { Some(d) } else { None }
         });
 
     let Some(observe_dir) = observe_dir else {
-        eprintln!("  Warning: observe/ directory not found, skipping Observe UI");
+        eprintln!("  Warning: ui/observe/ directory not found, skipping Observe UI");
         return;
     };
 
     if !observe_dir.join("node_modules").exists() {
         eprintln!(
-            "  Warning: observe/node_modules not found. Run `npm install` in {} first.",
+            "  Warning: ui/observe/node_modules not found. Run `npm install` in {} first.",
             observe_dir.display()
         );
         return;
@@ -374,6 +374,7 @@ fn spawn_observe_ui(api_port: u16) {
         let result = tokio::process::Command::new("npm")
             .arg("run")
             .arg("dev")
+            .env("TEMPER_API_URL", format!("http://127.0.0.1:{api_port}"))
             .env("NEXT_PUBLIC_TEMPER_API_PORT", api_port.to_string())
             .env("PORT", observe_port.to_string())
             .current_dir(&observe_dir)

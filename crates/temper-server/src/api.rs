@@ -83,6 +83,9 @@ pub fn build_api_router() -> Router<ServerState> {
             "/tenants/{tenant}/decisions/{id}/deny",
             post(handle_deny_decision),
         )
+        // Cross-tenant decision endpoints
+        .route("/decisions", get(handle_list_all_decisions))
+        .route("/decisions/stream", get(handle_all_decisions_stream))
 }
 
 /// PUT /api/tenants/{tenant}/secrets/{key_name} — encrypt and store a secret.
@@ -393,9 +396,29 @@ async fn handle_list_decisions(
         .cloned()
         .collect();
 
+    let pending_count = entries
+        .iter()
+        .filter(|d| d.status == DecisionStatus::Pending)
+        .count();
+    let approved_count = entries
+        .iter()
+        .filter(|d| d.status == DecisionStatus::Approved)
+        .count();
+    let denied_count = entries
+        .iter()
+        .filter(|d| d.status == DecisionStatus::Denied)
+        .count();
+    let total = entries.len();
+
     (
         StatusCode::OK,
-        axum::Json(serde_json::json!({"decisions": entries})),
+        axum::Json(serde_json::json!({
+            "decisions": entries,
+            "total": total,
+            "pending_count": pending_count,
+            "approved_count": approved_count,
+            "denied_count": denied_count,
+        })),
     )
         .into_response()
 }
@@ -548,6 +571,72 @@ async fn handle_decision_stream(
             // Lagged receiver: skip missed events and continue.
             Err(_) => None,
         }
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// GET /api/decisions — list all decisions across all tenants.
+async fn handle_list_all_decisions(
+    State(state): State<ServerState>,
+    Query(params): Query<DecisionListParams>,
+) -> impl IntoResponse {
+    let log = state.pending_decision_log.read().unwrap(); // ci-ok: infallible lock
+    let entries: Vec<_> = log
+        .entries()
+        .iter()
+        .filter(|d| {
+            if let Some(ref s) = params.status {
+                let status_str = serde_json::to_value(&d.status)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default();
+                status_str == *s
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+
+    let pending_count = entries
+        .iter()
+        .filter(|d| d.status == DecisionStatus::Pending)
+        .count();
+    let approved_count = entries
+        .iter()
+        .filter(|d| d.status == DecisionStatus::Approved)
+        .count();
+    let denied_count = entries
+        .iter()
+        .filter(|d| d.status == DecisionStatus::Denied)
+        .count();
+    let total = entries.len();
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "decisions": entries,
+            "total": total,
+            "pending_count": pending_count,
+            "approved_count": approved_count,
+            "denied_count": denied_count,
+        })),
+    )
+        .into_response()
+}
+
+/// GET /api/decisions/stream — SSE for all pending decisions across all tenants.
+async fn handle_all_decisions_stream(
+    State(state): State<ServerState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.pending_decision_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
+        Ok(pd) => {
+            let data = serde_json::to_string(&pd).unwrap_or_default();
+            Some(Ok(Event::default().event("pending_decision").data(data)))
+        }
+        Err(_) => None,
     });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
