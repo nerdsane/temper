@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useMemo } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { fetchAgents } from "@/lib/api";
 import { usePolling, useRelativeTime } from "@/lib/hooks";
 import type { AgentsResponse } from "@/lib/types";
@@ -41,6 +41,7 @@ function rateBgClass(rate: number): string {
 }
 
 export default function AgentsPage() {
+  const router = useRouter();
   const [initialError, setInitialError] = useState<string | null>(null);
 
   const loadInitial = useCallback(async () => {
@@ -184,15 +185,13 @@ export default function AgentsPage() {
                 return (
                   <tr
                     key={agent.agent_id}
+                    onClick={() => router.push(`/agents/${encodeURIComponent(agent.agent_id)}`)}
                     className={`border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors cursor-pointer ${i % 2 === 1 ? "bg-white/[0.01]" : ""}`}
                   >
                     <td className="px-3.5 py-2.5">
-                      <Link
-                        href={`/agents/${encodeURIComponent(agent.agent_id)}`}
-                        className="font-mono text-zinc-200 hover:text-teal-400 transition-colors"
-                      >
+                      <span className="font-mono text-zinc-200">
                         {agent.agent_id}
-                      </Link>
+                      </span>
                     </td>
                     <td className="px-3.5 py-2.5 text-right font-mono text-zinc-400">
                       {agent.total_actions}

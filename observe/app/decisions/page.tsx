@@ -6,12 +6,14 @@ import {
   approveDecision,
   denyDecision,
   subscribePendingDecisions,
+  fetchSpecs,
 } from "@/lib/api";
 import { usePolling, useRelativeTime } from "@/lib/hooks";
 import type {
   DecisionsResponse,
   PendingDecision,
   PolicyScope,
+  SpecSummary,
 } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
 
@@ -161,7 +163,8 @@ function DecisionCard({
 export default function DecisionsPage() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [initialError, setInitialError] = useState<string | null>(null);
-  const [tenant] = useState("default");
+  const [tenant, setTenant] = useState<string>("");
+  const [tenants, setTenants] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [acting, setActing] = useState(false);
   const [liveDecisions, setLiveDecisions] = useState<PendingDecision[]>([]);
@@ -170,7 +173,18 @@ export default function DecisionsPage() {
     setInitialLoading(true);
     setInitialError(null);
     try {
-      await fetchDecisions(tenant);
+      // Derive tenants from loaded specs (same pattern as main dashboard)
+      const specs = await fetchSpecs();
+      const tenantSet = new Set<string>();
+      for (const s of specs) {
+        if (s.tenant && s.tenant !== "temper-system") tenantSet.add(s.tenant);
+      }
+      const tenantList = Array.from(tenantSet).sort();
+      setTenants(tenantList);
+      // Auto-select first tenant if none selected yet
+      const activeTenant = tenantList[0] ?? "default";
+      setTenant((prev) => prev || activeTenant);
+      await fetchDecisions(activeTenant);
     } catch (err) {
       setInitialError(
         err instanceof Error ? err.message : "Failed to load decisions",
@@ -178,7 +192,7 @@ export default function DecisionsPage() {
     } finally {
       setInitialLoading(false);
     }
-  }, [tenant]);
+  }, []);
 
   useEffect(() => {
     loadInitial();
@@ -191,7 +205,7 @@ export default function DecisionsPage() {
         statusFilter !== "all" ? { status: statusFilter } : undefined,
       ),
     interval: 5000,
-    enabled: !initialLoading && !initialError,
+    enabled: !initialLoading && !initialError && !!tenant,
   });
 
   const data = decisionsPoll.data;
@@ -199,7 +213,7 @@ export default function DecisionsPage() {
 
   // SSE for live pending decisions
   useEffect(() => {
-    if (initialLoading || initialError) return;
+    if (initialLoading || initialError || !tenant) return;
     const cleanup = subscribePendingDecisions(tenant, (decision) => {
       setLiveDecisions((prev) => [...prev.slice(-49), decision]);
       decisionsPoll.refresh();
@@ -294,6 +308,17 @@ export default function DecisionsPage() {
                 {liveDecisions.length} live
               </span>
             </div>
+          )}
+          {tenants.length > 1 && (
+            <select
+              value={tenant}
+              onChange={(e) => setTenant(e.target.value)}
+              className="bg-[#111115] text-zinc-400 text-xs rounded-sm px-2 py-1.5 focus:outline-none"
+            >
+              {tenants.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
           )}
           <select
             value={statusFilter}
