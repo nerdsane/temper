@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { fetchSpecs, fetchEntities } from "@/lib/api";
 import { useConnection } from "@/lib/connection";
+import { useDecisionNotifier } from "@/lib/decision-notifier";
 import type { SpecSummary } from "@/lib/types";
 
 function NavIcon({ icon }: { icon: string }) {
@@ -131,6 +132,7 @@ function CollapsibleSection({
 export default function Sidebar() {
   const pathname = usePathname();
   const { connected, checking } = useConnection();
+  const { pendingCount } = useDecisionNotifier();
   const [specs, setSpecs] = useState<SpecSummary[]>([]);
   const [entityCounts, setEntityCounts] = useState<Record<string, number>>({});
 
@@ -209,6 +211,11 @@ export default function Sidebar() {
           >
             <NavIcon icon={item.icon} />
             {item.label}
+            {item.label === "Decisions" && pendingCount > 0 && (
+              <span className="ml-auto text-[10px] font-mono bg-pink-500/20 text-pink-400 px-1.5 py-0.5 rounded-full min-w-[20px] text-center">
+                {pendingCount}
+              </span>
+            )}
           </Link>
         ))}
 

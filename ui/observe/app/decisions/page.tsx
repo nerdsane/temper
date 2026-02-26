@@ -18,6 +18,11 @@ import type {
   SpecSummary,
 } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
+import {
+  redactSensitiveFields,
+  generatePolicyPreview,
+  groupByDate,
+} from "@/lib/utils";
 
 const ALL_TENANTS = "__all__";
 
@@ -48,6 +53,18 @@ const SCOPE_LABELS: Record<PolicyScope, string> = {
   broad: "Broad -- all resources for action",
 };
 
+/** Redact inline secrets in denial reason strings (e.g. "token=sk-abc123"). */
+function redactDenialReason(reason: string): string {
+  return reason.replace(
+    /\b(authorization|api_key|apikey|token|secret|password|cookie|credential|bearer|jwt|session_token|access_token|refresh_token|private_key)\s*[=:]\s*\S+/gi,
+    (match) => {
+      const sep = match.includes("=") ? "=" : ":";
+      const key = match.split(/[=:]/)[0].trim();
+      return `${key}${sep}[redacted]`;
+    },
+  );
+}
+
 function DecisionCard({
   decision,
   onApprove,
@@ -62,9 +79,19 @@ function DecisionCard({
   showTenant?: boolean;
 }) {
   const [scope, setScope] = useState<PolicyScope>("narrow");
-  const [showPolicy, setShowPolicy] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
   const ts = new Date(decision.created_at);
   const timeStr = ts.toLocaleString();
+
+  const policyPreview = generatePolicyPreview(
+    decision.agent_id,
+    decision.action,
+    decision.resource_type,
+    decision.resource_id,
+    scope,
+  );
+
+  const redactedAttrs = redactSensitiveFields(decision.resource_attrs);
 
   return (
     <div className="glass rounded p-4 animate-fade-in">
@@ -105,7 +132,7 @@ function DecisionCard({
             Reason
           </span>
           <span className="text-[13px] text-pink-400">
-            {decision.denial_reason}
+            {redactDenialReason(decision.denial_reason)}
           </span>
         </div>
         {decision.module_name && (
@@ -118,24 +145,33 @@ function DecisionCard({
             </span>
           </div>
         )}
+        {decision.resource_attrs &&
+          Object.keys(decision.resource_attrs).length > 0 && (
+            <div className="flex items-start gap-2">
+              <span className="text-[10px] text-zinc-600 uppercase tracking-wider w-16 pt-0.5">
+                Attrs
+              </span>
+              <pre className="text-[11px] font-mono text-zinc-500 overflow-x-auto whitespace-pre-wrap">
+                {JSON.stringify(redactedAttrs, null, 2)}
+              </pre>
+            </div>
+          )}
       </div>
 
-      {/* Policy preview */}
-      {decision.generated_policy && (
-        <div className="mb-3">
-          <button
-            onClick={() => setShowPolicy(!showPolicy)}
-            className="text-[11px] text-teal-400 hover:text-teal-300 transition-colors"
-          >
-            {showPolicy ? "Hide" : "Show"} generated policy
-          </button>
-          {showPolicy && (
-            <pre className="mt-2 p-2.5 bg-black/30 rounded text-[11px] font-mono text-zinc-400 overflow-x-auto whitespace-pre-wrap border border-white/[0.04]">
-              {decision.generated_policy}
-            </pre>
-          )}
-        </div>
-      )}
+      {/* Live policy preview */}
+      <div className="mb-3">
+        <button
+          onClick={() => setShowPreview(!showPreview)}
+          className="text-[11px] text-teal-400 hover:text-teal-300 transition-colors"
+        >
+          {showPreview ? "Hide" : "Preview"} policy
+        </button>
+        {showPreview && (
+          <pre className="mt-2 p-2.5 bg-black/30 rounded text-[11px] font-mono text-zinc-400 overflow-x-auto whitespace-pre-wrap border border-white/[0.04]">
+            {policyPreview}
+          </pre>
+        )}
+      </div>
 
       {/* Actions */}
       <div className="flex items-center gap-3 pt-2 border-t border-white/[0.04]">
@@ -169,6 +205,96 @@ function DecisionCard({
       </div>
     </div>
   );
+}
+
+function HistoryRow({
+  decision,
+  showTenant,
+  even,
+}: {
+  decision: PendingDecision;
+  showTenant: boolean;
+  even: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const decidedTs = decision.decided_at
+    ? new Date(decision.decided_at).toLocaleString()
+    : "--";
+
+  return (
+    <>
+      <tr
+        className={`border-b border-white/[0.03] cursor-pointer hover:bg-white/[0.03] transition-colors ${even ? "bg-white/[0.01]" : ""}`}
+        onClick={() =>
+          decision.generated_policy && setExpanded((prev) => !prev)
+        }
+      >
+        {showTenant && (
+          <td className="px-3.5 py-2.5 font-mono text-zinc-500 text-[11px]">
+            {decision.tenant}
+          </td>
+        )}
+        <td className="px-3.5 py-2.5 font-mono text-zinc-300">
+          {decision.agent_id}
+        </td>
+        <td className="px-3.5 py-2.5 font-mono text-teal-400">
+          {decision.action}
+        </td>
+        <td className="px-3.5 py-2.5 font-mono text-zinc-400">
+          {decision.resource_type}::{decision.resource_id}
+        </td>
+        <td className="px-3.5 py-2.5">
+          <span
+            className={`text-xs font-mono px-2 py-0.5 rounded-full ${
+              decision.status === "approved"
+                ? "bg-teal-500/15 text-teal-400"
+                : decision.status === "denied"
+                  ? "bg-pink-500/15 text-pink-400"
+                  : "bg-amber-500/15 text-amber-400"
+            }`}
+          >
+            {decision.status}
+          </span>
+        </td>
+        <td className="px-3.5 py-2.5 font-mono text-zinc-500 text-[11px]">
+          {decision.approved_scope ?? "--"}
+        </td>
+        <td className="px-3.5 py-2.5 text-right font-mono text-zinc-600 text-[11px]">
+          {decidedTs}
+          {decision.generated_policy && (
+            <span className="ml-1.5 text-zinc-700">
+              {expanded ? "\u25B4" : "\u25BE"}
+            </span>
+          )}
+        </td>
+      </tr>
+      {expanded && decision.generated_policy && (
+        <tr className="border-b border-white/[0.03]">
+          <td
+            colSpan={showTenant ? 7 : 6}
+            className="px-3.5 py-2.5"
+          >
+            <pre className="p-2.5 bg-black/30 rounded text-[11px] font-mono text-zinc-400 overflow-x-auto whitespace-pre-wrap border border-white/[0.04]">
+              {decision.generated_policy}
+            </pre>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function exportDecisions(decisions: PendingDecision[]) {
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const blob = new Blob([JSON.stringify(decisions, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `temper-decisions-${dateStr}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export default function DecisionsPage() {
@@ -276,6 +402,11 @@ export default function DecisionsPage() {
     return data.decisions.filter((d) => d.status !== "pending");
   }, [data]);
 
+  const groupedHistory = useMemo(
+    () => groupByDate(resolvedDecisions, (d) => d.decided_at),
+    [resolvedDecisions],
+  );
+
   const showTenantBadge = tenant === ALL_TENANTS;
 
   if (initialLoading) {
@@ -347,6 +478,14 @@ export default function DecisionsPage() {
             <option value="denied">Denied</option>
             <option value="expired">Expired</option>
           </select>
+          {resolvedDecisions.length > 0 && (
+            <button
+              onClick={() => exportDecisions(data?.decisions ?? [])}
+              className="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 text-xs rounded-sm transition-colors"
+            >
+              Export
+            </button>
+          )}
           {lastUpdated && (
             <span className="text-xs text-zinc-600">Updated {lastUpdated}</span>
           )}
@@ -412,90 +551,68 @@ export default function DecisionsPage() {
         </div>
       )}
 
-      {/* History Table */}
+      {/* History Table — grouped by date */}
       {resolvedDecisions.length > 0 && (
         <div>
           <h2 className="text-base font-semibold text-zinc-200 mb-3 tracking-tight">
             Decision History
           </h2>
-          <div className="glass rounded overflow-hidden max-h-96 overflow-y-auto">
-            <table className="w-full text-[13px]">
-              <thead className="sticky top-0 bg-[#111115]/90 backdrop-blur-sm z-10">
-                <tr className="border-b border-white/[0.06]">
-                  {showTenantBadge && (
-                    <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
-                      Tenant
-                    </th>
-                  )}
-                  <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
-                    Agent
-                  </th>
-                  <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
-                    Action
-                  </th>
-                  <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
-                    Resource
-                  </th>
-                  <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
-                    Scope
-                  </th>
-                  <th className="text-right px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
-                    Decided
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {resolvedDecisions.map((d, i) => {
-                  const decidedTs = d.decided_at
-                    ? new Date(d.decided_at).toLocaleString()
-                    : "--";
-                  return (
-                    <tr
-                      key={d.id}
-                      className={`border-b border-white/[0.03] ${i % 2 === 1 ? "bg-white/[0.01]" : ""}`}
-                    >
-                      {showTenantBadge && (
-                        <td className="px-3.5 py-2.5 font-mono text-zinc-500 text-[11px]">
-                          {d.tenant}
-                        </td>
-                      )}
-                      <td className="px-3.5 py-2.5 font-mono text-zinc-300">
-                        {d.agent_id}
-                      </td>
-                      <td className="px-3.5 py-2.5 font-mono text-teal-400">
-                        {d.action}
-                      </td>
-                      <td className="px-3.5 py-2.5 font-mono text-zinc-400">
-                        {d.resource_type}::{d.resource_id}
-                      </td>
-                      <td className="px-3.5 py-2.5">
-                        <span
-                          className={`text-xs font-mono px-2 py-0.5 rounded-full ${
-                            d.status === "approved"
-                              ? "bg-teal-500/15 text-teal-400"
-                              : d.status === "denied"
-                                ? "bg-pink-500/15 text-pink-400"
-                                : "bg-amber-500/15 text-amber-400"
-                          }`}
-                        >
-                          {d.status}
-                        </span>
-                      </td>
-                      <td className="px-3.5 py-2.5 font-mono text-zinc-500 text-[11px]">
-                        {d.approved_scope ?? "--"}
-                      </td>
-                      <td className="px-3.5 py-2.5 text-right font-mono text-zinc-600 text-[11px]">
-                        {decidedTs}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          {Array.from(groupedHistory.entries()).map(
+            ([bucket, decisions]) => (
+              <div key={bucket} className="mb-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">
+                    {bucket}
+                  </span>
+                  <div className="flex-1 h-px bg-white/[0.04]" />
+                  <span className="text-[10px] font-mono text-zinc-700">
+                    {decisions.length}
+                  </span>
+                </div>
+                <div className="glass rounded overflow-hidden max-h-96 overflow-y-auto">
+                  <table className="w-full text-[13px]">
+                    <thead className="sticky top-0 bg-[#111115]/90 backdrop-blur-sm z-10">
+                      <tr className="border-b border-white/[0.06]">
+                        {showTenantBadge && (
+                          <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                            Tenant
+                          </th>
+                        )}
+                        <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                          Agent
+                        </th>
+                        <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                          Action
+                        </th>
+                        <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                          Resource
+                        </th>
+                        <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                          Status
+                        </th>
+                        <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                          Scope
+                        </th>
+                        <th className="text-right px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                          Decided
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {decisions.map((d, i) => (
+                        <HistoryRow
+                          key={d.id}
+                          decision={d}
+                          showTenant={showTenantBadge}
+                          even={i % 2 === 1}
+                        />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ),
+          )}
         </div>
       )}
     </div>
