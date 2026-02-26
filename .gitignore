@@ -34,3 +34,29 @@ generated_imgs/
 .cascade-results/
 .proof/archive/
 apps/scratch/
+
+# Development tooling
+.mcp.json
+.reviews/
+.slop/
+.worktrees/
+.progress/
+
+# Node.js (observe UI)
+node_modules/
+.next/
+
+# Generated data
+ui/observe/public/graph-data.json
+
+# Unfinished observe UI pages
+ui/observe/app/visualize/
+ui/observe/components/Graph3D.tsx
+
+# Personal scripts
+scripts/discord-clean-view.js
+scripts/generate-graph-json.js
+
+.proof/
+.code-review-pass
+.dst-review-pass

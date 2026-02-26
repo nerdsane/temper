@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Temper</title>
+  <meta name="description" content="Spec-first platform for governed applications. Describe, verify, deploy, evolve.">
+  <meta name="theme-color" content="#0a0a0c">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%232dd4bf'/><text x='16' y='23' font-size='20' font-weight='bold' fill='%230a0a0c' text-anchor='middle' font-family='system-ui'>T</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0a0a0c;
+      --surface: #111115;
+      --glass: rgba(255, 255, 255, 0.04);
+      --glass-hover: rgba(255, 255, 255, 0.06);
+      --border: rgba(255, 255, 255, 0.06);
+      --border-hover: rgba(255, 255, 255, 0.12);
+      --teal: #2dd4bf;
+      --teal-dim: rgba(45, 212, 191, 0.12);
+      --teal-glow: rgba(45, 212, 191, 0.08);
+      --pink: #f472b6;
+      --text: #fafafa;
+      --secondary: #a1a1aa;
+      --muted: #52525b;
+      --font: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+      --mono: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      background-image: radial-gradient(ellipse at top left, #131320 0%, #0d0d14 40%, #0a0a0c 100%);
+      color: var(--text);
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+      min-height: 100vh;
+    }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
+
+    a { color: var(--teal); text-decoration: none; transition: color 0.2s; }
+    a:hover { color: #5eead4; }
+
+    .container { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+
+    /* ── Nav ─────────────────────────────── */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(10, 10, 12, 0.8);
+      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+    }
+    nav .container { display: flex; align-items: center; justify-content: space-between; height: 56px; }
+    .nav-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; color: var(--text); letter-spacing: -0.02em; }
+    .nav-brand:hover { color: var(--text); }
+    .nav-mark { width: 28px; height: 28px; border-radius: 7px; background: var(--teal); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 14px; color: var(--bg); }
+    .nav-links { display: flex; align-items: center; gap: 28px; list-style: none; }
+    .nav-links a { font-size: 13px; color: var(--secondary); font-weight: 500; }
+    .nav-links a:hover { color: var(--text); }
+    .nav-gh { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 1px solid var(--border); border-radius: 7px; font-size: 13px; color: var(--text) !important; transition: border-color 0.2s, background 0.2s; }
+    .nav-gh:hover { border-color: var(--teal); background: var(--teal-glow); }
+    .nav-gh svg { opacity: 0.7; }
+    @media (max-width: 640px) { .nav-links li:not(:last-child) { display: none; } }
+
+    /* ── Hero ────────────────────────────── */
+    .hero {
+      padding: 180px 0 120px;
+      text-align: center;
+      position: relative;
+    }
+    .hero::before {
+      content: '';
+      position: absolute; top: -20%; left: 50%; transform: translateX(-50%);
+      width: 700px; height: 700px;
+      background: radial-gradient(circle, var(--teal-glow) 0%, transparent 60%);
+      pointer-events: none;
+    }
+    .hero .container { position: relative; z-index: 1; }
+    .hero-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 14px; border-radius: 100px;
+      background: var(--glass); border: 1px solid var(--border);
+      font-size: 12px; font-weight: 500; color: var(--secondary);
+      margin-bottom: 40px; letter-spacing: 0.04em;
+    }
+    .hero-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--teal); }
+    .hero h1 {
+      font-size: clamp(2.5rem, 5.5vw, 4rem);
+      font-weight: 700; letter-spacing: -0.03em; line-height: 1.1;
+      max-width: 680px; margin: 0 auto 24px;
+    }
+    .hero-sub {
+      font-size: 18px; color: var(--secondary); max-width: 480px;
+      margin: 0 auto 48px; line-height: 1.7;
+    }
+    .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 10px 22px; border-radius: 8px;
+      font-family: var(--font); font-size: 14px; font-weight: 600;
+      transition: all 0.2s; cursor: pointer; border: none;
+    }
+    .btn-teal { background: var(--teal); color: var(--bg); }
+    .btn-teal:hover { color: var(--bg); background: #5eead4; transform: translateY(-1px); box-shadow: 0 4px 20px var(--teal-glow); }
+    .btn-glass { background: var(--glass); color: var(--text); border: 1px solid var(--border); }
+    .btn-glass:hover { color: var(--text); background: var(--glass-hover); border-color: var(--border-hover); transform: translateY(-1px); }
+
+    /* ── Sections ────────────────────────── */
+    section { padding: 100px 0; }
+    .label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; color: var(--teal); margin-bottom: 12px; }
+    .heading { font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 700; letter-spacing: -0.02em; margin-bottom: 16px; }
+    .sub { font-size: 16px; color: var(--secondary); max-width: 520px; margin-bottom: 48px; line-height: 1.7; }
+
+    /* ── About ───────────────────────────── */
+    .about { border-top: 1px solid var(--border); }
+    .about-text { max-width: 600px; }
+    .about-text p { font-size: 16px; color: var(--secondary); line-height: 1.8; margin-bottom: 16px; }
+    .about-text strong { color: var(--text); font-weight: 600; }
+
+    /* ── Cards ───────────────────────────── */
+    .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 640px) { .card-grid { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 28px; transition: border-color 0.25s, background 0.25s;
+    }
+    .card:hover { border-color: var(--border-hover); background: rgba(255,255,255,0.025); }
+    .card-icon {
+      width: 36px; height: 36px; border-radius: 9px;
+      background: var(--teal-dim); display: flex; align-items: center; justify-content: center;
+      margin-bottom: 20px;
+    }
+    .card-icon svg { color: var(--teal); }
+    .card h3 { font-size: 16px; font-weight: 600; margin-bottom: 14px; }
+    .card ul { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+    .card li { color: var(--secondary); font-size: 14px; padding-left: 16px; position: relative; line-height: 1.6; }
+    .card li::before { content: ''; position: absolute; left: 0; top: 8px; width: 4px; height: 4px; border-radius: 50%; background: var(--muted); }
+
+    /* ── Steps ───────────────────────────── */
+    .steps { border-top: 1px solid var(--border); }
+    .steps-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    @media (max-width: 768px) { .steps-row { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 480px) { .steps-row { grid-template-columns: 1fr; } }
+    .step {
+      padding: 24px; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; transition: border-color 0.25s;
+    }
+    .step:hover { border-color: var(--border-hover); }
+    .step-n {
+      font-family: var(--mono); font-size: 11px; font-weight: 600;
+      color: var(--teal); margin-bottom: 14px; letter-spacing: 0.06em;
+    }
+    .step h3 { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+    .step p { font-size: 13px; color: var(--secondary); line-height: 1.6; }
+
+    /* ── Code ────────────────────────────── */
+    .code-section { border-top: 1px solid var(--border); }
+    .code-box {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; overflow: hidden;
+    }
+    .code-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 12px 16px; border-bottom: 1px solid var(--border);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; }
+    .dot-r { background: #3f3f46; } .dot-y { background: #3f3f46; } .dot-g { background: #3f3f46; }
+    .code-bar span { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-left: 4px; }
+    .code-body {
+      padding: 20px; font-family: var(--mono); font-size: 13px;
+      line-height: 1.8; overflow-x: auto; white-space: pre; color: var(--secondary);
+    }
+    .c { color: var(--muted); }
+    .g { color: #22c55e; }
+    .t { color: var(--teal); }
+    .f { color: #818cf8; }
+
+    /* ── Footer ──────────────────────────── */
+    footer {
+      padding: 40px 0; border-top: 1px solid var(--border);
+    }
+    .footer-row {
+      display: flex; align-items: center; justify-content: space-between;
+      flex-wrap: wrap; gap: 16px;
+    }
+    .footer-brand { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+    .footer-links { display: flex; gap: 20px; list-style: none; }
+    .footer-links a { font-size: 13px; color: var(--muted); }
+    .footer-links a:hover { color: var(--secondary); }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .hero .container > * { animation: fadeUp 0.5s ease-out both; }
+    .hero .container > *:nth-child(2) { animation-delay: 0.08s; }
+    .hero .container > *:nth-child(3) { animation-delay: 0.16s; }
+    .hero .container > *:nth-child(4) { animation-delay: 0.24s; }
+
+    @media (max-width: 640px) {
+      section { padding: 72px 0; }
+      .hero { padding: 140px 0 80px; }
+      .footer-row { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="container">
+    <a href="#" class="nav-brand"><div class="nav-mark">T</div> Temper</a>
+    <ul class="nav-links">
+      <li><a href="#about">About</a></li>
+      <li><a href="#use-cases">Use Cases</a></li>
+      <li><a href="#how">How It Works</a></li>
+      <li>
+        <a href="https://github.com/nerdsane/temper" class="nav-gh" target="_blank" rel="noopener">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </li>
+    </ul>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="container">
+    <div class="hero-badge"><span class="dot"></span> Built with Rust &middot; 590+ tests &middot; 19 crates</div>
+    <h1>Spec-first platform for governed applications</h1>
+    <p class="hero-sub">Describe your domain. Verify it's correct. Deploy it. Evolve it from production.</p>
+    <div class="hero-actions">
+      <a href="https://github.com/nerdsane/temper" class="btn btn-teal" target="_blank" rel="noopener">Get Started</a>
+      <a href="https://github.com/nerdsane/temper/blob/main/docs/PAPER.md" class="btn btn-glass" target="_blank" rel="noopener">Read the Paper</a>
+    </div>
+  </div>
+</section>
+
+<section class="about" id="about">
+  <div class="container">
+    <div class="about-text">
+      <p class="label">Philosophy</p>
+      <h2 class="heading">What is Temper?</h2>
+      <p>Most backend applications are state machines. An order moves through <strong>Draft &rarr; Submitted &rarr; Shipped &rarr; Delivered</strong>. If the state machine is the essential artifact, the surrounding infrastructure follows mechanically from the specification.</p>
+      <p><strong>Specifications are the source of truth. Everything else is derived.</strong> You describe your domain as I/O Automata. The platform verifies correctness through four levels of formal analysis, then generates an event-sourced runtime, OData API, Cedar authorization, and observability &mdash; all from the spec.</p>
+    </div>
+  </div>
+</section>
+
+<section id="use-cases">
+  <div class="container">
+    <p class="label">Use Cases</p>
+    <h2 class="heading">Two modes, one platform</h2>
+    <p class="sub">Same architecture, different deployment shape. What changes is who writes the specs and who sets the policies.</p>
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+        </div>
+        <h3>Agent Operating Layer</h3>
+        <ul>
+          <li>Agents generate verified specs for their plans</li>
+          <li>Cedar default-deny &mdash; humans approve expansions</li>
+          <li>Full audit trail with agent identity</li>
+          <li>WASM-sandboxed external access</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+        </div>
+        <h3>Application Platform</h3>
+        <ul>
+          <li>Specs &rarr; verification cascade &rarr; OData API</li>
+          <li>Event-sourced persistence (Postgres, Turso, Redis)</li>
+          <li>Cedar authorization on every transition</li>
+          <li>Evolution engine captures unmet intents</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="steps" id="how">
+  <div class="container">
+    <p class="label">Pipeline</p>
+    <h2 class="heading">How it works</h2>
+    <p class="sub">Four stages from conversation to production.</p>
+    <div class="steps-row">
+      <div class="step">
+        <p class="step-n">01</p>
+        <h3>Describe</h3>
+        <p>IOA specs define states, actions, guards, and invariants.</p>
+      </div>
+      <div class="step">
+        <p class="step-n">02</p>
+        <h3>Verify</h3>
+        <p>SMT, model checking, deterministic simulation, property tests.</p>
+      </div>
+      <div class="step">
+        <p class="step-n">03</p>
+        <h3>Deploy</h3>
+        <p>Actor runtime, event sourcing, OData API, Cedar auth.</p>
+      </div>
+      <div class="step">
+        <p class="step-n">04</p>
+        <h3>Evolve</h3>
+        <p>Production feedback, developer approval, hot-swap.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="code-section" id="quickstart">
+  <div class="container">
+    <p class="label">Get Started</p>
+    <h2 class="heading">Quick start</h2>
+    <p class="sub">Clone, test, and run a reference app.</p>
+    <div class="code-box">
+      <div class="code-bar">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        <span>terminal</span>
+      </div>
+      <div class="code-body"><span class="c"># Clone and test</span>
+<span class="g">git clone</span> <span class="t">https://github.com/nerdsane/temper.git</span>
+<span class="g">cd</span> temper
+<span class="g">cargo test</span> <span class="f">--workspace</span>
+
+<span class="c"># Run the ecommerce reference app (no external deps)</span>
+<span class="t">TURSO_URL</span>=file:local.db <span class="g">cargo run</span> <span class="f">--</span> serve \
+  <span class="f">--storage</span> turso \
+  <span class="f">--specs-dir</span> reference-apps/ecommerce/specs \
+  <span class="f">--tenant</span> ecommerce</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <div class="footer-row">
+      <div class="footer-brand">
+        <div class="nav-mark" style="width:22px;height:22px;border-radius:5px;font-size:11px;">T</div>
+        Temper &middot; MIT / Apache-2.0
+      </div>
+      <ul class="footer-links">
+        <li><a href="https://github.com/nerdsane/temper" target="_blank">GitHub</a></li>
+        <li><a href="https://github.com/nerdsane/temper/blob/main/docs/PAPER.md" target="_blank">Docs</a></li>
+        <li><a href="https://github.com/nerdsane/temper/blob/main/CONTRIBUTING.md" target="_blank">Contributing</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
