@@ -11,7 +11,7 @@ Usage:
     TEMPER_URL=http://localhost:3002 python3 serve.py  # different Temper instance
 
 Copy this file to your app directory alongside index.html:
-    cp ~/workspace/Development/temper/skills/temper/serve.py ~/workspace/apps/my-app/serve.py
+    cp ~/workspace/Development/temper/skills/temper-openclaw/serve.py ~/workspace/apps/my-app/serve.py
 """
 import http.server, urllib.request, urllib.error, os
 from socketserver import ThreadingMixIn

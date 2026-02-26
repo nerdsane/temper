@@ -203,7 +203,21 @@ module = "stripe_charge"
 on_success = "ChargeSucceeded"
 on_failure = "ChargeFailed"
 ```
-The WASM module is a Rust `cdylib` compiled to `wasm32-unknown-unknown` and uploaded via `POST /api/wasm/modules/{name}`. See the main Temper builder skill (`.claude/skills/temper.md`) for the full WASM module template.
+The WASM module is a Rust `cdylib` compiled to `wasm32-unknown-unknown` and uploaded via `POST /api/wasm/modules/{name}`. See the developer skill (`.claude/skills/temper-developer.md`) for the full WASM module template.
+
+**Built-in module: `http_fetch`** — for simple HTTP integrations, use the pre-compiled `http_fetch` module instead of writing custom WASM. Configure it directly in the integration block:
+```toml
+[[integration]]
+name = "fetch_weather"
+trigger = "fetch_weather"
+type = "wasm"
+module = "http_fetch"
+on_success = "FetchSucceeded"
+on_failure = "FetchFailed"
+url = "https://api.example.com/{param}"
+method = "GET"
+```
+The `http_fetch` module reads `url`, `method`, and `body` from the integration config, makes the HTTP call via the host, and returns `{"status_code": "200", "body": "..."}` as callback params. URL templates support `{param}` substitution from action params.
 
 **Terminal states** — states with no outgoing actions. Entities in terminal states can't move. Design intentionally. Don't write `assert = "no_further_transitions"` — that's not valid IOA syntax and will be silently ignored. Just don't define any `[[action]]` with `from = ["TerminalState"]`.
 
@@ -227,9 +241,11 @@ If verification fails, the server won't start. Fix the spec first.
 ```bash
 curl -sf http://localhost:3001/tdata -H "X-Tenant-Id: _" > /dev/null 2>&1 \
   && echo "Temper already running" \
-  || { nohup ./target/release/temper serve --storage turso --port 3001 \
+  || { nohup ./target/release/temper serve --storage turso --port 3001 --observe \
          > /tmp/temper.log 2>&1 & sleep 4 && echo "Temper started"; }
 ```
+
+The `--observe` flag auto-starts the Observe UI at `http://localhost:3001`. This is where humans approve or deny governance decisions (see Governance section below).
 
 **That's it.** Temper auto-reloads your specs on startup — if you've called `load-dir` before, your entity types come back automatically. Your data was never gone (it's in the DB). No extra steps.
 
@@ -321,6 +337,64 @@ curl "http://localhost:3001/tdata/Tasks('abc-123')" -H "X-Tenant-Id: my-app"
 
 ---
 
+## 3.5. Governance — Cedar Default-Deny
+
+Temper enforces **Cedar authorization** on all agent actions. By default, agents have **no permissions** — every action is denied until a human approves it.
+
+### How It Works
+
+1. Agent fires an action (e.g., `POST .../Temper.FetchWeather`)
+2. Cedar evaluates the policy → **DENIED** (403 Forbidden)
+3. Response includes a **decision ID** (`PD-<uuid>`) and guidance
+4. Agent must **wait** — poll the decisions API until a human approves
+5. Human approves via **Observe UI** (`http://localhost:3001`) or **`temper decide`** CLI
+6. Agent retries the action → **SUCCESS**
+
+### Agent-Side (curl)
+
+```bash
+# 1. Action gets denied
+curl -X POST "http://localhost:3001/tdata/Tasks('abc')/Temper.Assign" \
+  -H "Content-Type: application/json" -H "X-Tenant-Id: my-app" \
+  -d '{"AssignedTo": "haku"}'
+# → 403 {"error": {"code": "AuthorizationDenied", "message": "...PD-abc123..."}}
+
+# 2. Wait for human approval (poll every 2s)
+curl -s "http://localhost:3001/api/tenants/my-app/decisions" | \
+  python3 -c "import sys,json; [print(d) for d in json.load(sys.stdin) if d['status']=='Pending']"
+
+# 3. After human approves, retry
+curl -X POST "http://localhost:3001/tdata/Tasks('abc')/Temper.Assign" ...
+# → 200 Success
+```
+
+### Human Approval Channels
+
+**Observe UI** — browser at `http://localhost:3001/decisions`. Start server with `--observe` flag. Shows pending decisions, approve/deny with scope selection.
+
+**`temper decide` CLI** — terminal-based approval for developers:
+```bash
+./target/release/temper decide --port 3001 --tenant my-app
+# Interactive: shows pending decisions, prompts for approve/deny with scope
+```
+
+### Key Rules
+
+- **Agents cannot self-approve.** The `approve_decision`, `deny_decision`, and `set_policy` methods are **removed from the agent sandbox** — not hidden, removed.
+- **Agents can only read governance state** — `get_decisions` and `poll_decision` are available.
+- **Scope options** — when approving, humans choose: narrow (this entity), medium (this entity type), or broad (all actions of this type).
+- **Decisions are immutable** — once approved or denied, they can't be changed.
+
+### OpenClaw Plugin Integration
+
+When using the OpenClaw plugin, denied actions generate signal files just like any other Temper event. The agent wakes, sees the denial, and should:
+1. Log the denial and decision ID
+2. Notify the human via DM with context about what was denied and why
+3. Wait for approval (poll or watch for the SSE event)
+4. Retry on approval
+
+---
+
 ## 4. Build the UI
 
 Build a single-file HTML served via a proxy. **Any shape** — dashboard, kanban, timeline, form, graph, chart, wizard, anything.
@@ -329,11 +403,11 @@ Build a single-file HTML served via a proxy. **Any shape** — dashboard, kanban
 
 **Always read `~/workspace/apps/shared/design-system.md` before generating any UI.**
 
-The default design system ships alongside this skill at `skills/temper/design-system.md`. On first use, copy it to the shared location:
+The default design system ships alongside this skill at `skills/temper-openclaw/design-system.md`. On first use, copy it to the shared location:
 
 ```bash
 mkdir -p ~/workspace/apps/shared
-cp ~/workspace/Development/temper/skills/temper/design-system.md \
+cp ~/workspace/Development/temper/skills/temper-openclaw/design-system.md \
    ~/workspace/apps/shared/design-system.md
 ```
 
@@ -361,7 +435,7 @@ You are not limited to lists and cards. Build whatever the data needs:
 `serve.py` ships with this skill. Copy it to your app directory:
 
 ```bash
-cp ~/workspace/Development/temper/skills/temper/serve.py \
+cp ~/workspace/Development/temper/skills/temper-openclaw/serve.py \
    ~/workspace/apps/your-app/serve.py
 ```
 
@@ -654,21 +728,31 @@ Agent writes results back through Temper, not Discord. Discord is for notificati
 
 ## Code Mode MCP
 
-Temper includes a stdio MCP server (`temper mcp`) for Code Mode workflows:
+Temper includes a stdio MCP server (`temper mcp`) for Claude Code / Claude Desktop workflows:
 
 ```bash
-# Terminal 1: HTTP server
-./target/release/temper serve --storage turso --app my-app=apps/my-app/specs --port 3001
+# Terminal 1: HTTP server with Observe UI
+./target/release/temper serve --storage turso --app my-app=apps/my-app/specs --port 3001 --observe
 
 # Terminal 2: MCP stdio server
 ./target/release/temper mcp --app my-app=apps/my-app/specs --port 3001
 ```
 
 Two tools:
-- `search(code)` — inspect loaded IOA specs programmatically
-- `execute(code)` — run guarded operations via `temper.list/get/create/action/patch`
+- `search(code)` — inspect loaded IOA specs programmatically (no server needed)
+- `execute(code)` — run governed operations via `temper.list/get/create/action/patch`
 
-Code runs inside the Monty sandbox (no filesystem, no env vars, no raw network — only `temper.*` methods which call your local Temper server).
+Code runs inside the Monty sandbox (no filesystem, no env vars, no raw network — only `temper.*` and `spec.*` methods).
+
+**Governance in MCP mode:** The same Cedar default-deny applies. When `execute` calls an action that's denied:
+1. The tool returns an error with `AuthorizationDenied` and a decision ID
+2. The agent uses `await temper.poll_decision(tenant, 'PD-xxx')` to wait
+3. A human approves via Observe UI or `temper decide` CLI
+4. The agent retries
+
+**Blocked methods:** `approve_decision`, `deny_decision`, `set_policy` are **removed from the sandbox** — agents cannot self-approve.
+
+See `.claude/skills/temper-agent.md` for the full MCP Python API reference.
 
 Claude Desktop config:
 ```json
