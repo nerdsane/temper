@@ -56,11 +56,9 @@ pub async fn handle_webhook(
     }
 
     // Extract entity ID from the configured source.
-    let entity_id = match webhook.entity_lookup.as_str() {
-        "query_param" | _ => {
-            let param_name = webhook.entity_param.as_deref().unwrap_or("entity_id");
-            query.get(param_name).cloned()
-        }
+    let entity_id = {
+        let param_name = webhook.entity_param.as_deref().unwrap_or("entity_id");
+        query.get(param_name).cloned()
     };
 
     let Some(entity_id) = entity_id else {
