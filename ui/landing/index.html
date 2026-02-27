@@ -16,10 +16,10 @@
     :root {
       --bg: #0a0a0c;
       --surface: #111115;
-      --glass: rgba(255, 255, 255, 0.04);
-      --glass-hover: rgba(255, 255, 255, 0.06);
-      --border: rgba(255, 255, 255, 0.06);
-      --border-hover: rgba(255, 255, 255, 0.12);
+      --glass: rgba(255, 255, 255, 0.02);
+      --glass-hover: rgba(255, 255, 255, 0.04);
+      --border: rgba(255, 255, 255, 0.04);
+      --border-hover: rgba(255, 255, 255, 0.1);
       --teal: #2dd4bf;
       --teal-dim: rgba(45, 212, 191, 0.12);
       --teal-glow: rgba(45, 212, 191, 0.08);
@@ -42,6 +42,55 @@
       -webkit-font-smoothing: antialiased;
       overflow-x: hidden;
       min-height: 100vh;
+      position: relative;
+    }
+
+    /* ── Ambient mesh gradient ────────────── */
+    body::before {
+      content: '';
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background:
+        radial-gradient(ellipse 80% 60% at 15% 20%, rgba(45, 212, 191, 0.05) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 50% at 75% 40%, rgba(139, 92, 246, 0.03) 0%, transparent 55%),
+        radial-gradient(ellipse 70% 60% at 50% 80%, rgba(45, 212, 191, 0.03) 0%, transparent 50%);
+    }
+
+    /* ── Noise overlay ───────────────────── */
+    body::after {
+      content: '';
+      position: fixed; inset: 0; z-index: 1; pointer-events: none;
+      opacity: 0.02;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-repeat: repeat;
+      background-size: 256px 256px;
+    }
+
+    /* ── Floating ambient orbs ───────────── */
+    .ambient-orb {
+      position: fixed;
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .ambient-orb-1 {
+      width: 600px; height: 600px;
+      top: -10%; left: -5%;
+      background: radial-gradient(circle, rgba(45, 212, 191, 0.04) 0%, transparent 70%);
+      animation: orbDrift1 25s ease-in-out infinite;
+    }
+    .ambient-orb-2 {
+      width: 500px; height: 500px;
+      bottom: -10%; right: -8%;
+      background: radial-gradient(circle, rgba(139, 92, 246, 0.03) 0%, transparent 70%);
+      animation: orbDrift2 30s ease-in-out infinite;
+    }
+    @keyframes orbDrift1 {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(40px, 30px) scale(1.1); }
+    }
+    @keyframes orbDrift2 {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(-30px, -40px) scale(1.08); }
     }
 
     ::-webkit-scrollbar { width: 6px; }
@@ -52,30 +101,29 @@
     a { color: var(--teal); text-decoration: none; transition: color 0.2s; }
     a:hover { color: #5eead4; }
 
-    .container { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+    .container { max-width: 960px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 2; }
 
     /* ── Nav ─────────────────────────────── */
     nav {
       position: fixed; top: 0; left: 0; right: 0; z-index: 100;
       background: rgba(10, 10, 12, 0.8);
       backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-      border-bottom: 1px solid var(--border);
     }
-    nav .container { display: flex; align-items: center; justify-content: space-between; height: 56px; }
+    nav .container { display: flex; align-items: center; justify-content: space-between; height: 52px; }
     .nav-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; color: var(--text); letter-spacing: -0.02em; }
     .nav-brand:hover { color: var(--text); }
     .nav-mark { width: 28px; height: 28px; border-radius: 7px; background: var(--teal); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 14px; color: var(--bg); }
     .nav-links { display: flex; align-items: center; gap: 28px; list-style: none; }
     .nav-links a { font-size: 13px; color: var(--secondary); font-weight: 500; }
     .nav-links a:hover { color: var(--text); }
-    .nav-gh { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 1px solid var(--border); border-radius: 7px; font-size: 13px; color: var(--text) !important; transition: border-color 0.2s, background 0.2s; }
+    .nav-gh { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; color: var(--text) !important; transition: border-color 0.2s, background 0.2s; }
     .nav-gh:hover { border-color: var(--teal); background: var(--teal-glow); }
     .nav-gh svg { opacity: 0.7; }
     @media (max-width: 640px) { .nav-links li:not(:last-child) { display: none; } }
 
     /* ── Hero ────────────────────────────── */
     .hero {
-      padding: 160px 0 100px;
+      padding: 160px 0 140px;
       text-align: center;
       position: relative;
     }
@@ -84,8 +132,13 @@
       width: 600px; height: 600px;
       background: radial-gradient(circle, rgba(45,212,191,0.08) 0%, transparent 60%);
       pointer-events: none;
+      animation: glowPulse 8s ease-in-out infinite;
     }
-    .hero .container { position: relative; z-index: 1; }
+    @keyframes glowPulse {
+      0%, 100% { transform: translateX(-50%) scale(1); opacity: 1; }
+      50% { transform: translateX(-50%) scale(1.15); opacity: 0.8; }
+    }
+    .hero .container { position: relative; z-index: 2; }
     .hero-badge {
       display: inline-flex; align-items: center; gap: 8px;
       padding: 6px 14px; border-radius: 100px;
@@ -93,7 +146,14 @@
       font-size: 12px; font-weight: 500; color: var(--secondary);
       margin-bottom: 32px; letter-spacing: 0.04em;
     }
-    .hero-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--teal); }
+    .hero-badge .dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--teal);
+      animation: dotPulse 2s ease-in-out infinite;
+    }
+    @keyframes dotPulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
     .hero-mascot {
       margin-bottom: 32px;
     }
@@ -102,8 +162,12 @@
     }
     .hero h1 {
       font-size: clamp(2.5rem, 5.5vw, 4rem);
-      font-weight: 700; letter-spacing: -0.03em; line-height: 1.1;
+      font-weight: 700; letter-spacing: -0.04em; line-height: 1.1;
       max-width: 680px; margin: 0 auto 24px;
+      background: linear-gradient(135deg, #fafafa 0%, #2dd4bf 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
     }
     .hero-sub {
       font-size: 18px; color: var(--secondary); max-width: 540px;
@@ -112,7 +176,7 @@
     .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
     .btn {
       display: inline-flex; align-items: center; gap: 8px;
-      padding: 10px 22px; border-radius: 8px;
+      padding: 10px 22px; border-radius: 4px;
       font-family: var(--font); font-size: 14px; font-weight: 600;
       transition: all 0.2s; cursor: pointer; border: none;
     }
@@ -122,9 +186,13 @@
     .btn-glass:hover { color: var(--text); background: var(--glass-hover); border-color: var(--border-hover); transform: translateY(-1px); }
 
     /* ── Sections ────────────────────────── */
-    section { padding: 100px 0; }
-    .label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; color: var(--teal); margin-bottom: 12px; }
-    .heading { font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 700; letter-spacing: -0.02em; margin-bottom: 16px; }
+    section { padding: 120px 0; }
+    .section-divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.06) 50%, transparent 100%);
+    }
+    .label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--teal); margin-bottom: 12px; }
+    .heading { font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 600; letter-spacing: -0.02em; margin-bottom: 16px; }
     .sub { font-size: 16px; color: var(--secondary); max-width: 520px; margin-bottom: 48px; line-height: 1.7; }
 
     /* ── Scroll animations ───────────────── */
@@ -135,7 +203,7 @@
     }
     .animate-on-scroll.visible {
       opacity: 1;
-      transform: translateY(0);
+      transform: translateY(0) scale(1) translateX(0);
     }
     .stagger-1 { transition-delay: 0.05s; }
     .stagger-2 { transition-delay: 0.1s; }
@@ -143,15 +211,78 @@
     .stagger-4 { transition-delay: 0.2s; }
     .stagger-5 { transition-delay: 0.25s; }
 
+    /* Card zoom-in */
+    .animate-zoom {
+      opacity: 0;
+      transform: translateY(16px) scale(0.97);
+      transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+    }
+    .animate-zoom.visible {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+
+    /* Flow slide-from-left */
+    .animate-slide-left {
+      opacity: 0;
+      transform: translateX(-24px);
+      transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+    }
+    .animate-slide-left.visible {
+      opacity: 1;
+      transform: translateX(0);
+    }
+
+    /* Flow slide-from-right */
+    .animate-slide-right {
+      opacity: 0;
+      transform: translateX(24px);
+      transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+    }
+    .animate-slide-right.visible {
+      opacity: 1;
+      transform: translateX(0);
+    }
+
+    /* Steps slide-in from right */
+    .animate-slide-in {
+      opacity: 0;
+      transform: translateX(20px);
+      transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+    }
+    .animate-slide-in.visible {
+      opacity: 1;
+      transform: translateX(0);
+    }
+
+    /* Position rows slide from left */
+    .animate-from-left {
+      opacity: 0;
+      transform: translateX(-12px);
+      transition: opacity 0.5s ease-out, transform 0.5s ease-out;
+    }
+    .animate-from-left.visible {
+      opacity: 1;
+      transform: translateX(0);
+    }
+
     /* ── About cards ─────────────────────── */
-    .about { border-top: 1px solid var(--border); }
-    .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
     @media (max-width: 640px) { .card-grid { grid-template-columns: 1fr; } }
     .card {
-      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-      padding: 28px; transition: border-color 0.25s, background 0.25s;
+      background: rgba(255, 255, 255, 0.02);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: 3px;
+      padding: 28px;
+      transition: border-color 0.25s, background 0.25s, transform 0.25s, box-shadow 0.25s;
     }
-    .card:hover { border-color: var(--border-hover); background: rgba(255,255,255,0.025); }
+    .card:hover {
+      border-color: var(--border-hover);
+      background: rgba(255, 255, 255, 0.03);
+      transform: translateY(-2px);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 4px 24px rgba(45, 212, 191, 0.04);
+    }
     .card-dot {
       width: 8px; height: 8px; border-radius: 50%; margin-bottom: 16px;
     }
@@ -162,10 +293,12 @@
     .card p { font-size: 14px; color: var(--secondary); line-height: 1.6; }
 
     /* ── Flow diagram ────────────────────── */
-    .flow { border-top: 1px solid var(--border); }
     .flow-diagram { max-width: 640px; margin: 0 auto; }
     .flow-box {
-      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      background: rgba(255, 255, 255, 0.02);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: 3px;
       padding: 24px; text-align: center;
     }
     .flow-box h3 { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
@@ -182,26 +315,33 @@
     }
     .flow-mini {
       background: rgba(45, 212, 191, 0.06); border: 1px solid rgba(45, 212, 191, 0.1);
-      border-radius: 8px; padding: 10px 8px; font-size: 12px; font-weight: 500; text-align: center;
+      border-radius: 2px; padding: 10px 8px; font-size: 12px; font-weight: 500; text-align: center;
     }
     .flow-secondary-grid {
       display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px;
     }
     .flow-mini-secondary {
       background: var(--glass); border: 1px solid var(--border);
-      border-radius: 8px; padding: 10px 8px; font-size: 12px; color: var(--secondary); text-align: center;
+      border-radius: 2px; padding: 10px 8px; font-size: 12px; color: var(--secondary); text-align: center;
     }
 
     /* ── Steps ───────────────────────────── */
-    .steps { border-top: 1px solid var(--border); }
-    .steps-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    .steps-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; }
     @media (max-width: 768px) { .steps-row { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 480px) { .steps-row { grid-template-columns: 1fr; } }
     .step {
-      padding: 24px; background: var(--surface); border: 1px solid var(--border);
-      border-radius: 12px; transition: border-color 0.25s;
+      padding: 24px;
+      background: rgba(255, 255, 255, 0.02);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: 3px;
+      transition: border-color 0.25s, transform 0.25s, box-shadow 0.25s;
     }
-    .step:hover { border-color: var(--border-hover); }
+    .step:hover {
+      border-color: var(--border-hover);
+      transform: translateY(-2px);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 4px 24px rgba(45, 212, 191, 0.04);
+    }
     .step-n {
       font-family: var(--mono); font-size: 12px; font-weight: 600;
       color: var(--teal); margin-bottom: 14px; letter-spacing: 0.06em;
@@ -210,32 +350,41 @@
     .step p { font-size: 13px; color: var(--secondary); line-height: 1.6; }
     .step-callout {
       margin-top: 32px; padding: 20px 24px;
-      background: var(--glass); border: 1px solid var(--border); border-radius: 12px;
+      background: var(--glass); border: 1px solid var(--border); border-radius: 3px;
+      border-left: 2px solid rgba(45, 212, 191, 0.3);
       font-size: 14px; color: var(--secondary); line-height: 1.7;
     }
 
     /* ── Use cases ───────────────────────── */
-    .use-cases { border-top: 1px solid var(--border); }
-    .use-case-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .use-case-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
     @media (max-width: 640px) { .use-case-grid { grid-template-columns: 1fr; } }
     .use-case {
-      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-      padding: 32px; transition: border-color 0.25s;
+      background: rgba(255, 255, 255, 0.02);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: 3px;
+      padding: 32px;
+      transition: border-color 0.25s, transform 0.25s, box-shadow 0.25s;
     }
-    .use-case:hover { border-color: var(--border-hover); }
+    .use-case:hover {
+      border-color: var(--border-hover);
+      transform: translateY(-2px);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 4px 24px rgba(45, 212, 191, 0.04);
+    }
     .use-case h3 { font-size: 17px; font-weight: 600; margin-bottom: 12px; }
     .use-case p { font-size: 14px; color: var(--secondary); line-height: 1.7; margin-bottom: 16px; }
     .use-case-snippet {
-      background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+      background: rgba(17, 17, 21, 0.8); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--border); border-radius: 2px;
       padding: 16px; font-family: var(--mono); font-size: 12px; line-height: 1.8;
       color: var(--secondary); overflow-x: auto; white-space: pre;
     }
 
     /* ── Code ────────────────────────────── */
-    .code-section { border-top: 1px solid var(--border); }
     .code-box {
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 12px; overflow: hidden;
+      background: rgba(17, 17, 21, 0.8); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--border);
+      border-radius: 3px; overflow: hidden;
     }
     .code-bar {
       display: flex; align-items: center; gap: 8px;
@@ -256,7 +405,6 @@
     .s { color: #22c55e; }
 
     /* ── Positioning ─────────────────────── */
-    .positioning { border-top: 1px solid var(--border); }
     .position-list { max-width: 640px; }
     .position-row {
       padding: 20px 0;
@@ -268,7 +416,8 @@
 
     /* ── Footer ──────────────────────────── */
     footer {
-      padding: 40px 0; border-top: 1px solid var(--border);
+      padding: 40px 0;
+      position: relative; z-index: 2;
     }
     .footer-row {
       display: flex; align-items: center; justify-content: space-between;
@@ -281,38 +430,51 @@
 
     /* ── Hero animations ─────────────────── */
     @keyframes fadeUp {
-      from { opacity: 0; transform: translateY(8px); }
+      from { opacity: 0; transform: translateY(20px); }
       to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes mascotReveal {
+      from { opacity: 0; transform: scale(0.9); filter: blur(4px); }
+      to { opacity: 1; transform: scale(1); filter: blur(0); }
     }
     .hero .container > * { animation: fadeUp 0.5s ease-out both; }
     .hero .container > *:nth-child(1) { animation-delay: 0s; }
-    .hero .container > *:nth-child(2) { animation-delay: 0.06s; }
-    .hero .container > *:nth-child(3) { animation-delay: 0.12s; }
-    .hero .container > *:nth-child(4) { animation-delay: 0.18s; }
-    .hero .container > *:nth-child(5) { animation-delay: 0.24s; }
+    .hero .container > *:nth-child(2) { animation: mascotReveal 0.6s ease-out both; animation-delay: 0.1s; }
+    .hero .container > *:nth-child(3) { animation-delay: 0.2s; }
+    .hero .container > *:nth-child(4) { animation-delay: 0.3s; }
+    .hero .container > *:nth-child(5) { animation-delay: 0.4s; }
 
     /* ── Responsive ──────────────────────── */
     @media (max-width: 640px) {
-      section { padding: 72px 0; }
-      .hero { padding: 140px 0 80px; }
+      section { padding: 80px 0; }
+      .hero { padding: 140px 0 100px; }
       .hero-mascot img { width: 140px; }
       .footer-row { flex-direction: column; align-items: flex-start; }
       .flow-core-grid, .flow-secondary-grid { grid-template-columns: 1fr 1fr; }
+      .ambient-orb { display: none; }
     }
 
     /* ── Reduced motion ──────────────────── */
     @media (prefers-reduced-motion: reduce) {
       .hero .container > * { animation: none; opacity: 1; transform: none; }
-      .animate-on-scroll { opacity: 1; transform: none; transition: none; }
+      .animate-on-scroll, .animate-zoom, .animate-slide-left, .animate-slide-right,
+      .animate-slide-in, .animate-from-left { opacity: 1; transform: none; transition: none; }
+      .hero-glow { animation: none; }
+      .hero-badge .dot { animation: none; }
+      .ambient-orb { animation: none; }
       html { scroll-behavior: auto; }
     }
   </style>
 </head>
 <body>
 
+<!-- Ambient orbs -->
+<div class="ambient-orb ambient-orb-1"></div>
+<div class="ambient-orb ambient-orb-2"></div>
+
 <nav>
   <div class="container">
-    <a href="#" class="nav-brand"><div class="nav-mark">T</div> Temper</a>
+    <a href="#" class="nav-brand">Temper</a>
     <ul class="nav-links">
       <li><a href="#about">About</a></li>
       <li><a href="#how">How It Works</a></li>
@@ -348,38 +510,39 @@
 </section>
 
 <!-- ── About ─────────────────────────────── -->
+<div class="section-divider"></div>
 <section class="about" id="about">
   <div class="container">
     <p class="label">What Agents Get</p>
     <h2 class="heading">Everything an agent needs to operate safely</h2>
     <p class="sub">Instead of giving agents raw API keys and direct database access, you give them Temper.</p>
     <div class="card-grid">
-      <div class="card animate-on-scroll">
+      <div class="card animate-zoom">
         <div class="card-dot lime"></div>
         <h3>Verified state</h3>
         <p>The agent describes what it needs. Temper generates a state machine, proves it correct across all reachable states, and deploys an API. Bad states are ruled out before the spec loads.</p>
       </div>
-      <div class="card animate-on-scroll stagger-1">
+      <div class="card animate-zoom stagger-1">
         <div class="card-dot teal"></div>
         <h3>Governed access</h3>
         <p>Cedar authorization evaluates every action. Default-deny. When the agent tries something not yet permitted, the denial surfaces to the human for approval.</p>
       </div>
-      <div class="card animate-on-scroll stagger-2">
+      <div class="card animate-zoom stagger-2">
         <div class="card-dot teal"></div>
         <h3>Complete audit trail</h3>
         <p>Every action carries agent identity, before/after state, and the authorization decision that governed it. Multiple agents sharing a Temper instance see each other's changes.</p>
       </div>
-      <div class="card animate-on-scroll stagger-3">
+      <div class="card animate-zoom stagger-3">
         <div class="card-dot pink"></div>
         <h3>WASM integrations</h3>
         <p>External system calls execute through sandboxed WASM modules, gated by Cedar policies. No raw API keys. No direct network access.</p>
       </div>
-      <div class="card animate-on-scroll stagger-4">
+      <div class="card animate-zoom stagger-4">
         <div class="card-dot teal"></div>
         <h3>Persistent state + event sourcing</h3>
         <p>State survives restarts. Every transition is an event in a durable journal. Long-running workflows pick up where they left off.</p>
       </div>
-      <div class="card animate-on-scroll stagger-5">
+      <div class="card animate-zoom stagger-5">
         <div class="card-dot teal"></div>
         <h3>Self-describing API</h3>
         <p>The generated OData v4 API includes a $metadata endpoint. Agents discover the full surface without documentation.</p>
@@ -389,14 +552,15 @@
 </section>
 
 <!-- ── How It Works ──────────────────────── -->
+<div class="section-divider"></div>
 <section class="flow" id="how">
   <div class="container">
     <p class="label">How It Works</p>
     <h2 class="heading">One interface. Complete governance.</h2>
     <p class="sub">Agents interact through a sandboxed Python REPL. Temper mediates all access.</p>
 
-    <div class="flow-diagram animate-on-scroll">
-      <div class="flow-box">
+    <div class="flow-diagram">
+      <div class="flow-box animate-slide-left">
         <h3>Agent</h3>
         <p>Claude Code, Cursor, OpenClaw, LangChain, ...</p>
       </div>
@@ -405,7 +569,7 @@
         <div class="flow-arrow-label">MCP (search + execute)</div>
         <svg width="12" height="8" viewBox="0 0 12 8" fill="none" aria-hidden="true"><path d="M6 8L0 0h12L6 8z" fill="currentColor"/></svg>
       </div>
-      <div class="flow-box">
+      <div class="flow-box animate-slide-right stagger-1">
         <h3>Monty Sandbox</h3>
         <p>temper.start_server() &middot; submit_specs() &middot; action()</p>
       </div>
@@ -413,7 +577,7 @@
         <div class="flow-arrow-line"></div>
         <svg width="12" height="8" viewBox="0 0 12 8" fill="none" aria-hidden="true"><path d="M6 8L0 0h12L6 8z" fill="currentColor"/></svg>
       </div>
-      <div class="flow-box core">
+      <div class="flow-box core animate-slide-left stagger-2">
         <h3>Temper Core</h3>
         <div class="flow-core-grid">
           <div class="flow-mini">Spec Parse</div>
@@ -433,7 +597,7 @@
         <div class="flow-arrow-line"></div>
         <svg width="12" height="8" viewBox="0 0 12 8" fill="none" aria-hidden="true"><path d="M6 8L0 0h12L6 8z" fill="currentColor"/></svg>
       </div>
-      <div class="flow-box">
+      <div class="flow-box animate-slide-right stagger-3">
         <h3>Storage</h3>
         <p>Postgres or Turso/libSQL</p>
       </div>
@@ -442,28 +606,29 @@
 </section>
 
 <!-- ── Verification ──────────────────────── -->
+<div class="section-divider"></div>
 <section class="steps" id="verification">
   <div class="container">
     <p class="label">Verification</p>
     <h2 class="heading">Four levels of proof before production</h2>
     <p class="sub">Every spec passes all four levels. No exceptions.</p>
     <div class="steps-row">
-      <div class="step animate-on-scroll">
+      <div class="step animate-slide-in">
         <p class="step-n">L0</p>
         <h3>Z3 SMT</h3>
         <p>Guards satisfiable, invariants inductive, no unreachable states.</p>
       </div>
-      <div class="step animate-on-scroll stagger-1">
+      <div class="step animate-slide-in stagger-1">
         <p class="step-n">L1</p>
         <h3>Stateright</h3>
         <p>Exhaustive state space exploration, safety + liveness properties.</p>
       </div>
-      <div class="step animate-on-scroll stagger-2">
+      <div class="step animate-slide-in stagger-2">
         <p class="step-n">L2</p>
         <h3>Simulation</h3>
         <p>Fault injection, message delays, drops, crashes. Reproducible via seeded PRNG.</p>
       </div>
-      <div class="step animate-on-scroll stagger-3">
+      <div class="step animate-slide-in stagger-3">
         <p class="step-n">L3</p>
         <h3>Proptest</h3>
         <p>Random action sequences with shrinking to minimal counterexamples.</p>
@@ -476,18 +641,19 @@
 </section>
 
 <!-- ── Use Cases ──────────────────────────── -->
+<div class="section-divider"></div>
 <section class="use-cases" id="use-cases">
   <div class="container">
     <p class="label">Use Cases</p>
     <h2 class="heading">Two modes, one platform</h2>
     <p class="sub">Same verification. Same governance. Same audit trail. What changes is who writes the specs and who sets the policies.</p>
     <div class="use-case-grid">
-      <div class="use-case animate-on-scroll">
+      <div class="use-case animate-zoom">
         <h3>Agent OS</h3>
         <p>The agent builds and operates. The human sets policies. Cedar's default-deny posture means the agent can't exceed its authorization without explicit human approval.</p>
         <p>Temper doesn't tell the agent what to do. It mediates the agent's access to state and external systems, ensures actions are authorized, and maintains a verifiable record of everything that happened.</p>
       </div>
-      <div class="use-case animate-on-scroll stagger-1">
+      <div class="use-case animate-zoom stagger-1">
         <h3>Agent-built applications</h3>
         <p>Developer agents build full applications. User agents or humans consume them. When users encounter something the app can't do yet, the system captures it as an unmet intent.</p>
         <div class="use-case-snippet"><span class="c">User: "Split my order into two shipments"</span>
@@ -502,6 +668,7 @@
 </section>
 
 <!-- ── Code ──────────────────────────────── -->
+<div class="section-divider"></div>
 <section class="code-section" id="quickstart">
   <div class="container">
     <p class="label">Quick Start</p>
@@ -535,25 +702,26 @@ decision = <span class="k">await</span> <span class="f">temper</span>.<span clas
 </section>
 
 <!-- ── Positioning ────────────────────────── -->
+<div class="section-divider"></div>
 <section class="positioning">
   <div class="container">
     <p class="label">Positioning</p>
     <h2 class="heading">How Temper is different</h2>
     <p class="sub">Temper often gets compared to things it isn't.</p>
     <div class="position-list">
-      <div class="position-row animate-on-scroll">
+      <div class="position-row animate-from-left">
         <strong>Not an agent framework</strong>
         <p>LangChain, CrewAI, OpenClaw, AutoGen build agents. Temper is the operating layer agents run on top of. You bring your own agent; Temper governs what it can do.</p>
       </div>
-      <div class="position-row animate-on-scroll stagger-1">
+      <div class="position-row animate-from-left stagger-1">
         <strong>Not a workflow engine</strong>
         <p>Temporal and Inngest orchestrate steps. Temper verifies the state machine itself before it runs &mdash; proving invariants hold across all reachable states, not just the happy path.</p>
       </div>
-      <div class="position-row animate-on-scroll stagger-2">
+      <div class="position-row animate-from-left stagger-2">
         <strong>Not an API framework</strong>
         <p>Rails, Django, FastAPI require controllers, routes, middleware. Temper generates the API from specifications. The spec is the app.</p>
       </div>
-      <div class="position-row animate-on-scroll stagger-3">
+      <div class="position-row animate-from-left stagger-3">
         <strong>Not a database</strong>
         <p>Temper uses Postgres or Turso for persistence. It adds a verified state machine layer and event sourcing on top.</p>
       </div>
@@ -562,6 +730,7 @@ decision = <span class="k">await</span> <span class="f">temper</span>.<span clas
 </section>
 
 <!-- ── Footer ────────────────────────────── -->
+<div class="section-divider"></div>
 <footer>
   <div class="container">
     <div class="footer-row">
@@ -588,7 +757,7 @@ decision = <span class="k">await</span> <span class="f">temper</span>.<span clas
       }
     });
   }, { threshold: 0.1 });
-  document.querySelectorAll('.animate-on-scroll').forEach(el => observer.observe(el));
+  document.querySelectorAll('.animate-on-scroll, .animate-zoom, .animate-slide-left, .animate-slide-right, .animate-slide-in, .animate-from-left').forEach(el => observer.observe(el));
 </script>
 
 </body>

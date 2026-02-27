@@ -90,6 +90,9 @@ enum Commands {
         /// Load an app: --app name=specs-dir (repeatable)
         #[arg(long)]
         app: Vec<String>,
+        /// Agent identity for Cedar authorization and trajectory logging (default: "mcp-agent")
+        #[arg(long)]
+        agent_id: Option<String>,
     },
 }
 
@@ -132,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
             }
             serve::run(port, apps, storage, storage_explicit, observe).await?
         }
-        Commands::Mcp { port, app } => {
+        Commands::Mcp { port, app, agent_id } => {
             let mut apps: Vec<(String, String)> = Vec::new();
             for entry in &app {
                 if let Some((name, path)) = entry.split_once('=') {
@@ -141,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
                     anyhow::bail!("Invalid --app format: '{entry}'. Expected name=specs-dir");
                 }
             }
-            mcp::run(port, apps).await?
+            mcp::run(port, apps, agent_id).await?
         }
     }
 
@@ -307,7 +310,10 @@ mod tests {
     fn test_cli_parse_mcp_no_port() {
         let cli = Cli::parse_from(["temper", "mcp"]);
         match cli.command {
-            Commands::Mcp { port, .. } => assert_eq!(port, None),
+            Commands::Mcp { port, agent_id, .. } => {
+                assert_eq!(port, None);
+                assert_eq!(agent_id, None);
+            }
             _ => panic!("expected Mcp command"),
         }
     }
@@ -323,9 +329,32 @@ mod tests {
             "haku-ops=apps/haku-ops/specs",
         ]);
         match cli.command {
-            Commands::Mcp { port, app } => {
+            Commands::Mcp { port, app, agent_id } => {
                 assert_eq!(port, Some(3001));
                 assert_eq!(app, vec!["haku-ops=apps/haku-ops/specs"]);
+                assert_eq!(agent_id, None);
+            }
+            _ => panic!("expected Mcp command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_mcp_with_agent_id() {
+        let cli = Cli::parse_from([
+            "temper",
+            "mcp",
+            "--port",
+            "3001",
+            "--agent-id",
+            "haku",
+            "--app",
+            "haku-ops=apps/haku-ops/specs",
+        ]);
+        match cli.command {
+            Commands::Mcp { port, app, agent_id } => {
+                assert_eq!(port, Some(3001));
+                assert_eq!(app, vec!["haku-ops=apps/haku-ops/specs"]);
+                assert_eq!(agent_id, Some("haku".to_string()));
             }
             _ => panic!("expected Mcp command"),
         }

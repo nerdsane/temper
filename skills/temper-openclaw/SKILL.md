@@ -622,12 +622,16 @@ jq -r '.gateway.port'  ~/.openclaw/openclaw.json
         enabled: true,
         config: {
           url: "http://127.0.0.1:3001",
+          temperBinary: "/path/to/temper",  // optional, default: "temper" on PATH
+          port: 3001,                       // optional, passed as --port to temper mcp
+          agentId: "haku",                  // optional, Cedar principal identity
           hooksToken: "<gateway.token from above>",
           hooksPort: 18789,   // or whatever gateway.port shows
           apps: {
             "my-app": {
               agent: "your-agent-id",   // e.g. "haku", "calcifer", "main"
-              subscribe: ["Task"],      // entity types to watch
+              subscribe: ["Task"],      // entity types to watch via SSE
+              specsDir: "apps/my-app/specs",  // optional, passed as --app to temper mcp
             },
           },
         },
@@ -652,19 +656,28 @@ grep -i "temper" /tmp/openclaw.log   # or check gateway logs
 
 No isolated sessions. No polling. No inference cost at idle. The signal file is durable — if the agent is busy, the signal waits.
 
-### Using the `temper` Tool
+### Using the Temper Tools
 
-Once the plugin is loaded, every agent session has a `temper` tool:
+Once the plugin is loaded, every agent session has two tools — the same REPL interface Claude Code gets via MCP:
 
+**`temper_search`** — Inspect loaded IOA specs (no server needed):
 ```json
-{ "operation": "list",   "app": "my-app", "entityType": "Tasks" }
-{ "operation": "get",    "app": "my-app", "entityType": "Tasks", "entityId": "task-123" }
-{ "operation": "create", "app": "my-app", "entityType": "Tasks", "body": { "Title": "Fix login" } }
-{ "operation": "action", "app": "my-app", "entityType": "Tasks", "entityId": "task-123",
-  "actionName": "Complete", "body": { "Result": "deployed" } }
-{ "operation": "patch",  "app": "my-app", "entityType": "Tasks", "entityId": "task-123",
-  "body": { "Notes": "Updated" } }
+{ "code": "return await spec.tenants()" }
+{ "code": "return await spec.entity_types('my-app')" }
+{ "code": "return await spec.get_spec('my-app', 'Task')" }
+{ "code": "return await spec.actions('my-app', 'Task')" }
 ```
+
+**`temper_execute`** — Run governed operations against Temper:
+```json
+{ "code": "return await temper.list('my-app', 'Tasks')" }
+{ "code": "return await temper.get('my-app', 'Tasks', 'task-123')" }
+{ "code": "return await temper.create('my-app', 'Tasks', {'Title': 'Fix login'})" }
+{ "code": "return await temper.action('my-app', 'Tasks', 'task-123', 'Complete', {'Result': 'deployed'})" }
+{ "code": "return await temper.patch('my-app', 'Tasks', 'task-123', {'Notes': 'Updated'})" }
+```
+
+These tools run Python in a sandboxed REPL — agents can dynamically generate specs, submit them, handle governance, compile WASM, and inspect state. Cedar default-deny applies to all `temper_execute` calls.
 
 ---
 
@@ -728,7 +741,7 @@ Agent writes results back through Temper, not Discord. Discord is for notificati
 
 ## Code Mode MCP
 
-Temper includes a stdio MCP server (`temper mcp`) for Claude Code / Claude Desktop workflows:
+Temper includes a stdio MCP server (`temper mcp`) for Claude Code, Claude Desktop, and OpenClaw agent workflows:
 
 ```bash
 # Terminal 1: HTTP server with Observe UI
@@ -760,11 +773,13 @@ Claude Desktop config:
   "mcpServers": {
     "temper": {
       "command": "/path/to/temper/target/release/temper",
-      "args": ["mcp", "--app", "my-app=apps/my-app/specs", "--port", "3001"]
+      "args": ["mcp", "--app", "my-app=apps/my-app/specs", "--port", "3001", "--agent-id", "claude-desktop"]
     }
   }
 }
 ```
+
+The `--agent-id` flag sets the Cedar principal identity for authorization and trajectory logging (defaults to "mcp-agent"). The OpenClaw plugin passes this automatically from its `agentId` config field.
 
 ---
 

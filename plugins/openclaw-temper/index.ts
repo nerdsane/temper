@@ -1,22 +1,18 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { spawn, type ChildProcess } from "child_process";
 import { writeFileSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { createInterface, type Interface as ReadlineInterface } from "readline";
 
-type TemperOperation = "list" | "get" | "create" | "action" | "patch";
-
-type TemperToolParams = {
-  operation?: string;
-  app?: string;
-  entityType?: string;
-  entityId?: string;
-  actionName?: string;
-  body?: unknown;
-};
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 type TemperAppConfig = {
   agent: string;
   subscribe?: string[];
+  specsDir?: string;
 };
 
 type TemperPluginConfig = {
@@ -24,6 +20,14 @@ type TemperPluginConfig = {
   apps: Record<string, TemperAppConfig>;
   hooksToken?: string;
   hooksPort?: number;
+  temperBinary?: string;
+  port?: number;
+  agentId?: string;
+};
+
+type ToolResult = {
+  content: { type: "text"; text: string }[];
+  isError?: boolean;
 };
 
 type TemperEvent = {
@@ -35,47 +39,31 @@ type TemperEvent = {
   [key: string]: unknown;
 };
 
+type PendingRequest = {
+  resolve: (result: ToolResult) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
 const DEFAULT_HOOKS_PORT = 18789;
 const INITIAL_RECONNECT_MS = 1000;
 const MAX_RECONNECT_MS = 30000;
+const MCP_CALL_TIMEOUT_MS = 180_000;
+const DEBOUNCE_MS = 30_000;
 
-const TEMPER_TOOL_PARAMETERS_SCHEMA = {
-  type: "object",
-  properties: {
-    operation: {
-      type: "string",
-      enum: ["list", "get", "create", "action", "patch"],
-      description: "Operation to perform",
-    },
-    app: {
-      type: "string",
-      description: "Tenant/app name (e.g. 'haku-ops')",
-    },
-    entityType: {
-      type: "string",
-      description: "Entity set name (e.g. 'Proposals', 'Tasks')",
-    },
-    entityId: {
-      type: "string",
-      description: "Entity ID (for get/action/patch)",
-    },
-    actionName: {
-      type: "string",
-      description: "Action name (for action operation, e.g. 'Approve')",
-    },
-    body: {
-      type: "object",
-      description: "Request body (for create/action/patch)",
-    },
-  },
-  required: ["operation", "app", "entityType"],
-} as const;
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
 
-const textResult = (text: string) => ({
+const textResult = (text: string): ToolResult => ({
   content: [{ type: "text" as const, text }],
 });
 
-const errorResult = (text: string) => ({
+const errorResult = (text: string): ToolResult => ({
   content: [{ type: "text" as const, text }],
   isError: true,
 });
@@ -85,22 +73,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const normalizeBaseUrl = (url: string): string => url.replace(/\/+$/, "");
 
-const escapeODataString = (value: string): string => value.replace(/'/g, "''");
-
 const isAbortError = (error: unknown): boolean =>
   typeof error === "object" &&
   error !== null &&
   "name" in error &&
   (error as { name?: unknown }).name === "AbortError";
-
-const readStringParam = (params: Record<string, unknown>, key: string): string | undefined => {
-  const value = params[key];
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-};
 
 const parseConfig = (pluginConfig: unknown): TemperPluginConfig => {
   if (!isRecord(pluginConfig)) {
@@ -134,10 +111,12 @@ const parseConfig = (pluginConfig: unknown): TemperPluginConfig => {
           .filter((entry) => entry.length > 0)
       : undefined;
 
-    apps[appName] = {
-      agent,
-      subscribe,
-    };
+    const specsDir =
+      typeof rawAppConfig.specsDir === "string" && rawAppConfig.specsDir.trim().length > 0
+        ? rawAppConfig.specsDir.trim()
+        : undefined;
+
+    apps[appName] = { agent, subscribe, specsDir };
   }
 
   if (Object.keys(apps).length === 0) {
@@ -154,21 +133,390 @@ const parseConfig = (pluginConfig: unknown): TemperPluginConfig => {
       ? pluginConfig.hooksPort
       : undefined;
 
+  const temperBinary =
+    typeof pluginConfig.temperBinary === "string" && pluginConfig.temperBinary.trim().length > 0
+      ? pluginConfig.temperBinary.trim()
+      : undefined;
+
+  const port =
+    typeof pluginConfig.port === "number" && Number.isInteger(pluginConfig.port)
+      ? pluginConfig.port
+      : undefined;
+
+  const agentId =
+    typeof pluginConfig.agentId === "string" && pluginConfig.agentId.trim().length > 0
+      ? pluginConfig.agentId.trim()
+      : undefined;
+
   return {
     url: normalizeBaseUrl(url),
     apps,
     hooksToken,
     hooksPort,
+    temperBinary,
+    port,
+    agentId,
   };
 };
 
-const buildEntityRef = (entityType: string, entityId?: string): string => {
-  const encodedEntityType = encodeURIComponent(entityType);
-  if (!entityId) {
-    return encodedEntityType;
+// ---------------------------------------------------------------------------
+// McpStdioBridge
+// ---------------------------------------------------------------------------
+
+class McpStdioBridge {
+  private child: ChildProcess | null = null;
+  private rl: ReadlineInterface | null = null;
+  private nextId = 1;
+  private pending = new Map<number, PendingRequest>();
+  private initialized = false;
+  private binary: string;
+  private args: string[];
+  private logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
+
+  constructor(config: TemperPluginConfig, logger: McpStdioBridge["logger"]) {
+    this.binary = config.temperBinary ?? "temper";
+    this.logger = logger;
+
+    const args = ["mcp"];
+    if (config.port !== undefined) {
+      args.push("--port", String(config.port));
+    }
+    if (config.agentId) {
+      args.push("--agent-id", config.agentId);
+    }
+    for (const [appName, appConfig] of Object.entries(config.apps)) {
+      if (appConfig.specsDir) {
+        args.push("--app", `${appName}=${appConfig.specsDir}`);
+      }
+    }
+    this.args = args;
   }
-  return `${encodedEntityType}('${escapeODataString(entityId)}')`;
-};
+
+  async start(): Promise<void> {
+    await this.spawn();
+  }
+
+  async stop(): Promise<void> {
+    this.initialized = false;
+
+    for (const [id, req] of this.pending) {
+      clearTimeout(req.timer);
+      req.reject(new Error("MCP bridge shutting down"));
+      this.pending.delete(id);
+    }
+
+    if (this.rl) {
+      this.rl.close();
+      this.rl = null;
+    }
+
+    if (this.child) {
+      const child = this.child;
+      this.child = null;
+
+      child.kill("SIGTERM");
+
+      await new Promise<void>((resolve) => {
+        const killTimer = setTimeout(() => {
+          child.kill("SIGKILL");
+          resolve();
+        }, 3000);
+
+        child.once("exit", () => {
+          clearTimeout(killTimer);
+          resolve();
+        });
+      });
+    }
+  }
+
+  isReady(): boolean {
+    return this.initialized && this.child !== null && this.child.exitCode === null;
+  }
+
+  async callTool(name: string, code: string): Promise<ToolResult> {
+    if (!this.isReady()) {
+      await this.restartIfNeeded();
+    }
+
+    if (!this.isReady()) {
+      return errorResult("[temper] MCP bridge is not available");
+    }
+
+    const id = this.nextId++;
+
+    return new Promise<ToolResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        resolve(errorResult(`[temper] MCP call timed out after ${MCP_CALL_TIMEOUT_MS / 1000}s`));
+      }, MCP_CALL_TIMEOUT_MS);
+
+      this.pending.set(id, { resolve, reject, timer });
+
+      this.sendRequest({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name,
+          arguments: { code },
+        },
+      });
+    });
+  }
+
+  private async spawn(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.logger.info(`[temper] Spawning MCP bridge: ${this.binary} ${this.args.join(" ")}`);
+
+      const child = spawn(this.binary, this.args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env },
+      });
+
+      this.child = child;
+
+      child.stderr?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString().trim();
+        if (text) {
+          this.logger.warn(`[temper] MCP stderr: ${text}`);
+        }
+      });
+
+      child.on("error", (err) => {
+        this.logger.error(`[temper] MCP process error: ${err.message}`);
+        this.handleExit(-1);
+        reject(err);
+      });
+
+      child.on("exit", (code) => {
+        this.logger.warn(`[temper] MCP process exited with code ${code}`);
+        this.handleExit(code ?? -1);
+      });
+
+      if (!child.stdout || !child.stdin) {
+        reject(new Error("Failed to get stdio handles from MCP process"));
+        return;
+      }
+
+      this.rl = createInterface({ input: child.stdout });
+      this.rl.on("line", (line) => this.handleLine(line));
+
+      // Send initialize handshake
+      const initId = this.nextId++;
+      const initTimer = setTimeout(() => {
+        this.pending.delete(initId);
+        reject(new Error("MCP initialize handshake timed out"));
+      }, 10_000);
+
+      this.pending.set(initId, {
+        resolve: () => {
+          clearTimeout(initTimer);
+          this.pending.delete(initId);
+
+          // Send initialized notification
+          this.sendRequest({
+            jsonrpc: "2.0",
+            method: "notifications/initialized",
+          });
+
+          this.initialized = true;
+          this.logger.info("[temper] MCP bridge initialized");
+          resolve();
+        },
+        reject: (err) => {
+          clearTimeout(initTimer);
+          this.pending.delete(initId);
+          reject(err);
+        },
+        timer: initTimer,
+      });
+
+      this.sendRequest({
+        jsonrpc: "2.0",
+        id: initId,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "openclaw-temper", version: "1.0.0" },
+        },
+      });
+    });
+  }
+
+  private sendRequest(request: Record<string, unknown>): void {
+    if (this.child?.stdin?.writable) {
+      this.child.stdin.write(JSON.stringify(request) + "\n");
+    }
+  }
+
+  private handleLine(line: string): void {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
+    try {
+      const msg = JSON.parse(trimmed);
+      if (!isRecord(msg)) return;
+
+      const id = typeof msg.id === "number" ? msg.id : undefined;
+      if (id === undefined) return;
+
+      const pending = this.pending.get(id);
+      if (!pending) return;
+
+      clearTimeout(pending.timer);
+      this.pending.delete(id);
+
+      if (isRecord(msg.error)) {
+        const errMsg = typeof msg.error.message === "string" ? msg.error.message : "MCP error";
+        pending.resolve(errorResult(`[temper] ${errMsg}`));
+        return;
+      }
+
+      const result = msg.result;
+      if (!isRecord(result)) {
+        pending.resolve(textResult(JSON.stringify(result)));
+        return;
+      }
+
+      // MCP tools/call result has { content: [...], isError?: bool }
+      const content = result.content;
+      if (Array.isArray(content)) {
+        const texts: string[] = [];
+        for (const item of content) {
+          if (isRecord(item) && typeof item.text === "string") {
+            texts.push(item.text);
+          }
+        }
+        const isError = result.isError === true;
+        if (isError) {
+          pending.resolve(errorResult(texts.join("\n") || "Unknown MCP error"));
+        } else {
+          pending.resolve(textResult(texts.join("\n") || "(empty response)"));
+        }
+      } else {
+        // Likely the initialize response — resolve with it
+        pending.resolve(textResult(JSON.stringify(result)));
+      }
+    } catch {
+      // Ignore unparseable lines (could be debug output)
+    }
+  }
+
+  private handleExit(_code: number): void {
+    this.initialized = false;
+    this.child = null;
+
+    if (this.rl) {
+      this.rl.close();
+      this.rl = null;
+    }
+
+    for (const [id, req] of this.pending) {
+      clearTimeout(req.timer);
+      req.reject(new Error("MCP process exited unexpectedly"));
+      this.pending.delete(id);
+    }
+  }
+
+  private async restartIfNeeded(): Promise<void> {
+    if (this.isReady()) return;
+
+    this.logger.info("[temper] MCP bridge not ready, restarting...");
+    try {
+      await this.stop();
+      await this.spawn();
+    } catch (err) {
+      this.logger.error(
+        `[temper] MCP bridge restart failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tool factories
+// ---------------------------------------------------------------------------
+
+const createSearchTool = (bridge: McpStdioBridge) => ({
+  name: "temper_search",
+  description: [
+    "Inspect loaded Temper IOA specs. Takes a `code` string — Python executed in a sandbox.",
+    "",
+    "Available API:",
+    "  await spec.tenants()                          → list loaded tenants",
+    "  await spec.entity_types(tenant)               → entity types for a tenant",
+    "  await spec.get_spec(tenant, entity_type)       → full IOA spec as dict",
+    "  await spec.states(tenant, entity_type)          → list of states",
+    "  await spec.actions(tenant, entity_type)         → list of actions",
+    "  await spec.invariants(tenant, entity_type)      → list of invariants",
+    "",
+    "Example: return await spec.tenants()",
+  ].join("\n"),
+  parameters: {
+    type: "object",
+    properties: {
+      code: {
+        type: "string",
+        description: "Python code to execute in the Temper spec sandbox",
+      },
+    },
+    required: ["code"],
+  } as const,
+  async execute(_toolCallId: string, params: Record<string, unknown>) {
+    const code = typeof params.code === "string" ? params.code : "";
+    if (!code.trim()) {
+      return errorResult("code parameter is required");
+    }
+    return bridge.callTool("search", code);
+  },
+});
+
+const createExecuteTool = (bridge: McpStdioBridge) => ({
+  name: "temper_execute",
+  description: [
+    "Execute governed operations against a running Temper server. Takes a `code` string — Python executed in a sandbox.",
+    "",
+    "Available API:",
+    "  await temper.start_server(**kwargs)             → start Temper runtime",
+    "  await temper.load_specs(tenant, specs_dir)      → load IOA specs from directory",
+    "  await temper.list(tenant, entity_type)           → list entities",
+    "  await temper.get(tenant, entity_type, id)        → get entity by ID",
+    "  await temper.create(tenant, entity_type, body)   → create entity",
+    "  await temper.action(tenant, entity_type, id, action, body=None) → fire action",
+    "  await temper.patch(tenant, entity_type, id, body) → update entity fields",
+    "  await temper.get_decisions(tenant)                → list governance decisions",
+    "  await temper.poll_decision(tenant, decision_id, timeout=120) → wait for human approval",
+    "  await temper.submit_spec(tenant, spec_toml)       → submit IOA spec string",
+    "  await temper.upload_wasm(name, wasm_bytes)         → upload WASM module",
+    "",
+    "Cedar governance: actions may be denied (403). Use poll_decision to wait for human approval.",
+    "",
+    "Example: return await temper.list('my-app', 'Tasks')",
+  ].join("\n"),
+  parameters: {
+    type: "object",
+    properties: {
+      code: {
+        type: "string",
+        description: "Python code to execute in the Temper governed sandbox",
+      },
+    },
+    required: ["code"],
+  } as const,
+  async execute(_toolCallId: string, params: Record<string, unknown>) {
+    const code = typeof params.code === "string" ? params.code : "";
+    if (!code.trim()) {
+      return errorResult("code parameter is required");
+    }
+    return bridge.callTool("execute", code);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// SSE service (unchanged from original)
+// ---------------------------------------------------------------------------
 
 const formatWakeText = (event: TemperEvent, appName: string): string => {
   const action = typeof event.action === "string" && event.action.length > 0 ? event.action : "unknown";
@@ -203,111 +551,6 @@ const parseSseEventData = (rawEvent: string): string | null => {
   return dataLines.join("\n");
 };
 
-const createTemperTool = (config: TemperPluginConfig) => ({
-  name: "temper",
-  description:
-    "Query and act on Temper state machine entities. Operations: list, get, create, action, patch.",
-  parameters: TEMPER_TOOL_PARAMETERS_SCHEMA,
-  async execute(_toolCallId: string, params: TemperToolParams) {
-    const paramsRecord = isRecord(params) ? params : {};
-
-    const operation = readStringParam(paramsRecord, "operation");
-    const app = readStringParam(paramsRecord, "app");
-    const entityType = readStringParam(paramsRecord, "entityType");
-    const entityId = readStringParam(paramsRecord, "entityId");
-    const actionName = readStringParam(paramsRecord, "actionName");
-    const body = paramsRecord.body;
-
-    if (!operation || !["list", "get", "create", "action", "patch"].includes(operation)) {
-      return errorResult("operation must be one of: list, get, create, action, patch");
-    }
-    if (!app) {
-      return errorResult("app is required");
-    }
-    if (!entityType) {
-      return errorResult("entityType is required");
-    }
-
-    const op = operation as TemperOperation;
-    if ((op === "get" || op === "action" || op === "patch") && !entityId) {
-      return errorResult("entityId is required for get/action/patch");
-    }
-    if (op === "action" && !actionName) {
-      return errorResult("actionName is required for action");
-    }
-    if ((op === "create" || op === "patch") && !isRecord(body)) {
-      return errorResult("body must be an object for create/patch");
-    }
-    if (op === "action" && body !== undefined && !isRecord(body)) {
-      return errorResult("body must be an object when provided for action");
-    }
-
-    let method: "GET" | "POST" | "PATCH";
-    let endpointPath: string;
-    let requestBody: Record<string, unknown> | undefined;
-
-    switch (op) {
-      case "list": {
-        method = "GET";
-        endpointPath = buildEntityRef(entityType);
-        break;
-      }
-      case "get": {
-        method = "GET";
-        endpointPath = buildEntityRef(entityType, entityId);
-        break;
-      }
-      case "create": {
-        method = "POST";
-        endpointPath = buildEntityRef(entityType);
-        requestBody = body as Record<string, unknown>;
-        break;
-      }
-      case "action": {
-        method = "POST";
-        endpointPath = `${buildEntityRef(entityType, entityId)}/Temper.${encodeURIComponent(
-          actionName as string,
-        )}`;
-        if (isRecord(body)) {
-          requestBody = body;
-        }
-        break;
-      }
-      case "patch": {
-        method = "PATCH";
-        endpointPath = buildEntityRef(entityType, entityId);
-        requestBody = body as Record<string, unknown>;
-        break;
-      }
-    }
-
-    const headers: Record<string, string> = {
-      "X-Tenant-Id": app,
-    };
-    if (requestBody) {
-      headers["Content-Type"] = "application/json";
-    }
-
-    const endpointUrl = `${config.url}/tdata/${endpointPath}`;
-
-    try {
-      const response = await fetch(endpointUrl, {
-        method,
-        headers,
-        body: requestBody ? JSON.stringify(requestBody) : undefined,
-      });
-
-      const responseText = await response.text();
-      if (!response.ok) {
-        return errorResult(responseText || `${response.status} ${response.statusText}`);
-      }
-      return textResult(responseText);
-    } catch (error) {
-      return errorResult(error instanceof Error ? error.message : String(error));
-    }
-  },
-});
-
 const createSseService = (api: OpenClawPluginApi, config: TemperPluginConfig) => {
   const hooksPort = config.hooksPort ?? DEFAULT_HOOKS_PORT;
   const hooksBaseUrl = `http://127.0.0.1:${hooksPort}/hooks`;
@@ -330,9 +573,7 @@ const createSseService = (api: OpenClawPluginApi, config: TemperPluginConfig) =>
       }, delayMs);
     });
 
-  // Debounce: track last wake time per app so rapid events fire only one wake
   const lastWakeMs: Record<string, number> = {};
-  const DEBOUNCE_MS = 30_000; // 30 seconds
 
   const writeSignalFile = (agentId: string, event: TemperEvent, appName: string, text: string): void => {
     try {
@@ -352,7 +593,7 @@ const createSseService = (api: OpenClawPluginApi, config: TemperPluginConfig) =>
         `**Action:** ${event.action ?? "unknown"}`,
         `**Transition:** ${event.from_status ?? "?"} → ${event.to_status ?? "?"}`,
         ``,
-        `Pull entity details: temper.get("${event.entity_type}", "${event.entity_id}")`,
+        `Pull entity details: temper_execute with code: return await temper.get("${appName}", "${event.entity_type}", "${event.entity_id}")`,
       ].join("\n");
       writeFileSync(join(signalDir, filename), content, "utf-8");
     } catch (err) {
@@ -388,12 +629,10 @@ const createSseService = (api: OpenClawPluginApi, config: TemperPluginConfig) =>
       const agentId = appConfig.agent.trim();
       const text = formatWakeText(event, appName);
 
-      // 1. Write signal file (zero cost, persistent, always runs)
       if (agentId) {
         writeSignalFile(agentId, event, appName, text);
       }
 
-      // 2. Fire wake — debounced per app (best-effort, one per 30s batch)
       const now = Date.now();
       const lastWake = lastWakeMs[appName] ?? 0;
       if (now - lastWake >= DEBOUNCE_MS) {
@@ -566,10 +805,14 @@ const createSseService = (api: OpenClawPluginApi, config: TemperPluginConfig) =>
   };
 };
 
+// ---------------------------------------------------------------------------
+// Plugin registration
+// ---------------------------------------------------------------------------
+
 const temperPlugin = {
   id: "openclaw-temper",
   name: "Temper",
-  description: "Temper state machine integration — real-time entity subscriptions and agent tools",
+  description: "Temper MCP integration — governed REPL tools, real-time entity subscriptions",
   register(api: OpenClawPluginApi) {
     let config: TemperPluginConfig;
     try {
@@ -578,10 +821,9 @@ const temperPlugin = {
       const message = error instanceof Error ? error.message : String(error);
       api.logger.error(`[temper] ${message}`);
       api.registerTool({
-        name: "temper",
-        description:
-          "Query and act on Temper state machine entities. Operations: list, get, create, action, patch.",
-        parameters: TEMPER_TOOL_PARAMETERS_SCHEMA,
+        name: "temper_execute",
+        description: "Execute governed Temper operations (plugin misconfigured)",
+        parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
         async execute() {
           return errorResult(`[temper] Plugin misconfigured: ${message}`);
         },
@@ -589,11 +831,57 @@ const temperPlugin = {
       return;
     }
 
-    api.registerTool(createTemperTool(config));
+    // Create MCP bridge
+    const bridge = new McpStdioBridge(config, api.logger);
+
+    // Register tools
+    api.registerTool(createSearchTool(bridge));
+    api.registerTool(createExecuteTool(bridge));
+
+    // Register MCP bridge as a service (lifecycle management)
+    api.registerService({
+      id: "temper-mcp",
+      start: async () => {
+        try {
+          await bridge.start();
+          api.logger.info("[temper] MCP bridge started");
+        } catch (err) {
+          api.logger.error(
+            `[temper] MCP bridge failed to start: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      },
+      stop: async () => {
+        await bridge.stop();
+        api.logger.info("[temper] MCP bridge stopped");
+      },
+    });
+
+    // Register SSE service (unchanged)
     api.registerService(createSseService(api, config));
 
+    // Inject Temper context at the start of each agent turn
+    if (typeof api.on === "function") {
+      api.on("before_prompt_build", async () => {
+        if (!bridge.isReady()) return;
+
+        try {
+          const result = await bridge.callTool("search", "return await spec.tenants()");
+          if (!result.isError && result.content.length > 0) {
+            const summary = result.content[0].text;
+            return {
+              systemMessage: `[Temper] Loaded tenants: ${summary}`,
+            };
+          }
+        } catch {
+          // Non-critical — skip injection silently
+        }
+        return undefined;
+      });
+    }
+
     api.on("gateway_start", () => {
-      api.logger.info("[temper] Temper plugin ready");
+      api.logger.info("[temper] Temper plugin ready (MCP bridge + SSE)");
     });
   },
 };

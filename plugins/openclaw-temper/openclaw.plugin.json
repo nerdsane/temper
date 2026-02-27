@@ -1,12 +1,15 @@
 {
   "id": "openclaw-temper",
   "name": "Temper",
-  "description": "Temper state machine integration — real-time entity subscriptions and agent tools",
+  "description": "Temper MCP integration — governed REPL tools (temper_search, temper_execute) and real-time entity subscriptions via SSE",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "url": { "type": "string", "description": "Temper server URL" },
+      "url": { "type": "string", "description": "Temper server URL (used for SSE events)" },
+      "temperBinary": { "type": "string", "description": "Path to temper binary (default: 'temper' on PATH)" },
+      "port": { "type": "integer", "description": "Port where Temper HTTP server is running (passed as --port to temper mcp)" },
+      "agentId": { "type": "string", "description": "Agent identity for Cedar authorization and trajectory logging (passed as --agent-id)" },
       "apps": {
         "type": "object",
         "additionalProperties": {
@@ -16,8 +19,9 @@
             "subscribe": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "Entity types to subscribe to"
-            }
+              "description": "Entity types to subscribe to via SSE"
+            },
+            "specsDir": { "type": "string", "description": "Path to specs directory (passed as --app name=specsDir to temper mcp)" }
           },
           "required": ["agent"]
         }
@@ -29,6 +33,9 @@
   },
   "uiHints": {
     "url": { "label": "Temper URL", "placeholder": "http://localhost:3001" },
+    "temperBinary": { "label": "Temper Binary", "placeholder": "temper" },
+    "port": { "label": "Temper Port", "placeholder": "3001" },
+    "agentId": { "label": "Agent ID", "placeholder": "my-agent" },
     "hooksToken": { "label": "Hooks Token", "sensitive": true },
     "hooksPort": { "label": "Gateway Port", "placeholder": "18789" }
   }
