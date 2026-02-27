@@ -172,7 +172,8 @@ fn translate_effects(effects: &[automaton::Effect]) -> Vec<ModelEffect> {
             automaton::Effect::ListAppend { var } => Some(ModelEffect::ListAppend(var.clone())),
             automaton::Effect::ListRemoveAt { var } => Some(ModelEffect::ListRemoveAt(var.clone())),
             automaton::Effect::Emit { .. } => None, // Emit is runtime-only
-            automaton::Effect::Trigger { .. } => None, // Trigger is runtime-only (WASM dispatch)
+            automaton::Effect::Trigger { .. } => None, // Trigger is runtime-only (WASM dispatch)\
+            automaton::Effect::Schedule { .. } => None, // Schedule is runtime-only (timer dispatch)
         })
         .collect()
 }

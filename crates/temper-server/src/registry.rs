@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
-use temper_spec::automaton::{self, Automaton, Integration};
+use temper_spec::automaton::{self, Automaton, Integration, Webhook};
 use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy, parse_cross_invariants};
 use temper_spec::csdl::CsdlDocument;
 
@@ -153,6 +153,8 @@ pub struct TenantConfig {
     pub cross_invariants: Option<CrossInvariantSpec>,
     /// Raw `cross-invariants.toml` source, if provided.
     pub cross_invariants_source: Option<String>,
+    /// Indexed webhook routes: path -> (entity_type, Webhook).
+    pub webhook_routes: BTreeMap<String, (String, Webhook)>,
     /// Per-entity verification status (design-time observation).
     pub verification: BTreeMap<String, VerificationStatus>,
 }
@@ -380,6 +382,9 @@ impl SpecRegistry {
                 .entities
                 .retain(|k, _| new_entity_types.contains(k));
 
+            // Rebuild webhook route index.
+            existing_config.webhook_routes = build_webhook_routes(&existing_config.entities);
+
             // Reset verification to Pending for re-verification.
             existing_config.verification = existing_config
                 .entities
@@ -415,6 +420,7 @@ impl SpecRegistry {
                 .map(|k| (k.clone(), VerificationStatus::Pending))
                 .collect();
 
+            let webhook_routes = build_webhook_routes(&entities);
             self.tenants.insert(
                 tenant,
                 TenantConfig {
@@ -426,6 +432,7 @@ impl SpecRegistry {
                     relation_graph,
                     cross_invariants,
                     cross_invariants_source,
+                    webhook_routes,
                     verification,
                 },
             );
@@ -580,6 +587,19 @@ impl SpecRegistry {
     ) -> Option<&BTreeMap<String, VerificationStatus>> {
         self.tenants.get(tenant).map(|tc| &tc.verification)
     }
+}
+
+/// Build webhook route index from parsed entity specs.
+fn build_webhook_routes(
+    entities: &BTreeMap<String, EntitySpec>,
+) -> BTreeMap<String, (String, Webhook)> {
+    let mut routes = BTreeMap::new();
+    for (entity_type, spec) in entities {
+        for wh in &spec.automaton.webhooks {
+            routes.insert(wh.path.clone(), (entity_type.clone(), wh.clone()));
+        }
+    }
+    routes
 }
 
 fn build_relation_graph(

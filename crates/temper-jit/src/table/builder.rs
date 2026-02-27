@@ -117,6 +117,15 @@ impl TransitionTable {
                             automaton::Effect::Trigger { name } => {
                                 effects.push(Effect::Custom(name.clone()));
                             }
+                            automaton::Effect::Schedule {
+                                action,
+                                delay_seconds,
+                            } => {
+                                effects.push(Effect::ScheduleAction {
+                                    action: action.clone(),
+                                    delay_seconds: *delay_seconds,
+                                });
+                            }
                         }
                     }
                 } else {
@@ -169,5 +178,42 @@ impl TransitionTable {
             rules,
             rule_index,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_schedule_effect_maps_to_schedule_action() {
+        let spec = r#"
+[automaton]
+name = "OAuthToken"
+states = ["Active", "Refreshing", "Expired"]
+initial = "Active"
+
+[[action]]
+name = "Activate"
+from = ["Refreshing"]
+to = "Active"
+effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
+"#;
+
+        let table = TransitionTable::from_ioa_source(spec);
+        let rule = table.rules.iter().find(|r| r.name == "Activate").unwrap();
+
+        let has_schedule = rule.effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::ScheduleAction { action, delay_seconds }
+                    if action == "Refresh" && *delay_seconds == 2700
+            )
+        });
+        assert!(
+            has_schedule,
+            "expected ScheduleAction effect, got: {:?}",
+            rule.effects
+        );
     }
 }

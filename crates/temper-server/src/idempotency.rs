@@ -124,6 +124,7 @@ mod tests {
             },
             error: None,
             custom_effects: vec![],
+            scheduled_actions: vec![],
         }
     }
 

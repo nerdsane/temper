@@ -147,6 +147,7 @@ fn effect_var(effect: &Effect) -> Option<&str> {
         Effect::ListAppend { var } => Some(var.as_str()),
         Effect::ListRemoveAt { var } => Some(var.as_str()),
         Effect::Trigger { .. } => None,
+        Effect::Schedule { .. } => None,
     }
 }
 
@@ -170,6 +171,10 @@ fn render_effect(effect: &Effect) -> String {
         Effect::ListAppend { var } => format!("list_append {var}"),
         Effect::ListRemoveAt { var } => format!("list_remove_at {var}"),
         Effect::Trigger { name } => format!("trigger {name}"),
+        Effect::Schedule {
+            action,
+            delay_seconds,
+        } => format!("schedule {action} {delay_seconds}s"),
     }
 }
 

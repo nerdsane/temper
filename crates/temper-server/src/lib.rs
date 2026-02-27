@@ -21,12 +21,14 @@ pub mod reaction;
 pub mod registry;
 mod response;
 mod router;
+pub mod secret_template;
 pub mod secrets_vault;
 #[cfg(feature = "observe")]
 pub mod sentinel;
 pub mod state;
 pub mod wasm_authz_gate;
 pub mod wasm_registry;
+pub mod webhook_receiver;
 pub mod webhooks;
 
 pub use entity_actor::{EntityActor, EntityActorHandler, EntityMsg, EntityResponse, EntityState};

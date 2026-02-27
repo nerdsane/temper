@@ -287,6 +287,44 @@ impl SimScheduler {
         self.pending.push(msg);
     }
 
+    /// Send a message with an explicit delivery time (for scheduled actions).
+    ///
+    /// Unlike [`send()`], this bypasses fault injection delay — the delay is
+    /// intentional, not a fault. Message drop and crash faults still apply.
+    pub fn send_at(
+        &mut self,
+        from: &str,
+        to: &str,
+        msg_type: &str,
+        payload: &str,
+        deliver_at: SimTime,
+    ) {
+        let id = self.next_msg_id;
+        self.next_msg_id += 1;
+
+        // Apply message drop fault (timer delivery is not guaranteed).
+        if self.rng.chance(self.fault_config.message_drop_prob) {
+            self.dropped.push(SimMessage {
+                from: from.to_string(),
+                to: to.to_string(),
+                msg_type: msg_type.to_string(),
+                payload: payload.to_string(),
+                deliver_at,
+                id,
+            });
+            return;
+        }
+
+        self.pending.push(SimMessage {
+            from: from.to_string(),
+            to: to.to_string(),
+            msg_type: msg_type.to_string(),
+            payload: payload.to_string(),
+            deliver_at,
+            id,
+        });
+    }
+
     /// Advance one tick: deliver all messages due at current_time + 1.
     /// Returns the messages delivered this tick.
     pub fn tick(&mut self) -> Vec<SimMessage> {
@@ -647,5 +685,50 @@ mod tests {
         // Just verify it completed without panic and some messages got through
         let total = sched.total_delivered() + sched.total_dropped();
         assert!(total > 0, "Should have processed some messages");
+    }
+
+    #[test]
+    fn test_send_at_delivers_at_specified_time() {
+        let mut sched = SimScheduler::new(1, FaultConfig::none());
+        sched.register_actor("a");
+        sched.register_actor("b");
+
+        // Schedule a message at time 5
+        sched.send_at("a", "b", "Scheduled", "{}", 5);
+
+        // Ticks 1-4: nothing delivered
+        for _ in 1..5 {
+            sched.tick();
+            assert_eq!(
+                sched.total_delivered(),
+                0,
+                "should not deliver before deliver_at"
+            );
+        }
+
+        // Tick 5: message delivered
+        sched.tick();
+        assert_eq!(sched.total_delivered(), 1);
+
+        let msg = sched.receive("b").unwrap();
+        assert_eq!(msg.msg_type, "Scheduled");
+        assert_eq!(msg.deliver_at, 5);
+    }
+
+    #[test]
+    fn test_send_at_respects_message_drop() {
+        let config = FaultConfig {
+            message_drop_prob: 1.0,
+            ..FaultConfig::none()
+        };
+        let mut sched = SimScheduler::new(42, config);
+        sched.register_actor("a");
+        sched.register_actor("b");
+
+        sched.send_at("a", "b", "Scheduled", "{}", 3);
+        sched.run_until_quiescent(10);
+
+        assert_eq!(sched.total_delivered(), 0);
+        assert_eq!(sched.total_dropped(), 1);
     }
 }

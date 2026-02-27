@@ -27,6 +27,9 @@ pub struct Automaton {
     /// Integration declarations (external triggers).
     #[serde(default, rename = "integration")]
     pub integrations: Vec<Integration>,
+    /// Inbound webhook declarations (external callback receivers).
+    #[serde(default, rename = "webhook")]
+    pub webhooks: Vec<Webhook>,
 }
 
 /// Automaton metadata.
@@ -138,6 +141,9 @@ pub enum Effect {
     /// Trigger a named WASM integration (post-transition async execution).
     #[serde(rename = "trigger")]
     Trigger { name: String },
+    /// Schedule a delayed action on the same entity.
+    #[serde(rename = "schedule")]
+    Schedule { action: String, delay_seconds: u64 },
 }
 
 /// A safety invariant.
@@ -203,4 +209,47 @@ pub struct Integration {
 
 fn default_webhook() -> String {
     "webhook".to_string()
+}
+
+/// Default method for webhooks.
+fn default_post() -> String {
+    "POST".to_string()
+}
+
+/// Default entity lookup strategy.
+fn default_query_param() -> String {
+    "query_param".to_string()
+}
+
+/// An inbound webhook declaration.
+///
+/// Webhooks allow external systems (OAuth providers, payment gateways) to
+/// call back into Temper, triggering entity actions. They are metadata-only
+/// — they do not affect verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Webhook {
+    /// Webhook name (e.g., "oauth_callback").
+    pub name: String,
+    /// URL path suffix (e.g., "oauth/callback").
+    pub path: String,
+    /// HTTP method (default: POST).
+    #[serde(default = "default_post")]
+    pub method: String,
+    /// Action to dispatch when webhook is called.
+    pub action: String,
+    /// How to find the target entity: "query_param", "body_field", "header", "path_param".
+    #[serde(default = "default_query_param")]
+    pub entity_lookup: String,
+    /// Which parameter holds the entity ID.
+    #[serde(default)]
+    pub entity_param: Option<String>,
+    /// Parameter extraction map (e.g., {"code": "query.code"}).
+    #[serde(default)]
+    pub extract: BTreeMap<String, String>,
+    /// Optional HMAC secret for transport-layer validation (supports {secret:key} templates).
+    #[serde(default)]
+    pub hmac_secret: Option<String>,
+    /// Header containing the HMAC signature from the external system.
+    #[serde(default)]
+    pub hmac_header: Option<String>,
 }

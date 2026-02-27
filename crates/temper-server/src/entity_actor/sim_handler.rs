@@ -11,6 +11,7 @@ use std::sync::Arc;
 use temper_jit::table::{EvalContext, TransitionTable};
 use temper_runtime::scheduler::{CompareOp, SimActorHandler, SpecAssert, SpecInvariant};
 
+use super::effects::ScheduledAction;
 use super::types::EntityState;
 
 /// Simulation handler wrapping a real TransitionTable.
@@ -24,6 +25,8 @@ pub struct EntityActorHandler {
     invariants: Vec<SpecInvariant>,
     /// Custom effects from the last successful action (integration triggers).
     last_custom_effects: Vec<String>,
+    /// Scheduled actions from the last successful action (timer requests).
+    last_scheduled_actions: Vec<ScheduledAction>,
 }
 
 impl EntityActorHandler {
@@ -54,6 +57,7 @@ impl EntityActorHandler {
             state,
             invariants: Vec::new(),
             last_custom_effects: Vec::new(),
+            last_scheduled_actions: Vec::new(),
         }
     }
 
@@ -183,12 +187,14 @@ impl SimActorHandler for EntityActorHandler {
         if result.success {
             // Capture custom effects for integration callback scheduling
             self.last_custom_effects = result.custom_effects;
+            self.last_scheduled_actions = result.scheduled_actions;
             if let Some(event) = result.event {
                 self.state.events.push(event);
             }
             Ok(serde_json::to_value(&self.state).unwrap_or_default())
         } else {
             self.last_custom_effects.clear();
+            self.last_scheduled_actions.clear();
             Err(result.error.unwrap_or_else(|| "Unknown error".to_string()))
         }
     }

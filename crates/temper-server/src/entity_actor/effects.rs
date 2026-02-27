@@ -10,10 +10,20 @@
 //! production and simulation. Having a single `apply_effects()` function
 //! guarantees that simulation tests exercise the real production logic.
 
+use serde::{Deserialize, Serialize};
 use temper_jit::table::{Effect, EvalContext, TransitionTable};
 use temper_runtime::scheduler::sim_now;
 
 use super::types::{EntityEvent, EntityState};
+
+/// A scheduled action to fire after a delay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledAction {
+    /// The action name to dispatch.
+    pub action: String,
+    /// Delay in seconds before dispatching the action.
+    pub delay_seconds: u64,
+}
 
 /// Build an [`EvalContext`] from current entity state.
 ///
@@ -43,6 +53,8 @@ pub struct ProcessResult {
     pub event: Option<EntityEvent>,
     /// Custom effects for post-transition hook dispatch.
     pub custom_effects: Vec<String>,
+    /// Scheduled actions to fire after delays (for timer dispatch).
+    pub scheduled_actions: Vec<ScheduledAction>,
     /// Error message (if action failed).
     pub error: Option<String>,
 }
@@ -69,7 +81,8 @@ pub fn process_action(
             let from_status = state.status.clone();
             let to_status = transition_result.new_state.clone();
 
-            let custom_effects = apply_effects(state, &transition_result.effects, params);
+            let (custom_effects, scheduled_actions) =
+                apply_effects(state, &transition_result.effects, params);
             apply_new_state_fallback(state, &from_status, &to_status);
             sync_fields(state, params);
 
@@ -85,6 +98,7 @@ pub fn process_action(
                 success: true,
                 event: Some(event),
                 custom_effects,
+                scheduled_actions,
                 error: None,
             }
         }
@@ -92,6 +106,7 @@ pub fn process_action(
             success: false,
             event: None,
             custom_effects: vec![],
+            scheduled_actions: vec![],
             error: Some(format!(
                 "Action '{}' not valid from state '{}'",
                 action, state.status
@@ -101,6 +116,7 @@ pub fn process_action(
             success: false,
             event: None,
             custom_effects: vec![],
+            scheduled_actions: vec![],
             error: Some(format!("Unknown action: {}", action)),
         },
     }
@@ -118,13 +134,14 @@ pub fn process_action(
 /// - `params` — The action parameters (needed for `ListAppend` / `ListRemoveAt`).
 ///
 /// # Returns
-/// A list of custom effect names (for post-transition hook dispatch).
+/// A tuple of (custom effect names, scheduled actions).
 pub fn apply_effects(
     state: &mut EntityState,
     effects: &[Effect],
     params: &serde_json::Value,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<ScheduledAction>) {
     let mut custom_effects = Vec::new();
+    let mut scheduled_actions = Vec::new();
 
     for effect in effects {
         match effect {
@@ -193,10 +210,26 @@ pub fn apply_effects(
                     "custom effect (dispatched by post-transition hook)"
                 );
             }
+            Effect::ScheduleAction {
+                action,
+                delay_seconds,
+            } => {
+                scheduled_actions.push(ScheduledAction {
+                    action: action.clone(),
+                    delay_seconds: *delay_seconds,
+                });
+                tracing::info!(
+                    entity_type = %state.entity_type,
+                    entity_id = %state.entity_id,
+                    scheduled_action = %action,
+                    delay_seconds,
+                    "scheduled action (timer request)"
+                );
+            }
         }
     }
 
-    custom_effects
+    (custom_effects, scheduled_actions)
 }
 
 /// Apply the `new_state` fallback from a TransitionResult.
@@ -241,5 +274,82 @@ pub fn sync_fields(state: &mut EntityState, params: &serde_json::Value) {
                 .collect();
             obj.insert(k.clone(), serde_json::Value::Array(arr));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_process_action_returns_scheduled_actions() {
+        let _guard = temper_runtime::scheduler::install_deterministic_context(42);
+
+        let spec = r#"
+[automaton]
+name = "OAuthToken"
+states = ["Active", "Refreshing", "Expired"]
+initial = "Active"
+
+[[action]]
+name = "Activate"
+from = ["Refreshing"]
+to = "Active"
+effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
+"#;
+
+        let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
+        let mut state = EntityState {
+            entity_type: "OAuthToken".into(),
+            entity_id: "tok-1".into(),
+            status: "Refreshing".into(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: serde_json::json!({}),
+            events: vec![],
+            sequence_nr: 0,
+        };
+
+        let result = process_action(&mut state, &table, "Activate", &serde_json::json!({}));
+
+        assert!(result.success, "action should succeed");
+        assert_eq!(state.status, "Active");
+        assert_eq!(result.scheduled_actions.len(), 1);
+        assert_eq!(result.scheduled_actions[0].action, "Refresh");
+        assert_eq!(result.scheduled_actions[0].delay_seconds, 2700);
+    }
+
+    #[test]
+    fn test_apply_effects_returns_scheduled_actions_tuple() {
+        let effects = vec![
+            Effect::SetState("Active".into()),
+            Effect::ScheduleAction {
+                action: "Refresh".into(),
+                delay_seconds: 3600,
+            },
+        ];
+
+        let mut state = EntityState {
+            entity_type: "Token".into(),
+            entity_id: "t1".into(),
+            status: "Idle".into(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: serde_json::json!({}),
+            events: vec![],
+            sequence_nr: 0,
+        };
+
+        let (custom, scheduled) = apply_effects(&mut state, &effects, &serde_json::json!({}));
+
+        assert!(custom.is_empty());
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].action, "Refresh");
+        assert_eq!(scheduled[0].delay_seconds, 3600);
+        assert_eq!(state.status, "Active");
     }
 }

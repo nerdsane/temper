@@ -129,6 +129,10 @@ fn format_effects(effects: &[Effect]) -> String {
             Effect::ListAppend { var } => format!("{var}'.append(param)"),
             Effect::ListRemoveAt { var } => format!("{var}'.remove_at(param)"),
             Effect::Trigger { name } => format!("trigger({name})"),
+            Effect::Schedule {
+                action,
+                delay_seconds,
+            } => format!("schedule({action}, {delay_seconds}s)"),
         })
         .collect::<Vec<_>>()
         .join(" /\\ ")
@@ -361,6 +365,25 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
             current_section = "integration";
             continue;
         }
+        if trimmed == "[[webhook]]" || trimmed.starts_with("[webhook.") {
+            flush_all(
+                &mut current_action,
+                &mut actions,
+                &mut current_invariant,
+                &mut invariants,
+                &mut current_state_var,
+                &mut state_vars,
+                &mut current_liveness,
+                &mut liveness_props,
+            );
+            if let Some(ig) = current_integration.take()
+                && !ig.name.is_empty()
+            {
+                integrations.push(ig);
+            }
+            current_section = "webhook";
+            continue;
+        }
 
         // Key-value pairs
         if let Some((key, value)) = parse_kv(trimmed) {
@@ -447,6 +470,10 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
                                         a.effect.push(Effect::Trigger { name });
                                     }
                                 }
+                                // Format: array of inline tables [{ type = "schedule", ... }]
+                                else if value.starts_with("[{") || value.starts_with("[\n") {
+                                    parse_effect_array(&value, &mut a.effect);
+                                }
                             }
                             _ => {}
                         }
@@ -520,9 +547,24 @@ fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError
         invariants,
         liveness: liveness_props,
         integrations,
+        webhooks: extract_webhooks(input),
     })
 }
 
+/// Extract `[[webhook]]` sections from TOML source via serde.
+///
+/// The hand-written parser does not handle `[[webhook]]` sections, so
+/// we do a second pass with `toml::from_str` to deserialize them.
+fn extract_webhooks(source: &str) -> Vec<super::types::Webhook> {
+    #[derive(serde::Deserialize)]
+    struct WebhookWrapper {
+        #[serde(default, rename = "webhook")]
+        webhooks: Vec<super::types::Webhook>,
+    }
+    toml::from_str::<WebhookWrapper>(source)
+        .map(|w| w.webhooks)
+        .unwrap_or_default()
+}
 #[allow(clippy::too_many_arguments)]
 fn flush_all(
     action: &mut Option<Action>,
@@ -684,6 +726,107 @@ fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseError> {
             "unsupported guard syntax '{trimmed}'"
         ))),
     }
+}
+
+/// Parse an effect array in inline table format.
+///
+/// Handles: `[{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]`
+fn parse_effect_array(value: &str, effects: &mut Vec<Effect>) {
+    let trimmed = value.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return;
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+
+    // Split on "}, {" to separate inline table entries.
+    // Simple approach: iterate over inline tables delimited by braces.
+    for entry in split_inline_tables(inner) {
+        let entry = entry.trim().trim_matches('{').trim_matches('}').trim();
+        let fields = parse_inline_fields(entry);
+
+        let effect_type = fields.get("type").map(|s| s.as_str()).unwrap_or("");
+        match effect_type {
+            "schedule" => {
+                let action = fields.get("action").cloned().unwrap_or_default();
+                let delay_seconds: u64 = fields
+                    .get("delay_seconds")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                if !action.is_empty() {
+                    effects.push(Effect::Schedule {
+                        action,
+                        delay_seconds,
+                    });
+                }
+            }
+            "increment" => {
+                if let Some(var) = fields.get("var").cloned() {
+                    effects.push(Effect::Increment { var });
+                }
+            }
+            "decrement" => {
+                if let Some(var) = fields.get("var").cloned() {
+                    effects.push(Effect::Decrement { var });
+                }
+            }
+            "set_bool" => {
+                if let Some(var) = fields.get("var").cloned() {
+                    let value = fields.get("value").map(|s| s == "true").unwrap_or(false);
+                    effects.push(Effect::SetBool { var, value });
+                }
+            }
+            "emit" => {
+                if let Some(event) = fields.get("event").cloned() {
+                    effects.push(Effect::Emit { event });
+                }
+            }
+            "trigger" => {
+                if let Some(name) = fields.get("name").cloned() {
+                    effects.push(Effect::Trigger { name });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Split inline tables from a TOML array (e.g., "{a = 1}, {b = 2}").
+fn split_inline_tables(s: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    result.push(&s[start..=i]);
+                    start = i + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+/// Parse key-value pairs from an inline table (e.g., "type = "schedule", action = "Refresh"").
+fn parse_inline_fields(s: &str) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    for pair in s.split(',') {
+        let pair = pair.trim();
+        if let Some(eq_pos) = pair.find('=') {
+            let key = pair[..eq_pos].trim().to_string();
+            let val = pair[eq_pos + 1..]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+            map.insert(key, val);
+        }
+    }
+    map
 }
 
 fn parse_kv(line: &str) -> Option<(&str, String)> {
@@ -1173,5 +1316,39 @@ guard = "items > nope"
 
         let err = parse_automaton(spec).expect_err("invalid numeric guard should fail");
         assert!(err.to_string().contains("right side must be an integer"));
+    }
+
+    #[test]
+    fn test_parse_schedule_effect() {
+        let spec = r#"
+[automaton]
+name = "OAuthToken"
+states = ["Active", "Refreshing", "Expired"]
+initial = "Active"
+
+[[action]]
+name = "Activate"
+from = ["Refreshing"]
+to = "Active"
+effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
+"#;
+
+        let automaton = parse_automaton(spec).expect("should parse schedule effect");
+        let activate = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "Activate")
+            .unwrap();
+        assert_eq!(activate.effect.len(), 1);
+        match &activate.effect[0] {
+            Effect::Schedule {
+                action,
+                delay_seconds,
+            } => {
+                assert_eq!(action, "Refresh");
+                assert_eq!(*delay_seconds, 2700);
+            }
+            other => panic!("expected Schedule, got: {:?}", other),
+        }
     }
 }

@@ -10,6 +10,7 @@ use tower_http::trace::TraceLayer;
 use crate::dispatch;
 use crate::events;
 use crate::state::ServerState;
+use crate::webhook_receiver;
 
 const TEMPER_CLIENT_JS: &str = include_str!("../static/temper-client.js");
 
@@ -37,6 +38,7 @@ async fn serve_temper_client() -> (
 /// - GET  /tdata/$events              → SSE stream of entity state changes
 /// - GET  /tdata/{*path}              → entity set / entity / navigation / function
 /// - POST /tdata/{*path}              → create entity / bound action
+/// - GET|POST /webhooks/{tenant}/{*path} → inbound webhook receiver
 ///
 /// Tenant is extracted from the `X-Tenant-Id` header. Falls back to the
 /// first registered tenant in the SpecRegistry.
@@ -58,7 +60,11 @@ pub fn build_router(state: ServerState) -> Router {
     let router = Router::new()
         .nest("/tdata", tdata)
         .route("/temper-client.js", get(serve_temper_client))
-        .route("/static/temper-client.js", get(serve_temper_client));
+        .route("/static/temper-client.js", get(serve_temper_client))
+        .route(
+            "/webhooks/{tenant}/{*path}",
+            get(webhook_receiver::handle_webhook).post(webhook_receiver::handle_webhook),
+        );
 
     #[cfg(feature = "observe")]
     let router = router.nest("/observe", crate::observe::build_observe_router());

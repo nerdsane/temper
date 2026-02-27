@@ -92,4 +92,7 @@ pub struct EntityResponse {
     /// Custom effects emitted during this transition (for hook dispatch).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_effects: Vec<String>,
+    /// Scheduled actions to fire after delays (for timer dispatch).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduled_actions: Vec<crate::entity_actor::effects::ScheduledAction>,
 }

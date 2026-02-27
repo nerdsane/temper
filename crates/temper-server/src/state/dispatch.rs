@@ -8,6 +8,7 @@ use super::wasm_invocation_log::WasmInvocationEntry;
 use crate::dispatch::AgentContext;
 use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
+use crate::secret_template::resolve_secret_templates;
 use crate::wasm_authz_gate::PermissiveWasmAuthzGate;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
@@ -178,7 +179,12 @@ impl ServerState {
                 entity_state: serde_json::to_value(_entity_state).unwrap_or_default(),
                 agent_id: agent_ctx.agent_id.clone(),
                 session_id: agent_ctx.session_id.clone(),
-                integration_config: integration.config.clone(),
+                integration_config: match self.secrets_vault.as_ref() {
+                    Some(vault) => {
+                        resolve_secret_templates(&integration.config, vault, &tenant.to_string())
+                    }
+                    None => integration.config.clone(),
+                },
             };
 
             // Look up module hash
@@ -482,7 +488,55 @@ impl ServerState {
             }
         }
 
+        // Schedule delayed actions (fire-and-forget background timers).
+        // Uses a sync helper (like dispatch_wasm_integrations) so
+        // tokio::spawn doesn't affect the async future's Send analysis.
+        if response.success && !response.scheduled_actions.is_empty() {
+            self.dispatch_scheduled_actions(
+                tenant,
+                entity_type,
+                entity_id,
+                &response.scheduled_actions,
+            );
+        }
+
         Ok(response)
+    }
+
+    /// Schedule delayed actions as fire-and-forget background timers.
+    ///
+    /// This is a **sync** method (like `dispatch_wasm_integrations`) so that
+    /// `tokio::spawn` inside it does not affect the Send analysis of the
+    /// calling async function's future.
+    fn dispatch_scheduled_actions(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        scheduled_actions: &[crate::entity_actor::effects::ScheduledAction],
+    ) {
+        for sched in scheduled_actions {
+            let state = self.clone();
+            let t = tenant.clone();
+            let et = entity_type.to_string();
+            let eid = entity_id.to_string();
+            let action = sched.action.clone();
+            let delay = std::time::Duration::from_secs(sched.delay_seconds);
+            tokio::spawn(async move {
+                // determinism-ok: timer delivery is a background side-effect
+                tokio::time::sleep(delay).await;
+                let _ = state
+                    .dispatch_tenant_action(
+                        &t,
+                        &et,
+                        &eid,
+                        &action,
+                        serde_json::json!({"__scheduled": true}),
+                        &AgentContext::default(),
+                    )
+                    .await;
+            });
+        }
     }
 
     /// Core dispatch without reaction cascade (used by ReactionDispatcher to

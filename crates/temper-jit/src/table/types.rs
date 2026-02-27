@@ -123,6 +123,8 @@ pub enum Effect {
     /// The actor runtime ignores unknown custom effects — they are only
     /// meaningful to the hook that registered for them.
     Custom(String),
+    /// Schedule a delayed action (timer fires after delay_seconds).
+    ScheduleAction { action: String, delay_seconds: u64 },
 }
 
 /// The result of evaluating a transition.

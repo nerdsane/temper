@@ -167,11 +167,12 @@ impl EntityActor {
                             if result.success {
                                 // Shared effect application — same code as handle() and simulation.
                                 let from_status = event.from_status.clone();
-                                super::effects::apply_effects(
-                                    state,
-                                    &result.effects,
-                                    &event.params,
-                                );
+                                let (_custom_effects, _scheduled_actions) =
+                                    super::effects::apply_effects(
+                                        state,
+                                        &result.effects,
+                                        &event.params,
+                                    );
                                 super::effects::apply_new_state_fallback(
                                     state,
                                     &from_status,
@@ -330,6 +331,7 @@ impl Actor for EntityActor {
                             "Event budget exhausted ({MAX_EVENTS_PER_ENTITY} max)"
                         )),
                         custom_effects: vec![],
+                        scheduled_actions: vec![],
                     });
                     return Ok(());
                 }
@@ -410,6 +412,7 @@ impl Actor for EntityActor {
                         state: state.clone(),
                         error: None,
                         custom_effects: result.custom_effects,
+                        scheduled_actions: result.scheduled_actions,
                     });
                 } else {
                     // Transition failed — emit telemetry
@@ -438,6 +441,7 @@ impl Actor for EntityActor {
                         state: state.clone(),
                         error: result.error,
                         custom_effects: vec![],
+                        scheduled_actions: vec![],
                     });
                 }
             }
@@ -447,6 +451,7 @@ impl Actor for EntityActor {
                     state: state.clone(),
                     error: None,
                     custom_effects: vec![],
+                    scheduled_actions: vec![],
                 });
             }
             EntityMsg::GetField { field } => {
@@ -482,6 +487,7 @@ impl Actor for EntityActor {
                     state: state.clone(),
                     error: None,
                     custom_effects: vec![],
+                    scheduled_actions: vec![],
                 });
             }
             EntityMsg::Delete => {
@@ -490,6 +496,7 @@ impl Actor for EntityActor {
                     state: state.clone(),
                     error: None,
                     custom_effects: vec![],
+                    scheduled_actions: vec![],
                 });
             }
         }
