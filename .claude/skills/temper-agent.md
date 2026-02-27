@@ -97,18 +97,32 @@ return result
 
 ### 4. Handle authorization denials (CRITICAL)
 
-When Cedar denies an action, you get an error containing `AuthorizationDenied` and a decision ID like `PD-<uuid>`. You MUST wait for human approval:
+When Cedar denies an action, you get an error containing `AuthorizationDenied` and a decision ID like `PD-<uuid>`. You MUST surface this to the user and wait for human approval.
 
 ```python
-# After getting AuthorizationDenied with decision ID PD-abc123:
-decision = await temper.poll_decision("default", "PD-abc123")
-return decision
-# Returns: {"status": "Approved", ...} or {"status": "Denied", ...}
+try:
+    result = await temper.action("default", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
+    return result
+except Exception as e:
+    error = str(e)
+    if "AuthorizationDenied" in error:
+        # The error message contains the decision ID on a line like:
+        #   Decision: PD-abc123-def456 (pending human approval)
+        # Extract it:
+        import re
+        match = re.search(r"(PD-[a-f0-9-]+)", error)
+        decision_id = match.group(1) if match else None
+
+        if decision_id:
+            # Tell the user to approve in the Observe UI, then poll
+            return f"Action denied — approve at http://localhost:3001/decisions then I'll retry."
+            # After human approves in the Observe UI:
+            # decision = await temper.poll_decision("default", decision_id)
+            # if decision["status"] == "Approved": retry the action
+    raise
 ```
 
-Then retry the original action if approved.
-
-**You CANNOT self-approve.** Calling `approve_decision`, `deny_decision`, or `set_policy` will return an error. A human must approve via the Observe UI (http://localhost:3001) or `temper decide` CLI.
+**You CANNOT self-approve.** Calling `approve_decision`, `deny_decision`, or `set_policy` will return an error. A human must approve via the **Observe UI** at http://localhost:3001/decisions — the agent cannot resolve governance decisions.
 
 ---
 
@@ -254,10 +268,11 @@ You call action → Cedar evaluates policy → DENIED (403)
 ```
 
 **Rules:**
-- NEVER try to approve your own decisions
+- NEVER try to approve your own decisions — governance write methods are not exposed to agents
 - NEVER call `approve_decision`, `deny_decision`, or `set_policy` — they are blocked
-- ALWAYS use `poll_decision` to wait after a denial
-- Tell the user what's pending so they can approve it
+- ALWAYS surface the denial to the user with a link to the **Observe UI**: `http://localhost:3001/decisions`
+- ALWAYS use `poll_decision` to wait after the user has been notified
+- The user approves in the Observe UI (browser) — not through this chat
 
 ---
 
@@ -285,10 +300,15 @@ try:
 except Exception as e:
     error = str(e)
     if "AuthorizationDenied" in error:
-        # Extract PD-xxx from the error message
-        # Wait for human approval
-        return error  # Show the user what needs approval
-    return error
+        import re
+        match = re.search(r"(PD-[a-f0-9-]+)", error)
+        decision_id = match.group(1) if match else "unknown"
+        # Surface to user — they approve in the Observe UI, not here
+        return f"Denied by Cedar policy. Decision {decision_id} pending.\nApprove at: http://localhost:3001/decisions"
+        # After user approves in browser:
+        # decision = await temper.poll_decision("default", decision_id)
+        # if decision["status"] == "Approved": retry the action
+    raise
 ```
 
 ### List and inspect entities
