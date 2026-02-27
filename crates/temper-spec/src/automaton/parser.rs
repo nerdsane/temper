@@ -165,13 +165,13 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
                 )));
             }
         }
-        if let Some(to) = &action.to {
-            if !automaton.automaton.states.contains(to) {
-                return Err(AutomatonParseError::Validation(format!(
-                    "action '{}' references undeclared to-state '{to}'",
-                    action.name
-                )));
-            }
+        if let Some(to) = &action.to
+            && !automaton.automaton.states.contains(to)
+        {
+            return Err(AutomatonParseError::Validation(format!(
+                "action '{}' references undeclared to-state '{to}'",
+                action.name
+            )));
         }
     }
 
@@ -185,21 +185,21 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
                     ig.name
                 )));
             }
-            if let Some(ref cb) = ig.on_success {
-                if !action_names.contains(&cb.as_str()) {
-                    return Err(AutomatonParseError::Validation(format!(
-                        "integration '{}' on_success references unknown action '{cb}'",
-                        ig.name
-                    )));
-                }
+            if let Some(ref cb) = ig.on_success
+                && !action_names.contains(&cb.as_str())
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "integration '{}' on_success references unknown action '{cb}'",
+                    ig.name
+                )));
             }
-            if let Some(ref cb) = ig.on_failure {
-                if !action_names.contains(&cb.as_str()) {
-                    return Err(AutomatonParseError::Validation(format!(
-                        "integration '{}' on_failure references unknown action '{cb}'",
-                        ig.name
-                    )));
-                }
+            if let Some(ref cb) = ig.on_failure
+                && !action_names.contains(&cb.as_str())
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "integration '{}' on_failure references unknown action '{cb}'",
+                    ig.name
+                )));
             }
         }
     }
