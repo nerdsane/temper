@@ -135,7 +135,11 @@ async fn main() -> anyhow::Result<()> {
             }
             serve::run(port, apps, storage, storage_explicit, observe).await?
         }
-        Commands::Mcp { port, app, agent_id } => {
+        Commands::Mcp {
+            port,
+            app,
+            agent_id,
+        } => {
             let mut apps: Vec<(String, String)> = Vec::new();
             for entry in &app {
                 if let Some((name, path)) = entry.split_once('=') {
@@ -329,7 +333,11 @@ mod tests {
             "haku-ops=apps/haku-ops/specs",
         ]);
         match cli.command {
-            Commands::Mcp { port, app, agent_id } => {
+            Commands::Mcp {
+                port,
+                app,
+                agent_id,
+            } => {
                 assert_eq!(port, Some(3001));
                 assert_eq!(app, vec!["haku-ops=apps/haku-ops/specs"]);
                 assert_eq!(agent_id, None);
@@ -351,7 +359,11 @@ mod tests {
             "haku-ops=apps/haku-ops/specs",
         ]);
         match cli.command {
-            Commands::Mcp { port, app, agent_id } => {
+            Commands::Mcp {
+                port,
+                app,
+                agent_id,
+            } => {
                 assert_eq!(port, Some(3001));
                 assert_eq!(app, vec!["haku-ops=apps/haku-ops/specs"]);
                 assert_eq!(agent_id, Some("haku".to_string()));

@@ -5,7 +5,6 @@
     <img src="assets/mascot-vectorized.svg" width="140" alt="Temper">
   </picture>
 </p>
-
 <h1 align="center">Temper</h1>
 
 <p align="center">

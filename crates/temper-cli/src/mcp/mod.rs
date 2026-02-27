@@ -1,6 +1,10 @@
 use anyhow::Result;
 
-pub async fn run(port: Option<u16>, apps: Vec<(String, String)>, agent_id: Option<String>) -> Result<()> {
+pub async fn run(
+    port: Option<u16>,
+    apps: Vec<(String, String)>,
+    agent_id: Option<String>,
+) -> Result<()> {
     let apps = apps
         .into_iter()
         .map(|(name, specs_dir)| temper_mcp::AppConfig {
