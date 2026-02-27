@@ -46,6 +46,11 @@ pub(super) fn escape_odata_key(key: &str) -> String {
     key.replace('\'', "''")
 }
 
+/// Extract an optional string argument at `index`, returning `None` if absent.
+pub(super) fn optional_string_arg(args: &[MontyObject], index: usize) -> Option<String> {
+    args.get(index).and_then(|a| String::try_from(a).ok())
+}
+
 pub(super) fn expect_string_arg(
     args: &[MontyObject],
     index: usize,

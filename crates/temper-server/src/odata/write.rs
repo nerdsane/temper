@@ -5,6 +5,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use temper_odata::path::{ODataPath, parse_path};
+use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
 use super::bindings::dispatch_bound_action;
@@ -16,9 +17,10 @@ use super::response::annotate_entity;
 use crate::constraint_engine::{
     post_write_invariant_checks, pre_delete_relation_checks, pre_upsert_relation_checks,
 };
-use crate::dispatch::extract_agent_context;
+use crate::dispatch::{AgentContext, extract_agent_context};
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
+use crate::state::trajectory::TrajectoryEntry;
 
 type ODataWriteError = Box<axum::response::Response>;
 
@@ -54,6 +56,46 @@ fn resolve_entity_type_or_404(
                 StatusCode::NOT_FOUND,
                 "EntitySetNotFound",
                 &format!("Entity set '{set_name}' not found"),
+            )
+            .into_response(),
+        )
+    })
+}
+
+/// Like [`resolve_entity_type_or_404`], but also records a trajectory entry
+/// for the unmet intent so the Evolution Engine can track entity-set-not-found gaps.
+fn resolve_entity_type_or_record_404(
+    state: &ServerState,
+    tenant: &TenantId,
+    set_name: &str,
+    agent_ctx: &AgentContext,
+) -> Result<String, ODataWriteError> {
+    resolve_entity_type(state, tenant, set_name).ok_or_else(|| {
+        let entry = TrajectoryEntry {
+            timestamp: sim_now().to_rfc3339(),
+            tenant: tenant.to_string(),
+            entity_type: set_name.to_string(),
+            entity_id: String::new(),
+            action: "EntitySetNotFound".to_string(),
+            success: false,
+            from_status: None,
+            to_status: None,
+            error: Some(format!("Entity set '{}' not found", set_name)),
+            agent_id: agent_ctx.agent_id.clone(),
+            session_id: agent_ctx.session_id.clone(),
+            authz_denied: None,
+            denied_resource: None,
+            denied_module: None,
+        };
+        if let Ok(mut log) = state.trajectory_log.write() {
+            // ci-ok: infallible lock
+            log.push(entry);
+        }
+        Box::new(
+            odata_error(
+                StatusCode::NOT_FOUND,
+                "EntitySetNotFound",
+                &format!("Entity set '{}' not found", set_name),
             )
             .into_response(),
         )
@@ -117,10 +159,11 @@ pub async fn handle_odata_post(
 
     match odata_path {
         ODataPath::EntitySet(name) => {
-            let entity_type = match resolve_entity_type_or_404(&state, &tenant, &name) {
-                Ok(t) => t,
-                Err(resp) => return *resp,
-            };
+            let entity_type =
+                match resolve_entity_type_or_record_404(&state, &tenant, &name, &agent_ctx) {
+                    Ok(t) => t,
+                    Err(resp) => return *resp,
+                };
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                 return *resp;
             }
@@ -199,10 +242,11 @@ pub async fn handle_odata_post(
                 }
             };
 
-            let entity_type = match resolve_entity_type_or_404(&state, &tenant, &set_name) {
-                Ok(t) => t,
-                Err(resp) => return *resp,
-            };
+            let entity_type =
+                match resolve_entity_type_or_record_404(&state, &tenant, &set_name, &agent_ctx) {
+                    Ok(t) => t,
+                    Err(resp) => return *resp,
+                };
 
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                 return *resp;

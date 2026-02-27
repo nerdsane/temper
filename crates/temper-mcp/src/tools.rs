@@ -11,7 +11,7 @@ use tokio::io::AsyncBufReadExt;
 use super::runtime::RuntimeContext;
 use super::sandbox::{
     escape_odata_key, expect_json_object_arg, expect_string_arg, format_authz_denied,
-    format_http_error,
+    format_http_error, optional_string_arg,
 };
 
 impl RuntimeContext {
@@ -294,6 +294,58 @@ impl RuntimeContext {
                 self.compile_and_upload_wasm(&tenant, &module_name, &rust_source)
                     .await
             }
+            // --- Evolution observability (read-only) ---
+            "get_trajectories" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let entity_type = optional_string_arg(args, 1);
+                let failed_only = optional_string_arg(args, 2);
+                let limit = optional_string_arg(args, 3);
+                let mut path = "/observe/trajectories".to_string();
+                let mut params = Vec::new();
+                if let Some(ref et) = entity_type {
+                    params.push(format!("entity_type={et}"));
+                }
+                if failed_only.as_deref() == Some("true") {
+                    params.push("success=false".to_string());
+                }
+                if let Some(ref l) = limit {
+                    params.push(format!("failed_limit={l}"));
+                }
+                if !params.is_empty() {
+                    path.push('?');
+                    path.push_str(&params.join("&"));
+                }
+                self.temper_request(&tenant, Method::GET, path, None).await
+            }
+            "get_insights" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                self.temper_request(
+                    &tenant,
+                    Method::GET,
+                    "/observe/evolution/insights".to_string(),
+                    None,
+                )
+                .await
+            }
+            "get_evolution_records" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let record_type = optional_string_arg(args, 1);
+                let path = match record_type {
+                    Some(rt) => format!("/observe/evolution/records?record_type={rt}"),
+                    None => "/observe/evolution/records".to_string(),
+                };
+                self.temper_request(&tenant, Method::GET, path, None).await
+            }
+            "check_sentinel" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                self.temper_request(
+                    &tenant,
+                    Method::POST,
+                    "/api/evolution/sentinel/check".to_string(),
+                    None,
+                )
+                .await
+            }
             "approve_decision" | "deny_decision" | "set_policy" => Err(format!(
                 "temper.{method}() is not available to agents. \
                  Governance write operations (approve, deny, set_policy) \
@@ -304,7 +356,8 @@ impl RuntimeContext {
                  list, get, create, action, patch, \
                  show_spec, submit_specs, get_policies, \
                  upload_wasm, compile_wasm, \
-                 get_decisions, poll_decision"
+                 get_decisions, poll_decision, \
+                 get_trajectories, get_insights, get_evolution_records, check_sentinel"
             )),
         }
     }

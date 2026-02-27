@@ -163,6 +163,15 @@ All take `(tenant, entity_set, ...)`. The `entity_set` is the **plural collectio
 | `get_decisions` | `await temper.get_decisions(tenant)` | Array of pending decisions |
 | `poll_decision` | `await temper.poll_decision(tenant, decision_id)` | Blocks until resolved (30s max) |
 
+### Evolution Observability (Read-Only)
+
+| Method | Signature | Returns |
+|--------|-----------|---------|
+| `get_trajectories` | `await temper.get_trajectories(tenant, entity_type?, failed_only?, limit?)` | Trajectory summary with failed intents |
+| `get_insights` | `await temper.get_insights(tenant)` | Ranked insight records |
+| `get_evolution_records` | `await temper.get_evolution_records(tenant, record_type?)` | O-P-A-D-I records |
+| `check_sentinel` | `await temper.check_sentinel(tenant)` | Sentinel alerts |
+
 ### Search Tool (No Server Required)
 
 Use `mcp__temper__search` instead of `mcp__temper__execute` for read-only spec queries:
@@ -273,6 +282,32 @@ You call action → Cedar evaluates policy → DENIED (403)
 - ALWAYS surface the denial to the user with a link to the **Observe UI**: `http://localhost:3001/decisions`
 - ALWAYS use `poll_decision` to wait after the user has been notified
 - The user approves in the Observe UI (browser) — not through this chat
+
+## Evolution Loop
+
+Temper automatically records failed intents as trajectory entries. Agents can close the feedback loop by reading evolution data and proposing spec changes.
+
+```
+Agent tries action → FAILS (404 entity not found / 409 invalid transition)
+  → Temper automatically records this as a trajectory entry
+  → Agent calls get_trajectories(tenant, entity_type, "true") to see failures
+  → Agent calls get_insights(tenant) for system-generated recommendations
+  → Agent designs a spec change (new entity type, new action, new integration)
+  → Agent calls submit_specs(tenant, specs) — Cedar gates this
+  → If denied → pending decision → human approves in Observe UI
+  → Spec deployed → agent retries → SUCCESS
+  → If new spec has integration (HTTP fetch) → Cedar gates that too
+  → Another pending decision → human approves → integration runs
+```
+
+**Rules:**
+- Unmet intents are recorded **automatically** by Temper at the server level — agents don't call anything special
+- Evolution data is read-only for agents (`get_trajectories`, `get_insights`, `get_evolution_records`, `check_sentinel`)
+- The agent's "write" action is `submit_specs` — governed by Cedar (default-deny)
+- Cedar gates both spec changes AND integration calls — human approval required
+- No "developer mode" vs "agent mode" — every agent participates naturally
+
+**Example:** Agent wants email → no `Email` entity → 404 auto-recorded → agent reads trajectories → proposes Email spec with `http_fetch` integration → Cedar gates submission → human approves → deployed → agent retries → Cedar gates HTTP integration → human approves → email fetched.
 
 ---
 
