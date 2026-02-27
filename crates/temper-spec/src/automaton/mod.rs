@@ -15,6 +15,7 @@
 mod initial;
 mod lint;
 pub mod parser;
+mod toml_parser;
 mod types;
 
 pub use initial::{
