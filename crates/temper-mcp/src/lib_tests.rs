@@ -743,16 +743,16 @@ fn format_authz_denied_with_decision_id() {
     let body = r#"{"error":{"code":"AuthorizationDenied","message":"Authorization denied for AddItem on Order('order-123'). Decision PD-abc123 created."}}"#;
     let result = format_authz_denied(body).expect("should parse");
     assert_eq!(
-        result["status"].as_str().unwrap(),
+        result["status"].as_str().unwrap(), // ci-ok: test assertion
         "authorization_denied",
         "should have structured status"
     );
     assert_eq!(
-        result["decision_id"].as_str().unwrap(),
+        result["decision_id"].as_str().unwrap(), // ci-ok: test assertion
         "PD-abc123",
         "should include decision ID"
     );
-    let hint = result["hint"].as_str().unwrap();
+    let hint = result["hint"].as_str().unwrap(); // ci-ok: test assertion
     assert!(hint.contains("poll_decision"), "should include poll_decision guidance");
     assert!(hint.contains("PD-abc123"), "hint should reference decision ID");
 }
@@ -761,9 +761,9 @@ fn format_authz_denied_with_decision_id() {
 fn format_authz_denied_without_decision_id() {
     let body = r#"{"error":{"code":"AuthorizationDenied","message":"Authorization denied: no matching permit policy"}}"#;
     let result = format_authz_denied(body).expect("should parse");
-    assert_eq!(result["status"].as_str().unwrap(), "authorization_denied");
+    assert_eq!(result["status"].as_str().unwrap(), "authorization_denied"); // ci-ok: test assertion
     assert!(result.get("decision_id").is_none() || result["decision_id"].is_null());
-    let hint = result["hint"].as_str().unwrap();
+    let hint = result["hint"].as_str().unwrap(); // ci-ok: test assertion
     assert!(hint.contains("poll_decision"));
 }
 
