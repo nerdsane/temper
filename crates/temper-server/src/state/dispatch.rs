@@ -475,7 +475,6 @@ impl ServerState {
         Ok(None)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn dispatch_wasm_callback(
         &self,
         tenant: &TenantId,
@@ -651,7 +650,6 @@ impl ServerState {
     }
 
     /// Dispatch with optional blocking integration await.
-    #[allow(clippy::too_many_arguments)]
     pub async fn dispatch_tenant_action_ext(
         &self,
         tenant: &TenantId,
@@ -908,14 +906,16 @@ impl ServerState {
             if await_integration {
                 if let Ok(Some(final_response)) = self
                     .dispatch_wasm_integrations_blocking(
-                        tenant,
-                        entity_type,
-                        entity_id,
-                        action,
-                        &response.custom_effects,
-                        &response.state,
-                        agent_ctx,
-                        &action_params,
+                        super::dispatch_blocking::BlockingWasmDispatch {
+                            tenant,
+                            entity_type,
+                            entity_id,
+                            action,
+                            custom_effects: &response.custom_effects,
+                            entity_state: &response.state,
+                            agent_ctx,
+                            action_params: &action_params,
+                        },
                     )
                     .await
                 {
