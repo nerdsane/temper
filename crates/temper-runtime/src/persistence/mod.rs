@@ -122,3 +122,8 @@ pub enum PersistenceError {
     #[error("storage error: {0}")]
     Storage(String),
 }
+
+/// Convert backend-specific errors into [`PersistenceError::Storage`].
+pub fn storage_error(err: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError::Storage(err.to_string())
+}

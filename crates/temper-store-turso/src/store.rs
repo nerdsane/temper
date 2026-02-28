@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use libsql::{Builder, Database, TransactionBehavior, params};
 use temper_runtime::persistence::{
-    EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
+    EventMetadata, EventStore, PersistenceEnvelope, PersistenceError, storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -560,18 +560,6 @@ impl TursoEventStore {
     }
 }
 
-fn storage_error(err: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError::Storage(err.to_string())
-}
-
-/// Split a persistence ID into `(tenant, entity_type, entity_id)`.
-///
-/// Accepts both the new 3-segment format (`tenant:type:id`) and the legacy
-/// 2-segment format (`type:id`) mapped to the `"default"` tenant.
-fn parse_persistence_id(persistence_id: &str) -> Result<(&str, &str, &str), PersistenceError> {
-    parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)
-}
-
 impl EventStore for TursoEventStore {
     async fn append(
         &self,
@@ -579,7 +567,8 @@ impl EventStore for TursoEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -657,7 +646,8 @@ impl EventStore for TursoEventStore {
         persistence_id: &str,
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
-        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
 
         let mut rows = conn
@@ -703,7 +693,8 @@ impl EventStore for TursoEventStore {
         sequence_nr: u64,
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
-        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
 
         conn.execute(
@@ -732,7 +723,8 @@ impl EventStore for TursoEventStore {
         &self,
         persistence_id: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
-        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(

@@ -12,9 +12,9 @@ use temper_runtime::tenant::parse_persistence_id_parts;
 
 /// A PostgreSQL-backed event store.
 ///
-/// Persistence IDs follow the `"entity_type:entity_id"` convention. Both
-/// halves are stored in separate columns so that queries can efficiently
-/// target all events for a given entity type.
+/// Persistence IDs follow `"tenant:entity_type:entity_id"` (with legacy
+/// `"entity_type:entity_id"` mapped to tenant `"default"`). Components are
+/// stored in separate columns for efficient filtering.
 #[derive(Clone, Debug)]
 pub struct PostgresEventStore {
     pool: PgPool,
@@ -30,19 +30,6 @@ impl PostgresEventStore {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Split a persistence ID into `(tenant, entity_type, entity_id)`.
-///
-/// Accepts both the new 3-segment format (`tenant:type:id`) and the
-/// legacy 2-segment format (`type:id`). Legacy IDs are assigned to
-/// the `"default"` tenant.
-pub fn parse_persistence_id(persistence_id: &str) -> Result<(&str, &str, &str), PersistenceError> {
-    parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +52,8 @@ impl EventStore for PostgresEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
         let mut tx = self
             .pool
@@ -139,7 +127,8 @@ impl EventStore for PostgresEventStore {
         persistence_id: &str,
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
-        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
         let rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> = sqlx::query_as(
             "SELECT sequence_nr, event_type, payload, metadata \
@@ -179,7 +168,8 @@ impl EventStore for PostgresEventStore {
         sequence_nr: u64,
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
-        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
         sqlx::query(
             "INSERT INTO snapshots (tenant, entity_type, entity_id, sequence_nr, state) \
@@ -206,7 +196,8 @@ impl EventStore for PostgresEventStore {
         &self,
         persistence_id: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
-        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
 
         let row: Option<(i64, Vec<u8>)> = sqlx::query_as(
             "SELECT sequence_nr, state FROM snapshots \
@@ -250,6 +241,11 @@ impl EventStore for PostgresEventStore {
 mod tests {
     use super::*;
     use crate::migration::run_migrations;
+    use temper_runtime::tenant::parse_persistence_id_parts;
+
+    fn parse_pid(persistence_id: &str) -> Result<(&str, &str, &str), PersistenceError> {
+        parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)
+    }
 
     fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
         PersistenceEnvelope {
@@ -270,7 +266,7 @@ mod tests {
 
     #[test]
     fn parse_3_segment_persistence_id() {
-        let (tenant, entity_type, entity_id) = parse_persistence_id("alpha:Order:abc-123").unwrap();
+        let (tenant, entity_type, entity_id) = parse_pid("alpha:Order:abc-123").unwrap();
         assert_eq!(tenant, "alpha");
         assert_eq!(entity_type, "Order");
         assert_eq!(entity_id, "abc-123");
@@ -278,7 +274,7 @@ mod tests {
 
     #[test]
     fn parse_legacy_2_segment_persistence_id() {
-        let (tenant, entity_type, entity_id) = parse_persistence_id("Order:abc-123").unwrap();
+        let (tenant, entity_type, entity_id) = parse_pid("Order:abc-123").unwrap();
         assert_eq!(tenant, "default");
         assert_eq!(entity_type, "Order");
         assert_eq!(entity_id, "abc-123");
@@ -287,7 +283,7 @@ mod tests {
     #[test]
     fn parse_3_segment_with_colons_in_id() {
         // splitn(3, ':') puts everything after the second colon into entity_id
-        let (tenant, entity_type, entity_id) = parse_persistence_id("beta:Task:T-1:sub").unwrap();
+        let (tenant, entity_type, entity_id) = parse_pid("beta:Task:T-1:sub").unwrap();
         assert_eq!(tenant, "beta");
         assert_eq!(entity_type, "Task");
         assert_eq!(entity_id, "T-1:sub");
@@ -295,7 +291,7 @@ mod tests {
 
     #[test]
     fn parse_persistence_id_missing_colon() {
-        let err = parse_persistence_id("OrderAbc123").unwrap_err();
+        let err = parse_pid("OrderAbc123").unwrap_err();
         assert!(
             matches!(err, PersistenceError::Storage(_)),
             "expected Storage error, got: {err:?}"
@@ -304,11 +300,11 @@ mod tests {
 
     #[test]
     fn parse_persistence_id_empty_segment() {
-        assert!(parse_persistence_id(":Order:abc").is_err());
-        assert!(parse_persistence_id("tenant::abc").is_err());
-        assert!(parse_persistence_id("tenant:Order:").is_err());
-        assert!(parse_persistence_id(":abc").is_err());
-        assert!(parse_persistence_id("Order:").is_err());
+        assert!(parse_pid(":Order:abc").is_err());
+        assert!(parse_pid("tenant::abc").is_err());
+        assert!(parse_pid("tenant:Order:").is_err());
+        assert!(parse_pid(":abc").is_err());
+        assert!(parse_pid("Order:").is_err());
     }
 
     #[test]

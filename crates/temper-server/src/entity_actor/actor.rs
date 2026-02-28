@@ -27,7 +27,9 @@ use std::sync::{Arc, RwLock};
 use temper_jit::table::TransitionTable;
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
-use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::persistence::{
+    EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
+};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::event_store::ServerEventStore;
@@ -110,11 +112,13 @@ impl EntityActor {
         persistence_id: &str,
         state: &mut EntityState,
         event: &EntityEvent,
-    ) {
+    ) -> Result<u64, PersistenceError> {
+        let payload = serde_json::to_value(event)
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
         let envelope = PersistenceEnvelope {
             sequence_nr: state.sequence_nr + 1,
             event_type: event.action.clone(),
-            payload: serde_json::to_value(event).unwrap_or_default(),
+            payload,
             metadata: EventMetadata {
                 event_id: sim_uuid(),
                 causation_id: sim_uuid(),
@@ -131,12 +135,14 @@ impl EntityActor {
             Ok(new_seq) => {
                 state.sequence_nr = new_seq;
                 tracing::debug!(entity = %state.entity_id, seq = new_seq, "event persisted");
+                Ok(new_seq)
             }
             Err(e) => {
                 tracing::error!(
                     entity = %state.entity_id, error = %e,
                     "failed to persist event — state advanced but not durable"
                 );
+                Err(e)
             }
         }
     }
@@ -277,7 +283,14 @@ impl Actor for EntityActor {
             };
 
             if let Some(ref store) = self.event_store {
-                Self::persist_event(store, &self.persistence_id(), &mut state, &created).await;
+                Self::persist_event(store, &self.persistence_id(), &mut state, &created)
+                    .await
+                    .map_err(|e| {
+                        ActorError::custom(format!(
+                            "failed to persist bootstrap Created event for {}:{}: {}",
+                            self.entity_type, self.entity_id, e
+                        ))
+                    })?;
             }
             state.events.push(created);
         }
@@ -342,6 +355,7 @@ impl Actor for EntityActor {
                 }
 
                 let event_count_before = state.events.len();
+                let state_before = state.clone();
                 let result = super::effects::process_action_with_xref(
                     state,
                     &table,
@@ -357,8 +371,21 @@ impl Actor for EntityActor {
                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
 
                     // Persist to Postgres (if configured)
-                    if let Some(ref store) = self.event_store {
-                        Self::persist_event(store, &self.persistence_id(), state, &event).await;
+                    if let Some(ref store) = self.event_store
+                        && let Err(e) =
+                            Self::persist_event(store, &self.persistence_id(), state, &event).await
+                    {
+                        // Roll back speculative in-memory state if durability failed.
+                        *state = state_before;
+                        ctx.reply(EntityResponse {
+                            success: false,
+                            state: state.clone(),
+                            error: Some(format!("persistence failed: {e}")),
+                            custom_effects: vec![],
+                            scheduled_actions: vec![],
+                            spawn_requests: vec![],
+                        });
+                        return Ok(());
                     }
 
                     // Telemetry as Views: emit wide event → OTEL span + metrics.

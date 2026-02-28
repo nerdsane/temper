@@ -157,6 +157,10 @@ fn authorize_tenant_decision_management(
     None
 }
 
+fn is_backend_not_supported_error(err: &str) -> bool {
+    err.to_ascii_lowercase().contains("not supported")
+}
+
 /// PUT /api/tenants/{tenant}/secrets/{key_name} — encrypt and store a secret.
 async fn handle_put_secret(
     State(state): State<ServerState>,
@@ -212,19 +216,26 @@ async fn handle_put_secret(
         }
     };
 
-    // Cache in memory.
-    if let Err(e) = vault.cache_secret(&tenant, &key_name, value.to_string()) {
-        return (StatusCode::CONFLICT, e).into_response();
-    }
-
-    // Persist to DB.
+    // Persist first.
     if let Err(e) = state
         .upsert_secret(&tenant, &key_name, &ciphertext, &nonce)
         .await
     {
+        let status = if is_backend_not_supported_error(&e) {
+            StatusCode::NOT_IMPLEMENTED
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        return (status, format!("Persistence failed: {e}")).into_response();
+    }
+
+    // Cache in memory after successful persistence.
+    if let Err(e) = vault.cache_secret(&tenant, &key_name, value.to_string()) {
+        // Best-effort rollback to keep storage/cache aligned.
+        let _ = state.delete_secret(&tenant, &key_name).await;
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Persistence failed: {e}"),
+            StatusCode::CONFLICT,
+            format!("Cache update failed after persistence write: {e}"),
         )
             .into_response();
     }
@@ -245,16 +256,23 @@ async fn handle_delete_secret(
             .into_response();
     };
 
-    vault.remove_secret(&tenant, &key_name);
-
     match state.delete_secret(&tenant, &key_name).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Delete failed: {e}"),
-        )
-            .into_response(),
+        Ok(true) => {
+            vault.remove_secret(&tenant, &key_name);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => {
+            vault.remove_secret(&tenant, &key_name);
+            StatusCode::NOT_FOUND.into_response()
+        }
+        Err(e) => {
+            let status = if is_backend_not_supported_error(&e) {
+                StatusCode::NOT_IMPLEMENTED
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, format!("Delete failed: {e}")).into_response()
+        }
     }
 }
 

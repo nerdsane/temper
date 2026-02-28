@@ -15,7 +15,9 @@ use std::sync::Arc;
 use fred::prelude::*;
 use fred::types::scripts::Script;
 use serde::{Deserialize, Serialize};
-use temper_runtime::persistence::{EventStore, PersistenceEnvelope, PersistenceError};
+use temper_runtime::persistence::{
+    EventStore, PersistenceEnvelope, PersistenceError, storage_error,
+};
 use temper_runtime::tenant::parse_persistence_id_parts;
 
 /// Lua script for atomic append: check expected sequence, RPUSH events, SET new seq, SADD entity ref.
@@ -156,14 +158,6 @@ impl RedisEventStore {
     }
 }
 
-fn parse_persistence_id(persistence_id: &str) -> Result<(&str, &str, &str), PersistenceError> {
-    parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)
-}
-
-fn storage_error(err: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError::Storage(err.to_string())
-}
-
 impl EventStore for RedisEventStore {
     async fn append(
         &self,
@@ -171,7 +165,8 @@ impl EventStore for RedisEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let seq_key = Self::seq_key(tenant, entity_type, entity_id);
         let events_key = Self::events_key(tenant, entity_type, entity_id);
         let entities_key = Self::tenant_entities_key(tenant);
@@ -222,7 +217,8 @@ impl EventStore for RedisEventStore {
         persistence_id: &str,
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
-        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let events_key = Self::events_key(tenant, entity_type, entity_id);
 
         // Events are stored via RPUSH with sequential indices starting at 0.
@@ -251,7 +247,8 @@ impl EventStore for RedisEventStore {
         sequence_nr: u64,
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
-        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let key = Self::snapshot_key(tenant, entity_type, entity_id);
         let record = SnapshotRecord {
             sequence_nr,
@@ -271,7 +268,8 @@ impl EventStore for RedisEventStore {
         &self,
         persistence_id: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
-        let (tenant, entity_type, entity_id) = parse_persistence_id(persistence_id)?;
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let key = Self::snapshot_key(tenant, entity_type, entity_id);
         let encoded: Option<String> = self.client.get(&key).await.map_err(storage_error)?;
         let Some(encoded) = encoded else {

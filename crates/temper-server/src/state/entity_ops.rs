@@ -98,7 +98,7 @@ impl ServerState {
     ) -> Option<ActorRef<EntityMsg>> {
         let key = format!("{tenant}:{entity_type}:{entity_id}");
 
-        // Check actor registry
+        // Fast-path: check actor registry under read lock.
         {
             let registry = self.actor_registry.read().unwrap();
             if let Some(actor_ref) = registry.get(&key) {
@@ -121,7 +121,7 @@ impl ServerState {
                 .map(|t| Arc::new(RwLock::new((**t).clone())))
         })?;
 
-        // Spawn new actor
+        // Build actor instance (spawn guarded below to avoid duplicate races).
         let actor = match &self.event_store {
             Some(store) => EntityActor::with_persistence(
                 entity_type,
@@ -134,13 +134,19 @@ impl ServerState {
             None => EntityActor::new(entity_type, entity_id, table, initial_fields)
                 .with_tenant(tenant.as_str()),
         };
-        let actor_ref = self.actor_system.spawn(actor, &key);
 
-        // Register in actor registry
-        {
+        // Slow-path: atomically re-check and spawn under write lock.
+        // This prevents duplicate actors when concurrent requests race to create
+        // the same (tenant, entity_type, entity_id) key.
+        let actor_ref = {
             let mut registry = self.actor_registry.write().unwrap();
-            registry.insert(key, actor_ref.clone());
-        }
+            if let Some(existing) = registry.get(&key) {
+                return Some(existing.clone());
+            }
+            let actor_ref = self.actor_system.spawn(actor, &key);
+            registry.insert(key.clone(), actor_ref.clone());
+            actor_ref
+        };
 
         // Track in entity index for collection queries
         {
@@ -377,9 +383,10 @@ impl ServerState {
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
         match store.read_events(&persistence_id, 0).await {
             Ok(events) if !events.is_empty() => {
-                // Best effort: if spec exists, spawn actor and populate index.
-                let _ = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id);
-                true
+                // Entity is considered loaded only if actor spawn/index backfill
+                // succeeded (e.g. transition table exists).
+                self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
+                    .is_some()
             }
             _ => false,
         }
