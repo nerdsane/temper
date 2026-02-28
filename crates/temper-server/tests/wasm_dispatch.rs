@@ -9,7 +9,7 @@ use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
 use temper_server::dispatch::AgentContext;
 use temper_server::registry::SpecRegistry;
-use temper_server::state::TrajectorySource;
+use temper_server::state::{DispatchExtOptions, TrajectorySource};
 use temper_spec::csdl::parse_csdl;
 
 /// Pre-built echo integration WASM binary.
@@ -310,6 +310,7 @@ async fn wasm_authz_denial_records_governance_artifacts_blocking_mode() {
         wasm_reg.register(&tenant, "echo_integration", &hash);
     }
 
+    let agent_ctx = AgentContext::default();
     let response = state
         .dispatch_tenant_action_ext(
             &tenant,
@@ -317,8 +318,10 @@ async fn wasm_authz_denial_records_governance_artifacts_blocking_mode() {
             "echo-authz-blocking",
             "TriggerEcho",
             serde_json::json!({}),
-            &AgentContext::default(),
-            true,
+            DispatchExtOptions {
+                agent_ctx: &agent_ctx,
+                await_integration: true,
+            },
         )
         .await
         .expect("blocking TriggerEcho should return callback result");

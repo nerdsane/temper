@@ -9,6 +9,7 @@ mod persistence;
 pub mod trajectory;
 pub mod wasm_invocation_log;
 
+pub use dispatch::DispatchExtOptions;
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{DecisionStatus, PendingDecision, PendingDecisionLog, PolicyScope};

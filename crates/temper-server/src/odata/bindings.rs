@@ -13,7 +13,7 @@ use super::response::annotate_entity;
 use crate::constraint_engine::{post_write_invariant_checks, pre_upsert_relation_checks};
 use crate::dispatch::AgentContext;
 use crate::response::{ODataResponse, odata_error};
-use crate::state::ServerState;
+use crate::state::{DispatchExtOptions, ServerState};
 
 /// Extract `X-Temper-*` headers from an axum `HeaderMap` into `(key, value)` pairs
 /// suitable for `SecurityContext::from_headers`.
@@ -232,8 +232,10 @@ pub(super) async fn dispatch_bound_action(
             key_str,
             action,
             body_json,
-            agent_ctx,
-            await_integration,
+            DispatchExtOptions {
+                agent_ctx,
+                await_integration,
+            },
         )
         .await;
 

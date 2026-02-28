@@ -114,7 +114,7 @@ fn authorize_tenant_decision_management(
     state: &ServerState,
     headers: &HeaderMap,
     tenant: &str,
-) -> Result<(), axum::response::Response> {
+) -> Option<axum::response::Response> {
     let security_ctx = security_context_from_headers(headers, None, None);
     if let Err(reason) = state.authorize_with_context(
         &security_ctx,
@@ -134,18 +134,20 @@ fn authorize_tenant_decision_management(
             &reason,
             None,
         );
-        return Err((
-            StatusCode::FORBIDDEN,
-            axum::Json(serde_json::json!({
-                "error": {
-                    "code": "AuthorizationDenied",
-                    "message": format!("{reason} Decision {}", pd.id),
-                }
-            })),
-        )
-            .into_response());
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({
+                    "error": {
+                        "code": "AuthorizationDenied",
+                        "message": format!("{reason} Decision {}", pd.id),
+                    }
+                })),
+            )
+                .into_response(),
+        );
     }
-    Ok(())
+    None
 }
 
 /// PUT /api/tenants/{tenant}/secrets/{key_name} — encrypt and store a secret.
@@ -510,7 +512,7 @@ async fn handle_list_decisions(
     headers: HeaderMap,
     Query(params): Query<DecisionListParams>,
 ) -> impl IntoResponse {
-    if let Err(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
+    if let Some(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
         return resp;
     }
 
@@ -576,7 +578,7 @@ async fn handle_approve_decision(
     headers: HeaderMap,
     axum::Json(body): axum::Json<ApproveBody>,
 ) -> impl IntoResponse {
-    if let Err(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
+    if let Some(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
         return resp;
     }
 
@@ -689,7 +691,7 @@ async fn handle_deny_decision(
     headers: HeaderMap,
     body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
-    if let Err(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
+    if let Some(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
         return resp;
     }
 
@@ -732,7 +734,7 @@ async fn handle_decision_stream(
     Path(tenant): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
+    if let Some(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
         return resp;
     }
 

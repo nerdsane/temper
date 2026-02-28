@@ -24,6 +24,18 @@ pub(crate) enum WasmDispatchMode {
     Inline,
 }
 
+#[derive(Clone, Copy)]
+struct WasmEntityRef<'a> {
+    tenant: &'a TenantId,
+    entity_type: &'a str,
+    entity_id: &'a str,
+}
+
+pub struct DispatchExtOptions<'a> {
+    pub agent_ctx: &'a AgentContext,
+    pub await_integration: bool,
+}
+
 #[derive(Clone, Default)]
 struct HttpCallAuthzDenialTracker {
     denial_reason: Arc<Mutex<Option<String>>>,
@@ -167,6 +179,11 @@ impl ServerState {
                 .unwrap_or_default()
         };
         let base_gate = self.wasm_authz_gate();
+        let entity_ref = WasmEntityRef {
+            tenant,
+            entity_type,
+            entity_id,
+        };
         let mut last_response: Option<EntityResponse> = None;
 
         for effect_name in custom_effects {
@@ -227,15 +244,7 @@ impl ServerState {
                         "integration": integration.name.clone(),
                     });
                     if let Some(resp) = self
-                        .dispatch_wasm_callback(
-                            tenant,
-                            entity_type,
-                            entity_id,
-                            cb,
-                            params,
-                            agent_ctx,
-                            mode,
-                        )
+                        .dispatch_wasm_callback(entity_ref, cb, params, agent_ctx, mode)
                         .await?
                     {
                         last_response = Some(resp);
@@ -294,9 +303,7 @@ impl ServerState {
                         let error_str = format!("authorization denied for http_call: {reason}");
                         if let Some(resp) = self
                             .handle_wasm_failure(
-                                tenant,
-                                entity_type,
-                                entity_id,
+                                entity_ref,
                                 action,
                                 &integration.name,
                                 &module_name,
@@ -334,9 +341,7 @@ impl ServerState {
                     if let Some(ref cb) = integration.on_success
                         && let Some(resp) = self
                             .dispatch_wasm_callback(
-                                tenant,
-                                entity_type,
-                                entity_id,
+                                entity_ref,
                                 cb,
                                 result.callback_params,
                                 agent_ctx,
@@ -360,9 +365,7 @@ impl ServerState {
 
                     if let Some(resp) = self
                         .handle_wasm_failure(
-                            tenant,
-                            entity_type,
-                            entity_id,
+                            entity_ref,
                             action,
                             &integration.name,
                             &module_name,
@@ -387,9 +390,7 @@ impl ServerState {
 
                     if let Some(resp) = self
                         .handle_wasm_failure(
-                            tenant,
-                            entity_type,
-                            entity_id,
+                            entity_ref,
                             action,
                             &integration.name,
                             &module_name,
@@ -413,9 +414,7 @@ impl ServerState {
     #[allow(clippy::too_many_arguments)]
     async fn handle_wasm_failure(
         &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
+        entity_ref: WasmEntityRef<'_>,
         trigger_action: &str,
         integration_name: &str,
         module_name: &str,
@@ -428,9 +427,9 @@ impl ServerState {
         let is_authz_denied = error_str.contains("authorization denied for http_call");
         let log_entry = WasmInvocationEntry {
             timestamp: sim_now().to_rfc3339(),
-            tenant: tenant.to_string(),
-            entity_type: entity_type.to_string(),
-            entity_id: entity_id.to_string(),
+            tenant: entity_ref.tenant.to_string(),
+            entity_type: entity_ref.entity_type.to_string(),
+            entity_id: entity_ref.entity_id.to_string(),
             module_name: module_name.to_string(),
             trigger_action: trigger_action.to_string(),
             callback_action: on_failure.clone(),
@@ -446,9 +445,7 @@ impl ServerState {
 
         let decision_id = if is_authz_denied {
             self.record_wasm_authz_denial(
-                tenant,
-                entity_type,
-                entity_id,
+                entity_ref,
                 trigger_action,
                 integration_name,
                 module_name,
@@ -468,7 +465,7 @@ impl ServerState {
                 params["authz_denied"] = serde_json::json!(true);
             }
             return self
-                .dispatch_wasm_callback(tenant, entity_type, entity_id, cb, params, agent_ctx, mode)
+                .dispatch_wasm_callback(entity_ref, cb, params, agent_ctx, mode)
                 .await;
         }
 
@@ -477,9 +474,7 @@ impl ServerState {
 
     async fn dispatch_wasm_callback(
         &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
+        entity_ref: WasmEntityRef<'_>,
         callback_action: &str,
         callback_params: serde_json::Value,
         agent_ctx: &AgentContext,
@@ -489,9 +484,9 @@ impl ServerState {
             WasmDispatchMode::Inline => {
                 let resp = self
                     .dispatch_tenant_action_core(
-                        tenant,
-                        entity_type,
-                        entity_id,
+                        entity_ref.tenant,
+                        entity_ref.entity_type,
+                        entity_ref.entity_id,
                         callback_action,
                         callback_params,
                         agent_ctx,
@@ -503,9 +498,9 @@ impl ServerState {
             WasmDispatchMode::Background => {
                 if let Err(e) = self
                     .dispatch_tenant_action(
-                        tenant,
-                        entity_type,
-                        entity_id,
+                        entity_ref.tenant,
+                        entity_ref.entity_type,
+                        entity_ref.entity_id,
                         callback_action,
                         callback_params,
                         &AgentContext::default(),
@@ -525,23 +520,21 @@ impl ServerState {
 
     fn record_wasm_authz_denial(
         &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
+        entity_ref: WasmEntityRef<'_>,
         trigger_action: &str,
         integration_name: &str,
         module_name: &str,
         error_str: &str,
     ) -> Option<String> {
         let pd = PendingDecision::from_denial(
-            tenant.as_str(),
+            entity_ref.tenant.as_str(),
             "wasm-module",
             "http_call",
             "HttpEndpoint",
             integration_name,
             serde_json::json!({
-                "entity_type": entity_type,
-                "entity_id": entity_id,
+                "entity_type": entity_ref.entity_type,
+                "entity_id": entity_ref.entity_id,
                 "module": module_name,
                 "trigger_action": trigger_action,
             }),
@@ -557,9 +550,9 @@ impl ServerState {
 
         let traj = TrajectoryEntry {
             timestamp: sim_now().to_rfc3339(),
-            tenant: tenant.to_string(),
-            entity_type: entity_type.to_string(),
-            entity_id: entity_id.to_string(),
+            tenant: entity_ref.tenant.to_string(),
+            entity_type: entity_ref.entity_type.to_string(),
+            entity_id: entity_ref.entity_id.to_string(),
             action: trigger_action.to_string(),
             success: false,
             from_status: None,
@@ -643,8 +636,10 @@ impl ServerState {
             entity_id,
             action,
             params,
-            agent_ctx,
-            false,
+            DispatchExtOptions {
+                agent_ctx,
+                await_integration: false,
+            },
         )
         .await
     }
@@ -657,9 +652,10 @@ impl ServerState {
         entity_id: &str,
         action: &str,
         params: serde_json::Value,
-        agent_ctx: &AgentContext,
-        await_integration: bool,
+        options: DispatchExtOptions<'_>,
     ) -> Result<EntityResponse, String> {
+        let agent_ctx = options.agent_ctx;
+        let await_integration = options.await_integration;
         let response = self
             .dispatch_tenant_action_core(
                 tenant,
