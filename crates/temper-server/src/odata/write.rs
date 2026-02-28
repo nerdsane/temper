@@ -86,7 +86,7 @@ fn resolve_entity_type_or_record_404(
             authz_denied: None,
             denied_resource: None,
             denied_module: None,
-            source: Some(TrajectorySource::Entity),
+            source: Some(TrajectorySource::Platform),
         };
         if let Ok(mut log) = state.trajectory_log.write() {
             // ci-ok: infallible lock

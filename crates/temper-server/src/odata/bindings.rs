@@ -149,7 +149,7 @@ pub(super) async fn dispatch_bound_action(
             authz_denied: Some(true),
             denied_resource: Some(format!("{}:{}", entity_type, key_str)),
             denied_module: None,
-            source: None,
+            source: Some(crate::state::trajectory::TrajectorySource::Authz),
         };
         {
             let mut tlog = state.trajectory_log.write().unwrap(); // ci-ok: infallible lock

@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post, put};
+use temper_authz::PrincipalKind;
 use temper_runtime::scheduler::sim_now;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -89,6 +90,24 @@ pub fn build_api_router() -> Router<ServerState> {
         // Cross-tenant decision endpoints
         .route("/decisions", get(handle_list_all_decisions))
         .route("/decisions/stream", get(handle_all_decisions_stream))
+}
+
+fn is_cross_tenant_decision_admin(headers: &HeaderMap) -> bool {
+    let security_ctx = security_context_from_headers(headers, None, None);
+    matches!(security_ctx.principal.kind, PrincipalKind::Admin)
+}
+
+fn cross_tenant_admin_denied() -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        axum::Json(serde_json::json!({
+            "error": {
+                "code": "AuthorizationDenied",
+                "message": "Admin principal required for cross-tenant decision access",
+            }
+        })),
+    )
+        .into_response()
 }
 
 /// PUT /api/tenants/{tenant}/secrets/{key_name} — encrypt and store a secret.
@@ -526,59 +545,60 @@ async fn handle_approve_decision(
         }
     };
 
-    let generated_policy;
-    let evolution_record_id;
-    {
-        let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
-        let decision = match log.get_mut(&id) {
-            Some(d) if d.tenant == tenant => d,
-            _ => {
-                return (StatusCode::NOT_FOUND, "Decision not found").into_response();
-            }
-        };
-
-        if decision.status != DecisionStatus::Pending {
-            return (
-                StatusCode::CONFLICT,
-                format!("Decision already resolved as {:?}", decision.status),
-            )
-                .into_response();
+    // Validate decision + stage generated policy.
+    let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
+    let decision = match log.get_mut(&id) {
+        Some(d) if d.tenant == tenant => d,
+        _ => {
+            return (StatusCode::NOT_FOUND, "Decision not found").into_response();
         }
+    };
 
-        generated_policy = decision.generate_policy(&scope);
-        evolution_record_id = decision.evolution_record_id.clone();
-        decision.status = DecisionStatus::Approved;
-        decision.approved_scope = Some(scope);
-        decision.generated_policy = Some(generated_policy.clone());
-        decision.decided_by = body.decided_by.clone();
-        decision.decided_at = Some(sim_now().to_rfc3339());
+    if decision.status != DecisionStatus::Pending {
+        return (
+            StatusCode::CONFLICT,
+            format!("Decision already resolved as {:?}", decision.status),
+        )
+            .into_response();
     }
 
-    // Append the generated policy to tenant policies and reload.
-    let combined = {
+    let generated_policy = decision.generate_policy(&scope);
+    let evolution_record_id = decision.evolution_record_id.clone();
+
+    // Build prospective policy set, validate+reload, then commit map atomically.
+    {
         let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-        let entry = policies.entry(tenant.clone()).or_default();
+        let mut next_policies = policies.clone();
+        let entry = next_policies.entry(tenant.clone()).or_default();
         if !entry.is_empty() {
             entry.push('\n');
         }
         entry.push_str(&generated_policy);
 
-        // Build combined text for reload.
         let mut combined = String::new();
-        for (_t, text) in policies.iter() {
+        for text in next_policies.values() {
             combined.push_str(text);
             combined.push('\n');
         }
-        combined
-    };
 
-    if let Err(e) = state.authz.reload_policies(&combined) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to reload policies: {e}"),
-        )
-            .into_response();
+        if let Err(e) = state.authz.reload_policies(&combined) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to reload policies: {e}"),
+            )
+                .into_response();
+        }
+
+        *policies = next_policies;
     }
+
+    // Mark decision approved only after policy reload succeeds.
+    decision.status = DecisionStatus::Approved;
+    decision.approved_scope = Some(scope);
+    decision.generated_policy = Some(generated_policy.clone());
+    decision.decided_by = body.decided_by.clone();
+    decision.decided_at = Some(sim_now().to_rfc3339());
+    drop(log);
 
     // Create D-Record for the approval (evolution audit trail).
     // Link to the A-Record via derived_from for O-A-D chain tracing.
@@ -679,8 +699,13 @@ async fn handle_decision_stream(
 /// GET /api/decisions — list all decisions across all tenants.
 async fn handle_list_all_decisions(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Query(params): Query<DecisionListParams>,
 ) -> impl IntoResponse {
+    if !is_cross_tenant_decision_admin(&headers) {
+        return cross_tenant_admin_denied();
+    }
+
     let log = state.pending_decision_log.read().unwrap(); // ci-ok: infallible lock
     let entries: Vec<_> = log
         .entries()
@@ -729,15 +754,24 @@ async fn handle_list_all_decisions(
 /// GET /api/decisions/stream — SSE for all pending decisions across all tenants.
 async fn handle_all_decisions_stream(
     State(state): State<ServerState>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !is_cross_tenant_decision_admin(&headers) {
+        return cross_tenant_admin_denied();
+    }
+
     let rx = state.pending_decision_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
         Ok(pd) => {
             let data = serde_json::to_string(&pd).unwrap_or_default();
-            Some(Ok(Event::default().event("pending_decision").data(data)))
+            Some(Ok::<Event, Infallible>(
+                Event::default().event("pending_decision").data(data),
+            ))
         }
         Err(_) => None,
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }

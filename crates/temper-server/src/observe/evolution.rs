@@ -1036,6 +1036,19 @@ pub(crate) async fn handle_feature_requests(
     State(state): State<ServerState>,
     Query(params): Query<std::collections::BTreeMap<String, String>>,
 ) -> Json<serde_json::Value> {
+    fn feature_request_dedup_key(description: &str) -> String {
+        if let Some(rest) = description.strip_prefix("Agents tried '")
+            && let Some((action, _)) = rest.split_once('\'')
+        {
+            return format!("action:{action}");
+        }
+        description
+            .split(" — ")
+            .next()
+            .unwrap_or(description)
+            .to_string()
+    }
+
     // Generate fresh feature requests from trajectory data.
     let generated = insight_generator::generate_feature_requests(&state);
 
@@ -1043,11 +1056,11 @@ pub(crate) async fn handle_feature_requests(
     {
         let mut log = state.feature_request_log.write().unwrap(); // ci-ok: infallible lock
         for fr in generated {
-            // Dedup: if we already have a FR with same category + matching description prefix, update freq.
+            // Dedup by category + stable action/prefix key.
+            let fr_key = feature_request_dedup_key(&fr.description);
             let existing = log.iter_mut().find(|existing| {
                 existing.category == fr.category
-                    && existing.description.split(" — ").next()
-                        == fr.description.split(" — ").next()
+                    && feature_request_dedup_key(&existing.description) == fr_key
             });
             if let Some(existing) = existing {
                 existing.frequency = fr.frequency;

@@ -818,37 +818,40 @@ pub(crate) async fn handle_load_inline(
         &std::collections::BTreeMap::new(),
     );
     if let Err(reason) = authz_result {
-        // Record trajectory for each entity type being submitted.
-        for entity_name in &entity_names {
-            let _ = record_authz_denial(
+        // Record denials and use the first decision ID as the primary chain anchor.
+        let mut decision_ids = Vec::new();
+        if entity_names.is_empty() {
+            let pd = record_authz_denial(
                 &state,
                 &tenant,
                 &security_ctx,
                 None,
                 "submit_specs",
                 "SpecRegistry",
-                entity_name,
-                serde_json::json!({"entity_type": entity_name}),
+                &tenant,
+                serde_json::json!({"entity_types": entity_names}),
                 &reason,
                 None,
             );
-        }
-        let pd = crate::state::PendingDecision::from_denial(
-            &tenant,
-            security_ctx.principal.id.as_str(),
-            "submit_specs",
-            "SpecRegistry",
-            &tenant,
-            serde_json::json!({"entity_types": entity_names}),
-            &reason,
-            None,
-        );
-        {
-            let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
-            if log.push(pd.clone()) {
-                let _ = state.pending_decision_tx.send(pd.clone());
+            decision_ids.push(pd.id);
+        } else {
+            for entity_name in &entity_names {
+                let pd = record_authz_denial(
+                    &state,
+                    &tenant,
+                    &security_ctx,
+                    None,
+                    "submit_specs",
+                    "SpecRegistry",
+                    entity_name,
+                    serde_json::json!({"entity_type": entity_name}),
+                    &reason,
+                    None,
+                );
+                decision_ids.push(pd.id);
             }
         }
+        let primary_decision_id = decision_ids.first().cloned().unwrap_or_default();
 
         // Create O-Record for the denied spec submission.
         let o_record = ObservationRecord {
@@ -866,7 +869,7 @@ pub(crate) async fn handle_load_inline(
                 "agent_id": security_ctx.principal.id,
                 "tenant": tenant,
                 "entity_types": entity_names,
-                "decision_id": pd.id,
+                "decision_id": primary_decision_id.clone(),
             }),
         };
         let o_id = o_record.header.id.clone();
@@ -907,8 +910,10 @@ pub(crate) async fn handle_load_inline(
         // Link the PendingDecision to the A-Record for O-A-D chain tracing.
         {
             let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
-            if let Some(decision) = log.get_mut(&pd.id) {
-                decision.evolution_record_id = Some(a_record_id);
+            for decision_id in decision_ids {
+                if let Some(decision) = log.get_mut(&decision_id) {
+                    decision.evolution_record_id = Some(a_record_id.clone());
+                }
             }
         }
 
@@ -917,7 +922,7 @@ pub(crate) async fn handle_load_inline(
             serde_json::json!({
                 "error": {
                     "code": "AuthorizationDenied",
-                    "message": format!("{reason} Decision {}", pd.id),
+                    "message": format!("{reason} Decision {}", primary_decision_id),
                 }
             })
             .to_string(),

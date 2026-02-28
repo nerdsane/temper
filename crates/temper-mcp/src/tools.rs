@@ -280,11 +280,11 @@ impl RuntimeContext {
                             None,
                         )
                         .await?;
-                    if let Some(decisions) = result.as_array() {
+                    if let Some(decisions) = result.get("decisions").and_then(Value::as_array) {
                         for d in decisions {
                             if d.get("id").and_then(Value::as_str) == Some(&decision_id) {
                                 let status = d.get("status").and_then(Value::as_str).unwrap_or("");
-                                if status != "Pending" {
+                                if !status.eq_ignore_ascii_case("pending") {
                                     return Ok(d.clone());
                                 }
                             }

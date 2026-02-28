@@ -7,9 +7,12 @@
 use std::sync::Arc;
 
 use super::ServerState;
+use super::pending_decisions::PendingDecision;
+use super::trajectory::{TrajectoryEntry, TrajectorySource};
 use super::wasm_invocation_log::WasmInvocationEntry;
 use crate::dispatch::AgentContext;
 use crate::entity_actor::{EntityResponse, EntityState};
+use crate::secret_template::resolve_secret_templates;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{
@@ -108,7 +111,7 @@ impl ServerState {
                     if let Some(ref on_failure) = integration.on_failure {
                         let fail_params = serde_json::json!({
                             "error": format!("WASM module '{}' not found", module_name),
-                            "integration": integration.name,
+                            "integration": integration.name.clone(),
                         });
                         match self
                             .dispatch_tenant_action_core(
@@ -152,7 +155,14 @@ impl ServerState {
                     entity_state: serde_json::to_value(entity_state).unwrap_or_default(),
                     agent_id: agent_ctx.agent_id.clone(),
                     session_id: agent_ctx.session_id.clone(),
-                    integration_config: integration.config.clone(),
+                    integration_config: match self.secrets_vault.as_ref() {
+                        Some(vault) => resolve_secret_templates(
+                            &integration.config,
+                            vault,
+                            &tenant.to_string(),
+                        ),
+                        None => integration.config.clone(),
+                    },
                 };
 
                 // Phase 3: Pre-filter secrets through authorization gate
@@ -228,6 +238,9 @@ impl ServerState {
                             duration_ms = result.duration_ms,
                             "WASM integration returned failure (blocking)"
                         );
+                        let error_str = result.error.clone().unwrap_or_default();
+                        let is_authz_denied =
+                            error_str.contains("authorization denied for http_call");
                         let log_entry = WasmInvocationEntry {
                             timestamp: sim_now().to_rfc3339(),
                             tenant: tenant.to_string(),
@@ -242,18 +255,72 @@ impl ServerState {
                             success: false,
                             error: result.error.clone(),
                             duration_ms: result.duration_ms,
-                            authz_denied: None,
+                            authz_denied: if is_authz_denied { Some(true) } else { None },
                         };
                         if let Ok(mut log) = self.wasm_invocation_log.write() {
                             log.push(log_entry.clone());
                         }
                         let _ = self.persist_wasm_invocation(&log_entry).await;
 
+                        // Surface authz denials as pending decisions + trajectory entries.
+                        let mut decision_id = None;
+                        if is_authz_denied {
+                            let pd = PendingDecision::from_denial(
+                                tenant.as_str(),
+                                "wasm-module",
+                                "http_call",
+                                "HttpEndpoint",
+                                &integration.name,
+                                serde_json::json!({
+                                    "entity_type": entity_type,
+                                    "entity_id": entity_id,
+                                    "module": module_name,
+                                    "trigger_action": action,
+                                }),
+                                &error_str,
+                                Some(module_name.clone()),
+                            );
+                            decision_id = Some(pd.id.clone());
+                            {
+                                let mut pdlog = self.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
+                                if pdlog.push(pd.clone()) {
+                                    let _ = self.pending_decision_tx.send(pd);
+                                }
+                            }
+
+                            let traj = TrajectoryEntry {
+                                timestamp: sim_now().to_rfc3339(),
+                                tenant: tenant.to_string(),
+                                entity_type: entity_type.to_string(),
+                                entity_id: entity_id.to_string(),
+                                action: action.to_string(),
+                                success: false,
+                                from_status: None,
+                                to_status: None,
+                                error: Some(error_str.clone()),
+                                agent_id: None,
+                                session_id: None,
+                                authz_denied: Some(true),
+                                denied_resource: Some(integration.name.clone()),
+                                denied_module: Some(module_name.clone()),
+                                source: Some(TrajectorySource::Authz),
+                            };
+                            if let Ok(mut tlog) = self.trajectory_log.write() {
+                                tlog.push(traj);
+                            }
+                        }
+
                         if let Some(ref cb) = integration.on_failure {
-                            let params = serde_json::json!({
-                                "error": result.error.unwrap_or_default(),
-                                "integration": integration.name,
+                            let mut params = serde_json::json!({
+                                "error": error_str,
+                                "integration": integration.name.clone(),
                             });
+                            if is_authz_denied {
+                                if let Some(ref did) = decision_id {
+                                    params["decision_id"] = serde_json::json!(did);
+                                }
+                                params["authz_denied"] = serde_json::json!(true);
+                            }
                             match self
                                 .dispatch_tenant_action_core(
                                     tenant,
@@ -280,6 +347,9 @@ impl ServerState {
                             error = %e,
                             "WASM module invocation error (blocking)"
                         );
+                        let error_str = e.to_string();
+                        let is_authz_denied =
+                            error_str.contains("authorization denied for http_call");
                         let log_entry = WasmInvocationEntry {
                             timestamp: sim_now().to_rfc3339(),
                             tenant: tenant.to_string(),
@@ -289,20 +359,53 @@ impl ServerState {
                             trigger_action: action.to_string(),
                             callback_action: integration.on_failure.clone(),
                             success: false,
-                            error: Some(e.to_string()),
+                            error: Some(error_str.clone()),
                             duration_ms: 0,
-                            authz_denied: None,
+                            authz_denied: if is_authz_denied { Some(true) } else { None },
                         };
                         if let Ok(mut log) = self.wasm_invocation_log.write() {
                             log.push(log_entry.clone());
                         }
                         let _ = self.persist_wasm_invocation(&log_entry).await;
 
+                        // Surface authz denials as pending decisions.
+                        let mut decision_id = None;
+                        if is_authz_denied {
+                            let pd = PendingDecision::from_denial(
+                                tenant.as_str(),
+                                "wasm-module",
+                                "http_call",
+                                "HttpEndpoint",
+                                &integration.name,
+                                serde_json::json!({
+                                    "entity_type": entity_type,
+                                    "entity_id": entity_id,
+                                    "module": module_name,
+                                    "trigger_action": action,
+                                }),
+                                &error_str,
+                                Some(module_name.clone()),
+                            );
+                            decision_id = Some(pd.id.clone());
+                            {
+                                let mut pdlog = self.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
+                                if pdlog.push(pd.clone()) {
+                                    let _ = self.pending_decision_tx.send(pd);
+                                }
+                            }
+                        }
+
                         if let Some(ref cb) = integration.on_failure {
-                            let params = serde_json::json!({
-                                "error": e.to_string(),
-                                "integration": integration.name,
+                            let mut params = serde_json::json!({
+                                "error": error_str,
+                                "integration": integration.name.clone(),
                             });
+                            if is_authz_denied {
+                                if let Some(ref did) = decision_id {
+                                    params["decision_id"] = serde_json::json!(did);
+                                }
+                                params["authz_denied"] = serde_json::json!(true);
+                            }
                             match self
                                 .dispatch_tenant_action_core(
                                     tenant,
