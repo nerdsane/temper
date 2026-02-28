@@ -545,7 +545,10 @@ mod tests {
             "Should have warnings for unverifiable invariants"
         );
         assert!(
-            result.warnings.iter().any(|w| w.contains("ShipRequiresPayment")),
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("ShipRequiresPayment")),
             "Should warn about ShipRequiresPayment, got: {:?}",
             result.warnings,
         );

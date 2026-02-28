@@ -94,9 +94,7 @@ fn check_invariants(model: &TemperModel, state: &TemperModelState) -> Result<(),
                 };
                 !holds
             }
-            InvariantKind::NeverState { state: forbidden } => {
-                state.status == *forbidden
-            }
+            InvariantKind::NeverState { state: forbidden } => state.status == *forbidden,
             InvariantKind::Unverifiable { .. } => false, // not checkable, never violated
         };
 

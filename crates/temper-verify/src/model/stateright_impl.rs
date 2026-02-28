@@ -139,10 +139,10 @@ fn check_counter_compare(model: &TemperModel, state: &TemperModelState) -> bool 
 /// Check all NeverState invariants: entity should never be in the forbidden state.
 fn check_never_state(model: &TemperModel, state: &TemperModelState) -> bool {
     for inv in &model.invariants {
-        if let InvariantKind::NeverState { state: forbidden } = &inv.kind {
-            if state.status == *forbidden {
-                return false;
-            }
+        if let InvariantKind::NeverState { state: forbidden } = &inv.kind
+            && state.status == *forbidden
+        {
+            return false;
         }
     }
     true
@@ -351,10 +351,7 @@ impl Model for TemperModel {
             .iter()
             .any(|i| matches!(i.kind, InvariantKind::NeverState { .. }));
         if has_never_state {
-            props.push(Property::always(
-                "NeverStateInvariants",
-                check_never_state,
-            ));
+            props.push(Property::always("NeverStateInvariants", check_never_state));
         }
 
         // Note: Unverifiable invariants generate no properties (skipped).

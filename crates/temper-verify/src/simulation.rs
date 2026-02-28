@@ -372,9 +372,7 @@ fn check_invariants_on_state(
                 };
                 !holds
             }
-            InvariantKind::NeverState { state } => {
-                state_after.status == *state
-            }
+            InvariantKind::NeverState { state } => state_after.status == *state,
             InvariantKind::Unverifiable { .. } => false, // not checkable, never violated
         };
 

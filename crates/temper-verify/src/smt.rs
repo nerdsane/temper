@@ -208,9 +208,10 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                 }
                 InvariantKind::NeverState { state } => {
                     // Structural check: no transition has to_state == forbidden_state.
-                    !model.transitions.iter().any(|t| {
-                        t.to_state.as_ref().is_some_and(|to| to == state)
-                    })
+                    !model
+                        .transitions
+                        .iter()
+                        .any(|t| t.to_state.as_ref().is_some_and(|to| to == state))
                 }
                 InvariantKind::Unverifiable { .. } => {
                     // Not checkable at model level — trivially inductive.
