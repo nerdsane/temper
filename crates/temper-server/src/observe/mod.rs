@@ -179,10 +179,7 @@ pub fn build_observe_router() -> Router<ServerState> {
             "/evolution/unmet-intents",
             get(evolution::handle_unmet_intents),
         )
-        .route(
-            "/evolution/stream",
-            get(evolution::handle_evolution_stream),
-        )
+        .route("/evolution/stream", get(evolution::handle_evolution_stream))
 }
 
 #[cfg(test)]

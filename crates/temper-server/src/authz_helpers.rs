@@ -4,7 +4,6 @@
 //! used across OData bindings, policy management, spec submission, and WASM
 //! authz gates.
 
-
 use axum::http::HeaderMap;
 use temper_authz::SecurityContext;
 use temper_runtime::scheduler::sim_now;

@@ -199,7 +199,10 @@ pub(crate) fn generate_insights(state: &ServerState) -> Vec<InsightRecord> {
             temper_evolution::records::InsightCategory::UnmetIntent => {
                 format!(
                     "Action '{}' on '{}' has {:.0}% failure rate ({} attempts). Possible missing feature.",
-                    signal.action, signal.entity_type, (1.0 - success_rate) * 100.0, signal.total,
+                    signal.action,
+                    signal.entity_type,
+                    (1.0 - success_rate) * 100.0,
+                    signal.total,
                 )
             }
             temper_evolution::records::InsightCategory::Friction => {
@@ -211,7 +214,10 @@ pub(crate) fn generate_insights(state: &ServerState) -> Vec<InsightRecord> {
             temper_evolution::records::InsightCategory::Workaround => {
                 format!(
                     "Pattern detected on '{}.{}' — {} attempts with {:.0}% success. May be a workaround.",
-                    signal.entity_type, signal.action, signal.total, success_rate * 100.0,
+                    signal.entity_type,
+                    signal.action,
+                    signal.total,
+                    success_rate * 100.0,
                 )
             }
         };
@@ -227,7 +233,11 @@ pub(crate) fn generate_insights(state: &ServerState) -> Vec<InsightRecord> {
     }
 
     // Sort by priority (highest first).
-    insights.sort_by(|a, b| b.priority_score.partial_cmp(&a.priority_score).unwrap_or(std::cmp::Ordering::Equal));
+    insights.sort_by(|a, b| {
+        b.priority_score
+            .partial_cmp(&a.priority_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     insights
 }
 
@@ -246,10 +256,7 @@ pub(crate) fn generate_unmet_intents(state: &ServerState) -> Vec<UnmetIntent> {
 
     for entry in entries {
         if entry.action == "SubmitSpec" && entry.success {
-            submitted_specs.insert(
-                entry.entity_type.clone(),
-                entry.timestamp.clone(),
-            );
+            submitted_specs.insert(entry.entity_type.clone(), entry.timestamp.clone());
             continue;
         }
 
@@ -278,10 +285,9 @@ pub(crate) fn generate_unmet_intents(state: &ServerState) -> Vec<UnmetIntent> {
                 format!("Spec for '{}' has been submitted.", accum.entity_type)
             } else {
                 match accum.error_pattern.as_str() {
-                    "EntitySetNotFound" => format!(
-                        "Consider creating '{}' entity type.",
-                        accum.entity_type,
-                    ),
+                    "EntitySetNotFound" => {
+                        format!("Consider creating '{}' entity type.", accum.entity_type,)
+                    }
                     "AuthzDenied" => format!(
                         "Consider adding Cedar permit policy for actions on '{}'.",
                         accum.entity_type,
@@ -300,7 +306,11 @@ pub(crate) fn generate_unmet_intents(state: &ServerState) -> Vec<UnmetIntent> {
                 failure_count: accum.count,
                 first_seen: accum.first_seen,
                 last_seen: accum.last_seen,
-                status: if resolved { "resolved".to_string() } else { "open".to_string() },
+                status: if resolved {
+                    "resolved".to_string()
+                } else {
+                    "open".to_string()
+                },
                 resolved_by,
                 recommendation,
             }

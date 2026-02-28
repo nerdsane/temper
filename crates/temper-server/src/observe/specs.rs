@@ -14,11 +14,11 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use temper_runtime::scheduler::sim_now;
 
-use axum::http::HeaderMap;
 use crate::authz_helpers::{record_authz_denial, security_context_from_headers};
 use crate::reaction::registry::parse_reactions;
 use crate::registry::VerificationStatus;
 use crate::state::{ServerState, TrajectoryEntry};
+use axum::http::HeaderMap;
 use temper_evolution::records::{
     AnalysisRecord, ObservationClass, ObservationRecord, RecordHeader, RecordType, SolutionOption,
 };

@@ -285,7 +285,8 @@ impl ServerState {
                             "WASM integration returned failure"
                         );
                         let error_str = result.error.clone().unwrap_or_default();
-                        let is_authz_denied = error_str.contains("authorization denied for http_call");
+                        let is_authz_denied =
+                            error_str.contains("authorization denied for http_call");
 
                         let log_entry = WasmInvocationEntry {
                             timestamp: sim_now().to_rfc3339(),
@@ -390,7 +391,8 @@ impl ServerState {
                             "WASM module invocation error"
                         );
                         let error_str = e.to_string();
-                        let is_authz_denied = error_str.contains("authorization denied for http_call");
+                        let is_authz_denied =
+                            error_str.contains("authorization denied for http_call");
 
                         let log_entry = WasmInvocationEntry {
                             timestamp: sim_now().to_rfc3339(),

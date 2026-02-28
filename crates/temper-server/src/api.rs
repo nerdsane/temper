@@ -19,9 +19,7 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use crate::authz_helpers::{record_authz_denial, security_context_from_headers};
 use crate::state::{DecisionStatus, PolicyScope, ServerState};
-use temper_evolution::records::{
-    Decision, DecisionRecord, RecordHeader, RecordType,
-};
+use temper_evolution::records::{Decision, DecisionRecord, RecordHeader, RecordType};
 
 /// Build the management API router (mounted at /api).
 ///
@@ -588,7 +586,10 @@ async fn handle_approve_decision(
             .decided_by
             .clone()
             .unwrap_or_else(|| "unknown".to_string()),
-        rationale: format!("Approved with scope: {:?}. Policy: {}", body.scope, generated_policy),
+        rationale: format!(
+            "Approved with scope: {:?}. Policy: {}",
+            body.scope, generated_policy
+        ),
         verification_results: None,
         implementation: None,
     };

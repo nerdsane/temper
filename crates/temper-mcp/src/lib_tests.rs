@@ -510,7 +510,10 @@ async fn e2e_agent_denial_human_approve_retry() {
     )
     .await;
     let (text, is_error) = tool_text(&response);
-    assert!(!is_error, "agent action should return structured denial (not error): {response:#}");
+    assert!(
+        !is_error,
+        "agent action should return structured denial (not error): {response:#}"
+    );
     assert!(
         text.contains("authorization_denied"),
         "should get structured authorization_denied status, got: {text}"
@@ -753,8 +756,14 @@ fn format_authz_denied_with_decision_id() {
         "should include decision ID"
     );
     let hint = result["hint"].as_str().unwrap(); // ci-ok: test assertion
-    assert!(hint.contains("poll_decision"), "should include poll_decision guidance");
-    assert!(hint.contains("PD-abc123"), "hint should reference decision ID");
+    assert!(
+        hint.contains("poll_decision"),
+        "should include poll_decision guidance"
+    );
+    assert!(
+        hint.contains("PD-abc123"),
+        "hint should reference decision ID"
+    );
 }
 
 #[test]
