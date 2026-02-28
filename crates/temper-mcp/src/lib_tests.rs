@@ -568,6 +568,8 @@ async fn e2e_agent_denial_human_approve_retry() {
         format!("http://127.0.0.1:{port}/api/tenants/demo/decisions/{decision_id}/approve");
     let approve_resp = http
         .post(&approve_url)
+        .header("X-Temper-Principal-Kind", "admin")
+        .header("X-Temper-Principal-Id", "human-test")
         .json(&json!({ "scope": "broad", "decided_by": "human-test" }))
         .send()
         .await

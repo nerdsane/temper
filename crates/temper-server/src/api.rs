@@ -116,6 +116,13 @@ fn authorize_tenant_decision_management(
     tenant: &str,
 ) -> Option<axum::response::Response> {
     let security_ctx = security_context_from_headers(headers, None, None);
+    if state.authz.policy_count() == 0
+        && matches!(security_ctx.principal.kind, PrincipalKind::Admin)
+    {
+        // Bootstrap path: before any Cedar policies exist, allow explicit admins
+        // to manage pending decisions so governance cannot deadlock.
+        return None;
+    }
     if let Err(reason) = state.authorize_with_context(
         &security_ctx,
         "manage_policies",

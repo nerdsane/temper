@@ -235,13 +235,14 @@ impl RuntimeContext {
                     Some(s) => format!("/api/tenants/{tenant}/decisions?status={s}"),
                     None => format!("/api/tenants/{tenant}/decisions"),
                 };
-                self.temper_request(&tenant, Method::GET, path, None).await
+                self.temper_governance_request(&tenant, Method::GET, path, None)
+                    .await
             }
             "get_decision_status" => {
                 let tenant = expect_string_arg(args, 0, "tenant", method)?;
                 let decision_id = expect_string_arg(args, 1, "decision_id", method)?;
                 let result = self
-                    .temper_request(
+                    .temper_governance_request(
                         &tenant,
                         Method::GET,
                         format!("/api/tenants/{tenant}/decisions"),
@@ -273,7 +274,7 @@ impl RuntimeContext {
                 let start = std::time::Instant::now(); // determinism-ok: wall-clock for MCP timeout only
                 loop {
                     let result = self
-                        .temper_request(
+                        .temper_governance_request(
                             &tenant,
                             Method::GET,
                             format!("/api/tenants/{tenant}/decisions"),
@@ -460,6 +461,64 @@ impl RuntimeContext {
         {
             // Return structured denial as successful content so the agent
             // can programmatically detect the denial and poll for approval.
+            return Ok(structured);
+        }
+
+        Err(format_http_error(status, &text))
+    }
+
+    async fn temper_governance_request(
+        &self,
+        tenant: &str,
+        method: Method,
+        path: String,
+        body: Option<Value>,
+    ) -> std::result::Result<Value, String> {
+        let port = self.server_port.get().ok_or_else(|| {
+            "Server not running. Call `await temper.start_server()` first, \
+             or restart MCP with --port to connect to an existing server."
+                .to_string()
+        })?;
+        let url = format!("http://127.0.0.1:{port}{path}");
+        let mut request = self
+            .http
+            .request(method, &url)
+            .header("X-Tenant-Id", tenant)
+            .header("Accept", "application/json");
+
+        let admin_id = self
+            .principal_id
+            .as_deref()
+            .unwrap_or("mcp-governance-admin");
+        request = request
+            .header("X-Temper-Principal-Kind", "admin")
+            .header("X-Temper-Principal-Id", admin_id);
+
+        if let Some(ref payload) = body {
+            request = request.json(payload);
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("failed to call Temper at {url}: {e}"))?;
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| format!("failed to read Temper response body: {e}"))?;
+
+        if status.is_success() {
+            if text.trim().is_empty() {
+                return Ok(Value::Null);
+            }
+            return serde_json::from_str(&text).or(Ok(Value::String(text)));
+        }
+
+        if status == reqwest::StatusCode::FORBIDDEN
+            && let Some(structured) = format_authz_denied(&text)
+        {
             return Ok(structured);
         }
 
