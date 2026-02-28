@@ -31,7 +31,11 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
     let mut current_liveness: Option<Liveness> = None;
     let mut current_integration: Option<Integration> = None;
 
-    for line in input.lines() {
+    // Pre-process: join multiline array values (bracket continuation).
+    // Lines like `effect = [\n  { ... },\n]` become a single logical line.
+    let logical_lines = join_multiline_arrays(input);
+
+    for line in &logical_lines {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -216,7 +220,14 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
                             "params" => a.params = parse_string_array(&value),
                             "hint" => a.hint = Some(value.clone()),
                             "guard" => {
-                                a.guard.push(parse_guard_clause(&value)?);
+                                // Guard can be a string ("min count 2") or
+                                // an array of inline tables ([{ type = "cross_entity_state", ... }])
+                                let gv = value.trim();
+                                if gv.starts_with('[') && gv.contains('{') {
+                                    parse_guard_array(gv, &mut a.guard)?;
+                                } else {
+                                    a.guard.push(parse_guard_clause(gv)?);
+                                }
                             }
                             "effect" => {
                                 // Format: "increment var" → Increment
@@ -273,7 +284,7 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
                                     }
                                 }
                                 // Format: array of inline tables [{ type = "schedule", ... }]
-                                else if value.starts_with("[{") || value.starts_with("[\n") {
+                                else if value.trim().starts_with('[') && value.contains('{') {
                                     parse_effect_array(&value, &mut a.effect);
                                 }
                             }
@@ -350,6 +361,7 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
         liveness: liveness_props,
         integrations,
         webhooks: extract_webhooks(input),
+        context_entities: Vec::new(),
     })
 }
 
@@ -588,9 +600,105 @@ fn parse_effect_array(value: &str, effects: &mut Vec<Effect>) {
                     effects.push(Effect::Trigger { name });
                 }
             }
+            "list_append" => {
+                if let Some(var) = fields.get("var").cloned() {
+                    effects.push(Effect::ListAppend { var });
+                }
+            }
+            "list_remove_at" => {
+                if let Some(var) = fields.get("var").cloned() {
+                    effects.push(Effect::ListRemoveAt { var });
+                }
+            }
+            "spawn" => {
+                let entity_type = fields.get("entity_type").cloned().unwrap_or_default();
+                let entity_id_source = fields.get("entity_id_source").cloned().unwrap_or_default();
+                let initial_action = fields.get("initial_action").cloned();
+                let store_id_in = fields.get("store_id_in").cloned();
+                if !entity_type.is_empty() {
+                    effects.push(Effect::Spawn {
+                        entity_type,
+                        entity_id_source,
+                        initial_action,
+                        store_id_in,
+                    });
+                }
+            }
             _ => {}
         }
     }
+}
+
+/// Parse a guard array in inline table format.
+///
+/// Handles: `[{ type = "cross_entity_state", entity_type = "Child", ... }]`
+fn parse_guard_array(value: &str, guards: &mut Vec<Guard>) -> Result<(), AutomatonParseError> {
+    let trimmed = value.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Ok(());
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+
+    for entry in split_inline_tables(inner) {
+        let entry = entry.trim().trim_matches('{').trim_matches('}').trim();
+        let fields = parse_inline_fields(entry);
+
+        let guard_type = fields.get("type").map(|s| s.as_str()).unwrap_or("");
+        match guard_type {
+            "cross_entity_state" => {
+                let entity_type = fields.get("entity_type").cloned().unwrap_or_default();
+                let entity_id_source = fields.get("entity_id_source").cloned().unwrap_or_default();
+                let required_status = fields
+                    .get("required_status")
+                    .map(|s| parse_string_array(s))
+                    .unwrap_or_default();
+                if !entity_type.is_empty() {
+                    guards.push(Guard::CrossEntityState {
+                        entity_type,
+                        entity_id_source,
+                        required_status,
+                    });
+                }
+            }
+            "state_in" => {
+                let values = fields
+                    .get("values")
+                    .map(|s| parse_string_array(s))
+                    .unwrap_or_default();
+                guards.push(Guard::StateIn { values });
+            }
+            "min_count" => {
+                let var = fields.get("var").cloned().unwrap_or_default();
+                let min: usize = fields.get("min").and_then(|s| s.parse().ok()).unwrap_or(0);
+                guards.push(Guard::MinCount { var, min });
+            }
+            "max_count" => {
+                let var = fields.get("var").cloned().unwrap_or_default();
+                let max: usize = fields.get("max").and_then(|s| s.parse().ok()).unwrap_or(0);
+                guards.push(Guard::MaxCount { var, max });
+            }
+            "is_true" => {
+                let var = fields.get("var").cloned().unwrap_or_default();
+                guards.push(Guard::IsTrue { var });
+            }
+            "list_contains" => {
+                let var = fields.get("var").cloned().unwrap_or_default();
+                let value = fields.get("value").cloned().unwrap_or_default();
+                guards.push(Guard::ListContains { var, value });
+            }
+            "list_length_min" => {
+                let var = fields.get("var").cloned().unwrap_or_default();
+                let min: usize = fields.get("min").and_then(|s| s.parse().ok()).unwrap_or(0);
+                guards.push(Guard::ListLengthMin { var, min });
+            }
+            _ => {
+                return Err(AutomatonParseError::Validation(format!(
+                    "unsupported guard type '{guard_type}'"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Split inline tables from a TOML array (e.g., "{a = 1}, {b = 2}").
@@ -652,4 +760,68 @@ pub(super) fn parse_string_array(value: &str) -> Vec<String> {
     } else {
         vec![trimmed.trim_matches('"').to_string()]
     }
+}
+
+/// Join multiline array values into single logical lines.
+///
+/// When a TOML line has unbalanced brackets (e.g., `effect = [`), this
+/// function accumulates subsequent lines until brackets are balanced,
+/// producing a single logical line for the parser.
+fn join_multiline_arrays(input: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut buffer = String::new();
+    let mut bracket_depth: i32 = 0;
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+
+        if bracket_depth > 0 {
+            // We're inside a multiline value — accumulate
+            buffer.push(' ');
+            buffer.push_str(trimmed);
+            for ch in trimmed.chars() {
+                match ch {
+                    '[' => bracket_depth += 1,
+                    ']' => bracket_depth -= 1,
+                    _ => {}
+                }
+            }
+            if bracket_depth <= 0 {
+                result.push(std::mem::take(&mut buffer));
+                bracket_depth = 0;
+            }
+            continue;
+        }
+
+        // Check if this line opens an unbalanced bracket
+        let mut depth: i32 = 0;
+        // Only count brackets in the value part (after '=')
+        let value_part = if let Some(eq_pos) = trimmed.find('=') {
+            &trimmed[eq_pos + 1..]
+        } else {
+            trimmed
+        };
+        for ch in value_part.chars() {
+            match ch {
+                '[' => depth += 1,
+                ']' => depth -= 1,
+                _ => {}
+            }
+        }
+
+        if depth > 0 {
+            // Unbalanced — start buffering
+            buffer = trimmed.to_string();
+            bracket_depth = depth;
+        } else {
+            result.push(trimmed.to_string());
+        }
+    }
+
+    // If buffer is non-empty (malformed input), flush it
+    if !buffer.is_empty() {
+        result.push(buffer);
+    }
+
+    result
 }

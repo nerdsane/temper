@@ -495,5 +495,43 @@ impl ServerState {
     }
 }
 
+/// Resolve the current status of an entity.
+///
+/// Fast path: check the `entity_state_cache` (populated on every successful dispatch).
+/// Slow path: fall back to `get_tenant_entity_state()` (async actor ask) and backfill cache.
+impl ServerState {
+    pub async fn resolve_entity_status(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Option<String> {
+        // Fast path: check cache
+        let cache_key = format!("{tenant}:{entity_type}:{entity_id}");
+        if let Ok(cache) = self.entity_state_cache.read()
+            && let Some((status, _timestamp)) = cache.get(&cache_key)
+        {
+            return Some(status.clone());
+        }
+
+        // Slow path: actor ask + backfill
+        if let Ok(response) = self
+            .get_tenant_entity_state(tenant, entity_type, entity_id)
+            .await
+        {
+            let status = response.state.status.clone();
+            if let Ok(mut cache) = self.entity_state_cache.write() {
+                cache.insert(
+                    cache_key,
+                    (status.clone(), temper_runtime::scheduler::sim_now()),
+                );
+            }
+            Some(status)
+        } else {
+            None
+        }
+    }
+}
+
 use temper_authz::{AuthzDecision, SecurityContext};
 use temper_runtime::actor::ActorRef;

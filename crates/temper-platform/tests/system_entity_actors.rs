@@ -49,6 +49,7 @@ async fn actor_project_full_lifecycle() {
             EntityMsg::Action {
                 name: "UpdateSpecs".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -63,6 +64,7 @@ async fn actor_project_full_lifecycle() {
             EntityMsg::Action {
                 name: "Verify".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -77,6 +79,7 @@ async fn actor_project_full_lifecycle() {
             EntityMsg::Action {
                 name: "Archive".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -99,6 +102,7 @@ async fn actor_project_verify_requires_building_state() {
             EntityMsg::Action {
                 name: "Verify".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -127,6 +131,7 @@ async fn actor_tenant_full_lifecycle() {
             EntityMsg::Action {
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -141,6 +146,7 @@ async fn actor_tenant_full_lifecycle() {
             EntityMsg::Action {
                 name: "Suspend".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -155,6 +161,7 @@ async fn actor_tenant_full_lifecycle() {
             EntityMsg::Action {
                 name: "Reactivate".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -169,6 +176,7 @@ async fn actor_tenant_full_lifecycle() {
             EntityMsg::Action {
                 name: "Archive".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -190,6 +198,7 @@ async fn actor_tenant_cannot_deploy_archived() {
             EntityMsg::Action {
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -200,6 +209,7 @@ async fn actor_tenant_cannot_deploy_archived() {
             EntityMsg::Action {
                 name: "Archive".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -212,6 +222,7 @@ async fn actor_tenant_cannot_deploy_archived() {
             EntityMsg::Action {
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -245,6 +256,7 @@ async fn actor_catalog_publish_and_fork() {
             EntityMsg::Action {
                 name: "Publish".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -259,6 +271,7 @@ async fn actor_catalog_publish_and_fork() {
             EntityMsg::Action {
                 name: "Fork".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -273,6 +286,7 @@ async fn actor_catalog_publish_and_fork() {
             EntityMsg::Action {
                 name: "Deprecate".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -305,6 +319,7 @@ async fn actor_collaborator_invite_accept_remove() {
             EntityMsg::Action {
                 name: "Accept".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -319,6 +334,7 @@ async fn actor_collaborator_invite_accept_remove() {
             EntityMsg::Action {
                 name: "ChangeRole".into(),
                 params: serde_json::json!({"role": "editor"}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -332,6 +348,7 @@ async fn actor_collaborator_invite_accept_remove() {
             EntityMsg::Action {
                 name: "Remove".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -359,6 +376,7 @@ async fn actor_version_lifecycle() {
             EntityMsg::Action {
                 name: "MarkDeployed".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -372,6 +390,7 @@ async fn actor_version_lifecycle() {
             EntityMsg::Action {
                 name: "Supersede".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -423,6 +442,7 @@ async fn actor_multiple_system_entities_independent() {
             EntityMsg::Action {
                 name: "UpdateSpecs".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -433,6 +453,7 @@ async fn actor_multiple_system_entities_independent() {
             EntityMsg::Action {
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )
@@ -443,6 +464,7 @@ async fn actor_multiple_system_entities_independent() {
             EntityMsg::Action {
                 name: "Publish".into(),
                 params: serde_json::json!({}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
             },
             TIMEOUT,
         )

@@ -115,6 +115,20 @@ fn format_guards(guards: &[Guard]) -> String {
             Guard::IsTrue { var } => format!("{var} = TRUE"),
             Guard::ListContains { var, value } => format!("{value} \\in {var}"),
             Guard::ListLengthMin { var, min } => format!("Len({var}) >= {min}"),
+            Guard::CrossEntityState {
+                entity_type,
+                entity_id_source,
+                required_status,
+            } => {
+                format!(
+                    "{entity_type}[{entity_id_source}].status \\in {{{}}}",
+                    required_status
+                        .iter()
+                        .map(|s| format!("\"{s}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
         })
         .collect::<Vec<_>>()
         .join(" /\\ ")
@@ -137,6 +151,13 @@ fn format_effects(effects: &[Effect]) -> String {
             } => format!("Schedule(\"{action}\", {delay_seconds})"),
             Effect::ListAppend { var } => format!("ListAppend({var})"),
             Effect::ListRemoveAt { var } => format!("ListRemoveAt({var})"),
+            Effect::Spawn {
+                entity_type,
+                entity_id_source,
+                ..
+            } => {
+                format!("Spawn({entity_type}, {entity_id_source})")
+            }
         })
         .collect::<Vec<_>>()
         .join(" /\\ ")

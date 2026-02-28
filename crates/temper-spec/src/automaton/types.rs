@@ -30,6 +30,9 @@ pub struct Automaton {
     /// Inbound webhook declarations (external callback receivers).
     #[serde(default, rename = "webhook")]
     pub webhooks: Vec<Webhook>,
+    /// Context entity declarations for Cedar authorization.
+    #[serde(default, rename = "context_entity")]
+    pub context_entities: Vec<ContextEntityDecl>,
 }
 
 /// Automaton metadata.
@@ -114,6 +117,16 @@ pub enum Guard {
     /// A list variable must have at least N elements.
     #[serde(rename = "list_length_min")]
     ListLengthMin { var: String, min: usize },
+    /// Another entity must be in one of the required statuses.
+    #[serde(rename = "cross_entity_state")]
+    CrossEntityState {
+        /// The target entity type (e.g., "TestWorkflow").
+        entity_type: String,
+        /// Field name on the current entity holding the target entity ID.
+        entity_id_source: String,
+        /// Target must be in one of these statuses (any match passes).
+        required_status: Vec<String>,
+    },
 }
 
 /// An effect (state change in the post-state).
@@ -144,6 +157,18 @@ pub enum Effect {
     /// Schedule a delayed action on the same entity.
     #[serde(rename = "schedule")]
     Schedule { action: String, delay_seconds: u64 },
+    /// Spawn a child entity as a post-transition effect.
+    #[serde(rename = "spawn")]
+    Spawn {
+        /// The child entity type to create.
+        entity_type: String,
+        /// Source for the child entity ID: field name from params, or "{uuid}" for auto-generated.
+        entity_id_source: String,
+        /// Optional action to dispatch on the child after creation.
+        initial_action: Option<String>,
+        /// Optional field on the parent to store the child's ID.
+        store_id_in: Option<String>,
+    },
 }
 
 /// A safety invariant.
@@ -252,4 +277,18 @@ pub struct Webhook {
     /// Header containing the HMAC signature from the external system.
     #[serde(default)]
     pub hmac_header: Option<String>,
+}
+
+/// A context entity declaration for Cedar authorization.
+///
+/// Declares that another entity's status should be available in the Cedar
+/// authorization context when evaluating policies for this entity type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextEntityDecl {
+    /// Label for this context entity (e.g., "parent_agent").
+    pub name: String,
+    /// The target entity type to look up (e.g., "LeadAgent").
+    pub entity_type: String,
+    /// Field on this entity holding the target entity's ID.
+    pub id_field: String,
 }

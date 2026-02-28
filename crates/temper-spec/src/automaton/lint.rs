@@ -135,6 +135,7 @@ fn guard_var(guard: &Guard) -> Option<&str> {
         Guard::IsTrue { var } => Some(var.as_str()),
         Guard::ListContains { var, .. } => Some(var.as_str()),
         Guard::ListLengthMin { var, .. } => Some(var.as_str()),
+        Guard::CrossEntityState { .. } => None,
     }
 }
 
@@ -148,6 +149,7 @@ fn effect_var(effect: &Effect) -> Option<&str> {
         Effect::ListRemoveAt { var } => Some(var.as_str()),
         Effect::Trigger { .. } => None,
         Effect::Schedule { .. } => None,
+        Effect::Spawn { .. } => None,
     }
 }
 
@@ -159,6 +161,16 @@ fn render_guard(guard: &Guard) -> String {
         Guard::IsTrue { var } => format!("is_true {var}"),
         Guard::ListContains { var, value } => format!("list_contains {var} {value}"),
         Guard::ListLengthMin { var, min } => format!("list_length_min {var} {min}"),
+        Guard::CrossEntityState {
+            entity_type,
+            entity_id_source,
+            required_status,
+        } => {
+            format!(
+                "cross_entity_state {entity_type}.{entity_id_source} in {:?}",
+                required_status
+            )
+        }
     }
 }
 
@@ -175,6 +187,13 @@ fn render_effect(effect: &Effect) -> String {
             action,
             delay_seconds,
         } => format!("schedule {action} {delay_seconds}s"),
+        Effect::Spawn {
+            entity_type,
+            entity_id_source,
+            ..
+        } => {
+            format!("spawn {entity_type} from {entity_id_source}")
+        }
     }
 }
 

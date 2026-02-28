@@ -167,7 +167,7 @@ impl EntityActor {
                             if result.success {
                                 // Shared effect application — same code as handle() and simulation.
                                 let from_status = event.from_status.clone();
-                                let (_custom_effects, _scheduled_actions) =
+                                let (_custom_effects, _scheduled_actions, _spawn_requests) =
                                     super::effects::apply_effects(
                                         state,
                                         &result.effects,
@@ -292,7 +292,11 @@ impl Actor for EntityActor {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
-            EntityMsg::Action { name, params } => {
+            EntityMsg::Action {
+                name,
+                params,
+                cross_entity_booleans,
+            } => {
                 // Capture start time for span duration (DST-safe: sim_now()
                 // returns logical clock in simulation, wall clock in production).
                 let action_start = sim_now();
@@ -332,12 +336,19 @@ impl Actor for EntityActor {
                         )),
                         custom_effects: vec![],
                         scheduled_actions: vec![],
+                        spawn_requests: vec![],
                     });
                     return Ok(());
                 }
 
                 let event_count_before = state.events.len();
-                let result = super::effects::process_action(state, &table, &name, &params);
+                let result = super::effects::process_action_with_xref(
+                    state,
+                    &table,
+                    &name,
+                    &params,
+                    &cross_entity_booleans,
+                );
 
                 if result.success {
                     // process_action returned a successful transition with event.
@@ -413,6 +424,7 @@ impl Actor for EntityActor {
                         error: None,
                         custom_effects: result.custom_effects,
                         scheduled_actions: result.scheduled_actions,
+                        spawn_requests: result.spawn_requests,
                     });
                 } else {
                     // Transition failed — emit telemetry
@@ -442,6 +454,7 @@ impl Actor for EntityActor {
                         error: result.error,
                         custom_effects: vec![],
                         scheduled_actions: vec![],
+                        spawn_requests: vec![],
                     });
                 }
             }
@@ -452,6 +465,7 @@ impl Actor for EntityActor {
                     error: None,
                     custom_effects: vec![],
                     scheduled_actions: vec![],
+                    spawn_requests: vec![],
                 });
             }
             EntityMsg::GetField { field } => {
@@ -488,6 +502,7 @@ impl Actor for EntityActor {
                     error: None,
                     custom_effects: vec![],
                     scheduled_actions: vec![],
+                    spawn_requests: vec![],
                 });
             }
             EntityMsg::Delete => {
@@ -497,6 +512,7 @@ impl Actor for EntityActor {
                     error: None,
                     custom_effects: vec![],
                     scheduled_actions: vec![],
+                    spawn_requests: vec![],
                 });
             }
         }
@@ -561,6 +577,7 @@ mod tests {
                 EntityMsg::Action {
                     name: "AddItem".into(),
                     params: serde_json::json!({"ProductId": "prod-1"}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
                 },
                 Duration::from_secs(1),
             )
@@ -576,6 +593,7 @@ mod tests {
                 EntityMsg::Action {
                     name: "SubmitOrder".into(),
                     params: serde_json::json!({"ShippingAddressId": "addr-1"}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
                 },
                 Duration::from_secs(1),
             )
@@ -599,6 +617,7 @@ mod tests {
                 EntityMsg::Action {
                     name: "SubmitOrder".into(),
                     params: serde_json::json!({}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
                 },
                 Duration::from_secs(1),
             )
@@ -640,6 +659,7 @@ mod tests {
                     EntityMsg::Action {
                         name: action.into(),
                         params,
+                        cross_entity_booleans: std::collections::BTreeMap::new(),
                     },
                     Duration::from_secs(1),
                 )
@@ -673,6 +693,7 @@ mod tests {
                 EntityMsg::Action {
                     name: "CancelOrder".into(),
                     params: serde_json::json!({"Reason": "changed mind"}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
                 },
                 Duration::from_secs(1),
             )
@@ -702,6 +723,7 @@ mod tests {
                     EntityMsg::Action {
                         name: action.to_string(),
                         params: serde_json::json!({}),
+                        cross_entity_booleans: std::collections::BTreeMap::new(),
                     },
                     Duration::from_secs(1),
                 )
@@ -715,6 +737,7 @@ mod tests {
                 EntityMsg::Action {
                     name: "CancelOrder".into(),
                     params: serde_json::json!({}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
                 },
                 Duration::from_secs(1),
             )
@@ -745,6 +768,7 @@ mod tests {
                 EntityMsg::Action {
                     name: "CancelOrder".into(),
                     params: serde_json::json!({}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
                 },
                 Duration::from_secs(1),
             )
@@ -757,6 +781,7 @@ mod tests {
                 EntityMsg::Action {
                     name: "AddItem".into(),
                     params: serde_json::json!({}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
                 },
                 Duration::from_secs(1),
             )

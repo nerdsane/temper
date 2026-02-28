@@ -161,6 +161,21 @@ impl AuthzEngine {
             }
         }
 
+        // Inject resource attributes into context (enables Cedar policies to
+        // reference entity state and cross-entity context via `context.key`).
+        for (key, value) in resource_attrs {
+            if let Some(s) = value.as_str() {
+                ctx_map.insert(
+                    key.clone(),
+                    cedar_policy::RestrictedExpression::new_string(s.to_string()),
+                );
+            } else if let Some(b) = value.as_bool() {
+                ctx_map.insert(key.clone(), cedar_policy::RestrictedExpression::new_bool(b));
+            } else if let Some(n) = value.as_i64() {
+                ctx_map.insert(key.clone(), cedar_policy::RestrictedExpression::new_long(n));
+            }
+        }
+
         // Build context and request
         let context = match Context::from_pairs(ctx_map) {
             Ok(c) => c,
@@ -422,5 +437,57 @@ mod tests {
         let ctx = admin_context();
         let attrs = HashMap::new();
         assert!(!engine.authorize(&ctx, "read", "Order", &attrs).is_allowed());
+    }
+
+    #[test]
+    fn test_context_entity_status_in_cedar_context() {
+        // Policy that gates on context.ctx_parent_agent_status
+        let policy = r#"
+            permit(
+                principal is Agent,
+                action == Action::"canary_deploy",
+                resource is DeployWorkflow
+            ) when {
+                context.ctx_parent_agent_status == "canary_ok"
+            };
+        "#;
+
+        let engine = AuthzEngine::new(policy).unwrap();
+
+        let ctx = SecurityContext::from_headers(&[
+            ("x-temper-principal-id".to_string(), "agent-1".to_string()),
+            ("x-temper-principal-kind".to_string(), "agent".to_string()),
+        ]);
+
+        // Without context entity status: should deny
+        let mut attrs = HashMap::new();
+        attrs.insert("id".to_string(), serde_json::json!("deploy-1"));
+        let decision = engine.authorize(&ctx, "canary_deploy", "DeployWorkflow", &attrs);
+        assert!(
+            !decision.is_allowed(),
+            "should deny without context entity status"
+        );
+
+        // With context entity status matching: should allow
+        attrs.insert(
+            "ctx_parent_agent_status".to_string(),
+            serde_json::json!("canary_ok"),
+        );
+        let decision = engine.authorize(&ctx, "canary_deploy", "DeployWorkflow", &attrs);
+        assert!(
+            decision.is_allowed(),
+            "should allow with matching context entity status, got: {decision:?}"
+        );
+
+        // With wrong context entity status: should deny
+        attrs.insert(
+            "ctx_parent_agent_status".to_string(),
+            serde_json::json!("planning"),
+        );
+        let decision = engine.authorize(&ctx, "canary_deploy", "DeployWorkflow", &attrs);
+        assert!(
+            !decision.is_allowed(),
+            "should deny with wrong context entity status"
+        );
     }
 }

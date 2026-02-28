@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use temper_spec::automaton::{
-    self, AssertCompareOp, Automaton, ParsedAssert, parse_assert_expr, parse_bool_initial,
+    self, Automaton, ParsedAssert, parse_assert_expr, parse_bool_initial,
     parse_counter_initial_usize, parse_list_initial,
 };
 

@@ -107,6 +107,39 @@ pub(super) async fn dispatch_bound_action(
         }
     }
 
+    // Resolve context entities for Cedar authorization (Gap 3: Agent OS).
+    // Read [[context_entity]] declarations from the spec, resolve target entity
+    // statuses, and inject as ctx_{name}_status into resource_attrs.
+    {
+        let context_entities: Vec<temper_spec::automaton::ContextEntityDecl> = {
+            let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+            registry
+                .get_spec(tenant, entity_type)
+                .map(|s| s.automaton.context_entities.clone())
+                .unwrap_or_default()
+        };
+
+        for ce in &context_entities {
+            let target_id = current_state
+                .state
+                .fields
+                .get(&ce.id_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if !target_id.is_empty()
+                && let Some(status) = state
+                    .resolve_entity_status(tenant, &ce.entity_type, target_id)
+                    .await
+            {
+                resource_attrs.insert(
+                    format!("ctx_{}_status", ce.name),
+                    serde_json::Value::String(status),
+                );
+            }
+        }
+    }
+
     let authz_result =
         state.authorize_with_context(&security_ctx, action, entity_type, &resource_attrs);
     if let Err(reason) = authz_result {

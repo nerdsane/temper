@@ -20,6 +20,9 @@ pub enum EntityMsg {
     Action {
         name: String,
         params: serde_json::Value,
+        /// Pre-resolved cross-entity state booleans (injected by dispatch layer).
+        #[allow(dead_code)]
+        cross_entity_booleans: BTreeMap<String, bool>,
     },
     /// Get the current entity state.
     GetState,
@@ -95,4 +98,7 @@ pub struct EntityResponse {
     /// Scheduled actions to fire after delays (for timer dispatch).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scheduled_actions: Vec<crate::entity_actor::effects::ScheduledAction>,
+    /// Spawn requests for child entities (executed by dispatch pipeline).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawn_requests: Vec<crate::entity_actor::effects::SpawnRequest>,
 }

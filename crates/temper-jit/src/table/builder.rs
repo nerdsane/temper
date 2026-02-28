@@ -74,6 +74,17 @@ impl TransitionTable {
                                 min: *min,
                             });
                         }
+                        automaton::Guard::CrossEntityState {
+                            entity_type,
+                            entity_id_source,
+                            required_status,
+                        } => {
+                            guards.push(Guard::CrossEntityStateIn {
+                                entity_type: entity_type.clone(),
+                                entity_id_source: entity_id_source.clone(),
+                                required_status: required_status.clone(),
+                            });
+                        }
                     }
                 }
 
@@ -124,6 +135,19 @@ impl TransitionTable {
                                 effects.push(Effect::ScheduleAction {
                                     action: action.clone(),
                                     delay_seconds: *delay_seconds,
+                                });
+                            }
+                            automaton::Effect::Spawn {
+                                entity_type,
+                                entity_id_source,
+                                initial_action,
+                                store_id_in,
+                            } => {
+                                effects.push(Effect::SpawnEntity {
+                                    entity_type: entity_type.clone(),
+                                    entity_id_source: entity_id_source.clone(),
+                                    initial_action: initial_action.clone(),
+                                    store_id_in: store_id_in.clone(),
                                 });
                             }
                         }
@@ -213,6 +237,121 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
         assert!(
             has_schedule,
             "expected ScheduleAction effect, got: {:?}",
+            rule.effects
+        );
+    }
+}
+
+#[cfg(test)]
+mod cross_entity_tests {
+    use super::*;
+    use crate::EvalContext;
+
+    #[test]
+    fn test_cross_entity_guard_maps_to_cross_entity_state_in() {
+        let spec = r#"
+[automaton]
+name = "Parent"
+states = ["Waiting", "Ready"]
+initial = "Waiting"
+
+[[action]]
+name = "Proceed"
+from = ["Waiting"]
+to = "Ready"
+guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source = "child_id", required_status = ["Done"] }]
+"#;
+
+        let table = TransitionTable::from_ioa_source(spec);
+        let rule = table.rules.iter().find(|r| r.name == "Proceed").unwrap();
+
+        // Guard should be And([StateIn, CrossEntityStateIn]) since from=["Waiting"] + guard
+        let is_cross = match &rule.guard {
+            Guard::CrossEntityStateIn {
+                entity_type,
+                entity_id_source,
+                required_status,
+            } => {
+                entity_type == "Child"
+                    && entity_id_source == "child_id"
+                    && required_status == &vec!["Done".to_string()]
+            }
+            Guard::And(guards) => guards.iter().any(|g| {
+                matches!(
+                    g,
+                    Guard::CrossEntityStateIn { entity_type, entity_id_source, required_status }
+                        if entity_type == "Child"
+                            && entity_id_source == "child_id"
+                            && required_status == &vec!["Done".to_string()]
+                )
+            }),
+            _ => false,
+        };
+        assert!(
+            is_cross,
+            "expected CrossEntityStateIn guard, got: {:?}",
+            rule.guard
+        );
+    }
+
+    #[test]
+    fn test_cross_entity_guard_check_with_boolean() {
+        let guard = Guard::CrossEntityStateIn {
+            entity_type: "Child".to_string(),
+            entity_id_source: "child_id".to_string(),
+            required_status: vec!["Done".to_string()],
+        };
+
+        let mut ctx = EvalContext::default();
+        // Without the boolean set, guard should fail
+        assert!(!guard.check("Waiting", &ctx));
+
+        // With __xref boolean set to true, guard should pass
+        ctx.booleans
+            .insert("__xref:Child:child_id".to_string(), true);
+        assert!(guard.check("Waiting", &ctx));
+
+        // With __xref boolean set to false, guard should fail
+        ctx.booleans
+            .insert("__xref:Child:child_id".to_string(), false);
+        assert!(!guard.check("Waiting", &ctx));
+    }
+
+    #[test]
+    fn test_spawn_effect_maps_to_spawn_entity() {
+        let spec = r#"
+[automaton]
+name = "Parent"
+states = ["Idle", "Active"]
+initial = "Idle"
+
+[[action]]
+name = "Start"
+from = ["Idle"]
+to = "Active"
+effect = [{ type = "spawn", entity_type = "SubTask", entity_id_source = "{uuid}", initial_action = "Begin", store_id_in = "subtask_id" }]
+"#;
+
+        let table = TransitionTable::from_ioa_source(spec);
+        let rule = table.rules.iter().find(|r| r.name == "Start").unwrap();
+
+        let has_spawn = rule.effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::SpawnEntity {
+                    entity_type,
+                    entity_id_source,
+                    initial_action,
+                    store_id_in,
+                } if entity_type == "SubTask"
+                    && entity_id_source == "{uuid}"
+                    && initial_action.as_deref() == Some("Begin")
+                    && store_id_in.as_deref() == Some("subtask_id")
+            )
+        });
+        assert!(
+            has_spawn,
+            "expected SpawnEntity effect, got: {:?}",
             rule.effects
         );
     }

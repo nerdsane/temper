@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use temper_jit::table::{Effect, EvalContext, TransitionTable};
-use temper_runtime::scheduler::sim_now;
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use super::types::{EntityEvent, EntityState};
 
@@ -25,11 +25,40 @@ pub struct ScheduledAction {
     pub delay_seconds: u64,
 }
 
+/// A request to spawn a child entity (executed post-transition by dispatch pipeline).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpawnRequest {
+    /// The child entity type.
+    pub entity_type: String,
+    /// The child entity ID.
+    pub entity_id: String,
+    /// Optional action to dispatch on the child after creation.
+    pub initial_action: Option<String>,
+    /// Optional field on the parent to store the child's ID.
+    pub store_id_in: Option<String>,
+}
+
+/// Maximum cross-entity lookups per transition (TigerStyle budget).
+pub const MAX_CROSS_ENTITY_LOOKUPS: usize = 4;
+/// Maximum entity spawns per transition (TigerStyle budget).
+pub const MAX_SPAWNS_PER_TRANSITION: usize = 8;
+
 /// Build an [`EvalContext`] from current entity state.
 ///
 /// This is the single source of truth for context construction. All code paths
 /// that call `TransitionTable::evaluate_ctx()` MUST use this function.
 pub fn build_eval_context(state: &EntityState) -> EvalContext {
+    build_eval_context_with_xref(state, &std::collections::BTreeMap::new())
+}
+
+/// Build an [`EvalContext`] with pre-resolved cross-entity booleans.
+///
+/// The `cross_entity_booleans` map contains `__xref:{type}:{field} -> bool` entries
+/// from cross-entity state gate resolution at the dispatch layer.
+pub fn build_eval_context_with_xref(
+    state: &EntityState,
+    cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
+) -> EvalContext {
     let mut ctx = EvalContext::default();
     ctx.counters.insert("items".to_string(), state.item_count);
     for (k, v) in &state.counters {
@@ -40,6 +69,10 @@ pub fn build_eval_context(state: &EntityState) -> EvalContext {
     }
     for (k, v) in &state.lists {
         ctx.lists.insert(k.clone(), v.clone());
+    }
+    // Merge pre-resolved cross-entity state booleans
+    for (k, v) in cross_entity_booleans {
+        ctx.booleans.insert(k.clone(), *v);
     }
     ctx
 }
@@ -55,6 +88,8 @@ pub struct ProcessResult {
     pub custom_effects: Vec<String>,
     /// Scheduled actions to fire after delays (for timer dispatch).
     pub scheduled_actions: Vec<ScheduledAction>,
+    /// Spawn requests for child entities.
+    pub spawn_requests: Vec<SpawnRequest>,
     /// Error message (if action failed).
     pub error: Option<String>,
 }
@@ -81,7 +116,71 @@ pub fn process_action(
             let from_status = state.status.clone();
             let to_status = transition_result.new_state.clone();
 
-            let (custom_effects, scheduled_actions) =
+            let (custom_effects, scheduled_actions, spawn_requests) =
+                apply_effects(state, &transition_result.effects, params);
+            let _ = &spawn_requests; // used by caller via ProcessResult
+            apply_new_state_fallback(state, &from_status, &to_status);
+            sync_fields(state, params);
+
+            let event = EntityEvent {
+                action: action.to_string(),
+                from_status,
+                to_status: state.status.clone(),
+                timestamp: sim_now(),
+                params: params.clone(),
+            };
+
+            ProcessResult {
+                success: true,
+                event: Some(event),
+                custom_effects,
+                scheduled_actions,
+                spawn_requests,
+                error: None,
+            }
+        }
+        Some(_) => ProcessResult {
+            success: false,
+            event: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            error: Some(format!(
+                "Action '{}' not valid from state '{}'",
+                action, state.status
+            )),
+        },
+        None => ProcessResult {
+            success: false,
+            event: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            error: Some(format!("Unknown action: {}", action)),
+        },
+    }
+}
+
+/// Process an action with pre-resolved cross-entity booleans.
+///
+/// Same as [`process_action`] but injects cross-entity state booleans
+/// into the evaluation context for `CrossEntityStateIn` guard evaluation.
+pub fn process_action_with_xref(
+    state: &mut EntityState,
+    table: &TransitionTable,
+    action: &str,
+    params: &serde_json::Value,
+    cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
+) -> ProcessResult {
+    let ctx = build_eval_context_with_xref(state, cross_entity_booleans);
+    let result = table.evaluate_ctx(&state.status, &ctx, action);
+
+    match result {
+        Some(transition_result) if transition_result.success => {
+            let from_status = state.status.clone();
+            let to_status = transition_result.new_state.clone();
+
+            let (custom_effects, scheduled_actions, spawn_requests) =
                 apply_effects(state, &transition_result.effects, params);
             apply_new_state_fallback(state, &from_status, &to_status);
             sync_fields(state, params);
@@ -99,6 +198,7 @@ pub fn process_action(
                 event: Some(event),
                 custom_effects,
                 scheduled_actions,
+                spawn_requests,
                 error: None,
             }
         }
@@ -107,6 +207,7 @@ pub fn process_action(
             event: None,
             custom_effects: vec![],
             scheduled_actions: vec![],
+            spawn_requests: vec![],
             error: Some(format!(
                 "Action '{}' not valid from state '{}'",
                 action, state.status
@@ -117,6 +218,7 @@ pub fn process_action(
             event: None,
             custom_effects: vec![],
             scheduled_actions: vec![],
+            spawn_requests: vec![],
             error: Some(format!("Unknown action: {}", action)),
         },
     }
@@ -139,9 +241,10 @@ pub fn apply_effects(
     state: &mut EntityState,
     effects: &[Effect],
     params: &serde_json::Value,
-) -> (Vec<String>, Vec<ScheduledAction>) {
+) -> (Vec<String>, Vec<ScheduledAction>, Vec<SpawnRequest>) {
     let mut custom_effects = Vec::new();
     let mut scheduled_actions = Vec::new();
+    let mut spawn_requests = Vec::new();
 
     for effect in effects {
         match effect {
@@ -226,10 +329,52 @@ pub fn apply_effects(
                     "scheduled action (timer request)"
                 );
             }
+            Effect::SpawnEntity {
+                entity_type,
+                entity_id_source,
+                initial_action,
+                store_id_in,
+            } => {
+                // Resolve child entity ID from params or generate UUID
+                let child_id = if entity_id_source == "{uuid}" {
+                    sim_uuid().to_string()
+                } else {
+                    params
+                        .get(entity_id_source)
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| sim_uuid().to_string())
+                };
+
+                // Store child ID in parent's fields if requested
+                if let Some(field_name) = store_id_in
+                    && let Some(obj) = state.fields.as_object_mut()
+                {
+                    obj.insert(
+                        field_name.clone(),
+                        serde_json::Value::String(child_id.clone()),
+                    );
+                }
+
+                spawn_requests.push(SpawnRequest {
+                    entity_type: entity_type.clone(),
+                    entity_id: child_id.clone(),
+                    initial_action: initial_action.clone(),
+                    store_id_in: store_id_in.clone(),
+                });
+
+                tracing::info!(
+                    entity_type = %state.entity_type,
+                    entity_id = %state.entity_id,
+                    child_type = %entity_type,
+                    child_id = %child_id,
+                    "spawn entity request"
+                );
+            }
         }
     }
 
-    (custom_effects, scheduled_actions)
+    (custom_effects, scheduled_actions, spawn_requests)
 }
 
 /// Apply the `new_state` fallback from a TransitionResult.
@@ -344,12 +489,120 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
             sequence_nr: 0,
         };
 
-        let (custom, scheduled) = apply_effects(&mut state, &effects, &serde_json::json!({}));
+        let (custom, scheduled, _spawns) =
+            apply_effects(&mut state, &effects, &serde_json::json!({}));
 
         assert!(custom.is_empty());
         assert_eq!(scheduled.len(), 1);
         assert_eq!(scheduled[0].action, "Refresh");
         assert_eq!(scheduled[0].delay_seconds, 3600);
         assert_eq!(state.status, "Active");
+    }
+
+    #[test]
+    fn test_spawn_effect_collects_requests() {
+        let _guard = temper_runtime::scheduler::install_deterministic_context(42);
+
+        let spec = r#"
+[automaton]
+name = "LeadAgent"
+states = ["Ready", "Planning"]
+initial = "Ready"
+
+[[action]]
+name = "StartPlan"
+from = ["Ready"]
+to = "Planning"
+effect = [
+    { type = "spawn", entity_type = "TestWorkflow", entity_id_source = "{uuid}", initial_action = "Start", store_id_in = "test_wf_id" },
+]
+"#;
+
+        let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
+        let mut state = EntityState {
+            entity_type: "LeadAgent".into(),
+            entity_id: "agent-1".into(),
+            status: "Ready".into(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: serde_json::json!({}),
+            events: vec![],
+            sequence_nr: 0,
+        };
+
+        let result = process_action(&mut state, &table, "StartPlan", &serde_json::json!({}));
+
+        assert!(result.success, "action should succeed");
+        assert_eq!(state.status, "Planning");
+        assert_eq!(result.spawn_requests.len(), 1);
+        assert_eq!(result.spawn_requests[0].entity_type, "TestWorkflow");
+        assert_eq!(
+            result.spawn_requests[0].initial_action.as_deref(),
+            Some("Start")
+        );
+        assert_eq!(
+            result.spawn_requests[0].store_id_in.as_deref(),
+            Some("test_wf_id")
+        );
+
+        // Child ID should be stored in parent fields
+        assert!(
+            state.fields.get("test_wf_id").is_some(),
+            "child ID should be stored in parent fields"
+        );
+    }
+
+    #[test]
+    fn test_cross_entity_guard_with_xref() {
+        let _guard = temper_runtime::scheduler::install_deterministic_context(42);
+
+        let spec = r#"
+[automaton]
+name = "LeadAgent"
+states = ["Planning", "Deployed"]
+initial = "Planning"
+
+[[action]]
+name = "Promote"
+from = ["Planning"]
+to = "Deployed"
+guard = [
+    { type = "cross_entity_state", entity_type = "TestWorkflow", entity_id_source = "test_wf_id", required_status = ["Passed"] }
+]
+"#;
+
+        let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
+        let mut state = EntityState {
+            entity_type: "LeadAgent".into(),
+            entity_id: "agent-1".into(),
+            status: "Planning".into(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: serde_json::json!({"test_wf_id": "wf-1"}),
+            events: vec![],
+            sequence_nr: 0,
+        };
+
+        // Without cross-entity booleans, guard should fail
+        let result = process_action(&mut state, &table, "Promote", &serde_json::json!({}));
+        assert!(
+            !result.success,
+            "should fail without cross-entity resolution"
+        );
+
+        // With cross-entity booleans via process_action_with_xref
+        let mut xref = std::collections::BTreeMap::new();
+        xref.insert("__xref:TestWorkflow:test_wf_id".to_string(), true);
+        let result =
+            process_action_with_xref(&mut state, &table, "Promote", &serde_json::json!({}), &xref);
+        assert!(
+            result.success,
+            "should succeed with cross-entity boolean = true"
+        );
+        assert_eq!(state.status, "Deployed");
     }
 }

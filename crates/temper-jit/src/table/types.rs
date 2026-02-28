@@ -92,6 +92,12 @@ pub enum Guard {
     ListContains { var: String, value: String },
     /// A named list variable must have at least N elements.
     ListLengthMin { var: String, min: usize },
+    /// Another entity must be in one of the required statuses (pre-resolved as boolean).
+    CrossEntityStateIn {
+        entity_type: String,
+        entity_id_source: String,
+        required_status: Vec<String>,
+    },
     /// All inner guards must pass.
     And(Vec<Guard>),
 }
@@ -125,6 +131,13 @@ pub enum Effect {
     Custom(String),
     /// Schedule a delayed action (timer fires after delay_seconds).
     ScheduleAction { action: String, delay_seconds: u64 },
+    /// Spawn a child entity as a post-transition effect.
+    SpawnEntity {
+        entity_type: String,
+        entity_id_source: String,
+        initial_action: Option<String>,
+        store_id_in: Option<String>,
+    },
 }
 
 /// The result of evaluating a transition.
@@ -197,6 +210,14 @@ impl Guard {
             }
             Guard::ListLengthMin { var, min } => {
                 ctx.lists.get(var).map_or(0, |list| list.len()) >= *min
+            }
+            Guard::CrossEntityStateIn {
+                entity_type,
+                entity_id_source,
+                ..
+            } => {
+                let key = format!("__xref:{}:{}", entity_type, entity_id_source);
+                ctx.booleans.get(&key).copied().unwrap_or(false)
             }
             Guard::And(guards) => guards.iter().all(|g| g.check(current_state, ctx)),
         }
