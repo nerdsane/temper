@@ -331,6 +331,20 @@ pub(crate) fn generate_unmet_intents(state: &ServerState) -> Vec<UnmetIntent> {
 /// Minimum number of platform-source trajectory failures before generating a FR-Record.
 const FEATURE_REQUEST_THRESHOLD: u64 = 3;
 
+/// Stable dedup key for feature-request descriptions.
+pub(crate) fn feature_request_dedup_key(description: &str) -> String {
+    if let Some(rest) = description.strip_prefix("Agents tried '")
+        && let Some((action, _)) = rest.split_once('\'')
+    {
+        return format!("action:{action}");
+    }
+    description
+        .split(" — ")
+        .next()
+        .unwrap_or(description)
+        .to_string()
+}
+
 /// Generate feature request records from platform-source trajectories.
 ///
 /// Filters trajectory entries with `source == Some(Platform)`, groups by

@@ -281,8 +281,7 @@ impl ServerState {
                                 Some(module_name.clone()),
                             );
                             decision_id = Some(pd.id.clone());
-                            {
-                                let mut pdlog = self.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
+                            if let Ok(mut pdlog) = self.pending_decision_log.write() {
                                 if pdlog.push(pd.clone()) {
                                     let _ = self.pending_decision_tx.send(pd);
                                 }
@@ -387,8 +386,7 @@ impl ServerState {
                                 Some(module_name.clone()),
                             );
                             decision_id = Some(pd.id.clone());
-                            {
-                                let mut pdlog = self.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
+                            if let Ok(mut pdlog) = self.pending_decision_log.write() {
                                 if pdlog.push(pd.clone()) {
                                     let _ = self.pending_decision_tx.send(pd);
                                 }
