@@ -1,9 +1,11 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useConnection } from "@/lib/connection";
 import { useDecisionNotifier } from "@/lib/decision-notifier";
+import { fetchUnmetIntents } from "@/lib/api";
 
 function NavIcon({ icon }: { icon: string }) {
   switch (icon) {
@@ -75,6 +77,20 @@ export default function Sidebar() {
   const pathname = usePathname();
   const { connected, checking } = useConnection();
   const { pendingCount } = useDecisionNotifier();
+  const [unmetCount, setUnmetCount] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+    const poll = async () => {
+      try {
+        const data = await fetchUnmetIntents();
+        if (mounted) setUnmetCount(data.open_count);
+      } catch { /* ignore */ }
+    };
+    poll();
+    const interval = setInterval(poll, 15000);
+    return () => { mounted = false; clearInterval(interval); };
+  }, []);
 
   const isActive = (href: string) => {
     if (href === "/") return pathname === "/";
@@ -110,6 +126,11 @@ export default function Sidebar() {
             {item.label === "Decisions" && pendingCount > 0 && (
               <span className="ml-auto text-[10px] font-mono bg-pink-500/20 text-pink-400 px-1.5 py-0.5 rounded-full min-w-[20px] text-center">
                 {pendingCount}
+              </span>
+            )}
+            {item.label === "Evolution" && unmetCount > 0 && (
+              <span className="ml-auto text-[10px] font-mono bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded-full min-w-[20px] text-center">
+                {unmetCount}
               </span>
             )}
           </Link>

@@ -175,6 +175,14 @@ pub fn build_observe_router() -> Router<ServerState> {
             "/wasm/modules/{module_name}",
             get(wasm::get_wasm_module_info),
         )
+        .route(
+            "/evolution/unmet-intents",
+            get(evolution::handle_unmet_intents),
+        )
+        .route(
+            "/evolution/stream",
+            get(evolution::handle_evolution_stream),
+        )
 }
 
 #[cfg(test)]

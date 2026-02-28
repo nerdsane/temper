@@ -116,10 +116,10 @@ pub(super) fn format_http_error(status: StatusCode, body: &str) -> String {
 
 /// Parse a 403 Forbidden body for structured Cedar denial information.
 ///
-/// Returns a rich error message with decision ID and guidance if the body
-/// matches the Temper AuthorizationDenied format. Instructs the agent to
-/// wait for human approval via `poll_decision` rather than self-approving.
-pub(super) fn format_authz_denied(body: &str) -> Option<String> {
+/// Returns a structured JSON value with decision ID and guidance if the body
+/// matches the Temper AuthorizationDenied format. The agent can parse this
+/// programmatically to detect denials and poll for human approval.
+pub(super) fn format_authz_denied(body: &str) -> Option<Value> {
     let json: Value = serde_json::from_str(body).ok()?;
     let code = json.pointer("/error/code").and_then(Value::as_str)?;
     if code != "AuthorizationDenied" {
@@ -131,24 +131,30 @@ pub(super) fn format_authz_denied(body: &str) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or("Authorization denied");
 
-    // Look for decision ID in the message (format: "PD-<uuid>")
-    let decision_hint = if let Some(pos) = message.find("PD-") {
+    // Extract decision ID from the message (format: "PD-<uuid>")
+    let decision_id = if let Some(pos) = message.find("PD-") {
         let id_end = message[pos..]
             .find(|c: char| c.is_whitespace() || c == ')' || c == '"')
             .unwrap_or(message.len() - pos);
-        let decision_id = &message[pos..pos + id_end];
-        format!(
-            "\n\nDecision: {decision_id} (pending human approval)\n\
-             A human must approve this action in the Observe UI or via `temper decide`.\n\
-             Use `await temper.poll_decision(tenant, '{decision_id}')` to wait for the decision.\n\
-             Do NOT attempt to approve this yourself — governance write methods are not available."
-        )
+        Some(message[pos..pos + id_end].to_string())
     } else {
-        "\n\nThis action requires human approval. A decision has been created.\n\
-         Use `await temper.get_decisions(tenant)` to find the decision ID,\n\
-         then `await temper.poll_decision(tenant, decision_id)` to wait for approval."
-            .to_string()
+        None
     };
 
-    Some(format!("AuthorizationDenied: {message}{decision_hint}"))
+    let mut result = serde_json::json!({
+        "status": "authorization_denied",
+        "message": format!("Cedar denied: {message}"),
+        "observe_url": "http://localhost:3001/decisions",
+        "hint": "A human must approve this action. Use `await temper.poll_decision(tenant, decision_id)` to wait, then retry."
+    });
+
+    if let Some(ref did) = decision_id {
+        result["decision_id"] = Value::String(did.clone());
+        result["hint"] = Value::String(format!(
+            "Call `await temper.poll_decision(tenant, '{}')` to wait for approval, then retry.",
+            did
+        ));
+    }
+
+    Some(result)
 }

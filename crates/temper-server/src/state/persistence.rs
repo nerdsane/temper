@@ -317,6 +317,7 @@ impl ServerState {
                         success,
                         error,
                         duration_ms: duration_ms as u64,
+                        authz_denied: None,
                     });
                 }
             }
@@ -345,6 +346,7 @@ impl ServerState {
                         success: row.success,
                         error: row.error,
                         duration_ms: row.duration_ms,
+                        authz_denied: None,
                     });
                 }
             }

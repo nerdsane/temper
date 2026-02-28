@@ -7,6 +7,9 @@
 #[cfg(feature = "observe")]
 mod api;
 mod constraint_engine;
+pub(crate) mod authz_helpers;
+#[cfg(feature = "observe")]
+pub(crate) mod insight_generator;
 pub mod dispatch;
 pub mod entity_actor;
 pub mod event_store;

@@ -426,9 +426,11 @@ impl RuntimeContext {
         }
 
         if status == reqwest::StatusCode::FORBIDDEN
-            && let Some(rich) = format_authz_denied(&text)
+            && let Some(structured) = format_authz_denied(&text)
         {
-            return Err(rich);
+            // Return structured denial as successful content so the agent
+            // can programmatically detect the denial and poll for approval.
+            return Ok(structured);
         }
 
         Err(format_http_error(status, &text))

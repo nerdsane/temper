@@ -19,6 +19,9 @@ import type {
   PolicyScope,
   AgentsResponse,
   AgentHistoryResponse,
+  UnmetIntentsResponse,
+  EvolutionRecordDetail,
+  ExtendedSentinelCheckResponse,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -337,4 +340,41 @@ export async function fetchPolicies(tenant: string): Promise<{ policy_text: stri
   const res = await fetchWithRetry(url, { cache: "no-store" });
   if (!res.ok) throw new ApiError(`Failed to fetch policies: ${res.status}`, res.status);
   return res.json();
+}
+
+/** Fetch unmet intents from trajectory analysis */
+export async function fetchUnmetIntents(): Promise<UnmetIntentsResponse> {
+  const res = await fetchWithRetry(`${API_BASE}/observe/evolution/unmet-intents`, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch unmet intents: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Fetch full evolution record detail by ID */
+export async function fetchRecordDetail(id: string): Promise<EvolutionRecordDetail> {
+  const res = await fetchWithRetry(`${API_BASE}/observe/evolution/records/${encodeURIComponent(id)}`, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch record ${id}: ${res.status}`, res.status);
+  const data = await res.json();
+  return data.record || data;
+}
+
+/** Trigger sentinel check with extended response (includes insights) */
+export async function triggerExtendedSentinelCheck(): Promise<ExtendedSentinelCheckResponse> {
+  const res = await fetchWithRetry(`${API_BASE}/api/evolution/sentinel/check`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!res.ok) throw new ApiError(`Sentinel check failed: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Subscribe to evolution SSE events */
+export function subscribeEvolutionEvents(onEvent: (event: Record<string, unknown>) => void): () => void {
+  const source = new EventSource(`${API_BASE}/observe/evolution/stream`);
+  source.addEventListener("evolution_event", (e) => {
+    try {
+      const data = JSON.parse((e as MessageEvent).data);
+      onEvent(data);
+    } catch { /* ignore parse errors */ }
+  });
+  return () => source.close();
 }

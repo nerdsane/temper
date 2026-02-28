@@ -1,15 +1,21 @@
 //! Evolution engine endpoints: trajectories, sentinel checks, and O-P-A-D-I record management.
 
+use std::convert::Infallible;
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::Deserialize;
 use temper_runtime::scheduler::sim_now;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 use temper_evolution::{
     Decision, DecisionRecord, RecordHeader, RecordStatus, RecordType, validate_chain,
 };
 
+use crate::insight_generator;
 use crate::sentinel;
 use crate::state::{ServerState, TrajectoryEntry};
 
@@ -343,9 +349,34 @@ pub(crate) async fn handle_sentinel_check(
         }));
     }
 
+    // Also generate insights from trajectory data.
+    let insights = insight_generator::generate_insights(&state);
+    let mut insight_results = Vec::new();
+    for insight in &insights {
+        state.record_store.insert_insight(insight.clone());
+        if let Some(ref pg_store) = state.pg_record_store {
+            if let Err(e) = pg_store.insert_insight(insight).await {
+                tracing::error!(
+                    record_id = %insight.header.id,
+                    error = %e,
+                    "failed to persist insight to postgres"
+                );
+            }
+        }
+        insight_results.push(serde_json::json!({
+            "record_id": insight.header.id,
+            "category": format!("{:?}", insight.category),
+            "intent": insight.signal.intent,
+            "priority_score": insight.priority_score,
+            "recommendation": insight.recommendation,
+        }));
+    }
+
     Ok(Json(serde_json::json!({
         "alerts_count": alerts.len(),
         "alerts": results,
+        "insights_count": insights.len(),
+        "insights": insight_results,
     })))
 }
 
@@ -959,4 +990,51 @@ async fn validate_chain_pg(
         errors,
         chain_length,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5E: Unmet Intents + Evolution SSE endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /observe/evolution/unmet-intents -- grouped unmet intents from trajectories.
+pub(crate) async fn handle_unmet_intents(
+    State(state): State<ServerState>,
+) -> Json<serde_json::Value> {
+    let intents = insight_generator::generate_unmet_intents(&state);
+    let open_count = intents.iter().filter(|i| i.status == "open").count();
+    let resolved_count = intents.iter().filter(|i| i.status == "resolved").count();
+
+    Json(serde_json::json!({
+        "intents": intents,
+        "open_count": open_count,
+        "resolved_count": resolved_count,
+    }))
+}
+
+/// GET /observe/evolution/stream -- SSE for real-time evolution events.
+///
+/// Streams new evolution records and insights as they are generated.
+/// Uses the same broadcast channel pattern as the pending decision stream.
+pub(crate) async fn handle_evolution_stream(
+    State(state): State<ServerState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    // Subscribe to pending decision broadcasts (which include authz denials
+    // that create evolution records). A dedicated evolution broadcast channel
+    // could be added later for O/P/A/D/I records specifically.
+    let rx = state.pending_decision_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+        Ok(pd) => Some(Ok(Event::default()
+            .event("evolution_event")
+            .json_data(serde_json::json!({
+                "type": "new_decision",
+                "decision_id": pd.id,
+                "action": pd.action,
+                "resource_type": pd.resource_type,
+                "status": "pending",
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}")))),
+        Err(_) => None,
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }

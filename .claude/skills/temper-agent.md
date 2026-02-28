@@ -137,32 +137,80 @@ return result
 
 ### 4. Handle authorization denials (CRITICAL)
 
-When Cedar denies an action, you get an error containing `AuthorizationDenied` and a decision ID like `PD-<uuid>`. You MUST surface this to the user and wait for human approval.
+When Cedar denies an action, you get a structured response with `status == "authorization_denied"` and a `decision_id`. You MUST surface this to the user, then poll for approval and retry.
 
 ```python
-try:
-    result = await temper.action("default", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
-    return result
-except Exception as e:
-    error = str(e)
-    if "AuthorizationDenied" in error:
-        # The error message contains the decision ID on a line like:
-        #   Decision: PD-abc123-def456 (pending human approval)
-        # Extract it:
-        import re
-        match = re.search(r"(PD-[a-f0-9-]+)", error)
-        decision_id = match.group(1) if match else None
+result = await temper.action("default", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
 
-        if decision_id:
-            # Tell the user to approve in the Observe UI, then poll
-            return f"Action denied — approve at http://localhost:3001/decisions then I'll retry."
-            # After human approves in the Observe UI:
-            # decision = await temper.poll_decision("default", decision_id)
-            # if decision["status"] == "Approved": retry the action
-    raise
+if isinstance(result, dict) and result.get("status") == "authorization_denied":
+    decision_id = result["decision_id"]
+
+    # Step 1: Tell the human what's pending
+    print(f"Action denied by Cedar policy. Decision {decision_id} pending.")
+    print(f"Approve at: http://localhost:3001/decisions")
+
+    # Step 2: Poll until the human resolves the decision
+    decision = await temper.poll_decision("default", decision_id)
+
+    if decision["status"] == "Approved":
+        # Step 3: Retry the original action — now permitted
+        result = await temper.action("default", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
+        return result
+    else:
+        return f"Decision {decision_id} was denied by the human."
+
+return result
 ```
 
 **You CANNOT self-approve.** Calling `approve_decision`, `deny_decision`, or `set_policy` will return an error. A human must approve via the **Observe UI** at http://localhost:3001/decisions — the agent cannot resolve governance decisions.
+
+---
+
+## Creating New Entity Types (Governed Flow)
+
+When you need a capability that doesn't exist yet (no matching entity type), you MUST follow the governed creation flow. You cannot bypass Cedar — every spec submission is policy-gated.
+
+```python
+# Step 1: Try to create the entity — expect 404 if type doesn't exist
+result = await temper.create("default", "EmailDrafts", {"id": "email-1"})
+# If 404: entity type doesn't exist. This is an UNMET INTENT.
+# The system has recorded it as a trajectory.
+
+# Step 2: Check insights — has the evolution engine seen this pattern?
+insights = await temper.get_insights("default")
+# Look for insights recommending EmailDraft creation
+
+# Step 3: Propose specs — Cedar will gate this
+result = await temper.submit_specs("default", {
+    "EmailDraft.ioa.toml": ioa_spec,
+    "model.csdl.xml": csdl
+})
+# If authorization_denied: a decision is pending human approval
+if result.get("status") == "authorization_denied":
+    decision_id = result["decision_id"]
+    # Tell the human, then poll
+    print(f"Spec submission denied. Decision {decision_id} pending.")
+    print(f"Approve at: http://localhost:3001/decisions")
+    decision = await temper.poll_decision("default", decision_id)
+    if decision["status"] == "Approved":
+        # Retry submit_specs — now permitted
+        result = await temper.submit_specs("default", specs)
+
+# Step 4: Now create and act on the entity
+created = await temper.create("default", "EmailDrafts", {"id": "email-1"})
+```
+
+**This is how the governed creation flow works:**
+
+1. **Attempt the action** — if the entity type doesn't exist, you get a 404. Temper automatically records this as a trajectory (unmet intent).
+2. **Read evolution data** — call `get_insights()` to see if the system has recommendations based on accumulated trajectories.
+3. **Propose a spec** — design the IOA + CSDL and call `submit_specs()`. Cedar default-deny means this will likely be denied the first time.
+4. **Detect denial** — check for `status == "authorization_denied"` in the response and extract `decision_id`.
+5. **Surface to human** — tell the user what's pending and link to the Observe UI.
+6. **Poll for approval** — call `poll_decision(tenant, decision_id)` to wait (30s max per poll, retry if needed).
+7. **On approval, retry** — resubmit the spec, then create and operate on the new entity type.
+
+Agents MUST go through this cycle. They cannot bypass Cedar. Every new entity type requires human approval.
 
 ---
 
@@ -309,7 +357,8 @@ The callback action receives `{"status_code": "200", "body": "...response..."}` 
 
 ```
 You call action → Cedar evaluates policy → DENIED (403)
-  → Error contains "AuthorizationDenied" + decision ID (PD-xxx)
+  → Response contains "authorization_denied" status + decision_id (PD-xxx)
+  → You tell the human what's pending
   → You call poll_decision(tenant, "PD-xxx") to wait
   → Human approves via Observe UI or `temper decide` CLI
   → poll_decision returns with status "Approved"
@@ -369,21 +418,20 @@ await temper.submit_specs("default", {
 await temper.create("default", "WeatherQueries", {"id": "q1", "city": "London"})
 
 # Trigger weather fetch (may be denied by Cedar — handle it!)
-try:
-    result = await temper.action("default", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
-    return result
-except Exception as e:
-    error = str(e)
-    if "AuthorizationDenied" in error:
-        import re
-        match = re.search(r"(PD-[a-f0-9-]+)", error)
-        decision_id = match.group(1) if match else "unknown"
-        # Surface to user — they approve in the Observe UI, not here
-        return f"Denied by Cedar policy. Decision {decision_id} pending.\nApprove at: http://localhost:3001/decisions"
-        # After user approves in browser:
-        # decision = await temper.poll_decision("default", decision_id)
-        # if decision["status"] == "Approved": retry the action
-    raise
+result = await temper.action("default", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
+
+if isinstance(result, dict) and result.get("status") == "authorization_denied":
+    decision_id = result["decision_id"]
+    # Surface to user — they approve in the Observe UI, not here
+    print(f"Denied by Cedar policy. Decision {decision_id} pending.")
+    print(f"Approve at: http://localhost:3001/decisions")
+    # Poll until human resolves the decision
+    decision = await temper.poll_decision("default", decision_id)
+    if decision["status"] == "Approved":
+        # Retry the action — now permitted
+        result = await temper.action("default", "WeatherQueries", "q1", "FetchWeather", {"city": "London"})
+
+return result
 ```
 
 ### List and inspect entities

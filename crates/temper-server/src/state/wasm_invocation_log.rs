@@ -25,6 +25,9 @@ pub struct WasmInvocationEntry {
     pub error: Option<String>,
     /// Invocation duration in milliseconds.
     pub duration_ms: u64,
+    /// Whether this failure was due to an authorization denial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authz_denied: Option<bool>,
 }
 
 /// Bounded, append-only WASM invocation log.
@@ -81,6 +84,7 @@ mod tests {
                 Some("module error".to_string())
             },
             duration_ms: 42,
+            authz_denied: None,
         }
     }
 

@@ -510,15 +510,15 @@ async fn e2e_agent_denial_human_approve_retry() {
     )
     .await;
     let (text, is_error) = tool_text(&response);
-    assert!(is_error, "agent action should be denied: {response:#}");
+    assert!(!is_error, "agent action should return structured denial (not error): {response:#}");
     assert!(
-        text.contains("AuthorizationDenied"),
-        "should get structured AuthorizationDenied, got: {text}"
+        text.contains("authorization_denied"),
+        "should get structured authorization_denied status, got: {text}"
     );
     // Verify enhanced error message includes poll_decision guidance.
     assert!(
         text.contains("poll_decision"),
-        "denial error should mention poll_decision, got: {text}"
+        "denial response should mention poll_decision, got: {text}"
     );
 
     // Step 2: Agent lists ALL decisions (no status filter) to debug.
@@ -742,28 +742,29 @@ async fn search_works_without_server() {
 fn format_authz_denied_with_decision_id() {
     let body = r#"{"error":{"code":"AuthorizationDenied","message":"Authorization denied for AddItem on Order('order-123'). Decision PD-abc123 created."}}"#;
     let result = format_authz_denied(body).expect("should parse");
-    assert!(
-        result.contains("AuthorizationDenied"),
-        "should start with code"
+    assert_eq!(
+        result["status"].as_str().unwrap(),
+        "authorization_denied",
+        "should have structured status"
     );
-    assert!(result.contains("PD-abc123"), "should include decision ID");
-    assert!(
-        result.contains("poll_decision"),
-        "should include poll_decision guidance"
+    assert_eq!(
+        result["decision_id"].as_str().unwrap(),
+        "PD-abc123",
+        "should include decision ID"
     );
-    assert!(
-        result.contains("not available"),
-        "should tell agent governance writes are not available"
-    );
+    let hint = result["hint"].as_str().unwrap();
+    assert!(hint.contains("poll_decision"), "should include poll_decision guidance");
+    assert!(hint.contains("PD-abc123"), "hint should reference decision ID");
 }
 
 #[test]
 fn format_authz_denied_without_decision_id() {
     let body = r#"{"error":{"code":"AuthorizationDenied","message":"Authorization denied: no matching permit policy"}}"#;
     let result = format_authz_denied(body).expect("should parse");
-    assert!(result.contains("AuthorizationDenied"));
-    assert!(result.contains("get_decisions"));
-    assert!(result.contains("poll_decision"));
+    assert_eq!(result["status"].as_str().unwrap(), "authorization_denied");
+    assert!(result.get("decision_id").is_none() || result["decision_id"].is_null());
+    let hint = result["hint"].as_str().unwrap();
+    assert!(hint.contains("poll_decision"));
 }
 
 #[test]

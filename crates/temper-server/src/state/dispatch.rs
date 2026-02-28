@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use super::ServerState;
+use super::pending_decisions::PendingDecision;
 use super::trajectory::TrajectoryEntry;
 use super::wasm_invocation_log::WasmInvocationEntry;
 use crate::dispatch::AgentContext;
@@ -109,6 +110,7 @@ impl ServerState {
                     success: false,
                     error: Some(format!("WASM module '{}' not found", module_name)),
                     duration_ms: 0,
+                    authz_denied: None,
                 };
                 if let Ok(mut log) = self.wasm_invocation_log.write() {
                     log.push(log_entry.clone());
@@ -249,6 +251,7 @@ impl ServerState {
                             success: true,
                             error: None,
                             duration_ms: result.duration_ms,
+                            authz_denied: None,
                         };
                         if let Ok(mut log) = invocation_log.write() {
                             log.push(log_entry.clone());
@@ -281,6 +284,9 @@ impl ServerState {
                             duration_ms = result.duration_ms,
                             "WASM integration returned failure"
                         );
+                        let error_str = result.error.clone().unwrap_or_default();
+                        let is_authz_denied = error_str.contains("authorization denied for http_call");
+
                         let log_entry = WasmInvocationEntry {
                             timestamp: sim_now().to_rfc3339(),
                             tenant: t.to_string(),
@@ -292,6 +298,7 @@ impl ServerState {
                             success: false,
                             error: result.error.clone(),
                             duration_ms: result.duration_ms,
+                            authz_denied: if is_authz_denied { Some(true) } else { None },
                         };
                         if let Ok(mut log) = invocation_log.write() {
                             log.push(log_entry.clone());
@@ -300,11 +307,67 @@ impl ServerState {
                         if let Err(e) = state.persist_wasm_invocation(&log_entry).await {
                             tracing::warn!(error = %e, "failed to persist WASM invocation log");
                         }
+
+                        // Surface authz denial as PendingDecision for human review.
+                        let mut decision_id = None;
+                        if is_authz_denied {
+                            let pd = PendingDecision::from_denial(
+                                t.as_str(),
+                                "wasm-module",
+                                "http_call",
+                                "HttpEndpoint",
+                                &int_name,
+                                serde_json::json!({
+                                    "entity_type": et,
+                                    "entity_id": eid,
+                                    "module": log_module_name,
+                                    "trigger_action": trigger_action,
+                                }),
+                                &error_str,
+                                Some(log_module_name.clone()),
+                            );
+                            decision_id = Some(pd.id.clone());
+                            {
+                                let mut pdlog = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
+                                if pdlog.push(pd.clone()) {
+                                    let _ = state.pending_decision_tx.send(pd);
+                                }
+                            }
+
+                            // Record trajectory for evolution engine.
+                            let traj = TrajectoryEntry {
+                                timestamp: sim_now().to_rfc3339(),
+                                tenant: t.to_string(),
+                                entity_type: et.clone(),
+                                entity_id: eid.clone(),
+                                action: trigger_action.clone(),
+                                success: false,
+                                from_status: None,
+                                to_status: None,
+                                error: Some(error_str.clone()),
+                                agent_id: None,
+                                session_id: None,
+                                authz_denied: Some(true),
+                                denied_resource: Some(int_name.clone()),
+                                denied_module: Some(log_module_name.clone()),
+                            };
+                            if let Ok(mut tlog) = state.trajectory_log.write() {
+                                tlog.push(traj);
+                            }
+                        }
+
                         if let Some(cb) = on_fail {
-                            let params = serde_json::json!({
-                                "error": result.error.unwrap_or_default(),
+                            let mut params = serde_json::json!({
+                                "error": error_str,
                                 "integration": int_name,
                             });
+                            // Include decision metadata for authz denials.
+                            if is_authz_denied {
+                                if let Some(ref did) = decision_id {
+                                    params["decision_id"] = serde_json::json!(did);
+                                }
+                                params["authz_denied"] = serde_json::json!(true);
+                            }
                             if let Err(e) = state
                                 .dispatch_tenant_action(
                                     &t,
@@ -326,6 +389,9 @@ impl ServerState {
                             error = %e,
                             "WASM module invocation error"
                         );
+                        let error_str = e.to_string();
+                        let is_authz_denied = error_str.contains("authorization denied for http_call");
+
                         let log_entry = WasmInvocationEntry {
                             timestamp: sim_now().to_rfc3339(),
                             tenant: t.to_string(),
@@ -335,22 +401,57 @@ impl ServerState {
                             trigger_action: trigger_action.clone(),
                             callback_action: on_fail.clone(),
                             success: false,
-                            error: Some(e.to_string()),
+                            error: Some(error_str.clone()),
                             duration_ms: 0,
+                            authz_denied: if is_authz_denied { Some(true) } else { None },
                         };
                         if let Ok(mut log) = invocation_log.write() {
                             log.push(log_entry.clone());
                         }
                         // Persist to DB (fire-and-forget)
-                        if let Err(e) = state.persist_wasm_invocation(&log_entry).await {
-                            tracing::warn!(error = %e, "failed to persist WASM invocation log");
+                        if let Err(pe) = state.persist_wasm_invocation(&log_entry).await {
+                            tracing::warn!(error = %pe, "failed to persist WASM invocation log");
                         }
+
+                        // Surface authz denial as PendingDecision for human review.
+                        let mut decision_id = None;
+                        if is_authz_denied {
+                            let pd = PendingDecision::from_denial(
+                                t.as_str(),
+                                "wasm-module",
+                                "http_call",
+                                "HttpEndpoint",
+                                &int_name,
+                                serde_json::json!({
+                                    "entity_type": et,
+                                    "entity_id": eid,
+                                    "module": log_module_name,
+                                    "trigger_action": trigger_action,
+                                }),
+                                &error_str,
+                                Some(log_module_name.clone()),
+                            );
+                            decision_id = Some(pd.id.clone());
+                            {
+                                let mut pdlog = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
+                                if pdlog.push(pd.clone()) {
+                                    let _ = state.pending_decision_tx.send(pd);
+                                }
+                            }
+                        }
+
                         if let Some(cb) = on_fail {
-                            let params = serde_json::json!({
-                                "error": e.to_string(),
+                            let mut params = serde_json::json!({
+                                "error": error_str,
                                 "integration": int_name,
                             });
-                            if let Err(e) = state
+                            if is_authz_denied {
+                                if let Some(ref did) = decision_id {
+                                    params["decision_id"] = serde_json::json!(did);
+                                }
+                                params["authz_denied"] = serde_json::json!(true);
+                            }
+                            if let Err(ce) = state
                                 .dispatch_tenant_action(
                                     &t,
                                     &et,
@@ -361,7 +462,7 @@ impl ServerState {
                                 )
                                 .await
                             {
-                                tracing::error!(callback = %cb, error = %e, "failed to dispatch WASM error callback");
+                                tracing::error!(callback = %cb, error = %ce, "failed to dispatch WASM error callback");
                             }
                         }
                     }

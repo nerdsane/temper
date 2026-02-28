@@ -8,6 +8,7 @@ use std::convert::Infallible;
 
 use axum::Router;
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -16,7 +17,11 @@ use temper_runtime::scheduler::sim_now;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
+use crate::authz_helpers::{record_authz_denial, security_context_from_headers};
 use crate::state::{DecisionStatus, PolicyScope, ServerState};
+use temper_evolution::records::{
+    Decision, DecisionRecord, RecordHeader, RecordType,
+};
 
 /// Build the management API router (mounted at /api).
 ///
@@ -229,11 +234,47 @@ async fn handle_get_policies(
 }
 
 /// PUT /api/tenants/{tenant}/policies — replace all policies (validate then reload).
+///
+/// Cedar-gated: requires `manage_policies` action on `PolicySet` resource.
 async fn handle_put_policies(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    // Cedar authorization gate.
+    let security_ctx = security_context_from_headers(&headers, None, None);
+    let authz_result = state.authorize_with_context(
+        &security_ctx,
+        "manage_policies",
+        "PolicySet",
+        &std::collections::BTreeMap::new(),
+    );
+    if let Err(reason) = authz_result {
+        let pd = record_authz_denial(
+            &state,
+            &tenant,
+            &security_ctx,
+            None,
+            "manage_policies",
+            "PolicySet",
+            &tenant,
+            serde_json::json!({"tenant": tenant}),
+            &reason,
+            None,
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": {
+                    "code": "AuthorizationDenied",
+                    "message": format!("{reason} Decision {}", pd.id),
+                }
+            })),
+        )
+            .into_response();
+    }
+
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -288,11 +329,47 @@ async fn handle_put_policies(
 }
 
 /// POST /api/tenants/{tenant}/policies/rules — append a single rule.
+///
+/// Cedar-gated: requires `manage_policies` action on `PolicySet` resource.
 async fn handle_add_policy_rule(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    // Cedar authorization gate.
+    let security_ctx = security_context_from_headers(&headers, None, None);
+    let authz_result = state.authorize_with_context(
+        &security_ctx,
+        "manage_policies",
+        "PolicySet",
+        &std::collections::BTreeMap::new(),
+    );
+    if let Err(reason) = authz_result {
+        let pd = record_authz_denial(
+            &state,
+            &tenant,
+            &security_ctx,
+            None,
+            "manage_policies",
+            "PolicySet",
+            &tenant,
+            serde_json::json!({"tenant": tenant}),
+            &reason,
+            None,
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": {
+                    "code": "AuthorizationDenied",
+                    "message": format!("{reason} Decision {}", pd.id),
+                }
+            })),
+        )
+            .into_response();
+    }
+
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -502,6 +579,20 @@ async fn handle_approve_decision(
         )
             .into_response();
     }
+
+    // Create D-Record for the approval (evolution audit trail).
+    let d_record = DecisionRecord {
+        header: RecordHeader::new(RecordType::Decision, "human:approval"),
+        decision: Decision::Approved,
+        decided_by: body
+            .decided_by
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        rationale: format!("Approved with scope: {:?}. Policy: {}", body.scope, generated_policy),
+        verification_results: None,
+        implementation: None,
+    };
+    state.record_store.insert_decision(d_record);
 
     (
         StatusCode::OK,

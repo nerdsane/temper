@@ -405,3 +405,49 @@ export interface AgentHistoryResponse {
   history: AgentHistoryEntry[];
   total: number;
 }
+
+// --- Unmet Intent types ---
+export interface UnmetIntent {
+  entity_type: string;
+  action: string;
+  error_pattern: string;
+  failure_count: number;
+  first_seen: string;
+  last_seen: string;
+  status: "open" | "resolved";
+  resolved_by?: string;
+  recommendation: string;
+}
+
+export interface UnmetIntentsResponse {
+  intents: UnmetIntent[];
+  open_count: number;
+  resolved_count: number;
+}
+
+// --- Extended evolution record detail ---
+export interface EvolutionRecordDetail extends EvolutionRecord {
+  derived_from?: string;
+  evidence_query?: string;
+  threshold_field?: string;
+  threshold_value?: number;
+  observed_value?: number;
+  root_cause?: string;
+  options?: { description: string; spec_diff?: string; risk: string; complexity: string }[];
+  decision?: "Approved" | "Rejected" | "Deferred";
+  decided_by?: string;
+  rationale?: string;
+  signal?: InsightSignal;
+}
+
+// --- Extended sentinel check response ---
+export interface ExtendedSentinelCheckResponse extends SentinelCheckResponse {
+  insights_count: number;
+  insights: {
+    record_id: string;
+    category: string;
+    intent: string;
+    priority_score: number;
+    recommendation: string;
+  }[];
+}

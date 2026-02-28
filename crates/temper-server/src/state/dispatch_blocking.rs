@@ -97,6 +97,7 @@ impl ServerState {
                         success: false,
                         error: Some(format!("WASM module '{}' not found", module_name)),
                         duration_ms: 0,
+                        authz_denied: None,
                     };
                     if let Ok(mut log) = self.wasm_invocation_log.write() {
                         log.push(log_entry.clone());
@@ -192,6 +193,7 @@ impl ServerState {
                             success: true,
                             error: None,
                             duration_ms: result.duration_ms,
+                            authz_denied: None,
                         };
                         if let Ok(mut log) = self.wasm_invocation_log.write() {
                             log.push(log_entry.clone());
@@ -240,6 +242,7 @@ impl ServerState {
                             success: false,
                             error: result.error.clone(),
                             duration_ms: result.duration_ms,
+                            authz_denied: None,
                         };
                         if let Ok(mut log) = self.wasm_invocation_log.write() {
                             log.push(log_entry.clone());
@@ -288,6 +291,7 @@ impl ServerState {
                             success: false,
                             error: Some(e.to_string()),
                             duration_ms: 0,
+                            authz_denied: None,
                         };
                         if let Ok(mut log) = self.wasm_invocation_log.write() {
                             log.push(log_entry.clone());
