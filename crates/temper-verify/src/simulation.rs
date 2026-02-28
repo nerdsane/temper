@@ -13,6 +13,8 @@ use temper_runtime::scheduler::{DeterministicRng, FaultConfig, SimActorState, Si
 
 use stateright::Model;
 
+use temper_spec::automaton::AssertCompareOp;
+
 use crate::model::{
     InvariantKind, LivenessKind, TemperModel, TemperModelAction, TemperModelState,
     build_model_from_ioa,
@@ -359,6 +361,21 @@ fn check_invariants_on_state(
                     .collect();
                 !valid.is_empty() && !valid.contains(&&state_after.status)
             }
+            InvariantKind::CounterCompare { var, op, value } => {
+                let val = state_after.counters.get(var).copied().unwrap_or(0);
+                let holds = match op {
+                    AssertCompareOp::Gt => val > *value,
+                    AssertCompareOp::Gte => val >= *value,
+                    AssertCompareOp::Lt => val < *value,
+                    AssertCompareOp::Lte => val <= *value,
+                    AssertCompareOp::Eq => val == *value,
+                };
+                !holds
+            }
+            InvariantKind::NeverState { state } => {
+                state_after.status == *state
+            }
+            InvariantKind::Unverifiable { .. } => false, // not checkable, never violated
         };
 
         if violated {

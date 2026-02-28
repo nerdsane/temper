@@ -146,6 +146,17 @@ pub enum InvariantKind {
     NoFurtherTransitions,
     /// When status is in trigger_states, status must also be in required_states.
     Implication,
+    /// Generalized counter comparison (e.g., `items >= 1`, `retries < 5`).
+    CounterCompare {
+        var: String,
+        op: temper_spec::automaton::AssertCompareOp,
+        value: usize,
+    },
+    /// The entity should never be in this state.
+    NeverState { state: String },
+    /// Assertion expression that cannot be verified at model level.
+    /// Surfaces as a warning in the cascade result.
+    Unverifiable { expression: String },
 }
 
 /// A safety invariant resolved for runtime checking.

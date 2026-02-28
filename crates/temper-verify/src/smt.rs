@@ -20,6 +20,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
+use temper_spec::automaton::AssertCompareOp;
+
 use crate::model::builder::build_model_from_ioa;
 use crate::model::semantics::collect_list_contains_pairs;
 use crate::model::types::{InvariantKind, ModelEffect, ModelGuard, TemperModel};
@@ -194,6 +196,26 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                         })
                     }
                 }
+                InvariantKind::CounterCompare { var, op, value } => {
+                    check_counter_compare_induction_z3(
+                        model,
+                        &inv.trigger_states,
+                        var,
+                        op,
+                        *value,
+                        max_counter,
+                    )
+                }
+                InvariantKind::NeverState { state } => {
+                    // Structural check: no transition has to_state == forbidden_state.
+                    !model.transitions.iter().any(|t| {
+                        t.to_state.as_ref().is_some_and(|to| to == state)
+                    })
+                }
+                InvariantKind::Unverifiable { .. } => {
+                    // Not checkable at model level — trivially inductive.
+                    true
+                }
             };
 
             (inv.name.clone(), inductive)
@@ -302,6 +324,84 @@ fn check_bool_required_induction_z3(
 
         // Check: ¬var' — if SAT, invariant is not preserved
         solver.assert(bool_post.not());
+
+        if matches!(solver.check(), SatResult::Sat) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Z3 induction check for CounterCompare invariants.
+///
+/// Generalisation of `check_counter_positive_induction_z3`:
+///   Assume: `var op value` (pre-state invariant) ∧ bounds
+///   Apply: effects → var'
+///   Check: `var' op value` must hold
+fn check_counter_compare_induction_z3(
+    model: &TemperModel,
+    trigger_states: &[String],
+    var: &str,
+    op: &AssertCompareOp,
+    value: usize,
+    max_counter: usize,
+) -> bool {
+    for t in &model.transitions {
+        let reaches_trigger = t
+            .to_state
+            .as_ref()
+            .is_some_and(|s| trigger_states.contains(s));
+
+        if !reaches_trigger {
+            continue;
+        }
+
+        let solver = Solver::new();
+
+        let counter_pre = Int::new_const(format!("{var}_pre"));
+        let zero = Int::from_i64(0);
+        let max_val = Int::from_i64(max_counter as i64);
+        let val = Int::from_i64(value as i64);
+
+        // Assume: counter is within bounds
+        solver.assert(counter_pre.ge(&zero));
+        solver.assert(counter_pre.le(&max_val));
+
+        // Assume: invariant holds in pre-state
+        let pre_invariant = match op {
+            AssertCompareOp::Gt => counter_pre.gt(&val),
+            AssertCompareOp::Gte => counter_pre.ge(&val),
+            AssertCompareOp::Lt => counter_pre.lt(&val),
+            AssertCompareOp::Lte => counter_pre.le(&val),
+            AssertCompareOp::Eq => counter_pre.eq(&val),
+        };
+        solver.assert(&pre_invariant);
+
+        // Compute post-state counter value based on effects
+        let one = Int::from_i64(1);
+        let mut counter_post = counter_pre.clone();
+        for effect in &t.effects {
+            match effect {
+                ModelEffect::IncrementCounter(v) if v == var => {
+                    counter_post = Int::add(&[&counter_post, &one]);
+                }
+                ModelEffect::DecrementCounter(v) if v == var => {
+                    let dec = Int::sub(&[&counter_post, &one]);
+                    counter_post = counter_post.gt(&zero).ite(&dec, &zero);
+                }
+                _ => {}
+            }
+        }
+
+        // Check: ¬(var' op value) — if SAT, invariant is not preserved
+        let post_invariant = match op {
+            AssertCompareOp::Gt => counter_post.gt(&val),
+            AssertCompareOp::Gte => counter_post.ge(&val),
+            AssertCompareOp::Lt => counter_post.lt(&val),
+            AssertCompareOp::Lte => counter_post.le(&val),
+            AssertCompareOp::Eq => counter_post.eq(&val),
+        };
+        solver.assert(post_invariant.not());
 
         if matches!(solver.check(), SatResult::Sat) {
             return false;

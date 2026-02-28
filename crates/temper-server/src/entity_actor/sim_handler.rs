@@ -91,70 +91,37 @@ impl EntityActorHandler {
     }
 }
 
-/// Parse an assertion expression from the IOA spec into a [`SpecAssert`].
+/// Map a shared [`ParsedAssert`] to the runtime [`SpecAssert`].
 ///
-/// Returns `None` for expressions that the framework cannot check automatically.
+/// Uses [`temper_spec::automaton::parse_assert_expr`] as the single parser,
+/// then maps the result to the runtime type. Returns `None` for expressions
+/// that the framework cannot check automatically.
 fn parse_assert_expr(expr: &str) -> Option<SpecAssert> {
-    let trimmed = expr.trim();
+    use temper_spec::automaton::{AssertCompareOp, ParsedAssert, parse_assert_expr as parse};
 
-    // Pattern: "items > 0" or "var > 0" — shorthand for CounterPositive.
-    if trimmed.contains("> 0") && !trimmed.contains(">=") {
-        let var = trimmed.split('>').next()?.trim().to_string();
-        return Some(SpecAssert::CounterPositive { var });
-    }
-
-    // Pattern: "no_further_transitions"
-    if trimmed == "no_further_transitions" {
-        return Some(SpecAssert::NoFurtherTransitions);
-    }
-
-    // Pattern: "ordering(StateA, StateB)" — StateA must precede StateB.
-    if trimmed.starts_with("ordering(") && trimmed.ends_with(')') {
-        let inner = &trimmed[9..trimmed.len() - 1];
-        let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-        if parts.len() == 2 {
-            return Some(SpecAssert::OrderingConstraint {
-                before: parts[0].to_string(),
-                after: parts[1].to_string(),
-            });
+    let parsed = parse(expr)?;
+    match parsed {
+        ParsedAssert::CounterPositive { var } => Some(SpecAssert::CounterPositive { var }),
+        ParsedAssert::NoFurtherTransitions => Some(SpecAssert::NoFurtherTransitions),
+        ParsedAssert::OrderingConstraint { before, after } => {
+            Some(SpecAssert::OrderingConstraint { before, after })
+        }
+        ParsedAssert::NeverState { state } => Some(SpecAssert::NeverState { state }),
+        ParsedAssert::CounterCompare { var, op, value } => {
+            let runtime_op = match op {
+                AssertCompareOp::Gt => CompareOp::Gt,
+                AssertCompareOp::Gte => CompareOp::Gte,
+                AssertCompareOp::Lt => CompareOp::Lt,
+                AssertCompareOp::Lte => CompareOp::Lte,
+                AssertCompareOp::Eq => CompareOp::Eq,
+            };
+            Some(SpecAssert::CounterCompare {
+                var,
+                op: runtime_op,
+                value,
+            })
         }
     }
-
-    // Pattern: "never(StateName)" — entity should never be in this state.
-    if trimmed.starts_with("never(") && trimmed.ends_with(')') {
-        let state = trimmed[6..trimmed.len() - 1].trim().to_string();
-        return Some(SpecAssert::NeverState { state });
-    }
-
-    // Generalized counter comparison: "var >= N", "var <= N", "var == N",
-    // "var > N", "var < N". Order matters: check two-char ops before one-char.
-    let ops: &[(&str, CompareOp)] = &[
-        (">=", CompareOp::Gte),
-        ("<=", CompareOp::Lte),
-        ("==", CompareOp::Eq),
-        (">", CompareOp::Gt),
-        ("<", CompareOp::Lt),
-    ];
-    for (op_str, op) in ops {
-        if let Some(pos) = trimmed.find(op_str) {
-            let var = trimmed[..pos].trim().to_string();
-            let val_str = trimmed[pos + op_str.len()..].trim();
-            if let Ok(value) = val_str.parse::<usize>() {
-                // "var > 0" is already handled by CounterPositive above.
-                if *op_str == ">" && value == 0 {
-                    continue;
-                }
-                return Some(SpecAssert::CounterCompare {
-                    var,
-                    op: op.clone(),
-                    value,
-                });
-            }
-        }
-    }
-
-    // Unrecognized expression — caller needs a manual checker.
-    None
 }
 
 impl SimActorHandler for EntityActorHandler {

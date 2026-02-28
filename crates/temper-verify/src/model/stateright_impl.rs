@@ -7,6 +7,8 @@
 use stateright::{Model, Property};
 
 use super::semantics::{apply_effects, evaluate_guard};
+use temper_spec::automaton::AssertCompareOp;
+
 use super::types::{
     InvariantKind, LivenessKind, ModelEffect, TemperModel, TemperModelAction, TemperModelState,
 };
@@ -98,6 +100,47 @@ fn check_implications(model: &TemperModel, state: &TemperModelState) -> bool {
                 continue; // Trivially true (constrains non-status variables)
             }
             if !valid_required.contains(&&state.status) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Check all CounterCompare invariants: when status is in triggers, counter op value.
+fn check_counter_compare(model: &TemperModel, state: &TemperModelState) -> bool {
+    for inv in &model.invariants {
+        if let InvariantKind::CounterCompare {
+            ref var,
+            ref op,
+            value,
+        } = inv.kind
+        {
+            let triggered =
+                inv.trigger_states.is_empty() || inv.trigger_states.contains(&state.status);
+            if triggered {
+                let val = state.counters.get(var).copied().unwrap_or(0);
+                let holds = match op {
+                    AssertCompareOp::Gt => val > value,
+                    AssertCompareOp::Gte => val >= value,
+                    AssertCompareOp::Lt => val < value,
+                    AssertCompareOp::Lte => val <= value,
+                    AssertCompareOp::Eq => val == value,
+                };
+                if !holds {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Check all NeverState invariants: entity should never be in the forbidden state.
+fn check_never_state(model: &TemperModel, state: &TemperModelState) -> bool {
+    for inv in &model.invariants {
+        if let InvariantKind::NeverState { state: forbidden } = &inv.kind {
+            if state.status == *forbidden {
                 return false;
             }
         }
@@ -289,6 +332,32 @@ impl Model for TemperModel {
                 check_implications,
             ));
         }
+
+        // Safety: CounterCompare invariants
+        let has_counter_compare = self
+            .invariants
+            .iter()
+            .any(|i| matches!(i.kind, InvariantKind::CounterCompare { .. }));
+        if has_counter_compare {
+            props.push(Property::always(
+                "CounterCompareInvariants",
+                check_counter_compare,
+            ));
+        }
+
+        // Safety: NeverState invariants
+        let has_never_state = self
+            .invariants
+            .iter()
+            .any(|i| matches!(i.kind, InvariantKind::NeverState { .. }));
+        if has_never_state {
+            props.push(Property::always(
+                "NeverStateInvariants",
+                check_never_state,
+            ));
+        }
+
+        // Note: Unverifiable invariants generate no properties (skipped).
 
         // Liveness: NoDeadlock (expressed as safety: "always has actions")
         let has_no_deadlock = self

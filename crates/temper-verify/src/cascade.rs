@@ -10,7 +10,7 @@
 //! Each level produces a pass/fail result. All levels run independently.
 
 use crate::checker::{self, VerificationResult};
-use crate::model::{self, TemperModel};
+use crate::model::{self, InvariantKind, TemperModel};
 use crate::proptest_gen::{self, PropTestResult};
 use crate::simulation::{self, SimConfig, SimulationResult};
 use crate::smt::{self, SmtResult};
@@ -86,6 +86,8 @@ pub struct CascadeResult {
     pub all_passed: bool,
     /// Per-level results.
     pub levels: Vec<LevelResult>,
+    /// Warnings about invariants that could not be verified at model level.
+    pub warnings: Vec<String>,
 }
 
 impl CascadeResult {
@@ -104,11 +106,13 @@ pub struct VerificationCascade {
     /// Simulation ticks per seed.
     sim_ticks: u64,
     /// Number of property test cases.
-    prop_test_cases: u64,
+    prop_test_cases: u32,
     /// Max steps per property test case.
     prop_test_max_steps: usize,
     /// Optional actor simulation runner (Level 2b).
     actor_sim_runner: Option<ActorSimRunner>,
+    /// If true, stop after the first failing level.
+    fail_fast: bool,
 }
 
 impl VerificationCascade {
@@ -122,6 +126,7 @@ impl VerificationCascade {
             prop_test_cases: 1000,
             prop_test_max_steps: 30,
             actor_sim_runner: None,
+            fail_fast: false,
         }
     }
 
@@ -144,40 +149,85 @@ impl VerificationCascade {
     }
 
     /// Set the number of property test cases.
-    pub fn with_prop_test_cases(mut self, cases: u64) -> Self {
+    pub fn with_prop_test_cases(mut self, cases: u32) -> Self {
         self.prop_test_cases = cases;
+        self
+    }
+
+    /// Enable fail-fast mode: stop after the first failing level.
+    pub fn with_fail_fast(mut self) -> Self {
+        self.fail_fast = true;
         self
     }
 
     /// Run the full verification cascade.
     pub fn run(&self) -> CascadeResult {
         let mut levels = Vec::new();
+        let model = self.build_temper_model();
+
+        // Collect warnings for Unverifiable invariants.
+        let warnings = collect_unverifiable_warnings(&model);
 
         // Level 0: SMT symbolic verification
         let l0 = self.run_symbolic_verification();
+        let l0_passed = l0.passed;
         levels.push(l0);
+        if self.fail_fast && !l0_passed {
+            return CascadeResult {
+                all_passed: false,
+                levels,
+                warnings,
+            };
+        }
 
         // Level 1: Stateright model checking
-        let model = self.build_temper_model();
         let l1 = self.run_model_check(&model);
+        let l1_passed = l1.passed;
         levels.push(l1);
+        if self.fail_fast && !l1_passed {
+            return CascadeResult {
+                all_passed: false,
+                levels,
+                warnings,
+            };
+        }
 
         // Level 2: Deterministic simulation (model-level)
         let l2 = self.run_simulation_level();
+        let l2_passed = l2.passed;
         levels.push(l2);
+        if self.fail_fast && !l2_passed {
+            return CascadeResult {
+                all_passed: false,
+                levels,
+                warnings,
+            };
+        }
 
         // Level 2b: Actor simulation (real TransitionTable::evaluate())
         if let Some(ref runner) = self.actor_sim_runner {
             let l2b = self.run_actor_simulation(runner);
+            let l2b_passed = l2b.passed;
             levels.push(l2b);
+            if self.fail_fast && !l2b_passed {
+                return CascadeResult {
+                    all_passed: false,
+                    levels,
+                    warnings,
+                };
+            }
         }
 
-        // Level 3: Property-based tests
+        // Level 3: Property-based tests (with shrinking for minimal counterexamples)
         let l3 = self.run_prop_tests_level(&model);
         levels.push(l3);
 
         let all_passed = levels.iter().all(|l| l.passed);
-        CascadeResult { all_passed, levels }
+        CascadeResult {
+            all_passed,
+            levels,
+            warnings,
+        }
     }
 
     fn build_temper_model(&self) -> TemperModel {
@@ -333,9 +383,9 @@ impl VerificationCascade {
         }
     }
 
-    /// Level 3: Property-based tests.
+    /// Level 3: Property-based tests with shrinking for minimal counterexamples.
     fn run_prop_tests_level(&self, _model: &TemperModel) -> LevelResult {
-        let result = proptest_gen::run_prop_tests_from_ioa(
+        let result = proptest_gen::run_prop_tests_with_shrinking_from_ioa(
             &self.ioa_source,
             self.prop_test_cases,
             self.prop_test_max_steps,
@@ -396,6 +446,24 @@ impl VerificationCascade {
             smt: None,
         }
     }
+}
+
+/// Collect warnings for invariants classified as `Unverifiable`.
+fn collect_unverifiable_warnings(model: &TemperModel) -> Vec<String> {
+    model
+        .invariants
+        .iter()
+        .filter_map(|inv| {
+            if let InvariantKind::Unverifiable { expression } = &inv.kind {
+                Some(format!(
+                    "invariant '{}' has unverifiable assertion '{}' — skipped at model level",
+                    inv.name, expression,
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -461,5 +529,71 @@ mod tests {
         let l3 = result.level_result(CascadeLevel::PropertyTest).unwrap();
         assert!(l3.summary.contains("L3"), "Should have L3 prefix");
         assert!(l3.passed);
+    }
+
+    #[test]
+    fn test_cascade_warnings_for_unverifiable_invariants() {
+        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
+            .with_sim_seeds(3)
+            .with_prop_test_cases(50);
+
+        let result = cascade.run();
+        // Order spec has "payment_captured" which is not a declared bool,
+        // so ShipRequiresPayment becomes Unverifiable.
+        assert!(
+            !result.warnings.is_empty(),
+            "Should have warnings for unverifiable invariants"
+        );
+        assert!(
+            result.warnings.iter().any(|w| w.contains("ShipRequiresPayment")),
+            "Should warn about ShipRequiresPayment, got: {:?}",
+            result.warnings,
+        );
+    }
+
+    #[test]
+    fn test_fail_fast_stops_at_first_failure() {
+        // Use a spec that will fail L0 (dead guard).
+        let broken_spec = r#"
+[automaton]
+name = "Broken"
+states = ["A", "B"]
+initial = "A"
+
+[[state]]
+name = "count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Go"
+from = ["A"]
+to = "B"
+guard = "count > 9"
+"#;
+        let cascade = VerificationCascade::from_ioa(broken_spec)
+            .with_sim_seeds(1)
+            .with_prop_test_cases(10)
+            .with_fail_fast();
+
+        let result = cascade.run();
+        assert!(!result.all_passed);
+        // Should have stopped early — fewer than 4 levels.
+        assert!(
+            result.levels.len() < 4,
+            "fail_fast should stop early, got {} levels",
+            result.levels.len(),
+        );
+    }
+
+    #[test]
+    fn test_no_fail_fast_runs_all_levels() {
+        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
+            .with_sim_seeds(3)
+            .with_prop_test_cases(50);
+
+        let result = cascade.run();
+        // Without fail_fast, all 4 levels should run.
+        assert_eq!(result.levels.len(), 4);
     }
 }

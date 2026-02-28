@@ -12,12 +12,14 @@
 //!
 //! TLA+ remains available for humans who want temporal reasoning.
 
+pub mod assert_parser;
 mod initial;
 mod lint;
 pub mod parser;
 mod toml_parser;
 mod types;
 
+pub use assert_parser::{AssertCompareOp, ParsedAssert, parse_assert_expr};
 pub use initial::{
     parse_bool_initial, parse_counter_initial_usize, parse_list_initial, parse_var_initial_json,
 };

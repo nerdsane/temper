@@ -11,6 +11,8 @@
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use stateright::Model;
 
+use temper_spec::automaton::AssertCompareOp;
+
 use crate::model::{
     InvariantKind, TemperModel, TemperModelAction, TemperModelState, build_model_from_ioa,
 };
@@ -81,6 +83,21 @@ fn check_invariants(model: &TemperModel, state: &TemperModelState) -> Result<(),
                     !valid_required.contains(&&state.status)
                 }
             }
+            InvariantKind::CounterCompare { var, op, value } => {
+                let val = state.counters.get(var).copied().unwrap_or(0);
+                let holds = match op {
+                    AssertCompareOp::Gt => val > *value,
+                    AssertCompareOp::Gte => val >= *value,
+                    AssertCompareOp::Lt => val < *value,
+                    AssertCompareOp::Lte => val <= *value,
+                    AssertCompareOp::Eq => val == *value,
+                };
+                !holds
+            }
+            InvariantKind::NeverState { state: forbidden } => {
+                state.status == *forbidden
+            }
+            InvariantKind::Unverifiable { .. } => false, // not checkable, never violated
         };
 
         if violated {
