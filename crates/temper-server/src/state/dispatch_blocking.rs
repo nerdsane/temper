@@ -281,10 +281,10 @@ impl ServerState {
                                 Some(module_name.clone()),
                             );
                             decision_id = Some(pd.id.clone());
-                            if let Ok(mut pdlog) = self.pending_decision_log.write() {
-                                if pdlog.push(pd.clone()) {
-                                    let _ = self.pending_decision_tx.send(pd);
-                                }
+                            if let Ok(mut pdlog) = self.pending_decision_log.write()
+                                && pdlog.push(pd.clone())
+                            {
+                                let _ = self.pending_decision_tx.send(pd);
                             }
 
                             let traj = TrajectoryEntry {
@@ -386,10 +386,10 @@ impl ServerState {
                                 Some(module_name.clone()),
                             );
                             decision_id = Some(pd.id.clone());
-                            if let Ok(mut pdlog) = self.pending_decision_log.write() {
-                                if pdlog.push(pd.clone()) {
-                                    let _ = self.pending_decision_tx.send(pd);
-                                }
+                            if let Ok(mut pdlog) = self.pending_decision_log.write()
+                                && pdlog.push(pd.clone())
+                            {
+                                let _ = self.pending_decision_tx.send(pd);
                             }
                         }
 
