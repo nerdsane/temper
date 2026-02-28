@@ -354,14 +354,14 @@ pub(crate) async fn handle_sentinel_check(
     let mut insight_results = Vec::new();
     for insight in &insights {
         state.record_store.insert_insight(insight.clone());
-        if let Some(ref pg_store) = state.pg_record_store {
-            if let Err(e) = pg_store.insert_insight(insight).await {
-                tracing::error!(
-                    record_id = %insight.header.id,
-                    error = %e,
-                    "failed to persist insight to postgres"
-                );
-            }
+        if let Some(ref pg_store) = state.pg_record_store
+            && let Err(e) = pg_store.insert_insight(insight).await
+        {
+            tracing::error!(
+                record_id = %insight.header.id,
+                error = %e,
+                "failed to persist insight to postgres"
+            );
         }
         insight_results.push(serde_json::json!({
             "record_id": insight.header.id,

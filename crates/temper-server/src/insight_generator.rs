@@ -62,10 +62,10 @@ pub(crate) fn generate_insights(state: &ServerState) -> Vec<InsightRecord> {
         if entry.authz_denied == Some(true) {
             signal.authz_denials += 1;
         }
-        if let Some(ref err) = entry.error {
-            if err.contains("EntitySetNotFound") || err.contains("entity set not found") {
-                signal.has_entity_not_found = true;
-            }
+        if let Some(ref err) = entry.error
+            && (err.contains("EntitySetNotFound") || err.contains("entity set not found"))
+        {
+            signal.has_entity_not_found = true;
         }
         if entry.action == "SubmitSpec" {
             signal.has_submit_spec = true;
