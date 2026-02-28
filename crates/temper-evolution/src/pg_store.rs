@@ -319,6 +319,7 @@ fn record_type_to_string(rt: RecordType) -> &'static str {
         RecordType::Analysis => "Analysis",
         RecordType::Decision => "Decision",
         RecordType::Insight => "Insight",
+        RecordType::FeatureRequest => "FeatureRequest",
     }
 }
 
@@ -338,6 +339,7 @@ fn string_to_record_type(s: &str) -> Option<RecordType> {
         "Analysis" => Some(RecordType::Analysis),
         "Decision" => Some(RecordType::Decision),
         "Insight" => Some(RecordType::Insight),
+        "FeatureRequest" => Some(RecordType::FeatureRequest),
         _ => None,
     }
 }
@@ -364,6 +366,7 @@ mod tests {
             RecordType::Analysis,
             RecordType::Decision,
             RecordType::Insight,
+            RecordType::FeatureRequest,
         ] {
             let s = record_type_to_string(rt);
             assert_eq!(string_to_record_type(s), Some(rt));

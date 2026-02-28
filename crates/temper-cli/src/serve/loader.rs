@@ -338,6 +338,7 @@ pub(super) async fn hydrate_trajectory_log(
                     authz_denied: None,
                     denied_resource: None,
                     denied_module: None,
+                    source: None,
                 });
             }
             let count = log.entries().len();
@@ -370,6 +371,7 @@ pub(super) async fn hydrate_trajectory_log(
                             authz_denied: None,
                             denied_resource: None,
                             denied_module: None,
+                            source: None,
                         });
                     }
                     let count = log.entries().len();

@@ -7,9 +7,13 @@
 use std::collections::BTreeMap;
 
 use temper_evolution::insight::{classify_insight, compute_priority_score};
-use temper_evolution::records::{InsightRecord, InsightSignal, RecordHeader, RecordType};
+use temper_evolution::records::{
+    FeatureRequestDisposition, FeatureRequestRecord, InsightRecord, InsightSignal,
+    PlatformGapCategory, RecordHeader, RecordType,
+};
 
 use crate::state::ServerState;
+use crate::state::trajectory::TrajectorySource;
 
 /// Aggregated trajectory signal for a (entity_type, action) pair.
 struct TrajectorySignal {
@@ -220,6 +224,12 @@ pub(crate) fn generate_insights(state: &ServerState) -> Vec<InsightRecord> {
                     success_rate * 100.0,
                 )
             }
+            temper_evolution::records::InsightCategory::PlatformGap => {
+                format!(
+                    "Platform gap: '{}' on '{}' failed {} times. Consider adding this capability.",
+                    signal.action, signal.entity_type, signal.total,
+                )
+            }
         };
 
         let header = RecordHeader::new(RecordType::Insight, "insight-generator");
@@ -316,6 +326,92 @@ pub(crate) fn generate_unmet_intents(state: &ServerState) -> Vec<UnmetIntent> {
             }
         })
         .collect()
+}
+
+/// Minimum number of platform-source trajectory failures before generating a FR-Record.
+const FEATURE_REQUEST_THRESHOLD: u64 = 3;
+
+/// Generate feature request records from platform-source trajectories.
+///
+/// Filters trajectory entries with `source == Some(Platform)`, groups by
+/// `(action, error_pattern)`, and creates `FeatureRequestRecord`s for groups
+/// that exceed the frequency threshold.
+pub(crate) fn generate_feature_requests(state: &ServerState) -> Vec<FeatureRequestRecord> {
+    let tlog = state.trajectory_log.read().unwrap(); // ci-ok: infallible lock
+    let entries = tlog.entries();
+
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    // Group platform-source failures by (action, error_pattern).
+    let mut groups: BTreeMap<(String, String), PlatformGapAccum> = BTreeMap::new();
+
+    for entry in entries {
+        // Only consider platform-source trajectories.
+        if entry.source != Some(TrajectorySource::Platform) {
+            continue;
+        }
+        if entry.success {
+            continue;
+        }
+
+        let error_pattern = categorize_error(entry.error.as_deref());
+        let key = (entry.action.clone(), error_pattern.clone());
+        let accum = groups.entry(key).or_insert_with(|| PlatformGapAccum {
+            action: entry.action.clone(),
+            error_pattern,
+            description: entry.error.clone().unwrap_or_default(),
+            count: 0,
+            timestamps: Vec::new(),
+        });
+        accum.count += 1;
+        accum.timestamps.push(entry.timestamp.clone());
+    }
+
+    let mut feature_requests = Vec::new();
+
+    for accum in groups.into_values() {
+        if accum.count < FEATURE_REQUEST_THRESHOLD {
+            continue;
+        }
+
+        let category = match accum.error_pattern.as_str() {
+            "EntitySetNotFound" => PlatformGapCategory::MissingCapability,
+            "AuthzDenied" => PlatformGapCategory::GovernanceBlocked,
+            "ActionNotFound" => PlatformGapCategory::MissingMethod,
+            _ => PlatformGapCategory::MissingCapability,
+        };
+
+        let description = format!(
+            "Agents tried '{}' {} times — {}",
+            accum.action, accum.count, accum.description,
+        );
+
+        let header = RecordHeader::new(RecordType::FeatureRequest, "insight-generator");
+        feature_requests.push(FeatureRequestRecord {
+            header,
+            category,
+            description,
+            frequency: accum.count,
+            trajectory_refs: accum.timestamps,
+            disposition: FeatureRequestDisposition::Open,
+            developer_notes: None,
+        });
+    }
+
+    // Sort by frequency (highest first).
+    feature_requests.sort_by_key(|b| std::cmp::Reverse(b.frequency));
+    feature_requests
+}
+
+/// Accumulator for platform gap grouping.
+struct PlatformGapAccum {
+    action: String,
+    error_pattern: String,
+    description: String,
+    count: u64,
+    timestamps: Vec<String>,
 }
 
 /// Categorize an error string into a pattern name.

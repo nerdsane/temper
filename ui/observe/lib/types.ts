@@ -425,6 +425,21 @@ export interface UnmetIntentsResponse {
   resolved_count: number;
 }
 
+// --- Feature Request types ---
+export type PlatformGapCategory = 'MissingMethod' | 'GovernanceBlocked' | 'UnsupportedIntegration' | 'MissingCapability';
+export type FeatureRequestDisposition = 'Open' | 'Acknowledged' | 'Planned' | 'WontFix' | 'Resolved';
+
+export interface FeatureRequest {
+  id: string;
+  category: PlatformGapCategory;
+  description: string;
+  frequency: number;
+  trajectory_refs: string[];
+  disposition: FeatureRequestDisposition;
+  developer_notes: string | null;
+  created_at: string;
+}
+
 // --- Extended evolution record detail ---
 export interface EvolutionRecordDetail extends EvolutionRecord {
   derived_from?: string;

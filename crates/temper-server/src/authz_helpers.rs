@@ -8,7 +8,7 @@ use axum::http::HeaderMap;
 use temper_authz::SecurityContext;
 use temper_runtime::scheduler::sim_now;
 
-use crate::state::{PendingDecision, ServerState, TrajectoryEntry};
+use crate::state::{PendingDecision, ServerState, TrajectoryEntry, TrajectorySource};
 
 /// Extract `X-Temper-*` headers from an axum `HeaderMap` into `(key, value)` pairs
 /// suitable for `SecurityContext::from_headers`.
@@ -95,6 +95,7 @@ pub(crate) fn record_authz_denial(
         authz_denied: Some(true),
         denied_resource: Some(format!("{resource_type}:{resource_id}")),
         denied_module: None,
+        source: Some(TrajectorySource::Authz),
     };
     {
         let mut tlog = state.trajectory_log.write().unwrap(); // ci-ok: infallible lock

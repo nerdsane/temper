@@ -20,7 +20,7 @@ use crate::constraint_engine::{
 use crate::dispatch::{AgentContext, extract_agent_context};
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
-use crate::state::trajectory::TrajectoryEntry;
+use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
 type ODataWriteError = Box<axum::response::Response>;
 
@@ -86,6 +86,7 @@ fn resolve_entity_type_or_record_404(
             authz_denied: None,
             denied_resource: None,
             denied_module: None,
+            source: Some(TrajectorySource::Entity),
         };
         if let Ok(mut log) = state.trajectory_log.write() {
             // ci-ok: infallible lock

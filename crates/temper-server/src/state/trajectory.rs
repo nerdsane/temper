@@ -2,6 +2,17 @@
 
 use std::collections::VecDeque;
 
+/// The source category of a trajectory entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TrajectorySource {
+    /// Entity action failure (existing behavior).
+    Entity,
+    /// Platform capability gap (e.g. unknown MCP method).
+    Platform,
+    /// Authorization denial.
+    Authz,
+}
+
 /// A single trajectory entry recording the outcome of a dispatched action.
 ///
 /// Captures both successful transitions and failed intents (guard rejection,
@@ -41,6 +52,9 @@ pub struct TrajectoryEntry {
     /// WASM module that was denied (for WASM authz denials).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub denied_module: Option<String>,
+    /// Source category for this trajectory entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<TrajectorySource>,
 }
 
 /// Bounded, append-only trajectory log.

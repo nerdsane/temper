@@ -12,14 +12,14 @@ pub mod wasm_invocation_log;
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{DecisionStatus, PendingDecision, PendingDecisionLog, PolicyScope};
-pub use trajectory::{TrajectoryEntry, TrajectoryLog};
+pub use trajectory::{TrajectoryEntry, TrajectoryLog, TrajectorySource};
 pub use wasm_invocation_log::{WasmInvocationEntry, WasmInvocationLog};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use temper_authz::AuthzEngine;
-use temper_evolution::{PostgresRecordStore, RecordStore};
+use temper_evolution::{FeatureRequestRecord, PostgresRecordStore, RecordStore};
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::actor::ActorRef;
@@ -68,6 +68,7 @@ pub struct DesignTimeEvent {
 pub(crate) const TRAJECTORY_LOG_CAPACITY: usize = 10_000;
 /// Maximum number of design-time events retained in memory.
 const DESIGN_TIME_LOG_CAPACITY: usize = 10_000;
+/// Maximum number of feature request records retained.
 /// Maximum number of WASM invocation entries retained in the bounded log.
 const WASM_INVOCATION_LOG_CAPACITY: usize = 500;
 
@@ -127,6 +128,8 @@ pub struct ServerState {
     pub metrics: Arc<MetricsCollector>,
     /// Bounded trajectory log for failed intent analysis and Evolution Engine.
     pub trajectory_log: Arc<RwLock<TrajectoryLog>>,
+    /// Bounded log of feature request records for platform gap tracking.
+    pub feature_request_log: Arc<RwLock<Vec<FeatureRequestRecord>>>,
     /// In-memory evolution record store (O/P/A/D/I records).
     pub record_store: Arc<RecordStore>,
     /// Optional Postgres evolution record store (source of truth when configured).
@@ -208,6 +211,7 @@ impl ServerState {
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
+            feature_request_log: Arc::new(RwLock::new(Vec::new())),
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
@@ -333,6 +337,7 @@ impl ServerState {
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
+            feature_request_log: Arc::new(RwLock::new(Vec::new())),
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),

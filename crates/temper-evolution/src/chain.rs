@@ -38,6 +38,8 @@ pub fn validate_chain(store: &RecordStore, leaf_id: &str) -> ChainValidation {
             RecordType::Decision
         } else if current_id.starts_with("I-") {
             RecordType::Insight
+        } else if current_id.starts_with("FR-") {
+            RecordType::FeatureRequest
         } else {
             errors.push(format!("Unknown record type prefix in '{current_id}'"));
             break;
@@ -58,6 +60,7 @@ pub fn validate_chain(store: &RecordStore, leaf_id: &str) -> ChainValidation {
             RecordType::Problem => vec![RecordType::Observation],
             RecordType::Observation => vec![], // root
             RecordType::Insight => vec![RecordType::Observation], // insights derive from observations
+            RecordType::FeatureRequest => vec![RecordType::Insight], // FR derives from insight
         };
 
         // Get derived_from link
@@ -77,6 +80,7 @@ pub fn validate_chain(store: &RecordStore, leaf_id: &str) -> ChainValidation {
             RecordType::Insight => store
                 .get_insight(&current_id)
                 .and_then(|r| r.header.derived_from),
+            RecordType::FeatureRequest => None, // FR-Records not in in-memory store
         };
 
         match derived_from {

@@ -234,6 +234,7 @@ mod tests {
             authz_denied: None,
             denied_resource: None,
             denied_module: None,
+            source: None,
         }
     }
 

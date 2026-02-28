@@ -237,6 +237,36 @@ impl RuntimeContext {
                 };
                 self.temper_request(&tenant, Method::GET, path, None).await
             }
+            "get_decision_status" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let decision_id = expect_string_arg(args, 1, "decision_id", method)?;
+                let result = self
+                    .temper_request(
+                        &tenant,
+                        Method::GET,
+                        format!("/api/tenants/{tenant}/decisions"),
+                        None,
+                    )
+                    .await?;
+                // Search through the decisions array for the matching ID.
+                if let Some(decisions) = result.get("decisions").and_then(Value::as_array) {
+                    for d in decisions {
+                        if d.get("id").and_then(Value::as_str) == Some(&decision_id) {
+                            let status =
+                                d.get("status").and_then(Value::as_str).unwrap_or("unknown");
+                            return Ok(serde_json::json!({
+                                "decision_id": decision_id,
+                                "status": status,
+                                "decision": d,
+                            }));
+                        }
+                    }
+                }
+                Ok(serde_json::json!({
+                    "decision_id": decision_id,
+                    "status": "not_found",
+                }))
+            }
             "poll_decision" => {
                 let tenant = expect_string_arg(args, 0, "tenant", method)?;
                 let decision_id = expect_string_arg(args, 1, "decision_id", method)?;
@@ -356,7 +386,7 @@ impl RuntimeContext {
                  list, get, create, action, patch, \
                  show_spec, submit_specs, get_policies, \
                  upload_wasm, compile_wasm, \
-                 get_decisions, poll_decision, \
+                 get_decisions, get_decision_status, poll_decision, \
                  get_trajectories, get_insights, get_evolution_records, check_sentinel"
             )),
         }

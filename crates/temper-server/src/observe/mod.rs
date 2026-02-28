@@ -13,7 +13,7 @@ mod verification;
 pub(crate) mod wasm;
 use axum::Router;
 
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use serde::{Deserialize, Serialize};
 
 use crate::state::ServerState;
@@ -178,6 +178,14 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route(
             "/evolution/unmet-intents",
             get(evolution::handle_unmet_intents),
+        )
+        .route(
+            "/evolution/feature-requests",
+            get(evolution::handle_feature_requests),
+        )
+        .route(
+            "/evolution/feature-requests/{id}",
+            patch(evolution::handle_update_feature_request),
         )
         .route("/evolution/stream", get(evolution::handle_evolution_stream))
 }

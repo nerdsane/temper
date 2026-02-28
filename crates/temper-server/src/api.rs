@@ -527,6 +527,7 @@ async fn handle_approve_decision(
     };
 
     let generated_policy;
+    let evolution_record_id;
     {
         let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
         let decision = match log.get_mut(&id) {
@@ -545,6 +546,7 @@ async fn handle_approve_decision(
         }
 
         generated_policy = decision.generate_policy(&scope);
+        evolution_record_id = decision.evolution_record_id.clone();
         decision.status = DecisionStatus::Approved;
         decision.approved_scope = Some(scope);
         decision.generated_policy = Some(generated_policy.clone());
@@ -579,8 +581,14 @@ async fn handle_approve_decision(
     }
 
     // Create D-Record for the approval (evolution audit trail).
+    // Link to the A-Record via derived_from for O-A-D chain tracing.
+    let d_header = RecordHeader::new(RecordType::Decision, "human:approval");
+    let d_header = match evolution_record_id {
+        Some(ref eid) => d_header.derived_from(eid.clone()),
+        None => d_header,
+    };
     let d_record = DecisionRecord {
-        header: RecordHeader::new(RecordType::Decision, "human:approval"),
+        header: d_header,
         decision: Decision::Approved,
         decided_by: body
             .decided_by

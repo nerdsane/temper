@@ -4,7 +4,7 @@
 //! to specification changes. Records form an immutable chain:
 //!
 //! O-Record (Observation) → P-Record (Problem) → A-Record (Analysis)
-//! → D-Record (Decision) → I-Record (Insight)
+//! → D-Record (Decision) → I-Record (Insight) → FR-Record (FeatureRequest)
 //!
 //! Each record links to its predecessor, creating a traceable proof chain
 //! from anomaly detection to deployed change.
@@ -20,8 +20,8 @@ pub use chain::{ChainValidation, validate_chain};
 pub use insight::{classify_insight, compute_priority_score, generate_digest};
 pub use pg_store::{PgRecordStoreError, PostgresRecordStore};
 pub use records::{
-    AnalysisRecord, Decision, DecisionRecord, InsightCategory, InsightRecord, InsightSignal,
-    ObservationClass, ObservationRecord, ProblemRecord, RecordHeader, RecordId, RecordStatus,
-    RecordType,
+    AnalysisRecord, Decision, DecisionRecord, FeatureRequestDisposition, FeatureRequestRecord,
+    InsightCategory, InsightRecord, InsightSignal, ObservationClass, ObservationRecord,
+    PlatformGapCategory, ProblemRecord, RecordHeader, RecordId, RecordStatus, RecordType,
 };
 pub use store::RecordStore;

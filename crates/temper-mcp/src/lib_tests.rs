@@ -781,3 +781,132 @@ fn format_authz_denied_non_matching_body() {
     let body = r#"{"error":{"code":"NotFound","message":"Entity not found"}}"#;
     assert!(format_authz_denied(body).is_none());
 }
+
+#[test]
+fn format_authz_denied_structured_json_fields() {
+    let body = r#"{"error":{"code":"AuthorizationDenied","message":"Authorization denied for SubmitOrder on Order('ord-1'). Decision PD-xyz789 created."}}"#;
+    let result = format_authz_denied(body).expect("should parse");
+
+    // New structured fields
+    assert_eq!(result["denied"], json!(true), "denied should be true");
+    assert!(
+        result["reason"]
+            .as_str()
+            .unwrap() // ci-ok: test assertion
+            .contains("Cedar denied"),
+        "reason should contain denial text"
+    );
+    assert_eq!(
+        result["pending_decision"].as_str().unwrap(), // ci-ok: test assertion
+        "PD-xyz789",
+        "pending_decision should contain decision ID"
+    );
+    let poll_hint = result["poll_hint"].as_str().unwrap(); // ci-ok: test assertion
+    assert!(
+        poll_hint.contains("poll_decision"),
+        "poll_hint should mention poll_decision"
+    );
+    assert!(
+        poll_hint.contains("PD-xyz789"),
+        "poll_hint should reference decision ID"
+    );
+
+    // Backward-compatible fields still present
+    assert_eq!(
+        result["status"].as_str().unwrap(), // ci-ok: test assertion
+        "authorization_denied"
+    );
+    assert_eq!(
+        result["decision_id"].as_str().unwrap(), // ci-ok: test assertion
+        "PD-xyz789"
+    );
+}
+
+#[test]
+fn format_authz_denied_structured_json_without_decision() {
+    let body = r#"{"error":{"code":"AuthorizationDenied","message":"No matching permit policy"}}"#;
+    let result = format_authz_denied(body).expect("should parse");
+
+    assert_eq!(result["denied"], json!(true));
+    assert!(result["reason"].as_str().unwrap().contains("Cedar denied")); // ci-ok: test assertion
+    assert!(
+        result["pending_decision"].is_null(),
+        "pending_decision should be null when no PD- found"
+    );
+    let poll_hint = result["poll_hint"].as_str().unwrap(); // ci-ok: test assertion
+    assert!(
+        poll_hint.contains("poll_decision"),
+        "poll_hint should still mention poll_decision"
+    );
+}
+
+#[tokio::test]
+async fn get_decision_status_returns_decision() {
+    let tmp = write_temp_specs();
+    let (port, shutdown) = start_test_temper_server().await;
+
+    // Use agent identity so Cedar authorization applies (default-deny for agents).
+    let ctx = RuntimeContext::from_config(&McpConfig {
+        temper_port: Some(port),
+        apps: vec![app("demo", tmp.path())],
+        principal_id: Some("status-bot".to_string()),
+    })
+    .expect("ctx");
+
+    // Create entity first (creation bypasses Cedar).
+    let response = rpc(
+        &ctx,
+        call_tool_request(
+            60,
+            "execute",
+            "return await temper.create('demo', 'Orders', {'id': 'status-test-1', 'customer': 'Bob'})",
+        ),
+    )
+    .await;
+    let (_, is_error) = tool_text(&response);
+    assert!(!is_error, "create should succeed: {response:#}");
+
+    // Agent tries an action -- should be denied.
+    let response = rpc(
+        &ctx,
+        call_tool_request(
+            61,
+            "execute",
+            "return await temper.action('demo', 'Orders', 'status-test-1', 'CancelOrder', {'Reason': 'test'})",
+        ),
+    )
+    .await;
+    let (text, is_error) = tool_text(&response);
+    assert!(!is_error, "should get structured denial: {response:#}");
+    let denial: Value = serde_json::from_str(text).expect("json");
+    let decision_id = denial["pending_decision"]
+        .as_str()
+        .or_else(|| denial["decision_id"].as_str())
+        .expect("should have decision ID");
+
+    // Use get_decision_status to check.
+    let status_code = format!(
+        "return await temper.get_decision_status('demo', '{}')",
+        decision_id
+    );
+    let response = rpc(&ctx, call_tool_request(62, "execute", &status_code)).await;
+
+    let _ = shutdown.send(());
+
+    let (text, is_error) = tool_text(&response);
+    assert!(
+        !is_error,
+        "get_decision_status should succeed: {response:#}"
+    );
+    let status_result: Value = serde_json::from_str(text).expect("json");
+    assert_eq!(
+        status_result["decision_id"].as_str().unwrap(), // ci-ok: test assertion
+        decision_id,
+        "should return the correct decision ID"
+    );
+    assert_eq!(
+        status_result["status"].as_str().unwrap(), // ci-ok: test assertion
+        "pending",
+        "status should be pending"
+    );
+}

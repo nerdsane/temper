@@ -151,6 +151,7 @@ impl RecordStore {
             RecordType::Analysis => inner.analyses.len(),
             RecordType::Decision => inner.decisions.len(),
             RecordType::Insight => inner.insights.len(),
+            RecordType::FeatureRequest => 0, // FR-Records not stored in-memory store
         }
     }
 

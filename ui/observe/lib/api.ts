@@ -22,6 +22,8 @@ import type {
   UnmetIntentsResponse,
   EvolutionRecordDetail,
   ExtendedSentinelCheckResponse,
+  FeatureRequest,
+  FeatureRequestDisposition,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -377,4 +379,25 @@ export function subscribeEvolutionEvents(onEvent: (event: Record<string, unknown
     } catch { /* ignore parse errors */ }
   });
   return () => source.close();
+}
+
+/** Fetch feature requests, optionally filtered by disposition */
+export async function fetchFeatureRequests(disposition?: FeatureRequestDisposition): Promise<FeatureRequest[]> {
+  const params = disposition ? `?disposition=${disposition}` : "";
+  const res = await fetchWithRetry(`${API_BASE}/observe/evolution/feature-requests${params}`, { cache: "no-store" });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/** Update a feature request's disposition and/or developer notes */
+export async function updateFeatureRequest(
+  id: string,
+  update: { disposition?: FeatureRequestDisposition; developer_notes?: string },
+): Promise<boolean> {
+  const res = await fetchWithRetry(`${API_BASE}/observe/evolution/feature-requests/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  return res.ok;
 }

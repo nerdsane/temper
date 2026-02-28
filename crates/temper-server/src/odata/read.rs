@@ -15,6 +15,35 @@ use super::response::annotate_entity;
 use crate::query_eval::{apply_query_options, expand_entity, select_fields};
 use crate::response::{ODataResponse, ODataXmlResponse, odata_error};
 use crate::state::ServerState;
+use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
+use temper_runtime::scheduler::sim_now;
+
+/// Record a trajectory entry for an EntitySetNotFound error.
+fn record_entity_set_not_found(state: &ServerState, tenant: &str, set_name: &str) {
+    let entry = TrajectoryEntry {
+        timestamp: sim_now().to_rfc3339(),
+        tenant: tenant.to_string(),
+        entity_type: set_name.to_string(),
+        entity_id: "".to_string(),
+        action: "EntitySetLookup".to_string(),
+        success: false,
+        from_status: None,
+        to_status: None,
+        error: Some(format!(
+            "EntitySetNotFound: entity set '{}' not found",
+            set_name
+        )),
+        agent_id: None,
+        session_id: None,
+        authz_denied: None,
+        denied_resource: None,
+        denied_module: None,
+        source: Some(TrajectorySource::Platform),
+    };
+    if let Ok(mut log) = state.trajectory_log.write() {
+        log.push(entry);
+    }
+}
 
 pub(super) async fn handle_odata_get_for_tenant(
     state: ServerState,
@@ -65,6 +94,7 @@ pub(super) async fn handle_odata_get_for_tenant(
             let entity_type = match resolve_entity_type(&state, &tenant, &name) {
                 Some(t) => t,
                 None => {
+                    record_entity_set_not_found(&state, tenant.as_str(), &name);
                     return odata_error(
                         StatusCode::NOT_FOUND,
                         "EntitySetNotFound",
@@ -118,6 +148,7 @@ pub(super) async fn handle_odata_get_for_tenant(
             let entity_type = match resolve_entity_type(&state, &tenant, &set_name) {
                 Some(t) => t,
                 None => {
+                    record_entity_set_not_found(&state, tenant.as_str(), &set_name);
                     return odata_error(
                         StatusCode::NOT_FOUND,
                         "EntitySetNotFound",
@@ -187,6 +218,7 @@ pub(super) async fn handle_odata_get_for_tenant(
             let parent_entity_type = match resolve_entity_type(&state, &tenant, &parent_set) {
                 Some(t) => t,
                 None => {
+                    record_entity_set_not_found(&state, tenant.as_str(), &parent_set);
                     return odata_error(
                         StatusCode::NOT_FOUND,
                         "EntitySetNotFound",

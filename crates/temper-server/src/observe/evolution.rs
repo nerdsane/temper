@@ -18,6 +18,7 @@ use temper_evolution::{
 use crate::insight_generator;
 use crate::sentinel;
 use crate::state::{ServerState, TrajectoryEntry};
+use temper_evolution::FeatureRequestDisposition;
 
 /// Query parameters for the trajectory aggregation endpoint.
 #[derive(Deserialize)]
@@ -290,6 +291,15 @@ pub(crate) async fn handle_unmet_intent(
         authz_denied: None,
         denied_resource: None,
         denied_module: None,
+        source: body
+            .get("source")
+            .and_then(|v| v.as_str())
+            .and_then(|s| match s {
+                "platform" => Some(crate::state::TrajectorySource::Platform),
+                "authz" => Some(crate::state::TrajectorySource::Authz),
+                "entity" => Some(crate::state::TrajectorySource::Entity),
+                _ => None,
+            }),
         error: Some(if error_msg.is_empty() {
             format!("Unmet intent: {intent}")
         } else {
@@ -880,6 +890,8 @@ fn record_type_from_id_prefix(id: &str) -> Option<RecordType> {
         Some(RecordType::Decision)
     } else if id.starts_with("I-") {
         Some(RecordType::Insight)
+    } else if id.starts_with("FR-") {
+        Some(RecordType::FeatureRequest)
     } else {
         None
     }
@@ -921,6 +933,7 @@ async fn fetch_pg_record_derived_from(
             .map_err(|e| format!("failed to read Insight '{id}': {e}"))?
             .map(|r| r.header.derived_from)
             .ok_or_else(|| format!("record '{id}' not found")),
+        RecordType::FeatureRequest => Ok(None), // FR-Records not stored in Postgres yet
     }
 }
 
@@ -953,6 +966,7 @@ async fn validate_chain_pg(
             RecordType::Problem => vec![RecordType::Observation],
             RecordType::Observation => vec![],
             RecordType::Insight => vec![RecordType::Observation],
+            RecordType::FeatureRequest => vec![RecordType::Insight],
         };
 
         let derived_from = match fetch_pg_record_derived_from(store, &current_id, record_type).await
@@ -1009,6 +1023,118 @@ pub(crate) async fn handle_unmet_intents(
         "open_count": open_count,
         "resolved_count": resolved_count,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5F: Feature Request endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /observe/evolution/feature-requests -- list feature request records.
+///
+/// Supports optional `disposition` query parameter to filter by status.
+pub(crate) async fn handle_feature_requests(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::BTreeMap<String, String>>,
+) -> Json<serde_json::Value> {
+    // Generate fresh feature requests from trajectory data.
+    let generated = insight_generator::generate_feature_requests(&state);
+
+    // Merge with stored feature requests (update frequencies, add new ones).
+    {
+        let mut log = state.feature_request_log.write().unwrap(); // ci-ok: infallible lock
+        for fr in generated {
+            // Dedup: if we already have a FR with same category + matching description prefix, update freq.
+            let existing = log.iter_mut().find(|existing| {
+                existing.category == fr.category
+                    && existing.description.split(" — ").next()
+                        == fr.description.split(" — ").next()
+            });
+            if let Some(existing) = existing {
+                existing.frequency = fr.frequency;
+                existing.trajectory_refs = fr.trajectory_refs;
+            } else if log.len() < 500 {
+                log.push(fr);
+            }
+        }
+    }
+
+    // Read and optionally filter.
+    let log = state.feature_request_log.read().unwrap(); // ci-ok: infallible lock
+    let disposition_filter = params.get("disposition").map(|d| d.to_string());
+
+    let filtered: Vec<serde_json::Value> = log
+        .iter()
+        .filter(|fr| {
+            if let Some(ref filter) = disposition_filter {
+                let disp_str = match fr.disposition {
+                    FeatureRequestDisposition::Open => "Open",
+                    FeatureRequestDisposition::Acknowledged => "Acknowledged",
+                    FeatureRequestDisposition::Planned => "Planned",
+                    FeatureRequestDisposition::WontFix => "WontFix",
+                    FeatureRequestDisposition::Resolved => "Resolved",
+                };
+                disp_str.eq_ignore_ascii_case(filter)
+            } else {
+                true
+            }
+        })
+        .map(|fr| {
+            serde_json::json!({
+                "id": fr.header.id,
+                "category": fr.category,
+                "description": fr.description,
+                "frequency": fr.frequency,
+                "trajectory_refs": &fr.trajectory_refs[..fr.trajectory_refs.len().min(100)],
+                "disposition": fr.disposition,
+                "developer_notes": fr.developer_notes,
+                "created_at": fr.header.timestamp.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!(filtered))
+}
+
+/// PATCH /observe/evolution/feature-requests/:id -- update disposition + notes.
+pub(crate) async fn handle_update_feature_request(
+    State(state): State<ServerState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut log = state.feature_request_log.write().unwrap(); // ci-ok: infallible lock
+
+    let fr = log
+        .iter_mut()
+        .find(|fr| fr.header.id == id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Feature request '{id}' not found"),
+            )
+        })?;
+
+    if let Some(disposition) = body.get("disposition").and_then(|v| v.as_str()) {
+        fr.disposition = match disposition.to_lowercase().as_str() {
+            "open" => FeatureRequestDisposition::Open,
+            "acknowledged" => FeatureRequestDisposition::Acknowledged,
+            "planned" => FeatureRequestDisposition::Planned,
+            "wontfix" | "wont_fix" => FeatureRequestDisposition::WontFix,
+            "resolved" => FeatureRequestDisposition::Resolved,
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid disposition: {disposition}"),
+                ));
+            }
+        };
+    }
+
+    if let Some(notes) = body.get("developer_notes").and_then(|v| v.as_str()) {
+        fr.developer_notes = Some(notes.to_string());
+    }
+
+    let updated = serde_json::to_value(&*fr).unwrap_or_default();
+    Ok(Json(updated))
 }
 
 /// GET /observe/evolution/stream -- SSE for real-time evolution events.

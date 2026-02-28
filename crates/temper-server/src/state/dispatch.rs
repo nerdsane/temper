@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::ServerState;
 use super::pending_decisions::PendingDecision;
-use super::trajectory::TrajectoryEntry;
+use super::trajectory::{TrajectoryEntry, TrajectorySource};
 use super::wasm_invocation_log::WasmInvocationEntry;
 use crate::dispatch::AgentContext;
 use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
@@ -351,6 +351,7 @@ impl ServerState {
                                 authz_denied: Some(true),
                                 denied_resource: Some(int_name.clone()),
                                 denied_module: Some(log_module_name.clone()),
+                                source: Some(TrajectorySource::Authz),
                             };
                             if let Ok(mut tlog) = state.trajectory_log.write() {
                                 tlog.push(traj);
@@ -675,6 +676,7 @@ impl ServerState {
                 authz_denied: None,
                 denied_resource: None,
                 denied_module: None,
+                source: Some(TrajectorySource::Entity),
             };
             if let Err(e) = self.persist_trajectory_entry(&entry).await {
                 tracing::error!(error = %e, "failed to persist trajectory entry");
@@ -714,6 +716,7 @@ impl ServerState {
                     authz_denied: None,
                     denied_resource: None,
                     denied_module: None,
+                    source: Some(TrajectorySource::Entity),
                 };
                 if let Err(persist_err) = self.persist_trajectory_entry(&entry).await {
                     tracing::error!(error = %persist_err, "failed to persist trajectory entry");
@@ -753,6 +756,7 @@ impl ServerState {
             authz_denied: None,
             denied_resource: None,
             denied_module: None,
+            source: Some(TrajectorySource::Entity),
         };
         // Best-effort persistence to event store.
         if let Err(e) = self.persist_trajectory_entry(&trajectory_entry).await {

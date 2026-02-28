@@ -17,7 +17,7 @@ use temper_runtime::scheduler::sim_now;
 use crate::authz_helpers::{record_authz_denial, security_context_from_headers};
 use crate::reaction::registry::parse_reactions;
 use crate::registry::VerificationStatus;
-use crate::state::{ServerState, TrajectoryEntry};
+use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 use axum::http::HeaderMap;
 use temper_evolution::records::{
     AnalysisRecord, ObservationClass, ObservationRecord, RecordHeader, RecordType, SolutionOption,
@@ -898,9 +898,18 @@ pub(crate) async fn handle_load_inline(
             }],
             recommendation: Some(0),
         };
+        let a_record_id = a_record.header.id.clone();
         state.record_store.insert_analysis(a_record.clone());
         if let Some(ref pg_store) = state.pg_record_store {
             let _ = pg_store.insert_analysis(&a_record).await;
+        }
+
+        // Link the PendingDecision to the A-Record for O-A-D chain tracing.
+        {
+            let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
+            if let Some(decision) = log.get_mut(&pd.id) {
+                decision.evolution_record_id = Some(a_record_id);
+            }
         }
 
         return Err((
@@ -932,6 +941,7 @@ pub(crate) async fn handle_load_inline(
             authz_denied: None,
             denied_resource: None,
             denied_module: None,
+            source: Some(TrajectorySource::Entity),
         };
         let mut tlog = state.trajectory_log.write().unwrap(); // ci-ok: infallible lock
         tlog.push(traj);

@@ -119,6 +119,14 @@ pub(super) fn format_http_error(status: StatusCode, body: &str) -> String {
 /// Returns a structured JSON value with decision ID and guidance if the body
 /// matches the Temper AuthorizationDenied format. The agent can parse this
 /// programmatically to detect denials and poll for human approval.
+///
+/// The response includes:
+/// - `denied`: always `true`
+/// - `reason`: the Cedar denial reason text
+/// - `pending_decision`: the PD-xxx decision ID (if available)
+/// - `poll_hint`: guidance on how to poll for approval
+/// - `status`: `"authorization_denied"` (backward compat)
+/// - `decision_id`: same as `pending_decision` (backward compat)
 pub(super) fn format_authz_denied(body: &str) -> Option<Value> {
     let json: Value = serde_json::from_str(body).ok()?;
     let code = json.pointer("/error/code").and_then(Value::as_str)?;
@@ -141,19 +149,29 @@ pub(super) fn format_authz_denied(body: &str) -> Option<Value> {
         None
     };
 
+    let default_hint = "A human must approve this action. Use `await temper.poll_decision(tenant, decision_id)` to wait, then retry.".to_string();
+    let hint = decision_id.as_ref().map_or(default_hint.clone(), |did| {
+        format!(
+            "Call `await temper.poll_decision(tenant, '{}')` to wait for approval, then retry.",
+            did
+        )
+    });
+
     let mut result = serde_json::json!({
+        "denied": true,
+        "reason": format!("Cedar denied: {message}"),
+        "pending_decision": decision_id,
+        "poll_hint": hint,
+        // Backward-compatible fields
         "status": "authorization_denied",
         "message": format!("Cedar denied: {message}"),
         "observe_url": "http://localhost:3001/decisions",
-        "hint": "A human must approve this action. Use `await temper.poll_decision(tenant, decision_id)` to wait, then retry."
+        "hint": hint
     });
 
+    // Also set decision_id for backward compat
     if let Some(ref did) = decision_id {
         result["decision_id"] = Value::String(did.clone());
-        result["hint"] = Value::String(format!(
-            "Call `await temper.poll_decision(tenant, '{}')` to wait for approval, then retry.",
-            did
-        ));
     }
 
     Some(result)

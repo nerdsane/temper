@@ -125,6 +125,7 @@ pub(super) async fn dispatch_bound_action(
             &reason,
             None,
         );
+        let pending_id = pd.id.clone();
         {
             let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
             if log.push(pd.clone()) {
@@ -148,6 +149,7 @@ pub(super) async fn dispatch_bound_action(
             authz_denied: Some(true),
             denied_resource: Some(format!("{}:{}", entity_type, key_str)),
             denied_module: None,
+            source: None,
         };
         {
             let mut tlog = state.trajectory_log.write().unwrap(); // ci-ok: infallible lock
@@ -157,7 +159,13 @@ pub(super) async fn dispatch_bound_action(
         http_span.set_status(Status::error(reason.clone()));
         let end_time: std::time::SystemTime = sim_now().into();
         http_span.end_with_timestamp(end_time);
-        return odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason).into_response();
+        let reason_with_id = format!("{reason} (decision: {pending_id})");
+        return odata_error(
+            StatusCode::FORBIDDEN,
+            "AuthorizationDenied",
+            &reason_with_id,
+        )
+        .into_response();
     }
 
     let current_fields = current_state.state.fields.clone();

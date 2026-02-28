@@ -74,6 +74,9 @@ pub struct PendingDecision {
     /// Scope of approval (if approved).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_scope: Option<PolicyScope>,
+    /// Link to the evolution A-Record that analyzed this denial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evolution_record_id: Option<String>,
 }
 
 impl PendingDecision {
@@ -105,6 +108,7 @@ impl PendingDecision {
             decided_at: None,
             generated_policy: None,
             approved_scope: None,
+            evolution_record_id: None,
         }
     }
 
