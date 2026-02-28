@@ -110,6 +110,44 @@ fn cross_tenant_admin_denied() -> axum::response::Response {
         .into_response()
 }
 
+fn authorize_tenant_decision_management(
+    state: &ServerState,
+    headers: &HeaderMap,
+    tenant: &str,
+) -> Result<(), axum::response::Response> {
+    let security_ctx = security_context_from_headers(headers, None, None);
+    if let Err(reason) = state.authorize_with_context(
+        &security_ctx,
+        "manage_policies",
+        "PolicySet",
+        &std::collections::BTreeMap::new(),
+    ) {
+        let pd = record_authz_denial(
+            state,
+            tenant,
+            &security_ctx,
+            None,
+            "manage_policies",
+            "PolicySet",
+            tenant,
+            serde_json::json!({"tenant": tenant}),
+            &reason,
+            None,
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": {
+                    "code": "AuthorizationDenied",
+                    "message": format!("{reason} Decision {}", pd.id),
+                }
+            })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
 /// PUT /api/tenants/{tenant}/secrets/{key_name} — encrypt and store a secret.
 async fn handle_put_secret(
     State(state): State<ServerState>,
@@ -469,8 +507,13 @@ struct DecisionListParams {
 async fn handle_list_decisions(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
+    headers: HeaderMap,
     Query(params): Query<DecisionListParams>,
 ) -> impl IntoResponse {
+    if let Err(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
+        return resp;
+    }
+
     let log = state.pending_decision_log.read().unwrap(); // ci-ok: infallible lock
     let entries: Vec<_> = log
         .entries()
@@ -530,8 +573,13 @@ struct ApproveBody {
 async fn handle_approve_decision(
     State(state): State<ServerState>,
     Path((tenant, id)): Path<(String, String)>,
+    headers: HeaderMap,
     axum::Json(body): axum::Json<ApproveBody>,
 ) -> impl IntoResponse {
+    if let Err(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
+        return resp;
+    }
+
     let scope: PolicyScope = match body.scope.as_str() {
         "narrow" => PolicyScope::Narrow,
         "medium" => PolicyScope::Medium,
@@ -638,8 +686,13 @@ async fn handle_approve_decision(
 async fn handle_deny_decision(
     State(state): State<ServerState>,
     Path((tenant, id)): Path<(String, String)>,
+    headers: HeaderMap,
     body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
+    if let Err(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
+        return resp;
+    }
+
     let decided_by = body
         .as_ref()
         .and_then(|b| b.get("decided_by"))
@@ -677,7 +730,12 @@ async fn handle_deny_decision(
 async fn handle_decision_stream(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
+        return resp;
+    }
+
     let rx = state.pending_decision_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
         match result {
@@ -686,14 +744,18 @@ async fn handle_decision_stream(
                     return None;
                 }
                 let data = serde_json::to_string(&pd).unwrap_or_default();
-                Some(Ok(Event::default().event("pending_decision").data(data)))
+                Some(Ok::<Event, Infallible>(
+                    Event::default().event("pending_decision").data(data),
+                ))
             }
             // Lagged receiver: skip missed events and continue.
             Err(_) => None,
         }
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// GET /api/decisions — list all decisions across all tenants.

@@ -18,7 +18,7 @@ pub struct ActorContext<A: Actor> {
     pub(crate) reply_channel: Option<oneshot::Sender<Result<Box<dyn Any + Send>, ActorError>>>,
 
     /// Children spawned by this actor.
-    pub(crate) children: HashMap<String, Box<dyn Any + Send>>,
+    pub(crate) children: HashMap<String, Box<dyn Any + Send>>, // determinism-ok: key-based lookup only; iteration order not observed
 
     _phantom: std::marker::PhantomData<A>,
 }
@@ -28,7 +28,7 @@ impl<A: Actor> ActorContext<A> {
         Self {
             id,
             reply_channel: None,
-            children: HashMap::new(),
+            children: HashMap::new(), // determinism-ok: map order is not used
             _phantom: std::marker::PhantomData,
         }
     }

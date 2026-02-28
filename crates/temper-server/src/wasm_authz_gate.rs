@@ -60,7 +60,7 @@ impl WasmAuthzGate for CedarWasmAuthzGate {
             .context_attrs
             .insert("url".into(), serde_json::Value::String(url.to_string()));
 
-        // Convert BTreeMap to HashMap at Cedar boundary
+        // Convert BTreeMap to HashMap at Cedar boundary (determinism-ok)
         let hash_attrs: std::collections::HashMap<_, _> = resource_attrs.into_iter().collect(); // determinism-ok: Cedar API requires HashMap
         let decision = self.engine.authorize_or_bypass(
             &enriched_ctx,
@@ -88,7 +88,7 @@ impl WasmAuthzGate for CedarWasmAuthzGate {
             serde_json::Value::String(secret_key.to_string()),
         );
 
-        // Convert BTreeMap to HashMap at Cedar boundary
+        // Convert BTreeMap to HashMap at Cedar boundary (determinism-ok)
         let hash_attrs: std::collections::HashMap<_, _> = resource_attrs.into_iter().collect(); // determinism-ok: Cedar API requires HashMap
         let decision =
             self.engine

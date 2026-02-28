@@ -34,6 +34,28 @@ fn build_test_app() -> Router {
         .with_state(state)
 }
 
+const ADMIN_MANAGE_POLICIES_POLICY: &str = r#"
+permit(
+  principal is Admin,
+  action == Action::"manage_policies",
+  resource is PolicySet
+);
+"#;
+
+fn install_admin_policy(state: &ServerState) {
+    state
+        .authz
+        .reload_policies(ADMIN_MANAGE_POLICIES_POLICY)
+        .expect("admin policy should parse");
+}
+
+fn build_app_with_state(state: ServerState) -> Router {
+    Router::new()
+        .nest("/observe", build_observe_router())
+        .nest("/api", crate::api::build_api_router())
+        .with_state(state)
+}
+
 #[tokio::test]
 async fn test_list_specs_returns_registered_entities() {
     let app = build_test_app();
@@ -92,6 +114,164 @@ async fn test_get_spec_detail_not_found() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_tenant_decisions_requires_manage_policies() {
+    let state = test_state_with_registry();
+    install_admin_policy(&state);
+    let app = build_app_with_state(state);
+
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::get("/api/tenants/default/decisions")
+                .header("x-temper-principal-id", "cust-1")
+                .header("x-temper-principal-kind", "customer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let allowed = app
+        .oneshot(
+            Request::get("/api/tenants/default/decisions")
+                .header("x-temper-principal-id", "admin-1")
+                .header("x-temper-principal-kind", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_tenant_decision_stream_requires_manage_policies() {
+    let state = test_state_with_registry();
+    install_admin_policy(&state);
+    let app = build_app_with_state(state);
+
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::get("/api/tenants/default/decisions/stream")
+                .header("x-temper-principal-id", "cust-1")
+                .header("x-temper-principal-kind", "customer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let allowed = app
+        .oneshot(
+            Request::get("/api/tenants/default/decisions/stream")
+                .header("x-temper-principal-id", "admin-1")
+                .header("x-temper-principal-kind", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let ct = allowed
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.contains("text/event-stream"),
+        "expected SSE content-type, got: {ct}"
+    );
+}
+
+#[tokio::test]
+async fn test_tenant_decision_mutations_require_manage_policies() {
+    let state = test_state_with_registry();
+    install_admin_policy(&state);
+    let app = build_app_with_state(state);
+
+    let deny_approve = app
+        .clone()
+        .oneshot(
+            Request::post("/api/tenants/default/decisions/PD-does-not-exist/approve")
+                .header("content-type", "application/json")
+                .header("x-temper-principal-id", "cust-1")
+                .header("x-temper-principal-kind", "customer")
+                .body(Body::from(r#"{"scope":"narrow"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deny_approve.status(), StatusCode::FORBIDDEN);
+
+    let deny_deny = app
+        .oneshot(
+            Request::post("/api/tenants/default/decisions/PD-does-not-exist/deny")
+                .header("content-type", "application/json")
+                .header("x-temper-principal-id", "cust-1")
+                .header("x-temper-principal-kind", "customer")
+                .body(Body::from(r#"{"decided_by":"cust-1"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deny_deny.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchanged() {
+    let state = test_state_with_registry();
+    install_admin_policy(&state);
+
+    let pending = crate::state::PendingDecision::from_denial(
+        "default",
+        "agent-1",
+        "submitOrder",
+        "Invalid-Type",
+        "order-1",
+        serde_json::json!({"id":"order-1"}),
+        "test denial",
+        None,
+    );
+    let decision_id = pending.id.clone();
+    {
+        let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
+        assert!(log.push(pending));
+    }
+    let before_policies = state
+        .tenant_policies
+        .read()
+        .unwrap() // ci-ok: infallible lock
+        .clone();
+
+    let app = build_app_with_state(state.clone());
+    let response = app
+        .oneshot(
+            Request::post(format!(
+                "/api/tenants/default/decisions/{decision_id}/approve"
+            ))
+            .header("content-type", "application/json")
+            .header("x-temper-principal-id", "admin-1")
+            .header("x-temper-principal-kind", "admin")
+            .body(Body::from(r#"{"scope":"broad","decided_by":"admin-1"}"#))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let log = state.pending_decision_log.read().unwrap(); // ci-ok: infallible lock
+    let decision = log.get(&decision_id).expect("decision should still exist");
+    assert_eq!(decision.status, crate::state::DecisionStatus::Pending);
+    assert!(decision.generated_policy.is_none());
+
+    let after_policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+    assert_eq!(*after_policies, before_policies);
 }
 
 #[tokio::test]

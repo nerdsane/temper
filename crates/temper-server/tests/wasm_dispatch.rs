@@ -9,6 +9,7 @@ use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
 use temper_server::dispatch::AgentContext;
 use temper_server::registry::SpecRegistry;
+use temper_server::state::TrajectorySource;
 use temper_spec::csdl::parse_csdl;
 
 /// Pre-built echo integration WASM binary.
@@ -82,6 +83,57 @@ fn build_echo_test_state() -> ServerState {
 
     let system = ActorSystem::new("wasm-dispatch-test");
     ServerState::from_registry(system, registry)
+}
+
+const ADMIN_ONLY_POLICY: &str = r#"
+permit(
+  principal is Admin,
+  action == Action::"manage_policies",
+  resource is PolicySet
+);
+"#;
+
+fn install_non_wasm_policy(state: &ServerState) {
+    state
+        .authz
+        .reload_policies(ADMIN_ONLY_POLICY)
+        .expect("policy should parse");
+}
+
+fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str) {
+    let pd_log = state
+        .pending_decision_log
+        .read()
+        .expect("pending decision lock"); // ci-ok: infallible lock
+    let decision = pd_log
+        .entries()
+        .iter()
+        .find(|d| d.resource_id == "echo_integration" && d.action == "http_call")
+        .expect("expected wasm authz pending decision");
+    assert_eq!(decision.module_name.as_deref(), Some("echo_integration"));
+
+    let tlog = state.trajectory_log.read().expect("trajectory lock"); // ci-ok: infallible lock
+    let authz_traj = tlog
+        .entries()
+        .iter()
+        .find(|t| {
+            t.entity_id == entity_id
+                && t.authz_denied == Some(true)
+                && t.source == Some(TrajectorySource::Authz)
+        })
+        .expect("expected authz trajectory");
+    assert_eq!(
+        authz_traj.denied_module.as_deref(),
+        Some("echo_integration")
+    );
+
+    let wlog = state.wasm_invocation_log.read().expect("wasm log lock"); // ci-ok: infallible lock
+    let denied_invocation = wlog
+        .entries()
+        .iter()
+        .find(|w| w.entity_id == entity_id && w.authz_denied == Some(true))
+        .expect("expected denied wasm invocation");
+    assert_eq!(denied_invocation.module_name, "echo_integration");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -191,4 +243,86 @@ async fn wasm_missing_module_dispatches_failure_callback() {
         final_status, "Failed",
         "missing module should trigger on_failure callback → Failed state"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_authz_denial_records_governance_artifacts_async_mode() {
+    let state = build_echo_test_state();
+    let tenant = TenantId::default();
+    install_non_wasm_policy(&state);
+
+    let hash = state
+        .wasm_engine
+        .compile_and_cache(ECHO_WASM)
+        .expect("echo module should compile");
+    {
+        let mut wasm_reg = state
+            .wasm_module_registry
+            .write()
+            .expect("wasm registry lock"); // ci-ok: infallible lock
+        wasm_reg.register(&tenant, "echo_integration", &hash);
+    }
+
+    let response = state
+        .dispatch_tenant_action(
+            &tenant,
+            "EchoTest",
+            "echo-authz-async",
+            "TriggerEcho",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
+        .await
+        .expect("TriggerEcho should succeed");
+    assert_eq!(response.state.status, "Pending");
+
+    let mut final_status = String::new();
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let entity = state
+            .get_tenant_entity_state(&tenant, "EchoTest", "echo-authz-async")
+            .await
+            .expect("entity should exist");
+        final_status = entity.state.status.clone();
+        if final_status == "Failed" {
+            break;
+        }
+    }
+    assert_eq!(final_status, "Failed");
+    assert_wasm_authz_denial_artifacts(&state, "echo-authz-async");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_authz_denial_records_governance_artifacts_blocking_mode() {
+    let state = build_echo_test_state();
+    let tenant = TenantId::default();
+    install_non_wasm_policy(&state);
+
+    let hash = state
+        .wasm_engine
+        .compile_and_cache(ECHO_WASM)
+        .expect("echo module should compile");
+    {
+        let mut wasm_reg = state
+            .wasm_module_registry
+            .write()
+            .expect("wasm registry lock"); // ci-ok: infallible lock
+        wasm_reg.register(&tenant, "echo_integration", &hash);
+    }
+
+    let response = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "EchoTest",
+            "echo-authz-blocking",
+            "TriggerEcho",
+            serde_json::json!({}),
+            &AgentContext::default(),
+            true,
+        )
+        .await
+        .expect("blocking TriggerEcho should return callback result");
+    assert!(response.success);
+    assert_eq!(response.state.status, "Failed");
+    assert_wasm_authz_denial_artifacts(&state, "echo-authz-blocking");
 }
