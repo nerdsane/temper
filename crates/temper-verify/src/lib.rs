@@ -9,6 +9,7 @@
 pub mod cascade;
 pub mod checker;
 pub mod model;
+pub mod paths;
 pub mod proptest_gen;
 pub mod simulation;
 pub mod smt;
@@ -19,6 +20,9 @@ pub use checker::{VerificationResult, check_model};
 pub use model::{
     InvariantKind, ModelEffect, ModelGuard, ResolvedTransition, TemperModel, TemperModelAction,
     TemperModelState, build_model_from_ioa,
+};
+pub use paths::{
+    PathExtractionConfig, PathExtractionResult, PathStep, ReachablePath, extract_paths,
 };
 pub use proptest_gen::{PropTestResult, run_prop_tests_from_ioa};
 pub use simulation::{

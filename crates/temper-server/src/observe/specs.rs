@@ -811,11 +811,22 @@ pub(crate) async fn handle_load_inline(
         .map(|k| k.strip_suffix(".ioa.toml").unwrap_or(k).to_string())
         .collect();
 
+    let mut spec_resource_attrs = std::collections::BTreeMap::new();
+    spec_resource_attrs.insert("id".to_string(), serde_json::json!("SpecRegistry"));
+    for (spec_key, spec_content) in &body.specs {
+        if spec_key.ends_with(".ioa.toml") && let Ok(automaton) = temper_spec::automaton::parse_automaton(spec_content) {
+            let metadata = automaton.extract_metadata();
+            for (k, v) in metadata.to_flat_map() {
+                spec_resource_attrs.insert(k, v);
+            }
+        }
+    }
+
     let authz_result = state.authorize_with_context(
         &security_ctx,
         "submit_specs",
         "SpecRegistry",
-        &std::collections::BTreeMap::new(),
+        &spec_resource_attrs,
     );
     if let Err(reason) = authz_result {
         // Record denials and use the first decision ID as the primary chain anchor.
@@ -870,6 +881,7 @@ pub(crate) async fn handle_load_inline(
                 "tenant": tenant,
                 "entity_types": entity_names,
                 "decision_id": primary_decision_id.clone(),
+                "spec_metadata": spec_resource_attrs,
             }),
         };
         let o_id = o_record.header.id.clone();
@@ -947,6 +959,7 @@ pub(crate) async fn handle_load_inline(
             denied_resource: None,
             denied_module: None,
             source: Some(TrajectorySource::Entity),
+            spec_governed: None,
         };
         let mut tlog = state.trajectory_log.write().unwrap(); // ci-ok: infallible lock
         tlog.push(traj);

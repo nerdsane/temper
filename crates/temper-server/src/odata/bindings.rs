@@ -140,6 +140,12 @@ pub(super) async fn dispatch_bound_action(
         }
     }
 
+    let has_spec = {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        registry.get_spec(tenant, entity_type).is_some()
+    };
+    resource_attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
+
     let authz_result =
         state.authorize_with_context(&security_ctx, action, entity_type, &resource_attrs);
     if let Err(reason) = authz_result {
@@ -183,6 +189,7 @@ pub(super) async fn dispatch_bound_action(
             denied_resource: Some(format!("{}:{}", entity_type, key_str)),
             denied_module: None,
             source: Some(crate::state::trajectory::TrajectorySource::Authz),
+            spec_governed: None,
         };
         {
             let mut tlog = state.trajectory_log.write().unwrap(); // ci-ok: infallible lock
@@ -285,16 +292,23 @@ pub(super) async fn dispatch_bound_action(
 
                 http_span.set_status(Status::Ok);
                 http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
-                let body = annotate_entity(
-                    serde_json::to_value(&response.state).unwrap_or_default(),
-                    format!("$metadata#{set_name}/$entity"),
-                    None,
-                );
-                ODataResponse {
-                    status: StatusCode::OK,
-                    body,
+
+                if !response.spec_governed {
+                    let body = serde_json::json!({
+                        "action": action,
+                        "entityId": key_str,
+                        "recorded": true,
+                        "specGoverned": false,
+                    });
+                    ODataResponse { status: StatusCode::OK, body }.into_response()
+                } else {
+                    let body = annotate_entity(
+                        serde_json::to_value(&response.state).unwrap_or_default(),
+                        format!("$metadata#{set_name}/$entity"),
+                        None,
+                    );
+                    ODataResponse { status: StatusCode::OK, body }.into_response()
                 }
-                .into_response()
             } else {
                 http_span.set_status(Status::error(response.error.clone().unwrap_or_default()));
                 http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));

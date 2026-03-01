@@ -39,6 +39,7 @@ fn record_entity_set_not_found(state: &ServerState, tenant: &str, set_name: &str
         denied_resource: None,
         denied_module: None,
         source: Some(TrajectorySource::Platform),
+        spec_governed: None,
     };
     if let Ok(mut log) = state.trajectory_log.write() {
         log.push(entry);

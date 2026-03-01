@@ -141,6 +141,7 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/entities", get(entities::list_entities))
         .route("/verify/{entity}", post(verification::run_verification))
         .route("/simulation/{entity}", get(verification::run_simulation))
+        .route("/paths/{entity}", get(verification::get_paths))
         .route(
             "/entities/{entity_type}/{entity_id}/history",
             get(entities::get_entity_history),

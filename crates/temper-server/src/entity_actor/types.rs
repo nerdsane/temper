@@ -82,6 +82,11 @@ pub struct EntityEvent {
     pub params: serde_json::Value,
 }
 
+/// Default value for `spec_governed`: actions are spec-governed unless explicitly marked otherwise.
+fn default_spec_governed() -> bool { true }
+/// Serde skip predicate: skip serializing `spec_governed` when it is `true` (the default).
+fn is_true(v: &bool) -> bool { *v }
+
 /// The response returned from an action or query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityResponse {
@@ -100,4 +105,7 @@ pub struct EntityResponse {
     /// Spawn requests for child entities (executed by dispatch pipeline).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spawn_requests: Vec<crate::entity_actor::effects::SpawnRequest>,
+    /// Whether the action was governed by a state-machine spec. Defaults to `true`.
+    #[serde(default = "default_spec_governed", skip_serializing_if = "is_true")]
+    pub spec_governed: bool,
 }

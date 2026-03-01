@@ -11,6 +11,7 @@ use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
 use crate::secret_template::resolve_secret_templates;
 use crate::wasm_authz_gate::PermissiveWasmAuthzGate;
+use temper_observe::wide_event;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{
@@ -238,6 +239,14 @@ impl ServerState {
                 }
                 let _ = self.persist_wasm_invocation(&log_entry).await;
 
+                // Observability: emit WideEvent for module-not-found failure
+                let wide = wide_event::from_wasm_invocation(
+                    &module_name, action, entity_type, entity_id,
+                    &tenant.to_string(), false, 0, Some(&error_str),
+                );
+                wide_event::emit_span(&wide);
+                wide_event::emit_metrics(&wide);
+
                 if let Some(ref cb) = integration.on_failure {
                     let params = serde_json::json!({
                         "error": error_str,
@@ -337,6 +346,14 @@ impl ServerState {
                         log.push(log_entry.clone());
                     }
                     let _ = self.persist_wasm_invocation(&log_entry).await;
+
+                    // Observability: emit WideEvent for successful WASM invocation
+                    let wide = wide_event::from_wasm_invocation(
+                        &module_name, action, entity_type, entity_id,
+                        &tenant.to_string(), true, result.duration_ms * 1_000_000, None,
+                    );
+                    wide_event::emit_span(&wide);
+                    wide_event::emit_metrics(&wide);
 
                     if let Some(ref cb) = integration.on_success
                         && let Some(resp) = self
@@ -442,6 +459,14 @@ impl ServerState {
             log.push(log_entry.clone());
         }
         let _ = self.persist_wasm_invocation(&log_entry).await;
+
+        // Observability: emit WideEvent for failed WASM invocation
+        let wide = wide_event::from_wasm_invocation(
+            module_name, trigger_action, entity_ref.entity_type, entity_ref.entity_id,
+            &entity_ref.tenant.to_string(), false, duration_ms * 1_000_000, Some(&error_str),
+        );
+        wide_event::emit_span(&wide);
+        wide_event::emit_metrics(&wide);
 
         let decision_id = if is_authz_denied {
             self.record_wasm_authz_denial(
@@ -564,6 +589,7 @@ impl ServerState {
             denied_resource: Some(integration_name.to_string()),
             denied_module: Some(module_name.to_string()),
             source: Some(TrajectorySource::Authz),
+            spec_governed: None,
         };
         if let Ok(mut tlog) = self.trajectory_log.write() {
             tlog.push(traj);
@@ -757,34 +783,51 @@ impl ServerState {
         await_integration: bool,
     ) -> Result<EntityResponse, String> {
         let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
-            // Record a trajectory entry for the "no transition table" failure.
+            // Spec-free dispatch: no transition table, but Cedar allowed the action.
             let entry = TrajectoryEntry {
                 timestamp: sim_now().to_rfc3339(),
                 tenant: tenant.to_string(),
                 entity_type: entity_type.to_string(),
                 entity_id: entity_id.to_string(),
                 action: action.to_string(),
-                success: false,
+                success: true,
                 from_status: None,
                 to_status: None,
-                error: Some(format!(
-                    "No transition table for tenant '{tenant}', entity type '{entity_type}'"
-                )),
+                error: None,
                 agent_id: agent_ctx.agent_id.clone(),
                 session_id: agent_ctx.session_id.clone(),
                 authz_denied: None,
                 denied_resource: None,
                 denied_module: None,
                 source: Some(TrajectorySource::Entity),
+                spec_governed: Some(false),
             };
             if let Err(e) = self.persist_trajectory_entry(&entry).await {
                 tracing::error!(error = %e, "failed to persist trajectory entry");
-            } else if let Ok(mut log) = self.trajectory_log.write() {
-                log.push(entry.clone());
             }
-            return Err(format!(
-                "No transition table for tenant '{tenant}', entity type '{entity_type}'"
-            ));
+            if let Ok(mut log) = self.trajectory_log.write() {
+                log.push(entry);
+            }
+            return Ok(EntityResponse {
+                success: true,
+                state: EntityState {
+                    entity_type: entity_type.to_string(),
+                    entity_id: entity_id.to_string(),
+                    status: String::new(),
+                    item_count: 0,
+                    counters: std::collections::BTreeMap::new(),
+                    booleans: std::collections::BTreeMap::new(),
+                    lists: std::collections::BTreeMap::new(),
+                    fields: serde_json::json!({}),
+                    events: vec![],
+                    sequence_nr: 0,
+                },
+                error: None,
+                custom_effects: vec![],
+                scheduled_actions: vec![],
+                spawn_requests: vec![],
+                spec_governed: false,
+            });
         };
 
         // Pre-resolve cross-entity state gates (Gap 1: Agent OS).
@@ -825,6 +868,7 @@ impl ServerState {
                     denied_resource: None,
                     denied_module: None,
                     source: Some(TrajectorySource::Entity),
+                    spec_governed: None,
                 };
                 if let Err(persist_err) = self.persist_trajectory_entry(&entry).await {
                     tracing::error!(error = %persist_err, "failed to persist trajectory entry");
@@ -865,6 +909,7 @@ impl ServerState {
             denied_resource: None,
             denied_module: None,
             source: Some(TrajectorySource::Entity),
+            spec_governed: None,
         };
         // Best-effort persistence to event store.
         if let Err(e) = self.persist_trajectory_entry(&trajectory_entry).await {
@@ -872,6 +917,10 @@ impl ServerState {
         }
         // Always push to in-memory log so /observe endpoints see it.
         if let Ok(mut log) = self.trajectory_log.write() {
+            log.push(trajectory_entry.clone());
+        }
+        // Push successful transitions to the dedicated success log (separate budget).
+        if trajectory_entry.success && let Ok(mut log) = self.success_trajectory_log.write() {
             log.push(trajectory_entry.clone());
         }
 

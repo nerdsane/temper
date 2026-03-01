@@ -55,6 +55,9 @@ pub struct TrajectoryEntry {
     /// Source category for this trajectory entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<TrajectorySource>,
+    /// Whether this action was governed by a state-machine spec (`true`) or spec-free (`false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_governed: Option<bool>,
 }
 
 /// Bounded, append-only trajectory log.

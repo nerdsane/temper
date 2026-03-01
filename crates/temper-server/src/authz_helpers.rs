@@ -96,6 +96,7 @@ pub(crate) fn record_authz_denial(
         denied_resource: Some(format!("{resource_type}:{resource_id}")),
         denied_module: None,
         source: Some(TrajectorySource::Authz),
+        spec_governed: None,
     };
     {
         let mut tlog = state.trajectory_log.write().unwrap(); // ci-ok: infallible lock
