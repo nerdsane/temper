@@ -73,7 +73,9 @@ impl<M: Message> MailboxSender<M> {
 
     /// Mailbox utilization as a fraction in [0.0, 1.0].
     pub fn utilization(&self) -> f64 {
-        if self.capacity == 0 { return 0.0; }
+        if self.capacity == 0 {
+            return 0.0;
+        }
         self.depth() as f64 / self.capacity as f64
     }
 }

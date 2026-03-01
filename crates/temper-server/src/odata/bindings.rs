@@ -300,14 +300,22 @@ pub(super) async fn dispatch_bound_action(
                         "recorded": true,
                         "specGoverned": false,
                     });
-                    ODataResponse { status: StatusCode::OK, body }.into_response()
+                    ODataResponse {
+                        status: StatusCode::OK,
+                        body,
+                    }
+                    .into_response()
                 } else {
                     let body = annotate_entity(
                         serde_json::to_value(&response.state).unwrap_or_default(),
                         format!("$metadata#{set_name}/$entity"),
                         None,
                     );
-                    ODataResponse { status: StatusCode::OK, body }.into_response()
+                    ODataResponse {
+                        status: StatusCode::OK,
+                        body,
+                    }
+                    .into_response()
                 }
             } else {
                 http_span.set_status(Status::error(response.error.clone().unwrap_or_default()));

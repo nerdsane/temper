@@ -83,9 +83,13 @@ pub struct EntityEvent {
 }
 
 /// Default value for `spec_governed`: actions are spec-governed unless explicitly marked otherwise.
-fn default_spec_governed() -> bool { true }
+fn default_spec_governed() -> bool {
+    true
+}
 /// Serde skip predicate: skip serializing `spec_governed` when it is `true` (the default).
-fn is_true(v: &bool) -> bool { *v }
+fn is_true(v: &bool) -> bool {
+    *v
+}
 
 /// The response returned from an action or query.
 #[derive(Debug, Clone, Serialize, Deserialize)]

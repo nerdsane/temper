@@ -723,15 +723,26 @@ pub(crate) async fn get_paths(
         }
         found
     };
-    let Some(ioa_source) = ioa_source else { return Err(StatusCode::NOT_FOUND); };
-    let target_states: Vec<String> = params.targets.map(|t| t.split(',').map(|s| s.trim().to_string()).collect()).unwrap_or_default();
+    let Some(ioa_source) = ioa_source else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let target_states: Vec<String> = params
+        .targets
+        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
     let max_paths = params.max_paths.unwrap_or(5);
     let max_length = params.max_length.unwrap_or(20);
     // determinism-ok: spawn_blocking for CPU-intensive path extraction in HTTP handler
     let result = tokio::task::spawn_blocking(move || {
         let model = temper_verify::build_model_from_ioa(&ioa_source, 2);
-        let config = temper_verify::PathExtractionConfig { target_states, max_paths_per_target: max_paths, max_path_length: max_length };
+        let config = temper_verify::PathExtractionConfig {
+            target_states,
+            max_paths_per_target: max_paths,
+            max_path_length: max_length,
+        };
         temper_verify::extract_paths(&model, &config)
-    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(result))
 }

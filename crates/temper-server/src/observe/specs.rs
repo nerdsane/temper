@@ -814,7 +814,9 @@ pub(crate) async fn handle_load_inline(
     let mut spec_resource_attrs = std::collections::BTreeMap::new();
     spec_resource_attrs.insert("id".to_string(), serde_json::json!("SpecRegistry"));
     for (spec_key, spec_content) in &body.specs {
-        if spec_key.ends_with(".ioa.toml") && let Ok(automaton) = temper_spec::automaton::parse_automaton(spec_content) {
+        if spec_key.ends_with(".ioa.toml")
+            && let Ok(automaton) = temper_spec::automaton::parse_automaton(spec_content)
+        {
             let metadata = automaton.extract_metadata();
             for (k, v) in metadata.to_flat_map() {
                 spec_resource_attrs.insert(k, v);

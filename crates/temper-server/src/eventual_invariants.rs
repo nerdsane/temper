@@ -160,8 +160,13 @@ pub fn spawn_eventual_recheck(
                     );
                     // Observability: emit WideEvent for invariant convergence
                     let wide = wide_event::from_invariant_check(
-                        &inv.name, &inv.entity_type, &inv.entity_id,
-                        &inv.tenant, inv.check_count as u32, "converged", 0,
+                        &inv.name,
+                        &inv.entity_type,
+                        &inv.entity_id,
+                        &inv.tenant,
+                        inv.check_count as u32,
+                        "converged",
+                        0,
                     );
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
@@ -195,8 +200,13 @@ pub fn spawn_eventual_recheck(
                 );
                 // Observability: emit WideEvent for invariant convergence failure
                 let wide = wide_event::from_invariant_check(
-                    &inv.name, &inv.entity_type, &inv.entity_id,
-                    &inv.tenant, inv.check_count as u32, "failed", 0,
+                    &inv.name,
+                    &inv.entity_type,
+                    &inv.entity_id,
+                    &inv.tenant,
+                    inv.check_count as u32,
+                    "failed",
+                    0,
                 );
                 wide_event::emit_span(&wide);
                 wide_event::emit_metrics(&wide);

@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use temper_runtime::persistence::EventStore;
 use temper_observe::wide_event;
+use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
@@ -212,11 +212,21 @@ impl ServerState {
         let decision = self
             .authz
             .authorize_or_bypass(&ctx, action, resource_type, &attrs);
-        let duration_ns = (sim_now() - authz_start).num_nanoseconds().unwrap_or(0).max(0) as u64;
-        let decision_str = match &decision { AuthzDecision::Allow => "Allow", AuthzDecision::Deny(_) => "Deny" };
+        let duration_ns = (sim_now() - authz_start)
+            .num_nanoseconds()
+            .unwrap_or(0)
+            .max(0) as u64;
+        let decision_str = match &decision {
+            AuthzDecision::Allow => "Allow",
+            AuthzDecision::Deny(_) => "Deny",
+        };
         let wide = wide_event::from_authz_decision(
-            action, resource_type, &format!("{:?}", ctx.principal.kind),
-            decision_str, duration_ns, "default",
+            action,
+            resource_type,
+            &format!("{:?}", ctx.principal.kind),
+            decision_str,
+            duration_ns,
+            "default",
         );
         wide_event::emit_span(&wide);
         wide_event::emit_metrics(&wide);
@@ -248,11 +258,21 @@ impl ServerState {
         let decision = self
             .authz
             .authorize_or_bypass(security_ctx, action, resource_type, &attrs);
-        let duration_ns = (sim_now() - authz_start).num_nanoseconds().unwrap_or(0).max(0) as u64;
-        let decision_str = match &decision { AuthzDecision::Allow => "Allow", AuthzDecision::Deny(_) => "Deny" };
+        let duration_ns = (sim_now() - authz_start)
+            .num_nanoseconds()
+            .unwrap_or(0)
+            .max(0) as u64;
+        let decision_str = match &decision {
+            AuthzDecision::Allow => "Allow",
+            AuthzDecision::Deny(_) => "Deny",
+        };
         let wide = wide_event::from_authz_decision(
-            action, resource_type, &format!("{:?}", security_ctx.principal.kind),
-            decision_str, duration_ns, "default",
+            action,
+            resource_type,
+            &format!("{:?}", security_ctx.principal.kind),
+            decision_str,
+            duration_ns,
+            "default",
         );
         wide_event::emit_span(&wide);
         wide_event::emit_metrics(&wide);

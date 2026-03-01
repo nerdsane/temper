@@ -314,7 +314,10 @@ pub fn emit_span(event: &WideEvent) {
     }
     attrs.push(KeyValue::new("temper.trace_id", event.trace_id.clone()));
     attrs.push(KeyValue::new("temper.span_id", event.span_id.clone()));
-    attrs.push(KeyValue::new("temper.from_status", event.from_status.clone()));
+    attrs.push(KeyValue::new(
+        "temper.from_status",
+        event.from_status.clone(),
+    ));
     attrs.push(KeyValue::new("temper.to_status", event.to_status.clone()));
 
     let status = if event.success {
@@ -358,10 +361,16 @@ mod tests {
 
     fn sample_event() -> WideEvent {
         from_transition(
-            "Order", "order-123", "SubmitOrder", "Draft", "Submitted",
-            true, 5_000_000,
+            "Order",
+            "order-123",
+            "SubmitOrder",
+            "Draft",
+            "Submitted",
+            true,
+            5_000_000,
             &serde_json::json!({"ShippingAddressId": "addr-1"}),
-            2, "trace-abc",
+            2,
+            "trace-abc",
         )
     }
 
@@ -378,10 +387,14 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_span_noop() { emit_span(&sample_event()); }
+    fn test_emit_span_noop() {
+        emit_span(&sample_event());
+    }
 
     #[test]
-    fn test_emit_metrics_noop() { emit_metrics(&sample_event()); }
+    fn test_emit_metrics_noop() {
+        emit_metrics(&sample_event());
+    }
 
     #[test]
     fn test_cost_decoupling() {
@@ -395,8 +408,16 @@ mod tests {
     #[test]
     fn test_failed_transition_marks_error() {
         let event = from_transition(
-            "Order", "order-456", "SubmitOrder", "Draft", "Draft",
-            false, 1_000_000, &serde_json::json!({}), 0, "trace-def",
+            "Order",
+            "order-456",
+            "SubmitOrder",
+            "Draft",
+            "Draft",
+            false,
+            1_000_000,
+            &serde_json::json!({}),
+            0,
+            "trace-def",
         );
         assert!(!event.success);
         assert_eq!(event.tags["success"], "false");
@@ -405,8 +426,14 @@ mod tests {
     #[test]
     fn test_wasm_invocation_event() {
         let event = from_wasm_invocation(
-            "weather_module", "CheckWeather", "Task", "task-1", "tenant-a",
-            true, 2_000_000, None,
+            "weather_module",
+            "CheckWeather",
+            "Task",
+            "task-1",
+            "tenant-a",
+            true,
+            2_000_000,
+            None,
         );
         assert_eq!(event.event_kind, EventKind::WasmInvocation);
         assert_eq!(event.tags["module_name"], "weather_module");
@@ -419,8 +446,14 @@ mod tests {
     #[test]
     fn test_wasm_invocation_with_error() {
         let event = from_wasm_invocation(
-            "weather_module", "CheckWeather", "Task", "task-1", "tenant-a",
-            false, 3_000_000, Some("module panicked"),
+            "weather_module",
+            "CheckWeather",
+            "Task",
+            "task-1",
+            "tenant-a",
+            false,
+            3_000_000,
+            Some("module panicked"),
         );
         assert!(!event.success);
         assert_eq!(event.attributes["error"], "module panicked");
@@ -428,9 +461,8 @@ mod tests {
 
     #[test]
     fn test_authz_decision_event() {
-        let event = from_authz_decision(
-            "SubmitOrder", "Order", "user", "Allow", 500_000, "tenant-b",
-        );
+        let event =
+            from_authz_decision("SubmitOrder", "Order", "user", "Allow", 500_000, "tenant-b");
         assert_eq!(event.event_kind, EventKind::AuthzDecision);
         assert_eq!(event.tags["decision"], "Allow");
         assert!(event.success);
@@ -440,17 +472,21 @@ mod tests {
 
     #[test]
     fn test_authz_deny_decision() {
-        let event = from_authz_decision(
-            "DeleteOrder", "Order", "user", "Deny", 800_000, "tenant-b",
-        );
+        let event =
+            from_authz_decision("DeleteOrder", "Order", "user", "Deny", 800_000, "tenant-b");
         assert!(!event.success);
     }
 
     #[test]
     fn test_invariant_check_event() {
         let event = from_invariant_check(
-            "order_total_positive", "Order", "order-99", "tenant-c",
-            3, "converged", 1_500_000,
+            "order_total_positive",
+            "Order",
+            "order-99",
+            "tenant-c",
+            3,
+            "converged",
+            1_500_000,
         );
         assert_eq!(event.event_kind, EventKind::InvariantCheck);
         assert_eq!(event.tags["outcome"], "converged");
@@ -462,8 +498,13 @@ mod tests {
     #[test]
     fn test_invariant_check_failed() {
         let event = from_invariant_check(
-            "stock_non_negative", "Inventory", "inv-5", "tenant-c",
-            10, "failed", 5_000_000,
+            "stock_non_negative",
+            "Inventory",
+            "inv-5",
+            "tenant-c",
+            10,
+            "failed",
+            5_000_000,
         );
         assert!(!event.success);
     }
@@ -476,6 +517,9 @@ mod tests {
             from_authz_decision("a", "T", "user", "Allow", 0, "t"),
             from_invariant_check("inv", "T", "id", "t", 1, "converged", 0),
         ];
-        for e in &events { emit_span(e); emit_metrics(e); }
+        for e in &events {
+            emit_span(e);
+            emit_metrics(e);
+        }
     }
 }

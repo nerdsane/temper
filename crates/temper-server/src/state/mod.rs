@@ -214,7 +214,9 @@ impl ServerState {
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
-            success_trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
+            success_trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(
+                TRAJECTORY_LOG_CAPACITY,
+            ))),
             feature_request_log: Arc::new(RwLock::new(Vec::new())),
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
@@ -341,7 +343,9 @@ impl ServerState {
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
-            success_trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
+            success_trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(
+                TRAJECTORY_LOG_CAPACITY,
+            ))),
             feature_request_log: Arc::new(RwLock::new(Vec::new())),
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,

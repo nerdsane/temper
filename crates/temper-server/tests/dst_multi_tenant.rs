@@ -116,7 +116,10 @@ async fn dst_tenant_a_cannot_dispatch_task() {
         )
         .await;
     let resp = r.expect("spec-free dispatch should succeed");
-    assert!(!resp.spec_governed, "should be spec-free (no Task spec in tenant-a)");
+    assert!(
+        !resp.spec_governed,
+        "should be spec-free (no Task spec in tenant-a)"
+    );
 }
 
 // =========================================================================
@@ -164,7 +167,10 @@ async fn dst_tenant_b_cannot_dispatch_order() {
         )
         .await;
     let resp = r.expect("spec-free dispatch should succeed");
-    assert!(!resp.spec_governed, "should be spec-free (no Order spec in tenant-b)");
+    assert!(
+        !resp.spec_governed,
+        "should be spec-free (no Order spec in tenant-b)"
+    );
 }
 
 // =========================================================================

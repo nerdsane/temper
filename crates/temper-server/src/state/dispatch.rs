@@ -241,8 +241,14 @@ impl ServerState {
 
                 // Observability: emit WideEvent for module-not-found failure
                 let wide = wide_event::from_wasm_invocation(
-                    &module_name, action, entity_type, entity_id,
-                    &tenant.to_string(), false, 0, Some(&error_str),
+                    &module_name,
+                    action,
+                    entity_type,
+                    entity_id,
+                    &tenant.to_string(),
+                    false,
+                    0,
+                    Some(&error_str),
                 );
                 wide_event::emit_span(&wide);
                 wide_event::emit_metrics(&wide);
@@ -349,8 +355,14 @@ impl ServerState {
 
                     // Observability: emit WideEvent for successful WASM invocation
                     let wide = wide_event::from_wasm_invocation(
-                        &module_name, action, entity_type, entity_id,
-                        &tenant.to_string(), true, result.duration_ms * 1_000_000, None,
+                        &module_name,
+                        action,
+                        entity_type,
+                        entity_id,
+                        &tenant.to_string(),
+                        true,
+                        result.duration_ms * 1_000_000,
+                        None,
                     );
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
@@ -462,8 +474,14 @@ impl ServerState {
 
         // Observability: emit WideEvent for failed WASM invocation
         let wide = wide_event::from_wasm_invocation(
-            module_name, trigger_action, entity_ref.entity_type, entity_ref.entity_id,
-            &entity_ref.tenant.to_string(), false, duration_ms * 1_000_000, Some(&error_str),
+            module_name,
+            trigger_action,
+            entity_ref.entity_type,
+            entity_ref.entity_id,
+            &entity_ref.tenant.to_string(),
+            false,
+            duration_ms * 1_000_000,
+            Some(&error_str),
         );
         wide_event::emit_span(&wide);
         wide_event::emit_metrics(&wide);
@@ -920,7 +938,9 @@ impl ServerState {
             log.push(trajectory_entry.clone());
         }
         // Push successful transitions to the dedicated success log (separate budget).
-        if trajectory_entry.success && let Ok(mut log) = self.success_trajectory_log.write() {
+        if trajectory_entry.success
+            && let Ok(mut log) = self.success_trajectory_log.write()
+        {
             log.push(trajectory_entry.clone());
         }
 
