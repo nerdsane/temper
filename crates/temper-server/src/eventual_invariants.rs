@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use temper_observe::wide_event;
 use temper_runtime::scheduler::sim_now;
 
 /// Maximum number of pending invariants tracked simultaneously (TigerStyle budget).
@@ -157,6 +158,18 @@ pub fn spawn_eventual_recheck(
                         &inv.entity_type,
                         "eventual_converged",
                     );
+                    // Observability: emit WideEvent for invariant convergence
+                    let wide = wide_event::from_invariant_check(
+                        &inv.name,
+                        &inv.entity_type,
+                        &inv.entity_id,
+                        &inv.tenant,
+                        inv.check_count as u32,
+                        "converged",
+                        0,
+                    );
+                    wide_event::emit_span(&wide);
+                    wide_event::emit_metrics(&wide);
                     tracing::info!(
                         invariant = %inv.name,
                         tenant = %inv.tenant,
@@ -185,6 +198,18 @@ pub fn spawn_eventual_recheck(
                     &inv.name,
                     "eventual_convergence_failed",
                 );
+                // Observability: emit WideEvent for invariant convergence failure
+                let wide = wide_event::from_invariant_check(
+                    &inv.name,
+                    &inv.entity_type,
+                    &inv.entity_id,
+                    &inv.tenant,
+                    inv.check_count as u32,
+                    "failed",
+                    0,
+                );
+                wide_event::emit_span(&wide);
+                wide_event::emit_metrics(&wide);
                 tracing::error!(
                     invariant = %inv.name,
                     tenant = %inv.tenant,

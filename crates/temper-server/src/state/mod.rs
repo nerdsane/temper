@@ -129,6 +129,8 @@ pub struct ServerState {
     pub metrics: Arc<MetricsCollector>,
     /// Bounded trajectory log for failed intent analysis and Evolution Engine.
     pub trajectory_log: Arc<RwLock<TrajectoryLog>>,
+    /// Bounded trajectory log for successful transitions (separate budget).
+    pub success_trajectory_log: Arc<RwLock<TrajectoryLog>>,
     /// Bounded log of feature request records for platform gap tracking.
     pub feature_request_log: Arc<RwLock<Vec<FeatureRequestRecord>>>,
     /// In-memory evolution record store (O/P/A/D/I records).
@@ -212,6 +214,9 @@ impl ServerState {
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
+            success_trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(
+                TRAJECTORY_LOG_CAPACITY,
+            ))),
             feature_request_log: Arc::new(RwLock::new(Vec::new())),
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
@@ -338,6 +343,9 @@ impl ServerState {
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
             trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
+            success_trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(
+                TRAJECTORY_LOG_CAPACITY,
+            ))),
             feature_request_log: Arc::new(RwLock::new(Vec::new())),
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,

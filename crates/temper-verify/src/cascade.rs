@@ -88,6 +88,9 @@ pub struct CascadeResult {
     pub levels: Vec<LevelResult>,
     /// Warnings about invariants that could not be verified at model level.
     pub warnings: Vec<String>,
+    /// Reachable paths extracted after L1 model check (if path extraction was configured).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable_paths: Option<crate::paths::PathExtractionResult>,
 }
 
 impl CascadeResult {
@@ -113,6 +116,8 @@ pub struct VerificationCascade {
     actor_sim_runner: Option<ActorSimRunner>,
     /// If true, stop after the first failing level.
     fail_fast: bool,
+    /// Optional path extraction config (runs after L1 passes).
+    path_extraction_config: Option<crate::paths::PathExtractionConfig>,
 }
 
 impl VerificationCascade {
@@ -127,6 +132,7 @@ impl VerificationCascade {
             prop_test_max_steps: 30,
             actor_sim_runner: None,
             fail_fast: false,
+            path_extraction_config: None,
         }
     }
 
@@ -160,6 +166,12 @@ impl VerificationCascade {
         self
     }
 
+    /// Enable path extraction after L1 model check passes.
+    pub fn with_path_extraction(mut self, config: crate::paths::PathExtractionConfig) -> Self {
+        self.path_extraction_config = Some(config);
+        self
+    }
+
     /// Run the full verification cascade.
     pub fn run(&self) -> CascadeResult {
         let mut levels = Vec::new();
@@ -177,6 +189,7 @@ impl VerificationCascade {
                 all_passed: false,
                 levels,
                 warnings,
+                reachable_paths: None,
             };
         }
 
@@ -189,8 +202,18 @@ impl VerificationCascade {
                 all_passed: false,
                 levels,
                 warnings,
+                reachable_paths: None,
             };
         }
+
+        // Run path extraction after L1 passes (if configured).
+        let reachable_paths = if l1_passed {
+            self.path_extraction_config
+                .as_ref()
+                .map(|config| crate::paths::extract_paths(&model, config))
+        } else {
+            None
+        };
 
         // Level 2: Deterministic simulation (model-level)
         let l2 = self.run_simulation_level();
@@ -201,6 +224,7 @@ impl VerificationCascade {
                 all_passed: false,
                 levels,
                 warnings,
+                reachable_paths,
             };
         }
 
@@ -214,6 +238,7 @@ impl VerificationCascade {
                     all_passed: false,
                     levels,
                     warnings,
+                    reachable_paths,
                 };
             }
         }
@@ -227,6 +252,7 @@ impl VerificationCascade {
             all_passed,
             levels,
             warnings,
+            reachable_paths,
         }
     }
 

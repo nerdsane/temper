@@ -62,6 +62,22 @@ impl<M: Message> MailboxSender<M> {
     pub fn capacity(&self) -> usize {
         self.capacity
     }
+
+    /// Current number of messages queued in the mailbox.
+    ///
+    /// Computed as `max_capacity - available_capacity`. DST-safe:
+    /// exact under single-threaded simulation.
+    pub fn depth(&self) -> usize {
+        self.capacity.saturating_sub(self.inner.capacity())
+    }
+
+    /// Mailbox utilization as a fraction in [0.0, 1.0].
+    pub fn utilization(&self) -> f64 {
+        if self.capacity == 0 {
+            return 0.0;
+        }
+        self.depth() as f64 / self.capacity as f64
+    }
 }
 
 impl<M: Message> MailboxReceiver<M> {
@@ -150,5 +166,41 @@ mod tests {
         let result = tx.send(Envelope::Tell(TestMsg("orphan".into())));
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ActorError::SendFailed);
+    }
+
+    #[tokio::test]
+    async fn test_mailbox_depth_empty() {
+        let (tx, _rx) = mailbox::<TestMsg>(10);
+        assert_eq!(tx.depth(), 0);
+        assert_eq!(tx.utilization(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_mailbox_depth_after_sends() {
+        let (tx, _rx) = mailbox::<TestMsg>(10);
+        tx.send(Envelope::Tell(TestMsg("a".into()))).unwrap();
+        tx.send(Envelope::Tell(TestMsg("b".into()))).unwrap();
+        tx.send(Envelope::Tell(TestMsg("c".into()))).unwrap();
+        assert_eq!(tx.depth(), 3);
+        assert!((tx.utilization() - 0.3).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn test_mailbox_depth_full() {
+        let (tx, _rx) = mailbox::<TestMsg>(3);
+        tx.send(Envelope::Tell(TestMsg("1".into()))).unwrap();
+        tx.send(Envelope::Tell(TestMsg("2".into()))).unwrap();
+        tx.send(Envelope::Tell(TestMsg("3".into()))).unwrap();
+        assert_eq!(tx.depth(), 3);
+        assert_eq!(tx.utilization(), 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_mailbox_depth_after_recv() {
+        let (tx, mut rx) = mailbox::<TestMsg>(10);
+        tx.send(Envelope::Tell(TestMsg("a".into()))).unwrap();
+        tx.send(Envelope::Tell(TestMsg("b".into()))).unwrap();
+        let _ = rx.recv().await;
+        assert_eq!(tx.depth(), 1);
     }
 }

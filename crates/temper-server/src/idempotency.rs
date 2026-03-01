@@ -126,6 +126,7 @@ mod tests {
             custom_effects: vec![],
             scheduled_actions: vec![],
             spawn_requests: vec![],
+            spec_governed: true,
         }
     }
 

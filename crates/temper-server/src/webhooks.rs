@@ -235,6 +235,7 @@ mod tests {
             denied_resource: None,
             denied_module: None,
             source: None,
+            spec_governed: None,
         }
     }
 

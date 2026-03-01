@@ -339,6 +339,7 @@ pub(super) async fn hydrate_trajectory_log(
                     denied_resource: None,
                     denied_module: None,
                     source: None,
+                    spec_governed: None,
                 });
             }
             let count = log.entries().len();
@@ -372,6 +373,7 @@ pub(super) async fn hydrate_trajectory_log(
                             denied_resource: None,
                             denied_module: None,
                             source: None,
+                            spec_governed: None,
                         });
                     }
                     let count = log.entries().len();

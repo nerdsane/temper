@@ -39,3 +39,60 @@ forbid(
 ) when {
     context has "module"
 };
+
+// ============================================================
+// Dispatch Presets: Require specs for consequential actions
+// ============================================================
+
+// Deployment actions require a spec.
+@id("require-spec-for-deploy")
+forbid(
+    principal,
+    action == Action::"deploy",
+    resource
+) when {
+    context has "has_spec" && context.has_spec == false
+};
+
+// Actions with WASM integrations require a spec.
+@id("require-spec-for-wasm-execute")
+forbid(
+    principal,
+    action == Action::"execute",
+    resource
+) when {
+    context has "has_wasm_integration" &&
+    context.has_wasm_integration == true &&
+    context has "has_spec" &&
+    context.has_spec == false
+};
+
+// ============================================================
+// Spec Quality Presets: Structural invariants on submitted specs
+// ============================================================
+
+// Require guard on transitions to states containing "deploy" or "production".
+@id("require-guard-on-deploy-states")
+forbid(
+    principal,
+    action == Action::"submit_specs",
+    resource
+) when {
+    context has "states" &&
+    context has "guarded_target_states" &&
+    (context.states.contains("Deployed") || context.states.contains("Production")) &&
+    !(context.guarded_target_states.contains("Deployed") || context.guarded_target_states.contains("Production"))
+};
+
+// Require at least one invariant for specs with more than 3 states.
+@id("require-invariants-for-complex-specs")
+forbid(
+    principal,
+    action == Action::"submit_specs",
+    resource
+) when {
+    context has "state_count" &&
+    context has "invariant_count" &&
+    context.state_count > 3 &&
+    context.invariant_count == 0
+};

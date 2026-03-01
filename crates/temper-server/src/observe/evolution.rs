@@ -305,6 +305,7 @@ pub(crate) async fn handle_unmet_intent(
         } else {
             error_msg.to_string()
         }),
+        spec_governed: None,
     };
     state
         .persist_trajectory_entry(&entry)

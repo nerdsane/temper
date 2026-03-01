@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use temper_runtime::scheduler::sim_now;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -698,4 +698,51 @@ pub(crate) async fn handle_workflows(State(state): State<ServerState>) -> Json<W
     }
 
     Json(WorkflowsResponse { workflows })
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PathsQueryParams {
+    pub targets: Option<String>,
+    pub max_paths: Option<usize>,
+    pub max_length: Option<usize>,
+}
+
+pub(crate) async fn get_paths(
+    State(state): State<ServerState>,
+    Path(entity): Path<String>,
+    Query(params): Query<PathsQueryParams>,
+) -> Result<Json<temper_verify::PathExtractionResult>, StatusCode> {
+    let ioa_source = {
+        let registry = state.registry.read().expect("registry lock poisoned");
+        let mut found = None;
+        for tenant_id in registry.tenant_ids() {
+            if let Some(entity_spec) = registry.get_spec(tenant_id, &entity) {
+                found = Some(entity_spec.ioa_source.clone());
+                break;
+            }
+        }
+        found
+    };
+    let Some(ioa_source) = ioa_source else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let target_states: Vec<String> = params
+        .targets
+        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+    let max_paths = params.max_paths.unwrap_or(5);
+    let max_length = params.max_length.unwrap_or(20);
+    // determinism-ok: spawn_blocking for CPU-intensive path extraction in HTTP handler
+    let result = tokio::task::spawn_blocking(move || {
+        let model = temper_verify::build_model_from_ioa(&ioa_source, 2);
+        let config = temper_verify::PathExtractionConfig {
+            target_states,
+            max_paths_per_target: max_paths,
+            max_path_length: max_length,
+        };
+        temper_verify::extract_paths(&model, &config)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(result))
 }

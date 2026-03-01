@@ -350,6 +350,7 @@ impl Actor for EntityActor {
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
+                        spec_governed: true,
                     });
                     return Ok(());
                 }
@@ -384,6 +385,7 @@ impl Actor for EntityActor {
                             custom_effects: vec![],
                             scheduled_actions: vec![],
                             spawn_requests: vec![],
+                            spec_governed: true,
                         });
                         return Ok(());
                     }
@@ -452,6 +454,7 @@ impl Actor for EntityActor {
                         custom_effects: result.custom_effects,
                         scheduled_actions: result.scheduled_actions,
                         spawn_requests: result.spawn_requests,
+                        spec_governed: true,
                     });
                 } else {
                     // Transition failed — emit telemetry
@@ -482,6 +485,7 @@ impl Actor for EntityActor {
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
+                        spec_governed: true,
                     });
                 }
             }
@@ -493,6 +497,7 @@ impl Actor for EntityActor {
                     custom_effects: vec![],
                     scheduled_actions: vec![],
                     spawn_requests: vec![],
+                    spec_governed: true,
                 });
             }
             EntityMsg::GetField { field } => {
@@ -530,6 +535,7 @@ impl Actor for EntityActor {
                     custom_effects: vec![],
                     scheduled_actions: vec![],
                     spawn_requests: vec![],
+                    spec_governed: true,
                 });
             }
             EntityMsg::Delete => {
@@ -540,6 +546,7 @@ impl Actor for EntityActor {
                     custom_effects: vec![],
                     scheduled_actions: vec![],
                     spawn_requests: vec![],
+                    spec_governed: true,
                 });
             }
         }
