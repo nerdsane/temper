@@ -108,57 +108,13 @@ pub fn process_action(
     action: &str,
     params: &serde_json::Value,
 ) -> ProcessResult {
-    let ctx = build_eval_context(state);
-    let result = table.evaluate_ctx(&state.status, &ctx, action);
-
-    match result {
-        Some(transition_result) if transition_result.success => {
-            let from_status = state.status.clone();
-            let to_status = transition_result.new_state.clone();
-
-            let (custom_effects, scheduled_actions, spawn_requests) =
-                apply_effects(state, &transition_result.effects, params);
-            let _ = &spawn_requests; // used by caller via ProcessResult
-            apply_new_state_fallback(state, &from_status, &to_status);
-            sync_fields(state, params);
-
-            let event = EntityEvent {
-                action: action.to_string(),
-                from_status,
-                to_status: state.status.clone(),
-                timestamp: sim_now(),
-                params: params.clone(),
-            };
-
-            ProcessResult {
-                success: true,
-                event: Some(event),
-                custom_effects,
-                scheduled_actions,
-                spawn_requests,
-                error: None,
-            }
-        }
-        Some(_) => ProcessResult {
-            success: false,
-            event: None,
-            custom_effects: vec![],
-            scheduled_actions: vec![],
-            spawn_requests: vec![],
-            error: Some(format!(
-                "Action '{}' not valid from state '{}'",
-                action, state.status
-            )),
-        },
-        None => ProcessResult {
-            success: false,
-            event: None,
-            custom_effects: vec![],
-            scheduled_actions: vec![],
-            spawn_requests: vec![],
-            error: Some(format!("Unknown action: {}", action)),
-        },
-    }
+    process_action_with_xref(
+        state,
+        table,
+        action,
+        params,
+        &std::collections::BTreeMap::new(),
+    )
 }
 
 /// Process an action with pre-resolved cross-entity booleans.

@@ -360,9 +360,9 @@ impl ServerState {
         if let Ok(mut log) = self.design_time_log.write() {
             if log.len() >= DESIGN_TIME_LOG_CAPACITY {
                 // Keep the newest events; evict oldest one.
-                let _ = log.remove(0);
+                log.pop_front();
             }
-            log.push(event);
+            log.push_back(event);
         }
     }
 }

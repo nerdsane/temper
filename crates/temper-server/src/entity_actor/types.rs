@@ -21,7 +21,6 @@ pub enum EntityMsg {
         name: String,
         params: serde_json::Value,
         /// Pre-resolved cross-entity state booleans (injected by dispatch layer).
-        #[allow(dead_code)]
         cross_entity_booleans: BTreeMap<String, bool>,
     },
     /// Get the current entity state.

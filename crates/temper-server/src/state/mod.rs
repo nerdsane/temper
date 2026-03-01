@@ -154,7 +154,7 @@ pub struct ServerState {
     /// Broadcast channel for design-time events (spec loading, verification progress).
     pub design_time_tx: Arc<tokio::sync::broadcast::Sender<DesignTimeEvent>>,
     /// In-memory log of design-time events for workflow history (append-only, bounded).
-    pub design_time_log: Arc<RwLock<Vec<DesignTimeEvent>>>,
+    pub design_time_log: Arc<RwLock<std::collections::VecDeque<DesignTimeEvent>>>,
     /// Cache of entity current state, updated on every state change broadcast.
     /// Key: "{tenant}:{entity_type}:{entity_id}", Value: (current_state, last_updated).
     #[allow(clippy::type_complexity)]
@@ -225,7 +225,7 @@ impl ServerState {
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
-            design_time_log: Arc::new(RwLock::new(Vec::new())),
+            design_time_log: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
             action_dispatch_timeout: env_timeout(),
             eventual_tracker: Arc::new(RwLock::new(
@@ -351,7 +351,7 @@ impl ServerState {
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
-            design_time_log: Arc::new(RwLock::new(Vec::new())),
+            design_time_log: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
             action_dispatch_timeout: env_timeout(),
             eventual_tracker: Arc::new(RwLock::new(
