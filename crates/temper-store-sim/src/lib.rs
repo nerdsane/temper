@@ -294,12 +294,12 @@ impl EventStore for SimEventStore {
         let mut seen = std::collections::BTreeSet::new();
 
         for persistence_id in inner.journals.keys() {
-            if let Ok((t, entity_type, entity_id)) = parse_persistence_id_parts(persistence_id) {
-                if t == tenant {
-                    let key = (entity_type.to_string(), entity_id.to_string());
-                    if seen.insert(key.clone()) {
-                        result.push(key);
-                    }
+            if let Ok((t, entity_type, entity_id)) = parse_persistence_id_parts(persistence_id)
+                && t == tenant
+            {
+                let key = (entity_type.to_string(), entity_id.to_string());
+                if seen.insert(key.clone()) {
+                    result.push(key);
                 }
             }
         }
