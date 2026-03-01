@@ -26,19 +26,12 @@ use std::cell::RefCell;
 ///
 /// When installed (via `install_buggify_context`), `buggify_check` uses this
 /// to produce deterministic fault injection decisions.
+#[derive(Default)]
 struct BuggifyContext {
     enabled: bool,
     rng_state: u64,
 }
 
-impl Default for BuggifyContext {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            rng_state: 0,
-        }
-    }
-}
 
 thread_local! { // determinism-ok: deliberate FoundationDB BUGGIFY pattern
     static BUGGIFY_CTX: RefCell<BuggifyContext> = RefCell::new(BuggifyContext::default());
