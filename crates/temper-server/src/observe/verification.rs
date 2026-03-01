@@ -713,7 +713,7 @@ pub(crate) async fn get_paths(
     Query(params): Query<PathsQueryParams>,
 ) -> Result<Json<temper_verify::PathExtractionResult>, StatusCode> {
     let ioa_source = {
-        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        let registry = state.registry.read().expect("registry lock poisoned");
         let mut found = None;
         for tenant_id in registry.tenant_ids() {
             if let Some(entity_spec) = registry.get_spec(tenant_id, &entity) {

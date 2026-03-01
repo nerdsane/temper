@@ -141,7 +141,7 @@ pub(super) async fn dispatch_bound_action(
     }
 
     let has_spec = {
-        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        let registry = state.registry.read().expect("registry lock poisoned");
         registry.get_spec(tenant, entity_type).is_some()
     };
     resource_attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
