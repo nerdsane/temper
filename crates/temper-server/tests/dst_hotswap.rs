@@ -90,7 +90,12 @@ fn build_state_with_sim(seed: u64) -> ServerState {
 
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
-    registry.register_tenant("default", csdl, CSDL_XML.to_string(), &[("Order", ORDER_IOA)]);
+    registry.register_tenant(
+        "default",
+        csdl,
+        CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA)],
+    );
 
     let system = ActorSystem::new("dst-hotswap");
     let mut state = ServerState::from_registry(system, registry);

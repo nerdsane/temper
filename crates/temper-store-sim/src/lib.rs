@@ -294,9 +294,7 @@ impl EventStore for SimEventStore {
         let mut seen = std::collections::BTreeSet::new();
 
         for persistence_id in inner.journals.keys() {
-            if let Ok((t, entity_type, entity_id)) =
-                parse_persistence_id_parts(persistence_id)
-            {
+            if let Ok((t, entity_type, entity_id)) = parse_persistence_id_parts(persistence_id) {
                 if t == tenant {
                     let key = (entity_type.to_string(), entity_id.to_string());
                     if seen.insert(key.clone()) {
@@ -397,10 +395,7 @@ mod tests {
         let store = SimEventStore::no_faults(42);
         let pid = "default:Order:ord-4";
 
-        store
-            .save_snapshot(pid, 5, b"state-data")
-            .await
-            .unwrap();
+        store.save_snapshot(pid, 5, b"state-data").await.unwrap();
 
         let snap = store.load_snapshot(pid).await.unwrap();
         assert_eq!(snap, Some((5, b"state-data".to_vec())));
@@ -421,27 +416,15 @@ mod tests {
         let store = SimEventStore::no_faults(42);
 
         store
-            .append(
-                "alpha:Order:ord-1",
-                0,
-                &[test_envelope(0, "Created")],
-            )
+            .append("alpha:Order:ord-1", 0, &[test_envelope(0, "Created")])
             .await
             .unwrap();
         store
-            .append(
-                "alpha:Task:task-1",
-                0,
-                &[test_envelope(0, "Created")],
-            )
+            .append("alpha:Task:task-1", 0, &[test_envelope(0, "Created")])
             .await
             .unwrap();
         store
-            .append(
-                "beta:Order:ord-9",
-                0,
-                &[test_envelope(0, "Created")],
-            )
+            .append("beta:Order:ord-9", 0, &[test_envelope(0, "Created")])
             .await
             .unwrap();
 
@@ -456,10 +439,7 @@ mod tests {
         );
 
         let beta = store.list_entity_ids("beta").await.unwrap();
-        assert_eq!(
-            beta,
-            vec![("Order".to_string(), "ord-9".to_string())]
-        );
+        assert_eq!(beta, vec![("Order".to_string(), "ord-9".to_string())]);
     }
 
     #[tokio::test]
@@ -512,9 +492,7 @@ mod tests {
         let store = SimEventStore::new(42, faults);
         let pid = "default:Order:fault-1";
 
-        let err = store
-            .append(pid, 0, &[test_envelope(0, "Created")])
-            .await;
+        let err = store.append(pid, 0, &[test_envelope(0, "Created")]).await;
         assert!(err.is_err());
     }
 }

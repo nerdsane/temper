@@ -128,7 +128,9 @@ macro_rules! buggify {
         #[cfg(not(test))]
         {
             // Suppress unused variable warning without evaluating at runtime.
-            if false { let _ = $prob; }
+            if false {
+                let _ = $prob;
+            }
             false
         }
     }};

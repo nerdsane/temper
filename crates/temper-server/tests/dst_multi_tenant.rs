@@ -92,7 +92,10 @@ async fn dst_tenant_a_dispatches_order() {
                 &agent,
             )
             .await;
-        assert!(r.is_ok(), "seed {seed}: tenant-a should be able to create Order");
+        assert!(
+            r.is_ok(),
+            "seed {seed}: tenant-a should be able to create Order"
+        );
     }
 }
 
@@ -139,7 +142,10 @@ async fn dst_tenant_b_dispatches_task() {
                 &agent,
             )
             .await;
-        assert!(r.is_ok(), "seed {seed}: tenant-b should be able to create Task");
+        assert!(
+            r.is_ok(),
+            "seed {seed}: tenant-b should be able to create Task"
+        );
     }
 }
 
@@ -260,7 +266,9 @@ async fn dst_hotswap_tenant_isolation() {
     // Get tenant-b's table version before.
     let v_before = {
         let reg = state.registry.read().expect("registry lock"); // ci-ok: infallible lock
-        let spec = reg.get_spec(&TenantId::new("tenant-b"), "Task").expect("Task spec");
+        let spec = reg
+            .get_spec(&TenantId::new("tenant-b"), "Task")
+            .expect("Task spec");
         spec.swap_controller().version()
     };
 
@@ -279,11 +287,16 @@ async fn dst_hotswap_tenant_isolation() {
     // Tenant-b's table version should be unchanged.
     let v_after = {
         let reg = state.registry.read().expect("registry lock"); // ci-ok: infallible lock
-        let spec = reg.get_spec(&TenantId::new("tenant-b"), "Task").expect("Task spec");
+        let spec = reg
+            .get_spec(&TenantId::new("tenant-b"), "Task")
+            .expect("Task spec");
         spec.swap_controller().version()
     };
 
-    assert_eq!(v_before, v_after, "tenant-b's table should not be affected by tenant-a hot-swap");
+    assert_eq!(
+        v_before, v_after,
+        "tenant-b's table should not be affected by tenant-a hot-swap"
+    );
 
     // Tenant-b's Task should still be in InProgress.
     let r = state

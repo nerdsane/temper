@@ -45,9 +45,7 @@ async fn dispatch_action(
         .expect("actor should respond")
 }
 
-async fn get_state(
-    actor_ref: &temper_runtime::actor::ActorRef<EntityMsg>,
-) -> EntityResponse {
+async fn get_state(actor_ref: &temper_runtime::actor::ActorRef<EntityMsg>) -> EntityResponse {
     actor_ref
         .ask(EntityMsg::GetState, Duration::from_secs(5))
         .await
@@ -152,10 +150,7 @@ async fn dst_sequence_monotonicity() {
         // Verify sequence numbers are strictly monotonic.
         let persistence_id = format!("default:Order:{entity_id}");
         let events = store_inner.dump_journal(&persistence_id);
-        assert!(
-            !events.is_empty(),
-            "seed {seed}: no events persisted"
-        );
+        assert!(!events.is_empty(), "seed {seed}: no events persisted");
 
         for i in 1..events.len() {
             assert!(
@@ -266,10 +261,7 @@ async fn dst_determinism_canary() {
             ));
         }
 
-        assert_eq!(
-            results[0], results[1],
-            "seed {seed}: determinism violation"
-        );
+        assert_eq!(results[0], results[1], "seed {seed}: determinism violation");
     }
 }
 
