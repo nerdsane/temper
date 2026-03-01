@@ -756,7 +756,6 @@ impl ServerState {
         agent_ctx: &AgentContext,
         await_integration: bool,
     ) -> Result<EntityResponse, String> {
-        let action_params = params.clone();
         let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
             // Record a trajectory entry for the "no transition table" failure.
             let entry = TrajectoryEntry {
@@ -795,6 +794,7 @@ impl ServerState {
             .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
             .await;
 
+        let action_params = params.clone();
         let response = match actor_ref
             .ask::<EntityResponse>(
                 EntityMsg::Action {

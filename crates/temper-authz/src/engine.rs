@@ -151,29 +151,13 @@ impl AuthzEngine {
 
         // Add context attributes
         for (key, value) in &security_ctx.context_attrs {
-            if let Some(s) = value.as_str() {
-                ctx_map.insert(
-                    key.clone(),
-                    cedar_policy::RestrictedExpression::new_string(s.to_string()),
-                );
-            } else if let Some(b) = value.as_bool() {
-                ctx_map.insert(key.clone(), cedar_policy::RestrictedExpression::new_bool(b));
-            }
+            insert_json_as_cedar(&mut ctx_map, key.clone(), value);
         }
 
         // Inject resource attributes into context (enables Cedar policies to
         // reference entity state and cross-entity context via `context.key`).
         for (key, value) in resource_attrs {
-            if let Some(s) = value.as_str() {
-                ctx_map.insert(
-                    key.clone(),
-                    cedar_policy::RestrictedExpression::new_string(s.to_string()),
-                );
-            } else if let Some(b) = value.as_bool() {
-                ctx_map.insert(key.clone(), cedar_policy::RestrictedExpression::new_bool(b));
-            } else if let Some(n) = value.as_i64() {
-                ctx_map.insert(key.clone(), cedar_policy::RestrictedExpression::new_long(n));
-            }
+            insert_json_as_cedar(&mut ctx_map, key.clone(), value);
         }
 
         // Build context and request
@@ -242,6 +226,43 @@ impl AuthzEngine {
             return AuthzDecision::Allow;
         }
         self.authorize(security_ctx, action, resource_type, resource_attrs)
+    }
+}
+
+/// Insert a `serde_json::Value` into a Cedar context map, converting to the
+/// appropriate `RestrictedExpression` type. Supports strings, bools, integers,
+/// and arrays of those types.
+fn insert_json_as_cedar(
+    map: &mut HashMap<String, cedar_policy::RestrictedExpression>,
+    key: String,
+    value: &serde_json::Value,
+) {
+    if let Some(s) = value.as_str() {
+        map.insert(
+            key,
+            cedar_policy::RestrictedExpression::new_string(s.to_string()),
+        );
+    } else if let Some(b) = value.as_bool() {
+        map.insert(key, cedar_policy::RestrictedExpression::new_bool(b));
+    } else if let Some(n) = value.as_i64() {
+        map.insert(key, cedar_policy::RestrictedExpression::new_long(n));
+    } else if let Some(arr) = value.as_array() {
+        let items: Vec<cedar_policy::RestrictedExpression> = arr
+            .iter()
+            .filter_map(|item| {
+                if let Some(s) = item.as_str() {
+                    Some(cedar_policy::RestrictedExpression::new_string(
+                        s.to_string(),
+                    ))
+                } else if let Some(n) = item.as_i64() {
+                    Some(cedar_policy::RestrictedExpression::new_long(n))
+                } else {
+                    item.as_bool()
+                        .map(cedar_policy::RestrictedExpression::new_bool)
+                }
+            })
+            .collect();
+        map.insert(key, cedar_policy::RestrictedExpression::new_set(items));
     }
 }
 

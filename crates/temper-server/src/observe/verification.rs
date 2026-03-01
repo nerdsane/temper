@@ -538,7 +538,9 @@ pub(crate) async fn handle_workflows(State(state): State<ServerState>) -> Json<W
             .design_time_log
             .read()
             .unwrap_or_else(|err| err.into_inner())
-            .clone()
+            .iter()
+            .cloned()
+            .collect()
     });
     let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
 
