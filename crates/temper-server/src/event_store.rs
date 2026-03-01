@@ -9,12 +9,18 @@ use temper_store_postgres::PostgresEventStore;
 use temper_store_redis::RedisEventStore;
 use temper_store_turso::TursoEventStore;
 
+#[cfg(feature = "sim")]
+use temper_store_sim::SimEventStore;
+
 /// Concrete event-store backend used by the server.
 #[derive(Clone)]
 pub enum ServerEventStore {
     Postgres(PostgresEventStore),
     Turso(TursoEventStore),
     Redis(RedisEventStore),
+    /// In-memory deterministic event store for simulation testing.
+    #[cfg(feature = "sim")]
+    Sim(SimEventStore),
 }
 
 impl ServerEventStore {
@@ -24,6 +30,8 @@ impl ServerEventStore {
             Self::Postgres(_) => "postgres",
             Self::Turso(_) => "turso",
             Self::Redis(_) => "redis",
+            #[cfg(feature = "sim")]
+            Self::Sim(_) => "sim",
         }
     }
 
@@ -32,6 +40,8 @@ impl ServerEventStore {
         match self {
             Self::Postgres(store) => Some(store.pool()),
             Self::Turso(_) | Self::Redis(_) => None,
+            #[cfg(feature = "sim")]
+            Self::Sim(_) => None,
         }
     }
 
@@ -40,6 +50,8 @@ impl ServerEventStore {
         match self {
             Self::Turso(store) => Some(store),
             Self::Postgres(_) | Self::Redis(_) => None,
+            #[cfg(feature = "sim")]
+            Self::Sim(_) => None,
         }
     }
 
@@ -48,6 +60,8 @@ impl ServerEventStore {
         match self {
             Self::Redis(store) => Some(store),
             Self::Postgres(_) | Self::Turso(_) => None,
+            #[cfg(feature = "sim")]
+            Self::Sim(_) => None,
         }
     }
 }
@@ -75,6 +89,12 @@ impl EventStore for ServerEventStore {
                     .append(persistence_id, expected_sequence, events)
                     .await
             }
+            #[cfg(feature = "sim")]
+            Self::Sim(store) => {
+                store
+                    .append(persistence_id, expected_sequence, events)
+                    .await
+            }
         }
     }
 
@@ -87,6 +107,8 @@ impl EventStore for ServerEventStore {
             Self::Postgres(store) => store.read_events(persistence_id, from_sequence).await,
             Self::Turso(store) => store.read_events(persistence_id, from_sequence).await,
             Self::Redis(store) => store.read_events(persistence_id, from_sequence).await,
+            #[cfg(feature = "sim")]
+            Self::Sim(store) => store.read_events(persistence_id, from_sequence).await,
         }
     }
 
@@ -112,6 +134,12 @@ impl EventStore for ServerEventStore {
                     .save_snapshot(persistence_id, sequence_nr, snapshot)
                     .await
             }
+            #[cfg(feature = "sim")]
+            Self::Sim(store) => {
+                store
+                    .save_snapshot(persistence_id, sequence_nr, snapshot)
+                    .await
+            }
         }
     }
 
@@ -123,6 +151,8 @@ impl EventStore for ServerEventStore {
             Self::Postgres(store) => store.load_snapshot(persistence_id).await,
             Self::Turso(store) => store.load_snapshot(persistence_id).await,
             Self::Redis(store) => store.load_snapshot(persistence_id).await,
+            #[cfg(feature = "sim")]
+            Self::Sim(store) => store.load_snapshot(persistence_id).await,
         }
     }
 
@@ -134,6 +164,8 @@ impl EventStore for ServerEventStore {
             Self::Postgres(store) => store.list_entity_ids(tenant).await,
             Self::Turso(store) => store.list_entity_ids(tenant).await,
             Self::Redis(store) => store.list_entity_ids(tenant).await,
+            #[cfg(feature = "sim")]
+            Self::Sim(store) => store.list_entity_ids(tenant).await,
         }
     }
 }

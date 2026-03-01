@@ -5271,9 +5271,11 @@ dependencies = [
  "temper-observe",
  "temper-odata",
  "temper-runtime",
+ "temper-server",
  "temper-spec",
  "temper-store-postgres",
  "temper-store-redis",
+ "temper-store-sim",
  "temper-store-turso",
  "temper-verify",
  "temper-wasm",
@@ -5325,6 +5327,18 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "uuid",
+]
+
+[[package]]
+name = "temper-store-sim"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "temper-runtime",
+ "tokio",
  "uuid",
 ]
 

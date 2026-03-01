@@ -13,6 +13,7 @@ members = [
     "crates/temper-store-postgres",
     "crates/temper-store-turso",
     "crates/temper-store-redis",
+    "crates/temper-store-sim",
     "crates/temper-server",
     "crates/temper-cli",
     "crates/temper-mcp",
@@ -110,6 +111,7 @@ temper-verify = { path = "crates/temper-verify" }
 temper-store-postgres = { path = "crates/temper-store-postgres" }
 temper-store-turso = { path = "crates/temper-store-turso" }
 temper-store-redis = { path = "crates/temper-store-redis" }
+temper-store-sim = { path = "crates/temper-store-sim" }
 temper-server = { path = "crates/temper-server" }
 temper-cli = { path = "crates/temper-cli" }
 temper-mcp = { path = "crates/temper-mcp" }
