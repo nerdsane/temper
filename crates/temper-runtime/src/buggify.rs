@@ -32,7 +32,6 @@ struct BuggifyContext {
     rng_state: u64,
 }
 
-
 thread_local! { // determinism-ok: deliberate FoundationDB BUGGIFY pattern
     static BUGGIFY_CTX: RefCell<BuggifyContext> = RefCell::new(BuggifyContext::default());
 }
