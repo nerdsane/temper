@@ -1,80 +1,66 @@
-use temper_runtime::scheduler::sim_now;
 use temper_store_turso::TursoTrajectoryInsert;
 
 use super::super::trajectory::TrajectoryEntry;
-use super::super::{DesignTimeEvent, ServerState, TRAJECTORY_LOG_CAPACITY};
+use super::super::{DesignTimeEvent, ServerState};
 use super::MetadataBackend;
 
 impl ServerState {
-    /// Broadcast and persist a design-time event.
+    /// Broadcast and persist a design-time event to Turso.
     pub async fn emit_design_time_event(&self, event: DesignTimeEvent) -> Result<(), String> {
-        let Some(pool) = self
-            .event_store
-            .as_ref()
-            .and_then(|store| store.postgres_pool())
-        else {
-            let _ = self.design_time_tx.send(event.clone());
-            self.push_design_time_event(event);
-            return Ok(());
-        };
-        let created_at = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|_| sim_now());
-        sqlx::query(
-            "INSERT INTO design_time_events \
-             (kind, entity_type, tenant, summary, level, passed, step_number, total_steps, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        )
-        .bind(&event.kind)
-        .bind(&event.entity_type)
-        .bind(&event.tenant)
-        .bind(&event.summary)
-        .bind(event.level.as_deref())
-        .bind(event.passed)
-        .bind(event.step_number.map(i16::from))
-        .bind(event.total_steps.map(i16::from))
-        .bind(created_at)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            format!(
-                "failed to persist design-time event {} for {}/{}: {e}",
-                event.kind, event.tenant, event.entity_type
-            )
-        })?;
-        let _ = self.design_time_tx.send(event.clone());
-        self.push_design_time_event(event);
+        // Persist to Turso.
+        if let Some(turso) = self.turso_opt() {
+            turso
+                .insert_design_time_event(
+                    &event.kind,
+                    &event.entity_type,
+                    &event.tenant,
+                    &event.summary,
+                    event.level.as_deref(),
+                    event.passed,
+                    event.step_number.map(i64::from),
+                    event.total_steps.map(i64::from),
+                )
+                .await
+                .map_err(|e| {
+                    format!(
+                        "failed to persist design-time event {} for {}/{}: {e}",
+                        event.kind, event.tenant, event.entity_type
+                    )
+                })?;
+        }
+        // Broadcast via SSE (keep for real-time UI).
+        let _ = self.design_time_tx.send(event);
         Ok(())
     }
 
-    /// Persist a trajectory entry (Postgres, Turso, or Redis).
+    /// Persist a trajectory entry to Turso (single source of truth).
     pub async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
-        let Some(store) = self.event_store.as_ref() else {
+        let Some(turso) = self.turso_opt() else {
             return Ok(());
         };
-
-        // Try Postgres first.
-        if let Some(pool) = store.postgres_pool() {
-            let created_at = chrono::DateTime::parse_from_rfc3339(&entry.timestamp)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| sim_now());
-            sqlx::query(
-                "INSERT INTO trajectories \
-                 (tenant, entity_type, entity_id, action, success, from_status, to_status, error, agent_id, session_id, created_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-            )
-            .bind(&entry.tenant)
-            .bind(&entry.entity_type)
-            .bind(&entry.entity_id)
-            .bind(&entry.action)
-            .bind(entry.success)
-            .bind(entry.from_status.as_deref())
-            .bind(entry.to_status.as_deref())
-            .bind(entry.error.as_deref())
-            .bind(entry.agent_id.as_deref())
-            .bind(entry.session_id.as_deref())
-            .bind(created_at)
-            .execute(pool)
+        turso
+            .persist_trajectory(TursoTrajectoryInsert {
+                tenant: &entry.tenant,
+                entity_type: &entry.entity_type,
+                entity_id: &entry.entity_id,
+                action: &entry.action,
+                success: entry.success,
+                from_status: entry.from_status.as_deref(),
+                to_status: entry.to_status.as_deref(),
+                error: entry.error.as_deref(),
+                agent_id: entry.agent_id.as_deref(),
+                session_id: entry.session_id.as_deref(),
+                authz_denied: entry.authz_denied,
+                denied_resource: entry.denied_resource.as_deref(),
+                denied_module: entry.denied_module.as_deref(),
+                source: entry.source.as_ref().map(|s| match s {
+                    super::super::TrajectorySource::Entity => "Entity",
+                    super::super::TrajectorySource::Platform => "Platform",
+                    super::super::TrajectorySource::Authz => "Authz",
+                }),
+                spec_governed: entry.spec_governed,
+                created_at: &entry.timestamp,
+            })
             .await
             .map_err(|e| {
                 format!(
@@ -82,44 +68,35 @@ impl ServerState {
                     entry.tenant, entry.entity_type, entry.entity_id, entry.action
                 )
             })?;
-            return Ok(());
-        }
+        Ok(())
+    }
 
-        // Fall back to Turso.
+
+    /// Persist a pending decision to the storage backend (Turso only for now).
+    pub async fn persist_pending_decision(
+        &self,
+        decision: &super::super::PendingDecision,
+    ) -> Result<(), String> {
+        let Some(store) = self.event_store.as_ref() else {
+            return Ok(());
+        };
+
         if let Some(turso) = store.turso_store() {
+            let status_str = match decision.status {
+                super::super::DecisionStatus::Pending => "pending",
+                super::super::DecisionStatus::Approved => "approved",
+                super::super::DecisionStatus::Denied => "denied",
+                super::super::DecisionStatus::Expired => "expired",
+            };
+            let data_json = serde_json::to_string(decision)
+                .map_err(|e| format!("failed to serialize decision {}: {e}", decision.id))?;
             turso
-                .persist_trajectory(TursoTrajectoryInsert {
-                    tenant: &entry.tenant,
-                    entity_type: &entry.entity_type,
-                    entity_id: &entry.entity_id,
-                    action: &entry.action,
-                    success: entry.success,
-                    from_status: entry.from_status.as_deref(),
-                    to_status: entry.to_status.as_deref(),
-                    error: entry.error.as_deref(),
-                    created_at: &entry.timestamp,
-                })
+                .upsert_pending_decision(&decision.id, &decision.tenant, status_str, &data_json)
                 .await
                 .map_err(|e| {
                     format!(
-                        "failed to persist trajectory entry for {}/{}/{} action {} in turso: {e}",
-                        entry.tenant, entry.entity_type, entry.entity_id, entry.action
-                    )
-                })?;
-            return Ok(());
-        }
-
-        // Fall back to Redis (capped list).
-        if let Some(redis) = store.redis_store() {
-            let entry_json = serde_json::to_string(entry)
-                .map_err(|e| format!("failed to serialize trajectory entry: {e}"))?;
-            redis
-                .persist_trajectory(&entry.tenant, &entry_json, TRAJECTORY_LOG_CAPACITY as i64)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "failed to persist trajectory entry for {}/{}/{} action {} in redis: {e}",
-                        entry.tenant, entry.entity_type, entry.entity_id, entry.action
+                        "failed to persist pending decision {} in turso: {e}",
+                        decision.id
                     )
                 })?;
         }

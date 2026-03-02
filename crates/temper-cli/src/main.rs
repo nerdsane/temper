@@ -67,7 +67,7 @@ enum Commands {
         /// If omitted, startup preserves legacy behavior:
         /// - use Postgres when `DATABASE_URL` is set
         /// - otherwise run in-memory only
-        #[arg(long, value_enum, default_value = "postgres")]
+        #[arg(long, value_enum, default_value = "turso")]
         storage: StorageBackend,
         /// Load an app: --app name=specs-dir (repeatable)
         #[arg(long)]
@@ -98,6 +98,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env file from project root (silently ignored if missing).
+    dotenvy::dotenv().ok();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -303,10 +306,10 @@ mod tests {
         let cli = Cli::parse_from(["temper", "serve"]);
         match cli.command {
             Commands::Serve {
-                storage: StorageBackend::Postgres,
+                storage: StorageBackend::Turso,
                 ..
             } => {}
-            _ => panic!("expected Serve command with default postgres storage"),
+            _ => panic!("expected Serve command with default turso storage"),
         }
     }
 

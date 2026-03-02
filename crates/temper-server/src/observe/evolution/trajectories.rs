@@ -19,7 +19,7 @@ pub(crate) struct TrajectoryQueryParams {
     pub failed_limit: Option<usize>,
 }
 
-/// GET /observe/trajectories -- aggregated trajectory stats with failed intent details.
+/// GET /observe/trajectories -- aggregated trajectory stats from Turso.
 ///
 /// Returns:
 /// - `total`: total matching entries
@@ -32,210 +32,50 @@ pub(crate) async fn handle_trajectories(
 ) -> Json<serde_json::Value> {
     let failed_limit = params.failed_limit.unwrap_or(50).min(500);
     let success_filter: Option<bool> = params.success.as_deref().map(|s| s == "true");
-    if let Some(pool) = state
-        .event_store
-        .as_ref()
-        .and_then(|store| store.postgres_pool())
-    {
-        let totals: Result<(i64, i64), sqlx::Error> = sqlx::query_as(
-            "SELECT COUNT(*) AS total, \\
-                    COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END), 0) AS success_count \\
-             FROM trajectories \\
-             WHERE ($1::text IS NULL OR entity_type = $1) \\
-               AND ($2::text IS NULL OR action = $2) \\
-               AND ($3::bool IS NULL OR success = $3)",
-        )
-        .bind(params.entity_type.as_deref())
-        .bind(params.action.as_deref())
-        .bind(success_filter)
-        .fetch_one(pool)
-        .await;
 
-        let by_action_rows: Result<Vec<(String, i64, i64, i64)>, sqlx::Error> = sqlx::query_as(
-            "SELECT action, \\
-                    COUNT(*) AS total, \\
-                    COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END), 0) AS success, \\
-                    COALESCE(SUM(CASE WHEN NOT success THEN 1 ELSE 0 END), 0) AS error \\
-             FROM trajectories \\
-             WHERE ($1::text IS NULL OR entity_type = $1) \\
-               AND ($2::text IS NULL OR action = $2) \\
-               AND ($3::bool IS NULL OR success = $3) \\
-             GROUP BY action \\
-             ORDER BY action ASC",
-        )
-        .bind(params.entity_type.as_deref())
-        .bind(params.action.as_deref())
-        .bind(success_filter)
-        .fetch_all(pool)
-        .await;
-
-        type FailedRow = (
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            chrono::DateTime<chrono::Utc>,
-        );
-        let failed_rows: Result<Vec<FailedRow>, sqlx::Error> = sqlx::query_as(
-            "SELECT tenant, entity_type, entity_id, action, from_status, error, created_at \\
-             FROM trajectories \\
-             WHERE success = false \\
-               AND ($1::text IS NULL OR entity_type = $1) \\
-               AND ($2::text IS NULL OR action = $2) \\
-               AND ($3::bool IS NULL OR success = $3) \\
-             ORDER BY created_at DESC \\
-             LIMIT $4",
-        )
-        .bind(params.entity_type.as_deref())
-        .bind(params.action.as_deref())
-        .bind(success_filter)
-        .bind(failed_limit as i64)
-        .fetch_all(pool)
-        .await;
-
-        if let (Ok((total, success_count)), Ok(by_action_rows), Ok(failed_rows)) =
-            (totals, by_action_rows, failed_rows)
+    // Query Turso directly (single source of truth).
+    if let Some(turso) = state.turso_opt() {
+        match turso
+            .query_trajectory_stats(
+                params.entity_type.as_deref(),
+                params.action.as_deref(),
+                success_filter,
+                failed_limit as i64,
+            )
+            .await
         {
-            let total = total as u64;
-            let success_count = success_count as u64;
-            let error_count = total.saturating_sub(success_count);
-            let success_rate = if total > 0 {
-                success_count as f64 / total as f64
-            } else {
-                0.0
-            };
-
-            let by_action: std::collections::BTreeMap<String, serde_json::Value> = by_action_rows
-                .into_iter()
-                .map(|(action, total, success, error)| {
-                    (
-                        action,
-                        serde_json::json!({
-                            "total": total as u64,
-                            "success": success as u64,
-                            "error": error as u64,
-                        }),
-                    )
-                })
-                .collect();
-
-            let failed_intents: Vec<serde_json::Value> = failed_rows
-                .into_iter()
-                .map(
-                    |(tenant, entity_type, entity_id, action, from_status, error, created_at)| {
-                        serde_json::json!({
-                            "timestamp": created_at.to_rfc3339(),
-                            "tenant": tenant,
-                            "entity_type": entity_type,
-                            "entity_id": entity_id,
-                            "action": action,
-                            "from_status": from_status,
-                            "error": error,
-                        })
-                    },
-                )
-                .collect();
-
-            return Json(serde_json::json!({
-                "total": total,
-                "success_count": success_count,
-                "error_count": error_count,
-                "success_rate": success_rate,
-                "by_action": by_action,
-                "failed_intents": failed_intents,
-            }));
-        }
-
-        tracing::warn!("failed to query trajectories from postgres, falling back to in-memory log");
-    }
-
-    let log = state
-        .trajectory_log
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-
-    // Filter entries.
-    let filtered: Vec<&TrajectoryEntry> = log
-        .entries()
-        .iter()
-        .filter(|e| {
-            if let Some(ref ft) = params.entity_type
-                && e.entity_type != *ft
-            {
-                return false;
+            Ok(stats) => {
+                return Json(serde_json::json!({
+                    "total": stats.total,
+                    "success_count": stats.success_count,
+                    "error_count": stats.error_count,
+                    "success_rate": stats.success_rate,
+                    "by_action": stats.by_action,
+                    "failed_intents": stats.failed_intents,
+                }));
             }
-            if let Some(ref fa) = params.action
-                && e.action != *fa
-            {
-                return false;
-            }
-            if let Some(sf) = success_filter
-                && e.success != sf
-            {
-                return false;
-            }
-            true
-        })
-        .collect();
-
-    let total = filtered.len() as u64;
-    let success_count = filtered.iter().filter(|e| e.success).count() as u64;
-    let error_count = total.saturating_sub(success_count);
-    let success_rate = if total > 0 {
-        success_count as f64 / total as f64
-    } else {
-        0.0
-    };
-
-    // Per-action breakdown (BTreeMap for deterministic order).
-    let mut by_action: std::collections::BTreeMap<String, serde_json::Value> =
-        std::collections::BTreeMap::new();
-    for entry in &filtered {
-        let stats = by_action
-            .entry(entry.action.clone())
-            .or_insert_with(|| serde_json::json!({"total": 0u64, "success": 0u64, "error": 0u64}));
-        if let Some(obj) = stats.as_object_mut() {
-            *obj.entry("total").or_insert(serde_json::json!(0)) =
-                serde_json::json!(obj["total"].as_u64().unwrap_or(0) + 1);
-            if entry.success {
-                *obj.entry("success").or_insert(serde_json::json!(0)) =
-                    serde_json::json!(obj["success"].as_u64().unwrap_or(0) + 1);
-            } else {
-                *obj.entry("error").or_insert(serde_json::json!(0)) =
-                    serde_json::json!(obj["error"].as_u64().unwrap_or(0) + 1);
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to query trajectories from Turso");
             }
         }
     }
 
-    // Collect most recent failed intents.
-    let failed_intents: Vec<serde_json::Value> = filtered
-        .iter()
-        .rev()
-        .filter(|e| !e.success)
-        .take(failed_limit)
-        .map(|e| {
-            serde_json::json!({
-                "timestamp": e.timestamp,
-                "tenant": e.tenant,
-                "entity_type": e.entity_type,
-                "entity_id": e.entity_id,
-                "action": e.action,
-                "from_status": e.from_status,
-                "error": e.error,
-            })
-        })
-        .collect();
-
+    // Fallback: empty response when no Turso configured.
     Json(serde_json::json!({
-        "total": total,
-        "success_count": success_count,
-        "error_count": error_count,
-        "success_rate": success_rate,
-        "by_action": by_action,
-        "failed_intents": failed_intents,
+        "total": 0,
+        "success_count": 0,
+        "error_count": 0,
+        "success_rate": 0.0,
+        "by_action": {},
+        "failed_intents": [],
     }))
+}
+
+#[allow(dead_code)]
+fn _legacy_postgres_path() {
+    // Removed: Postgres fallback path. All reads go through Turso now.
+    if false {
+}
 }
 
 /// POST /api/evolution/trajectories/unmet -- record an unmet user intent.
@@ -295,9 +135,6 @@ pub(crate) async fn handle_unmet_intent(
         .persist_trajectory_entry(&entry)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if let Ok(mut log) = state.trajectory_log.write() {
-        log.push(entry.clone());
-    }
 
     Ok(StatusCode::CREATED)
 }

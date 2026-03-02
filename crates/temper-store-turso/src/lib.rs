@@ -27,6 +27,13 @@ pub struct TursoTrajectoryInsert<'a> {
     pub from_status: Option<&'a str>,
     pub to_status: Option<&'a str>,
     pub error: Option<&'a str>,
+    pub agent_id: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub authz_denied: Option<bool>,
+    pub denied_resource: Option<&'a str>,
+    pub denied_module: Option<&'a str>,
+    pub source: Option<&'a str>,
+    pub spec_governed: Option<bool>,
     pub created_at: &'a str,
 }
 
@@ -45,6 +52,7 @@ pub struct TursoWasmInvocationInsert<'a> {
 }
 
 pub use store::{
-    TursoEventStore, TursoSpecRow, TursoTenantConstraintRow, TursoTrajectoryRow,
-    TursoWasmInvocationRow, TursoWasmModuleRow,
+    AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow, TursoEventStore,
+    TursoSpecRow, TursoTenantConstraintRow, TursoTrajectoryRow, TursoWasmInvocationRow,
+    TursoWasmModuleRow,
 };

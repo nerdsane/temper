@@ -117,6 +117,57 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
 
+        conn.execute(schema::CREATE_PENDING_DECISIONS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_PENDING_DECISIONS_TENANT_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_PENDING_DECISIONS_STATUS_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+
+        conn.execute(schema::CREATE_TENANT_POLICIES_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+
+        // Phase 0: New tables for Turso-as-single-source-of-truth.
+        conn.execute(schema::CREATE_FEATURE_REQUESTS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_EVOLUTION_RECORDS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_EVOLUTION_RECORDS_TYPE_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_EVOLUTION_RECORDS_STATUS_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_DESIGN_TIME_EVENTS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+
+        // Trajectory table extensions — ALTER TABLE to add missing columns.
+        // SQLite returns an error for duplicate columns, so we ignore failures.
+        for stmt in &[
+            schema::ALTER_TRAJECTORIES_ADD_AGENT_ID,
+            schema::ALTER_TRAJECTORIES_ADD_SESSION_ID,
+            schema::ALTER_TRAJECTORIES_ADD_AUTHZ_DENIED,
+            schema::ALTER_TRAJECTORIES_ADD_DENIED_RESOURCE,
+            schema::ALTER_TRAJECTORIES_ADD_DENIED_MODULE,
+            schema::ALTER_TRAJECTORIES_ADD_SOURCE,
+            schema::ALTER_TRAJECTORIES_ADD_SPEC_GOVERNED,
+        ] {
+            let _ = conn.execute(*stmt, ()).await; // ignore "duplicate column" errors
+        }
+        conn.execute(schema::CREATE_TRAJECTORIES_AGENT_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+
         Ok(())
     }
 
@@ -219,7 +270,7 @@ impl TursoEventStore {
         Ok(out)
     }
 
-    /// Persist a trajectory entry.
+    /// Persist a trajectory entry (all columns including agent/authz fields).
     pub async fn persist_trajectory(
         &self,
         entry: TursoTrajectoryInsert<'_>,
@@ -227,8 +278,9 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         conn.execute(
             "INSERT INTO trajectories \
-             (tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
+              agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 entry.tenant,
                 entry.entity_type,
@@ -238,6 +290,13 @@ impl TursoEventStore {
                 entry.from_status,
                 entry.to_status,
                 entry.error,
+                entry.agent_id,
+                entry.session_id,
+                entry.authz_denied.map(|b| b as i64),
+                entry.denied_resource,
+                entry.denied_module,
+                entry.source,
+                entry.spec_governed.map(|b| b as i64),
                 entry.created_at
             ],
         )
@@ -254,7 +313,8 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, created_at \
+                "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
+                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at \
                  FROM trajectories \
                  ORDER BY created_at DESC \
                  LIMIT ?1",
@@ -265,19 +325,557 @@ impl TursoEventStore {
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(TursoTrajectoryRow {
-                tenant: row.get::<String>(0).map_err(storage_error)?,
-                entity_type: row.get::<String>(1).map_err(storage_error)?,
-                entity_id: row.get::<String>(2).map_err(storage_error)?,
-                action: row.get::<String>(3).map_err(storage_error)?,
-                success: row.get::<i64>(4).map_err(storage_error)? != 0,
-                from_status: row.get::<Option<String>>(5).map_err(storage_error)?,
-                to_status: row.get::<Option<String>>(6).map_err(storage_error)?,
-                error: row.get::<Option<String>>(7).map_err(storage_error)?,
-                created_at: row.get::<String>(8).map_err(storage_error)?,
+            out.push(Self::row_to_trajectory(&row)?);
+        }
+        Ok(out)
+    }
+
+    /// Parse a trajectory row from a libsql Row (16 columns).
+    fn row_to_trajectory(row: &libsql::Row) -> Result<TursoTrajectoryRow, PersistenceError> {
+        Ok(TursoTrajectoryRow {
+            tenant: row.get::<String>(0).map_err(storage_error)?,
+            entity_type: row.get::<String>(1).map_err(storage_error)?,
+            entity_id: row.get::<String>(2).map_err(storage_error)?,
+            action: row.get::<String>(3).map_err(storage_error)?,
+            success: row.get::<i64>(4).map_err(storage_error)? != 0,
+            from_status: row.get::<Option<String>>(5).map_err(storage_error)?,
+            to_status: row.get::<Option<String>>(6).map_err(storage_error)?,
+            error: row.get::<Option<String>>(7).map_err(storage_error)?,
+            agent_id: row.get::<Option<String>>(8).map_err(storage_error)?,
+            session_id: row.get::<Option<String>>(9).map_err(storage_error)?,
+            authz_denied: row
+                .get::<Option<i64>>(10)
+                .map_err(storage_error)?
+                .map(|v| v != 0),
+            denied_resource: row.get::<Option<String>>(11).map_err(storage_error)?,
+            denied_module: row.get::<Option<String>>(12).map_err(storage_error)?,
+            source: row.get::<Option<String>>(13).map_err(storage_error)?,
+            spec_governed: row
+                .get::<Option<i64>>(14)
+                .map_err(storage_error)?
+                .map(|v| v != 0),
+            created_at: row.get::<String>(15).map_err(storage_error)?,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Trajectory query methods (Phase 1B)
+    // -----------------------------------------------------------------------
+
+    /// Query trajectory statistics with optional filters.
+    pub async fn query_trajectory_stats(
+        &self,
+        entity_type: Option<&str>,
+        action: Option<&str>,
+        success_filter: Option<bool>,
+        failed_limit: i64,
+    ) -> Result<TrajectoryStats, PersistenceError> {
+        let conn = self.configured_connection().await?;
+
+        // Total + success count.
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) AS total, \
+                        COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success_count \
+                 FROM trajectories \
+                 WHERE (?1 IS NULL OR entity_type = ?1) \
+                   AND (?2 IS NULL OR action = ?2) \
+                   AND (?3 IS NULL OR success = ?3)",
+                params![
+                    entity_type,
+                    action,
+                    success_filter.map(|b| b as i64)
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let (total, success_count) = match rows.next().await.map_err(storage_error)? {
+            Some(row) => (
+                row.get::<i64>(0).map_err(storage_error)? as u64,
+                row.get::<i64>(1).map_err(storage_error)? as u64,
+            ),
+            None => (0, 0),
+        };
+        drop(rows);
+
+        // Per-action breakdown.
+        let mut rows = conn
+            .query(
+                "SELECT action, COUNT(*) AS total, \
+                        COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success, \
+                        COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) AS error \
+                 FROM trajectories \
+                 GROUP BY action",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut by_action = std::collections::BTreeMap::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let name = row.get::<String>(0).map_err(storage_error)?;
+            by_action.insert(
+                name,
+                ActionStats {
+                    total: row.get::<i64>(1).map_err(storage_error)? as u64,
+                    success: row.get::<i64>(2).map_err(storage_error)? as u64,
+                    error: row.get::<i64>(3).map_err(storage_error)? as u64,
+                },
+            );
+        }
+        drop(rows);
+
+        // Failed intents (newest first).
+        let mut rows = conn
+            .query(
+                "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
+                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at \
+                 FROM trajectories \
+                 WHERE success = 0 \
+                 ORDER BY created_at DESC \
+                 LIMIT ?1",
+                params![failed_limit],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut failed_intents = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            failed_intents.push(Self::row_to_trajectory(&row)?);
+        }
+
+        let error_count = total.saturating_sub(success_count);
+        Ok(TrajectoryStats {
+            total,
+            success_count,
+            error_count,
+            success_rate: if total > 0 {
+                success_count as f64 / total as f64
+            } else {
+                0.0
+            },
+            by_action,
+            failed_intents,
+        })
+    }
+
+    /// Query trajectories for a specific agent.
+    pub async fn query_trajectories_by_agent(
+        &self,
+        agent_id: &str,
+        tenant: Option<&str>,
+        entity_type: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
+                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at \
+                 FROM trajectories \
+                 WHERE agent_id = ?1 \
+                   AND (?2 IS NULL OR tenant = ?2) \
+                   AND (?3 IS NULL OR entity_type = ?3) \
+                 ORDER BY created_at DESC \
+                 LIMIT ?4",
+                params![agent_id, tenant, entity_type, limit],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(Self::row_to_trajectory(&row)?);
+        }
+        Ok(out)
+    }
+
+    /// Query agent summaries (grouped by agent_id).
+    pub async fn query_agent_summaries(
+        &self,
+        tenant: Option<&str>,
+    ) -> Result<Vec<AgentSummary>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT agent_id, \
+                        COUNT(*) AS total_actions, \
+                        COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success_count, \
+                        COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) AS error_count, \
+                        COALESCE(SUM(CASE WHEN authz_denied = 1 THEN 1 ELSE 0 END), 0) AS denial_count, \
+                        MAX(created_at) AS last_active_at \
+                 FROM trajectories \
+                 WHERE agent_id IS NOT NULL \
+                   AND (?1 IS NULL OR tenant = ?1) \
+                 GROUP BY agent_id \
+                 ORDER BY last_active_at DESC",
+                params![tenant],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let total = row.get::<i64>(1).map_err(storage_error)? as u64;
+            let success = row.get::<i64>(2).map_err(storage_error)? as u64;
+            out.push(AgentSummary {
+                agent_id: row.get::<String>(0).map_err(storage_error)?,
+                total_actions: total,
+                success_count: success,
+                error_count: row.get::<i64>(3).map_err(storage_error)? as u64,
+                denial_count: row.get::<i64>(4).map_err(storage_error)? as u64,
+                success_rate: if total > 0 {
+                    success as f64 / total as f64
+                } else {
+                    0.0
+                },
+                last_active_at: row.get::<String>(5).map_err(storage_error)?,
             });
         }
         Ok(out)
+    }
+
+    // -----------------------------------------------------------------------
+    // Feature request CRUD (Phase 1C)
+    // -----------------------------------------------------------------------
+
+    /// Upsert a feature request.
+    pub async fn upsert_feature_request(
+        &self,
+        id: &str,
+        category: &str,
+        description: &str,
+        frequency: i64,
+        trajectory_refs_json: &str,
+        disposition: &str,
+        developer_notes: Option<&str>,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.configured_connection().await?;
+        conn.execute(
+            "INSERT INTO feature_requests (id, category, description, frequency, trajectory_refs, disposition, developer_notes, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now')) \
+             ON CONFLICT(id) DO UPDATE SET \
+                 category = ?2, description = ?3, frequency = ?4, trajectory_refs = ?5, \
+                 disposition = ?6, developer_notes = ?7, updated_at = datetime('now')",
+            params![id, category, description, frequency, trajectory_refs_json, disposition, developer_notes],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// List feature requests with optional disposition filter.
+    pub async fn list_feature_requests(
+        &self,
+        disposition: Option<&str>,
+    ) -> Result<Vec<FeatureRequestRow>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, category, description, frequency, trajectory_refs, disposition, developer_notes, created_at, updated_at \
+                 FROM feature_requests \
+                 WHERE (?1 IS NULL OR disposition = ?1) \
+                 ORDER BY frequency DESC, created_at DESC",
+                params![disposition],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(FeatureRequestRow {
+                id: row.get::<String>(0).map_err(storage_error)?,
+                category: row.get::<String>(1).map_err(storage_error)?,
+                description: row.get::<String>(2).map_err(storage_error)?,
+                frequency: row.get::<i64>(3).map_err(storage_error)?,
+                trajectory_refs: row.get::<String>(4).map_err(storage_error)?,
+                disposition: row.get::<String>(5).map_err(storage_error)?,
+                developer_notes: row.get::<Option<String>>(6).map_err(storage_error)?,
+                created_at: row.get::<String>(7).map_err(storage_error)?,
+                updated_at: row.get::<String>(8).map_err(storage_error)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Update a feature request's disposition and developer notes.
+    pub async fn update_feature_request(
+        &self,
+        id: &str,
+        disposition: &str,
+        developer_notes: Option<&str>,
+    ) -> Result<bool, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let affected = conn
+            .execute(
+                "UPDATE feature_requests SET disposition = ?2, developer_notes = ?3, updated_at = datetime('now') \
+                 WHERE id = ?1",
+                params![id, disposition, developer_notes],
+            )
+            .await
+            .map_err(storage_error)?;
+        Ok(affected > 0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Evolution record CRUD (Phase 1D)
+    // -----------------------------------------------------------------------
+
+    /// Insert an evolution record.
+    pub async fn insert_evolution_record(
+        &self,
+        id: &str,
+        record_type: &str,
+        status: &str,
+        created_by: &str,
+        derived_from: Option<&str>,
+        data_json: &str,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.configured_connection().await?;
+        conn.execute(
+            "INSERT INTO evolution_records (id, record_type, status, created_by, derived_from, data, timestamp) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
+            params![id, record_type, status, created_by, derived_from, data_json],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Get a single evolution record by ID.
+    pub async fn get_evolution_record(
+        &self,
+        id: &str,
+    ) -> Result<Option<EvolutionRecordRow>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, record_type, status, created_by, derived_from, data, timestamp \
+                 FROM evolution_records WHERE id = ?1",
+                params![id],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let Some(row) = rows.next().await.map_err(storage_error)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self::row_to_evolution_record(&row)?))
+    }
+
+    /// List evolution records with optional type and status filters.
+    pub async fn list_evolution_records(
+        &self,
+        record_type: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<Vec<EvolutionRecordRow>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, record_type, status, created_by, derived_from, data, timestamp \
+                 FROM evolution_records \
+                 WHERE (?1 IS NULL OR record_type = ?1) \
+                   AND (?2 IS NULL OR status = ?2) \
+                 ORDER BY timestamp DESC",
+                params![record_type, status],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(Self::row_to_evolution_record(&row)?);
+        }
+        Ok(out)
+    }
+
+    /// List ranked insights (Insight type, sorted by priority_score in data).
+    pub async fn list_ranked_insights(&self) -> Result<Vec<EvolutionRecordRow>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, record_type, status, created_by, derived_from, data, timestamp \
+                 FROM evolution_records \
+                 WHERE record_type = 'Insight' \
+                 ORDER BY timestamp DESC",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(Self::row_to_evolution_record(&row)?);
+        }
+        // Sort by priority_score descending (extracted from JSON data).
+        out.sort_by(|a, b| {
+            let score_a = serde_json::from_str::<serde_json::Value>(&a.data)
+                .ok()
+                .and_then(|v| v.get("priority_score").and_then(|s| s.as_f64()))
+                .unwrap_or(0.0);
+            let score_b = serde_json::from_str::<serde_json::Value>(&b.data)
+                .ok()
+                .and_then(|v| v.get("priority_score").and_then(|s| s.as_f64()))
+                .unwrap_or(0.0);
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(out)
+    }
+
+    /// Parse an evolution record row.
+    fn row_to_evolution_record(
+        row: &libsql::Row,
+    ) -> Result<EvolutionRecordRow, PersistenceError> {
+        Ok(EvolutionRecordRow {
+            id: row.get::<String>(0).map_err(storage_error)?,
+            record_type: row.get::<String>(1).map_err(storage_error)?,
+            status: row.get::<String>(2).map_err(storage_error)?,
+            created_by: row.get::<String>(3).map_err(storage_error)?,
+            derived_from: row.get::<Option<String>>(4).map_err(storage_error)?,
+            data: row.get::<String>(5).map_err(storage_error)?,
+            timestamp: row.get::<String>(6).map_err(storage_error)?,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Design-time event CRUD (Phase 1E)
+    // -----------------------------------------------------------------------
+
+    /// Insert a design-time event.
+    pub async fn insert_design_time_event(
+        &self,
+        kind: &str,
+        entity_type: &str,
+        tenant: &str,
+        summary: &str,
+        level: Option<&str>,
+        passed: Option<bool>,
+        step_number: Option<i64>,
+        total_steps: Option<i64>,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.configured_connection().await?;
+        conn.execute(
+            "INSERT INTO design_time_events (kind, entity_type, tenant, summary, level, passed, step_number, total_steps) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![kind, entity_type, tenant, summary, level, passed.map(|b| b as i64), step_number, total_steps],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// List recent design-time events for a tenant.
+    pub async fn list_design_time_events(
+        &self,
+        tenant: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<DesignTimeEventRow>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, kind, entity_type, tenant, summary, level, passed, step_number, total_steps, created_at \
+                 FROM design_time_events \
+                 WHERE (?1 IS NULL OR tenant = ?1) \
+                 ORDER BY created_at DESC \
+                 LIMIT ?2",
+                params![tenant, limit],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(DesignTimeEventRow {
+                id: row.get::<i64>(0).map_err(storage_error)?,
+                kind: row.get::<String>(1).map_err(storage_error)?,
+                entity_type: row.get::<String>(2).map_err(storage_error)?,
+                tenant: row.get::<String>(3).map_err(storage_error)?,
+                summary: row.get::<String>(4).map_err(storage_error)?,
+                level: row.get::<Option<String>>(5).map_err(storage_error)?,
+                passed: row
+                    .get::<Option<i64>>(6)
+                    .map_err(storage_error)?
+                    .map(|v| v != 0),
+                step_number: row.get::<Option<i64>>(7).map_err(storage_error)?,
+                total_steps: row.get::<Option<i64>>(8).map_err(storage_error)?,
+                created_at: row.get::<String>(9).map_err(storage_error)?,
+            });
+        }
+        Ok(out)
+    }
+
+    // -----------------------------------------------------------------------
+    // Decision query methods (Phase 1F)
+    // -----------------------------------------------------------------------
+
+    /// Query decisions for a specific tenant with optional status filter.
+    pub async fn query_decisions(
+        &self,
+        tenant: &str,
+        status: Option<&str>,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT data FROM pending_decisions \
+                 WHERE tenant = ?1 AND (?2 IS NULL OR status = ?2) \
+                 ORDER BY created_at DESC",
+                params![tenant, status],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(out)
+    }
+
+    /// Query all decisions across tenants with optional status filter.
+    pub async fn query_all_decisions(
+        &self,
+        status: Option<&str>,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT data FROM pending_decisions \
+                 WHERE (?1 IS NULL OR status = ?1) \
+                 ORDER BY created_at DESC",
+                params![status],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(out)
+    }
+
+    /// Get a single pending decision by ID, returning the full JSON data.
+    pub async fn get_pending_decision(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT data FROM pending_decisions WHERE id = ?1",
+                params![id],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        match rows.next().await.map_err(storage_error)? {
+            Some(row) => Ok(Some(row.get::<String>(0).map_err(storage_error)?)),
+            None => Ok(None),
+        }
     }
 
     /// Upsert tenant-level cross-entity constraint definitions.
@@ -558,6 +1156,84 @@ impl TursoEventStore {
     fn connection(&self) -> Result<libsql::Connection, PersistenceError> {
         self.db.connect().map_err(storage_error)
     }
+
+    /// Upsert a pending decision (insert or update).
+    pub async fn upsert_pending_decision(
+        &self,
+        id: &str,
+        tenant: &str,
+        status: &str,
+        data_json: &str,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.configured_connection().await?;
+        conn.execute(
+            "INSERT INTO pending_decisions (id, tenant, status, data, updated_at)              VALUES (?1, ?2, ?3, ?4, datetime('now'))              ON CONFLICT(id) DO UPDATE SET status = ?3, data = ?4, updated_at = datetime('now')",
+            params![id, tenant, status, data_json],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Load all pending decisions (newest first, up to limit).
+    pub async fn load_pending_decisions(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT data FROM pending_decisions ORDER BY created_at DESC LIMIT ?1",
+                params![limit],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(out)
+    }
+
+    /// Upsert Cedar policy text for a tenant.
+    pub async fn upsert_tenant_policy(
+        &self,
+        tenant: &str,
+        policy_text: &str,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.configured_connection().await?;
+        conn.execute(
+            "INSERT INTO tenant_policies (tenant, policy_text, updated_at)              VALUES (?1, ?2, datetime('now'))              ON CONFLICT(tenant) DO UPDATE SET policy_text = ?2, updated_at = datetime('now')",
+            params![tenant, policy_text],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Load all tenant Cedar policies.
+    pub async fn load_tenant_policies(
+        &self,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, policy_text FROM tenant_policies ORDER BY tenant",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push((
+                row.get::<String>(0).map_err(storage_error)?,
+                row.get::<String>(1).map_err(storage_error)?,
+            ));
+        }
+        Ok(out)
+    }
 }
 
 impl EventStore for TursoEventStore {
@@ -797,8 +1473,8 @@ pub struct TursoSpecRow {
     pub updated_at: String,
 }
 
-/// Row returned by [`TursoEventStore::load_recent_trajectories()`].
-#[derive(Debug, Clone)]
+/// Row returned by trajectory queries.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TursoTrajectoryRow {
     /// Tenant name.
     pub tenant: String,
@@ -816,6 +1492,134 @@ pub struct TursoTrajectoryRow {
     pub to_status: Option<String>,
     /// Error description (for failed intents).
     pub error: Option<String>,
+    /// Agent identity that performed the action.
+    pub agent_id: Option<String>,
+    /// Session the action belonged to.
+    pub session_id: Option<String>,
+    /// Whether this was an authorization denial.
+    pub authz_denied: Option<bool>,
+    /// Denied resource identifier.
+    pub denied_resource: Option<String>,
+    /// WASM module involved in the denial.
+    pub denied_module: Option<String>,
+    /// Source: "Entity", "Platform", "Authz".
+    pub source: Option<String>,
+    /// Whether the action is governed by a spec.
+    pub spec_governed: Option<bool>,
+    /// ISO-8601 timestamp.
+    pub created_at: String,
+}
+
+/// Aggregated trajectory statistics.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrajectoryStats {
+    /// Total trajectory count.
+    pub total: u64,
+    /// Number of successful actions.
+    pub success_count: u64,
+    /// Number of failed actions.
+    pub error_count: u64,
+    /// Success rate (0.0 - 1.0).
+    pub success_rate: f64,
+    /// Per-action breakdown.
+    pub by_action: std::collections::BTreeMap<String, ActionStats>,
+    /// Recent failed intents.
+    pub failed_intents: Vec<TursoTrajectoryRow>,
+}
+
+/// Per-action statistics.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActionStats {
+    /// Total actions.
+    pub total: u64,
+    /// Successful actions.
+    pub success: u64,
+    /// Failed actions.
+    pub error: u64,
+}
+
+/// Agent summary aggregated from trajectories.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentSummary {
+    /// Agent identifier.
+    pub agent_id: String,
+    /// Total actions performed by this agent.
+    pub total_actions: u64,
+    /// Successful actions.
+    pub success_count: u64,
+    /// Failed actions.
+    pub error_count: u64,
+    /// Authorization denials.
+    pub denial_count: u64,
+    /// Success rate (0.0 - 1.0).
+    pub success_rate: f64,
+    /// Most recent activity timestamp.
+    pub last_active_at: String,
+}
+
+/// Row returned by feature request queries.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FeatureRequestRow {
+    /// Feature request ID.
+    pub id: String,
+    /// Category label.
+    pub category: String,
+    /// Description of the feature request.
+    pub description: String,
+    /// Number of trajectory references.
+    pub frequency: i64,
+    /// JSON array of trajectory reference IDs.
+    pub trajectory_refs: String,
+    /// Disposition: Open, Acknowledged, Planned, WontFix, Resolved.
+    pub disposition: String,
+    /// Developer notes.
+    pub developer_notes: Option<String>,
+    /// ISO-8601 created timestamp.
+    pub created_at: String,
+    /// ISO-8601 updated timestamp.
+    pub updated_at: String,
+}
+
+/// Row returned by evolution record queries.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EvolutionRecordRow {
+    /// Record ID.
+    pub id: String,
+    /// Record type: Observation, Problem, Analysis, Decision, Insight.
+    pub record_type: String,
+    /// Status: Open, Resolved, Superseded, Rejected.
+    pub status: String,
+    /// Creator identity.
+    pub created_by: String,
+    /// ID of the parent record this was derived from.
+    pub derived_from: Option<String>,
+    /// Full record data as JSON.
+    pub data: String,
+    /// ISO-8601 timestamp.
+    pub timestamp: String,
+}
+
+/// Row returned by design-time event queries.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DesignTimeEventRow {
+    /// Auto-increment ID.
+    pub id: i64,
+    /// Event kind.
+    pub kind: String,
+    /// Entity type.
+    pub entity_type: String,
+    /// Tenant.
+    pub tenant: String,
+    /// Human-readable summary.
+    pub summary: String,
+    /// Verification level name.
+    pub level: Option<String>,
+    /// Whether this level passed.
+    pub passed: Option<bool>,
+    /// Step number in the workflow.
+    pub step_number: Option<i64>,
+    /// Total steps in the workflow.
+    pub total_steps: Option<i64>,
     /// ISO-8601 timestamp.
     pub created_at: String,
 }
@@ -840,7 +1644,7 @@ pub struct TursoWasmModuleRow {
 }
 
 /// Row returned by WASM invocation log queries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TursoWasmInvocationRow {
     /// Tenant name.
     pub tenant: String,

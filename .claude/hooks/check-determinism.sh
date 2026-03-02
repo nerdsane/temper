@@ -37,16 +37,34 @@ case "${FILE_PATH:-}" in
     */tests/*|*_test.rs|*test_*.rs) exit 0 ;;
 esac
 
-# Helper: check for a pattern, excluding lines with '// determinism-ok' or comment-only lines
+# Helper: check for a pattern, excluding determinism-ok, comments, and trailing comments
 check_pattern() {
     local pattern="$1"
     local message="$2"
-    if grep -n "$pattern" "$FILE_PATH" 2>/dev/null \
-        | grep -v '// determinism-ok' \
-        | grep -qv '^[[:space:]]*//' ; then
-        VIOLATIONS="${VIOLATIONS}\n  BLOCKED: $message"
-        HAS_VIOLATION=true
-    fi
+
+    local matches
+    matches="$(grep -n "$pattern" "$FILE_PATH" 2>/dev/null || true)"
+    [ -z "$matches" ] && return
+
+    # Exclude determinism-ok annotations
+    matches="$(echo "$matches" | grep -v '// determinism-ok' || true)"
+    [ -z "$matches" ] && return
+
+    # Exclude pure comment lines (grep -n prefixes "NNN:", so anchor after it)
+    matches="$(echo "$matches" | grep -v '^[0-9]*:[[:space:]]*//' || true)"
+    [ -z "$matches" ] && return
+
+    # Only flag if pattern appears in code, not just in a trailing comment
+    while IFS= read -r line; do
+        local content="${line#*:}"
+        # Strip trailing line comment (space + //) to isolate code portion
+        local code_part="${content%% //*}"
+        if echo "$code_part" | grep -q "$pattern" 2>/dev/null; then
+            VIOLATIONS="${VIOLATIONS}\n  BLOCKED: $message"
+            HAS_VIOLATION=true
+            return
+        fi
+    done <<< "$matches"
 }
 
 VIOLATIONS=""

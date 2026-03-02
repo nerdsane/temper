@@ -1,12 +1,11 @@
 //! Agent audit endpoints for the observe API.
 //!
 //! Provides per-agent action history and summary statistics derived
-//! from the trajectory log.
+//! from Turso (single source of truth).
 
 use axum::extract::{Path, Query, State};
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 use crate::state::ServerState;
 
@@ -83,83 +82,40 @@ pub(crate) async fn list_agents(
     State(state): State<ServerState>,
     Query(params): Query<ListAgentsParams>,
 ) -> Json<serde_json::Value> {
-    let log = state.trajectory_log.read().unwrap(); // ci-ok: infallible lock
-    let mut agents: BTreeMap<String, AgentSummary> = BTreeMap::new();
-
-    for entry in log.entries() {
-        // Skip entries without agent_id
-        let agent_id = match entry.agent_id.as_deref() {
-            Some(id) if !id.is_empty() => id,
-            _ => continue,
-        };
-
-        // Apply tenant filter
-        if let Some(ref tenant_filter) = params.tenant
-            && entry.tenant != *tenant_filter
-        {
-            continue;
-        }
-
-        let summary = agents
-            .entry(agent_id.to_string())
-            .or_insert_with(|| AgentSummary {
-                agent_id: agent_id.to_string(),
-                total_actions: 0,
-                success_count: 0,
-                error_count: 0,
-                denial_count: 0,
-                success_rate: 0.0,
-                last_active_at: None,
-                entity_types: Vec::new(),
-                tenants: Vec::new(),
-            });
-
-        summary.total_actions += 1;
-        if entry.success {
-            summary.success_count += 1;
-        } else {
-            summary.error_count += 1;
-        }
-        if entry.authz_denied == Some(true) {
-            summary.denial_count += 1;
-        }
-
-        // Track latest timestamp
-        if summary
-            .last_active_at
-            .as_ref()
-            .is_none_or(|t| entry.timestamp > *t)
-        {
-            summary.last_active_at = Some(entry.timestamp.clone());
-        }
-
-        // Track entity types
-        if !summary.entity_types.contains(&entry.entity_type) {
-            summary.entity_types.push(entry.entity_type.clone());
-        }
-
-        // Track tenants
-        if !summary.tenants.contains(&entry.tenant) {
-            summary.tenants.push(entry.tenant.clone());
+    // Query Turso directly (single source of truth).
+    if let Some(turso) = state.turso_opt() {
+        match turso.query_agent_summaries(params.tenant.as_deref()).await {
+            Ok(summaries) => {
+                let agents: Vec<AgentSummary> = summaries
+                    .into_iter()
+                    .map(|s| AgentSummary {
+                        agent_id: s.agent_id,
+                        total_actions: s.total_actions as usize,
+                        success_count: s.success_count as usize,
+                        error_count: s.error_count as usize,
+                        denial_count: s.denial_count as usize,
+                        success_rate: s.success_rate,
+                        last_active_at: Some(s.last_active_at),
+                        entity_types: Vec::new(),
+                        tenants: Vec::new(),
+                    })
+                    .collect();
+                let total = agents.len();
+                return Json(serde_json::json!({
+                    "agents": agents,
+                    "total": total,
+                }));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to query agent summaries from Turso");
+            }
         }
     }
 
-    // Compute success rates
-    let mut agent_list: Vec<AgentSummary> = agents.into_values().collect();
-    for agent in &mut agent_list {
-        agent.success_rate = if agent.total_actions > 0 {
-            agent.success_count as f64 / agent.total_actions as f64
-        } else {
-            0.0
-        };
-    }
-
-    // Sort by last_active_at descending (most recent first)
-    agent_list.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
-
+    // Fallback: empty response when no Turso configured.
     Json(serde_json::json!({
-        "agents": agent_list,
-        "total": agent_list.len(),
+        "agents": [],
+        "total": 0,
     }))
 }
 
@@ -170,49 +126,52 @@ pub(crate) async fn get_agent_history(
     Query(params): Query<AgentHistoryParams>,
 ) -> Json<serde_json::Value> {
     let limit = params.limit.unwrap_or(100).min(500);
-    let log = state.trajectory_log.read().unwrap(); // ci-ok: infallible lock
 
-    let mut history: Vec<AgentHistoryEntry> = Vec::new();
-    for entry in log.entries().iter().rev() {
-        if history.len() >= limit {
-            break;
-        }
-
-        let matches_agent = entry.agent_id.as_deref() == Some(&agent_id);
-        if !matches_agent {
-            continue;
-        }
-
-        // Apply filters
-        if let Some(ref tenant_filter) = params.tenant
-            && entry.tenant != *tenant_filter
+    // Query Turso directly (single source of truth).
+    if let Some(turso) = state.turso_opt() {
+        match turso
+            .query_trajectories_by_agent(
+                &agent_id,
+                params.tenant.as_deref(),
+                params.entity_type.as_deref(),
+                limit as i64,
+            )
+            .await
         {
-            continue;
+            Ok(rows) => {
+                let history: Vec<AgentHistoryEntry> = rows
+                    .into_iter()
+                    .map(|r| AgentHistoryEntry {
+                        timestamp: r.created_at,
+                        tenant: r.tenant,
+                        entity_type: r.entity_type,
+                        entity_id: r.entity_id,
+                        action: r.action,
+                        success: r.success,
+                        from_status: r.from_status,
+                        to_status: r.to_status,
+                        error: r.error,
+                        authz_denied: r.authz_denied.unwrap_or(false),
+                        denied_resource: r.denied_resource,
+                    })
+                    .collect();
+                let total = history.len();
+                return Json(serde_json::json!({
+                    "agent_id": agent_id,
+                    "history": history,
+                    "total": total,
+                }));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to query agent history from Turso");
+            }
         }
-        if let Some(ref et_filter) = params.entity_type
-            && entry.entity_type != *et_filter
-        {
-            continue;
-        }
-
-        history.push(AgentHistoryEntry {
-            timestamp: entry.timestamp.clone(),
-            tenant: entry.tenant.clone(),
-            entity_type: entry.entity_type.clone(),
-            entity_id: entry.entity_id.clone(),
-            action: entry.action.clone(),
-            success: entry.success,
-            from_status: entry.from_status.clone(),
-            to_status: entry.to_status.clone(),
-            error: entry.error.clone(),
-            authz_denied: entry.authz_denied.unwrap_or(false),
-            denied_resource: entry.denied_resource.clone(),
-        });
     }
 
+    // Fallback: empty response when no Turso configured.
     Json(serde_json::json!({
         "agent_id": agent_id,
-        "history": history,
-        "total": history.len(),
+        "history": [],
+        "total": 0,
     }))
 }

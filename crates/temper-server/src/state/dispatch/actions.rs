@@ -191,9 +191,6 @@ impl crate::state::ServerState {
             if let Err(e) = self.persist_trajectory_entry(&entry).await {
                 tracing::error!(error = %e, "failed to persist trajectory entry");
             }
-            if let Ok(mut log) = self.trajectory_log.write() {
-                log.push(entry);
-            }
             return Ok(EntityResponse {
                 success: true,
                 state: EntityState {
@@ -258,8 +255,6 @@ impl crate::state::ServerState {
                 };
                 if let Err(persist_err) = self.persist_trajectory_entry(&entry).await {
                     tracing::error!(error = %persist_err, "failed to persist trajectory entry");
-                } else if let Ok(mut log) = self.trajectory_log.write() {
-                    log.push(entry.clone());
                 }
                 return Err(format!("Actor dispatch failed: {e}"));
             }
@@ -301,16 +296,7 @@ impl crate::state::ServerState {
         if let Err(e) = self.persist_trajectory_entry(&trajectory_entry).await {
             tracing::error!(error = %e, "failed to persist trajectory entry");
         }
-        // Always push to in-memory log so /observe endpoints see it.
-        if let Ok(mut log) = self.trajectory_log.write() {
-            log.push(trajectory_entry.clone());
-        }
-        // Push successful transitions to the dedicated success log (separate budget).
-        if trajectory_entry.success
-            && let Ok(mut log) = self.success_trajectory_log.write()
-        {
-            log.push(trajectory_entry.clone());
-        }
+
 
         // Broadcast state change for SSE subscribers (best-effort, ignore send errors)
         if response.success {

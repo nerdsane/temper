@@ -20,7 +20,7 @@ use tokio::io::AsyncBufReadExt;
 
 use temper_evolution::PostgresRecordStore;
 use temper_observe::ClickHouseStore;
-use temper_observe::otel::init_tracing;
+use temper_observe::otel::init_observability;
 use temper_platform::optimization::run_optimization_cycle;
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
@@ -37,7 +37,7 @@ use temper_verify::cascade::VerificationCascade;
 
 use crate::StorageBackend;
 
-use loader::{hydrate_trajectory_log, load_into_registry, read_ioa_sources};
+use loader::{load_into_registry, read_ioa_sources};
 use storage::{
     connect_postgres_store, load_registry_from_postgres, load_registry_from_turso,
     redact_connection_url, upsert_loaded_specs_to_postgres, upsert_loaded_specs_to_turso,
@@ -64,11 +64,9 @@ pub async fn run(
     storage_explicit: bool,
     observe: bool,
 ) -> Result<()> {
-    // Initialize OTEL tracing if OTLP_ENDPOINT is set.
-    // The guard must be held alive for the server's lifetime.
-    let _otel_guard = std::env::var("OTLP_ENDPOINT").ok().map(|endpoint| {
-        init_tracing(&endpoint, "temper-platform").expect("Failed to initialize OTEL tracing")
-    });
+    // Initialize observability (OTEL export if OTLP_ENDPOINT or LOGFIRE_TOKEN
+    // is set, otherwise stderr-only logging).
+    let _otel_guard = init_observability("temper-platform");
 
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
@@ -236,9 +234,37 @@ pub async fn run(
         }
     }
 
-    // Hydrate trajectory log from persistent backend (Postgres, Turso, or Redis).
+    // Trajectory data is now read directly from Turso (single source of truth).
+
+    // Pending decisions are now read directly from Turso (single source of truth).
+
+    // Hydrate Cedar policies from Turso.
     if let Some(ref store) = state.server.event_store {
-        hydrate_trajectory_log(&state.server, store, &apps).await;
+        if let Some(turso) = store.turso_store() {
+            match turso.load_tenant_policies().await {
+                Ok(rows) if !rows.is_empty() => {
+                    let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+                    for (tenant, policy_text) in &rows {
+                        policies.insert(tenant.clone(), policy_text.clone());
+                    }
+                    // Reload all policies into Cedar engine.
+                    let mut combined = String::new();
+                    for text in policies.values() {
+                        combined.push_str(text);
+                        combined.push('\n');
+                    }
+                    if let Err(e) = state.server.authz.reload_policies(&combined) {
+                        eprintln!("  Warning: failed to reload Cedar policies from Turso: {e}");
+                    } else {
+                        println!("  Restored Cedar policies for {} tenants from Turso.", rows.len());
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("  Warning: failed to load Cedar policies from Turso: {e}");
+                }
+            }
+        }
     }
 
     // Recover WASM modules from persistent backend (Postgres or Turso).
@@ -253,16 +279,7 @@ pub async fn run(
             }
         }
 
-        // Recover recent WASM invocation history.
-        match state.server.load_recent_wasm_invocations(500).await {
-            Ok(count) if count > 0 => {
-                println!("  Restored {count} WASM invocation entries from database.");
-            }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("  Warning: failed to recover WASM invocations: {e}");
-            }
-        }
+        // WASM invocations are now read directly from Turso (single source of truth).
     }
 
     println!("Starting Temper platform server...");

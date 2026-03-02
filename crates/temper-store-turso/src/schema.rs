@@ -125,6 +125,28 @@ pub const CREATE_WASM_INVOCATION_LOGS_CREATED_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_wasm_invocation_logs_created
     ON wasm_invocation_logs(created_at DESC);";
 
+/// CREATE TABLE statement for pending authorization decisions.
+///
+/// Stores Cedar authorization denials awaiting human approval.
+/// The full PendingDecision is stored as JSON in the `data` column.
+pub const CREATE_PENDING_DECISIONS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS pending_decisions (
+    id TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);";
+
+pub const CREATE_PENDING_DECISIONS_TENANT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_pending_decisions_tenant
+    ON pending_decisions(tenant);";
+
+pub const CREATE_PENDING_DECISIONS_STATUS_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_pending_decisions_status
+    ON pending_decisions(status);";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +166,16 @@ mod tests {
         assert!(CREATE_WASM_INVOCATION_LOGS_TENANT_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_WASM_INVOCATION_LOGS_MODULE_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_WASM_INVOCATION_LOGS_CREATED_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_PENDING_DECISIONS_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_PENDING_DECISIONS_TENANT_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_PENDING_DECISIONS_STATUS_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_TRAJECTORIES_AGENT_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_FEATURE_REQUESTS_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_EVOLUTION_RECORDS_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_EVOLUTION_RECORDS_TYPE_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_EVOLUTION_RECORDS_STATUS_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_DESIGN_TIME_EVENTS_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX.contains("IF NOT EXISTS"));
     }
 
     #[test]
@@ -164,3 +196,93 @@ mod tests {
         }
     }
 }
+
+/// Cedar policy storage per tenant.
+pub const CREATE_TENANT_POLICIES_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS tenant_policies (
+    tenant TEXT PRIMARY KEY,
+    policy_text TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);";
+
+// ---------------------------------------------------------------------------
+// Phase 0: Turso as single source of truth — new tables + trajectory extensions
+// ---------------------------------------------------------------------------
+
+/// ALTER TABLE migrations for the `trajectories` table.
+///
+/// These add columns that were previously only tracked in-memory
+/// (agent_id, session_id, authz_denied, etc.). Each statement uses
+/// try-and-ignore semantics in SQLite (duplicate column is a no-op error).
+pub const ALTER_TRAJECTORIES_ADD_AGENT_ID: &str =
+    "ALTER TABLE trajectories ADD COLUMN agent_id TEXT";
+pub const ALTER_TRAJECTORIES_ADD_SESSION_ID: &str =
+    "ALTER TABLE trajectories ADD COLUMN session_id TEXT";
+pub const ALTER_TRAJECTORIES_ADD_AUTHZ_DENIED: &str =
+    "ALTER TABLE trajectories ADD COLUMN authz_denied INTEGER";
+pub const ALTER_TRAJECTORIES_ADD_DENIED_RESOURCE: &str =
+    "ALTER TABLE trajectories ADD COLUMN denied_resource TEXT";
+pub const ALTER_TRAJECTORIES_ADD_DENIED_MODULE: &str =
+    "ALTER TABLE trajectories ADD COLUMN denied_module TEXT";
+pub const ALTER_TRAJECTORIES_ADD_SOURCE: &str =
+    "ALTER TABLE trajectories ADD COLUMN source TEXT";
+pub const ALTER_TRAJECTORIES_ADD_SPEC_GOVERNED: &str =
+    "ALTER TABLE trajectories ADD COLUMN spec_governed INTEGER";
+
+/// Index on agent_id for agent-scoped trajectory queries.
+pub const CREATE_TRAJECTORIES_AGENT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_trajectories_agent
+    ON trajectories(agent_id);";
+
+/// Feature request records generated from trajectory analysis.
+pub const CREATE_FEATURE_REQUESTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS feature_requests (
+    id TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    description TEXT NOT NULL,
+    frequency INTEGER NOT NULL DEFAULT 0,
+    trajectory_refs TEXT NOT NULL DEFAULT '[]',
+    disposition TEXT NOT NULL DEFAULT 'Open',
+    developer_notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);";
+
+/// Evolution record chain (O/P/A/D/I records).
+pub const CREATE_EVOLUTION_RECORDS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS evolution_records (
+    id TEXT PRIMARY KEY,
+    record_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Open',
+    created_by TEXT NOT NULL,
+    derived_from TEXT,
+    data TEXT NOT NULL,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now'))
+);";
+
+pub const CREATE_EVOLUTION_RECORDS_TYPE_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_evolution_records_type
+    ON evolution_records(record_type);";
+
+pub const CREATE_EVOLUTION_RECORDS_STATUS_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_evolution_records_status
+    ON evolution_records(status);";
+
+/// Design-time events emitted during spec loading and verification.
+pub const CREATE_DESIGN_TIME_EVENTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS design_time_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    tenant TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    level TEXT,
+    passed INTEGER,
+    step_number INTEGER,
+    total_steps INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);";
+
+pub const CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_design_time_events_tenant
+    ON design_time_events(tenant, entity_type);";

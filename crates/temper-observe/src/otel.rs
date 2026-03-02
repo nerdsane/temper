@@ -32,7 +32,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
 /// Default OTLP endpoint for Logfire.
-const LOGFIRE_ENDPOINT: &str = "https://logfire-api.pydantic.dev";
+const LOGFIRE_ENDPOINT: &str = "https://logfire-us.pydantic.dev";
 
 /// Guard returned by [`init_tracing`].  Holds provider handles so the
 /// caller can [`shutdown`](OtelGuard::shutdown) cleanly before exit.

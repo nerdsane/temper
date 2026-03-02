@@ -39,14 +39,13 @@ pub(crate) fn security_context_from_headers(
 
 /// Record result of an authorization denial.
 ///
-/// Creates a `PendingDecision` for human review, pushes it to the bounded log
-/// and broadcasts it via SSE. Also records a `TrajectoryEntry` with
-/// `authz_denied: Some(true)` for the evolution engine.
+/// Creates a `PendingDecision` for human review, broadcasts it via SSE, and
+/// persists both the decision and trajectory to Turso synchronously.
 ///
 /// Returns the `PendingDecision` so callers can include the decision ID in
 /// their HTTP response.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn record_authz_denial(
+pub(crate) async fn record_authz_denial(
     state: &crate::state::ServerState,
     tenant: &str,
     security_ctx: &SecurityContext,
@@ -78,15 +77,15 @@ pub(crate) fn record_authz_denial(
         module_name,
     );
 
-    // Push to bounded log + broadcast for SSE.
-    {
-        let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
-        if log.push(pd.clone()) {
-            let _ = state.pending_decision_tx.send(pd.clone());
-        }
+    // Broadcast for SSE.
+    let _ = state.pending_decision_tx.send(pd.clone());
+
+    // Persist decision to Turso synchronously.
+    if let Err(e) = state.persist_pending_decision(&pd).await {
+        eprintln!("Warning: failed to persist pending decision {}: {e}", pd.id);
     }
 
-    // Record trajectory for evolution engine.
+    // Record trajectory to Turso synchronously.
     let traj = TrajectoryEntry {
         timestamp: sim_now().to_rfc3339(),
         tenant: tenant.to_string(),
@@ -105,9 +104,8 @@ pub(crate) fn record_authz_denial(
         source: Some(TrajectorySource::Authz),
         spec_governed: None,
     };
-    {
-        let mut tlog = state.trajectory_log.write().unwrap(); // ci-ok: infallible lock
-        tlog.push(traj);
+    if let Err(e) = state.persist_trajectory_entry(&traj).await {
+        eprintln!("Warning: failed to persist authz trajectory: {e}");
     }
 
     pd

@@ -1,13 +1,16 @@
 use super::*;
+use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
+use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
 use crate::dispatch::AgentContext;
+use crate::event_store::ServerEventStore;
 use crate::registry::SpecRegistry;
 
 const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
@@ -24,6 +27,26 @@ fn test_state_with_registry() -> ServerState {
     );
     let system = ActorSystem::new("test-observe");
     ServerState::from_registry(system, registry)
+}
+
+/// Build a test state with a local Turso (SQLite) backend for
+/// tests that need persisted data (trajectories, decisions, records).
+async fn test_state_with_turso() -> ServerState {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let db_url = format!(
+        "file:/tmp/temper-observe-test-{}-{}.db",
+        std::process::id(),
+        id,
+    );
+    // Clean up leftover DB from a previous run.
+    let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
+    let turso = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let mut state = test_state_with_registry();
+    state.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state
 }
 
 fn build_test_app() -> Router {
@@ -225,7 +248,7 @@ async fn test_tenant_decision_mutations_require_manage_policies() {
 
 #[tokio::test]
 async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchanged() {
-    let state = test_state_with_registry();
+    let state = test_state_with_turso().await;
     install_admin_policy(&state);
 
     let pending = crate::state::PendingDecision::from_denial(
@@ -239,10 +262,11 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
         None,
     );
     let decision_id = pending.id.clone();
-    {
-        let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
-        assert!(log.push(pending));
-    }
+    // Persist decision to Turso (single source of truth).
+    state
+        .persist_pending_decision(&pending)
+        .await
+        .expect("persist pending decision to Turso");
     let before_policies = state
         .tenant_policies
         .read()
@@ -265,8 +289,15 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
         .unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-    let log = state.pending_decision_log.read().unwrap(); // ci-ok: infallible lock
-    let decision = log.get(&decision_id).expect("decision should still exist");
+    // Verify decision status unchanged in Turso.
+    let turso = state.turso_opt().expect("turso configured");
+    let data_str = turso
+        .get_pending_decision(&decision_id)
+        .await
+        .expect("query turso")
+        .expect("decision should still exist");
+    let decision: crate::state::PendingDecision =
+        serde_json::from_str(&data_str).expect("deserialize");
     assert_eq!(decision.status, crate::state::DecisionStatus::Pending);
     assert!(decision.generated_policy.is_none());
 
@@ -507,7 +538,7 @@ async fn test_metrics_returns_prometheus_format() {
 
 #[tokio::test]
 async fn test_trajectories_records_success_and_failure() {
-    let state = test_state_with_registry();
+    let state = test_state_with_turso().await;
 
     // Successful action.
     let r = state
@@ -572,7 +603,7 @@ async fn test_trajectories_records_success_and_failure() {
 
 #[tokio::test]
 async fn test_trajectories_filters_by_entity_type() {
-    let state = test_state_with_registry();
+    let state = test_state_with_turso().await;
 
     let _ = state
         .dispatch_tenant_action(
@@ -758,7 +789,7 @@ async fn test_evolution_records_empty() {
 
 #[tokio::test]
 async fn test_evolution_records_after_sentinel() {
-    let state = test_state_with_registry();
+    let state = test_state_with_turso().await;
 
     // Generate errors to trigger sentinel.
     for i in 0..10 {
@@ -810,7 +841,8 @@ async fn test_evolution_records_after_sentinel() {
 
 #[tokio::test]
 async fn test_evolution_get_record_not_found() {
-    let app = build_test_app();
+    let state = test_state_with_turso().await;
+    let app = build_app_with_state(state);
 
     let response = app
         .oneshot(
@@ -826,9 +858,9 @@ async fn test_evolution_get_record_not_found() {
 
 #[tokio::test]
 async fn test_evolution_decide_creates_d_record() {
-    let state = test_state_with_registry();
+    let state = test_state_with_turso().await;
 
-    // Manually insert an O-Record.
+    // Manually insert an O-Record into Turso.
     let obs = temper_evolution::ObservationRecord {
         header: temper_evolution::RecordHeader {
             id: "O-test-decide".to_string(),
@@ -846,7 +878,20 @@ async fn test_evolution_decide_creates_d_record() {
         observed_value: None,
         context: serde_json::json!({}),
     };
-    state.record_store.insert_observation(obs);
+    let data_json = serde_json::to_string(&obs).unwrap();
+    state
+        .turso_opt()
+        .expect("turso configured")
+        .insert_evolution_record(
+            &obs.header.id,
+            "Observation",
+            &format!("{:?}", obs.header.status),
+            &obs.header.created_by,
+            obs.header.derived_from.as_deref(),
+            &data_json,
+        )
+        .await
+        .expect("insert O-Record to Turso");
 
     let app = Router::new()
         .nest("/observe", build_observe_router())
@@ -876,7 +921,8 @@ async fn test_evolution_decide_creates_d_record() {
 
 #[tokio::test]
 async fn test_evolution_decide_not_found() {
-    let app = build_test_app();
+    let state = test_state_with_turso().await;
+    let app = build_app_with_state(state);
 
     let response = app
         .oneshot(
@@ -1108,9 +1154,17 @@ effect = "set phantom true"
 
 #[tokio::test]
 async fn test_load_dir_emits_design_time_events() {
+    let db_url = format!(
+        "file:/tmp/temper-design-time-test-{}.db",
+        std::process::id(),
+    );
+    let turso = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
     let system = ActorSystem::new("test-load-dir-events");
     let registry = SpecRegistry::new();
-    let state = ServerState::from_registry(system, registry);
+    let mut state = ServerState::from_registry(system, registry);
+    state.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
 
     let app = Router::new()
         .nest("/observe", build_observe_router())
@@ -1142,21 +1196,25 @@ async fn test_load_dir_emits_design_time_events() {
         .await
         .unwrap();
 
-    // Check that design-time events were logged
-    let log = state.design_time_log.read().unwrap();
-    assert!(!log.is_empty(), "design-time log should have events");
+    // Check that design-time events were persisted to Turso.
+    let turso = state.turso_opt().expect("turso configured");
+    let events = turso
+        .list_design_time_events(None, 1000)
+        .await
+        .expect("query design-time events from Turso");
+    assert!(!events.is_empty(), "design-time events should be in Turso");
 
-    // Should have spec_loaded, verify_started, verify_level, and verify_done events
-    let loaded_events: Vec<_> = log.iter().filter(|e| e.kind == "spec_loaded").collect();
+    // Should have spec_loaded, verify_started, and verify_done events
+    let loaded_events: Vec<_> = events.iter().filter(|e| e.kind == "spec_loaded").collect();
     assert!(!loaded_events.is_empty(), "should have spec_loaded events");
 
-    let started_events: Vec<_> = log.iter().filter(|e| e.kind == "verify_started").collect();
+    let started_events: Vec<_> = events.iter().filter(|e| e.kind == "verify_started").collect();
     assert!(
         !started_events.is_empty(),
         "should have verify_started events"
     );
 
-    let done_events: Vec<_> = log.iter().filter(|e| e.kind == "verify_done").collect();
+    let done_events: Vec<_> = events.iter().filter(|e| e.kind == "verify_done").collect();
     assert!(!done_events.is_empty(), "should have verify_done events");
 }
 

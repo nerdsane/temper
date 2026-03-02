@@ -4,13 +4,17 @@
 //! action → custom_effects → dispatch_wasm_integrations → WasmEngine.invoke()
 //! → callback dispatched → entity state transitions.
 
+use std::sync::Arc;
+
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
+use temper_server::ServerEventStore;
 use temper_server::ServerState;
 use temper_server::dispatch::AgentContext;
 use temper_server::registry::SpecRegistry;
-use temper_server::state::{DispatchExtOptions, TrajectorySource};
+use temper_server::state::{DispatchExtOptions, PendingDecision};
 use temper_spec::csdl::parse_csdl;
+use temper_store_turso::TursoEventStore;
 
 /// Pre-built echo integration WASM binary.
 const ECHO_WASM: &[u8] =
@@ -85,6 +89,24 @@ fn build_echo_test_state() -> ServerState {
     ServerState::from_registry(system, registry)
 }
 
+/// Build a test state with a local Turso (SQLite) backend so that
+/// persisted artifacts (decisions, trajectories, invocations) can be
+/// queried after dispatch.
+async fn build_echo_test_state_with_turso() -> ServerState {
+    let db_url = format!(
+        "file:/tmp/temper-wasm-dispatch-test-{}.db",
+        std::process::id()
+    );
+    // Clean up any leftover DB from a previous run.
+    let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
+    let turso = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let mut state = build_echo_test_state();
+    state.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+    state
+}
+
 const ADMIN_ONLY_POLICY: &str = r#"
 permit(
   principal is Admin,
@@ -100,39 +122,68 @@ fn install_non_wasm_policy(state: &ServerState) {
         .expect("policy should parse");
 }
 
-fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str) {
-    let pd_log = state
-        .pending_decision_log
-        .read()
-        .expect("pending decision lock"); // ci-ok: infallible lock
-    let decision = pd_log
-        .entries()
+/// Verify authz denial artifacts are persisted to Turso.
+///
+/// Checks that the WASM authorization denial pathway creates:
+/// 1. A PendingDecision for the denied http_call action
+/// 2. A trajectory entry with authz_denied flag and source=Authz
+/// 3. A WASM invocation entry recording the failed invocation
+async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str) {
+    let turso = state
+        .turso_opt()
+        .expect("Turso backend required for authz denial artifact verification");
+
+    // Wait briefly for background tokio::spawn tasks to complete
+    // (pending decision and trajectory persist use tokio::spawn).
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // 1. Verify PendingDecision was persisted.
+    let decisions = turso
+        .query_all_decisions(None)
+        .await
+        .expect("query decisions from Turso");
+    let decision = decisions
         .iter()
+        .filter_map(|data| serde_json::from_str::<PendingDecision>(data).ok())
         .find(|d| d.resource_id == "echo_integration" && d.action == "http_call")
-        .expect("expected wasm authz pending decision");
+        .expect("expected wasm authz pending decision in Turso");
     assert_eq!(decision.module_name.as_deref(), Some("echo_integration"));
 
-    let tlog = state.trajectory_log.read().expect("trajectory lock"); // ci-ok: infallible lock
-    let authz_traj = tlog
-        .entries()
+    // 2. Verify authz trajectory entry was persisted.
+    let trajectories = turso
+        .load_recent_trajectories(1000)
+        .await
+        .expect("query trajectories from Turso");
+    let authz_traj = trajectories
         .iter()
         .find(|t| {
             t.entity_id == entity_id
                 && t.authz_denied == Some(true)
-                && t.source == Some(TrajectorySource::Authz)
+                && t.source.as_deref() == Some("Authz")
         })
-        .expect("expected authz trajectory");
+        .expect("expected authz trajectory in Turso");
     assert_eq!(
         authz_traj.denied_module.as_deref(),
         Some("echo_integration")
     );
 
-    let wlog = state.wasm_invocation_log.read().expect("wasm log lock"); // ci-ok: infallible lock
-    let denied_invocation = wlog
-        .entries()
+    // 3. Verify denied WASM invocation was persisted.
+    // The wasm_invocation_logs table does not store authz_denied directly;
+    // we identify the denied invocation by entity_id + failure + error text.
+    let invocations = turso
+        .load_recent_wasm_invocations(1000)
+        .await
+        .expect("query wasm invocations from Turso");
+    let denied_invocation = invocations
         .iter()
-        .find(|w| w.entity_id == entity_id && w.authz_denied == Some(true))
-        .expect("expected denied wasm invocation");
+        .find(|w| {
+            w.entity_id == entity_id
+                && !w.success
+                && w.error
+                    .as_deref()
+                    .map_or(false, |e| e.contains("authorization denied"))
+        })
+        .expect("expected denied wasm invocation in Turso");
     assert_eq!(denied_invocation.module_name, "echo_integration");
 }
 
@@ -247,7 +298,7 @@ async fn wasm_missing_module_dispatches_failure_callback() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wasm_authz_denial_records_governance_artifacts_async_mode() {
-    let state = build_echo_test_state();
+    let state = build_echo_test_state_with_turso().await;
     let tenant = TenantId::default();
     install_non_wasm_policy(&state);
 
@@ -289,12 +340,12 @@ async fn wasm_authz_denial_records_governance_artifacts_async_mode() {
         }
     }
     assert_eq!(final_status, "Failed");
-    assert_wasm_authz_denial_artifacts(&state, "echo-authz-async");
+    assert_wasm_authz_denial_artifacts(&state, "echo-authz-async").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wasm_authz_denial_records_governance_artifacts_blocking_mode() {
-    let state = build_echo_test_state();
+    let state = build_echo_test_state_with_turso().await;
     let tenant = TenantId::default();
     install_non_wasm_policy(&state);
 
@@ -327,5 +378,5 @@ async fn wasm_authz_denial_records_governance_artifacts_blocking_mode() {
         .expect("blocking TriggerEcho should return callback result");
     assert!(response.success);
     assert_eq!(response.state.status, "Failed");
-    assert_wasm_authz_denial_artifacts(&state, "echo-authz-blocking");
+    assert_wasm_authz_denial_artifacts(&state, "echo-authz-blocking").await;
 }

@@ -34,6 +34,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 dirs = "6"
+dotenvy = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

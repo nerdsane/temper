@@ -15,7 +15,7 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 use crate::state::ServerState;
 
 /// Check function type: given the server state, returns `Some(observed_value)` if triggered.
-type SentinelCheckFn = Box<dyn Fn(&ServerState) -> Option<f64> + Send + Sync>;
+type SentinelCheckFn = Box<dyn Fn(&ServerState, &[crate::state::TrajectoryEntry]) -> Option<f64> + Send + Sync>;
 
 /// A sentinel rule that can evaluate server state and detect anomalies.
 pub struct SentinelRule {
@@ -55,7 +55,7 @@ pub fn default_rules() -> Vec<SentinelRule> {
             classification: ObservationClass::ErrorRate,
             threshold_field: "error_rate".to_string(),
             threshold_value: 0.10,
-            check: Box::new(|state| {
+            check: Box::new(|state, _entries| {
                 let total = state.metrics.transitions_total.load(Ordering::Relaxed);
                 if total == 0 {
                     return None;
@@ -75,13 +75,8 @@ pub fn default_rules() -> Vec<SentinelRule> {
             classification: ObservationClass::StateMachine,
             threshold_field: "rejection_rate".to_string(),
             threshold_value: 0.20,
-            check: Box::new(|state| {
-                // Check per-action rejection rates from trajectory log.
-                let log = match state.trajectory_log.read() {
-                    Ok(l) => l,
-                    Err(e) => e.into_inner(),
-                };
-                let entries = log.entries();
+            check: Box::new(|_state, entries| {
+                // Check per-action rejection rates from trajectory entries.
                 if entries.is_empty() {
                     return None;
                 }
@@ -121,7 +116,7 @@ pub fn default_rules() -> Vec<SentinelRule> {
             classification: ObservationClass::ResourceUsage,
             threshold_field: "transitions_total".to_string(),
             threshold_value: 1.0,
-            check: Box::new(|state| {
+            check: Box::new(|state, _entries| {
                 let total = state.metrics.transitions_total.load(Ordering::Relaxed);
                 let active = {
                     let reg = match state.actor_registry.read() {
@@ -145,12 +140,12 @@ pub fn default_rules() -> Vec<SentinelRule> {
 ///
 /// Returns a list of alerts for rules whose thresholds were crossed.
 /// Each alert includes a fully-formed O-Record ready for insertion into the RecordStore.
-pub fn check_rules(rules: &[SentinelRule], state: &ServerState) -> Vec<SentinelAlert> {
+pub fn check_rules(rules: &[SentinelRule], state: &ServerState, trajectory_entries: &[crate::state::TrajectoryEntry]) -> Vec<SentinelAlert> {
     let now = sim_now();
     let mut alerts = Vec::new();
 
     for rule in rules {
-        if let Some(observed_value) = (rule.check)(state) {
+        if let Some(observed_value) = (rule.check)(state, trajectory_entries) {
             let id_suffix = &sim_uuid().to_string()[..8];
             let year = now.format("%Y");
             let record_id = format!("O-{year}-{id_suffix}");
@@ -253,7 +248,7 @@ mod tests {
         }
 
         let rules = default_rules();
-        let alerts = check_rules(&rules, &state);
+        let alerts = check_rules(&rules, &state, &[]);
 
         // Error rate is 6/10 = 60% which should trigger the error_rate_spike rule.
         let error_alert = alerts.iter().find(|a| a.rule_name == "error_rate_spike");
@@ -267,7 +262,7 @@ mod tests {
     fn test_no_alerts_on_clean_state() {
         let state = test_state_with_registry();
         let rules = default_rules();
-        let alerts = check_rules(&rules, &state);
+        let alerts = check_rules(&rules, &state, &[]);
         assert!(
             alerts.is_empty(),
             "no alerts on clean state with no activity and no actors"

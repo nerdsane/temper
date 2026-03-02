@@ -21,26 +21,34 @@ use crate::state::ServerState;
 pub(crate) async fn handle_sentinel_check(
     State(state): State<ServerState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Load trajectory entries from Turso for sentinel and insight generation.
+    let trajectory_entries = state.load_trajectory_entries(10_000).await;
+
     let rules = sentinel::default_rules();
-    let alerts = sentinel::check_rules(&rules, &state);
+    let alerts = sentinel::check_rules(&rules, &state, &trajectory_entries);
 
     // Store generated O-Records.
     let mut results = Vec::new();
     for alert in &alerts {
-        if let Some(ref pg_store) = state.pg_record_store {
-            pg_store
-                .insert_observation(&alert.record)
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        record_id = %alert.record.header.id,
-                        error = %e,
-                        "failed to persist sentinel observation to postgres"
-                    );
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
+        // Persist observation to Turso.
+        if let Some(turso) = state.turso_opt() {
+            let data_json = serde_json::to_string(&alert.record).unwrap_or_default();
+            if let Err(e) = turso.insert_evolution_record(
+                &alert.record.header.id,
+                "Observation",
+                &format!("{:?}", alert.record.header.status),
+                &alert.record.header.created_by,
+                alert.record.header.derived_from.as_deref(),
+                &data_json,
+            ).await {
+                tracing::error!(
+                    record_id = %alert.record.header.id,
+                    error = %e,
+                    "failed to persist sentinel observation to Turso"
+                );
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
         }
-        state.record_store.insert_observation(alert.record.clone());
         results.push(serde_json::json!({
             "rule": alert.rule_name,
             "record_id": alert.record.header.id,
@@ -52,18 +60,26 @@ pub(crate) async fn handle_sentinel_check(
     }
 
     // Also generate insights from trajectory data.
-    let insights = insight_generator::generate_insights(&state);
+    let insights = insight_generator::generate_insights(&trajectory_entries);
     let mut insight_results = Vec::new();
     for insight in &insights {
-        state.record_store.insert_insight(insight.clone());
-        if let Some(ref pg_store) = state.pg_record_store
-            && let Err(e) = pg_store.insert_insight(insight).await
-        {
-            tracing::error!(
-                record_id = %insight.header.id,
-                error = %e,
-                "failed to persist insight to postgres"
-            );
+        // Persist insight to Turso.
+        if let Some(turso) = state.turso_opt() {
+            let data_json = serde_json::to_string(insight).unwrap_or_default();
+            if let Err(e) = turso.insert_evolution_record(
+                &insight.header.id,
+                "Insight",
+                &format!("{:?}", insight.header.status),
+                &insight.header.created_by,
+                insight.header.derived_from.as_deref(),
+                &data_json,
+            ).await {
+                tracing::error!(
+                    record_id = %insight.header.id,
+                    error = %e,
+                    "failed to persist insight to Turso"
+                );
+            }
         }
         insight_results.push(serde_json::json!({
             "record_id": insight.header.id,
@@ -86,7 +102,8 @@ pub(crate) async fn handle_sentinel_check(
 pub(crate) async fn handle_unmet_intents(
     State(state): State<ServerState>,
 ) -> Json<serde_json::Value> {
-    let intents = insight_generator::generate_unmet_intents(&state);
+    let trajectory_entries = state.load_trajectory_entries(10_000).await;
+    let intents = insight_generator::generate_unmet_intents(&trajectory_entries);
     let open_count = intents.iter().filter(|i| i.status == "open").count();
     let resolved_count = intents.iter().filter(|i| i.status == "resolved").count();
 
@@ -97,112 +114,120 @@ pub(crate) async fn handle_unmet_intents(
     }))
 }
 
-/// GET /observe/evolution/feature-requests -- list feature request records.
+/// GET /observe/evolution/feature-requests -- list feature request records from Turso.
 ///
 /// Supports optional `disposition` query parameter to filter by status.
 pub(crate) async fn handle_feature_requests(
     State(state): State<ServerState>,
     Query(params): Query<BTreeMap<String, String>>,
 ) -> Json<serde_json::Value> {
-    // Generate fresh feature requests from trajectory data.
-    let generated = insight_generator::generate_feature_requests(&state);
+    let disposition_filter = params.get("disposition").map(|d| d.as_str());
 
-    // Merge with stored feature requests (update frequencies, add new ones).
-    {
-        let mut log = state.feature_request_log.write().unwrap(); // ci-ok: infallible lock
-        for fr in generated {
-            // Dedup by category + stable action/prefix key.
-            let fr_key = insight_generator::feature_request_dedup_key(&fr.description);
-            let existing = log.iter_mut().find(|existing| {
-                existing.category == fr.category
-                    && insight_generator::feature_request_dedup_key(&existing.description) == fr_key
-            });
-            if let Some(existing) = existing {
-                existing.frequency = fr.frequency;
-                existing.trajectory_refs = fr.trajectory_refs;
-            } else if log.len() < 500 {
-                log.push(fr);
+    // Load trajectory entries for feature request generation.
+    let trajectory_entries = state.load_trajectory_entries(10_000).await;
+
+    // Query Turso directly (single source of truth).
+    if let Some(turso) = state.turso_opt() {
+        // First, generate and upsert fresh feature requests from trajectory data.
+        let generated = insight_generator::generate_feature_requests(&trajectory_entries);
+        for fr in &generated {
+            let refs_json = serde_json::to_string(&fr.trajectory_refs).unwrap_or_else(|_| "[]".to_string());
+            let disp_str = match fr.disposition {
+                FeatureRequestDisposition::Open => "Open",
+                FeatureRequestDisposition::Acknowledged => "Acknowledged",
+                FeatureRequestDisposition::Planned => "Planned",
+                FeatureRequestDisposition::WontFix => "WontFix",
+                FeatureRequestDisposition::Resolved => "Resolved",
+            };
+            if let Err(e) = turso
+                .upsert_feature_request(
+                    &fr.header.id,
+                    &format!("{:?}", fr.category),
+                    &fr.description,
+                    fr.frequency as i64,
+                    &refs_json,
+                    disp_str,
+                    fr.developer_notes.as_deref(),
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "failed to upsert feature request to Turso");
+            }
+        }
+
+        // Then read back from Turso with filter.
+        match turso.list_feature_requests(disposition_filter).await {
+            Ok(rows) => {
+                let items: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "id": r.id,
+                            "category": r.category,
+                            "description": r.description,
+                            "frequency": r.frequency,
+                            "trajectory_refs": serde_json::from_str::<serde_json::Value>(&r.trajectory_refs).unwrap_or_default(),
+                            "disposition": r.disposition,
+                            "developer_notes": r.developer_notes,
+                            "created_at": r.created_at,
+                        })
+                    })
+                    .collect();
+                return Json(serde_json::json!(items));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to query feature requests from Turso");
             }
         }
     }
 
-    // Read and optionally filter.
-    let log = state.feature_request_log.read().unwrap(); // ci-ok: infallible lock
-    let disposition_filter = params.get("disposition").map(|d| d.to_string());
-
-    let filtered: Vec<serde_json::Value> = log
-        .iter()
-        .filter(|fr| {
-            if let Some(ref filter) = disposition_filter {
-                let disp_str = match fr.disposition {
-                    FeatureRequestDisposition::Open => "Open",
-                    FeatureRequestDisposition::Acknowledged => "Acknowledged",
-                    FeatureRequestDisposition::Planned => "Planned",
-                    FeatureRequestDisposition::WontFix => "WontFix",
-                    FeatureRequestDisposition::Resolved => "Resolved",
-                };
-                disp_str.eq_ignore_ascii_case(filter)
-            } else {
-                true
-            }
-        })
-        .map(|fr| {
-            serde_json::json!({
-                "id": fr.header.id,
-                "category": fr.category,
-                "description": fr.description,
-                "frequency": fr.frequency,
-                "trajectory_refs": &fr.trajectory_refs[..fr.trajectory_refs.len().min(100)],
-                "disposition": fr.disposition,
-                "developer_notes": fr.developer_notes,
-                "created_at": fr.header.timestamp.to_rfc3339(),
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!(filtered))
+    // Fallback: empty response when no Turso configured.
+    Json(serde_json::json!([]))
 }
 
-/// PATCH /observe/evolution/feature-requests/:id -- update disposition + notes.
+/// PATCH /observe/evolution/feature-requests/:id -- update disposition + notes in Turso.
 pub(crate) async fn handle_update_feature_request(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut log = state.feature_request_log.write().unwrap(); // ci-ok: infallible lock
+    let disposition = body.get("disposition").and_then(|v| v.as_str());
+    let notes = body.get("developer_notes").and_then(|v| v.as_str());
 
-    let fr = log
-        .iter_mut()
-        .find(|fr| fr.header.id == id)
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("Feature request '{id}' not found"),
-            )
-        })?;
-
-    if let Some(disposition) = body.get("disposition").and_then(|v| v.as_str()) {
-        fr.disposition = match disposition.to_lowercase().as_str() {
-            "open" => FeatureRequestDisposition::Open,
-            "acknowledged" => FeatureRequestDisposition::Acknowledged,
-            "planned" => FeatureRequestDisposition::Planned,
-            "wontfix" | "wont_fix" => FeatureRequestDisposition::WontFix,
-            "resolved" => FeatureRequestDisposition::Resolved,
+    // Validate disposition if provided.
+    if let Some(d) = disposition {
+        match d.to_lowercase().as_str() {
+            "open" | "acknowledged" | "planned" | "wontfix" | "wont_fix" | "resolved" => {}
             _ => {
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    format!("Invalid disposition: {disposition}"),
+                    format!("Invalid disposition: {d}"),
                 ));
             }
-        };
+        }
     }
 
-    if let Some(notes) = body.get("developer_notes").and_then(|v| v.as_str()) {
-        fr.developer_notes = Some(notes.to_string());
-    }
+    let Some(turso) = state.turso_opt() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Turso backend not configured".to_string(),
+        ));
+    };
 
-    let updated = serde_json::to_value(&*fr).unwrap_or_default();
-    Ok(Json(updated))
+    turso
+        .update_feature_request(&id, disposition.unwrap_or(""), notes)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to update feature request: {e}"),
+            )
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "id": id,
+        "updated": true,
+    })))
 }
 
 /// GET /observe/evolution/stream -- SSE for real-time evolution events.
