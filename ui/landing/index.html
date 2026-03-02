@@ -783,13 +783,14 @@ decision = <span class="k">await</span> <span class="f">temper</span>.<span clas
   scene.add(outerCage, innerCage);
 
   // Energy Core (Shader-based)
-  const count = 2000; // Increased density
+  const count = 2500; 
   const geometry = new THREE.BufferGeometry();
   const pos = new Float32Array(count * 3);
   const offset = new Float32Array(count); 
 
   for(let i = 0; i < count; i++) {
-    const r = 3.2;
+    // Distribute WITHIN volume (using cubic root for even distribution)
+    const r = Math.pow(Math.random(), 0.33) * 3.2;
     const theta = Math.random() * Math.PI * 2;
     const phi = Math.acos(2 * Math.random() - 1);
     pos[i*3] = r * Math.sin(phi) * Math.cos(theta);
@@ -805,60 +806,54 @@ decision = <span class="k">await</span> <span class="f">temper</span>.<span clas
       uTime: { value: 0 },
       uMouse: { value: new THREE.Vector3(0, 0, 0) },
       uScroll: { value: 0 },
-      uColor: { value: new THREE.Color('#2dd4bf') },
-      uColorAccent: { value: new THREE.Color('#ffffff') } // Pure white for hottest points
+      uColor: { value: new THREE.Color('#2dd4bf') }
     },
     vertexShader: `
       uniform float uTime;
       uniform vec3 uMouse;
-      uniform float uScroll;
       attribute float aOffset;
       varying float vGlow;
-      varying float vDist;
       
       void main() {
         vec3 p = position;
-        float t = uTime * 0.4 + aOffset;
+        float t = uTime * 0.3 + aOffset;
         
         // Fluid motion
-        p.x += sin(t * 0.3 + p.y) * 0.5;
-        p.y += cos(t * 0.4 + p.z) * 0.5;
-        p.z += sin(t * 0.5 + p.x) * 0.5;
+        p.x += sin(t * 0.4 + p.y) * 0.3;
+        p.y += cos(t * 0.5 + p.z) * 0.3;
+        p.z += sin(t * 0.6 + p.x) * 0.3;
         
         // Vortex influence
         float dToMouse = distance(p.xy, uMouse.xy);
         if(dToMouse < 4.0) {
-          float force = (4.0 - dToMouse) / 4.0;
-          p.xy += (uMouse.xy - p.xy) * force * 0.6;
+          float force = pow((4.0 - dToMouse) / 4.0, 2.0);
+          p.xy += (uMouse.xy - p.xy) * force * 0.3;
         }
 
-        // Keep contained
+        // Containment
         float r = length(p);
         if(r > 3.4) p *= (3.4 / r);
 
         vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-        // Larger, more reactive particles
-        gl_PointSize = (25.0 / -mvPosition.z) * (1.0 + uScroll * 3.0);
+        
+        // Constant size relative to camera, no scroll influence
+        gl_PointSize = (35.0 / -mvPosition.z);
         gl_Position = projectionMatrix * mvPosition;
+        
         vGlow = 1.0 - (r / 3.4);
-        vDist = dToMouse;
       }
     `,
     fragmentShader: `
       uniform vec3 uColor;
-      uniform vec3 uColorAccent;
       varying float vGlow;
-      varying float vDist;
       void main() {
         float d = distance(gl_PointCoord, vec2(0.5));
         if(d > 0.5) discard;
         
-        // Exponential falloff for "hotter" center
-        float strength = pow(1.0 - d * 2.0, 3.0);
+        float strength = pow(1.0 - d * 2.0, 2.0);
         
-        // Boost color intensity
-        vec3 color = mix(uColor, uColorAccent, vGlow * 1.5);
-        gl_FragColor = vec4(color * 2.0, strength * vGlow * 1.2);
+        // Consistent green output
+        gl_FragColor = vec4(uColor * 1.8, strength * (vGlow + 0.2));
       }
     `,
     transparent: true,
@@ -885,17 +880,23 @@ decision = <span class="k">await</span> <span class="f">temper</span>.<span clas
   const animate = (time) => {
     requestAnimationFrame(animate);
     const t = time * 0.001;
-    // Stronger scroll impact
     const scrollFactor = scrollY * 0.0015;
 
     material.uniforms.uTime.value = t;
-    material.uniforms.uScroll.value = Math.min(scrollFactor, 2.0);
     material.uniforms.uMouse.value.x += (targetMouseX - material.uniforms.uMouse.value.x) * 0.05;
     material.uniforms.uMouse.value.y += (targetMouseY - material.uniforms.uMouse.value.y) * 0.05;
 
-    // Much more rotation on scroll
-    outerCage.rotation.y = t * 0.05 + scrollFactor * 2.5;
-    outerCage.rotation.z = t * 0.03 + scrollFactor * 0.5;
+    // Synchronize rotation across all core elements
+    const rotY = t * 0.05 + scrollFactor * 2.5;
+    const rotZ = t * 0.03 + scrollFactor * 0.5;
+    
+    outerCage.rotation.y = rotY;
+    outerCage.rotation.z = rotZ;
+    
+    // Core (fire) follows the outer cage exactly
+    fire.rotation.y = rotY;
+    fire.rotation.z = rotZ;
+
     innerCage.rotation.y = -t * 0.08 - scrollFactor * 3.0;
     innerCage.rotation.x = t * 0.04 + scrollFactor * 1.2;
 
@@ -907,24 +908,6 @@ decision = <span class="k">await</span> <span class="f">temper</span>.<span clas
     renderer.render(scene, camera);
   };
   animate(0);
-
-  window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
-
-  window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
-
-  window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
 
   window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
