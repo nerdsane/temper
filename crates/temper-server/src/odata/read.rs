@@ -189,29 +189,29 @@ fn enrich_entity_response(
         .unwrap_or("");
 
     let mut actions = Vec::new();
-    if let Some(tc) = tenant_config {
-        if let Some(spec) = tc.entities.get(entity_type) {
-            let table = spec.table();
-            for rule in &table.rules {
-                if rule.from_states.iter().any(|s| s == current_status) {
-                    // Look up hint from automaton actions
-                    let hint = spec
-                        .automaton
-                        .actions
-                        .iter()
-                        .find(|a| a.name == rule.name)
-                        .and_then(|a| a.hint.clone());
-                    let action_entry = serde_json::json!({
-                        "name": rule.name,
-                        "target": format!("{entity_set}('{entity_key}')/Temper.{}", rule.name),
-                        "hint": hint,
-                    });
-                    // Avoid duplicate action names (multiple rules for same action)
-                    if !actions.iter().any(|a: &serde_json::Value| {
-                        a.get("name").and_then(|n| n.as_str()) == Some(&rule.name)
-                    }) {
-                        actions.push(action_entry);
-                    }
+    if let Some(tc) = tenant_config
+        && let Some(spec) = tc.entities.get(entity_type)
+    {
+        let table = spec.table();
+        for rule in &table.rules {
+            if rule.from_states.iter().any(|s| s == current_status) {
+                // Look up hint from automaton actions
+                let hint = spec
+                    .automaton
+                    .actions
+                    .iter()
+                    .find(|a| a.name == rule.name)
+                    .and_then(|a| a.hint.clone());
+                let action_entry = serde_json::json!({
+                    "name": rule.name,
+                    "target": format!("{entity_set}('{entity_key}')/Temper.{}", rule.name),
+                    "hint": hint,
+                });
+                // Avoid duplicate action names (multiple rules for same action)
+                if !actions.iter().any(|a: &serde_json::Value| {
+                    a.get("name").and_then(|n| n.as_str()) == Some(&rule.name)
+                }) {
+                    actions.push(action_entry);
                 }
             }
         }

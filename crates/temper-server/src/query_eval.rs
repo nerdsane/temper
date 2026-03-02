@@ -380,14 +380,13 @@ async fn expand_entity_recursive(
                         .get("fields")
                         .and_then(|f| f.get(source_field.as_str()))
                         .and_then(|v| v.as_str());
-                    if let Some(fk) = fk_value {
-                        if let Ok(response) = state
+                    if let Some(fk) = fk_value
+                        && let Ok(response) = state
                             .get_tenant_entity_state(tenant, &info.target_type, fk)
                             .await
-                        {
-                            let json = serde_json::to_value(&response.state).unwrap_or_default();
-                            related_entities.push(json);
-                        }
+                    {
+                        let json = serde_json::to_value(&response.state).unwrap_or_default();
+                        related_entities.push(json);
                     }
                 }
                 Some(FkResolution::Reverse { target_fk_field }) => {
