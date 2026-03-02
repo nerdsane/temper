@@ -52,14 +52,3 @@ export interface SpawnEvent {
   parentEntityId: string;
 }
 
-/** Tool definition compatible with agent-core SDK. */
-export interface AgentTool {
-  name: string;
-  description: string;
-  parameters: {
-    type: "object";
-    properties: Record<string, unknown>;
-    required?: string[];
-  };
-  execute: (params: Record<string, unknown>) => Promise<unknown>;
-}

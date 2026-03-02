@@ -1,7 +1,7 @@
 {
   "name": "@temper/pi",
   "version": "0.1.0",
-  "description": "Pi agent-core SDK integration for Temper governed agent delegation",
+  "description": "Pi extension for Temper governed agent delegation",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,10 +9,12 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "vitest",
-    "demo": "tsx demo/run.ts"
+    "demo": "tsx demo/run.ts",
+    "chat": "pi --no-tools --no-extensions -e src/extension.ts"
   },
   "dependencies": {
-    "@anthropic-ai/agent-core": "^0.1.0"
+    "@mariozechner/pi-coding-agent": "^0.3.0",
+    "@mariozechner/pi-ai": "^0.3.0"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
