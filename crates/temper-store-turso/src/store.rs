@@ -537,6 +537,7 @@ impl TursoEventStore {
     // -----------------------------------------------------------------------
 
     /// Upsert a feature request.
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_feature_request(
         &self,
         id: &str,
@@ -739,6 +740,7 @@ impl TursoEventStore {
     // -----------------------------------------------------------------------
 
     /// Insert a design-time event.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_design_time_event(
         &self,
         kind: &str,
