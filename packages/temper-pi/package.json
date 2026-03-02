@@ -13,8 +13,8 @@
     "chat": "pi --no-tools --no-extensions -e src/extension.ts"
   },
   "dependencies": {
-    "@mariozechner/pi-coding-agent": "^0.3.0",
-    "@mariozechner/pi-ai": "^0.3.0"
+    "@mariozechner/pi-coding-agent": "^0.55.0",
+    "@mariozechner/pi-ai": "^0.55.0"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

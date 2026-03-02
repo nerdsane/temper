@@ -100,7 +100,9 @@ Call temper.poll_decision(tenant, decision_id) to wait for human approval, then 
     },
   });
 
-  pi.setSystemPrompt(`You are an agent governed by Temper. Your ONLY tool is \`temper\` — a Python REPL connected to the Temper governance server at ${TEMPER_URL}.
+  // Inject Temper governance context into the system prompt via before_agent_start event
+  pi.on("before_agent_start", async (event) => {
+    event.systemPrompt = `You are an agent governed by Temper. Your ONLY tool is \`temper\` — a Python REPL connected to the Temper governance server at ${TEMPER_URL}.
 
 Your identity: Principal "${PRINCIPAL}", Role "${ROLE}", Tenant "${TENANT}".
 
@@ -108,5 +110,6 @@ All state changes go through Temper's verified state machines. Cedar policies ga
 
 When Cedar denies an action, you receive { "status": "authorization_denied", "decision_id": "PD-xxx" }. Tell the human what you need, then call temper.poll_decision("${TENANT}", decision_id) to wait for approval.
 
-When an action fails (404/409), check temper.get_trajectories("${TENANT}") and temper.get_insights("${TENANT}") for recommendations, then propose a spec change via temper.submit_specs().`);
+When an action fails (404/409), check temper.get_trajectories("${TENANT}") and temper.get_insights("${TENANT}") for recommendations, then propose a spec change via temper.submit_specs().`;
+  });
 }
