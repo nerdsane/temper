@@ -289,6 +289,7 @@ pub async fn run(
         .local_addr()
         .context("Failed to get listener local address")?
         .port();
+    let _ = state.server.listen_port.set(actual_port);
 
     // Optionally start the Observe UI (Next.js dev server).
     if observe {

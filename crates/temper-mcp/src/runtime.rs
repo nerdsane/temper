@@ -18,27 +18,45 @@ use super::sandbox::{default_limits, expect_string_arg, format_monty_exception, 
 use super::spec_loader::load_apps;
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct AppMetadata {
-    pub(super) entity_set_to_type: BTreeMap<String, String>,
-    pub(super) entity_type_to_set: BTreeMap<String, String>,
+pub(crate) struct AppMetadata {
+    pub(crate) entity_set_to_type: BTreeMap<String, String>,
+    pub(crate) entity_type_to_set: BTreeMap<String, String>,
 }
 
 #[derive(Clone)]
-pub(super) struct RuntimeContext {
-    pub(super) spec: Value,
-    pub(super) app_metadata: BTreeMap<String, AppMetadata>,
+pub(crate) struct RuntimeContext {
+    pub(crate) spec: Value,
+    pub(crate) app_metadata: BTreeMap<String, AppMetadata>,
     /// Port of the Temper HTTP server. Set at construction when an explicit
     /// port is provided, or later by `start_server` in self-contained mode.
-    pub(super) server_port: Arc<std::sync::OnceLock<u16>>,
+    pub(crate) server_port: Arc<std::sync::OnceLock<u16>>,
     /// App configurations (used to build `--app` args when spawning server).
-    pub(super) apps: Vec<crate::AppConfig>,
+    pub(crate) apps: Vec<crate::AppConfig>,
     /// Path to the temper binary (for spawning `temper serve`).
-    pub(super) binary_path: Option<std::path::PathBuf>,
-    pub(super) http: reqwest::Client,
-    pub(super) principal_id: Option<String>,
+    pub(crate) binary_path: Option<std::path::PathBuf>,
+    pub(crate) http: reqwest::Client,
+    pub(crate) principal_id: Option<String>,
 }
 
 impl RuntimeContext {
+    /// Create a minimal context for the HTTP REPL endpoint.
+    ///
+    /// The REPL handler on the Temper server already knows its own port.
+    /// All `temper.*` method calls loop back through HTTP to localhost.
+    pub(crate) fn for_repl(port: u16, principal_id: Option<String>) -> Self {
+        let server_port = Arc::new(std::sync::OnceLock::new());
+        let _ = server_port.set(port);
+        Self {
+            spec: Value::Object(Default::default()),
+            app_metadata: BTreeMap::new(),
+            server_port,
+            apps: Vec::new(),
+            binary_path: None,
+            http: reqwest::Client::new(),
+            principal_id,
+        }
+    }
+
     pub(super) fn from_config(config: &McpConfig) -> Result<Self> {
         let (spec, app_metadata) = load_apps(&config.apps)?;
         let server_port = Arc::new(std::sync::OnceLock::new());
@@ -56,7 +74,7 @@ impl RuntimeContext {
         })
     }
 
-    pub(super) fn run_search(&self, code: &str) -> Result<String> {
+    pub(crate) fn run_search(&self, code: &str) -> Result<String> {
         let program = wrap_user_code(code);
         let runner = MontyRun::new(program, "search.py", vec!["spec".to_string()], vec![])
             .map_err(|e| anyhow!(format_monty_exception(&e)))?;
@@ -238,7 +256,7 @@ impl RuntimeContext {
         }
     }
 
-    pub(super) async fn run_execute(&self, code: &str) -> Result<String> {
+    pub(crate) async fn run_execute(&self, code: &str) -> Result<String> {
         let program = wrap_user_code(code);
         let runner = MontyRun::new(program, "execute.py", vec!["temper".to_string()], vec![])
             .map_err(|e| anyhow!(format_monty_exception(&e)))?;

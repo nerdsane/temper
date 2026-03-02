@@ -5268,6 +5268,7 @@ dependencies = [
  "temper-authz",
  "temper-evolution",
  "temper-jit",
+ "temper-mcp",
  "temper-observe",
  "temper-odata",
  "temper-runtime",

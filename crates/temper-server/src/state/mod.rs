@@ -175,6 +175,8 @@ pub struct ServerState {
     /// Per-tenant Cedar policy text (tenant -> policy text).
     pub tenant_policies: Arc<RwLock<BTreeMap<String, String>>>,
     pub secrets_vault: Option<Arc<SecretsVault>>,
+    /// Listening port for HTTP REPL self-referencing calls.
+    pub listen_port: Arc<std::sync::OnceLock<u16>>,
 }
 
 impl ServerState {
@@ -241,6 +243,7 @@ impl ServerState {
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             secrets_vault: None,
+            listen_port: Arc::new(std::sync::OnceLock::new()),
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -370,6 +373,7 @@ impl ServerState {
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             secrets_vault: None,
+            listen_port: Arc::new(std::sync::OnceLock::new()),
         };
         state.register_builtin_wasm_modules();
         state

@@ -1,0 +1,65 @@
+# DeployWorkflow Entity — I/O Automaton Specification
+#
+# A child workflow spawned by LeadPlan for deployment.
+# Covers provisioning, deploying, verifying, going live, and rollback.
+
+[automaton]
+name = "DeployWorkflow"
+states = ["Pending", "Provisioning", "Deploying", "Verifying", "Live", "RolledBack"]
+initial = "Pending"
+
+# --- Actions: Deploy Lifecycle ---
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Pending"]
+to = "Provisioning"
+hint = "Start provisioning infrastructure for deployment."
+effect = [{ type = "emit_event", event = "ProvisioningStarted" }]
+
+[[action]]
+name = "StartDeploy"
+kind = "input"
+from = ["Provisioning"]
+to = "Deploying"
+params = ["environment", "version"]
+hint = "Begin deploying the application to the provisioned environment."
+effect = [{ type = "emit_event", event = "DeploymentStarted" }]
+
+[[action]]
+name = "Verify"
+kind = "input"
+from = ["Deploying"]
+to = "Verifying"
+hint = "Run post-deployment verification checks."
+
+[[action]]
+name = "GoLive"
+kind = "input"
+from = ["Verifying"]
+to = "Live"
+params = ["deploy_url"]
+hint = "Mark deployment as live and serving traffic."
+effect = [{ type = "emit_event", event = "DeploymentLive" }]
+
+[[action]]
+name = "Rollback"
+kind = "input"
+from = ["Deploying", "Verifying"]
+to = "RolledBack"
+params = ["reason"]
+hint = "Roll back a failed or problematic deployment."
+effect = [{ type = "emit_event", event = "DeploymentRolledBack" }]
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "LiveIsFinal"
+when = ["Live"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "RolledBackIsFinal"
+when = ["RolledBack"]
+assert = "no_further_transitions"

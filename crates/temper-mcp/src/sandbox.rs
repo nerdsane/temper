@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 
 use super::convert::monty_object_to_json;
 
-pub(super) fn wrap_user_code(code: &str) -> String {
+pub(crate) fn wrap_user_code(code: &str) -> String {
     let mut out = String::from("async def __temper_user():\n");
 
     if code.trim().is_empty() {
@@ -25,7 +25,7 @@ pub(super) fn wrap_user_code(code: &str) -> String {
     out
 }
 
-pub(super) fn default_limits() -> ResourceLimits {
+pub(crate) fn default_limits() -> ResourceLimits {
     // 180s allows time for governance operations like poll_decision,
     // where the agent waits for human approval.
     ResourceLimits::new()
@@ -34,7 +34,7 @@ pub(super) fn default_limits() -> ResourceLimits {
         .max_allocations(250_000)
 }
 
-pub(super) fn format_monty_exception(exception: &MontyException) -> String {
+pub(crate) fn format_monty_exception(exception: &MontyException) -> String {
     if exception.traceback().is_empty() {
         exception.summary()
     } else {
@@ -42,16 +42,16 @@ pub(super) fn format_monty_exception(exception: &MontyException) -> String {
     }
 }
 
-pub(super) fn escape_odata_key(key: &str) -> String {
+pub(crate) fn escape_odata_key(key: &str) -> String {
     key.replace('\'', "''")
 }
 
 /// Extract an optional string argument at `index`, returning `None` if absent.
-pub(super) fn optional_string_arg(args: &[MontyObject], index: usize) -> Option<String> {
+pub(crate) fn optional_string_arg(args: &[MontyObject], index: usize) -> Option<String> {
     args.get(index).and_then(|a| String::try_from(a).ok())
 }
 
-pub(super) fn expect_string_arg(
+pub(crate) fn expect_string_arg(
     args: &[MontyObject],
     index: usize,
     name: &str,
@@ -72,7 +72,7 @@ pub(super) fn expect_string_arg(
     })
 }
 
-pub(super) fn expect_json_object_arg(
+pub(crate) fn expect_json_object_arg(
     args: &[MontyObject],
     index: usize,
     name: &str,
@@ -94,7 +94,7 @@ pub(super) fn expect_json_object_arg(
     }
 }
 
-pub(super) fn format_http_error(status: StatusCode, body: &str) -> String {
+pub(crate) fn format_http_error(status: StatusCode, body: &str) -> String {
     let details = if body.trim().is_empty() {
         "<empty body>".to_string()
     } else if let Ok(json) = serde_json::from_str::<Value>(body) {
@@ -127,7 +127,7 @@ pub(super) fn format_http_error(status: StatusCode, body: &str) -> String {
 /// - `poll_hint`: guidance on how to poll for approval
 /// - `status`: `"authorization_denied"` (backward compat)
 /// - `decision_id`: same as `pending_decision` (backward compat)
-pub(super) fn format_authz_denied(body: &str) -> Option<Value> {
+pub(crate) fn format_authz_denied(body: &str) -> Option<Value> {
     let json: Value = serde_json::from_str(body).ok()?;
     let code = json.pointer("/error/code").and_then(Value::as_str)?;
     if code != "AuthorizationDenied" {

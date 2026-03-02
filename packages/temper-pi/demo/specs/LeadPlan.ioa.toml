@@ -1,0 +1,84 @@
+# LeadPlan Entity — I/O Automaton Specification
+#
+# Top-level orchestrator for a deployment pipeline.
+# Spawns child workflows (TestWorkflow, ReviewWorkflow, DeployWorkflow)
+# at each phase transition via structured effects.
+
+[automaton]
+name = "LeadPlan"
+states = ["Created", "Planning", "Testing", "Reviewing", "Deploying", "Completed", "Failed"]
+initial = "Created"
+
+# --- Actions: Pipeline Lifecycle ---
+
+[[action]]
+name = "StartPlanning"
+kind = "input"
+from = ["Created"]
+to = "Planning"
+hint = "Begin the planning phase of the deployment pipeline."
+
+[[action]]
+name = "StartTesting"
+kind = "input"
+from = ["Planning"]
+to = "Testing"
+hint = "Move to the testing phase. Spawns a TestWorkflow child entity."
+effect = [
+  { type = "spawn_entity", entity_type = "TestWorkflow", entity_id_source = "{uuid}", initial_action = "Begin", store_id_in = "test_workflow_id" },
+  { type = "emit_event", event = "TestingStarted" }
+]
+
+[[action]]
+name = "StartReview"
+kind = "input"
+from = ["Testing"]
+to = "Reviewing"
+params = ["test_results"]
+hint = "Move to the review phase. Spawns a ReviewWorkflow child entity."
+effect = [
+  { type = "spawn_entity", entity_type = "ReviewWorkflow", entity_id_source = "{uuid}", initial_action = "Begin", store_id_in = "review_workflow_id" },
+  { type = "emit_event", event = "ReviewStarted" }
+]
+
+[[action]]
+name = "StartDeploy"
+kind = "input"
+from = ["Reviewing"]
+to = "Deploying"
+params = ["review_approval"]
+hint = "Move to the deployment phase. Spawns a DeployWorkflow child entity."
+effect = [
+  { type = "spawn_entity", entity_type = "DeployWorkflow", entity_id_source = "{uuid}", initial_action = "Begin", store_id_in = "deploy_workflow_id" },
+  { type = "emit_event", event = "DeployStarted" }
+]
+
+[[action]]
+name = "Complete"
+kind = "input"
+from = ["Deploying"]
+to = "Completed"
+params = ["deploy_url"]
+hint = "Mark the pipeline as successfully completed."
+effect = [{ type = "emit_event", event = "PipelineCompleted" }]
+
+[[action]]
+name = "Fail"
+kind = "input"
+from = ["Planning", "Testing", "Reviewing", "Deploying"]
+to = "Failed"
+params = ["reason"]
+hint = "Mark the pipeline as failed from any active phase."
+effect = [{ type = "emit_event", event = "PipelineFailed" }]
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "CompletedIsFinal"
+when = ["Completed"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "FailedIsFinal"
+when = ["Failed"]
+assert = "no_further_transitions"

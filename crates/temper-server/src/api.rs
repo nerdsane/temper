@@ -87,6 +87,8 @@ pub fn build_api_router() -> Router<ServerState> {
             "/tenants/{tenant}/decisions/{id}/deny",
             post(handle_deny_decision),
         )
+        // REPL endpoint (Monty sandbox over HTTP)
+        .route("/repl", post(handle_repl))
         // Cross-tenant decision endpoints
         .route("/decisions", get(handle_list_all_decisions))
         .route("/decisions/stream", get(handle_all_decisions_stream))
@@ -867,3 +869,85 @@ async fn handle_all_decisions_stream(
         .keep_alive(KeepAlive::default())
         .into_response()
 }
+
+// ---------------------------------------------------------------------------
+// Phase 0: REPL endpoint — exposes the Monty sandbox over HTTP
+// ---------------------------------------------------------------------------
+
+/// Request body for POST /api/repl.
+#[derive(serde::Deserialize)]
+struct ReplRequest {
+    code: String,
+}
+
+/// POST /api/repl — execute Python code in the Temper Monty sandbox.
+///
+/// The sandbox provides `temper.*` methods (create, action, submit_specs, etc.)
+/// that loop back to this server via HTTP. Agent identity is extracted from
+/// `X-Temper-Principal-Id` / `X-Temper-Principal-Kind` / `X-Temper-Agent-Role`
+/// headers and forwarded on internal requests.
+///
+/// Security: 180s timeout, 64MB memory, method allowlisting, no filesystem or
+/// network access. External APIs go through `[[integration]]` in IOA specs.
+async fn handle_repl(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<ReplRequest>,
+) -> impl IntoResponse {
+    let principal_id = headers
+        .get("x-temper-principal-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    let port = state.listen_port.get().copied().unwrap_or(4200);
+    let code = body.code;
+
+    // The Monty sandbox types are !Send, so we run in a dedicated
+    // single-threaded runtime via spawn_blocking.
+    let result = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create REPL runtime"); // determinism-ok: one-shot runtime for sandbox
+        rt.block_on(async move {
+            let config = temper_mcp::repl::ReplConfig {
+                server_port: port,
+                principal_id,
+            };
+            temper_mcp::repl::run_repl(&config, &code).await
+        })
+    })
+    .await;
+
+    match result {
+        Ok(Ok(result_json)) => {
+            let value: serde_json::Value = serde_json::from_str(&result_json)
+                .unwrap_or(serde_json::Value::String(result_json));
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "result": value,
+                    "error": serde_json::Value::Null,
+                })),
+            )
+                .into_response()
+        }
+        Ok(Err(e)) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "result": serde_json::Value::Null,
+                "error": e.to_string(),
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({
+                "result": serde_json::Value::Null,
+                "error": format!("REPL task panicked: {e}"),
+            })),
+        )
+            .into_response(),
+    }
+}
+

@@ -9,6 +9,7 @@ mod sandbox;
 mod spec_loader;
 mod tools;
 
+pub mod repl;
 pub use runtime::run_stdio_server;
 
 #[cfg(test)]

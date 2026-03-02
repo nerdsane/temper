@@ -15,7 +15,7 @@ use super::sandbox::{
 };
 
 impl RuntimeContext {
-    pub(super) async fn dispatch_temper_method(
+    pub(crate) async fn dispatch_temper_method(
         &self,
         method: &str,
         args: &[MontyObject],

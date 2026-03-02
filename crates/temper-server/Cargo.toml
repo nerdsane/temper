@@ -23,6 +23,7 @@ temper-observe = { workspace = true }
 temper-authz = { workspace = true }
 temper-evolution = { workspace = true }
 temper-wasm = { workspace = true }
+temper-mcp = { workspace = true }
 temper-verify = { workspace = true, optional = true }
 temper-store-sim = { workspace = true, optional = true }
 axum = { workspace = true }
