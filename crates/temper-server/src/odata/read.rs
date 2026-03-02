@@ -75,7 +75,14 @@ async fn resolve_parent_entity(
                 property: property.clone(),
                 options: None,
             };
-            expand_entity(&mut parent_body, &[expand_item], &parent_type, state, tenant).await;
+            expand_entity(
+                &mut parent_body,
+                &[expand_item],
+                &parent_type,
+                state,
+                tenant,
+            )
+            .await;
 
             let nav_value = parent_body.get(property).ok_or_else(|| {
                 (
@@ -608,8 +615,7 @@ pub(super) async fn handle_odata_get_for_tenant(
                     );
 
                     if let Some(ref expand_items) = query_options.expand {
-                        expand_entity(&mut body, expand_items, &target_type, &state, &tenant)
-                            .await;
+                        expand_entity(&mut body, expand_items, &target_type, &state, &tenant).await;
                     }
 
                     if let Some(ref select) = query_options.select {

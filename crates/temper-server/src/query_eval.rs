@@ -385,8 +385,7 @@ async fn expand_entity_recursive(
                             .get_tenant_entity_state(tenant, &info.target_type, fk)
                             .await
                         {
-                            let json =
-                                serde_json::to_value(&response.state).unwrap_or_default();
+                            let json = serde_json::to_value(&response.state).unwrap_or_default();
                             related_entities.push(json);
                         }
                     }
@@ -400,8 +399,7 @@ async fn expand_entity_recursive(
                             .get_tenant_entity_state(tenant, &info.target_type, related_id)
                             .await
                         {
-                            let json =
-                                serde_json::to_value(&response.state).unwrap_or_default();
+                            let json = serde_json::to_value(&response.state).unwrap_or_default();
                             let matches = json
                                 .get("fields")
                                 .and_then(|f| f.get(target_fk_field.as_str()))
@@ -421,20 +419,15 @@ async fn expand_entity_recursive(
                             .get_tenant_entity_state(tenant, &info.target_type, related_id)
                             .await
                         {
-                            let json =
-                                serde_json::to_value(&response.state).unwrap_or_default();
+                            let json = serde_json::to_value(&response.state).unwrap_or_default();
                             let matches = json
                                 .get("fields")
                                 .and_then(|f| f.as_object())
                                 .is_some_and(|fields| {
                                     let parent_id_field = format!("{}Id", entity_type);
-                                    fields
-                                        .get("parentId")
-                                        .and_then(|v| v.as_str())
+                                    fields.get("parentId").and_then(|v| v.as_str())
                                         == Some(parent_id.as_str())
-                                        || fields
-                                            .get(&parent_id_field)
-                                            .and_then(|v| v.as_str())
+                                        || fields.get(&parent_id_field).and_then(|v| v.as_str())
                                             == Some(parent_id.as_str())
                                 });
                             if matches {

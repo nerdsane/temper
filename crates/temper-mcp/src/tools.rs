@@ -399,12 +399,7 @@ impl RuntimeContext {
                     }
                     // Params but no dot → treat as filtered GET
                     return self
-                        .temper_request(
-                            &tenant,
-                            Method::GET,
-                            format!("/tdata/{path}"),
-                            None,
-                        )
+                        .temper_request(&tenant, Method::GET, format!("/tdata/{path}"), None)
                         .await;
                 }
 
