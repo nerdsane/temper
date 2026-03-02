@@ -439,7 +439,8 @@ impl crate::state::ServerState {
         let _ = self.pending_decision_tx.send(pd.clone());
         {
             let state_c = self.clone();
-            tokio::spawn(async move { // determinism-ok: background persist for sync WASM authz path
+            tokio::spawn(async move {
+                // determinism-ok: background persist for sync WASM authz path
                 if let Err(e) = state_c.persist_pending_decision(&pd).await {
                     tracing::error!(error = %e, "failed to persist WASM authz decision");
                 }
@@ -466,7 +467,8 @@ impl crate::state::ServerState {
         };
         {
             let state_c = self.clone();
-            tokio::spawn(async move { // determinism-ok: background persist for sync WASM authz path
+            tokio::spawn(async move {
+                // determinism-ok: background persist for sync WASM authz path
                 if let Err(e) = state_c.persist_trajectory_entry(&traj).await {
                     tracing::error!(error = %e, "failed to persist WASM authz trajectory");
                 }

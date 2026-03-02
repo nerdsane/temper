@@ -69,7 +69,8 @@ pub(crate) async fn handle_load_inline(
                 &reason,
                 None,
                 None,
-            ).await;
+            )
+            .await;
             decision_ids.push(pd.id);
         } else {
             for entity_name in &entity_names {
@@ -85,7 +86,8 @@ pub(crate) async fn handle_load_inline(
                     &reason,
                     None,
                     None,
-                ).await;
+                )
+                .await;
                 decision_ids.push(pd.id);
             }
         }
@@ -115,14 +117,16 @@ pub(crate) async fn handle_load_inline(
         // Persist observation to Turso.
         if let Some(turso) = state.turso_opt() {
             let data_json = serde_json::to_string(&o_record).unwrap_or_default();
-            let _ = turso.insert_evolution_record(
-                &o_record.header.id,
-                "Observation",
-                &format!("{:?}", o_record.header.status),
-                &o_record.header.created_by,
-                o_record.header.derived_from.as_deref(),
-                &data_json,
-            ).await;
+            let _ = turso
+                .insert_evolution_record(
+                    &o_record.header.id,
+                    "Observation",
+                    &format!("{:?}", o_record.header.status),
+                    &o_record.header.created_by,
+                    o_record.header.derived_from.as_deref(),
+                    &data_json,
+                )
+                .await;
         }
 
         // Create A-Record with the proposed spec as spec_diff.
@@ -152,14 +156,16 @@ pub(crate) async fn handle_load_inline(
         // Persist analysis to Turso.
         if let Some(turso) = state.turso_opt() {
             let data_json = serde_json::to_string(&a_record).unwrap_or_default();
-            let _ = turso.insert_evolution_record(
-                &a_record.header.id,
-                "Analysis",
-                &format!("{:?}", a_record.header.status),
-                &a_record.header.created_by,
-                a_record.header.derived_from.as_deref(),
-                &data_json,
-            ).await;
+            let _ = turso
+                .insert_evolution_record(
+                    &a_record.header.id,
+                    "Analysis",
+                    &format!("{:?}", a_record.header.status),
+                    &a_record.header.created_by,
+                    a_record.header.derived_from.as_deref(),
+                    &data_json,
+                )
+                .await;
         }
 
         // Link the PendingDecision to the A-Record for O-A-D chain tracing.
@@ -168,7 +174,9 @@ pub(crate) async fn handle_load_inline(
         if let Some(turso) = state.turso_opt() {
             for decision_id in &decision_ids {
                 if let Ok(Some(data_str)) = turso.get_pending_decision(decision_id).await {
-                    if let Ok(mut pd) = serde_json::from_str::<crate::state::PendingDecision>(&data_str) {
+                    if let Ok(mut pd) =
+                        serde_json::from_str::<crate::state::PendingDecision>(&data_str)
+                    {
                         pd.evolution_record_id = Some(a_record_id.clone());
                         let updated_json = serde_json::to_string(&pd).unwrap_or_default();
                         let status_str = match pd.status {
@@ -177,7 +185,14 @@ pub(crate) async fn handle_load_inline(
                             crate::state::DecisionStatus::Denied => "denied",
                             crate::state::DecisionStatus::Expired => "expired",
                         };
-                        let _ = turso.upsert_pending_decision(decision_id, &pd.tenant, status_str, &updated_json).await;
+                        let _ = turso
+                            .upsert_pending_decision(
+                                decision_id,
+                                &pd.tenant,
+                                status_str,
+                                &updated_json,
+                            )
+                            .await;
                     }
                 }
             }

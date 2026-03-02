@@ -1,7 +1,7 @@
 use super::*;
-use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use std::sync::Arc;
 use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
@@ -1208,7 +1208,10 @@ async fn test_load_dir_emits_design_time_events() {
     let loaded_events: Vec<_> = events.iter().filter(|e| e.kind == "spec_loaded").collect();
     assert!(!loaded_events.is_empty(), "should have spec_loaded events");
 
-    let started_events: Vec<_> = events.iter().filter(|e| e.kind == "verify_started").collect();
+    let started_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == "verify_started")
+        .collect();
     assert!(
         !started_events.is_empty(),
         "should have verify_started events"

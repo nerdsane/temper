@@ -4,8 +4,8 @@ use sqlx::PgPool;
 use temper_runtime::scheduler::sim_now;
 use temper_store_turso::{TursoEventStore, TursoWasmInvocationInsert};
 
-use super::wasm_invocation_log::WasmInvocationEntry;
 use super::ServerState;
+use super::wasm_invocation_log::WasmInvocationEntry;
 
 enum MetadataBackend<'a> {
     Postgres(&'a PgPool),
@@ -253,6 +253,4 @@ impl ServerState {
 
         Ok(0)
     }
-
-
 }

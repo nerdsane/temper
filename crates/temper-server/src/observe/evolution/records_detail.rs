@@ -2,9 +2,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
-use temper_evolution::{
-    Decision, DecisionRecord, RecordHeader, RecordStatus, RecordType,
-};
+use temper_evolution::{Decision, DecisionRecord, RecordHeader, RecordStatus, RecordType};
 use temper_runtime::scheduler::sim_now;
 
 use crate::state::ServerState;
@@ -25,7 +23,10 @@ pub(crate) async fn get_evolution_record(
                 serde_json::from_str(&row.data).unwrap_or_else(|_| serde_json::json!({}));
             if let Some(obj) = record.as_object_mut() {
                 obj.insert("id".to_string(), serde_json::json!(row.id));
-                obj.insert("record_type".to_string(), serde_json::json!(row.record_type));
+                obj.insert(
+                    "record_type".to_string(),
+                    serde_json::json!(row.record_type),
+                );
                 obj.insert("status".to_string(), serde_json::json!(row.status));
                 obj.insert("created_by".to_string(), serde_json::json!(row.created_by));
                 obj.insert("timestamp".to_string(), serde_json::json!(row.timestamp));

@@ -256,7 +256,10 @@ pub async fn run(
                     if let Err(e) = state.server.authz.reload_policies(&combined) {
                         eprintln!("  Warning: failed to reload Cedar policies from Turso: {e}");
                     } else {
-                        println!("  Restored Cedar policies for {} tenants from Turso.", rows.len());
+                        println!(
+                            "  Restored Cedar policies for {} tenants from Turso.",
+                            rows.len()
+                        );
                     }
                 }
                 Ok(_) => {}

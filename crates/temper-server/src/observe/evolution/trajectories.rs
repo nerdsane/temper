@@ -74,8 +74,7 @@ pub(crate) async fn handle_trajectories(
 #[allow(dead_code)]
 fn _legacy_postgres_path() {
     // Removed: Postgres fallback path. All reads go through Turso now.
-    if false {
-}
+    if false {}
 }
 
 /// POST /api/evolution/trajectories/unmet -- record an unmet user intent.

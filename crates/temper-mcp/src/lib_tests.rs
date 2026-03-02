@@ -78,11 +78,7 @@ fn tool_text(response: &Value) -> (&str, bool) {
 async fn start_test_temper_server() -> (u16, oneshot::Sender<()>) {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let db_url = format!(
-        "file:/tmp/temper-mcp-test-{}-{}.db",
-        std::process::id(),
-        id,
-    );
+    let db_url = format!("file:/tmp/temper-mcp-test-{}-{}.db", std::process::id(), id,);
     let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
     let turso = TursoEventStore::new(&db_url, None)
         .await

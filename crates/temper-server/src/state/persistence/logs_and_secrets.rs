@@ -71,7 +71,6 @@ impl ServerState {
         Ok(())
     }
 
-
     /// Persist a pending decision to the storage backend (Turso only for now).
     pub async fn persist_pending_decision(
         &self,

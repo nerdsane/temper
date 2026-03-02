@@ -33,14 +33,17 @@ pub(crate) async fn handle_sentinel_check(
         // Persist observation to Turso.
         if let Some(turso) = state.turso_opt() {
             let data_json = serde_json::to_string(&alert.record).unwrap_or_default();
-            if let Err(e) = turso.insert_evolution_record(
-                &alert.record.header.id,
-                "Observation",
-                &format!("{:?}", alert.record.header.status),
-                &alert.record.header.created_by,
-                alert.record.header.derived_from.as_deref(),
-                &data_json,
-            ).await {
+            if let Err(e) = turso
+                .insert_evolution_record(
+                    &alert.record.header.id,
+                    "Observation",
+                    &format!("{:?}", alert.record.header.status),
+                    &alert.record.header.created_by,
+                    alert.record.header.derived_from.as_deref(),
+                    &data_json,
+                )
+                .await
+            {
                 tracing::error!(
                     record_id = %alert.record.header.id,
                     error = %e,
@@ -66,14 +69,17 @@ pub(crate) async fn handle_sentinel_check(
         // Persist insight to Turso.
         if let Some(turso) = state.turso_opt() {
             let data_json = serde_json::to_string(insight).unwrap_or_default();
-            if let Err(e) = turso.insert_evolution_record(
-                &insight.header.id,
-                "Insight",
-                &format!("{:?}", insight.header.status),
-                &insight.header.created_by,
-                insight.header.derived_from.as_deref(),
-                &data_json,
-            ).await {
+            if let Err(e) = turso
+                .insert_evolution_record(
+                    &insight.header.id,
+                    "Insight",
+                    &format!("{:?}", insight.header.status),
+                    &insight.header.created_by,
+                    insight.header.derived_from.as_deref(),
+                    &data_json,
+                )
+                .await
+            {
                 tracing::error!(
                     record_id = %insight.header.id,
                     error = %e,
@@ -131,7 +137,8 @@ pub(crate) async fn handle_feature_requests(
         // First, generate and upsert fresh feature requests from trajectory data.
         let generated = insight_generator::generate_feature_requests(&trajectory_entries);
         for fr in &generated {
-            let refs_json = serde_json::to_string(&fr.trajectory_refs).unwrap_or_else(|_| "[]".to_string());
+            let refs_json =
+                serde_json::to_string(&fr.trajectory_refs).unwrap_or_else(|_| "[]".to_string());
             let disp_str = match fr.disposition {
                 FeatureRequestDisposition::Open => "Open",
                 FeatureRequestDisposition::Acknowledged => "Acknowledged",
@@ -199,10 +206,7 @@ pub(crate) async fn handle_update_feature_request(
         match d.to_lowercase().as_str() {
             "open" | "acknowledged" | "planned" | "wontfix" | "wont_fix" | "resolved" => {}
             _ => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid disposition: {d}"),
-                ));
+                return Err((StatusCode::BAD_REQUEST, format!("Invalid disposition: {d}")));
             }
         }
     }

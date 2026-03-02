@@ -275,7 +275,6 @@ pub(super) fn to_pascal_case(s: &str) -> String {
         .collect()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

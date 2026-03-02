@@ -19,7 +19,9 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::authz_helpers::{record_authz_denial, security_context_from_headers};
-use crate::state::{DecisionStatus, PendingDecision, PolicyScope, ServerState, TrajectoryEntry, TrajectorySource};
+use crate::state::{
+    DecisionStatus, PendingDecision, PolicyScope, ServerState, TrajectoryEntry, TrajectorySource,
+};
 use temper_evolution::records::{Decision, DecisionRecord, RecordHeader, RecordType};
 
 /// Build the management API router (mounted at /api).
@@ -142,7 +144,8 @@ async fn authorize_tenant_decision_management(
             &reason,
             None,
             None,
-        ).await;
+        )
+        .await;
         return Some(
             (
                 StatusCode::FORBIDDEN,
@@ -347,7 +350,8 @@ async fn handle_put_policies(
             &reason,
             None,
             None,
-        ).await;
+        )
+        .await;
         return (
             StatusCode::FORBIDDEN,
             axum::Json(serde_json::json!({
@@ -443,7 +447,8 @@ async fn handle_add_policy_rule(
             &reason,
             None,
             None,
-        ).await;
+        )
+        .await;
         return (
             StatusCode::FORBIDDEN,
             axum::Json(serde_json::json!({
@@ -547,15 +552,27 @@ async fn handle_list_decisions(
 
     // Query Turso directly (single source of truth).
     if let Some(turso) = state.turso_opt() {
-        match turso.query_decisions(&tenant, params.status.as_deref()).await {
+        match turso
+            .query_decisions(&tenant, params.status.as_deref())
+            .await
+        {
             Ok(data_strings) => {
                 let entries: Vec<serde_json::Value> = data_strings
                     .iter()
                     .filter_map(|s| serde_json::from_str(s).ok())
                     .collect();
-                let pending_count = entries.iter().filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("Pending")).count();
-                let approved_count = entries.iter().filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("Approved")).count();
-                let denied_count = entries.iter().filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("Denied")).count();
+                let pending_count = entries
+                    .iter()
+                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("Pending"))
+                    .count();
+                let approved_count = entries
+                    .iter()
+                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("Approved"))
+                    .count();
+                let denied_count = entries
+                    .iter()
+                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("Denied"))
+                    .count();
                 let total = entries.len();
                 return (
                     StatusCode::OK,
@@ -625,22 +642,28 @@ async fn handle_approve_decision(
     // Read decision from Turso (single source of truth).
     let mut decision: PendingDecision = {
         let Some(turso) = state.turso_opt() else {
-            return (StatusCode::SERVICE_UNAVAILABLE, "Turso backend not configured").into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Turso backend not configured",
+            )
+                .into_response();
         };
         match turso.get_pending_decision(&id).await {
-            Ok(Some(data_str)) => {
-                match serde_json::from_str::<PendingDecision>(&data_str) {
-                    Ok(d) if d.tenant == tenant => d,
-                    _ => {
-                        return (StatusCode::NOT_FOUND, "Decision not found").into_response();
-                    }
+            Ok(Some(data_str)) => match serde_json::from_str::<PendingDecision>(&data_str) {
+                Ok(d) if d.tenant == tenant => d,
+                _ => {
+                    return (StatusCode::NOT_FOUND, "Decision not found").into_response();
                 }
-            }
+            },
             Ok(None) => {
                 return (StatusCode::NOT_FOUND, "Decision not found").into_response();
             }
             Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load decision: {e}")).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to load decision: {e}"),
+                )
+                    .into_response();
             }
         }
     };
@@ -733,14 +756,17 @@ async fn handle_approve_decision(
     // Persist D-Record to Turso.
     if let Some(turso) = state.turso_opt() {
         let data_json = serde_json::to_string(&d_record).unwrap_or_default();
-        if let Err(e) = turso.insert_evolution_record(
-            &d_record.header.id,
-            "Decision",
-            &format!("{:?}", d_record.header.status),
-            &d_record.header.created_by,
-            d_record.header.derived_from.as_deref(),
-            &data_json,
-        ).await {
+        if let Err(e) = turso
+            .insert_evolution_record(
+                &d_record.header.id,
+                "Decision",
+                &format!("{:?}", d_record.header.status),
+                &d_record.header.created_by,
+                d_record.header.derived_from.as_deref(),
+                &data_json,
+            )
+            .await
+        {
             tracing::warn!(error = %e, "failed to persist D-Record to Turso");
         }
     }
@@ -776,22 +802,28 @@ async fn handle_deny_decision(
     // Read decision from Turso (single source of truth).
     let mut decision: PendingDecision = {
         let Some(turso) = state.turso_opt() else {
-            return (StatusCode::SERVICE_UNAVAILABLE, "Turso backend not configured").into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Turso backend not configured",
+            )
+                .into_response();
         };
         match turso.get_pending_decision(&id).await {
-            Ok(Some(data_str)) => {
-                match serde_json::from_str::<PendingDecision>(&data_str) {
-                    Ok(d) if d.tenant == tenant => d,
-                    _ => {
-                        return (StatusCode::NOT_FOUND, "Decision not found").into_response();
-                    }
+            Ok(Some(data_str)) => match serde_json::from_str::<PendingDecision>(&data_str) {
+                Ok(d) if d.tenant == tenant => d,
+                _ => {
+                    return (StatusCode::NOT_FOUND, "Decision not found").into_response();
                 }
-            }
+            },
             Ok(None) => {
                 return (StatusCode::NOT_FOUND, "Decision not found").into_response();
             }
             Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load decision: {e}")).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to load decision: {e}"),
+                )
+                    .into_response();
             }
         }
     };
@@ -871,9 +903,18 @@ async fn handle_list_all_decisions(
                     .iter()
                     .filter_map(|s| serde_json::from_str(s).ok())
                     .collect();
-                let pending_count = entries.iter().filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("Pending")).count();
-                let approved_count = entries.iter().filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("Approved")).count();
-                let denied_count = entries.iter().filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("Denied")).count();
+                let pending_count = entries
+                    .iter()
+                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("Pending"))
+                    .count();
+                let approved_count = entries
+                    .iter()
+                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("Approved"))
+                    .count();
+                let denied_count = entries
+                    .iter()
+                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("Denied"))
+                    .count();
                 let total = entries.len();
                 return (
                     StatusCode::OK,

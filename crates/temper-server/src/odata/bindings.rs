@@ -145,7 +145,8 @@ pub(super) async fn dispatch_bound_action(
             &reason,
             None,
             Some(current_state.state.status.clone()),
-        ).await;
+        )
+        .await;
 
         http_span.set_status(Status::error(reason.clone()));
         let end_time: std::time::SystemTime = sim_now().into();

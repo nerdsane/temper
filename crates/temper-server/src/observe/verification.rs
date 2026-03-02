@@ -491,39 +491,43 @@ pub(crate) async fn handle_workflows(State(state): State<ServerState>) -> Json<W
         None
     };
 
-    let runtime_counts: std::collections::BTreeMap<String, u64> = if let Some(turso) = state.turso_opt() {
-        match turso.load_recent_trajectories(100_000).await {
-            Ok(rows) => {
-                let mut counts = std::collections::BTreeMap::new();
-                for row in &rows {
-                    *counts.entry(row.tenant.clone()).or_insert(0) += 1;
+    let runtime_counts: std::collections::BTreeMap<String, u64> =
+        if let Some(turso) = state.turso_opt() {
+            match turso.load_recent_trajectories(100_000).await {
+                Ok(rows) => {
+                    let mut counts = std::collections::BTreeMap::new();
+                    for row in &rows {
+                        *counts.entry(row.tenant.clone()).or_insert(0) += 1;
+                    }
+                    counts
                 }
-                counts
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to read trajectory counts from Turso");
+                    std::collections::BTreeMap::new()
+                }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to read trajectory counts from Turso");
-                std::collections::BTreeMap::new()
-            }
-        }
-    } else {
-        std::collections::BTreeMap::new()
-    };
+        } else {
+            std::collections::BTreeMap::new()
+        };
 
     let event_log: Vec<crate::state::DesignTimeEvent> = if let Some(events) = persisted_events {
         events
     } else if let Some(turso) = state.turso_opt() {
         match turso.list_design_time_events(None, 10_000).await {
-            Ok(rows) => rows.into_iter().map(|r| crate::state::DesignTimeEvent {
-                kind: r.kind,
-                entity_type: r.entity_type,
-                tenant: r.tenant,
-                summary: r.summary,
-                level: r.level,
-                passed: r.passed,
-                timestamp: r.created_at,
-                step_number: r.step_number.map(|n| n as u8),
-                total_steps: r.total_steps.map(|n| n as u8),
-            }).collect(),
+            Ok(rows) => rows
+                .into_iter()
+                .map(|r| crate::state::DesignTimeEvent {
+                    kind: r.kind,
+                    entity_type: r.entity_type,
+                    tenant: r.tenant,
+                    summary: r.summary,
+                    level: r.level,
+                    passed: r.passed,
+                    timestamp: r.created_at,
+                    step_number: r.step_number.map(|n| n as u8),
+                    total_steps: r.total_steps.map(|n| n as u8),
+                })
+                .collect(),
             Err(e) => {
                 tracing::warn!(error = %e, "failed to read design_time_events from Turso");
                 Vec::new()

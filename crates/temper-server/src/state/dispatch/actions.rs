@@ -297,7 +297,6 @@ impl crate::state::ServerState {
             tracing::error!(error = %e, "failed to persist trajectory entry");
         }
 
-
         // Broadcast state change for SSE subscribers (best-effort, ignore send errors)
         if response.success {
             let _ = self.event_tx.send(EntityStateChange {

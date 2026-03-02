@@ -237,9 +237,7 @@ pub async fn list_wasm_modules(
                     let module = row.module_name.clone();
                     let success = row.success;
                     let ts = Some(row.created_at.clone());
-                    let (total, s_count, last_ts) = stats
-                        .entry(module)
-                        .or_insert((0, 0, None));
+                    let (total, s_count, last_ts) = stats.entry(module).or_insert((0, 0, None));
                     *total += 1;
                     if success {
                         *s_count += 1;

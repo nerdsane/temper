@@ -33,7 +33,6 @@ struct TrajectorySignal {
 /// EntitySetNotFound 404 trajectories with SubmitSpec events to detect
 /// resolved vs open unmet intents.
 pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Vec<InsightRecord> {
-
     if entries.is_empty() {
         return Vec::new();
     }
@@ -252,8 +251,9 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
 ///
 /// Groups failed trajectories by error pattern and cross-references with
 /// SubmitSpec events to determine open vs resolved status.
-pub(crate) fn generate_unmet_intents(entries: &[crate::state::TrajectoryEntry]) -> Vec<UnmetIntent> {
-
+pub(crate) fn generate_unmet_intents(
+    entries: &[crate::state::TrajectoryEntry],
+) -> Vec<UnmetIntent> {
     // Track entity types that have had specs submitted.
     let mut submitted_specs: BTreeMap<String, String> = BTreeMap::new();
     // Track failed patterns by (entity_type, error_pattern).
@@ -345,8 +345,9 @@ pub(crate) fn feature_request_dedup_key(description: &str) -> String {
 /// Filters trajectory entries with `source == Some(Platform)`, groups by
 /// `(action, error_pattern)`, and creates `FeatureRequestRecord`s for groups
 /// that exceed the frequency threshold.
-pub(crate) fn generate_feature_requests(entries: &[crate::state::TrajectoryEntry]) -> Vec<FeatureRequestRecord> {
-
+pub(crate) fn generate_feature_requests(
+    entries: &[crate::state::TrajectoryEntry],
+) -> Vec<FeatureRequestRecord> {
     if entries.is_empty() {
         return Vec::new();
     }

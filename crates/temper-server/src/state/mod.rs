@@ -65,8 +65,6 @@ pub struct DesignTimeEvent {
     pub total_steps: Option<u8>,
 }
 
-
-
 fn env_bool(name: &str, default: bool) -> bool {
     match std::env::var(name) {
         // determinism-ok: read once at startup, not per simulation step

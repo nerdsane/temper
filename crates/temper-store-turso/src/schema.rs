@@ -224,8 +224,7 @@ pub const ALTER_TRAJECTORIES_ADD_DENIED_RESOURCE: &str =
     "ALTER TABLE trajectories ADD COLUMN denied_resource TEXT";
 pub const ALTER_TRAJECTORIES_ADD_DENIED_MODULE: &str =
     "ALTER TABLE trajectories ADD COLUMN denied_module TEXT";
-pub const ALTER_TRAJECTORIES_ADD_SOURCE: &str =
-    "ALTER TABLE trajectories ADD COLUMN source TEXT";
+pub const ALTER_TRAJECTORIES_ADD_SOURCE: &str = "ALTER TABLE trajectories ADD COLUMN source TEXT";
 pub const ALTER_TRAJECTORIES_ADD_SPEC_GOVERNED: &str =
     "ALTER TABLE trajectories ADD COLUMN spec_governed INTEGER";
 

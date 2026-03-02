@@ -381,11 +381,7 @@ impl TursoEventStore {
                  WHERE (?1 IS NULL OR entity_type = ?1) \
                    AND (?2 IS NULL OR action = ?2) \
                    AND (?3 IS NULL OR success = ?3)",
-                params![
-                    entity_type,
-                    action,
-                    success_filter.map(|b| b as i64)
-                ],
+                params![entity_type, action, success_filter.map(|b| b as i64)],
             )
             .await
             .map_err(storage_error)?;
@@ -726,9 +722,7 @@ impl TursoEventStore {
     }
 
     /// Parse an evolution record row.
-    fn row_to_evolution_record(
-        row: &libsql::Row,
-    ) -> Result<EvolutionRecordRow, PersistenceError> {
+    fn row_to_evolution_record(row: &libsql::Row) -> Result<EvolutionRecordRow, PersistenceError> {
         Ok(EvolutionRecordRow {
             id: row.get::<String>(0).map_err(storage_error)?,
             record_type: row.get::<String>(1).map_err(storage_error)?,
@@ -859,10 +853,7 @@ impl TursoEventStore {
     }
 
     /// Get a single pending decision by ID, returning the full JSON data.
-    pub async fn get_pending_decision(
-        &self,
-        id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
+    pub async fn get_pending_decision(&self, id: &str) -> Result<Option<String>, PersistenceError> {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
@@ -1213,9 +1204,7 @@ impl TursoEventStore {
     }
 
     /// Load all tenant Cedar policies.
-    pub async fn load_tenant_policies(
-        &self,
-    ) -> Result<Vec<(String, String)>, PersistenceError> {
+    pub async fn load_tenant_policies(&self) -> Result<Vec<(String, String)>, PersistenceError> {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(

@@ -15,7 +15,8 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 use crate::state::ServerState;
 
 /// Check function type: given the server state, returns `Some(observed_value)` if triggered.
-type SentinelCheckFn = Box<dyn Fn(&ServerState, &[crate::state::TrajectoryEntry]) -> Option<f64> + Send + Sync>;
+type SentinelCheckFn =
+    Box<dyn Fn(&ServerState, &[crate::state::TrajectoryEntry]) -> Option<f64> + Send + Sync>;
 
 /// A sentinel rule that can evaluate server state and detect anomalies.
 pub struct SentinelRule {
@@ -140,7 +141,11 @@ pub fn default_rules() -> Vec<SentinelRule> {
 ///
 /// Returns a list of alerts for rules whose thresholds were crossed.
 /// Each alert includes a fully-formed O-Record ready for insertion into the RecordStore.
-pub fn check_rules(rules: &[SentinelRule], state: &ServerState, trajectory_entries: &[crate::state::TrajectoryEntry]) -> Vec<SentinelAlert> {
+pub fn check_rules(
+    rules: &[SentinelRule],
+    state: &ServerState,
+    trajectory_entries: &[crate::state::TrajectoryEntry],
+) -> Vec<SentinelAlert> {
     let now = sim_now();
     let mut alerts = Vec::new();
 

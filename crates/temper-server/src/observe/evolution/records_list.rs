@@ -21,10 +21,7 @@ pub(crate) async fn list_evolution_records(
     // Query Turso directly (single source of truth).
     if let Some(turso) = state.turso_opt() {
         match turso
-            .list_evolution_records(
-                params.record_type.as_deref(),
-                params.status.as_deref(),
-            )
+            .list_evolution_records(params.record_type.as_deref(), params.status.as_deref())
             .await
         {
             Ok(rows) => {
