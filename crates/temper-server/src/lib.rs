@@ -6,7 +6,6 @@
 
 #[cfg(feature = "observe")]
 mod api;
-#[cfg(feature = "observe")]
 pub(crate) mod authz_helpers;
 mod constraint_engine;
 pub mod dispatch;

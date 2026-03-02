@@ -140,6 +140,7 @@ fn authorize_tenant_decision_management(
             serde_json::json!({"tenant": tenant}),
             &reason,
             None,
+            None,
         );
         return Some(
             (
@@ -344,6 +345,7 @@ async fn handle_put_policies(
             serde_json::json!({"tenant": tenant}),
             &reason,
             None,
+            None,
         );
         return (
             StatusCode::FORBIDDEN,
@@ -438,6 +440,7 @@ async fn handle_add_policy_rule(
             &tenant,
             serde_json::json!({"tenant": tenant}),
             &reason,
+            None,
             None,
         );
         return (

@@ -2,6 +2,7 @@
 //!
 //! Provides common builders, fixtures, and dispatch helpers to eliminate
 //! duplicated scaffolding across DST test suites.
+#![allow(dead_code)]
 
 use std::sync::Arc;
 
@@ -25,6 +26,32 @@ pub const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.
 /// fault injection.
 pub fn build_default_state(seed: u64, system_name: &str) -> (ServerState, SimEventStore) {
     build_single_tenant_state(seed, system_name, "default", &[("Order", ORDER_IOA)])
+}
+
+/// Build a `ServerState` with a caller-provided SimEventStore handle.
+///
+/// Useful for crash/recovery tests where multiple `ServerState` instances
+/// must share the same underlying persistence backend.
+pub fn build_single_tenant_state_with_store(
+    sim_store: SimEventStore,
+    system_name: &str,
+    tenant: &str,
+    entities: &[(&str, &str)],
+) -> ServerState {
+    let store = ServerEventStore::Sim(sim_store);
+    let mut registry = SpecRegistry::new();
+    let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
+    registry.register_tenant(tenant, csdl, CSDL_XML.to_string(), entities);
+
+    let system = ActorSystem::new(system_name);
+    let mut state = ServerState::from_registry(system, registry);
+    state.event_store = Some(Arc::new(store));
+    state
+}
+
+/// Build the default tenant state using a caller-provided SimEventStore.
+pub fn build_default_state_with_store(sim_store: SimEventStore, system_name: &str) -> ServerState {
+    build_single_tenant_state_with_store(sim_store, system_name, "default", &[("Order", ORDER_IOA)])
 }
 
 /// Build a `ServerState` for a single tenant with the given entity specs.

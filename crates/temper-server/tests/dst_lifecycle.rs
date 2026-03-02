@@ -4,38 +4,11 @@
 //! - Create → dispatch → persist → crash → respawn → replay → continue
 //! - Full lifecycle through all states with persistence
 
-use std::sync::Arc;
+mod common;
 
-use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_runtime::tenant::TenantId;
-use temper_server::dispatch::AgentContext;
-use temper_server::registry::SpecRegistry;
-use temper_server::{ServerEventStore, ServerState};
-use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
-
-const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
-const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
-
-fn build_state_with_sim(seed: u64) -> (ServerState, SimEventStore) {
-    let sim_store = SimEventStore::no_faults(seed);
-    let store = ServerEventStore::Sim(sim_store.clone());
-
-    let mut registry = SpecRegistry::new();
-    let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
-    registry.register_tenant(
-        "default",
-        csdl,
-        CSDL_XML.to_string(),
-        &[("Order", ORDER_IOA)],
-    );
-
-    let system = ActorSystem::new("dst-lifecycle");
-    let mut state = ServerState::from_registry(system, registry);
-    state.event_store = Some(Arc::new(store));
-    (state, sim_store)
-}
 
 // =========================================================================
 // Test: Full order lifecycle through dispatch_tenant_action
@@ -45,9 +18,8 @@ fn build_state_with_sim(seed: u64) -> (ServerState, SimEventStore) {
 async fn dst_full_lifecycle_through_dispatch() {
     for seed in 0..100 {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
-        let (state, _sim_store) = build_state_with_sim(seed);
+        let (state, _sim_store) = common::build_default_state(seed, "dst-lifecycle");
         let tenant = TenantId::default();
-        let agent = AgentContext::default();
         let eid = format!("o-life-{seed}");
 
         let actions_and_expected = [
@@ -60,17 +32,16 @@ async fn dst_full_lifecycle_through_dispatch() {
         ];
 
         for (action, expected_status) in &actions_and_expected {
-            let r = state
-                .dispatch_tenant_action(
-                    &tenant,
-                    "Order",
-                    &eid,
-                    action,
-                    serde_json::json!({}),
-                    &agent,
-                )
-                .await
-                .unwrap_or_else(|e| panic!("seed {seed}: {action} failed: {e}"));
+            let r = common::dispatch(
+                &state,
+                &tenant,
+                "Order",
+                &eid,
+                action,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("seed {seed}: {action} failed: {e}"));
             assert!(
                 r.success,
                 "seed {seed}: {action} not successful: {:?}",
@@ -91,40 +62,26 @@ async fn dst_full_lifecycle_through_dispatch() {
 #[tokio::test]
 async fn dst_lifecycle_crash_and_recovery() {
     for seed in 0..50 {
-        let sim_store = SimEventStore::no_faults(seed);
-        let store = Arc::new(ServerEventStore::Sim(sim_store.clone()));
+        let shared_store = SimEventStore::no_faults(seed);
         let tenant = TenantId::default();
-        let agent = AgentContext::default();
         let eid = format!("o-crash-{seed}");
 
         // Phase 1: Create and advance to Confirmed.
         {
             let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
-            let mut registry = SpecRegistry::new();
-            let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
-            registry.register_tenant(
-                "default",
-                csdl,
-                CSDL_XML.to_string(),
-                &[("Order", ORDER_IOA)],
-            );
-
-            let system = ActorSystem::new("dst-crash-1");
-            let mut state = ServerState::from_registry(system, registry);
-            state.event_store = Some(store.clone());
+            let state = common::build_default_state_with_store(shared_store.clone(), "dst-crash-1");
 
             for action in &["AddItem", "SubmitOrder", "ConfirmOrder"] {
-                let r = state
-                    .dispatch_tenant_action(
-                        &tenant,
-                        "Order",
-                        &eid,
-                        action,
-                        serde_json::json!({}),
-                        &agent,
-                    )
-                    .await
-                    .unwrap_or_else(|e| panic!("seed {seed}: {action} failed: {e}"));
+                let r = common::dispatch(
+                    &state,
+                    &tenant,
+                    "Order",
+                    &eid,
+                    action,
+                    serde_json::json!({}),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("seed {seed}: {action} failed: {e}"));
                 assert!(r.success, "seed {seed}: {action} failed: {:?}", r.error);
             }
         }
@@ -133,31 +90,19 @@ async fn dst_lifecycle_crash_and_recovery() {
         // Phase 2: Respawn with same SimEventStore.
         {
             let (_guard2, _clock2, _id_gen2) = install_deterministic_context(seed + 10000);
-            let mut registry = SpecRegistry::new();
-            let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
-            registry.register_tenant(
-                "default",
-                csdl,
-                CSDL_XML.to_string(),
-                &[("Order", ORDER_IOA)],
-            );
-
-            let system = ActorSystem::new("dst-crash-2");
-            let mut state = ServerState::from_registry(system, registry);
-            state.event_store = Some(store.clone());
+            let state = common::build_default_state_with_store(shared_store.clone(), "dst-crash-2");
 
             // Continue from Confirmed → Processing.
-            let r = state
-                .dispatch_tenant_action(
-                    &tenant,
-                    "Order",
-                    &eid,
-                    "ProcessOrder",
-                    serde_json::json!({}),
-                    &agent,
-                )
-                .await
-                .unwrap_or_else(|e| panic!("seed {seed}: ProcessOrder post-recovery failed: {e}"));
+            let r = common::dispatch(
+                &state,
+                &tenant,
+                "Order",
+                &eid,
+                "ProcessOrder",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("seed {seed}: ProcessOrder post-recovery failed: {e}"));
             assert!(
                 r.success,
                 "seed {seed}: ProcessOrder after recovery failed: {:?}",
@@ -175,22 +120,20 @@ async fn dst_lifecycle_crash_and_recovery() {
 #[tokio::test]
 async fn dst_lifecycle_event_count() {
     let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-    let (state, sim_store) = build_state_with_sim(42);
+    let (state, sim_store) = common::build_default_state(42, "dst-lifecycle");
     let tenant = TenantId::default();
-    let agent = AgentContext::default();
 
     for action in &["AddItem", "SubmitOrder", "ConfirmOrder"] {
-        state
-            .dispatch_tenant_action(
-                &tenant,
-                "Order",
-                "o-count",
-                action,
-                serde_json::json!({}),
-                &agent,
-            )
-            .await
-            .unwrap();
+        common::dispatch(
+            &state,
+            &tenant,
+            "Order",
+            "o-count",
+            action,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
     }
 
     // The SimEventStore should have events for this entity.

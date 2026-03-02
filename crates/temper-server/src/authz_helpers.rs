@@ -8,7 +8,7 @@ use axum::http::HeaderMap;
 use temper_authz::SecurityContext;
 use temper_runtime::scheduler::sim_now;
 
-use crate::state::{PendingDecision, ServerState, TrajectoryEntry, TrajectorySource};
+use crate::state::{PendingDecision, TrajectoryEntry, TrajectorySource};
 
 /// Extract `X-Temper-*` headers from an axum `HeaderMap` into `(key, value)` pairs
 /// suitable for `SecurityContext::from_headers`.
@@ -47,7 +47,7 @@ pub(crate) fn security_context_from_headers(
 /// their HTTP response.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_authz_denial(
-    state: &ServerState,
+    state: &crate::state::ServerState,
     tenant: &str,
     security_ctx: &SecurityContext,
     agent_id_override: Option<&str>,
@@ -57,8 +57,15 @@ pub(crate) fn record_authz_denial(
     resource_attrs: serde_json::Value,
     reason: &str,
     module_name: Option<String>,
+    from_status: Option<String>,
 ) -> PendingDecision {
     let principal_id = agent_id_override.unwrap_or(security_ctx.principal.id.as_str());
+    let denied_module = module_name.clone();
+    let session_id = security_ctx
+        .context_attrs
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let pd = PendingDecision::from_denial(
         tenant,
@@ -87,14 +94,14 @@ pub(crate) fn record_authz_denial(
         entity_id: resource_id.to_string(),
         action: action.to_string(),
         success: false,
-        from_status: None,
+        from_status,
         to_status: None,
         error: Some(reason.to_string()),
         agent_id: Some(principal_id.to_string()),
-        session_id: None,
+        session_id,
         authz_denied: Some(true),
         denied_resource: Some(format!("{resource_type}:{resource_id}")),
-        denied_module: None,
+        denied_module,
         source: Some(TrajectorySource::Authz),
         spec_governed: None,
     };

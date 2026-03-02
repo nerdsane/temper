@@ -102,7 +102,7 @@ async fn dst_replay_fidelity() {
             store.clone(),
         )
         .with_tenant("default");
-        let actor_ref2 = system2.spawn(actor2, &format!("{entity_id}-replay"));
+        let actor_ref2 = system2.spawn(actor2, format!("{entity_id}-replay"));
 
         let post = get_state(&actor_ref2).await;
         assert_eq!(
@@ -207,7 +207,7 @@ async fn dst_crash_recovery() {
                 store.clone(),
             )
             .with_tenant("default");
-            let actor_ref = system.spawn(actor, &format!("{entity_id}-2"));
+            let actor_ref = system.spawn(actor, format!("{entity_id}-2"));
 
             let state = get_state(&actor_ref).await;
             assert_eq!(
@@ -236,7 +236,7 @@ async fn dst_determinism_canary() {
             let store_inner = SimEventStore::no_faults(seed);
             let store = Arc::new(ServerEventStore::Sim(store_inner.clone()));
             let table = order_table();
-            let system = ActorSystem::new(&format!("dst-det-{run}"));
+            let system = ActorSystem::new(format!("dst-det-{run}"));
 
             let entity_id = format!("ord-det-{seed}");
             let actor = EntityActor::with_persistence(

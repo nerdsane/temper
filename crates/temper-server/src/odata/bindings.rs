@@ -4,32 +4,16 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use opentelemetry::KeyValue as OtelKeyValue;
 use opentelemetry::trace::{Span, Status, Tracer};
-use temper_authz::SecurityContext;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
 use super::common::constraint_violation_response;
 use super::response::annotate_entity;
+use crate::authz_helpers::{record_authz_denial, security_context_from_headers};
 use crate::constraint_engine::{post_write_invariant_checks, pre_upsert_relation_checks};
 use crate::dispatch::AgentContext;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::{DispatchExtOptions, ServerState};
-
-/// Extract `X-Temper-*` headers from an axum `HeaderMap` into `(key, value)` pairs
-/// suitable for `SecurityContext::from_headers`.
-fn extract_temper_headers(headers: &HeaderMap) -> Vec<(String, String)> {
-    headers
-        .iter()
-        .filter_map(|(name, value)| {
-            let key = name.as_str().to_lowercase();
-            if key.starts_with("x-temper-") {
-                value.to_str().ok().map(|v| (key, v.to_string()))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_bound_action(
@@ -69,8 +53,8 @@ pub(super) async fn dispatch_bound_action(
     }
 
     // Build SecurityContext from X-Temper-* headers, enriched with agent identity.
-    let temper_headers = extract_temper_headers(headers);
-    let security_ctx = SecurityContext::from_headers(&temper_headers).with_agent_context(
+    let security_ctx = security_context_from_headers(
+        headers,
         agent_ctx.agent_id.as_deref(),
         agent_ctx.session_id.as_deref(),
     );
@@ -149,57 +133,24 @@ pub(super) async fn dispatch_bound_action(
     let authz_result =
         state.authorize_with_context(&security_ctx, action, entity_type, &resource_attrs);
     if let Err(reason) = authz_result {
-        // Create a pending decision for the dashboard to review.
-        let principal_id = agent_ctx
-            .agent_id
-            .as_deref()
-            .unwrap_or(security_ctx.principal.id.as_str());
-        let pd = crate::state::PendingDecision::from_denial(
+        let pd = record_authz_denial(
+            state,
             tenant.as_str(),
-            principal_id,
+            &security_ctx,
+            agent_ctx.agent_id.as_deref(),
             action,
             entity_type,
             key_str,
             serde_json::to_value(&resource_attrs).unwrap_or_default(),
             &reason,
             None,
+            Some(current_state.state.status.clone()),
         );
-        let pending_id = pd.id.clone();
-        {
-            let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
-            if log.push(pd.clone()) {
-                let _ = state.pending_decision_tx.send(pd);
-            }
-        }
-
-        // Record the denial in the trajectory log.
-        let traj = crate::state::TrajectoryEntry {
-            timestamp: sim_now().to_rfc3339(),
-            tenant: tenant.as_str().to_string(),
-            entity_type: entity_type.to_string(),
-            entity_id: key_str.to_string(),
-            action: action.to_string(),
-            success: false,
-            from_status: Some(current_state.state.status.clone()),
-            to_status: None,
-            error: Some(reason.clone()),
-            agent_id: agent_ctx.agent_id.clone(),
-            session_id: agent_ctx.session_id.clone(),
-            authz_denied: Some(true),
-            denied_resource: Some(format!("{}:{}", entity_type, key_str)),
-            denied_module: None,
-            source: Some(crate::state::trajectory::TrajectorySource::Authz),
-            spec_governed: None,
-        };
-        {
-            let mut tlog = state.trajectory_log.write().unwrap(); // ci-ok: infallible lock
-            tlog.push(traj);
-        }
 
         http_span.set_status(Status::error(reason.clone()));
         let end_time: std::time::SystemTime = sim_now().into();
         http_span.end_with_timestamp(end_time);
-        let reason_with_id = format!("{reason} (decision: {pending_id})");
+        let reason_with_id = format!("{reason} (decision: {})", pd.id);
         return odata_error(
             StatusCode::FORBIDDEN,
             "AuthorizationDenied",

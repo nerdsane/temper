@@ -5,19 +5,12 @@
 //! - Actions can't cross tenant boundaries
 //! - Hot-swapping one tenant doesn't affect another
 
-use std::sync::Arc;
+mod common;
 
-use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_runtime::tenant::TenantId;
 use temper_server::dispatch::AgentContext;
-use temper_server::registry::SpecRegistry;
-use temper_server::{ServerEventStore, ServerState};
 use temper_spec::csdl::parse_csdl;
-use temper_store_sim::SimEventStore;
-
-const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
-const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 
 const TASK_IOA: &str = r#"
 [automaton]
@@ -44,31 +37,15 @@ to = "Cancelled"
 kind = "input"
 "#;
 
-fn build_two_tenant_state(seed: u64) -> ServerState {
-    let sim_store = SimEventStore::no_faults(seed);
-    let store = ServerEventStore::Sim(sim_store);
-
-    let mut registry = SpecRegistry::new();
-    let csdl_a = parse_csdl(CSDL_XML).expect("CSDL parse");
-    registry.register_tenant(
+fn build_two_tenant_state(seed: u64) -> temper_server::ServerState {
+    common::build_two_tenant_state(
+        seed,
+        "dst-mt",
         "tenant-a",
-        csdl_a,
-        CSDL_XML.to_string(),
-        &[("Order", ORDER_IOA)],
-    );
-
-    let csdl_b = parse_csdl(CSDL_XML).expect("CSDL parse");
-    registry.register_tenant(
+        &[("Order", common::ORDER_IOA)],
         "tenant-b",
-        csdl_b,
-        CSDL_XML.to_string(),
         &[("Task", TASK_IOA)],
-    );
-
-    let system = ActorSystem::new("dst-mt");
-    let mut state = ServerState::from_registry(system, registry);
-    state.event_store = Some(Arc::new(store));
-    state
+    )
 }
 
 // =========================================================================
@@ -277,12 +254,12 @@ async fn dst_hotswap_tenant_isolation() {
     // Hot-swap tenant-a's Order spec.
     {
         let mut reg = state.registry.write().expect("registry lock"); // ci-ok: infallible lock
-        let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
+        let csdl = parse_csdl(common::CSDL_XML).expect("CSDL parse");
         reg.register_tenant(
             "tenant-a",
             csdl,
-            CSDL_XML.to_string(),
-            &[("Order", ORDER_IOA)],
+            common::CSDL_XML.to_string(),
+            &[("Order", common::ORDER_IOA)],
         );
     }
 
