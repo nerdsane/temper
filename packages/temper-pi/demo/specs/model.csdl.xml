@@ -12,6 +12,15 @@
         <Property Name="deploy_workflow_id" Type="Edm.String"/>
         <Property Name="deploy_url" Type="Edm.String"/>
         <Property Name="reason" Type="Edm.String"/>
+        <NavigationProperty Name="TestWorkflow" Type="Temper.TestWorkflow">
+          <ReferentialConstraint Property="test_workflow_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="ReviewWorkflow" Type="Temper.ReviewWorkflow">
+          <ReferentialConstraint Property="review_workflow_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="DeployWorkflow" Type="Temper.DeployWorkflow">
+          <ReferentialConstraint Property="deploy_workflow_id" ReferencedProperty="id"/>
+        </NavigationProperty>
       </EntityType>
 
       <EntityType Name="TestWorkflow">
@@ -44,11 +53,76 @@
         <Property Name="reason" Type="Edm.String"/>
       </EntityType>
 
+      <EntityType Name="Pipeline">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="work_item_count" Type="Edm.String"/>
+        <Property Name="summary" Type="Edm.String"/>
+        <Property Name="reason" Type="Edm.String"/>
+        <NavigationProperty Name="WorkItems" Type="Collection(Temper.WorkItem)"/>
+        <NavigationProperty Name="Agents" Type="Collection(Temper.AgentSession)"/>
+      </EntityType>
+
+      <EntityType Name="WorkItem">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="pipeline_id" Type="Edm.String"/>
+        <Property Name="agent_session_id" Type="Edm.String"/>
+        <Property Name="title" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="deliverable" Type="Edm.String"/>
+        <Property Name="feedback" Type="Edm.String"/>
+        <Property Name="reason" Type="Edm.String"/>
+        <NavigationProperty Name="Pipeline" Type="Temper.Pipeline">
+          <ReferentialConstraint Property="pipeline_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Agent" Type="Temper.AgentSession" Nullable="true">
+          <ReferentialConstraint Property="agent_session_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+      </EntityType>
+
+      <EntityType Name="AgentSession">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="work_item_id" Type="Edm.String"/>
+        <Property Name="pipeline_id" Type="Edm.String"/>
+        <Property Name="task_description" Type="Edm.String"/>
+        <Property Name="result_summary" Type="Edm.String"/>
+        <Property Name="block_reason" Type="Edm.String"/>
+        <Property Name="reason" Type="Edm.String"/>
+        <NavigationProperty Name="WorkItem" Type="Temper.WorkItem" Nullable="true">
+          <ReferentialConstraint Property="work_item_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Pipeline" Type="Temper.Pipeline">
+          <ReferentialConstraint Property="pipeline_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+      </EntityType>
+
       <EntityContainer Name="Service">
-        <EntitySet Name="LeadPlans" EntityType="Temper.LeadPlan"/>
+        <EntitySet Name="LeadPlans" EntityType="Temper.LeadPlan">
+          <NavigationPropertyBinding Path="TestWorkflow" Target="TestWorkflows"/>
+          <NavigationPropertyBinding Path="ReviewWorkflow" Target="ReviewWorkflows"/>
+          <NavigationPropertyBinding Path="DeployWorkflow" Target="DeployWorkflows"/>
+        </EntitySet>
         <EntitySet Name="TestWorkflows" EntityType="Temper.TestWorkflow"/>
         <EntitySet Name="ReviewWorkflows" EntityType="Temper.ReviewWorkflow"/>
         <EntitySet Name="DeployWorkflows" EntityType="Temper.DeployWorkflow"/>
+        <EntitySet Name="Pipelines" EntityType="Temper.Pipeline">
+          <NavigationPropertyBinding Path="WorkItems" Target="WorkItems"/>
+          <NavigationPropertyBinding Path="Agents" Target="AgentSessions"/>
+        </EntitySet>
+        <EntitySet Name="WorkItems" EntityType="Temper.WorkItem">
+          <NavigationPropertyBinding Path="Pipeline" Target="Pipelines"/>
+          <NavigationPropertyBinding Path="Agent" Target="AgentSessions"/>
+        </EntitySet>
+        <EntitySet Name="AgentSessions" EntityType="Temper.AgentSession">
+          <NavigationPropertyBinding Path="WorkItem" Target="WorkItems"/>
+          <NavigationPropertyBinding Path="Pipeline" Target="Pipelines"/>
+        </EntitySet>
       </EntityContainer>
 
     </Schema>

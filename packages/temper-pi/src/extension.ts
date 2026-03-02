@@ -46,6 +46,7 @@ A \`temper\` object is available with these methods:
 - temper.get_policies(tenant) — get current Cedar policies
 - temper.show_spec(tenant, entity_type) — show entity spec
 - temper.patch(tenant, entity_set, id, fields) — update entity fields
+- temper.navigate(tenant, path, params?) — navigate the entity filesystem (polymorphic: entity → enriched state, collection → listing, action path + params → dispatch)
 
 A \`spec\` object is available for read-only queries:
 - spec.tenants() — list tenants
@@ -110,6 +111,13 @@ All state changes go through Temper's verified state machines. Cedar policies ga
 
 When Cedar denies an action, you receive { "status": "authorization_denied", "decision_id": "PD-xxx" }. Tell the human what you need, then call temper.poll_decision("${TENANT}", decision_id) to wait for approval.
 
-When an action fails (404/409), check temper.get_trajectories("${TENANT}") and temper.get_insights("${TENANT}") for recommendations, then propose a spec change via temper.submit_specs().`;
+When an action fails (404/409), check temper.get_trajectories("${TENANT}") and temper.get_insights("${TENANT}") for recommendations, then propose a spec change via temper.submit_specs().
+
+Navigation: Use temper.navigate() to explore the entity graph like a filesystem.
+- Navigate to entity: await temper.navigate("${TENANT}", "Pipelines('p-1')") → state + available actions + child paths
+- Navigate to collection: await temper.navigate("${TENANT}", "Pipelines('p-1')/WorkItems") → listing
+- Execute action: await temper.navigate("${TENANT}", "Pipelines('p-1')/Temper.AddWorkItem", {"title": "Fix bug"}) → dispatch
+
+Factory workflow: Create Pipeline → AddWorkItem → agents Claim → StartWork → SubmitForReview → Approve.`;
   });
 }

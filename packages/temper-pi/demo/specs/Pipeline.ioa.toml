@@ -1,0 +1,89 @@
+# Pipeline Entity — I/O Automaton Specification
+#
+# Orchestrates a collection of work items toward a goal.
+# Manages the pipeline lifecycle from draft through activation,
+# work item creation, and eventual completion or failure.
+# Spawns WorkItem child entities via the AddWorkItem action.
+
+[automaton]
+name = "Pipeline"
+states = ["Draft", "Active", "Paused", "Completed", "Failed"]
+initial = "Draft"
+
+# --- State Variables ---
+
+[[state]]
+name = "description"
+type = "string"
+initial = ""
+
+[[state]]
+name = "work_item_count"
+type = "counter"
+initial = "0"
+
+# --- Actions: Pipeline Lifecycle ---
+
+[[action]]
+name = "Activate"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+params = ["description"]
+hint = "Activate the pipeline with a description of its goal."
+
+[[action]]
+name = "AddWorkItem"
+kind = "input"
+from = ["Active"]
+params = ["title", "description"]
+hint = "Add a new work item to the active pipeline. Spawns a WorkItem child entity and increments work_item_count."
+effect = [
+  { type = "spawn_entity", entity_type = "WorkItem", entity_id_source = "{uuid}", initial_action = "Create", store_id_in = "last_work_item_id" },
+  { type = "emit_event", event = "WorkItemAdded" }
+]
+
+[[action]]
+name = "Pause"
+kind = "input"
+from = ["Active"]
+to = "Paused"
+hint = "Pause the pipeline. No new work items can be added while paused."
+
+[[action]]
+name = "Resume"
+kind = "input"
+from = ["Paused"]
+to = "Active"
+hint = "Resume a paused pipeline."
+
+[[action]]
+name = "Complete"
+kind = "input"
+from = ["Active"]
+to = "Completed"
+params = ["summary"]
+guard = "work_item_count > 0"
+hint = "Mark the pipeline as successfully completed. Requires at least one work item."
+effect = [{ type = "emit_event", event = "PipelineCompleted" }]
+
+[[action]]
+name = "Fail"
+kind = "input"
+from = ["Active", "Paused"]
+to = "Failed"
+params = ["reason"]
+hint = "Mark the pipeline as failed from Active or Paused state."
+effect = [{ type = "emit_event", event = "PipelineFailed" }]
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "CompletedIsFinal"
+when = ["Completed"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "FailedIsFinal"
+when = ["Failed"]
+assert = "no_further_transitions"

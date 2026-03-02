@@ -257,10 +257,22 @@ pub fn select_fields(
         .collect()
 }
 
+/// How to resolve a foreign key for a navigation property.
+enum FkResolution {
+    /// Many-to-one: the source entity holds a FK pointing to the target.
+    /// E.g., Order→Customer: Order.CustomerId → Customer.Id.
+    Forward { source_field: String },
+    /// One-to-many: target entities hold a FK pointing back to the source.
+    /// E.g., Customer→Orders: Order.CustomerId points to Customer.Id.
+    Reverse { target_fk_field: String },
+}
+
 /// Metadata about a navigation property needed for expansion.
 struct NavExpansionInfo {
     target_type: String,
     is_collection: bool,
+    /// RelationGraph-based FK resolution (None = fall back to convention scan).
+    fk_resolution: Option<FkResolution>,
 }
 
 /// Resolve navigation properties for $expand on a single entity.
@@ -311,7 +323,7 @@ async fn expand_entity_recursive(
         &temper_odata::query::types::ExpandItem,
         Option<NavExpansionInfo>,
     )> = {
-        let registry = state.registry.read().unwrap();
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
         let tenant_config = registry.get_tenant(tenant);
         expand_items
             .iter()
@@ -323,9 +335,20 @@ async fn expand_entity_recursive(
                     let is_collection = tenant_config
                         .is_some_and(|tc| is_collection_nav(&tc.csdl, entity_type, &item.property))
                         || is_collection_nav(&state.csdl, entity_type, &item.property);
+                    // Compute FK resolution from RelationGraph
+                    let fk_resolution = tenant_config.and_then(|tc| {
+                        find_fk_resolution(
+                            &tc.relation_graph,
+                            entity_type,
+                            &target_type,
+                            &item.property,
+                            is_collection,
+                        )
+                    });
                     NavExpansionInfo {
                         target_type,
                         is_collection,
+                        fk_resolution,
                     }
                 });
                 (item, info)
@@ -346,29 +369,78 @@ async fn expand_entity_recursive(
 
     for (item, info) in &nav_infos {
         let Some(info) = info else { continue };
-
-        let related_ids = state.list_entity_ids(tenant, &info.target_type);
         let mut related_entities = Vec::new();
 
         if let Some(ref parent_id) = entity_id {
-            for related_id in &related_ids {
-                if let Ok(response) = state
-                    .get_tenant_entity_state(tenant, &info.target_type, related_id)
-                    .await
-                {
-                    let related_json = serde_json::to_value(&response.state).unwrap_or_default();
-                    // Check if this entity references the parent
-                    let matches = related_json
+            match &info.fk_resolution {
+                Some(FkResolution::Forward { source_field }) => {
+                    // Many-to-one: entity holds FK to target.
+                    // e.g., Order.CustomerId → fetch Customer by that ID directly.
+                    let fk_value = entity
                         .get("fields")
-                        .and_then(|f| f.as_object())
-                        .is_some_and(|fields| {
-                            let parent_id_field = format!("{}Id", entity_type);
-                            fields.get("parentId").and_then(|v| v.as_str()) == Some(parent_id)
-                                || fields.get(&parent_id_field).and_then(|v| v.as_str())
-                                    == Some(parent_id)
-                        });
-                    if matches {
-                        related_entities.push(related_json);
+                        .and_then(|f| f.get(source_field.as_str()))
+                        .and_then(|v| v.as_str());
+                    if let Some(fk) = fk_value {
+                        if let Ok(response) = state
+                            .get_tenant_entity_state(tenant, &info.target_type, fk)
+                            .await
+                        {
+                            let json =
+                                serde_json::to_value(&response.state).unwrap_or_default();
+                            related_entities.push(json);
+                        }
+                    }
+                }
+                Some(FkResolution::Reverse { target_fk_field }) => {
+                    // One-to-many: target entities hold FK back to us.
+                    // e.g., Customer→Orders: filter Orders where CustomerId == parent_id.
+                    let related_ids = state.list_entity_ids(tenant, &info.target_type);
+                    for related_id in &related_ids {
+                        if let Ok(response) = state
+                            .get_tenant_entity_state(tenant, &info.target_type, related_id)
+                            .await
+                        {
+                            let json =
+                                serde_json::to_value(&response.state).unwrap_or_default();
+                            let matches = json
+                                .get("fields")
+                                .and_then(|f| f.get(target_fk_field.as_str()))
+                                .and_then(|v| v.as_str())
+                                == Some(parent_id.as_str());
+                            if matches {
+                                related_entities.push(json);
+                            }
+                        }
+                    }
+                }
+                None => {
+                    // Fallback: convention scan (parentId / {EntityType}Id).
+                    let related_ids = state.list_entity_ids(tenant, &info.target_type);
+                    for related_id in &related_ids {
+                        if let Ok(response) = state
+                            .get_tenant_entity_state(tenant, &info.target_type, related_id)
+                            .await
+                        {
+                            let json =
+                                serde_json::to_value(&response.state).unwrap_or_default();
+                            let matches = json
+                                .get("fields")
+                                .and_then(|f| f.as_object())
+                                .is_some_and(|fields| {
+                                    let parent_id_field = format!("{}Id", entity_type);
+                                    fields
+                                        .get("parentId")
+                                        .and_then(|v| v.as_str())
+                                        == Some(parent_id.as_str())
+                                        || fields
+                                            .get(&parent_id_field)
+                                            .and_then(|v| v.as_str())
+                                            == Some(parent_id.as_str())
+                                });
+                            if matches {
+                                related_entities.push(json);
+                            }
+                        }
                     }
                 }
             }
@@ -425,7 +497,7 @@ async fn expand_entity_recursive(
 }
 
 /// Find the target entity type name for a navigation property.
-fn find_nav_target(
+pub(crate) fn find_nav_target(
     csdl: &temper_spec::csdl::CsdlDocument,
     entity_type: &str,
     nav_prop: &str,
@@ -443,6 +515,44 @@ fn find_nav_target(
             };
             // Extract simple name from qualified name
             return Some(inner.rsplit('.').next().unwrap_or(inner).to_string());
+        }
+    }
+    None
+}
+
+/// Determine FK resolution strategy from the [`RelationGraph`].
+///
+/// For non-collection nav (many-to-one), finds an outgoing edge from the source
+/// entity matching the nav property. For collection nav (one-to-many), finds an
+/// outgoing edge from the target entity that points back to the source.
+fn find_fk_resolution(
+    graph: &crate::registry::RelationGraph,
+    entity_type: &str,
+    target_type: &str,
+    nav_property: &str,
+    is_collection: bool,
+) -> Option<FkResolution> {
+    if !is_collection {
+        // Many-to-one: look for an outgoing edge from entity_type matching the nav property.
+        if let Some(edges) = graph.outgoing.get(entity_type) {
+            for edge in edges {
+                if edge.navigation_property == nav_property && edge.to_entity == target_type {
+                    return Some(FkResolution::Forward {
+                        source_field: edge.source_field.clone(),
+                    });
+                }
+            }
+        }
+    } else {
+        // One-to-many: look for an outgoing edge from target_type pointing back to entity_type.
+        if let Some(edges) = graph.outgoing.get(target_type) {
+            for edge in edges {
+                if edge.to_entity == entity_type {
+                    return Some(FkResolution::Reverse {
+                        target_fk_field: edge.source_field.clone(),
+                    });
+                }
+            }
         }
     }
     None
@@ -576,5 +686,69 @@ mod tests {
         };
         let filtered = filter_entities(entities, &filter);
         assert_eq!(filtered.len(), 2); // Alice and Charlie
+    }
+
+    #[test]
+    fn test_find_fk_resolution_forward() {
+        // Simulate Order→Customer: Order has outgoing edge with source_field=CustomerId
+        let mut graph = crate::registry::RelationGraph::default();
+        graph.outgoing.insert(
+            "Order".to_string(),
+            vec![crate::registry::RelationEdge {
+                from_entity: "Order".to_string(),
+                navigation_property: "Customer".to_string(),
+                to_entity: "Customer".to_string(),
+                source_field: "CustomerId".to_string(),
+                target_field: "Id".to_string(),
+                nullable: false,
+                delete_policy: temper_spec::cross_invariant::DeletePolicy::Restrict,
+            }],
+        );
+
+        // Non-collection nav → Forward resolution
+        let result = find_fk_resolution(&graph, "Order", "Customer", "Customer", false);
+        assert!(result.is_some());
+        match result.unwrap() {
+            FkResolution::Forward { source_field } => {
+                assert_eq!(source_field, "CustomerId");
+            }
+            _ => panic!("Expected Forward resolution"),
+        }
+    }
+
+    #[test]
+    fn test_find_fk_resolution_reverse() {
+        // Simulate Customer→Orders: Order has outgoing edge back to Customer
+        let mut graph = crate::registry::RelationGraph::default();
+        graph.outgoing.insert(
+            "Order".to_string(),
+            vec![crate::registry::RelationEdge {
+                from_entity: "Order".to_string(),
+                navigation_property: "Customer".to_string(),
+                to_entity: "Customer".to_string(),
+                source_field: "CustomerId".to_string(),
+                target_field: "Id".to_string(),
+                nullable: false,
+                delete_policy: temper_spec::cross_invariant::DeletePolicy::Restrict,
+            }],
+        );
+
+        // Collection nav on Customer→Orders → Reverse resolution
+        let result = find_fk_resolution(&graph, "Customer", "Order", "Orders", true);
+        assert!(result.is_some());
+        match result.unwrap() {
+            FkResolution::Reverse { target_fk_field } => {
+                assert_eq!(target_fk_field, "CustomerId");
+            }
+            _ => panic!("Expected Reverse resolution"),
+        }
+    }
+
+    #[test]
+    fn test_find_fk_resolution_no_edge() {
+        let graph = crate::registry::RelationGraph::default();
+        // No edges → fallback
+        let result = find_fk_resolution(&graph, "Foo", "Bar", "Bars", true);
+        assert!(result.is_none());
     }
 }
