@@ -22,6 +22,13 @@ const TENANT_IOA: &str = include_str!("specs/Tenant.ioa.toml");
 const CATALOG_ENTRY_IOA: &str = include_str!("specs/CatalogEntry.ioa.toml");
 const COLLABORATOR_IOA: &str = include_str!("specs/Collaborator.ioa.toml");
 const VERSION_IOA: &str = include_str!("specs/Version.ioa.toml");
+const OBSERVATION_IOA: &str = include_str!("specs/Observation.ioa.toml");
+const PROBLEM_IOA: &str = include_str!("specs/Problem.ioa.toml");
+const ANALYSIS_IOA: &str = include_str!("specs/Analysis.ioa.toml");
+const EVOLUTION_DECISION_IOA: &str = include_str!("specs/EvolutionDecision.ioa.toml");
+const INSIGHT_IOA: &str = include_str!("specs/Insight.ioa.toml");
+const FEATURE_REQUEST_IOA: &str = include_str!("specs/FeatureRequest.ioa.toml");
+const GOVERNANCE_DECISION_IOA: &str = include_str!("specs/GovernanceDecision.ioa.toml");
 const SYSTEM_CSDL: &str = include_str!("specs/model.csdl.xml");
 
 /// All system entity specs as (entity_type, ioa_source) pairs.
@@ -31,6 +38,13 @@ const SYSTEM_SPECS: &[(&str, &str)] = &[
     ("CatalogEntry", CATALOG_ENTRY_IOA),
     ("Collaborator", COLLABORATOR_IOA),
     ("Version", VERSION_IOA),
+    ("Observation", OBSERVATION_IOA),
+    ("Problem", PROBLEM_IOA),
+    ("Analysis", ANALYSIS_IOA),
+    ("EvolutionDecision", EVOLUTION_DECISION_IOA),
+    ("Insight", INSIGHT_IOA),
+    ("FeatureRequest", FEATURE_REQUEST_IOA),
+    ("GovernanceDecision", GOVERNANCE_DECISION_IOA),
 ];
 
 /// Bootstrap the system tenant.
@@ -190,6 +204,73 @@ mod tests {
 
     #[test]
     fn test_entity_types_count() {
-        assert_eq!(SYSTEM_SPECS.len(), 5);
+        assert_eq!(SYSTEM_SPECS.len(), 12);
+    }
+
+    #[test]
+    fn test_observation_initial_state() {
+        let automaton = automaton::parse_automaton(OBSERVATION_IOA).unwrap();
+        assert_eq!(automaton.automaton.initial, "Open");
+        assert_eq!(automaton.automaton.states.len(), 4);
+    }
+
+    #[test]
+    fn test_problem_initial_state() {
+        let automaton = automaton::parse_automaton(PROBLEM_IOA).unwrap();
+        assert_eq!(automaton.automaton.initial, "Open");
+        assert_eq!(automaton.automaton.states.len(), 4);
+    }
+
+    #[test]
+    fn test_analysis_initial_state() {
+        let automaton = automaton::parse_automaton(ANALYSIS_IOA).unwrap();
+        assert_eq!(automaton.automaton.initial, "Open");
+        assert_eq!(automaton.automaton.states.len(), 4);
+    }
+
+    #[test]
+    fn test_evolution_decision_initial_state() {
+        let automaton = automaton::parse_automaton(EVOLUTION_DECISION_IOA).unwrap();
+        assert_eq!(automaton.automaton.initial, "Open");
+        assert_eq!(automaton.automaton.states.len(), 4);
+    }
+
+    #[test]
+    fn test_insight_initial_state() {
+        let automaton = automaton::parse_automaton(INSIGHT_IOA).unwrap();
+        assert_eq!(automaton.automaton.initial, "Open");
+        assert_eq!(automaton.automaton.states.len(), 4);
+    }
+
+    #[test]
+    fn test_feature_request_initial_state() {
+        let automaton = automaton::parse_automaton(FEATURE_REQUEST_IOA).unwrap();
+        assert_eq!(automaton.automaton.initial, "Open");
+        assert_eq!(automaton.automaton.states.len(), 5);
+    }
+
+    #[test]
+    fn test_governance_decision_initial_state() {
+        let automaton = automaton::parse_automaton(GOVERNANCE_DECISION_IOA).unwrap();
+        assert_eq!(automaton.automaton.initial, "Pending");
+        assert_eq!(automaton.automaton.states.len(), 4);
+    }
+
+    #[test]
+    fn test_bootstrap_registers_new_entities() {
+        let state = PlatformState::new(None);
+
+        bootstrap_system_tenant(&state);
+
+        let registry = state.registry.read().unwrap();
+        let tenant = TenantId::new(SYSTEM_TENANT);
+
+        assert!(registry.get_table(&tenant, "Observation").is_some());
+        assert!(registry.get_table(&tenant, "Problem").is_some());
+        assert!(registry.get_table(&tenant, "Analysis").is_some());
+        assert!(registry.get_table(&tenant, "EvolutionDecision").is_some());
+        assert!(registry.get_table(&tenant, "Insight").is_some());
+        assert!(registry.get_table(&tenant, "FeatureRequest").is_some());
+        assert!(registry.get_table(&tenant, "GovernanceDecision").is_some());
     }
 }

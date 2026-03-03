@@ -9,6 +9,9 @@
 //! - `DeploySpecs`: Triggered when a Tenant entity transitions to Active
 //!   via the Deploy action. Runs the verify-and-deploy pipeline and
 //!   registers the tenant's specs in the SpecRegistry.
+//! - `GenerateCedarPolicy`: Triggered when a GovernanceDecision entity
+//!   transitions to Approved. Generates a Cedar permit policy from the
+//!   entity's fields and reloads the authz engine.
 
 use crate::deploy::pipeline::{DeployInput, DeployPipeline, EntitySpecSource};
 use crate::state::PlatformState;
@@ -26,6 +29,9 @@ pub fn dispatch_custom_effect(
 ) -> Result<(), String> {
     match effect_name {
         "DeploySpecs" => handle_deploy_specs(entity_type, entity_id, state),
+        "GenerateCedarPolicy" => {
+            handle_generate_cedar_policy(entity_type, entity_id, _params, state)
+        }
         _ => {
             tracing::debug!(
                 effect = effect_name,
@@ -113,6 +119,127 @@ fn handle_deploy_specs(
     }
 }
 
+/// Handle the GenerateCedarPolicy effect: generate and load Cedar policy.
+///
+/// Triggered when a GovernanceDecision entity transitions to Approved.
+/// Reads the entity's fields from the action params, generates a Cedar
+/// permit statement based on the scope, validates the combined policy set,
+/// and reloads the authz engine.
+fn handle_generate_cedar_policy(
+    _entity_type: &str,
+    entity_id: &str,
+    params: &serde_json::Value,
+    state: &PlatformState,
+) -> Result<(), String> {
+    tracing::info!(
+        entity_id = entity_id,
+        "GenerateCedarPolicy hook: generating Cedar policy from GovernanceDecision"
+    );
+
+    let agent_id = params
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let action_name = params
+        .get("action_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let resource_type = params
+        .get("resource_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let resource_id = params
+        .get("resource_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let scope = params
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or("narrow");
+    let tenant = params
+        .get("tenant")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if agent_id.is_empty() || action_name.is_empty() || resource_type.is_empty() {
+        return Err(format!(
+            "GenerateCedarPolicy: missing required fields for entity '{entity_id}'"
+        ));
+    }
+
+    let generated_policy = generate_cedar_permit(agent_id, action_name, resource_type, resource_id, scope);
+
+    tracing::info!(
+        entity_id = entity_id,
+        tenant = tenant,
+        scope = scope,
+        "GenerateCedarPolicy hook: generated policy, validating and loading"
+    );
+
+    // Validate and reload the policy set via ServerState.
+    {
+        let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        let mut next_policies = policies.clone();
+        let entry = next_policies.entry(tenant.to_string()).or_default();
+        if !entry.is_empty() {
+            entry.push('\n');
+        }
+        entry.push_str(&generated_policy);
+
+        let mut combined = String::new();
+        for text in next_policies.values() {
+            combined.push_str(text);
+            combined.push('\n');
+        }
+
+        if let Err(e) = state.server.authz.reload_policies(&combined) {
+            tracing::error!(error = %e, "GenerateCedarPolicy: failed to reload policies");
+            return Err(format!("Failed to reload policies: {e}"));
+        }
+
+        *policies = next_policies;
+    }
+
+    tracing::info!(
+        entity_id = entity_id,
+        "GenerateCedarPolicy hook: policy loaded successfully"
+    );
+    Ok(())
+}
+
+/// Generate a Cedar permit statement for the given scope.
+fn generate_cedar_permit(
+    agent_id: &str,
+    action_name: &str,
+    resource_type: &str,
+    resource_id: &str,
+    scope: &str,
+) -> String {
+    match scope {
+        "narrow" => {
+            format!(
+                "permit(\n  principal == Agent::\"{agent_id}\",\n  action == Action::\"{action_name}\",\n  resource == {resource_type}::\"{resource_id}\"\n);"
+            )
+        }
+        "medium" => {
+            format!(
+                "permit(\n  principal == Agent::\"{agent_id}\",\n  action == Action::\"{action_name}\",\n  resource is {resource_type}\n);"
+            )
+        }
+        "broad" => {
+            format!(
+                "permit(\n  principal == Agent::\"{agent_id}\",\n  action,\n  resource is {resource_type}\n);"
+            )
+        }
+        _ => {
+            // Default to narrow scope for safety.
+            format!(
+                "permit(\n  principal == Agent::\"{agent_id}\",\n  action == Action::\"{action_name}\",\n  resource == {resource_type}::\"{resource_id}\"\n);"
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +255,45 @@ mod tests {
             &state,
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_generate_cedar_permit_narrow() {
+        let policy = generate_cedar_permit("agent-1", "submitOrder", "Order", "order-123", "narrow");
+        assert!(policy.contains("Agent::\"agent-1\""));
+        assert!(policy.contains("Action::\"submitOrder\""));
+        assert!(policy.contains("Order::\"order-123\""));
+    }
+
+    #[test]
+    fn test_generate_cedar_permit_medium() {
+        let policy = generate_cedar_permit("agent-1", "submitOrder", "Order", "order-123", "medium");
+        assert!(policy.contains("Agent::\"agent-1\""));
+        assert!(policy.contains("Action::\"submitOrder\""));
+        assert!(policy.contains("resource is Order"));
+        assert!(!policy.contains("order-123"));
+    }
+
+    #[test]
+    fn test_generate_cedar_permit_broad() {
+        let policy = generate_cedar_permit("agent-1", "submitOrder", "Order", "order-123", "broad");
+        assert!(policy.contains("Agent::\"agent-1\""));
+        assert!(policy.contains("resource is Order"));
+        assert!(!policy.contains("submitOrder"));
+    }
+
+    #[test]
+    fn test_dispatch_generate_cedar_policy_missing_fields() {
+        let state = PlatformState::new(None);
+        let result = dispatch_custom_effect(
+            "GenerateCedarPolicy",
+            "GovernanceDecision",
+            "gd-1",
+            &serde_json::json!({}),
+            &state,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing required fields"));
     }
 
     #[test]

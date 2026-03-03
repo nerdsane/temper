@@ -1,0 +1,47 @@
+[automaton]
+name = "GovernanceDecision"
+initial = "Pending"
+states = ["Pending", "Approved", "Denied", "Expired"]
+
+[[action]]
+name = "CreateGovernanceDecision"
+from = []
+to = "Pending"
+kind = "input"
+params = ["tenant", "agent_id", "action_name", "resource_type", "resource_id", "denial_reason", "scope"]
+
+[[action]]
+name = "Approve"
+from = ["Pending"]
+to = "Approved"
+kind = "input"
+params = ["decided_by", "scope", "generated_policy"]
+effect = "trigger GenerateCedarPolicy"
+
+[[action]]
+name = "Deny"
+from = ["Pending"]
+to = "Denied"
+kind = "input"
+params = ["decided_by", "denial_reason"]
+
+[[action]]
+name = "Expire"
+from = ["Pending"]
+to = "Expired"
+kind = "internal"
+
+[[invariant]]
+name = "ApprovedIsTerminal"
+when = ["Approved"]
+assert = "true"
+
+[[invariant]]
+name = "DeniedIsTerminal"
+when = ["Denied"]
+assert = "true"
+
+[[invariant]]
+name = "ExpiredIsTerminal"
+when = ["Expired"]
+assert = "true"

@@ -1,0 +1,30 @@
+[automaton]
+name = "Analysis"
+initial = "Open"
+states = ["Open", "Reviewed", "Accepted", "Rejected"]
+
+[[action]]
+name = "CreateAnalysis"
+from = []
+to = "Open"
+kind = "input"
+params = ["problem_id", "root_cause", "options", "recommendation"]
+guard = [{ type = "cross_entity_state", entity_type = "Problem", entity_id_source = "problem_id", required_status = ["Reviewed"] }]
+
+[[action]]
+name = "MarkReviewed"
+from = ["Open"]
+to = "Reviewed"
+kind = "input"
+
+[[action]]
+name = "Accept"
+from = ["Reviewed"]
+to = "Accepted"
+kind = "input"
+
+[[action]]
+name = "Reject"
+from = ["Reviewed"]
+to = "Rejected"
+kind = "input"

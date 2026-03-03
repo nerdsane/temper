@@ -1,5 +1,11 @@
 //! Pending authorization decision queue.
 //!
+//! **Deprecated**: Authorization decisions are now managed as GovernanceDecision
+//! IOA entities in the `temper-system` tenant (ADR-0025). This module is
+//! retained for backward compatibility during migration. New code should
+//! dispatch `GovernanceDecision.CreateGovernanceDecision` via entity dispatch
+//! and use `GovernanceDecision.Approve` / `.Deny` for resolution.
+//!
 //! When a Cedar authorization denial occurs (either at the OData layer or the
 //! WASM authz gate), a `PendingDecision` is created and pushed to the bounded
 //! log. The human can then approve or deny the decision via the dashboard.

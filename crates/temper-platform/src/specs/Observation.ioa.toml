@@ -1,0 +1,29 @@
+[automaton]
+name = "Observation"
+initial = "Open"
+states = ["Open", "UnderReview", "Resolved", "Superseded"]
+
+[[action]]
+name = "CreateObservation"
+from = []
+to = "Open"
+kind = "input"
+params = ["source", "classification", "evidence_query", "context", "tenant"]
+
+[[action]]
+name = "Review"
+from = ["Open"]
+to = "UnderReview"
+kind = "input"
+
+[[action]]
+name = "Resolve"
+from = ["Open", "UnderReview"]
+to = "Resolved"
+kind = "input"
+
+[[action]]
+name = "Supersede"
+from = ["Open", "UnderReview"]
+to = "Superseded"
+kind = "input"

@@ -99,12 +99,177 @@
         <Parameter Name="bindingParameter" Type="Temper.System.Version" />
       </Action>
 
+      <EntityType Name="Observation">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Source" Type="Edm.String" />
+        <Property Name="Classification" Type="Edm.String" />
+        <Property Name="EvidenceQuery" Type="Edm.String" />
+        <Property Name="Context" Type="Edm.String" />
+        <Property Name="Tenant" Type="Edm.String" />
+      </EntityType>
+      <Action Name="ReviewObservation" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Observation" />
+      </Action>
+      <Action Name="ResolveObservation" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Observation" />
+      </Action>
+      <Action Name="SupersedeObservation" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Observation" />
+      </Action>
+
+      <EntityType Name="Problem">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="ObservationId" Type="Edm.String" />
+        <Property Name="ProblemStatement" Type="Edm.String" />
+        <Property Name="Severity" Type="Edm.String" />
+        <Property Name="Invariants" Type="Edm.String" />
+      </EntityType>
+      <Action Name="MarkProblemReviewed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Problem" />
+      </Action>
+      <Action Name="ResolveProblem" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Problem" />
+      </Action>
+      <Action Name="SupersedeProblem" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Problem" />
+      </Action>
+
+      <EntityType Name="Analysis">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="ProblemId" Type="Edm.String" />
+        <Property Name="RootCause" Type="Edm.String" />
+        <Property Name="Options" Type="Edm.String" />
+        <Property Name="Recommendation" Type="Edm.String" />
+      </EntityType>
+      <Action Name="MarkAnalysisReviewed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Analysis" />
+      </Action>
+      <Action Name="AcceptAnalysis" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Analysis" />
+      </Action>
+      <Action Name="RejectAnalysis" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Analysis" />
+      </Action>
+
+      <EntityType Name="EvolutionDecision">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="AnalysisId" Type="Edm.String" />
+        <Property Name="DecidedBy" Type="Edm.String" />
+        <Property Name="Rationale" Type="Edm.String" />
+        <Property Name="VerificationSummary" Type="Edm.String" />
+      </EntityType>
+      <Action Name="ApproveEvolutionDecision" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision" />
+      </Action>
+      <Action Name="RejectEvolutionDecision" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision" />
+      </Action>
+      <Action Name="DeferEvolutionDecision" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision" />
+      </Action>
+
+      <EntityType Name="Insight">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="ObservationId" Type="Edm.String" />
+        <Property Name="Category" Type="Edm.String" />
+        <Property Name="Signal" Type="Edm.String" />
+        <Property Name="Recommendation" Type="Edm.String" />
+        <Property Name="PriorityScore" Type="Edm.String" />
+      </EntityType>
+      <Action Name="AcknowledgeInsight" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Insight" />
+      </Action>
+      <Action Name="MarkInsightActioned" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Insight" />
+      </Action>
+      <Action Name="DismissInsight" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Insight" />
+      </Action>
+
+      <EntityType Name="FeatureRequest">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Category" Type="Edm.String" />
+        <Property Name="Description" Type="Edm.String" />
+        <Property Name="Frequency" Type="Edm.String" />
+        <Property Name="DeveloperNotes" Type="Edm.String" />
+      </EntityType>
+      <Action Name="AcknowledgeFeatureRequest" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" />
+      </Action>
+      <Action Name="PlanFeatureRequest" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" />
+      </Action>
+      <Action Name="WontFixFeatureRequest" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" />
+      </Action>
+      <Action Name="ResolveFeatureRequest" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" />
+      </Action>
+
+      <EntityType Name="GovernanceDecision">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Tenant" Type="Edm.String" />
+        <Property Name="AgentId" Type="Edm.String" />
+        <Property Name="ActionName" Type="Edm.String" />
+        <Property Name="ResourceType" Type="Edm.String" />
+        <Property Name="ResourceId" Type="Edm.String" />
+        <Property Name="DenialReason" Type="Edm.String" />
+        <Property Name="Scope" Type="Edm.String" />
+        <Property Name="GeneratedPolicy" Type="Edm.String" />
+        <Property Name="DecidedBy" Type="Edm.String" />
+        <Property Name="EvolutionRecordId" Type="Edm.String" />
+      </EntityType>
+      <Action Name="ApproveGovernanceDecision" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" />
+      </Action>
+      <Action Name="DenyGovernanceDecision" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" />
+      </Action>
+      <Action Name="ExpireGovernanceDecision" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" />
+      </Action>
+
       <EntityContainer Name="Container">
         <EntitySet Name="Projects" EntityType="Temper.System.Project" />
         <EntitySet Name="Tenants" EntityType="Temper.System.Tenant" />
         <EntitySet Name="CatalogEntries" EntityType="Temper.System.CatalogEntry" />
         <EntitySet Name="Collaborators" EntityType="Temper.System.Collaborator" />
         <EntitySet Name="Versions" EntityType="Temper.System.Version" />
+        <EntitySet Name="Observations" EntityType="Temper.System.Observation" />
+        <EntitySet Name="Problems" EntityType="Temper.System.Problem" />
+        <EntitySet Name="Analyses" EntityType="Temper.System.Analysis" />
+        <EntitySet Name="EvolutionDecisions" EntityType="Temper.System.EvolutionDecision" />
+        <EntitySet Name="Insights" EntityType="Temper.System.Insight" />
+        <EntitySet Name="FeatureRequests" EntityType="Temper.System.FeatureRequest" />
+        <EntitySet Name="GovernanceDecisions" EntityType="Temper.System.GovernanceDecision" />
       </EntityContainer>
     </Schema>
   </edmx:DataServices>

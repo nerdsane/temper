@@ -6,10 +6,13 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use temper_evolution::FeatureRequestDisposition;
+use temper_runtime::scheduler::sim_uuid;
+use temper_runtime::tenant::TenantId;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::instrument;
 
+use crate::dispatch::AgentContext;
 use crate::insight_generator;
 use crate::sentinel;
 use crate::state::ServerState;
@@ -29,7 +32,8 @@ pub(crate) async fn handle_sentinel_check(
     let rules = sentinel::default_rules();
     let alerts = sentinel::check_rules(&rules, &state, &trajectory_entries);
 
-    // Store generated O-Records.
+    // Store generated O-Records and create Observation entities.
+    let system_tenant = TenantId::new("temper-system");
     let mut results = Vec::new();
     for alert in &alerts {
         // Persist observation to Turso.
@@ -54,9 +58,35 @@ pub(crate) async fn handle_sentinel_check(
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
         }
+
+        // Create Observation entity in temper-system tenant.
+        let obs_id = format!("OBS-{}", sim_uuid());
+        let obs_params = serde_json::json!({
+            "source": alert.record.source,
+            "classification": format!("{:?}", alert.record.classification),
+            "evidence_query": alert.record.evidence_query,
+            "context": serde_json::to_string(&alert.record.context).unwrap_or_default(),
+            "tenant": "temper-system",
+            "legacy_record_id": alert.record.header.id,
+        });
+        if let Err(e) = state
+            .dispatch_tenant_action(
+                &system_tenant,
+                "Observation",
+                &obs_id,
+                "CreateObservation",
+                obs_params,
+                &AgentContext::default(),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "failed to create Observation entity for sentinel alert");
+        }
+
         results.push(serde_json::json!({
             "rule": alert.rule_name,
             "record_id": alert.record.header.id,
+            "entity_id": obs_id,
             "source": alert.record.source,
             "classification": alert.record.classification,
             "threshold": alert.record.threshold_value,
@@ -89,8 +119,34 @@ pub(crate) async fn handle_sentinel_check(
                 );
             }
         }
+
+        // Create Insight entity in temper-system tenant.
+        let insight_id = format!("INS-{}", sim_uuid());
+        let insight_params = serde_json::json!({
+            "observation_id": "",
+            "category": format!("{:?}", insight.category),
+            "signal": insight.signal.intent,
+            "recommendation": insight.recommendation,
+            "priority_score": format!("{:.4}", insight.priority_score),
+            "legacy_record_id": insight.header.id,
+        });
+        if let Err(e) = state
+            .dispatch_tenant_action(
+                &system_tenant,
+                "Insight",
+                &insight_id,
+                "CreateInsight",
+                insight_params,
+                &AgentContext::default(),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "failed to create Insight entity");
+        }
+
         insight_results.push(serde_json::json!({
             "record_id": insight.header.id,
+            "entity_id": insight_id,
             "category": format!("{:?}", insight.category),
             "intent": insight.signal.intent,
             "priority_score": insight.priority_score,
@@ -137,6 +193,7 @@ pub(crate) async fn handle_feature_requests(
     let trajectory_entries = state.load_trajectory_entries(10_000).await;
 
     // Query Turso directly (single source of truth).
+    let system_tenant = TenantId::new("temper-system");
     if let Some(turso) = state.turso_opt() {
         // First, generate and upsert fresh feature requests from trajectory data.
         let generated = insight_generator::generate_feature_requests(&trajectory_entries);
@@ -163,6 +220,29 @@ pub(crate) async fn handle_feature_requests(
                 .await
             {
                 tracing::warn!(error = %e, "failed to upsert feature request to Turso");
+            }
+
+            // Also create FeatureRequest entity in temper-system tenant.
+            let fr_id = format!("FR-{}", sim_uuid());
+            let fr_params = serde_json::json!({
+                "category": format!("{:?}", fr.category),
+                "description": fr.description,
+                "frequency": format!("{}", fr.frequency),
+                "developer_notes": fr.developer_notes.clone().unwrap_or_default(),
+                "legacy_record_id": fr.header.id,
+            });
+            if let Err(e) = state
+                .dispatch_tenant_action(
+                    &system_tenant,
+                    "FeatureRequest",
+                    &fr_id,
+                    "CreateFeatureRequest",
+                    fr_params,
+                    &AgentContext::default(),
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "failed to create FeatureRequest entity");
             }
         }
 
