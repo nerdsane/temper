@@ -162,7 +162,7 @@ impl TursoEventStore {
             schema::ALTER_TRAJECTORIES_ADD_SOURCE,
             schema::ALTER_TRAJECTORIES_ADD_SPEC_GOVERNED,
         ] {
-            let _ = conn.execute(*stmt, ()).await; // ignore "duplicate column" errors
+            let _ = conn.execute(stmt, ()).await; // ignore "duplicate column" errors
         }
         conn.execute(schema::CREATE_TRAJECTORIES_AGENT_INDEX, ())
             .await
