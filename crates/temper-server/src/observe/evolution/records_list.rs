@@ -1,7 +1,7 @@
 use axum::extract::{Query, State};
 use axum::response::Json;
 use serde::Deserialize;
-use temper_evolution::{RecordStatus, RecordType};
+use tracing::instrument;
 
 use crate::state::ServerState;
 
@@ -14,225 +14,115 @@ pub(crate) struct EvolutionRecordParams {
     pub status: Option<String>,
 }
 
-/// GET /observe/evolution/records -- list all evolution records.
+/// GET /observe/evolution/records -- list all evolution records from Turso.
+#[instrument(skip_all, fields(otel.name = "GET /observe/evolution/records"))]
 pub(crate) async fn list_evolution_records(
     State(state): State<ServerState>,
     Query(params): Query<EvolutionRecordParams>,
 ) -> Json<serde_json::Value> {
-    if let Some(ref pg_store) = state.pg_record_store {
-        let mut records: Vec<serde_json::Value> = Vec::new();
-        let type_filter = params.record_type.as_deref();
-        let status_filter = params.status.as_deref().and_then(parse_record_status);
-
-        if (type_filter.is_none() || type_filter == Some("observation"))
-            && let Ok(observations) = pg_store.open_observations().await
+    // Query Turso directly (single source of truth).
+    if let Some(turso) = state.turso_opt() {
+        match turso
+            .list_evolution_records(params.record_type.as_deref(), params.status.as_deref())
+            .await
         {
-            for obs in observations {
-                if matches_status_filter(&obs.header.status, &status_filter) {
-                    records.push(serde_json::json!({
-                        "id": obs.header.id,
-                        "record_type": "Observation",
-                        "status": format!("{:?}", obs.header.status),
-                        "created_by": obs.header.created_by,
-                        "timestamp": obs.header.timestamp.to_rfc3339(),
-                        "source": obs.source,
-                        "classification": obs.classification,
-                    }));
-                }
-            }
-        }
+            Ok(rows) => {
+                let records: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|r| {
+                        let mut val = serde_json::json!({
+                            "id": r.id,
+                            "record_type": r.record_type,
+                            "status": r.status,
+                            "created_by": r.created_by,
+                            "timestamp": r.timestamp,
+                        });
+                        if let Some(ref df) = r.derived_from {
+                            val["derived_from"] = serde_json::json!(df);
+                        }
+                        // Merge data fields into the response.
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&r.data)
+                            && let Some(obj) = data.as_object()
+                        {
+                            for (k, v) in obj {
+                                val[k] = v.clone();
+                            }
+                        }
+                        val
+                    })
+                    .collect();
 
-        if (type_filter.is_none() || type_filter == Some("insight"))
-            && let Ok(insights) = pg_store.ranked_insights().await
-        {
-            for insight in insights {
-                if matches_status_filter(&insight.header.status, &status_filter) {
-                    records.push(serde_json::json!({
-                        "id": insight.header.id,
-                        "record_type": "Insight",
-                        "status": format!("{:?}", insight.header.status),
-                        "created_by": insight.header.created_by,
-                        "timestamp": insight.header.timestamp.to_rfc3339(),
-                        "category": insight.category,
-                        "priority_score": insight.priority_score,
-                        "recommendation": insight.recommendation,
-                    }));
-                }
-            }
-        }
-
-        let total_observations = pg_store.count(RecordType::Observation).await.unwrap_or(0);
-        let total_problems = pg_store.count(RecordType::Problem).await.unwrap_or(0);
-        let total_analyses = pg_store.count(RecordType::Analysis).await.unwrap_or(0);
-        let total_decisions = pg_store.count(RecordType::Decision).await.unwrap_or(0);
-        let total_insights = pg_store.count(RecordType::Insight).await.unwrap_or(0);
-
-        if (type_filter.is_none() || type_filter == Some("problem")) && total_problems > 0 {
-            records.push(serde_json::json!({
-                "record_type": "Problem",
-                "count": total_problems,
-                "note": "Use GET /observe/evolution/records/{id} for individual records",
-            }));
-        }
-        if (type_filter.is_none() || type_filter == Some("analysis")) && total_analyses > 0 {
-            records.push(serde_json::json!({
-                "record_type": "Analysis",
-                "count": total_analyses,
-                "note": "Use GET /observe/evolution/records/{id} for individual records",
-            }));
-        }
-        if (type_filter.is_none() || type_filter == Some("decision")) && total_decisions > 0 {
-            records.push(serde_json::json!({
-                "record_type": "Decision",
-                "count": total_decisions,
-                "note": "Use GET /observe/evolution/records/{id} for individual records",
-            }));
-        }
-
-        return Json(serde_json::json!({
-            "records": records,
-            "total_observations": total_observations,
-            "total_problems": total_problems,
-            "total_analyses": total_analyses,
-            "total_decisions": total_decisions,
-            "total_insights": total_insights,
-        }));
-    }
-
-    let store = &state.record_store;
-    let mut records: Vec<serde_json::Value> = Vec::new();
-
-    let type_filter = params.record_type.as_deref();
-    let status_filter = params.status.as_deref().and_then(parse_record_status);
-
-    // Collect from each record type (only those matching the filter).
-    if type_filter.is_none() || type_filter == Some("observation") {
-        for obs in store.open_observations() {
-            if matches_status_filter(&obs.header.status, &status_filter) {
-                records.push(serde_json::json!({
-                    "id": obs.header.id,
-                    "record_type": "Observation",
-                    "status": format!("{:?}", obs.header.status),
-                    "created_by": obs.header.created_by,
-                    "timestamp": obs.header.timestamp.to_rfc3339(),
-                    "source": obs.source,
-                    "classification": obs.classification,
+                // Count by type.
+                let count_type = |t: &str| rows.iter().filter(|r| r.record_type == t).count();
+                return Json(serde_json::json!({
+                    "records": records,
+                    "total_observations": count_type("Observation"),
+                    "total_problems": count_type("Problem"),
+                    "total_analyses": count_type("Analysis"),
+                    "total_decisions": count_type("Decision"),
+                    "total_insights": count_type("Insight"),
                 }));
             }
-        }
-    }
-
-    if type_filter.is_none() || type_filter == Some("insight") {
-        for insight in store.ranked_insights() {
-            if matches_status_filter(&insight.header.status, &status_filter) {
-                records.push(serde_json::json!({
-                    "id": insight.header.id,
-                    "record_type": "Insight",
-                    "status": format!("{:?}", insight.header.status),
-                    "created_by": insight.header.created_by,
-                    "timestamp": insight.header.timestamp.to_rfc3339(),
-                    "category": insight.category,
-                    "priority_score": insight.priority_score,
-                    "recommendation": insight.recommendation,
-                }));
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to query evolution records from Turso");
             }
         }
     }
 
-    // For types not exposed via aggregation methods, use count as summary.
-    if type_filter.is_none() || type_filter == Some("problem") {
-        let count = store.count(RecordType::Problem);
-        if count > 0 {
-            records.push(serde_json::json!({
-                "record_type": "Problem",
-                "count": count,
-                "note": "Use GET /observe/evolution/records/{id} for individual records",
-            }));
-        }
-    }
-    if type_filter.is_none() || type_filter == Some("analysis") {
-        let count = store.count(RecordType::Analysis);
-        if count > 0 {
-            records.push(serde_json::json!({
-                "record_type": "Analysis",
-                "count": count,
-                "note": "Use GET /observe/evolution/records/{id} for individual records",
-            }));
-        }
-    }
-    if type_filter.is_none() || type_filter == Some("decision") {
-        let count = store.count(RecordType::Decision);
-        if count > 0 {
-            records.push(serde_json::json!({
-                "record_type": "Decision",
-                "count": count,
-                "note": "Use GET /observe/evolution/records/{id} for individual records",
-            }));
-        }
-    }
-
+    // Fallback: empty response when no Turso configured.
     Json(serde_json::json!({
-        "records": records,
-        "total_observations": store.count(RecordType::Observation),
-        "total_problems": store.count(RecordType::Problem),
-        "total_analyses": store.count(RecordType::Analysis),
-        "total_decisions": store.count(RecordType::Decision),
-        "total_insights": store.count(RecordType::Insight),
+        "records": [],
+        "total_observations": 0,
+        "total_problems": 0,
+        "total_analyses": 0,
+        "total_decisions": 0,
+        "total_insights": 0,
     }))
 }
 
-/// GET /observe/evolution/insights -- list ranked insights (I-Records).
+/// GET /observe/evolution/insights -- list ranked insights (I-Records) from Turso.
+#[instrument(skip_all, fields(otel.name = "GET /observe/evolution/insights"))]
 pub(crate) async fn list_evolution_insights(
     State(state): State<ServerState>,
 ) -> Json<serde_json::Value> {
-    let insights = if let Some(ref pg_store) = state.pg_record_store {
-        match pg_store.ranked_insights().await {
-            Ok(items) => items,
+    // Query Turso directly (single source of truth).
+    if let Some(turso) = state.turso_opt() {
+        match turso.list_ranked_insights().await {
+            Ok(rows) => {
+                let items: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|r| {
+                        let mut val = serde_json::json!({
+                            "id": r.id,
+                            "status": r.status,
+                            "timestamp": r.timestamp,
+                        });
+                        // Extract insight fields from JSON data.
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&r.data)
+                            && let Some(obj) = data.as_object()
+                        {
+                            for (k, v) in obj {
+                                val[k] = v.clone();
+                            }
+                        }
+                        val
+                    })
+                    .collect();
+                let total = items.len();
+                return Json(serde_json::json!({
+                    "insights": items,
+                    "total": total,
+                }));
+            }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to read insights from postgres, falling back to in-memory");
-                state.record_store.ranked_insights()
+                tracing::warn!(error = %e, "failed to query insights from Turso");
             }
         }
-    } else {
-        state.record_store.ranked_insights()
-    };
+    }
 
-    let items: Vec<serde_json::Value> = insights
-        .iter()
-        .map(|i| {
-            serde_json::json!({
-                "id": i.header.id,
-                "category": i.category,
-                "priority_score": i.priority_score,
-                "recommendation": i.recommendation,
-                "signal": i.signal,
-                "status": format!("{:?}", i.header.status),
-                "timestamp": i.header.timestamp.to_rfc3339(),
-            })
-        })
-        .collect();
-
+    // Fallback: empty response when no Turso configured.
     Json(serde_json::json!({
-        "insights": items,
-        "total": items.len(),
+        "insights": [],
+        "total": 0,
     }))
-}
-
-/// Parse a status filter string into a RecordStatus.
-fn parse_record_status(s: &str) -> Option<RecordStatus> {
-    match s.to_lowercase().as_str() {
-        "open" => Some(RecordStatus::Open),
-        "resolved" => Some(RecordStatus::Resolved),
-        "superseded" => Some(RecordStatus::Superseded),
-        "rejected" => Some(RecordStatus::Rejected),
-        _ => None,
-    }
-}
-
-/// Check if a record's status matches the optional filter.
-fn matches_status_filter(status: &RecordStatus, filter: &Option<RecordStatus>) -> bool {
-    match filter {
-        Some(f) => status == f,
-        None => true,
-    }
 }

@@ -12,15 +12,15 @@ pub mod wasm_invocation_log;
 pub use dispatch::DispatchExtOptions;
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use metrics::MetricsCollector;
-pub use pending_decisions::{DecisionStatus, PendingDecision, PendingDecisionLog, PolicyScope};
-pub use trajectory::{TrajectoryEntry, TrajectoryLog, TrajectorySource};
-pub use wasm_invocation_log::{WasmInvocationEntry, WasmInvocationLog};
+pub use pending_decisions::{DecisionStatus, PendingDecision, PolicyScope};
+pub use trajectory::{TrajectoryEntry, TrajectorySource};
+pub use wasm_invocation_log::WasmInvocationEntry;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use temper_authz::AuthzEngine;
-use temper_evolution::{FeatureRequestRecord, PostgresRecordStore, RecordStore};
+use temper_evolution::{PostgresRecordStore, RecordStore};
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::actor::ActorRef;
@@ -64,14 +64,6 @@ pub struct DesignTimeEvent {
     /// Total steps in the workflow (always 7 for verification).
     pub total_steps: Option<u8>,
 }
-
-/// Maximum number of trajectory entries retained in the bounded log.
-pub(crate) const TRAJECTORY_LOG_CAPACITY: usize = 10_000;
-/// Maximum number of design-time events retained in memory.
-const DESIGN_TIME_LOG_CAPACITY: usize = 10_000;
-/// Maximum number of feature request records retained.
-/// Maximum number of WASM invocation entries retained in the bounded log.
-const WASM_INVOCATION_LOG_CAPACITY: usize = 500;
 
 fn env_bool(name: &str, default: bool) -> bool {
     match std::env::var(name) {
@@ -127,12 +119,6 @@ pub struct ServerState {
     pub start_time: chrono::DateTime<chrono::Utc>,
     /// Metrics collector for the /observe endpoints.
     pub metrics: Arc<MetricsCollector>,
-    /// Bounded trajectory log for failed intent analysis and Evolution Engine.
-    pub trajectory_log: Arc<RwLock<TrajectoryLog>>,
-    /// Bounded trajectory log for successful transitions (separate budget).
-    pub success_trajectory_log: Arc<RwLock<TrajectoryLog>>,
-    /// Bounded log of feature request records for platform gap tracking.
-    pub feature_request_log: Arc<RwLock<Vec<FeatureRequestRecord>>>,
     /// In-memory evolution record store (O/P/A/D/I records).
     pub record_store: Arc<RecordStore>,
     /// Optional Postgres evolution record store (source of truth when configured).
@@ -147,16 +133,12 @@ pub struct ServerState {
     pub wasm_module_registry: Arc<RwLock<WasmModuleRegistry>>,
     /// WASM execution engine: compiles, caches, and invokes sandboxed modules.
     pub wasm_engine: Arc<WasmEngine>,
-    /// Bounded WASM invocation log for observability.
-    pub wasm_invocation_log: Arc<RwLock<WasmInvocationLog>>,
     /// Global cross-entity invariant enforcement toggle.
     pub cross_invariant_enforce: bool,
     /// Whether eventual invariants should block writes.
     pub cross_invariant_eventual_enforce: bool,
     /// Broadcast channel for design-time events (spec loading, verification progress).
     pub design_time_tx: Arc<tokio::sync::broadcast::Sender<DesignTimeEvent>>,
-    /// In-memory log of design-time events for workflow history (append-only, bounded).
-    pub design_time_log: Arc<RwLock<std::collections::VecDeque<DesignTimeEvent>>>,
     /// Cache of entity current state, updated on every state change broadcast.
     /// Key: "{tenant}:{entity_type}:{entity_id}", Value: (current_state, last_updated).
     #[allow(clippy::type_complexity)]
@@ -168,8 +150,6 @@ pub struct ServerState {
     /// Idempotency cache for deduplicating agent retries.
     pub idempotency_cache: Arc<IdempotencyCache>,
     /// Optional encrypted secrets vault for per-tenant secret management.
-    /// Bounded log of pending authorization decisions awaiting human review.
-    pub pending_decision_log: Arc<RwLock<PendingDecisionLog>>,
     /// Broadcast channel for new pending decisions (SSE subscriptions).
     pub pending_decision_tx: Arc<tokio::sync::broadcast::Sender<PendingDecision>>,
     /// Per-tenant Cedar policy text (tenant -> policy text).
@@ -215,31 +195,21 @@ impl ServerState {
             event_tx: Arc::new(event_tx),
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
-            trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
-            success_trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(
-                TRAJECTORY_LOG_CAPACITY,
-            ))),
-            feature_request_log: Arc::new(RwLock::new(Vec::new())),
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
             wasm_engine: Arc::new(WasmEngine::default()),
-            wasm_invocation_log: Arc::new(RwLock::new(WasmInvocationLog::new(
-                WASM_INVOCATION_LOG_CAPACITY,
-            ))),
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
-            design_time_log: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
             action_dispatch_timeout: env_timeout(),
             eventual_tracker: Arc::new(RwLock::new(
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
             idempotency_cache: Arc::new(IdempotencyCache::new()),
-            pending_decision_log: Arc::new(RwLock::new(PendingDecisionLog::new())),
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             secrets_vault: None,
@@ -345,31 +315,21 @@ impl ServerState {
             event_tx: Arc::new(event_tx),
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
-            trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(TRAJECTORY_LOG_CAPACITY))),
-            success_trajectory_log: Arc::new(RwLock::new(TrajectoryLog::new(
-                TRAJECTORY_LOG_CAPACITY,
-            ))),
-            feature_request_log: Arc::new(RwLock::new(Vec::new())),
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
             wasm_engine: Arc::new(WasmEngine::default()),
-            wasm_invocation_log: Arc::new(RwLock::new(WasmInvocationLog::new(
-                WASM_INVOCATION_LOG_CAPACITY,
-            ))),
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
-            design_time_log: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
             action_dispatch_timeout: env_timeout(),
             eventual_tracker: Arc::new(RwLock::new(
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
             idempotency_cache: Arc::new(IdempotencyCache::new()),
-            pending_decision_log: Arc::new(RwLock::new(PendingDecisionLog::new())),
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             secrets_vault: None,
@@ -426,5 +386,59 @@ impl ServerState {
     pub fn with_secrets_vault(mut self, vault: SecretsVault) -> Self {
         self.secrets_vault = Some(Arc::new(vault));
         self
+    }
+
+    /// Get a reference to the Turso event store.
+    ///
+    /// Panics if the event store is not configured or is not a Turso backend.
+    pub fn turso(&self) -> &temper_store_turso::TursoEventStore {
+        self.turso_opt()
+            .expect("Turso event store is not configured")
+    }
+
+    /// Get an optional reference to the Turso event store.
+    pub fn turso_opt(&self) -> Option<&temper_store_turso::TursoEventStore> {
+        self.event_store
+            .as_ref()
+            .and_then(|store| store.turso_store())
+    }
+
+    /// Load trajectory entries from Turso, converting to domain TrajectoryEntry.
+    pub async fn load_trajectory_entries(&self, limit: i64) -> Vec<TrajectoryEntry> {
+        let Some(turso) = self.turso_opt() else {
+            return Vec::new();
+        };
+        match turso.load_recent_trajectories(limit).await {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|r| TrajectoryEntry {
+                    timestamp: r.created_at,
+                    tenant: r.tenant,
+                    entity_type: r.entity_type,
+                    entity_id: r.entity_id,
+                    action: r.action,
+                    success: r.success,
+                    from_status: r.from_status,
+                    to_status: r.to_status,
+                    error: r.error,
+                    agent_id: r.agent_id,
+                    session_id: r.session_id,
+                    authz_denied: r.authz_denied,
+                    denied_resource: r.denied_resource,
+                    denied_module: r.denied_module,
+                    source: r.source.as_deref().and_then(|s| match s {
+                        "Entity" => Some(TrajectorySource::Entity),
+                        "Platform" => Some(TrajectorySource::Platform),
+                        "Authz" => Some(TrajectorySource::Authz),
+                        _ => None,
+                    }),
+                    spec_governed: r.spec_governed,
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load trajectories from Turso");
+                Vec::new()
+            }
+        }
     }
 }

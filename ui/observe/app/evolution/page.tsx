@@ -160,7 +160,7 @@ function ExpandableRecord({ record }: { record: EvolutionRecord }) {
         <span className={`text-xs font-medium px-1.5 py-0.5 rounded flex-shrink-0 ${recordTypeColors[record.record_type] ?? "bg-zinc-500/15 text-zinc-400"}`}>
           {record.record_type}
         </span>
-        <span className="text-xs text-zinc-500 font-mono flex-shrink-0">{record.id.slice(0, 12)}</span>
+        <span className="text-xs text-zinc-500 font-mono flex-shrink-0">{record.id?.slice(0, 12) ?? "—"}</span>
         {record.source && (
           <span className="text-xs text-zinc-400 truncate">{record.source}</span>
         )}
@@ -435,8 +435,8 @@ export default function EvolutionPage() {
                 <p className="text-xs text-zinc-400 mb-2">{intent.recommendation}</p>
                 <div className="flex items-center gap-4 text-[10px] text-zinc-600">
                   <span>Failures: <span className="text-zinc-400 font-mono">{intent.failure_count}</span></span>
-                  <span>First: <span className="text-zinc-400 font-mono">{intent.first_seen.slice(0, 10)}</span></span>
-                  <span>Last: <span className="text-zinc-400 font-mono">{intent.last_seen.slice(0, 10)}</span></span>
+                  <span>First: <span className="text-zinc-400 font-mono">{intent.first_seen?.slice(0, 10) ?? "—"}</span></span>
+                  <span>Last: <span className="text-zinc-400 font-mono">{intent.last_seen?.slice(0, 10) ?? "—"}</span></span>
                 </div>
               </div>
             ))}

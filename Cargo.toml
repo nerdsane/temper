@@ -70,9 +70,13 @@ proptest = "1"
 
 # OpenTelemetry
 opentelemetry = "0.28"
-opentelemetry-otlp = "0.28"
-opentelemetry_sdk = "0.28"
+opentelemetry-otlp = { version = "0.28", features = ["logs"] }
+opentelemetry_sdk = { version = "0.28", features = ["logs"] }
+opentelemetry-appender-tracing = "0.28"
 tracing-opentelemetry = "0.29"
+
+# Environment
+dotenvy = "0.15"
 
 # XML (CSDL parsing)
 quick-xml = { version = "0.37", features = ["serialize"] }

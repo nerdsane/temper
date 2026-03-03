@@ -48,6 +48,7 @@ pub(super) fn lint_loaded_specs(
 
     for (entity_name, source) in ioa_sources {
         let automaton = temper_spec::automaton::parse_automaton(source).map_err(|e| {
+            tracing::warn!(entity = %entity_name, error = %e, "IOA spec parse failure");
             (
                 StatusCode::BAD_REQUEST,
                 format!("Failed to parse IOA spec for {entity_name}: {e}"),

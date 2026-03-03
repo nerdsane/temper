@@ -6,6 +6,7 @@ use temper_evolution::records::{
     AnalysisRecord, ObservationClass, ObservationRecord, RecordHeader, RecordType, SolutionOption,
 };
 use temper_runtime::scheduler::sim_now;
+use tracing::instrument;
 
 use crate::authz_helpers::{record_authz_denial, security_context_from_headers};
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
@@ -18,6 +19,7 @@ use super::types::{LoadDirRequest, LoadInlineRequest};
 /// Accepts a JSON body with `tenant` and `specs` (map of filename -> content).
 /// Cedar-gated: requires `submit_specs` action on `SpecRegistry` resource.
 /// Records trajectory for every spec submission (success or denial).
+#[instrument(skip_all, fields(otel.name = "POST /api/specs/load-inline"))]
 pub(crate) async fn handle_load_inline(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -35,7 +37,7 @@ pub(crate) async fn handle_load_inline(
         .collect();
 
     let mut spec_resource_attrs = std::collections::BTreeMap::new();
-    spec_resource_attrs.insert("id".to_string(), serde_json::json!("SpecRegistry"));
+    spec_resource_attrs.insert("id".to_string(), serde_json::json!(tenant));
     for (spec_key, spec_content) in &body.specs {
         if spec_key.ends_with(".ioa.toml")
             && let Ok(automaton) = temper_spec::automaton::parse_automaton(spec_content)
@@ -55,41 +57,24 @@ pub(crate) async fn handle_load_inline(
     );
     if let Err(reason) = authz_result {
         // Record denials and use the first decision ID as the primary chain anchor.
-        let mut decision_ids = Vec::new();
-        if entity_names.is_empty() {
-            let pd = record_authz_denial(
-                &state,
-                &tenant,
-                &security_ctx,
-                None,
-                "submit_specs",
-                "SpecRegistry",
-                &tenant,
-                serde_json::json!({"entity_types": entity_names}),
-                &reason,
-                None,
-                None,
-            );
-            decision_ids.push(pd.id);
-        } else {
-            for entity_name in &entity_names {
-                let pd = record_authz_denial(
-                    &state,
-                    &tenant,
-                    &security_ctx,
-                    None,
-                    "submit_specs",
-                    "SpecRegistry",
-                    entity_name,
-                    serde_json::json!({"entity_type": entity_name}),
-                    &reason,
-                    None,
-                    None,
-                );
-                decision_ids.push(pd.id);
-            }
-        }
-        let primary_decision_id = decision_ids.first().cloned().unwrap_or_default();
+        // Record a single denial per authz check. The resource_id must match
+        // what Cedar evaluated: SpecRegistry::"<tenant>".
+        let pd = record_authz_denial(
+            &state,
+            &tenant,
+            &security_ctx,
+            None,
+            "submit_specs",
+            "SpecRegistry",
+            &tenant,
+            serde_json::json!({"entity_types": entity_names}),
+            &reason,
+            None,
+            None,
+        )
+        .await;
+        let primary_decision_id = pd.id.clone();
+        let decision_ids = vec![pd.id];
 
         // Create O-Record for the denied spec submission.
         let o_record = ObservationRecord {
@@ -112,9 +97,19 @@ pub(crate) async fn handle_load_inline(
             }),
         };
         let o_id = o_record.header.id.clone();
-        state.record_store.insert_observation(o_record.clone());
-        if let Some(ref pg_store) = state.pg_record_store {
-            let _ = pg_store.insert_observation(&o_record).await;
+        // Persist observation to Turso.
+        if let Some(turso) = state.turso_opt() {
+            let data_json = serde_json::to_string(&o_record).unwrap_or_default();
+            let _ = turso
+                .insert_evolution_record(
+                    &o_record.header.id,
+                    "Observation",
+                    &format!("{:?}", o_record.header.status),
+                    &o_record.header.created_by,
+                    o_record.header.derived_from.as_deref(),
+                    &data_json,
+                )
+                .await;
         }
 
         // Create A-Record with the proposed spec as spec_diff.
@@ -141,17 +136,41 @@ pub(crate) async fn handle_load_inline(
             recommendation: Some(0),
         };
         let a_record_id = a_record.header.id.clone();
-        state.record_store.insert_analysis(a_record.clone());
-        if let Some(ref pg_store) = state.pg_record_store {
-            let _ = pg_store.insert_analysis(&a_record).await;
+        // Persist analysis to Turso.
+        if let Some(turso) = state.turso_opt() {
+            let data_json = serde_json::to_string(&a_record).unwrap_or_default();
+            let _ = turso
+                .insert_evolution_record(
+                    &a_record.header.id,
+                    "Analysis",
+                    &format!("{:?}", a_record.header.status),
+                    &a_record.header.created_by,
+                    a_record.header.derived_from.as_deref(),
+                    &data_json,
+                )
+                .await;
         }
 
         // Link the PendingDecision to the A-Record for O-A-D chain tracing.
-        {
-            let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
-            for decision_id in decision_ids {
-                if let Some(decision) = log.get_mut(&decision_id) {
-                    decision.evolution_record_id = Some(a_record_id.clone());
+        // Decisions are persisted to Turso; the evolution_record_id link will be
+        // available when the decision is read back from Turso.
+        if let Some(turso) = state.turso_opt() {
+            for decision_id in &decision_ids {
+                if let Ok(Some(data_str)) = turso.get_pending_decision(decision_id).await
+                    && let Ok(mut pd) =
+                        serde_json::from_str::<crate::state::PendingDecision>(&data_str)
+                {
+                    pd.evolution_record_id = Some(a_record_id.clone());
+                    let updated_json = serde_json::to_string(&pd).unwrap_or_default();
+                    let status_str = match pd.status {
+                        crate::state::DecisionStatus::Pending => "pending",
+                        crate::state::DecisionStatus::Approved => "approved",
+                        crate::state::DecisionStatus::Denied => "denied",
+                        crate::state::DecisionStatus::Expired => "expired",
+                    };
+                    let _ = turso
+                        .upsert_pending_decision(decision_id, &pd.tenant, status_str, &updated_json)
+                        .await;
                 }
             }
         }
@@ -188,8 +207,9 @@ pub(crate) async fn handle_load_inline(
             source: Some(TrajectorySource::Entity),
             spec_governed: None,
         };
-        let mut tlog = state.trajectory_log.write().unwrap(); // ci-ok: infallible lock
-        tlog.push(traj);
+        if let Err(e) = state.persist_trajectory_entry(&traj).await {
+            tracing::error!(error = %e, "failed to persist spec submission trajectory");
+        }
     }
 
     // Write specs to a temp directory

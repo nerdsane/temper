@@ -11,6 +11,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode};
 use axum::response::IntoResponse;
 
+use tracing::instrument;
+
 use crate::dispatch::AgentContext;
 use crate::state::ServerState;
 use temper_runtime::tenant::TenantId;
@@ -23,6 +25,7 @@ use temper_spec::automaton::Webhook;
 /// The handler looks up the webhook configuration from the tenant's spec
 /// registry, validates the HTTP method, extracts the entity ID and action
 /// parameters, then dispatches the configured action to the target entity.
+#[instrument(skip_all, fields(tenant, webhook_path, otel.name = "GET|POST /webhooks/{tenant}/{*path}"))]
 pub async fn handle_webhook(
     method: Method,
     State(state): State<ServerState>,
@@ -35,6 +38,7 @@ pub async fn handle_webhook(
     let lookup = find_webhook(&state, &tenant, &webhook_path);
 
     let Some((entity_type, webhook)) = lookup else {
+        tracing::warn!(path = %webhook_path, "no webhook registered at path");
         return (
             StatusCode::NOT_FOUND,
             format!("No webhook registered at path '{webhook_path}' for tenant '{tenant_str}'"),
@@ -44,6 +48,7 @@ pub async fn handle_webhook(
     // Validate HTTP method.
     let expected_method = webhook.method.to_uppercase();
     if method.as_str() != expected_method {
+        tracing::warn!(expected = %expected_method, actual = %method, "webhook method mismatch");
         return (
             StatusCode::METHOD_NOT_ALLOWED,
             format!(
@@ -63,6 +68,7 @@ pub async fn handle_webhook(
 
     let Some(entity_id) = entity_id else {
         let param_name = webhook.entity_param.as_deref().unwrap_or("entity_id");
+        tracing::warn!(param = %param_name, "missing entity ID in webhook request");
         return (
             StatusCode::BAD_REQUEST,
             format!("Missing entity ID: expected query parameter '{param_name}'"),
@@ -98,10 +104,13 @@ pub async fn handle_webhook(
             let body = serde_json::to_string(&response).unwrap_or_default();
             (StatusCode::OK, body)
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Action dispatch failed: {e}"),
-        ),
+        Err(e) => {
+            tracing::error!(error = %e, "webhook action dispatch failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Action dispatch failed: {e}"),
+            )
+        }
     }
 }
 

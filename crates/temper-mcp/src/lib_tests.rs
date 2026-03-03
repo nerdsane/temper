@@ -5,11 +5,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+use std::sync::Arc;
+
 use axum::Router;
 use serde_json::{Value, json};
 use temper_runtime::ActorSystem;
-use temper_server::ServerState;
+use temper_server::{ServerEventStore, ServerState};
 use temper_spec::parse_csdl;
+use temper_store_turso::TursoEventStore;
 use tempfile::tempdir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -73,6 +76,14 @@ fn tool_text(response: &Value) -> (&str, bool) {
 }
 
 async fn start_test_temper_server() -> (u16, oneshot::Sender<()>) {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let db_url = format!("file:/tmp/temper-mcp-test-{}-{}.db", std::process::id(), id,);
+    let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
+    let turso = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
     let csdl = parse_csdl(csdl_xml).expect("parse csdl");
 
@@ -82,12 +93,13 @@ async fn start_test_temper_server() -> (u16, oneshot::Sender<()>) {
         include_str!("../../../test-fixtures/specs/order.ioa.toml").to_string(),
     );
 
-    let state = ServerState::with_specs(
+    let mut state = ServerState::with_specs(
         ActorSystem::new("temper-mcp-tests"),
         csdl,
         csdl_xml.to_string(),
         ioa_sources,
     );
+    state.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
 
     let router: Router = temper_server::build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

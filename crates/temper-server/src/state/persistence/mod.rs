@@ -4,28 +4,14 @@ use sqlx::PgPool;
 use temper_runtime::scheduler::sim_now;
 use temper_store_turso::{TursoEventStore, TursoWasmInvocationInsert};
 
+use super::ServerState;
 use super::wasm_invocation_log::WasmInvocationEntry;
-use super::{DESIGN_TIME_LOG_CAPACITY, DesignTimeEvent, ServerState};
 
 enum MetadataBackend<'a> {
     Postgres(&'a PgPool),
     Turso(&'a TursoEventStore),
     Redis,
 }
-
-/// Row type for WASM invocation log queries (avoids clippy::type_complexity).
-type WasmInvocationRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    bool,
-    Option<String>,
-    i64,
-    chrono::DateTime<chrono::Utc>,
-);
 
 mod logs_and_secrets;
 mod spec_metadata;
@@ -266,103 +252,5 @@ impl ServerState {
         }
 
         Ok(0)
-    }
-
-    /// Load recent WASM invocation entries from the persistence backend
-    /// into the in-memory bounded log.
-    pub async fn load_recent_wasm_invocations(&self, limit: usize) -> Result<usize, String> {
-        let Some(store) = self.event_store.as_ref() else {
-            return Ok(0);
-        };
-
-        // Postgres path.
-        if let Some(pool) = store.postgres_pool() {
-            let rows: Vec<WasmInvocationRow> = sqlx::query_as(
-                "SELECT tenant, entity_type, entity_id, module_name, trigger_action, \
-                        callback_action, success, error, duration_ms, created_at \
-                 FROM wasm_invocation_logs \
-                 ORDER BY created_at DESC \
-                 LIMIT $1",
-            )
-            .bind(limit as i64)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("failed to load WASM invocations from postgres: {e}"))?;
-
-            let count = rows.len();
-            if let Ok(mut log) = self.wasm_invocation_log.write() {
-                // Insert oldest-first (rows are newest-first from query).
-                for (
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    module_name,
-                    trigger_action,
-                    callback_action,
-                    success,
-                    error,
-                    duration_ms,
-                    created_at,
-                ) in rows.into_iter().rev()
-                {
-                    log.push(WasmInvocationEntry {
-                        timestamp: created_at.to_rfc3339(),
-                        tenant,
-                        entity_type,
-                        entity_id,
-                        module_name,
-                        trigger_action,
-                        callback_action,
-                        success,
-                        error,
-                        duration_ms: duration_ms as u64,
-                        authz_denied: None,
-                    });
-                }
-            }
-            return Ok(count);
-        }
-
-        // Turso path.
-        if let Some(turso) = store.turso_store() {
-            let rows = turso
-                .load_recent_wasm_invocations(limit as i64)
-                .await
-                .map_err(|e| format!("failed to load WASM invocations from turso: {e}"))?;
-
-            let count = rows.len();
-            if let Ok(mut log) = self.wasm_invocation_log.write() {
-                // Rows come newest-first, insert oldest-first.
-                for row in rows.into_iter().rev() {
-                    log.push(WasmInvocationEntry {
-                        timestamp: row.created_at,
-                        tenant: row.tenant,
-                        entity_type: row.entity_type,
-                        entity_id: row.entity_id,
-                        module_name: row.module_name,
-                        trigger_action: row.trigger_action,
-                        callback_action: row.callback_action,
-                        success: row.success,
-                        error: row.error,
-                        duration_ms: row.duration_ms,
-                        authz_denied: None,
-                    });
-                }
-            }
-            return Ok(count);
-        }
-
-        Ok(0)
-    }
-
-    /// Append to in-memory design-time log with bounded capacity.
-    pub fn push_design_time_event(&self, event: DesignTimeEvent) {
-        if let Ok(mut log) = self.design_time_log.write() {
-            if log.len() >= DESIGN_TIME_LOG_CAPACITY {
-                // Keep the newest events; evict oldest one.
-                log.pop_front();
-            }
-            log.push_back(event);
-        }
     }
 }

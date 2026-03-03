@@ -8,6 +8,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
+use tracing::instrument;
+
 use crate::dispatch::extract_tenant;
 use crate::state::ServerState;
 
@@ -75,6 +77,7 @@ pub struct WasmInvocationResponse {
 }
 
 /// POST /api/wasm/modules/{module_name} — upload a WASM binary.
+#[instrument(skip_all, fields(module_name, otel.name = "POST /api/wasm/modules/{module_name}"))]
 pub async fn upload_wasm_module(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -85,6 +88,7 @@ pub async fn upload_wasm_module(
 
     // TigerStyle: pre-assertion on module size (10 MB budget)
     if body.len() > temper_wasm::types::MAX_MODULE_SIZE {
+        tracing::warn!(size = body.len(), "WASM module too large");
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
@@ -97,6 +101,7 @@ pub async fn upload_wasm_module(
 
     // Compile and cache
     let hash = state.wasm_engine.compile_and_cache(&body).map_err(|e| {
+        tracing::warn!(error = %e, "WASM compilation failed");
         (
             StatusCode::BAD_REQUEST,
             format!("WASM compilation failed: {e}"),
@@ -134,6 +139,7 @@ pub async fn upload_wasm_module(
 }
 
 /// GET /observe/wasm/modules/{module_name} — module info.
+#[instrument(skip_all, fields(module_name, otel.name = "GET /observe/wasm/modules/{module_name}"))]
 pub async fn get_wasm_module_info(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -149,6 +155,7 @@ pub async fn get_wasm_module_info(
     };
 
     let Some(hash) = hash else {
+        tracing::warn!("WASM module not found");
         return Err((
             StatusCode::NOT_FOUND,
             format!("WASM module '{module_name}' not found for tenant '{tenant}'"),
@@ -165,6 +172,7 @@ pub async fn get_wasm_module_info(
 }
 
 /// DELETE /api/wasm/modules/{module_name} — remove a module.
+#[instrument(skip_all, fields(module_name, otel.name = "DELETE /api/wasm/modules/{module_name}"))]
 pub async fn delete_wasm_module(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -187,6 +195,7 @@ pub async fn delete_wasm_module(
     };
 
     if !removed {
+        tracing::warn!("WASM module not found for deletion");
         return Err((
             StatusCode::NOT_FOUND,
             format!("WASM module '{module_name}' not found for tenant '{tenant}'"),
@@ -219,26 +228,35 @@ pub async fn delete_wasm_module(
 }
 
 /// GET /observe/wasm/modules — list all modules for tenant (with stats).
+#[instrument(skip_all, fields(otel.name = "GET /observe/wasm/modules"))]
 pub async fn list_wasm_modules(
     State(state): State<ServerState>,
     _headers: HeaderMap,
 ) -> Json<serde_json::Value> {
     // Observe endpoints are cross-tenant — return all modules across all tenants.
 
-    // Collect invocation stats from the bounded log
+    // Collect invocation stats — Turso is single source of truth but we
+    // aggregate from load_recent_wasm_invocations; for module list we
+    // just use an empty stats map if Turso is unavailable.
     let invocation_stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> = {
-        let log = state.wasm_invocation_log.read().unwrap(); // ci-ok: infallible lock
         let mut stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> =
             std::collections::BTreeMap::new();
-        for entry in log.entries() {
-            let (total, success, last_ts) = stats
-                .entry(entry.module_name.clone())
-                .or_insert((0, 0, None));
-            *total += 1;
-            if entry.success {
-                *success += 1;
+        if let Some(turso) = state.turso_opt()
+            && let Ok(rows) = turso.load_recent_wasm_invocations(10_000).await
+        {
+            for row in rows {
+                let module = row.module_name.clone();
+                let success = row.success;
+                let ts = Some(row.created_at.clone());
+                let (total, s_count, last_ts) = stats.entry(module).or_insert((0, 0, None));
+                *total += 1;
+                if success {
+                    *s_count += 1;
+                }
+                if ts.is_some() {
+                    *last_ts = ts;
+                }
             }
-            *last_ts = Some(entry.timestamp.clone());
         }
         stats
     };
@@ -278,43 +296,50 @@ pub async fn list_wasm_modules(
     }))
 }
 
-/// GET /observe/wasm/invocations — query WASM invocation history.
-///
-/// Serves from the in-memory bounded log (fast path). When the requested
-/// limit exceeds the in-memory buffer size and a database is configured,
-/// falls back to querying the persistent `wasm_invocation_logs` table.
+/// GET /observe/wasm/invocations — query WASM invocation history from Turso.
+#[instrument(skip_all, fields(otel.name = "GET /observe/wasm/invocations"))]
 pub async fn list_wasm_invocations(
     State(state): State<ServerState>,
     Query(params): Query<InvocationQueryParams>,
 ) -> Json<WasmInvocationResponse> {
     let limit = params.limit.unwrap_or(100).min(10_000);
 
-    // Fast path: serve from in-memory bounded log
-    let log = state.wasm_invocation_log.read().unwrap(); // ci-ok: infallible lock
-    let filtered: Vec<serde_json::Value> = log
-        .entries()
-        .iter()
-        .rev()
-        .filter(|e| {
-            if let Some(ref mn) = params.module_name
-                && e.module_name != *mn
-            {
-                return false;
+    // Query Turso directly (single source of truth).
+    if let Some(turso) = state.turso_opt() {
+        match turso.load_recent_wasm_invocations(limit as i64).await {
+            Ok(rows) => {
+                let filtered: Vec<serde_json::Value> = rows
+                    .into_iter()
+                    .filter(|e| {
+                        if let Some(ref mn) = params.module_name
+                            && e.module_name != *mn
+                        {
+                            return false;
+                        }
+                        if let Some(s) = params.success
+                            && e.success != s
+                        {
+                            return false;
+                        }
+                        true
+                    })
+                    .map(|e| serde_json::to_value(&e).unwrap_or_default())
+                    .collect();
+                let total = filtered.len();
+                return Json(WasmInvocationResponse {
+                    invocations: filtered,
+                    total,
+                });
             }
-            if let Some(s) = params.success
-                && e.success != s
-            {
-                return false;
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to query WASM invocations from Turso");
             }
-            true
-        })
-        .take(limit)
-        .map(|e| serde_json::to_value(e).unwrap_or_default())
-        .collect();
+        }
+    }
 
-    let total = filtered.len();
+    // Fallback: empty response when no Turso configured.
     Json(WasmInvocationResponse {
-        invocations: filtered,
-        total,
+        invocations: Vec::new(),
+        total: 0,
     })
 }

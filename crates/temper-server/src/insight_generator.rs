@@ -12,7 +12,6 @@ use temper_evolution::records::{
     PlatformGapCategory, RecordHeader, RecordType,
 };
 
-use crate::state::ServerState;
 use crate::state::trajectory::TrajectorySource;
 
 /// Aggregated trajectory signal for a (entity_type, action) pair.
@@ -33,10 +32,7 @@ struct TrajectorySignal {
 /// classification and priority, and returns `InsightRecord`s. Also correlates
 /// EntitySetNotFound 404 trajectories with SubmitSpec events to detect
 /// resolved vs open unmet intents.
-pub(crate) fn generate_insights(state: &ServerState) -> Vec<InsightRecord> {
-    let tlog = state.trajectory_log.read().unwrap(); // ci-ok: infallible lock
-    let entries = tlog.entries();
-
+pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Vec<InsightRecord> {
     if entries.is_empty() {
         return Vec::new();
     }
@@ -255,10 +251,9 @@ pub(crate) fn generate_insights(state: &ServerState) -> Vec<InsightRecord> {
 ///
 /// Groups failed trajectories by error pattern and cross-references with
 /// SubmitSpec events to determine open vs resolved status.
-pub(crate) fn generate_unmet_intents(state: &ServerState) -> Vec<UnmetIntent> {
-    let tlog = state.trajectory_log.read().unwrap(); // ci-ok: infallible lock
-    let entries = tlog.entries();
-
+pub(crate) fn generate_unmet_intents(
+    entries: &[crate::state::TrajectoryEntry],
+) -> Vec<UnmetIntent> {
     // Track entity types that have had specs submitted.
     let mut submitted_specs: BTreeMap<String, String> = BTreeMap::new();
     // Track failed patterns by (entity_type, error_pattern).
@@ -332,6 +327,7 @@ pub(crate) fn generate_unmet_intents(state: &ServerState) -> Vec<UnmetIntent> {
 const FEATURE_REQUEST_THRESHOLD: u64 = 3;
 
 /// Stable dedup key for feature-request descriptions.
+#[allow(dead_code)]
 pub(crate) fn feature_request_dedup_key(description: &str) -> String {
     if let Some(rest) = description.strip_prefix("Agents tried '")
         && let Some((action, _)) = rest.split_once('\'')
@@ -350,10 +346,9 @@ pub(crate) fn feature_request_dedup_key(description: &str) -> String {
 /// Filters trajectory entries with `source == Some(Platform)`, groups by
 /// `(action, error_pattern)`, and creates `FeatureRequestRecord`s for groups
 /// that exceed the frequency threshold.
-pub(crate) fn generate_feature_requests(state: &ServerState) -> Vec<FeatureRequestRecord> {
-    let tlog = state.trajectory_log.read().unwrap(); // ci-ok: infallible lock
-    let entries = tlog.entries();
-
+pub(crate) fn generate_feature_requests(
+    entries: &[crate::state::TrajectoryEntry],
+) -> Vec<FeatureRequestRecord> {
     if entries.is_empty() {
         return Vec::new();
     }

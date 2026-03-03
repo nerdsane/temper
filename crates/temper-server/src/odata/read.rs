@@ -6,6 +6,7 @@ use axum::response::IntoResponse;
 use temper_odata::path::{ODataPath, parse_path};
 use temper_odata::query::parse_query_options;
 use temper_runtime::tenant::TenantId;
+use tracing::instrument;
 
 use super::common::{
     extract_key, extract_tenant, has_expand_options, resolve_entity_type, tenant_csdl_xml,
@@ -248,7 +249,8 @@ fn enrich_entity_response(
 }
 
 /// Record a trajectory entry for an EntitySetNotFound error.
-fn record_entity_set_not_found(state: &ServerState, tenant: &str, set_name: &str) {
+async fn record_entity_set_not_found(state: &ServerState, tenant: &str, set_name: &str) {
+    tracing::warn!(tenant = %tenant, entity_set = %set_name, "entity set not found");
     let entry = TrajectoryEntry {
         timestamp: sim_now().to_rfc3339(),
         tenant: tenant.to_string(),
@@ -270,11 +272,12 @@ fn record_entity_set_not_found(state: &ServerState, tenant: &str, set_name: &str
         source: Some(TrajectorySource::Platform),
         spec_governed: None,
     };
-    if let Ok(mut log) = state.trajectory_log.write() {
-        log.push(entry);
+    if let Err(e) = state.persist_trajectory_entry(&entry).await {
+        tracing::error!(error = %e, "failed to persist entity-set-not-found trajectory");
     }
 }
 
+#[instrument(skip_all, fields(tenant = %tenant, otel.name = "GET /odata/{path}"))]
 pub(super) async fn handle_odata_get_for_tenant(
     state: ServerState,
     tenant: TenantId,
@@ -324,7 +327,7 @@ pub(super) async fn handle_odata_get_for_tenant(
             let entity_type = match resolve_entity_type(&state, &tenant, &name) {
                 Some(t) => t,
                 None => {
-                    record_entity_set_not_found(&state, tenant.as_str(), &name);
+                    record_entity_set_not_found(&state, tenant.as_str(), &name).await;
                     return odata_error(
                         StatusCode::NOT_FOUND,
                         "EntitySetNotFound",
@@ -378,7 +381,7 @@ pub(super) async fn handle_odata_get_for_tenant(
             let entity_type = match resolve_entity_type(&state, &tenant, &set_name) {
                 Some(t) => t,
                 None => {
-                    record_entity_set_not_found(&state, tenant.as_str(), &set_name);
+                    record_entity_set_not_found(&state, tenant.as_str(), &set_name).await;
                     return odata_error(
                         StatusCode::NOT_FOUND,
                         "EntitySetNotFound",
@@ -455,7 +458,20 @@ pub(super) async fn handle_odata_get_for_tenant(
                     }
                 };
 
-            if !state.entity_exists(&tenant, &parent_type, &parent_key) {
+            let parent_entity_type = match resolve_entity_type(&state, &tenant, &parent_set) {
+                Some(t) => t,
+                None => {
+                    record_entity_set_not_found(&state, tenant.as_str(), &parent_set).await;
+                    return odata_error(
+                        StatusCode::NOT_FOUND,
+                        "EntitySetNotFound",
+                        &format!("Entity set '{parent_set}' not found"),
+                    )
+                    .into_response();
+                }
+            };
+
+            if !state.entity_exists(&tenant, &parent_entity_type, &parent_key) {
                 return odata_error(
                     StatusCode::NOT_FOUND,
                     "ResourceNotFound",
@@ -727,6 +743,7 @@ pub(super) async fn handle_odata_get_for_tenant(
 }
 
 /// Handle GET requests.
+#[instrument(skip_all, fields(otel.name = "GET /odata/{path}"))]
 pub async fn handle_odata_get(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -737,6 +754,7 @@ pub async fn handle_odata_get(
     handle_odata_get_for_tenant(state, tenant, path, query_params).await
 }
 
+#[instrument(skip_all, fields(otel.name = "GET /odata"))]
 pub async fn handle_service_document(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -752,6 +770,7 @@ pub async fn handle_service_document(
     }
 }
 
+#[instrument(skip_all, fields(otel.name = "GET /odata/$metadata"))]
 pub async fn handle_metadata(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -762,6 +781,7 @@ pub async fn handle_metadata(
     }
 }
 
+#[instrument(skip_all, fields(otel.name = "GET /odata/hints"))]
 pub async fn handle_hints(State(state): State<ServerState>) -> impl IntoResponse {
     let hints = state.agent_hints.read().unwrap().clone();
     ODataResponse {

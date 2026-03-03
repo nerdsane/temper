@@ -9,7 +9,7 @@ import {
   useCallback,
 } from "react";
 import Link from "next/link";
-import { subscribeAllPendingDecisions } from "./api";
+import { fetchAllDecisions, subscribeAllPendingDecisions } from "./api";
 import type { PendingDecision } from "./types";
 
 interface Toast {
@@ -164,7 +164,20 @@ export function DecisionNotifierProvider({
     return () => clearInterval(interval);
   }, [toasts.length]);
 
-  // SSE subscription
+  // Poll for pending count (SSE can't send admin headers so it fails with 403)
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const data = await fetchAllDecisions({ status: "pending" });
+        setPendingCount(data.pending_count ?? data.decisions.length);
+      } catch { /* ignore fetch errors */ }
+    };
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // SSE subscription (best-effort — may fail without admin headers)
   useEffect(() => {
     const cleanup = subscribeAllPendingDecisions((decision) => {
       if (seenIds.current.has(decision.id)) return;

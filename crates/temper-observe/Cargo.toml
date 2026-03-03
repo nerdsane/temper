@@ -11,7 +11,7 @@ temper-runtime = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
-opentelemetry-appender-tracing = "0.28"
+opentelemetry-appender-tracing = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true }

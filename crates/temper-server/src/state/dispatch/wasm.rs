@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tracing::instrument;
+
 use crate::dispatch::AgentContext;
 use crate::entity_actor::{EntityResponse, EntityState};
 use crate::secret_template::resolve_secret_templates;
@@ -18,6 +20,7 @@ use super::{HttpCallAuthzDenialTracker, TrackingWasmAuthzGate, WasmDispatchMode,
 
 impl crate::state::ServerState {
     #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_wasm_integrations_internal", tenant = %tenant, entity_type, entity_id, action_name = action))]
     pub(crate) async fn dispatch_wasm_integrations_internal(
         &self,
         tenant: &TenantId,
@@ -92,9 +95,7 @@ impl crate::state::ServerState {
                     duration_ms: 0,
                     authz_denied: None,
                 };
-                if let Ok(mut log) = self.wasm_invocation_log.write() {
-                    log.push(log_entry.clone());
-                }
+                // WASM invocations are persisted to Turso directly.
                 let _ = self.persist_wasm_invocation(&log_entry).await;
 
                 // Observability: emit WideEvent for module-not-found failure
@@ -206,9 +207,6 @@ impl crate::state::ServerState {
                         duration_ms: result.duration_ms,
                         authz_denied: None,
                     };
-                    if let Ok(mut log) = self.wasm_invocation_log.write() {
-                        log.push(log_entry.clone());
-                    }
                     let _ = self.persist_wasm_invocation(&log_entry).await;
 
                     // Observability: emit WideEvent for successful WASM invocation
@@ -299,6 +297,7 @@ impl crate::state::ServerState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(otel.name = "dispatch.handle_wasm_failure", trigger_action, integration_name, module_name))]
     async fn handle_wasm_failure(
         &self,
         entity_ref: WasmEntityRef<'_>,
@@ -325,9 +324,7 @@ impl crate::state::ServerState {
             duration_ms,
             authz_denied: if is_authz_denied { Some(true) } else { None },
         };
-        if let Ok(mut log) = self.wasm_invocation_log.write() {
-            log.push(log_entry.clone());
-        }
+        // WASM invocations are persisted to Turso directly.
         let _ = self.persist_wasm_invocation(&log_entry).await;
 
         // Observability: emit WideEvent for failed WASM invocation
@@ -373,6 +370,7 @@ impl crate::state::ServerState {
         Ok(None)
     }
 
+    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_wasm_callback", callback_action))]
     async fn dispatch_wasm_callback(
         &self,
         entity_ref: WasmEntityRef<'_>,
@@ -443,10 +441,15 @@ impl crate::state::ServerState {
             Some(module_name.to_string()),
         );
         let decision_id = pd.id.clone();
-        if let Ok(mut pdlog) = self.pending_decision_log.write()
-            && pdlog.push(pd.clone())
+        let _ = self.pending_decision_tx.send(pd.clone());
         {
-            let _ = self.pending_decision_tx.send(pd);
+            let state_c = self.clone();
+            tokio::spawn(async move {
+                // determinism-ok: background persist for sync WASM authz path
+                if let Err(e) = state_c.persist_pending_decision(&pd).await {
+                    tracing::error!(error = %e, "failed to persist WASM authz decision");
+                }
+            });
         }
 
         let traj = TrajectoryEntry {
@@ -467,8 +470,14 @@ impl crate::state::ServerState {
             source: Some(TrajectorySource::Authz),
             spec_governed: None,
         };
-        if let Ok(mut tlog) = self.trajectory_log.write() {
-            tlog.push(traj);
+        {
+            let state_c = self.clone();
+            tokio::spawn(async move {
+                // determinism-ok: background persist for sync WASM authz path
+                if let Err(e) = state_c.persist_trajectory_entry(&traj).await {
+                    tracing::error!(error = %e, "failed to persist WASM authz trajectory");
+                }
+            });
         }
 
         Some(decision_id)

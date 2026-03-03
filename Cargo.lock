@@ -5101,6 +5101,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "dotenvy",
  "reqwest",
  "serde",
  "serde_json",
@@ -5183,6 +5184,7 @@ dependencies = [
  "temper-runtime",
  "temper-server",
  "temper-spec",
+ "temper-store-turso",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -5381,9 +5383,11 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "libsql",
+ "serde",
  "serde_json",
  "temper-runtime",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

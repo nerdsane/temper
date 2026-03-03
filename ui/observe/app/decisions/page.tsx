@@ -346,18 +346,18 @@ export default function DecisionsPage() {
   const data = decisionsPoll.data;
   const lastUpdated = useRelativeTime(decisionsPoll.lastUpdated);
 
-  // SSE for live pending decisions
+  // SSE for live pending decisions (best-effort — may fail without admin headers)
   useEffect(() => {
     if (initialLoading || initialError) return;
     const cleanup =
       tenant === ALL_TENANTS
         ? subscribeAllPendingDecisions((decision) => {
             setLiveDecisions((prev) => [...prev.slice(-49), decision]);
-            decisionsPoll.refresh();
+            decisionsPoll.refresh().then(() => setLiveDecisions([]));
           })
         : subscribePendingDecisions(tenant, (decision) => {
             setLiveDecisions((prev) => [...prev.slice(-49), decision]);
-            decisionsPoll.refresh();
+            decisionsPoll.refresh().then(() => setLiveDecisions([]));
           });
     return cleanup;
   }, [initialLoading, initialError, tenant]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -368,8 +368,8 @@ export default function DecisionsPage() {
       try {
         await approveDecision(decisionTenant, id, scope);
         await decisionsPoll.refresh();
-      } catch {
-        // Error handled by polling
+      } catch (err) {
+        console.error("Failed to approve decision:", err);
       } finally {
         setActing(false);
       }
@@ -383,8 +383,8 @@ export default function DecisionsPage() {
       try {
         await denyDecision(decisionTenant, id);
         await decisionsPoll.refresh();
-      } catch {
-        // Error handled by polling
+      } catch (err) {
+        console.error("Failed to deny decision:", err);
       } finally {
         setActing(false);
       }

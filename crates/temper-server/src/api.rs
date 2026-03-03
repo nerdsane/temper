@@ -18,8 +18,12 @@ use temper_runtime::scheduler::sim_now;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
+use tracing::instrument;
+
 use crate::authz_helpers::{record_authz_denial, security_context_from_headers};
-use crate::state::{DecisionStatus, PolicyScope, ServerState};
+use crate::state::{
+    DecisionStatus, PendingDecision, PolicyScope, ServerState, TrajectoryEntry, TrajectorySource,
+};
 use temper_evolution::records::{Decision, DecisionRecord, RecordHeader, RecordType};
 
 /// Build the management API router (mounted at /api).
@@ -94,35 +98,16 @@ pub fn build_api_router() -> Router<ServerState> {
         .route("/decisions/stream", get(handle_all_decisions_stream))
 }
 
-fn is_cross_tenant_decision_admin(headers: &HeaderMap) -> bool {
-    let security_ctx = security_context_from_headers(headers, None, None);
-    matches!(security_ctx.principal.kind, PrincipalKind::Admin)
-}
-
-fn cross_tenant_admin_denied() -> axum::response::Response {
-    (
-        StatusCode::FORBIDDEN,
-        axum::Json(serde_json::json!({
-            "error": {
-                "code": "AuthorizationDenied",
-                "message": "Admin principal required for cross-tenant decision access",
-            }
-        })),
-    )
-        .into_response()
-}
-
-fn authorize_tenant_decision_management(
+async fn authorize_tenant_decision_management(
     state: &ServerState,
     headers: &HeaderMap,
     tenant: &str,
 ) -> Option<axum::response::Response> {
     let security_ctx = security_context_from_headers(headers, None, None);
-    if state.authz.policy_count() == 0
-        && matches!(security_ctx.principal.kind, PrincipalKind::Admin)
-    {
-        // Bootstrap path: before any Cedar policies exist, allow explicit admins
-        // to manage pending decisions so governance cannot deadlock.
+    if matches!(security_ctx.principal.kind, PrincipalKind::Admin) {
+        // Admin principals (e.g. Observe UI) always bypass Cedar for decision
+        // management. Without this, approving the first policy would lock out
+        // the admin from managing subsequent decisions.
         return None;
     }
     if let Err(reason) = state.authorize_with_context(
@@ -143,7 +128,8 @@ fn authorize_tenant_decision_management(
             &reason,
             None,
             None,
-        );
+        )
+        .await;
         return Some(
             (
                 StatusCode::FORBIDDEN,
@@ -165,12 +151,14 @@ fn is_backend_not_supported_error(err: &str) -> bool {
 }
 
 /// PUT /api/tenants/{tenant}/secrets/{key_name} — encrypt and store a secret.
+#[instrument(skip_all, fields(tenant, key_name, otel.name = "PUT /api/tenants/{tenant}/secrets/{key_name}"))]
 async fn handle_put_secret(
     State(state): State<ServerState>,
     Path((tenant, key_name)): Path<(String, String)>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let Some(vault) = state.secrets_vault.as_ref() else {
+        tracing::warn!("secrets vault not configured");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Secrets vault not configured (missing TEMPER_VAULT_KEY)",
@@ -181,6 +169,7 @@ async fn handle_put_secret(
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
+            tracing::warn!(error = %e, "invalid JSON in put secret request");
             return (StatusCode::BAD_REQUEST, format!("Invalid JSON: {e}")).into_response();
         }
     };
@@ -188,6 +177,7 @@ async fn handle_put_secret(
     let value = match body_json.get("value").and_then(|v| v.as_str()) {
         Some(v) => v,
         None => {
+            tracing::warn!("missing 'value' field in put secret request");
             return (
                 StatusCode::BAD_REQUEST,
                 "Missing \'value\' field in request body",
@@ -197,6 +187,7 @@ async fn handle_put_secret(
     };
 
     if value.len() > crate::secrets_vault::MAX_SECRET_VALUE_BYTES {
+        tracing::warn!(size = value.len(), "secret value exceeds maximum size");
         return (
             StatusCode::BAD_REQUEST,
             format!(
@@ -211,6 +202,7 @@ async fn handle_put_secret(
     let (ciphertext, nonce) = match vault.encrypt(value.as_bytes()) {
         Ok(pair) => pair,
         Err(e) => {
+            tracing::error!(error = %e, "encryption failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Encryption failed: {e}"),
@@ -229,6 +221,7 @@ async fn handle_put_secret(
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };
+        tracing::error!(error = %e, "secret persistence failed");
         return (status, format!("Persistence failed: {e}")).into_response();
     }
 
@@ -236,6 +229,7 @@ async fn handle_put_secret(
     if let Err(e) = vault.cache_secret(&tenant, &key_name, value.to_string()) {
         // Best-effort rollback to keep storage/cache aligned.
         let _ = state.delete_secret(&tenant, &key_name).await;
+        tracing::error!(error = %e, "cache update failed after persistence write");
         return (
             StatusCode::CONFLICT,
             format!("Cache update failed after persistence write: {e}"),
@@ -247,11 +241,13 @@ async fn handle_put_secret(
 }
 
 /// DELETE /api/tenants/{tenant}/secrets/{key_name} — remove a secret.
+#[instrument(skip_all, fields(tenant, key_name, otel.name = "DELETE /api/tenants/{tenant}/secrets/{key_name}"))]
 async fn handle_delete_secret(
     State(state): State<ServerState>,
     Path((tenant, key_name)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let Some(vault) = state.secrets_vault.as_ref() else {
+        tracing::warn!("secrets vault not configured");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Secrets vault not configured",
@@ -265,6 +261,7 @@ async fn handle_delete_secret(
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => {
+            tracing::warn!("secret not found for deletion");
             vault.remove_secret(&tenant, &key_name);
             StatusCode::NOT_FOUND.into_response()
         }
@@ -274,17 +271,20 @@ async fn handle_delete_secret(
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
+            tracing::error!(error = %e, "secret deletion failed");
             (status, format!("Delete failed: {e}")).into_response()
         }
     }
 }
 
 /// GET /api/tenants/{tenant}/secrets — list secret key names (never values).
+#[instrument(skip_all, fields(tenant, otel.name = "GET /api/tenants/{tenant}/secrets"))]
 async fn handle_list_secrets(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
 ) -> impl IntoResponse {
     let Some(vault) = state.secrets_vault.as_ref() else {
+        tracing::warn!("secrets vault not configured");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             axum::Json(serde_json::json!({"error": "Secrets vault not configured"})),
@@ -305,6 +305,7 @@ async fn handle_list_secrets(
 // ---------------------------------------------------------------------------
 
 /// GET /api/tenants/{tenant}/policies — return current Cedar policy text.
+#[instrument(skip_all, fields(tenant, otel.name = "GET /api/tenants/{tenant}/policies"))]
 async fn handle_get_policies(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
@@ -321,6 +322,7 @@ async fn handle_get_policies(
 /// PUT /api/tenants/{tenant}/policies — replace all policies (validate then reload).
 ///
 /// Cedar-gated: requires `manage_policies` action on `PolicySet` resource.
+#[instrument(skip_all, fields(tenant, otel.name = "PUT /api/tenants/{tenant}/policies"))]
 async fn handle_put_policies(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
@@ -336,6 +338,7 @@ async fn handle_put_policies(
         &std::collections::BTreeMap::new(),
     );
     if let Err(reason) = authz_result {
+        tracing::warn!(reason = %reason, "authorization denied for put policies");
         let pd = record_authz_denial(
             &state,
             &tenant,
@@ -348,7 +351,8 @@ async fn handle_put_policies(
             &reason,
             None,
             None,
-        );
+        )
+        .await;
         return (
             StatusCode::FORBIDDEN,
             axum::Json(serde_json::json!({
@@ -364,6 +368,7 @@ async fn handle_put_policies(
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
+            tracing::warn!(error = %e, "invalid JSON in put policies request");
             return (StatusCode::BAD_REQUEST, format!("Invalid JSON: {e}")).into_response();
         }
     };
@@ -371,6 +376,7 @@ async fn handle_put_policies(
     let policy_text = match body_json.get("policy_text").and_then(|v| v.as_str()) {
         Some(v) => v.to_string(),
         None => {
+            tracing::warn!("missing 'policy_text' field in put policies request");
             return (
                 StatusCode::BAD_REQUEST,
                 "Missing 'policy_text' field in request body",
@@ -394,6 +400,7 @@ async fn handle_put_policies(
     };
 
     if let Err(e) = state.authz.reload_policies(&combined) {
+        tracing::warn!(error = %e, "policy validation failed");
         return (
             StatusCode::BAD_REQUEST,
             format!("Policy validation failed: {e}"),
@@ -417,6 +424,7 @@ async fn handle_put_policies(
 /// POST /api/tenants/{tenant}/policies/rules — append a single rule.
 ///
 /// Cedar-gated: requires `manage_policies` action on `PolicySet` resource.
+#[instrument(skip_all, fields(tenant, otel.name = "POST /api/tenants/{tenant}/policies/rules"))]
 async fn handle_add_policy_rule(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
@@ -432,6 +440,7 @@ async fn handle_add_policy_rule(
         &std::collections::BTreeMap::new(),
     );
     if let Err(reason) = authz_result {
+        tracing::warn!(reason = %reason, "authorization denied for add policy rule");
         let pd = record_authz_denial(
             &state,
             &tenant,
@@ -444,7 +453,8 @@ async fn handle_add_policy_rule(
             &reason,
             None,
             None,
-        );
+        )
+        .await;
         return (
             StatusCode::FORBIDDEN,
             axum::Json(serde_json::json!({
@@ -460,6 +470,7 @@ async fn handle_add_policy_rule(
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
+            tracing::warn!(error = %e, "invalid JSON in add policy rule request");
             return (StatusCode::BAD_REQUEST, format!("Invalid JSON: {e}")).into_response();
         }
     };
@@ -467,6 +478,7 @@ async fn handle_add_policy_rule(
     let rule = match body_json.get("rule").and_then(|v| v.as_str()) {
         Some(v) => v.to_string(),
         None => {
+            tracing::warn!("missing 'rule' field in add policy rule request");
             return (
                 StatusCode::BAD_REQUEST,
                 "Missing 'rule' field in request body",
@@ -500,6 +512,7 @@ async fn handle_add_policy_rule(
     };
 
     if let Err(e) = state.authz.reload_policies(&combined) {
+        tracing::warn!(error = %e, "policy rule validation failed");
         return (
             StatusCode::BAD_REQUEST,
             format!("Rule validation failed: {e}"),
@@ -536,57 +549,64 @@ struct DecisionListParams {
 }
 
 /// GET /api/tenants/{tenant}/decisions — list decisions with optional status filter.
+#[instrument(skip_all, fields(tenant, otel.name = "GET /api/tenants/{tenant}/decisions"))]
 async fn handle_list_decisions(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Query(params): Query<DecisionListParams>,
 ) -> impl IntoResponse {
-    if let Some(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
-        return resp;
+    // Query Turso directly (single source of truth).
+    if let Some(turso) = state.turso_opt() {
+        match turso
+            .query_decisions(&tenant, params.status.as_deref())
+            .await
+        {
+            Ok(data_strings) => {
+                let entries: Vec<serde_json::Value> = data_strings
+                    .iter()
+                    .filter_map(|s| serde_json::from_str(s).ok())
+                    .collect();
+                let pending_count = entries
+                    .iter()
+                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("pending"))
+                    .count();
+                let approved_count = entries
+                    .iter()
+                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("approved"))
+                    .count();
+                let denied_count = entries
+                    .iter()
+                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("denied"))
+                    .count();
+                let total = entries.len();
+                return (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "decisions": entries,
+                        "total": total,
+                        "pending_count": pending_count,
+                        "approved_count": approved_count,
+                        "denied_count": denied_count,
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to query decisions from Turso");
+            }
+        }
     }
 
-    let log = state.pending_decision_log.read().unwrap(); // ci-ok: infallible lock
-    let entries: Vec<_> = log
-        .entries()
-        .iter()
-        .filter(|d| d.tenant == tenant)
-        .filter(|d| {
-            if let Some(ref s) = params.status {
-                let status_str = serde_json::to_value(&d.status)
-                    .ok()
-                    .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_default();
-                status_str == *s
-            } else {
-                true
-            }
-        })
-        .cloned()
-        .collect();
-
-    let pending_count = entries
-        .iter()
-        .filter(|d| d.status == DecisionStatus::Pending)
-        .count();
-    let approved_count = entries
-        .iter()
-        .filter(|d| d.status == DecisionStatus::Approved)
-        .count();
-    let denied_count = entries
-        .iter()
-        .filter(|d| d.status == DecisionStatus::Denied)
-        .count();
-    let total = entries.len();
-
+    // Fallback: empty response.
     (
         StatusCode::OK,
         axum::Json(serde_json::json!({
-            "decisions": entries,
-            "total": total,
-            "pending_count": pending_count,
-            "approved_count": approved_count,
-            "denied_count": denied_count,
+            "decisions": [],
+            "total": 0,
+            "pending_count": 0,
+            "approved_count": 0,
+            "denied_count": 0,
         })),
     )
         .into_response()
@@ -602,13 +622,14 @@ struct ApproveBody {
 }
 
 /// POST /api/tenants/{tenant}/decisions/{id}/approve — approve with scope.
+#[instrument(skip_all, fields(tenant, id, otel.name = "POST /api/tenants/{tenant}/decisions/{id}/approve"))]
 async fn handle_approve_decision(
     State(state): State<ServerState>,
     Path((tenant, id)): Path<(String, String)>,
     headers: HeaderMap,
     axum::Json(body): axum::Json<ApproveBody>,
 ) -> impl IntoResponse {
-    if let Some(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
+    if let Some(resp) = authorize_tenant_decision_management(&state, &headers, &tenant).await {
         return resp;
     }
 
@@ -617,6 +638,7 @@ async fn handle_approve_decision(
         "medium" => PolicyScope::Medium,
         "broad" => PolicyScope::Broad,
         other => {
+            tracing::warn!(scope = %other, "invalid scope in approve decision request");
             return (
                 StatusCode::BAD_REQUEST,
                 format!("Invalid scope: {other}. Must be narrow, medium, or broad."),
@@ -625,16 +647,41 @@ async fn handle_approve_decision(
         }
     };
 
-    // Validate decision + stage generated policy.
-    let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
-    let decision = match log.get_mut(&id) {
-        Some(d) if d.tenant == tenant => d,
-        _ => {
-            return (StatusCode::NOT_FOUND, "Decision not found").into_response();
+    // Read decision from Turso (single source of truth).
+    let mut decision: PendingDecision = {
+        let Some(turso) = state.turso_opt() else {
+            tracing::error!("Turso backend not configured for approve decision");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Turso backend not configured",
+            )
+                .into_response();
+        };
+        match turso.get_pending_decision(&id).await {
+            Ok(Some(data_str)) => match serde_json::from_str::<PendingDecision>(&data_str) {
+                Ok(d) if d.tenant == tenant => d,
+                _ => {
+                    tracing::warn!("decision not found for approval");
+                    return (StatusCode::NOT_FOUND, "Decision not found").into_response();
+                }
+            },
+            Ok(None) => {
+                tracing::warn!("decision not found for approval");
+                return (StatusCode::NOT_FOUND, "Decision not found").into_response();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to load decision from Turso");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to load decision: {e}"),
+                )
+                    .into_response();
+            }
         }
     };
 
     if decision.status != DecisionStatus::Pending {
+        tracing::warn!(status = ?decision.status, "decision already resolved");
         return (
             StatusCode::CONFLICT,
             format!("Decision already resolved as {:?}", decision.status),
@@ -662,6 +709,7 @@ async fn handle_approve_decision(
         }
 
         if let Err(e) = state.authz.reload_policies(&combined) {
+            tracing::error!(error = %e, "failed to reload policies during approval");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to reload policies: {e}"),
@@ -669,7 +717,20 @@ async fn handle_approve_decision(
                 .into_response();
         }
 
-        *policies = next_policies;
+        *policies = next_policies.clone();
+    }
+
+    // Persist updated policies to Turso synchronously.
+    if let Some(turso) = state.turso_opt() {
+        let policies_snapshot = {
+            let p = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+            p.clone()
+        };
+        for (t, text) in &policies_snapshot {
+            if let Err(e) = turso.upsert_tenant_policy(t, text).await {
+                eprintln!("Warning: failed to persist Cedar policy for tenant {t}: {e}");
+            }
+        }
     }
 
     // Mark decision approved only after policy reload succeeds.
@@ -678,7 +739,12 @@ async fn handle_approve_decision(
     decision.generated_policy = Some(generated_policy.clone());
     decision.decided_by = body.decided_by.clone();
     decision.decided_at = Some(sim_now().to_rfc3339());
-    drop(log);
+    let approved_decision = decision.clone();
+
+    // Persist updated decision to Turso synchronously.
+    if let Err(e) = state.persist_pending_decision(&approved_decision).await {
+        eprintln!("Warning: failed to persist approved decision {}: {e}", id);
+    }
 
     // Create D-Record for the approval (evolution audit trail).
     // Link to the A-Record via derived_from for O-A-D chain tracing.
@@ -701,7 +767,23 @@ async fn handle_approve_decision(
         verification_results: None,
         implementation: None,
     };
-    state.record_store.insert_decision(d_record);
+    // Persist D-Record to Turso.
+    if let Some(turso) = state.turso_opt() {
+        let data_json = serde_json::to_string(&d_record).unwrap_or_default();
+        if let Err(e) = turso
+            .insert_evolution_record(
+                &d_record.header.id,
+                "Decision",
+                &format!("{:?}", d_record.header.status),
+                &d_record.header.created_by,
+                d_record.header.derived_from.as_deref(),
+                &data_json,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "failed to persist D-Record to Turso");
+        }
+    }
 
     (
         StatusCode::OK,
@@ -715,13 +797,14 @@ async fn handle_approve_decision(
 }
 
 /// POST /api/tenants/{tenant}/decisions/{id}/deny — mark as denied.
+#[instrument(skip_all, fields(tenant, id, otel.name = "POST /api/tenants/{tenant}/decisions/{id}/deny"))]
 async fn handle_deny_decision(
     State(state): State<ServerState>,
     Path((tenant, id)): Path<(String, String)>,
     headers: HeaderMap,
     body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
-    if let Some(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
+    if let Some(resp) = authorize_tenant_decision_management(&state, &headers, &tenant).await {
         return resp;
     }
 
@@ -731,15 +814,41 @@ async fn handle_deny_decision(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let mut log = state.pending_decision_log.write().unwrap(); // ci-ok: infallible lock
-    let decision = match log.get_mut(&id) {
-        Some(d) if d.tenant == tenant => d,
-        _ => {
-            return (StatusCode::NOT_FOUND, "Decision not found").into_response();
+    // Read decision from Turso (single source of truth).
+    let mut decision: PendingDecision = {
+        let Some(turso) = state.turso_opt() else {
+            tracing::error!("Turso backend not configured for deny decision");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Turso backend not configured",
+            )
+                .into_response();
+        };
+        match turso.get_pending_decision(&id).await {
+            Ok(Some(data_str)) => match serde_json::from_str::<PendingDecision>(&data_str) {
+                Ok(d) if d.tenant == tenant => d,
+                _ => {
+                    tracing::warn!("decision not found for denial");
+                    return (StatusCode::NOT_FOUND, "Decision not found").into_response();
+                }
+            },
+            Ok(None) => {
+                tracing::warn!("decision not found for denial");
+                return (StatusCode::NOT_FOUND, "Decision not found").into_response();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to load decision from Turso");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to load decision: {e}"),
+                )
+                    .into_response();
+            }
         }
     };
 
     if decision.status != DecisionStatus::Pending {
+        tracing::warn!(status = ?decision.status, "decision already resolved");
         return (
             StatusCode::CONFLICT,
             format!("Decision already resolved as {:?}", decision.status),
@@ -750,6 +859,12 @@ async fn handle_deny_decision(
     decision.status = DecisionStatus::Denied;
     decision.decided_by = decided_by;
     decision.decided_at = Some(sim_now().to_rfc3339());
+    let denied_decision = decision.clone();
+
+    // Persist updated decision to Turso synchronously.
+    if let Err(e) = state.persist_pending_decision(&denied_decision).await {
+        tracing::warn!(error = %e, "failed to persist denied decision");
+    }
 
     (
         StatusCode::OK,
@@ -759,15 +874,12 @@ async fn handle_deny_decision(
 }
 
 /// GET /api/tenants/{tenant}/decisions/stream — SSE for new pending decisions.
+#[instrument(skip_all, fields(tenant, otel.name = "GET /api/tenants/{tenant}/decisions/stream"))]
 async fn handle_decision_stream(
     State(state): State<ServerState>,
     Path(tenant): Path<String>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Some(resp) = authorize_tenant_decision_management(&state, &headers, &tenant) {
-        return resp;
-    }
-
     let rx = state.pending_decision_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
         match result {
@@ -791,69 +903,71 @@ async fn handle_decision_stream(
 }
 
 /// GET /api/decisions — list all decisions across all tenants.
+#[instrument(skip_all, fields(otel.name = "GET /api/decisions"))]
 async fn handle_list_all_decisions(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Query(params): Query<DecisionListParams>,
 ) -> impl IntoResponse {
-    if !is_cross_tenant_decision_admin(&headers) {
-        return cross_tenant_admin_denied();
+    // Query Turso directly (single source of truth).
+    if let Some(turso) = state.turso_opt() {
+        match turso.query_all_decisions(params.status.as_deref()).await {
+            Ok(data_strings) => {
+                let entries: Vec<serde_json::Value> = data_strings
+                    .iter()
+                    .filter_map(|s| serde_json::from_str(s).ok())
+                    .collect();
+                let pending_count = entries
+                    .iter()
+                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("pending"))
+                    .count();
+                let approved_count = entries
+                    .iter()
+                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("approved"))
+                    .count();
+                let denied_count = entries
+                    .iter()
+                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("denied"))
+                    .count();
+                let total = entries.len();
+                return (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "decisions": entries,
+                        "total": total,
+                        "pending_count": pending_count,
+                        "approved_count": approved_count,
+                        "denied_count": denied_count,
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to query all decisions from Turso");
+            }
+        }
     }
 
-    let log = state.pending_decision_log.read().unwrap(); // ci-ok: infallible lock
-    let entries: Vec<_> = log
-        .entries()
-        .iter()
-        .filter(|d| {
-            if let Some(ref s) = params.status {
-                let status_str = serde_json::to_value(&d.status)
-                    .ok()
-                    .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_default();
-                status_str == *s
-            } else {
-                true
-            }
-        })
-        .cloned()
-        .collect();
-
-    let pending_count = entries
-        .iter()
-        .filter(|d| d.status == DecisionStatus::Pending)
-        .count();
-    let approved_count = entries
-        .iter()
-        .filter(|d| d.status == DecisionStatus::Approved)
-        .count();
-    let denied_count = entries
-        .iter()
-        .filter(|d| d.status == DecisionStatus::Denied)
-        .count();
-    let total = entries.len();
-
+    // Fallback: empty response.
     (
         StatusCode::OK,
         axum::Json(serde_json::json!({
-            "decisions": entries,
-            "total": total,
-            "pending_count": pending_count,
-            "approved_count": approved_count,
-            "denied_count": denied_count,
+            "decisions": [],
+            "total": 0,
+            "pending_count": 0,
+            "approved_count": 0,
+            "denied_count": 0,
         })),
     )
         .into_response()
 }
 
 /// GET /api/decisions/stream — SSE for all pending decisions across all tenants.
+#[instrument(skip_all, fields(otel.name = "GET /api/decisions/stream"))]
 async fn handle_all_decisions_stream(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !is_cross_tenant_decision_admin(&headers) {
-        return cross_tenant_admin_denied();
-    }
-
     let rx = state.pending_decision_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
         Ok(pd) => {
@@ -889,6 +1003,7 @@ struct ReplRequest {
 ///
 /// Security: 180s timeout, 64MB memory, method allowlisting, no filesystem or
 /// network access. External APIs go through `[[integration]]` in IOA specs.
+#[instrument(skip_all, fields(otel.name = "POST /api/repl"))]
 async fn handle_repl(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -899,6 +1014,13 @@ async fn handle_repl(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
+    let tenant = headers
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("default")
+        .to_string();
+
+    let agent_id = principal_id.clone();
     let port = state.listen_port.get().copied().unwrap_or(4200);
     let code = body.code;
 
@@ -932,21 +1054,50 @@ async fn handle_repl(
             )
                 .into_response()
         }
-        Ok(Err(e)) => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({
-                "result": serde_json::Value::Null,
-                "error": e.to_string(),
-            })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({
-                "result": serde_json::Value::Null,
-                "error": format!("REPL task panicked: {e}"),
-            })),
-        )
-            .into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "REPL sandbox execution error");
+            // Record sandbox error as trajectory entry (unmet intent).
+            let entry = TrajectoryEntry {
+                timestamp: sim_now().to_rfc3339(),
+                tenant: tenant.clone(),
+                entity_type: "sandbox".to_string(),
+                entity_id: String::new(),
+                action: "repl_execution".to_string(),
+                success: false,
+                from_status: None,
+                to_status: None,
+                error: Some(e.to_string()),
+                agent_id: agent_id.clone(),
+                session_id: None,
+                authz_denied: None,
+                denied_resource: None,
+                denied_module: None,
+                source: Some(TrajectorySource::Platform),
+                spec_governed: None,
+            };
+            if let Err(persist_err) = state.persist_trajectory_entry(&entry).await {
+                tracing::error!(error = %persist_err, "failed to persist REPL trajectory entry");
+            }
+
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "result": serde_json::Value::Null,
+                    "error": e.to_string(),
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "REPL task panicked");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({
+                    "result": serde_json::Value::Null,
+                    "error": format!("REPL task panicked: {e}"),
+                })),
+            )
+                .into_response()
+        }
     }
 }

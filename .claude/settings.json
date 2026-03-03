@@ -25,7 +25,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": ".*",
+        "matcher": "Write|Edit|Bash|NotebookEdit",
         "hooks": [
           {
             "type": "command",

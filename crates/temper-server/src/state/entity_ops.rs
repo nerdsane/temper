@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use tracing::instrument;
+
 use temper_observe::wide_event;
 use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::sim_now;
@@ -42,6 +44,7 @@ pub struct FailedLevelInfo {
 impl ServerState {
     /// Hydrate actor state from the event store by spawning actors for all
     /// entities that have persisted events in this tenant.
+    #[instrument(skip_all, fields(otel.name = "entity.hydrate_from_store", tenant = %tenant))]
     pub async fn hydrate_from_store(&self, tenant: &TenantId) {
         if let Some(ref store) = self.event_store {
             match store.list_entity_ids(tenant.as_str()).await {
@@ -91,6 +94,7 @@ impl ServerState {
     }
 
     /// Get or spawn an entity actor with initial fields for a specific tenant.
+    #[instrument(skip_all, fields(otel.name = "entity.get_or_spawn_tenant_actor_with_fields", tenant = %tenant, entity_type, entity_id))]
     pub fn get_or_spawn_tenant_actor_with_fields(
         &self,
         tenant: &TenantId,
@@ -164,6 +168,7 @@ impl ServerState {
     }
 
     /// Remove an entity from the index and actor registry.
+    #[instrument(skip_all, fields(otel.name = "entity.remove_entity", tenant = %tenant, entity_type, entity_id))]
     pub fn remove_entity(&self, tenant: &TenantId, entity_type: &str, entity_id: &str) {
         let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
 
@@ -184,6 +189,7 @@ impl ServerState {
     }
 
     /// List all entity IDs for a (tenant, entity_type) pair.
+    #[instrument(skip_all, fields(otel.name = "entity.list_entity_ids", tenant = %tenant, entity_type))]
     pub fn list_entity_ids(&self, tenant: &TenantId, entity_type: &str) -> Vec<String> {
         let index_key = format!("{tenant}:{entity_type}");
         let index = self.entity_index.read().unwrap();
@@ -243,6 +249,7 @@ impl ServerState {
     /// identity and resource attributes.
     ///
     /// Accepts `BTreeMap` for DST compliance; converts at the authz boundary.
+    #[instrument(skip_all, fields(otel.name = "entity.authorize_with_context", action, resource_type))]
     pub fn authorize_with_context(
         &self,
         security_ctx: &SecurityContext,
@@ -293,6 +300,7 @@ impl ServerState {
     }
 
     /// Get the current state of an entity actor for a specific tenant.
+    #[instrument(skip_all, fields(otel.name = "entity.get_tenant_entity_state", tenant = %tenant, entity_type, entity_id))]
     pub async fn get_tenant_entity_state(
         &self,
         tenant: &TenantId,
@@ -312,6 +320,7 @@ impl ServerState {
     }
 
     /// Create a new entity with initial fields and return its state.
+    #[instrument(skip_all, fields(otel.name = "entity.get_or_create_tenant_entity", tenant = %tenant, entity_type, entity_id))]
     pub async fn get_or_create_tenant_entity(
         &self,
         tenant: &TenantId,
@@ -345,6 +354,7 @@ impl ServerState {
     }
 
     /// Update fields on an existing entity.
+    #[instrument(skip_all, fields(otel.name = "entity.update_tenant_entity_fields", tenant = %tenant, entity_type, entity_id))]
     pub async fn update_tenant_entity_fields(
         &self,
         tenant: &TenantId,
@@ -369,6 +379,7 @@ impl ServerState {
     }
 
     /// Delete an entity.
+    #[instrument(skip_all, fields(otel.name = "entity.delete_tenant_entity", tenant = %tenant, entity_type, entity_id))]
     pub async fn delete_tenant_entity(
         &self,
         tenant: &TenantId,
@@ -406,6 +417,7 @@ impl ServerState {
 
     /// Ensure an entity is present in memory by lazily hydrating from the
     /// event store when needed.
+    #[instrument(skip_all, fields(otel.name = "entity.ensure_entity_loaded", tenant = %tenant, entity_type, entity_id))]
     pub async fn ensure_entity_loaded(
         &self,
         tenant: &TenantId,
@@ -434,6 +446,7 @@ impl ServerState {
 
     /// List entity IDs from in-memory index, lazily hydrating from the event
     /// store if the index is cold.
+    #[instrument(skip_all, fields(otel.name = "entity.list_entity_ids_lazy", tenant = %tenant, entity_type))]
     pub async fn list_entity_ids_lazy(&self, tenant: &TenantId, entity_type: &str) -> Vec<String> {
         let ids = self.list_entity_ids(tenant, entity_type);
         if !ids.is_empty() {
@@ -475,6 +488,7 @@ impl ServerState {
     /// - `Running` → `Err("running")` — verification is in progress
     /// - `Completed(all_passed: true)` → `Ok(())`
     /// - `Completed(all_passed: false)` → `Err("failed")` with failed level details
+    #[instrument(skip_all, fields(otel.name = "entity.check_verification_gate", tenant = %tenant, entity_type))]
     pub fn check_verification_gate(
         &self,
         tenant: &TenantId,
@@ -547,6 +561,7 @@ impl ServerState {
 /// Fast path: check the `entity_state_cache` (populated on every successful dispatch).
 /// Slow path: fall back to `get_tenant_entity_state()` (async actor ask) and backfill cache.
 impl ServerState {
+    #[instrument(skip_all, fields(otel.name = "entity.resolve_entity_status", tenant = %tenant, entity_type, entity_id))]
     pub async fn resolve_entity_status(
         &self,
         tenant: &TenantId,
