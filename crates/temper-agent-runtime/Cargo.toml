@@ -19,3 +19,6 @@ reqwest = { workspace = true }
 uuid = { workspace = true }
 futures-core = "0.3"
 bytes = "1"
+base64 = "0.22"
+dirs = "6"
+sha2 = { workspace = true }

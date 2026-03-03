@@ -103,6 +103,14 @@ enum Commands {
         /// Resume an existing agent by ID
         #[arg(long)]
         agent_id: Option<String>,
+        /// LLM provider (anthropic or openai-codex; auto-detected from model name if omitted)
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Authenticate with an LLM provider's subscription plan
+    Login {
+        /// Provider to log in to (currently: openai)
+        provider: String,
     },
     /// Start the stdio MCP server for Code Mode
     Mcp {
@@ -167,7 +175,20 @@ async fn main() -> anyhow::Result<()> {
             role,
             model,
             agent_id,
-        } => agent::run(port, &tenant, &goal, &role, &model, agent_id).await?,
+            provider,
+        } => {
+            agent::run(
+                port,
+                &tenant,
+                &goal,
+                &role,
+                &model,
+                agent_id,
+                provider.as_deref(),
+            )
+            .await?
+        }
+        Commands::Login { provider } => agent::login::run(&provider).await?,
         Commands::Mcp {
             port,
             app,
@@ -354,6 +375,7 @@ mod tests {
                 role,
                 model,
                 agent_id,
+                provider,
             } => {
                 assert_eq!(port, 3000);
                 assert_eq!(tenant, "default");
@@ -361,6 +383,7 @@ mod tests {
                 assert_eq!(role, "developer");
                 assert_eq!(model, "claude-sonnet-4-20250514");
                 assert_eq!(agent_id, None);
+                assert_eq!(provider, None);
             }
             _ => panic!("expected Agent command"),
         }
@@ -392,6 +415,7 @@ mod tests {
                 role,
                 model,
                 agent_id,
+                provider,
             } => {
                 assert_eq!(port, 8080);
                 assert_eq!(tenant, "my-app");
@@ -399,8 +423,41 @@ mod tests {
                 assert_eq!(role, "engineer");
                 assert_eq!(model, "claude-opus-4-20250514");
                 assert_eq!(agent_id, Some("abc-123".to_string()));
+                assert_eq!(provider, None);
             }
             _ => panic!("expected Agent command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_agent_with_provider() {
+        let cli = Cli::parse_from([
+            "temper",
+            "agent",
+            "--goal",
+            "test",
+            "--provider",
+            "openai-codex",
+            "--model",
+            "gpt-5.1-codex",
+        ]);
+        match cli.command {
+            Commands::Agent {
+                provider, model, ..
+            } => {
+                assert_eq!(provider, Some("openai-codex".to_string()));
+                assert_eq!(model, "gpt-5.1-codex");
+            }
+            _ => panic!("expected Agent command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_login() {
+        let cli = Cli::parse_from(["temper", "login", "openai"]);
+        match cli.command {
+            Commands::Login { provider } => assert_eq!(provider, "openai"),
+            _ => panic!("expected Login command"),
         }
     }
 
