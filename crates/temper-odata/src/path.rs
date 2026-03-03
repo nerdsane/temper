@@ -34,6 +34,14 @@ pub enum ODataPath {
         property: String,
     },
 
+    /// A keyed entity within a navigation collection,
+    /// e.g. `/Orders('abc-123')/Items('item-1')`.
+    NavigationEntity {
+        parent: Box<ODataPath>,
+        property: String,
+        key: KeyValue,
+    },
+
     /// A bound action on an entity, e.g. `/Orders('abc-123')/Namespace.CancelOrder`.
     BoundAction {
         parent: Box<ODataPath>,
@@ -198,7 +206,8 @@ fn parse_continuation_segment(segment: &str, parent: ODataPath) -> Result<ODataP
     }
 
     // Check for key access on a navigation property, e.g. Items(123).
-    // This models `/Parent/Items(123)` as Entity inside a NavigationProperty.
+    // This models `/Parent/Items(123)` as NavigationEntity, preserving the
+    // parent context for hierarchical path resolution.
     if let Some(paren_start) = segment.find('(') {
         let name = &segment[..paren_start];
         validate_identifier(name)?;
@@ -211,8 +220,11 @@ fn parse_continuation_segment(segment: &str, parent: ODataPath) -> Result<ODataP
         let key_str = &segment[paren_start + 1..segment.len() - 1];
         let key = parse_key_value(key_str)?;
 
-        // Model as entity access within the parent's navigation collection.
-        return Ok(ODataPath::Entity(name.to_string(), key));
+        return Ok(ODataPath::NavigationEntity {
+            parent: Box::new(parent),
+            property: name.to_string(),
+            key,
+        });
     }
 
     // Simple navigation property
@@ -451,6 +463,78 @@ mod tests {
         assert_eq!(
             parse_path("/Orders/").unwrap(),
             ODataPath::EntitySet("Orders".into())
+        );
+    }
+
+    #[test]
+    fn parse_navigation_entity_with_key() {
+        let result = parse_path("/Orders('abc-123')/Items('item-1')").unwrap();
+        assert_eq!(
+            result,
+            ODataPath::NavigationEntity {
+                parent: Box::new(ODataPath::Entity(
+                    "Orders".into(),
+                    KeyValue::Single("abc-123".into())
+                )),
+                property: "Items".into(),
+                key: KeyValue::Single("item-1".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_navigation_entity_integer_key() {
+        let result = parse_path("/Customers('c-1')/Orders(42)").unwrap();
+        assert_eq!(
+            result,
+            ODataPath::NavigationEntity {
+                parent: Box::new(ODataPath::Entity(
+                    "Customers".into(),
+                    KeyValue::Single("c-1".into())
+                )),
+                property: "Orders".into(),
+                key: KeyValue::Single("42".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_multi_level_navigation() {
+        // /Orders('o-1')/Items('i-1')/Product
+        let result = parse_path("/Orders('o-1')/Items('i-1')/Product").unwrap();
+        assert_eq!(
+            result,
+            ODataPath::NavigationProperty {
+                parent: Box::new(ODataPath::NavigationEntity {
+                    parent: Box::new(ODataPath::Entity(
+                        "Orders".into(),
+                        KeyValue::Single("o-1".into())
+                    )),
+                    property: "Items".into(),
+                    key: KeyValue::Single("i-1".into()),
+                }),
+                property: "Product".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_navigation_then_bound_action() {
+        // /Orders('o-1')/Items('i-1')/Temper.RemoveItem
+        let result = parse_path("/Orders('o-1')/Items('i-1')/Temper.RemoveItem").unwrap();
+        assert_eq!(
+            result,
+            ODataPath::BoundAction {
+                parent: Box::new(ODataPath::NavigationEntity {
+                    parent: Box::new(ODataPath::Entity(
+                        "Orders".into(),
+                        KeyValue::Single("o-1".into())
+                    )),
+                    property: "Items".into(),
+                    key: KeyValue::Single("i-1".into()),
+                }),
+                action: "RemoveItem".into(),
+            }
         );
     }
 

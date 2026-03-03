@@ -377,6 +377,36 @@ impl RuntimeContext {
                 )
                 .await
             }
+            "navigate" => {
+                let tenant = expect_string_arg(args, 0, "tenant", method)?;
+                let path = expect_string_arg(args, 1, "path", method)?;
+                let params = args.get(2).and_then(|a| {
+                    let s = String::try_from(a).ok()?;
+                    serde_json::from_str::<serde_json::Map<String, Value>>(&s).ok()
+                });
+
+                // If params present AND path contains a dot → bound action dispatch
+                if let Some(params) = params {
+                    if path.contains('.') {
+                        return self
+                            .temper_request(
+                                &tenant,
+                                Method::POST,
+                                format!("/tdata/{path}"),
+                                Some(Value::Object(params)),
+                            )
+                            .await;
+                    }
+                    // Params but no dot → treat as filtered GET
+                    return self
+                        .temper_request(&tenant, Method::GET, format!("/tdata/{path}"), None)
+                        .await;
+                }
+
+                // No params → GET request (entity or collection)
+                self.temper_request(&tenant, Method::GET, format!("/tdata/{path}"), None)
+                    .await
+            }
             "approve_decision" | "deny_decision" | "set_policy" => Err(format!(
                 "temper.{method}() is not available to agents. \
                  Governance write operations (approve, deny, set_policy) \
@@ -384,7 +414,7 @@ impl RuntimeContext {
             )),
             _ => Err(format!(
                 "unknown temper method '{method}'. Available: start_server, \
-                 list, get, create, action, patch, \
+                 list, get, create, action, patch, navigate, \
                  show_spec, submit_specs, get_policies, \
                  upload_wasm, compile_wasm, \
                  get_decisions, get_decision_status, poll_decision, \

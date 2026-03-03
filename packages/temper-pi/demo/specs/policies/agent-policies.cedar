@@ -46,3 +46,35 @@ forbid(
   action in [Action::"approve_decision", Action::"deny_decision"],
   resource
 ) when { principal is Agent };
+
+// Lead agent: full access to Pipeline, WorkItem, AgentSession
+permit(
+  principal == Agent::"lead-agent",
+  action in [Action::"dispatch_action", Action::"create_entity"],
+  resource in EntityType::"Pipeline"
+);
+
+permit(
+  principal == Agent::"lead-agent",
+  action in [Action::"dispatch_action", Action::"create_entity"],
+  resource in EntityType::"WorkItem"
+);
+
+permit(
+  principal == Agent::"lead-agent",
+  action in [Action::"dispatch_action", Action::"create_entity"],
+  resource in EntityType::"AgentSession"
+);
+
+// Worker agent: limited operations on WorkItem and AgentSession
+permit(
+  principal == Agent::"worker-agent",
+  action == Action::"dispatch_action",
+  resource in EntityType::"WorkItem"
+);
+
+permit(
+  principal == Agent::"worker-agent",
+  action == Action::"dispatch_action",
+  resource in EntityType::"AgentSession"
+);
