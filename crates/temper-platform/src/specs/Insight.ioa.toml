@@ -1,0 +1,29 @@
+[automaton]
+name = "Insight"
+initial = "Open"
+states = ["Open", "Acknowledged", "Actioned", "Dismissed"]
+
+[[action]]
+name = "CreateInsight"
+from = []
+to = "Open"
+kind = "input"
+params = ["observation_id", "category", "signal", "recommendation", "priority_score"]
+
+[[action]]
+name = "Acknowledge"
+from = ["Open"]
+to = "Acknowledged"
+kind = "input"
+
+[[action]]
+name = "MarkActioned"
+from = ["Acknowledged"]
+to = "Actioned"
+kind = "input"
+
+[[action]]
+name = "Dismiss"
+from = ["Open", "Acknowledged"]
+to = "Dismissed"
+kind = "input"

@@ -1,0 +1,40 @@
+[automaton]
+name = "FeatureRequest"
+initial = "Open"
+states = ["Open", "Acknowledged", "Planned", "WontFix", "Resolved"]
+
+[[action]]
+name = "CreateFeatureRequest"
+from = []
+to = "Open"
+kind = "input"
+params = ["category", "description", "frequency", "developer_notes"]
+
+[[action]]
+name = "Acknowledge"
+from = ["Open"]
+to = "Acknowledged"
+kind = "input"
+
+[[action]]
+name = "Plan"
+from = ["Acknowledged"]
+to = "Planned"
+kind = "input"
+
+[[action]]
+name = "WontFix"
+from = ["Acknowledged"]
+to = "WontFix"
+kind = "input"
+
+[[action]]
+name = "Resolve"
+from = ["Planned"]
+to = "Resolved"
+kind = "input"
+
+[[invariant]]
+name = "ResolvedIsTerminal"
+when = ["Resolved"]
+assert = "true"

@@ -9,7 +9,7 @@ use crate::state::pending_decisions::PendingDecision;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use crate::state::wasm_invocation_log::WasmInvocationEntry;
 use temper_observe::wide_event;
-use temper_runtime::scheduler::sim_now;
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{
     AuthorizedWasmHost, ProductionWasmHost, WasmAuthzContext, WasmAuthzGate, WasmHost,
@@ -442,16 +442,32 @@ impl crate::state::ServerState {
         );
         let decision_id = pd.id.clone();
         let _ = self.pending_decision_tx.send(pd.clone());
-        {
-            let state_c = self.clone();
-            tokio::spawn(async move {
-                // determinism-ok: background persist for sync WASM authz path
-                if let Err(e) = state_c.persist_pending_decision(&pd).await {
-                    tracing::error!(error = %e, "failed to persist WASM authz decision");
-                }
-            });
-        }
-
+        let state_c = self.clone();
+        #[rustfmt::skip]
+        tokio::spawn(async move { // determinism-ok: background persist
+            if let Err(e) = state_c.persist_pending_decision(&pd).await {
+                tracing::error!(error = %e, "failed to persist WASM authz decision");
+            }
+        });
+        // Create GovernanceDecision entity in temper-system tenant.
+        let state_c = self.clone();
+        let gd_id = format!("GD-{}", sim_uuid());
+        let gd_params = serde_json::json!({
+            "tenant": entity_ref.tenant.as_str(), "agent_id": "wasm-module",
+            "action_name": "http_call", "resource_type": "HttpEndpoint",
+            "resource_id": integration_name, "denial_reason": error_str,
+            "scope": "narrow", "pending_decision_id": decision_id,
+        });
+        #[rustfmt::skip]
+        tokio::spawn(async move { // determinism-ok: background entity creation
+            let tenant = TenantId::new("temper-system");
+            if let Err(e) = state_c.dispatch_tenant_action(
+                &tenant, "GovernanceDecision", &gd_id,
+                "CreateGovernanceDecision", gd_params, &AgentContext::default(),
+            ).await {
+                tracing::warn!(error = %e, "failed to create GovernanceDecision for WASM denial");
+            }
+        });
         let traj = TrajectoryEntry {
             timestamp: sim_now().to_rfc3339(),
             tenant: entity_ref.tenant.to_string(),
@@ -470,16 +486,13 @@ impl crate::state::ServerState {
             source: Some(TrajectorySource::Authz),
             spec_governed: None,
         };
-        {
-            let state_c = self.clone();
-            tokio::spawn(async move {
-                // determinism-ok: background persist for sync WASM authz path
-                if let Err(e) = state_c.persist_trajectory_entry(&traj).await {
-                    tracing::error!(error = %e, "failed to persist WASM authz trajectory");
-                }
-            });
-        }
-
+        let state_c = self.clone();
+        #[rustfmt::skip]
+        tokio::spawn(async move { // determinism-ok: background persist
+            if let Err(e) = state_c.persist_trajectory_entry(&traj).await {
+                tracing::error!(error = %e, "failed to persist WASM authz trajectory");
+            }
+        });
         Some(decision_id)
     }
 }

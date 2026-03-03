@@ -1,4 +1,9 @@
 //! Record chain validation — ensures the O→P→A→D chain is well-formed.
+//!
+//! **Deprecated**: Chain integrity is now enforced via cross-entity state
+//! guards on IOA entity specs (ADR-0025). Problem.Create requires
+//! Observation in Open/UnderReview, Analysis.Create requires Problem in
+//! Reviewed, etc. This module is retained for backward compatibility.
 
 use crate::records::*;
 use crate::store::RecordStore;

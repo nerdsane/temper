@@ -1,4 +1,11 @@
 //! In-memory record store for evolution records.
+//!
+//! **Deprecated**: Evolution records are now managed as IOA entities in the
+//! `temper-system` tenant (ADR-0025). This store is retained for backward
+//! compatibility during migration. New code should use entity dispatch to
+//! Observation, Problem, Analysis, EvolutionDecision, Insight, and
+//! FeatureRequest entities instead.
+//!
 //! Production deployments would back this with Git + Postgres.
 
 use std::collections::HashMap;

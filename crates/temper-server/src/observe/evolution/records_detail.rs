@@ -3,9 +3,11 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 use temper_evolution::{Decision, DecisionRecord, RecordHeader, RecordStatus, RecordType};
-use temper_runtime::scheduler::sim_now;
+use temper_runtime::scheduler::{sim_now, sim_uuid};
+use temper_runtime::tenant::TenantId;
 use tracing::instrument;
 
+use crate::dispatch::AgentContext;
 use crate::state::ServerState;
 
 /// GET /observe/evolution/records/{id} -- get a single record with chain info.
@@ -145,8 +147,37 @@ pub(crate) async fn handle_decide(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    // Also create an EvolutionDecision entity in temper-system tenant.
+    let system_tenant = TenantId::new("temper-system");
+    let ed_id = format!("ED-{}", sim_uuid());
+    let ed_params = serde_json::json!({
+        "analysis_id": "",
+        "decided_by": d_record.header.created_by,
+        "rationale": d_record.rationale,
+        "verification_summary": "",
+        "legacy_record_id": record_id,
+        "derived_from": id,
+    });
+    // Note: EvolutionDecision.CreateDecision has a cross-entity guard on Analysis,
+    // but the legacy record may not have a corresponding Analysis entity yet.
+    // We dispatch best-effort; failure is non-fatal.
+    if let Err(e) = state
+        .dispatch_tenant_action(
+            &system_tenant,
+            "EvolutionDecision",
+            &ed_id,
+            "CreateDecision",
+            ed_params,
+            &AgentContext::default(),
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "failed to create EvolutionDecision entity (cross-entity guard may have blocked)");
+    }
+
     Ok(Json(serde_json::json!({
         "record_id": record_id,
+        "entity_id": ed_id,
         "decision": format!("{:?}", d_record.decision),
         "derived_from": id,
         "status": "Open",

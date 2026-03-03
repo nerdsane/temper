@@ -6,8 +6,10 @@
 
 use axum::http::HeaderMap;
 use temper_authz::SecurityContext;
-use temper_runtime::scheduler::sim_now;
+use temper_runtime::scheduler::{sim_now, sim_uuid};
+use temper_runtime::tenant::TenantId;
 
+use crate::dispatch::AgentContext;
 use crate::state::{PendingDecision, TrajectoryEntry, TrajectorySource};
 
 /// Extract `X-Temper-*` headers from an axum `HeaderMap` into `(key, value)` pairs
@@ -83,6 +85,36 @@ pub(crate) async fn record_authz_denial(
     // Persist decision to Turso synchronously.
     if let Err(e) = state.persist_pending_decision(&pd).await {
         eprintln!("Warning: failed to persist pending decision {}: {e}", pd.id);
+    }
+
+    // Also create a GovernanceDecision entity in the temper-system tenant.
+    let gd_id = format!("GD-{}", sim_uuid());
+    let gd_params = serde_json::json!({
+        "tenant": tenant,
+        "agent_id": principal_id,
+        "action_name": action,
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "denial_reason": reason,
+        "scope": "narrow",
+        "pending_decision_id": pd.id,
+    });
+    let system_tenant = TenantId::new("temper-system");
+    if let Err(e) = state
+        .dispatch_tenant_action(
+            &system_tenant,
+            "GovernanceDecision",
+            &gd_id,
+            "CreateGovernanceDecision",
+            gd_params,
+            &AgentContext::default(),
+        )
+        .await
+    {
+        tracing::warn!(
+            error = %e,
+            "failed to create GovernanceDecision entity for denial"
+        );
     }
 
     // Record trajectory to Turso synchronously.
