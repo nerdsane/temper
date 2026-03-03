@@ -3,6 +3,7 @@
 //! Provides commands for parsing specifications, generating code,
 //! running model checks, and managing Temper projects.
 
+mod agent;
 mod codegen;
 mod decide;
 mod init;
@@ -82,6 +83,27 @@ enum Commands {
         #[arg(long, default_value = "default")]
         tenant: String,
     },
+    /// Run an autonomous agent on Temper entities
+    Agent {
+        /// Port where Temper HTTP server is running
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+        /// Tenant name
+        #[arg(short, long, default_value = "default")]
+        tenant: String,
+        /// Agent goal (what to accomplish)
+        #[arg(short, long)]
+        goal: String,
+        /// Agent role
+        #[arg(short, long, default_value = "developer")]
+        role: String,
+        /// LLM model to use
+        #[arg(short = 'm', long, default_value = "claude-sonnet-4-20250514")]
+        model: String,
+        /// Resume an existing agent by ID
+        #[arg(long)]
+        agent_id: Option<String>,
+    },
     /// Start the stdio MCP server for Code Mode
     Mcp {
         /// Port where Temper HTTP server is running (omit for self-contained mode)
@@ -138,6 +160,14 @@ async fn main() -> anyhow::Result<()> {
             }
             serve::run(port, apps, storage, storage_explicit, observe).await?
         }
+        Commands::Agent {
+            port,
+            tenant,
+            goal,
+            role,
+            model,
+            agent_id,
+        } => agent::run(port, &tenant, &goal, &role, &model, agent_id).await?,
         Commands::Mcp {
             port,
             app,
@@ -310,6 +340,67 @@ mod tests {
                 ..
             } => {}
             _ => panic!("expected Serve command with default turso storage"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_agent_defaults() {
+        let cli = Cli::parse_from(["temper", "agent", "--goal", "List files"]);
+        match cli.command {
+            Commands::Agent {
+                port,
+                tenant,
+                goal,
+                role,
+                model,
+                agent_id,
+            } => {
+                assert_eq!(port, 3000);
+                assert_eq!(tenant, "default");
+                assert_eq!(goal, "List files");
+                assert_eq!(role, "developer");
+                assert_eq!(model, "claude-sonnet-4-20250514");
+                assert_eq!(agent_id, None);
+            }
+            _ => panic!("expected Agent command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_agent_with_resume() {
+        let cli = Cli::parse_from([
+            "temper",
+            "agent",
+            "--goal",
+            "Build feature",
+            "--role",
+            "engineer",
+            "--model",
+            "claude-opus-4-20250514",
+            "--agent-id",
+            "abc-123",
+            "--port",
+            "8080",
+            "--tenant",
+            "my-app",
+        ]);
+        match cli.command {
+            Commands::Agent {
+                port,
+                tenant,
+                goal,
+                role,
+                model,
+                agent_id,
+            } => {
+                assert_eq!(port, 8080);
+                assert_eq!(tenant, "my-app");
+                assert_eq!(goal, "Build feature");
+                assert_eq!(role, "engineer");
+                assert_eq!(model, "claude-opus-4-20250514");
+                assert_eq!(agent_id, Some("abc-123".to_string()));
+            }
+            _ => panic!("expected Agent command"),
         }
     }
 

@@ -93,6 +93,9 @@ pub fn build_api_router() -> Router<ServerState> {
         )
         // REPL endpoint (Monty sandbox over HTTP)
         .route("/repl", post(handle_repl))
+        // Agent authorization + audit endpoints
+        .route("/authorize", post(handle_authorize))
+        .route("/audit", post(handle_audit))
         // Cross-tenant decision endpoints
         .route("/decisions", get(handle_list_all_decisions))
         .route("/decisions/stream", get(handle_all_decisions_stream))
@@ -981,6 +984,140 @@ async fn handle_all_decisions_stream(
 
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Agent authorization + audit endpoints
+// ---------------------------------------------------------------------------
+
+/// Request body for POST /api/authorize.
+#[derive(serde::Deserialize)]
+struct AuthorizeRequest {
+    agent_id: String,
+    action: String,
+    resource_type: String,
+    resource_id: String,
+    #[serde(default)]
+    context: serde_json::Value,
+}
+
+/// POST /api/authorize — lightweight Cedar authorization check for agent tool calls.
+///
+/// Always returns HTTP 200. The agent handles both outcomes programmatically.
+/// On deny, creates a `PendingDecision` for human review.
+#[instrument(skip_all, fields(otel.name = "POST /api/authorize"))]
+async fn handle_authorize(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<AuthorizeRequest>,
+) -> impl IntoResponse {
+    let security_ctx = security_context_from_headers(&headers, Some(&body.agent_id), None);
+    let resource_attrs = std::collections::BTreeMap::new();
+
+    match state.authorize_with_context(&security_ctx, &body.action, &body.resource_type, &resource_attrs) {
+        Ok(()) => {
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "allowed": true,
+                })),
+            )
+                .into_response()
+        }
+        Err(reason) => {
+            let tenant = headers
+                .get("x-tenant-id")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("default");
+
+            let pd = record_authz_denial(
+                &state,
+                tenant,
+                &security_ctx,
+                Some(&body.agent_id),
+                &body.action,
+                &body.resource_type,
+                &body.resource_id,
+                serde_json::json!({
+                    "agent_id": body.agent_id,
+                    "context": body.context,
+                }),
+                &reason,
+                None,
+                None,
+            )
+            .await;
+
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "allowed": false,
+                    "decision_id": pd.id,
+                    "reason": reason,
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Request body for POST /api/audit.
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct AuditRequest {
+    agent_id: String,
+    action: String,
+    resource_type: String,
+    resource_id: String,
+    success: bool,
+    #[serde(default)]
+    result: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+}
+
+/// POST /api/audit — record a tool invocation in the trajectory log.
+#[instrument(skip_all, fields(otel.name = "POST /api/audit"))]
+async fn handle_audit(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<AuditRequest>,
+) -> impl IntoResponse {
+    let tenant = headers
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("default");
+
+    let entry = TrajectoryEntry {
+        timestamp: sim_now().to_rfc3339(),
+        tenant: tenant.to_string(),
+        entity_type: body.resource_type,
+        entity_id: body.resource_id,
+        action: body.action,
+        success: body.success,
+        from_status: None,
+        to_status: None,
+        error: body.error,
+        agent_id: Some(body.agent_id),
+        session_id: None,
+        authz_denied: None,
+        denied_resource: None,
+        denied_module: None,
+        source: Some(TrajectorySource::Entity),
+        spec_governed: Some(false),
+    };
+
+    if let Err(e) = state.persist_trajectory_entry(&entry).await {
+        tracing::error!(error = %e, "failed to persist audit trajectory entry");
+    }
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "recorded": true })),
+    )
         .into_response()
 }
 
