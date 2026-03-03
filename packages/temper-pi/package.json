@@ -10,7 +10,10 @@
     "dev": "tsc --watch",
     "test": "vitest",
     "demo": "tsx demo/run.ts",
-    "chat": "pi --no-tools --no-extensions -e src/extension.ts"
+    "chat": "sh -c 'set -a; . ./.env 2>/dev/null; set +a; exec pi --no-tools --no-extensions -e src/extension.ts --model \"${TEMPER_MODEL:-claude-sonnet-4-20250514}\"'"
+  },
+  "pi": {
+    "extensions": ["./src/extension.ts"]
   },
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.55.0",

@@ -11,6 +11,8 @@ use temper_runtime::scheduler::sim_now;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
+use tracing::instrument;
+
 use crate::registry::VerificationStatus;
 use crate::state::ServerState;
 
@@ -20,6 +22,7 @@ use super::SimQueryParams;
 ///
 /// Runs all levels (L0 SMT, L1 Model Check, L2 DST, L3 PropTest) and returns results.
 /// Emits per-level `DesignTimeEvent`s via SSE so the UI can show streaming progress.
+#[instrument(skip_all, fields(entity, otel.name = "POST /observe/verify/{entity}"))]
 pub(crate) async fn run_verification(
     State(state): State<ServerState>,
     Path(entity): Path<String>,
@@ -37,6 +40,7 @@ pub(crate) async fn run_verification(
     };
 
     let Some((tenant_id, ioa_source)) = lookup else {
+        tracing::warn!("entity spec not found for verification");
         return Err(StatusCode::NOT_FOUND);
     };
     let tenant = tenant_id.as_str().to_string();
@@ -221,6 +225,7 @@ pub(crate) async fn run_verification(
 /// GET /observe/simulation/{entity}?seed=N&ticks=M -- run deterministic simulation.
 ///
 /// Runs a single-seed simulation with light fault injection and returns the result.
+#[instrument(skip_all, fields(entity, otel.name = "GET /observe/simulation/{entity}"))]
 pub(crate) async fn run_simulation(
     State(state): State<ServerState>,
     Path(entity): Path<String>,
@@ -239,6 +244,7 @@ pub(crate) async fn run_simulation(
     };
 
     let Some(ioa_source) = ioa_source else {
+        tracing::warn!("entity spec not found for simulation");
         return Err(StatusCode::NOT_FOUND);
     };
 
@@ -257,7 +263,10 @@ pub(crate) async fn run_simulation(
         temper_verify::run_simulation_from_ioa(&ioa_source, &config)
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        tracing::error!(error = %e, "simulation task failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(result))
 }
@@ -290,6 +299,7 @@ struct EntityVerificationStatusResponse {
 }
 
 /// GET /observe/verification-status -- all entity verification statuses.
+#[instrument(skip_all, fields(otel.name = "GET /observe/verification-status"))]
 pub(crate) async fn handle_verification_status(
     State(state): State<ServerState>,
 ) -> Json<AllVerificationStatus> {
@@ -370,6 +380,7 @@ pub(crate) async fn handle_verification_status(
 ///
 /// Subscribes to the design-time broadcast channel and streams events
 /// as they happen (spec loaded, verification started/level/done).
+#[instrument(skip_all, fields(otel.name = "GET /observe/design-time/stream"))]
 pub(crate) async fn handle_design_time_stream(
     State(state): State<ServerState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
@@ -429,6 +440,7 @@ pub(super) struct WorkflowsResponse {
 ///
 /// Builds a Temporal-like workflow timeline from the design-time event log,
 /// verification statuses, and trajectory log.
+#[instrument(skip_all, fields(otel.name = "GET /observe/workflows"))]
 pub(crate) async fn handle_workflows(State(state): State<ServerState>) -> Json<WorkflowsResponse> {
     let persisted_events: Option<Vec<crate::state::DesignTimeEvent>> = if let Some(pool) = state
         .event_store
@@ -701,6 +713,7 @@ pub(crate) struct PathsQueryParams {
     pub max_length: Option<usize>,
 }
 
+#[instrument(skip_all, fields(entity, otel.name = "GET /observe/paths/{entity}"))]
 pub(crate) async fn get_paths(
     State(state): State<ServerState>,
     Path(entity): Path<String>,
@@ -718,6 +731,7 @@ pub(crate) async fn get_paths(
         found
     };
     let Some(ioa_source) = ioa_source else {
+        tracing::warn!("entity spec not found for path extraction");
         return Err(StatusCode::NOT_FOUND);
     };
     let target_states: Vec<String> = params
@@ -737,6 +751,9 @@ pub(crate) async fn get_paths(
         temper_verify::extract_paths(&model, &config)
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        tracing::error!(error = %e, "path extraction task failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok(Json(result))
 }

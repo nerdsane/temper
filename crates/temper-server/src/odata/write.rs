@@ -7,6 +7,7 @@ use axum::response::IntoResponse;
 use temper_odata::path::{ODataPath, parse_path};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
+use tracing::instrument;
 
 use super::bindings::dispatch_bound_action;
 use super::common::{
@@ -51,6 +52,7 @@ fn resolve_entity_type_or_404(
     set_name: &str,
 ) -> Result<String, ODataWriteError> {
     resolve_entity_type(state, tenant, set_name).ok_or_else(|| {
+        tracing::warn!(tenant = %tenant, entity_set = %set_name, "entity set not found");
         Box::new(
             odata_error(
                 StatusCode::NOT_FOUND,
@@ -71,6 +73,7 @@ fn resolve_entity_type_or_record_404(
     agent_ctx: &AgentContext,
 ) -> Result<String, ODataWriteError> {
     resolve_entity_type(state, tenant, set_name).ok_or_else(|| {
+        tracing::warn!(tenant = %tenant, entity_set = %set_name, "entity set not found");
         let entry = TrajectoryEntry {
             timestamp: sim_now().to_rfc3339(),
             tenant: tenant.to_string(),
@@ -140,6 +143,7 @@ fn ensure_entity_exists_or_404(
 }
 
 /// Handle POST requests — entity creation and bound actions.
+#[instrument(skip_all, fields(otel.name = "POST /odata/{path}"))]
 pub async fn handle_odata_post(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -283,6 +287,7 @@ pub async fn handle_odata_post(
 }
 
 /// Handle PATCH requests — partial entity update.
+#[instrument(skip_all, fields(otel.name = "PATCH /odata/{path}"))]
 pub async fn handle_odata_patch(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -394,6 +399,7 @@ pub async fn handle_odata_patch(
 }
 
 /// Handle PUT requests — full entity replacement.
+#[instrument(skip_all, fields(otel.name = "PUT /odata/{path}"))]
 pub async fn handle_odata_put(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -484,6 +490,7 @@ pub async fn handle_odata_put(
 }
 
 /// Handle DELETE requests — entity deletion.
+#[instrument(skip_all, fields(otel.name = "DELETE /odata/{path}"))]
 pub async fn handle_odata_delete(
     State(state): State<ServerState>,
     headers: HeaderMap,

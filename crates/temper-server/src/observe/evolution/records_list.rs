@@ -1,6 +1,7 @@
 use axum::extract::{Query, State};
 use axum::response::Json;
 use serde::Deserialize;
+use tracing::instrument;
 
 use crate::state::ServerState;
 
@@ -14,6 +15,7 @@ pub(crate) struct EvolutionRecordParams {
 }
 
 /// GET /observe/evolution/records -- list all evolution records from Turso.
+#[instrument(skip_all, fields(otel.name = "GET /observe/evolution/records"))]
 pub(crate) async fn list_evolution_records(
     State(state): State<ServerState>,
     Query(params): Query<EvolutionRecordParams>,
@@ -79,6 +81,7 @@ pub(crate) async fn list_evolution_records(
 }
 
 /// GET /observe/evolution/insights -- list ranked insights (I-Records) from Turso.
+#[instrument(skip_all, fields(otel.name = "GET /observe/evolution/insights"))]
 pub(crate) async fn list_evolution_insights(
     State(state): State<ServerState>,
 ) -> Json<serde_json::Value> {

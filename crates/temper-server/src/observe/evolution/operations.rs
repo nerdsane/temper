@@ -8,6 +8,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use temper_evolution::FeatureRequestDisposition;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use tracing::instrument;
 
 use crate::insight_generator;
 use crate::sentinel;
@@ -18,6 +19,7 @@ use crate::state::ServerState;
 /// Evaluates all default sentinel rules against current server state.
 /// Any triggered rules generate O-Records and store them in the RecordStore.
 /// Returns a list of alerts (may be empty if all is healthy).
+#[instrument(skip_all, fields(otel.name = "POST /api/evolution/sentinel/check"))]
 pub(crate) async fn handle_sentinel_check(
     State(state): State<ServerState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
@@ -105,6 +107,7 @@ pub(crate) async fn handle_sentinel_check(
 }
 
 /// GET /observe/evolution/unmet-intents -- grouped unmet intents from trajectories.
+#[instrument(skip_all, fields(otel.name = "GET /observe/evolution/unmet-intents"))]
 pub(crate) async fn handle_unmet_intents(
     State(state): State<ServerState>,
 ) -> Json<serde_json::Value> {
@@ -123,6 +126,7 @@ pub(crate) async fn handle_unmet_intents(
 /// GET /observe/evolution/feature-requests -- list feature request records from Turso.
 ///
 /// Supports optional `disposition` query parameter to filter by status.
+#[instrument(skip_all, fields(otel.name = "GET /observe/evolution/feature-requests"))]
 pub(crate) async fn handle_feature_requests(
     State(state): State<ServerState>,
     Query(params): Query<BTreeMap<String, String>>,
@@ -193,6 +197,7 @@ pub(crate) async fn handle_feature_requests(
 }
 
 /// PATCH /observe/evolution/feature-requests/:id -- update disposition + notes in Turso.
+#[instrument(skip_all, fields(otel.name = "PATCH /observe/evolution/feature-requests/{id}"))]
 pub(crate) async fn handle_update_feature_request(
     State(state): State<ServerState>,
     Path(id): Path<String>,
@@ -206,6 +211,7 @@ pub(crate) async fn handle_update_feature_request(
         match d.to_lowercase().as_str() {
             "open" | "acknowledged" | "planned" | "wontfix" | "wont_fix" | "resolved" => {}
             _ => {
+                tracing::warn!(disposition = %d, "invalid disposition value");
                 return Err((StatusCode::BAD_REQUEST, format!("Invalid disposition: {d}")));
             }
         }
@@ -238,6 +244,7 @@ pub(crate) async fn handle_update_feature_request(
 ///
 /// Streams new evolution records and insights as they are generated.
 /// Uses the same broadcast channel pattern as the pending decision stream.
+#[instrument(skip_all, fields(otel.name = "GET /observe/evolution/stream"))]
 pub(crate) async fn handle_evolution_stream(
     State(state): State<ServerState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {

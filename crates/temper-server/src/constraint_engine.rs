@@ -1,6 +1,8 @@
 //! Cross-entity relation and invariant enforcement.
 
-use std::time::Instant;
+use std::time::Instant; // determinism-ok: scoped duration measurement only
+
+use tracing::instrument;
 
 use temper_runtime::tenant::TenantId;
 use temper_spec::cross_invariant::{
@@ -63,6 +65,7 @@ impl ConstraintViolation {
 }
 
 /// Check FK integrity for create/update style writes.
+#[instrument(skip_all, fields(otel.name = "constraint.pre_upsert_relation_checks", tenant = %tenant, entity_type, entity_id, operation))]
 pub async fn pre_upsert_relation_checks(
     state: &ServerState,
     tenant: &TenantId,
@@ -97,6 +100,11 @@ pub async fn pre_upsert_relation_checks(
         };
         if value.is_null() {
             if !edge.nullable {
+                tracing::warn!(
+                    tenant = %tenant_name, entity_type, entity_id, operation,
+                    field = %edge.source_field,
+                    "constraint violation: non-nullable relation field is null"
+                );
                 state.metrics.record_relation_integrity_violation(
                     &tenant_name,
                     entity_type,
@@ -115,6 +123,11 @@ pub async fn pre_upsert_relation_checks(
             continue;
         }
         let Some(target_id) = value.as_str() else {
+            tracing::warn!(
+                tenant = %tenant_name, entity_type, entity_id, operation,
+                field = %edge.source_field,
+                "constraint violation: relation field is not a string ID"
+            );
             state
                 .metrics
                 .record_relation_integrity_violation(&tenant_name, entity_type, operation);
@@ -129,6 +142,11 @@ pub async fn pre_upsert_relation_checks(
             .ensure_entity_loaded(tenant, &edge.to_entity, target_id)
             .await
         {
+            tracing::warn!(
+                tenant = %tenant_name, entity_type, entity_id, operation,
+                target_entity = %edge.to_entity, target_id,
+                "constraint violation: relation target not found"
+            );
             state
                 .metrics
                 .record_relation_integrity_violation(&tenant_name, entity_type, operation);
@@ -148,6 +166,7 @@ pub async fn pre_upsert_relation_checks(
 }
 
 /// Check incoming relation policy before deleting an entity.
+#[instrument(skip_all, fields(otel.name = "constraint.pre_delete_relation_checks", tenant = %tenant, entity_type, entity_id, operation))]
 pub async fn pre_delete_relation_checks(
     state: &ServerState,
     tenant: &TenantId,
@@ -188,6 +207,11 @@ pub async fn pre_delete_relation_checks(
                 let source_fields =
                     serde_json::to_value(&source_state.state.fields).unwrap_or_default();
                 if extract_field_as_str(&source_fields, &edge.source_field) == Some(entity_id) {
+                    tracing::warn!(
+                        tenant = %tenant_name, entity_type, entity_id, operation,
+                        from_entity = %edge.from_entity, source_id = %source_id,
+                        "constraint violation: cannot delete entity referenced by another"
+                    );
                     state.metrics.record_relation_integrity_violation(
                         &tenant_name,
                         entity_type,
@@ -211,6 +235,7 @@ pub async fn pre_delete_relation_checks(
 }
 
 /// Evaluate cross-entity invariants triggered by a write.
+#[instrument(skip_all, fields(otel.name = "constraint.post_write_invariant_checks", tenant = %tenant, entity_type, entity_id, action_name = action, operation))]
 pub async fn post_write_invariant_checks(
     state: &ServerState,
     tenant: &TenantId,
@@ -248,6 +273,10 @@ pub async fn post_write_invariant_checks(
             .metrics
             .record_cross_invariant_check(&tenant_name, entity_type, "evaluated");
         let Some(assertion) = parse_related_status_in_assert(&inv.assertion) else {
+            tracing::warn!(
+                tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
+                "constraint violation: invalid assertion syntax"
+            );
             state.metrics.record_cross_invariant_violation(
                 &tenant_name,
                 &inv.name,
@@ -263,6 +292,11 @@ pub async fn post_write_invariant_checks(
         };
 
         let Some(target_id) = extract_field_as_str(fields, &assertion.source_field) else {
+            tracing::warn!(
+                tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
+                source_field = %assertion.source_field,
+                "constraint violation: source field required by invariant is missing"
+            );
             state.metrics.record_cross_invariant_violation(
                 &tenant_name,
                 &inv.name,
@@ -284,6 +318,11 @@ pub async fn post_write_invariant_checks(
             .ensure_entity_loaded(tenant, &assertion.target_entity, target_id)
             .await
         {
+            tracing::warn!(
+                tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
+                target_entity = %assertion.target_entity, target_id,
+                "constraint violation: related entity not found"
+            );
             state.metrics.record_cross_invariant_violation(
                 &tenant_name,
                 &inv.name,
@@ -333,6 +372,12 @@ pub async fn post_write_invariant_checks(
         };
 
         if !assertion.statuses.iter().any(|s| s == &target_status) {
+            tracing::warn!(
+                tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
+                target_entity = %assertion.target_entity, target_id, target_status = %target_status,
+                expected = ?assertion.statuses,
+                "constraint violation: related entity status mismatch"
+            );
             state.metrics.record_cross_invariant_violation(
                 &tenant_name,
                 &inv.name,

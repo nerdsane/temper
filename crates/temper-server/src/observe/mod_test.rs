@@ -140,68 +140,39 @@ async fn test_get_spec_detail_not_found() {
 }
 
 #[tokio::test]
-async fn test_tenant_decisions_requires_manage_policies() {
+async fn test_tenant_decisions_accessible_without_auth() {
     let state = test_state_with_registry();
-    install_admin_policy(&state);
     let app = build_app_with_state(state);
 
-    let denied = app
-        .clone()
+    // Decision list is accessible without auth headers (consistent with
+    // other observe endpoints).
+    let response = app
         .oneshot(
             Request::get("/api/tenants/default/decisions")
-                .header("x-temper-principal-id", "cust-1")
-                .header("x-temper-principal-kind", "customer")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-
-    let allowed = app
-        .oneshot(
-            Request::get("/api/tenants/default/decisions")
-                .header("x-temper-principal-id", "admin-1")
-                .header("x-temper-principal-kind", "admin")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(allowed.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn test_tenant_decision_stream_requires_manage_policies() {
+async fn test_tenant_decision_stream_accessible_without_auth() {
     let state = test_state_with_registry();
-    install_admin_policy(&state);
     let app = build_app_with_state(state);
 
-    let denied = app
-        .clone()
+    // Decision stream is accessible without auth headers.
+    let response = app
         .oneshot(
             Request::get("/api/tenants/default/decisions/stream")
-                .header("x-temper-principal-id", "cust-1")
-                .header("x-temper-principal-kind", "customer")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-
-    let allowed = app
-        .oneshot(
-            Request::get("/api/tenants/default/decisions/stream")
-                .header("x-temper-principal-id", "admin-1")
-                .header("x-temper-principal-kind", "admin")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(allowed.status(), StatusCode::OK);
-    let ct = allowed
+    assert_eq!(response.status(), StatusCode::OK);
+    let ct = response
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())

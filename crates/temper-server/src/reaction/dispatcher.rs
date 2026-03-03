@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::dispatch::AgentContext;
 use temper_runtime::tenant::TenantId;
 use tracing;
+use tracing::instrument;
 
 use super::registry::ReactionRegistry;
 use super::types::{MAX_REACTION_DEPTH, ReactionResult, TargetResolver};
@@ -34,6 +35,7 @@ impl ReactionDispatcher {
     /// broadcast sent. Reactions are fire-and-forget: failures are logged but
     /// do not roll back the source transition.
     #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(otel.name = "reaction.dispatch", tenant = %tenant, entity_type, entity_id, action_name = action, depth))]
     pub async fn dispatch_reactions(
         &self,
         state: &crate::ServerState,

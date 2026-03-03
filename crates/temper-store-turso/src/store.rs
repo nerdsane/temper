@@ -7,6 +7,7 @@ use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError, storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
+use tracing::instrument;
 
 use crate::{
     TursoSpecVerificationUpdate, TursoTrajectoryInsert, TursoWasmInvocationInsert, schema,
@@ -22,9 +23,11 @@ impl TursoEventStore {
     ///
     /// `url`: `"libsql://your-db.turso.io"` or `"file:local.db"` for local SQLite.
     /// `auth_token`: Turso auth token (`None` for local SQLite).
+    #[instrument(skip_all, fields(otel.name = "turso.new"))]
     pub async fn new(url: &str, auth_token: Option<&str>) -> Result<Self, PersistenceError> {
         let db = if url.starts_with("libsql://") {
             let token = auth_token.ok_or_else(|| {
+                tracing::error!("auth token is required for libsql:// URLs");
                 PersistenceError::Storage("auth token is required for libsql:// URLs".to_string())
             })?;
             Builder::new_remote(url.to_string(), token.to_string())
@@ -49,6 +52,7 @@ impl TursoEventStore {
     /// WAL mode is set in `migrate()` (persists in the DB file). `busy_timeout`
     /// is a per-connection setting — 30 s gives concurrent verification threads
     /// time to wait for the write lock instead of immediately returning SQLITE_BUSY.
+    #[instrument(skip_all, fields(otel.name = "turso.configured_connection"))]
     async fn configured_connection(&self) -> Result<libsql::Connection, PersistenceError> {
         let conn = self.db.connect().map_err(storage_error)?;
         // busy_timeout returns the old value as a row — use query() and drop it.
@@ -60,6 +64,7 @@ impl TursoEventStore {
     }
 
     /// Run schema migrations on connect.
+    #[instrument(skip_all, fields(otel.name = "turso.migrate"))]
     async fn migrate(&self) -> Result<(), PersistenceError> {
         let conn = self.connection()?;
 
@@ -172,6 +177,7 @@ impl TursoEventStore {
     }
 
     /// Upsert a spec source (IOA + CSDL) for a tenant/entity_type.
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "turso.upsert_spec"))]
     pub async fn upsert_spec(
         &self,
         tenant: &str,
@@ -201,6 +207,7 @@ impl TursoEventStore {
     }
 
     /// Persist verification result for a spec.
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "turso.persist_spec_verification"))]
     pub async fn persist_spec_verification(
         &self,
         tenant: &str,
@@ -233,6 +240,7 @@ impl TursoEventStore {
     }
 
     /// Load all persisted specs (for startup recovery).
+    #[instrument(skip_all, fields(otel.name = "turso.load_specs"))]
     pub async fn load_specs(&self) -> Result<Vec<TursoSpecRow>, PersistenceError> {
         let conn = self.configured_connection().await?;
         let mut rows = conn
@@ -271,6 +279,7 @@ impl TursoEventStore {
     }
 
     /// Persist a trajectory entry (all columns including agent/authz fields).
+    #[instrument(skip_all, fields(otel.name = "turso.persist_trajectory"))]
     pub async fn persist_trajectory(
         &self,
         entry: TursoTrajectoryInsert<'_>,
@@ -306,6 +315,7 @@ impl TursoEventStore {
     }
 
     /// Load recent trajectory entries (newest first, up to `limit`).
+    #[instrument(skip_all, fields(otel.name = "turso.load_recent_trajectories"))]
     pub async fn load_recent_trajectories(
         &self,
         limit: i64,
@@ -363,6 +373,7 @@ impl TursoEventStore {
     // -----------------------------------------------------------------------
 
     /// Query trajectory statistics with optional filters.
+    #[instrument(skip_all, fields(otel.name = "turso.query_trajectory_stats"))]
     pub async fn query_trajectory_stats(
         &self,
         entity_type: Option<&str>,
@@ -457,6 +468,7 @@ impl TursoEventStore {
     }
 
     /// Query trajectories for a specific agent.
+    #[instrument(skip_all, fields(agent_id, otel.name = "turso.query_trajectories_by_agent"))]
     pub async fn query_trajectories_by_agent(
         &self,
         agent_id: &str,
@@ -488,6 +500,7 @@ impl TursoEventStore {
     }
 
     /// Query agent summaries (grouped by agent_id).
+    #[instrument(skip_all, fields(otel.name = "turso.query_agent_summaries"))]
     pub async fn query_agent_summaries(
         &self,
         tenant: Option<&str>,
@@ -538,6 +551,7 @@ impl TursoEventStore {
 
     /// Upsert a feature request.
     #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(id, otel.name = "turso.upsert_feature_request"))]
     pub async fn upsert_feature_request(
         &self,
         id: &str,
@@ -563,6 +577,7 @@ impl TursoEventStore {
     }
 
     /// List feature requests with optional disposition filter.
+    #[instrument(skip_all, fields(otel.name = "turso.list_feature_requests"))]
     pub async fn list_feature_requests(
         &self,
         disposition: Option<&str>,
@@ -597,6 +612,7 @@ impl TursoEventStore {
     }
 
     /// Update a feature request's disposition and developer notes.
+    #[instrument(skip_all, fields(id, otel.name = "turso.update_feature_request"))]
     pub async fn update_feature_request(
         &self,
         id: &str,
@@ -620,6 +636,7 @@ impl TursoEventStore {
     // -----------------------------------------------------------------------
 
     /// Insert an evolution record.
+    #[instrument(skip_all, fields(id, record_type, otel.name = "turso.insert_evolution_record"))]
     pub async fn insert_evolution_record(
         &self,
         id: &str,
@@ -641,6 +658,7 @@ impl TursoEventStore {
     }
 
     /// Get a single evolution record by ID.
+    #[instrument(skip_all, fields(id, otel.name = "turso.get_evolution_record"))]
     pub async fn get_evolution_record(
         &self,
         id: &str,
@@ -662,6 +680,7 @@ impl TursoEventStore {
     }
 
     /// List evolution records with optional type and status filters.
+    #[instrument(skip_all, fields(otel.name = "turso.list_evolution_records"))]
     pub async fn list_evolution_records(
         &self,
         record_type: Option<&str>,
@@ -688,6 +707,7 @@ impl TursoEventStore {
     }
 
     /// List ranked insights (Insight type, sorted by priority_score in data).
+    #[instrument(skip_all, fields(otel.name = "turso.list_ranked_insights"))]
     pub async fn list_ranked_insights(&self) -> Result<Vec<EvolutionRecordRow>, PersistenceError> {
         let conn = self.configured_connection().await?;
         let mut rows = conn
@@ -741,6 +761,7 @@ impl TursoEventStore {
 
     /// Insert a design-time event.
     #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "turso.insert_design_time_event"))]
     pub async fn insert_design_time_event(
         &self,
         kind: &str,
@@ -764,6 +785,7 @@ impl TursoEventStore {
     }
 
     /// List recent design-time events for a tenant.
+    #[instrument(skip_all, fields(otel.name = "turso.list_design_time_events"))]
     pub async fn list_design_time_events(
         &self,
         tenant: Option<&str>,
@@ -808,6 +830,7 @@ impl TursoEventStore {
     // -----------------------------------------------------------------------
 
     /// Query decisions for a specific tenant with optional status filter.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.query_decisions"))]
     pub async fn query_decisions(
         &self,
         tenant: &str,
@@ -832,6 +855,7 @@ impl TursoEventStore {
     }
 
     /// Query all decisions across tenants with optional status filter.
+    #[instrument(skip_all, fields(otel.name = "turso.query_all_decisions"))]
     pub async fn query_all_decisions(
         &self,
         status: Option<&str>,
@@ -855,6 +879,7 @@ impl TursoEventStore {
     }
 
     /// Get a single pending decision by ID, returning the full JSON data.
+    #[instrument(skip_all, fields(id, otel.name = "turso.get_pending_decision"))]
     pub async fn get_pending_decision(&self, id: &str) -> Result<Option<String>, PersistenceError> {
         let conn = self.configured_connection().await?;
         let mut rows = conn
@@ -872,6 +897,7 @@ impl TursoEventStore {
     }
 
     /// Upsert tenant-level cross-entity constraint definitions.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.upsert_tenant_constraints"))]
     pub async fn upsert_tenant_constraints(
         &self,
         tenant: &str,
@@ -893,6 +919,7 @@ impl TursoEventStore {
     }
 
     /// Delete tenant-level cross-entity constraint definitions.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.delete_tenant_constraints"))]
     pub async fn delete_tenant_constraints(&self, tenant: &str) -> Result<(), PersistenceError> {
         let conn = self.configured_connection().await?;
         conn.execute(
@@ -905,6 +932,7 @@ impl TursoEventStore {
     }
 
     /// Load all tenant-level cross-entity constraint definitions.
+    #[instrument(skip_all, fields(otel.name = "turso.load_tenant_constraints"))]
     pub async fn load_tenant_constraints(
         &self,
     ) -> Result<Vec<TursoTenantConstraintRow>, PersistenceError> {
@@ -935,6 +963,7 @@ impl TursoEventStore {
     ///
     /// If the module already exists, its version is incremented and the binary
     /// is replaced. Returns the SHA-256 hash of the stored module.
+    #[instrument(skip_all, fields(tenant, module_name, otel.name = "turso.upsert_wasm_module"))]
     pub async fn upsert_wasm_module(
         &self,
         tenant: &str,
@@ -960,6 +989,7 @@ impl TursoEventStore {
     }
 
     /// Load a WASM module by tenant and name.
+    #[instrument(skip_all, fields(tenant, module_name, otel.name = "turso.load_wasm_module"))]
     pub async fn load_wasm_module(
         &self,
         tenant: &str,
@@ -992,6 +1022,7 @@ impl TursoEventStore {
     }
 
     /// Load all WASM modules for a tenant.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.load_all_wasm_modules"))]
     pub async fn load_all_wasm_modules(
         &self,
         tenant: &str,
@@ -1024,6 +1055,7 @@ impl TursoEventStore {
     }
 
     /// Load all WASM modules across all tenants (for startup recovery).
+    #[instrument(skip_all, fields(otel.name = "turso.load_wasm_modules_all_tenants"))]
     pub async fn load_wasm_modules_all_tenants(
         &self,
     ) -> Result<Vec<TursoWasmModuleRow>, PersistenceError> {
@@ -1054,6 +1086,7 @@ impl TursoEventStore {
     }
 
     /// Persist a WASM invocation log entry.
+    #[instrument(skip_all, fields(otel.name = "turso.persist_wasm_invocation"))]
     pub async fn persist_wasm_invocation(
         &self,
         entry: &TursoWasmInvocationInsert<'_>,
@@ -1084,6 +1117,7 @@ impl TursoEventStore {
     }
 
     /// Load recent WASM invocation log entries (newest first, up to `limit`).
+    #[instrument(skip_all, fields(otel.name = "turso.load_recent_wasm_invocations"))]
     pub async fn load_recent_wasm_invocations(
         &self,
         limit: i64,
@@ -1120,6 +1154,7 @@ impl TursoEventStore {
     }
 
     /// Delete a WASM module.
+    #[instrument(skip_all, fields(tenant, module_name, otel.name = "turso.delete_wasm_module"))]
     pub async fn delete_wasm_module(
         &self,
         tenant: &str,
@@ -1151,6 +1186,7 @@ impl TursoEventStore {
     }
 
     /// Upsert a pending decision (insert or update).
+    #[instrument(skip_all, fields(id, tenant, otel.name = "turso.upsert_pending_decision"))]
     pub async fn upsert_pending_decision(
         &self,
         id: &str,
@@ -1169,6 +1205,7 @@ impl TursoEventStore {
     }
 
     /// Load all pending decisions (newest first, up to limit).
+    #[instrument(skip_all, fields(otel.name = "turso.load_pending_decisions"))]
     pub async fn load_pending_decisions(
         &self,
         limit: i64,
@@ -1190,6 +1227,7 @@ impl TursoEventStore {
     }
 
     /// Upsert Cedar policy text for a tenant.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.upsert_tenant_policy"))]
     pub async fn upsert_tenant_policy(
         &self,
         tenant: &str,
@@ -1206,6 +1244,7 @@ impl TursoEventStore {
     }
 
     /// Load all tenant Cedar policies.
+    #[instrument(skip_all, fields(otel.name = "turso.load_tenant_policies"))]
     pub async fn load_tenant_policies(&self) -> Result<Vec<(String, String)>, PersistenceError> {
         let conn = self.configured_connection().await?;
         let mut rows = conn
@@ -1228,6 +1267,7 @@ impl TursoEventStore {
 }
 
 impl EventStore for TursoEventStore {
+    #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
     async fn append(
         &self,
         persistence_id: &str,
@@ -1259,6 +1299,7 @@ impl EventStore for TursoEventStore {
         drop(rows);
 
         if current_seq != expected_sequence {
+            tracing::error!(expected = expected_sequence, actual = current_seq, "concurrency violation on append");
             let _ = tx.rollback().await;
             return Err(PersistenceError::ConcurrencyViolation {
                 expected: expected_sequence,
@@ -1270,9 +1311,15 @@ impl EventStore for TursoEventStore {
         for event in events {
             new_seq += 1;
             let payload_json = serde_json::to_string(&event.payload)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+                .map_err(|e| {
+                    tracing::error!(error = %e, "failed to serialize event payload");
+                    PersistenceError::Serialization(e.to_string())
+                })?;
             let metadata_json = serde_json::to_string(&event.metadata)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+                .map_err(|e| {
+                    tracing::error!(error = %e, "failed to serialize event metadata");
+                    PersistenceError::Serialization(e.to_string())
+                })?;
 
             let insert_result = tx
                 .execute(
@@ -1293,6 +1340,7 @@ impl EventStore for TursoEventStore {
 
             if let Err(e) = insert_result {
                 let msg = e.to_string();
+                tracing::error!(error = %e, "event insert failed");
                 let _ = tx.rollback().await;
                 if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
                     return Err(PersistenceError::ConcurrencyViolation {
@@ -1308,6 +1356,7 @@ impl EventStore for TursoEventStore {
         Ok(new_seq)
     }
 
+    #[instrument(skip_all, fields(persistence_id, otel.name = "turso.read_events"))]
     async fn read_events(
         &self,
         persistence_id: &str,
@@ -1336,12 +1385,19 @@ impl EventStore for TursoEventStore {
             let metadata_json = row.get::<Option<String>>(3).map_err(storage_error)?;
 
             let payload = serde_json::from_str(&payload_json)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+                .map_err(|e| {
+                    tracing::error!(error = %e, "failed to deserialize event payload");
+                    PersistenceError::Serialization(e.to_string())
+                })?;
             let metadata_raw = metadata_json.ok_or_else(|| {
+                tracing::error!("missing event metadata");
                 PersistenceError::Serialization("missing event metadata".to_string())
             })?;
             let metadata: EventMetadata = serde_json::from_str(&metadata_raw)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+                .map_err(|e| {
+                    tracing::error!(error = %e, "failed to deserialize event metadata");
+                    PersistenceError::Serialization(e.to_string())
+                })?;
 
             out.push(PersistenceEnvelope {
                 sequence_nr: seq,
@@ -1354,6 +1410,7 @@ impl EventStore for TursoEventStore {
         Ok(out)
     }
 
+    #[instrument(skip_all, fields(persistence_id, otel.name = "turso.save_snapshot"))]
     async fn save_snapshot(
         &self,
         persistence_id: &str,
@@ -1386,6 +1443,7 @@ impl EventStore for TursoEventStore {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(persistence_id, otel.name = "turso.load_snapshot"))]
     async fn load_snapshot(
         &self,
         persistence_id: &str,
@@ -1414,6 +1472,7 @@ impl EventStore for TursoEventStore {
         Ok(Some((sequence_nr, snapshot)))
     }
 
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.list_entity_ids"))]
     async fn list_entity_ids(
         &self,
         tenant: &str,

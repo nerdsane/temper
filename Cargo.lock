@@ -5387,6 +5387,7 @@ dependencies = [
  "serde_json",
  "temper-runtime",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

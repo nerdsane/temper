@@ -10,6 +10,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
+use tracing::instrument;
+
 use crate::state::ServerState;
 
 /// A notification emitted when an entity transitions to a new state.
@@ -37,6 +39,7 @@ pub struct EntityStateChange {
 ///
 /// Clients connect to `/tdata/$events` and receive a stream of JSON events
 /// for every successful entity state transition.
+#[instrument(skip_all, fields(otel.name = "GET /tdata/$events"))]
 pub async fn handle_events(
     State(state): State<ServerState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {

@@ -1,6 +1,7 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
+use tracing::instrument;
 use temper_spec::automaton::LintSeverity;
 use temper_spec::cross_invariant::{
     CrossInvariantLintSeverity, lint_cross_invariants, parse_cross_invariants,
@@ -20,6 +21,7 @@ use super::verification_stream::build_verification_stream_response;
 /// Reads CSDL and IOA files from `specs_dir`, registers them under `tenant`,
 /// emits design-time SSE events for each entity, and spawns background
 /// verification tasks that stream progress via SSE.
+#[instrument(skip_all, fields(otel.name = "POST /api/specs/load-dir"))]
 pub(crate) async fn handle_load_dir(
     State(state): State<ServerState>,
     Json(body): Json<LoadDirRequest>,

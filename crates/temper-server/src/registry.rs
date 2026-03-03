@@ -8,6 +8,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use tracing::instrument;
+
 use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
@@ -290,6 +292,7 @@ impl SpecRegistry {
     }
 
     /// Fallible variant of [`register_tenant_with_reactions_and_constraints`](Self::register_tenant_with_reactions_and_constraints).
+    #[instrument(skip_all, fields(otel.name = "registry.try_register_tenant_with_reactions_and_constraints"))]
     pub fn try_register_tenant_with_reactions_and_constraints(
         &mut self,
         tenant: impl Into<TenantId>,
@@ -540,6 +543,7 @@ impl SpecRegistry {
     /// Remove a tenant and all its specs from the registry.
     ///
     /// Returns `true` if the tenant was found and removed, `false` otherwise.
+    #[instrument(skip_all, fields(otel.name = "registry.remove_tenant", tenant = %tenant))]
     pub fn remove_tenant(&mut self, tenant: &TenantId) -> bool {
         self.tenants.remove(tenant).is_some()
     }
@@ -558,6 +562,7 @@ impl SpecRegistry {
     }
 
     /// Set verification status for a specific entity type.
+    #[instrument(skip_all, fields(otel.name = "registry.set_verification_status", tenant = %tenant, entity_type))]
     pub fn set_verification_status(
         &mut self,
         tenant: &TenantId,

@@ -8,6 +8,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
+use tracing::instrument;
+
 use crate::dispatch::extract_tenant;
 use crate::state::ServerState;
 
@@ -75,6 +77,7 @@ pub struct WasmInvocationResponse {
 }
 
 /// POST /api/wasm/modules/{module_name} — upload a WASM binary.
+#[instrument(skip_all, fields(module_name, otel.name = "POST /api/wasm/modules/{module_name}"))]
 pub async fn upload_wasm_module(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -85,6 +88,7 @@ pub async fn upload_wasm_module(
 
     // TigerStyle: pre-assertion on module size (10 MB budget)
     if body.len() > temper_wasm::types::MAX_MODULE_SIZE {
+        tracing::warn!(size = body.len(), "WASM module too large");
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
@@ -97,6 +101,7 @@ pub async fn upload_wasm_module(
 
     // Compile and cache
     let hash = state.wasm_engine.compile_and_cache(&body).map_err(|e| {
+        tracing::warn!(error = %e, "WASM compilation failed");
         (
             StatusCode::BAD_REQUEST,
             format!("WASM compilation failed: {e}"),
@@ -134,6 +139,7 @@ pub async fn upload_wasm_module(
 }
 
 /// GET /observe/wasm/modules/{module_name} — module info.
+#[instrument(skip_all, fields(module_name, otel.name = "GET /observe/wasm/modules/{module_name}"))]
 pub async fn get_wasm_module_info(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -149,6 +155,7 @@ pub async fn get_wasm_module_info(
     };
 
     let Some(hash) = hash else {
+        tracing::warn!("WASM module not found");
         return Err((
             StatusCode::NOT_FOUND,
             format!("WASM module '{module_name}' not found for tenant '{tenant}'"),
@@ -165,6 +172,7 @@ pub async fn get_wasm_module_info(
 }
 
 /// DELETE /api/wasm/modules/{module_name} — remove a module.
+#[instrument(skip_all, fields(module_name, otel.name = "DELETE /api/wasm/modules/{module_name}"))]
 pub async fn delete_wasm_module(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -187,6 +195,7 @@ pub async fn delete_wasm_module(
     };
 
     if !removed {
+        tracing::warn!("WASM module not found for deletion");
         return Err((
             StatusCode::NOT_FOUND,
             format!("WASM module '{module_name}' not found for tenant '{tenant}'"),
@@ -219,6 +228,7 @@ pub async fn delete_wasm_module(
 }
 
 /// GET /observe/wasm/modules — list all modules for tenant (with stats).
+#[instrument(skip_all, fields(otel.name = "GET /observe/wasm/modules"))]
 pub async fn list_wasm_modules(
     State(state): State<ServerState>,
     _headers: HeaderMap,
@@ -287,6 +297,7 @@ pub async fn list_wasm_modules(
 }
 
 /// GET /observe/wasm/invocations — query WASM invocation history from Turso.
+#[instrument(skip_all, fields(otel.name = "GET /observe/wasm/invocations"))]
 pub async fn list_wasm_invocations(
     State(state): State<ServerState>,
     Query(params): Query<InvocationQueryParams>,

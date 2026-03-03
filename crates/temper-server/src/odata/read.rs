@@ -6,6 +6,7 @@ use axum::response::IntoResponse;
 use temper_odata::path::{ODataPath, parse_path};
 use temper_odata::query::parse_query_options;
 use temper_runtime::tenant::TenantId;
+use tracing::instrument;
 
 use super::common::{
     extract_key, extract_tenant, has_expand_options, resolve_entity_type, tenant_csdl_xml,
@@ -20,6 +21,7 @@ use temper_runtime::scheduler::sim_now;
 
 /// Record a trajectory entry for an EntitySetNotFound error.
 async fn record_entity_set_not_found(state: &ServerState, tenant: &str, set_name: &str) {
+    tracing::warn!(tenant = %tenant, entity_set = %set_name, "entity set not found");
     let entry = TrajectoryEntry {
         timestamp: sim_now().to_rfc3339(),
         tenant: tenant.to_string(),
@@ -46,6 +48,7 @@ async fn record_entity_set_not_found(state: &ServerState, tenant: &str, set_name
     }
 }
 
+#[instrument(skip_all, fields(tenant = %tenant, otel.name = "GET /odata/{path}"))]
 pub(super) async fn handle_odata_get_for_tenant(
     state: ServerState,
     tenant: TenantId,
@@ -415,6 +418,7 @@ pub(super) async fn handle_odata_get_for_tenant(
 }
 
 /// Handle GET requests.
+#[instrument(skip_all, fields(otel.name = "GET /odata/{path}"))]
 pub async fn handle_odata_get(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -425,6 +429,7 @@ pub async fn handle_odata_get(
     handle_odata_get_for_tenant(state, tenant, path, query_params).await
 }
 
+#[instrument(skip_all, fields(otel.name = "GET /odata"))]
 pub async fn handle_service_document(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -440,6 +445,7 @@ pub async fn handle_service_document(
     }
 }
 
+#[instrument(skip_all, fields(otel.name = "GET /odata/$metadata"))]
 pub async fn handle_metadata(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -450,6 +456,7 @@ pub async fn handle_metadata(
     }
 }
 
+#[instrument(skip_all, fields(otel.name = "GET /odata/hints"))]
 pub async fn handle_hints(State(state): State<ServerState>) -> impl IntoResponse {
     let hints = state.agent_hints.read().unwrap().clone();
     ODataResponse {

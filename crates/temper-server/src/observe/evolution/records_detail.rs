@@ -4,10 +4,12 @@ use axum::response::Json;
 use serde::Deserialize;
 use temper_evolution::{Decision, DecisionRecord, RecordHeader, RecordStatus, RecordType};
 use temper_runtime::scheduler::sim_now;
+use tracing::instrument;
 
 use crate::state::ServerState;
 
 /// GET /observe/evolution/records/{id} -- get a single record with chain info.
+#[instrument(skip_all, fields(otel.name = "GET /observe/evolution/records/{id}"))]
 pub(crate) async fn get_evolution_record(
     State(state): State<ServerState>,
     Path(id): Path<String>,
@@ -44,7 +46,10 @@ pub(crate) async fn get_evolution_record(
                 },
             })))
         }
-        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Ok(None) => {
+            tracing::warn!(record_id = %id, "evolution record not found");
+            Err(StatusCode::NOT_FOUND)
+        }
         Err(e) => {
             tracing::error!(record_id = %id, error = %e, "failed to lookup evolution record");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -66,6 +71,7 @@ pub(crate) struct DecideRequest {
 /// POST /api/evolution/records/{id}/decide -- create a D-Record for a record.
 ///
 /// The target record (by ID) must exist. Creates a DecisionRecord derived from it.
+#[instrument(skip_all, fields(otel.name = "POST /api/evolution/records/{id}/decide"))]
 pub(crate) async fn handle_decide(
     State(state): State<ServerState>,
     Path(id): Path<String>,
@@ -86,6 +92,7 @@ pub(crate) async fn handle_decide(
         .is_some();
 
     if !exists {
+        tracing::warn!(record_id = %id, "target record not found for decide");
         return Err(StatusCode::NOT_FOUND);
     }
 
@@ -93,7 +100,10 @@ pub(crate) async fn handle_decide(
         "approved" | "approve" => Decision::Approved,
         "rejected" | "reject" => Decision::Rejected,
         "deferred" | "defer" => Decision::Deferred,
-        _ => return Err(StatusCode::BAD_REQUEST),
+        _ => {
+            tracing::warn!(decision = %body.decision, "invalid decision value");
+            return Err(StatusCode::BAD_REQUEST);
+        }
     };
 
     // Build the D-Record with DST-safe timestamps.

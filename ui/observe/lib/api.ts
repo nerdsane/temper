@@ -28,6 +28,12 @@ import type {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
+/** Admin headers for Observe UI — trusted admin interface for governance decisions. */
+const ADMIN_HEADERS: Record<string, string> = {
+  "X-Temper-Principal-Id": "observe-ui",
+  "X-Temper-Principal-Kind": "admin",
+};
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -248,7 +254,7 @@ export async function fetchDecisions(tenant: string, params?: {
   if (params?.status) query.set("status", params.status);
   const qs = query.toString();
   const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions${qs ? `?${qs}` : ""}`;
-  const res = await fetchWithRetry(url, { cache: "no-store" });
+  const res = await fetchWithRetry(url, { cache: "no-store", headers: ADMIN_HEADERS });
   if (!res.ok) throw new ApiError(`Failed to fetch decisions: ${res.status}`, res.status);
   return res.json();
 }
@@ -258,7 +264,7 @@ export async function approveDecision(tenant: string, decisionId: string, scope:
   const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions/${encodeURIComponent(decisionId)}/approve`;
   const res = await fetchWithRetry(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...ADMIN_HEADERS },
     body: JSON.stringify({ scope }),
   });
   if (!res.ok) throw new ApiError(`Failed to approve decision: ${res.status}`, res.status);
@@ -267,7 +273,7 @@ export async function approveDecision(tenant: string, decisionId: string, scope:
 /** Deny a pending decision */
 export async function denyDecision(tenant: string, decisionId: string): Promise<void> {
   const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions/${encodeURIComponent(decisionId)}/deny`;
-  const res = await fetchWithRetry(url, { method: "POST" });
+  const res = await fetchWithRetry(url, { method: "POST", headers: ADMIN_HEADERS });
   if (!res.ok) throw new ApiError(`Failed to deny decision: ${res.status}`, res.status);
 }
 
@@ -291,7 +297,7 @@ export async function fetchAllDecisions(params?: {
   if (params?.status) query.set("status", params.status);
   const qs = query.toString();
   const url = `${API_BASE}/api/decisions${qs ? `?${qs}` : ""}`;
-  const res = await fetchWithRetry(url, { cache: "no-store" });
+  const res = await fetchWithRetry(url, { cache: "no-store", headers: ADMIN_HEADERS });
   if (!res.ok) throw new ApiError(`Failed to fetch decisions: ${res.status}`, res.status);
   return res.json();
 }

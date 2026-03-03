@@ -126,7 +126,9 @@ export default function Sidebar() {
             className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-sm text-[13px] font-display transition-colors ${
               isActive(item.href)
                 ? "text-zinc-100 bg-white/[0.06]"
-                : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
+                : item.label === "Decisions" && pendingCount > 0
+                  ? "text-pink-400 bg-pink-500/10 hover:bg-pink-500/15"
+                  : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
             }`}
           >
             <NavIcon icon={item.icon} />

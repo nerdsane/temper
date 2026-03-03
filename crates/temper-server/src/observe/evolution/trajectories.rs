@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 use temper_runtime::scheduler::sim_now;
+use tracing::instrument;
 
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
@@ -26,6 +27,7 @@ pub(crate) struct TrajectoryQueryParams {
 /// - `success_count` / `error_count` / `success_rate`
 /// - `by_action`: per-action breakdown
 /// - `failed_intents`: most recent failed entries (up to `failed_limit`)
+#[instrument(skip_all, fields(otel.name = "GET /observe/trajectories"))]
 pub(crate) async fn handle_trajectories(
     State(state): State<ServerState>,
     Query(params): Query<TrajectoryQueryParams>,
@@ -81,6 +83,7 @@ fn _legacy_postgres_path() {
 ///
 /// Called by the production chat proxy when a user asks for something
 /// that doesn't map to any available action. This feeds the Evolution Engine.
+#[instrument(skip_all, fields(otel.name = "POST /api/evolution/trajectories/unmet"))]
 pub(crate) async fn handle_unmet_intent(
     State(state): State<ServerState>,
     Json(body): Json<serde_json::Value>,

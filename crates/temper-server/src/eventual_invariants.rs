@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 
+use tracing::{Instrument, instrument};
+
 use temper_observe::wide_event;
 use temper_runtime::scheduler::sim_now;
 
@@ -128,12 +130,12 @@ impl EventualInvariantTracker {
 /// The task polls every `interval` and re-evaluates invariants whose deadline
 /// has passed. On convergence, the invariant is resolved; on budget exhaustion,
 /// it is removed and an error is logged.
+#[instrument(skip_all, fields(otel.name = "eventual.spawn_recheck"))]
 pub fn spawn_eventual_recheck(
     state: crate::state::ServerState,
     interval: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        // determinism-ok: background convergence task
+    tokio::spawn(async move { // determinism-ok: background convergence task
         let mut ticker = tokio::time::interval(interval); // determinism-ok: convergence polling
         loop {
             ticker.tick().await;
@@ -144,10 +146,20 @@ pub fn spawn_eventual_recheck(
             };
 
             for (key, inv) in due_items {
+                let recheck_span = tracing::info_span!(
+                    "eventual.recheck_item",
+                    invariant = %inv.name,
+                    tenant = %inv.tenant,
+                    entity_type = %inv.entity_type,
+                    entity_id = %inv.entity_id,
+                    check_count = inv.check_count,
+                );
                 let tenant = temper_runtime::tenant::TenantId::new(&inv.tenant);
 
                 // Re-read the related entity and check if the invariant now holds
-                let converged = check_invariant_convergence(&state, &tenant, &inv).await;
+                let converged = check_invariant_convergence(&state, &tenant, &inv)
+                    .instrument(recheck_span)
+                    .await;
 
                 if converged {
                     if let Ok(mut tracker) = state.eventual_tracker.write() {
@@ -220,7 +232,7 @@ pub fn spawn_eventual_recheck(
                 );
             }
         }
-    })
+    }.instrument(tracing::info_span!("eventual.recheck")))
 }
 
 /// Check if a pending eventual invariant has converged.

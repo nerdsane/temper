@@ -6,6 +6,7 @@ use temper_evolution::records::{
     AnalysisRecord, ObservationClass, ObservationRecord, RecordHeader, RecordType, SolutionOption,
 };
 use temper_runtime::scheduler::sim_now;
+use tracing::instrument;
 
 use crate::authz_helpers::{record_authz_denial, security_context_from_headers};
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
@@ -18,6 +19,7 @@ use super::types::{LoadDirRequest, LoadInlineRequest};
 /// Accepts a JSON body with `tenant` and `specs` (map of filename -> content).
 /// Cedar-gated: requires `submit_specs` action on `SpecRegistry` resource.
 /// Records trajectory for every spec submission (success or denial).
+#[instrument(skip_all, fields(otel.name = "POST /api/specs/load-inline"))]
 pub(crate) async fn handle_load_inline(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -35,7 +37,7 @@ pub(crate) async fn handle_load_inline(
         .collect();
 
     let mut spec_resource_attrs = std::collections::BTreeMap::new();
-    spec_resource_attrs.insert("id".to_string(), serde_json::json!("SpecRegistry"));
+    spec_resource_attrs.insert("id".to_string(), serde_json::json!(tenant));
     for (spec_key, spec_content) in &body.specs {
         if spec_key.ends_with(".ioa.toml")
             && let Ok(automaton) = temper_spec::automaton::parse_automaton(spec_content)
@@ -55,43 +57,24 @@ pub(crate) async fn handle_load_inline(
     );
     if let Err(reason) = authz_result {
         // Record denials and use the first decision ID as the primary chain anchor.
-        let mut decision_ids = Vec::new();
-        if entity_names.is_empty() {
-            let pd = record_authz_denial(
-                &state,
-                &tenant,
-                &security_ctx,
-                None,
-                "submit_specs",
-                "SpecRegistry",
-                &tenant,
-                serde_json::json!({"entity_types": entity_names}),
-                &reason,
-                None,
-                None,
-            )
-            .await;
-            decision_ids.push(pd.id);
-        } else {
-            for entity_name in &entity_names {
-                let pd = record_authz_denial(
-                    &state,
-                    &tenant,
-                    &security_ctx,
-                    None,
-                    "submit_specs",
-                    "SpecRegistry",
-                    entity_name,
-                    serde_json::json!({"entity_type": entity_name}),
-                    &reason,
-                    None,
-                    None,
-                )
-                .await;
-                decision_ids.push(pd.id);
-            }
-        }
-        let primary_decision_id = decision_ids.first().cloned().unwrap_or_default();
+        // Record a single denial per authz check. The resource_id must match
+        // what Cedar evaluated: SpecRegistry::"<tenant>".
+        let pd = record_authz_denial(
+            &state,
+            &tenant,
+            &security_ctx,
+            None,
+            "submit_specs",
+            "SpecRegistry",
+            &tenant,
+            serde_json::json!({"entity_types": entity_names}),
+            &reason,
+            None,
+            None,
+        )
+        .await;
+        let primary_decision_id = pd.id.clone();
+        let decision_ids = vec![pd.id];
 
         // Create O-Record for the denied spec submission.
         let o_record = ObservationRecord {

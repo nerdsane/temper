@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tracing::{Instrument, instrument};
+
 use crate::dispatch::AgentContext;
 use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
@@ -33,6 +35,7 @@ impl crate::state::ServerState {
     ///
     /// After a successful action, also triggers any matching reaction rules
     /// for cross-entity coordination.
+    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_tenant_action", tenant = %tenant, entity_type, entity_id, action_name = action))]
     pub async fn dispatch_tenant_action(
         &self,
         tenant: &TenantId,
@@ -57,6 +60,7 @@ impl crate::state::ServerState {
     }
 
     /// Dispatch with optional blocking integration await.
+    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_tenant_action_ext", tenant = %tenant, entity_type, entity_id, action_name = action))]
     pub async fn dispatch_tenant_action_ext(
         &self,
         tenant: &TenantId,
@@ -138,9 +142,8 @@ impl crate::state::ServerState {
             let eid = entity_id.to_string();
             let action = sched.action.clone();
             let delay = std::time::Duration::from_secs(sched.delay_seconds);
-            tokio::spawn(async move {
-                // determinism-ok: timer delivery is a background side-effect
-                tokio::time::sleep(delay).await;
+            tokio::spawn(async move { // determinism-ok: timer delivery is a background side-effect
+                tokio::time::sleep(delay).await; // determinism-ok: scheduled delay
                 let _ = state
                     .dispatch_tenant_action(
                         &t,
@@ -151,13 +154,14 @@ impl crate::state::ServerState {
                         &AgentContext::default(),
                     )
                     .await;
-            });
+            }.instrument(tracing::info_span!("dispatch.scheduled_actions")));
         }
     }
 
     /// Core dispatch without reaction cascade (used by ReactionDispatcher to
     /// avoid infinite async recursion).
     #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_tenant_action_core", tenant = %tenant, entity_type, entity_id, action_name = action))]
     pub(crate) async fn dispatch_tenant_action_core(
         &self,
         tenant: &TenantId,
@@ -319,8 +323,7 @@ impl crate::state::ServerState {
         if let Some(ref dispatcher) = self.webhook_dispatcher {
             let dispatcher = Arc::clone(dispatcher);
             let entry = trajectory_entry;
-            tokio::spawn(async move {
-                // determinism-ok: external side-effect, no simulation-visible state
+            tokio::spawn(async move { // determinism-ok: external side-effect, no simulation-visible state
                 dispatcher.dispatch(&entry);
             });
         }
