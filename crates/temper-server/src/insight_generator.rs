@@ -327,6 +327,7 @@ pub(crate) fn generate_unmet_intents(
 const FEATURE_REQUEST_THRESHOLD: u64 = 3;
 
 /// Stable dedup key for feature-request descriptions.
+#[allow(dead_code)]
 pub(crate) fn feature_request_dedup_key(description: &str) -> String {
     if let Some(rest) = description.strip_prefix("Agents tried '")
         && let Some((action, _)) = rest.split_once('\'')

@@ -239,33 +239,33 @@ pub async fn run(
     // Pending decisions are now read directly from Turso (single source of truth).
 
     // Hydrate Cedar policies from Turso.
-    if let Some(ref store) = state.server.event_store {
-        if let Some(turso) = store.turso_store() {
-            match turso.load_tenant_policies().await {
-                Ok(rows) if !rows.is_empty() => {
-                    let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-                    for (tenant, policy_text) in &rows {
-                        policies.insert(tenant.clone(), policy_text.clone());
-                    }
-                    // Reload all policies into Cedar engine.
-                    let mut combined = String::new();
-                    for text in policies.values() {
-                        combined.push_str(text);
-                        combined.push('\n');
-                    }
-                    if let Err(e) = state.server.authz.reload_policies(&combined) {
-                        eprintln!("  Warning: failed to reload Cedar policies from Turso: {e}");
-                    } else {
-                        println!(
-                            "  Restored Cedar policies for {} tenants from Turso.",
-                            rows.len()
-                        );
-                    }
+    if let Some(ref store) = state.server.event_store
+        && let Some(turso) = store.turso_store()
+    {
+        match turso.load_tenant_policies().await {
+            Ok(rows) if !rows.is_empty() => {
+                let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+                for (tenant, policy_text) in &rows {
+                    policies.insert(tenant.clone(), policy_text.clone());
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("  Warning: failed to load Cedar policies from Turso: {e}");
+                // Reload all policies into Cedar engine.
+                let mut combined = String::new();
+                for text in policies.values() {
+                    combined.push_str(text);
+                    combined.push('\n');
                 }
+                if let Err(e) = state.server.authz.reload_policies(&combined) {
+                    eprintln!("  Warning: failed to reload Cedar policies from Turso: {e}");
+                } else {
+                    println!(
+                        "  Restored Cedar policies for {} tenants from Turso.",
+                        rows.len()
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("  Warning: failed to load Cedar policies from Turso: {e}");
             }
         }
     }

@@ -59,17 +59,117 @@ METHODS:
 - await temper.get_insights(tenant) — get ranked evolution insights
 - await temper.get_policies(tenant) — get current Cedar policies
 - await temper.patch(tenant, entity_set, id, fields_dict) — update entity fields
+- await temper.compile_wasm(tenant, module_name, rust_source) — compile Rust source into a WASM module and register it
+- await temper.upload_wasm(tenant, module_name, wasm_path) — upload a pre-compiled WASM binary
 
-INTEGRATION FORMAT (declare in IOA specs to gain external capabilities):
-  [[integration]]
-  name = "fetch_data"
-  trigger = "FetchData"
-  type = "wasm"
-  module = "http_fetch"
-  on_success = "FetchSucceeded"
-  on_failure = "FetchFailed"
-  url = "https://api.example.com/{param}"
-  method = "GET"
+IOA SPEC FORMAT — FOLLOW THIS EXACTLY:
+CRITICAL: Use [automaton] (NOT [entity]). Use initial (NOT status/initial_state). Use [[action]] array tables (NOT [actions.Name]).
+
+[automaton]
+name = "EntityName"
+states = ["State1", "State2", "State3"]
+initial = "State1"
+
+[[action]]
+name = "DoSomething"
+kind = "input"
+from = ["State1"]
+to = "State2"
+params = ["Param1"]
+hint = "Description."
+
+[[action]]
+name = "TriggerFetch"
+kind = "input"
+from = ["State1"]
+to = "State2"
+effect = "trigger some_integration"
+
+[[action]]
+name = "FetchSucceeded"
+kind = "input"
+from = ["State2"]
+to = "State3"
+params = ["result_data"]
+
+[[action]]
+name = "FetchFailed"
+kind = "input"
+from = ["State2"]
+to = "State1"
+
+[[invariant]]
+name = "FinalIsFinal"
+when = ["State3"]
+assert = "no_further_transitions"
+
+[[integration]]
+name = "some_integration"
+trigger = "some_integration"
+type = "wasm"
+module = "http_fetch"
+on_success = "FetchSucceeded"
+on_failure = "FetchFailed"
+url = "https://api.example.com/{param}"
+method = "GET"
+
+CSDL FORMAT — REQUIRED alongside IOA specs:
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="MyApp" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="EntityName">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="state" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Default">
+        <EntitySet Name="EntityNames" EntityType="MyApp.EntityName"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>
+
+SUBMIT EXAMPLE:
+await temper.submit_specs(tenant, {"EntityName.ioa.toml": ioa_string, "model.csdl.xml": csdl_string})
+
+CUSTOM WASM MODULES — for capabilities beyond http_fetch:
+The built-in http_fetch module handles simple HTTP GET/POST. For anything else (filesystem, custom transforms, multi-step orchestration), write a custom WASM module in Rust using temper-wasm-sdk:
+
+await temper.compile_wasm(tenant, "my_module", rust_source)
+
+The Rust source uses temper_wasm_sdk::prelude::* and the temper_module! macro:
+
+use temper_wasm_sdk::prelude::*;
+temper_module! {
+    fn run(ctx: Context) -> Result<Value> {
+        // ctx.config — BTreeMap<String, String> from [[integration]] config keys
+        // ctx.trigger_params — JSON Value from the triggering action's params
+        // ctx.entity_state — current entity state snapshot
+        // ctx.http_get(url) -> Result<HttpResponse>
+        // ctx.http_post(url, body) -> Result<HttpResponse>
+        // ctx.http_call(method, url, headers, body) -> Result<HttpResponse>
+        // ctx.get_secret(key) -> Result<String>
+        // ctx.log(level, msg)
+        // HttpResponse has .status (u16) and .body (String)
+        let resp = ctx.http_get(&ctx.config["url"])?;
+        let data: Value = serde_json::from_str(&resp.body)?;
+        Ok(json!({ "result": data }))
+    }
+}
+
+After compile_wasm succeeds, reference the module in [[integration]] sections:
+[[integration]]
+name = "my_custom_op"
+trigger = "my_custom_op"
+type = "wasm"
+module = "my_module"
+on_success = "OpSucceeded"
+on_failure = "OpFailed"
+custom_config_key = "some_value"
+
+On success the returned Value becomes the callback action's params. On error the on_failure action fires with {"error": "..."}.
+Compiler errors are returned for self-correction — fix and resubmit.
 
 EVOLUTION LOOP:
 When something fails (404/409/sandbox error), Temper records it as a trajectory entry.
@@ -178,8 +278,31 @@ url = "https://wttr.in/{city}?format=j1"
 method = "GET"
 \`\`\`
 
-For webhooks, use type = "webhook". For HTTP APIs, use type = "wasm" with module = "http_fetch".
-When you need filesystem access, database queries, email sending, etc., design specs with the appropriate integrations.
+For HTTP APIs, use type = "wasm" with module = "http_fetch" (built-in).
+For anything else (filesystem, custom transforms, multi-step logic), write a custom WASM module:
+
+\`\`\`python
+rust_src = '''
+use temper_wasm_sdk::prelude::*;
+temper_module! {
+    fn run(ctx: Context) -> Result<Value> {
+        // ctx.config — config keys from [[integration]]
+        // ctx.trigger_params — params from triggering action
+        // ctx.http_get(url) / ctx.http_post(url, body) / ctx.http_call(method, url, headers, body)
+        // ctx.get_secret(key) — read secrets
+        // ctx.log(level, msg) — logging
+        // Return Ok(json_value) for on_success callback, Err(string) for on_failure
+        let resp = ctx.http_get(&ctx.config["url"])?;
+        Ok(serde_json::from_str(&resp.body)?)
+    }
+}
+'''
+result = await temper.compile_wasm("${TENANT}", "my_module", rust_src)
+# Returns {"status":"compiled","module":"my_module","hash":"...","size":...} on success
+# Returns compiler errors on failure — fix and retry
+\`\`\`
+
+Then reference it in specs: module = "my_module" in [[integration]] sections.
 
 ## The Evolution Loop
 
