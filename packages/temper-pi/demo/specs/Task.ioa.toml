@@ -45,6 +45,13 @@ initial = ""
 # --- Actions: Task Lifecycle ---
 
 [[action]]
+name = "Create"
+kind = "input"
+from = ["Open"]
+params = ["title", "description", "plan_id"]
+hint = "Initialize task fields when spawned by a plan."
+
+[[action]]
 name = "Claim"
 kind = "input"
 from = ["Open"]

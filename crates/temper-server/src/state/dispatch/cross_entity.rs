@@ -62,19 +62,62 @@ impl crate::state::ServerState {
                 break;
             }
 
-            let target_id = current_fields
-                .get(id_source)
+            let field_value = current_fields.get(id_source);
+            let key = format!("__xref:{}:{}", target_type, id_source);
+
+            // If the field is a list (e.g. child_agent_ids), resolve each element.
+            if let Some(arr) = field_value.and_then(|v| v.as_array()) {
+                if arr.is_empty() {
+                    // Empty list: vacuous truth — guard passes.
+                    result.insert(key, true);
+                    continue;
+                }
+                let mut all_matched = true;
+                for item in arr {
+                    let item_id = item.as_str().unwrap_or("");
+                    if item_id.is_empty() {
+                        continue;
+                    }
+                    lookup_count += 1;
+                    if lookup_count > MAX_CROSS_ENTITY_LOOKUPS {
+                        tracing::warn!(
+                            entity_type,
+                            entity_id,
+                            "cross-entity lookup budget exhausted ({})",
+                            MAX_CROSS_ENTITY_LOOKUPS
+                        );
+                        all_matched = false;
+                        break;
+                    }
+                    if let Some(status) = self
+                        .resolve_entity_status(tenant, target_type, item_id)
+                        .await
+                    {
+                        if !required_statuses.iter().any(|s| s == &status) {
+                            all_matched = false;
+                            break;
+                        }
+                    } else {
+                        all_matched = false;
+                        break;
+                    }
+                }
+                result.insert(key, all_matched);
+                continue;
+            }
+
+            // Scalar field: resolve a single entity ID.
+            let target_id = field_value
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
             if target_id.is_empty() {
-                let key = format!("__xref:{}:{}", target_type, id_source);
-                result.insert(key, false);
+                // Empty string: vacuous truth — guard passes.
+                result.insert(key, true);
                 continue;
             }
 
             lookup_count += 1;
-            let key = format!("__xref:{}:{}", target_type, id_source);
             if let Some(status) = self
                 .resolve_entity_status(tenant, target_type, target_id)
                 .await
@@ -151,8 +194,7 @@ impl crate::state::ServerState {
             let initial_action = req.initial_action.clone();
             let agent = agent_ctx.clone();
 
-            tokio::spawn(async move {
-                // determinism-ok: spawn dispatch is a background side-effect
+            tokio::spawn(async move { // determinism-ok: spawn dispatch is a background side-effect
                 let initial_fields = serde_json::json!({
                     "parent_type": parent_t,
                     "parent_id": parent_i,

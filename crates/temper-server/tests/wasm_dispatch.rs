@@ -97,8 +97,11 @@ async fn build_echo_test_state_with_turso() -> ServerState {
         "file:/tmp/temper-wasm-dispatch-test-{}.db",
         std::process::id()
     );
-    // Clean up any leftover DB from a previous run.
-    let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
+    // Clean up any leftover DB + WAL/SHM files from a previous run.
+    let db_path = db_url.strip_prefix("file:").unwrap_or(&db_url);
+    let _ = std::fs::remove_file(db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
     let turso = TursoEventStore::new(&db_url, None)
         .await
         .expect("create local turso db");

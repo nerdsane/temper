@@ -99,6 +99,8 @@ pub fn build_api_router() -> Router<ServerState> {
         // Cross-tenant decision endpoints
         .route("/decisions", get(handle_list_all_decisions))
         .route("/decisions/stream", get(handle_all_decisions_stream))
+        // Agent progress SSE endpoint
+        .route("/agents/{agent_id}/stream", get(handle_agent_progress_stream))
 }
 
 async fn authorize_tenant_decision_management(
@@ -980,6 +982,39 @@ async fn handle_all_decisions_stream(
             ))
         }
         Err(_) => None,
+    });
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Agent progress SSE endpoint
+// ---------------------------------------------------------------------------
+
+/// GET /api/agents/{agent_id}/stream — SSE for agent progress events.
+#[instrument(skip_all, fields(agent_id, otel.name = "GET /api/agents/{agent_id}/stream"))]
+async fn handle_agent_progress_stream(
+    State(state): State<ServerState>,
+    Path(agent_id): Path<String>,
+    _headers: HeaderMap,
+) -> impl IntoResponse {
+    let rx = state.agent_progress_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(move |result| {
+        match result {
+            Ok(event) => {
+                if event.agent_id != agent_id {
+                    return None;
+                }
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                Some(Ok::<Event, Infallible>(
+                    Event::default().event(&event.kind).data(data),
+                ))
+            }
+            // Lagged receiver: skip missed events and continue.
+            Err(_) => None,
+        }
     });
 
     Sse::new(stream)

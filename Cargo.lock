@@ -4099,12 +4099,14 @@ dependencies = [
  "tokio",
  "tokio-native-tls",
  "tokio-rustls 0.26.4",
+ "tokio-util",
  "tower 0.5.3",
  "tower-http 0.6.8",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots 1.0.6",
 ]
@@ -5081,6 +5083,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
+name = "temper-agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "temper-sdk",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "temper-authz"
 version = "0.1.0"
 dependencies = [
@@ -5098,14 +5118,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
+ "bytes",
  "chrono",
  "clap",
  "dirs",
  "dotenvy",
+ "futures-core",
  "reqwest",
  "serde",
  "serde_json",
  "sqlx",
+ "temper-agent-runtime",
  "temper-codegen",
  "temper-evolution",
  "temper-jit",
@@ -5113,6 +5136,7 @@ dependencies = [
  "temper-observe",
  "temper-platform",
  "temper-runtime",
+ "temper-sdk",
  "temper-server",
  "temper-spec",
  "temper-store-postgres",
@@ -5121,6 +5145,7 @@ dependencies = [
  "temper-verify",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "uuid",
 ]
 
@@ -5147,6 +5172,24 @@ dependencies = [
  "temper-spec",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "temper-executor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "temper-agent-runtime",
+ "temper-sdk",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -5284,6 +5327,21 @@ dependencies = [
  "tokio-test",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "temper-sdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-test",
+ "tracing",
 ]
 
 [[package]]
@@ -6309,6 +6367,19 @@ checksum = "3f9dca005e69bf015e45577e415b9af8c67e8ee3c0e38b5b0add5aa92581ed5c"
 dependencies = [
  "leb128fmt",
  "wasmparser 0.245.1",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

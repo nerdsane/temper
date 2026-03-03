@@ -23,6 +23,9 @@ members = [
     "crates/temper-platform",
     "crates/temper-wasm",
     "crates/temper-wasm-sdk",
+    "crates/temper-sdk",
+    "crates/temper-agent-runtime",
+    "crates/temper-executor",
     "reference-apps/ecommerce",
     "reference-apps/oncall",
 ]
@@ -96,7 +99,7 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # HTTP client (for ClickHouse adapter + LLM API calls)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 
 # Testing
 tokio-test = "0.4"
@@ -125,6 +128,8 @@ temper-optimize = { path = "crates/temper-optimize" }
 temper-platform = { path = "crates/temper-platform" }
 temper-wasm = { path = "crates/temper-wasm" }
 temper-wasm-sdk = { path = "crates/temper-wasm-sdk" }
+temper-sdk = { path = "crates/temper-sdk" }
+temper-agent-runtime = { path = "crates/temper-agent-runtime" }
 
 # WASM runtime
 wasmtime = { version = "29", features = ["component-model"] }

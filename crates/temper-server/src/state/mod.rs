@@ -39,6 +39,29 @@ use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
 use temper_wasm::WasmEngine;
 
+/// An agent progress event for remote observation via SSE.
+///
+/// These events are broadcast so that the executor (or any observer) can
+/// track agent activity in real time without polling.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentProgressEvent {
+    /// Event kind: "tool_call_started", "tool_call_completed",
+    /// "task_started", "task_completed", "agent_completed".
+    pub kind: String,
+    /// The agent ID this event relates to.
+    pub agent_id: String,
+    /// Optional tool call ID (for tool_call_* events).
+    pub tool_call_id: Option<String>,
+    /// Optional tool name (for tool_call_* events).
+    pub tool_name: Option<String>,
+    /// Optional task ID (for task_* events).
+    pub task_id: Option<String>,
+    /// Optional result or status message.
+    pub message: Option<String>,
+    /// ISO-8601 timestamp when the event was created.
+    pub timestamp: String,
+}
+
 /// A design-time event emitted during spec loading and verification.
 ///
 /// These events are broadcast via SSE so the observe UI can show
@@ -66,8 +89,7 @@ pub struct DesignTimeEvent {
 }
 
 fn env_bool(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        // determinism-ok: read once at startup, not per simulation step
+    match std::env::var(name) { // determinism-ok: read once at startup, not per simulation step
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "0" | "false" | "off" | "no" => false,
             "1" | "true" | "on" | "yes" => true,
@@ -155,6 +177,9 @@ pub struct ServerState {
     /// Per-tenant Cedar policy text (tenant -> policy text).
     pub tenant_policies: Arc<RwLock<BTreeMap<String, String>>>,
     pub secrets_vault: Option<Arc<SecretsVault>>,
+    /// Broadcast channel for agent progress events (SSE subscriptions).
+    /// // determinism-ok: broadcast channel for external observation only
+    pub agent_progress_tx: Arc<tokio::sync::broadcast::Sender<AgentProgressEvent>>,
     /// Listening port for HTTP REPL self-referencing calls.
     pub listen_port: Arc<std::sync::OnceLock<u16>>,
 }
@@ -176,9 +201,10 @@ impl ServerState {
             }
         }
 
-        let (event_tx, _) = tokio::sync::broadcast::channel(256);
-        let (design_time_tx, _) = tokio::sync::broadcast::channel(256);
-        let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256);
+        let (event_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
+        let (design_time_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
+        let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
+        let (agent_progress_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let state = Self {
             actor_system: Arc::new(system),
             csdl: Arc::new(csdl),
@@ -213,6 +239,7 @@ impl ServerState {
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             secrets_vault: None,
+            agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             listen_port: Arc::new(std::sync::OnceLock::new()),
         };
 
@@ -293,9 +320,10 @@ impl ServerState {
     /// Use this when the registry must be shared with another component
     /// (e.g. `PlatformState`) so that writes are visible to dispatch.
     pub fn from_registry_shared(system: ActorSystem, registry: Arc<RwLock<SpecRegistry>>) -> Self {
-        let (event_tx, _) = tokio::sync::broadcast::channel(256);
-        let (design_time_tx, _) = tokio::sync::broadcast::channel(256);
-        let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256);
+        let (event_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
+        let (design_time_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
+        let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
+        let (agent_progress_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let state = Self {
             actor_system: Arc::new(system),
             csdl: Arc::new(CsdlDocument {
@@ -333,6 +361,7 @@ impl ServerState {
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             secrets_vault: None,
+            agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             listen_port: Arc::new(std::sync::OnceLock::new()),
         };
         state.register_builtin_wasm_modules();

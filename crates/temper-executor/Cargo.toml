@@ -1,0 +1,25 @@
+[package]
+name = "temper-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Temper Agent Executor — headless agent runner that watches for and claims Agent entities"
+
+[[bin]]
+name = "temper-executor"
+path = "src/main.rs"
+
+[dependencies]
+temper-agent-runtime = { path = "../temper-agent-runtime" }
+temper-sdk = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+futures-util = "0.3"

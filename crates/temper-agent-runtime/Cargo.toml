@@ -1,0 +1,21 @@
+[package]
+name = "temper-agent-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Temper Agent Runtime — core agent execution loop with pluggable LLM providers and tool registries"
+
+[dependencies]
+temper-sdk = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+futures-core = "0.3"
+bytes = "1"

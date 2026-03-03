@@ -24,6 +24,8 @@ temper-store-postgres = { workspace = true }
 temper-store-turso = { workspace = true }
 temper-store-redis = { workspace = true }
 temper-evolution = { workspace = true }
+temper-sdk = { workspace = true }
+temper-agent-runtime = { workspace = true }
 sqlx = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
@@ -36,6 +38,9 @@ chrono = { workspace = true }
 dirs = "6"
 dotenvy = { workspace = true }
 uuid = { workspace = true }
+tokio-stream = { workspace = true }
+futures-core = "0.3"
+bytes = "1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -96,6 +96,9 @@
         <Property Name="result" Type="Edm.String"/>
         <Property Name="block_reason" Type="Edm.String"/>
         <Property Name="conversation" Type="Edm.String"/>
+        <Property Name="executor_id" Type="Edm.String"/>
+        <Property Name="child_agent_ids" Type="Collection(Edm.String)"/>
+        <Property Name="last_child_id" Type="Edm.String"/>
         <NavigationProperty Name="Task" Type="Temper.Task" Nullable="true">
           <ReferentialConstraint Property="task_id" ReferencedProperty="id"/>
         </NavigationProperty>
