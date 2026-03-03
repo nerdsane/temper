@@ -40,18 +40,9 @@ impl TemperClient {
     }
 
     /// Create an Agent entity and transition it to Working.
-    async fn create_agent(
-        &self,
-        id: &str,
-        role: &str,
-        goal: &str,
-        model: &str,
-    ) -> Result<()> {
+    async fn create_agent(&self, id: &str, role: &str, goal: &str, model: &str) -> Result<()> {
         // Create entity.
-        let url = format!(
-            "{}/tdata/Agents",
-            self.base_url
-        );
+        let url = format!("{}/tdata/Agents", self.base_url);
         let body = json!({ "id": id });
         self.client
             .post(&url)
@@ -77,10 +68,7 @@ impl TemperClient {
 
     /// Get an Agent entity's current state.
     async fn get_agent(&self, id: &str) -> Result<serde_json::Value> {
-        let url = format!(
-            "{}/tdata/Agents('{id}')",
-            self.base_url
-        );
+        let url = format!("{}/tdata/Agents('{id}')", self.base_url);
         let resp = self
             .client
             .get(&url)
@@ -105,10 +93,7 @@ impl TemperClient {
         action: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let url = format!(
-            "{}/tdata/Agents('{id}')/Temper.{action}",
-            self.base_url
-        );
+        let url = format!("{}/tdata/Agents('{id}')/Temper.{action}", self.base_url);
         let resp = self
             .client
             .post(&url)
@@ -139,10 +124,7 @@ impl TemperClient {
         resource_id: &str,
     ) -> Result<String> {
         let tc_id = uuid::Uuid::now_v7().to_string();
-        let url = format!(
-            "{}/tdata/ToolCalls",
-            self.base_url
-        );
+        let url = format!("{}/tdata/ToolCalls", self.base_url);
         let body = json!({
             "id": tc_id,
             "agent_id": agent_id,
@@ -176,10 +158,7 @@ impl TemperClient {
         action: &str,
         params: serde_json::Value,
     ) -> Result<()> {
-        let url = format!(
-            "{}/tdata/ToolCalls('{id}')/Temper.{action}",
-            self.base_url
-        );
+        let url = format!("{}/tdata/ToolCalls('{id}')/Temper.{action}", self.base_url);
         let resp = self
             .client
             .post(&url)
@@ -225,8 +204,10 @@ impl TemperClient {
             .await
             .context("Failed to call /api/authorize")?;
 
-        let resp_json: serde_json::Value =
-            resp.json().await.context("Failed to parse authorize response")?;
+        let resp_json: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse authorize response")?;
 
         Ok(AuthzResponse {
             allowed: resp_json
@@ -263,8 +244,7 @@ impl TemperClient {
                 .await
                 .context("Failed to poll decisions")?;
 
-            let body: serde_json::Value =
-                resp.json().await.context("Failed to parse decisions")?;
+            let body: serde_json::Value = resp.json().await.context("Failed to parse decisions")?;
 
             let decisions = body
                 .get("decisions")
@@ -279,10 +259,7 @@ impl TemperClient {
 
             if !still_pending {
                 // Decision was resolved — check if approved.
-                let all_url = format!(
-                    "{}/api/tenants/{}/decisions",
-                    self.base_url, self.tenant
-                );
+                let all_url = format!("{}/api/tenants/{}/decisions", self.base_url, self.tenant);
                 let all_resp = self
                     .client
                     .get(&all_url)
@@ -339,7 +316,12 @@ async fn execute_tool_call(
 
     // 2. Authorize via Cedar.
     let authz = client
-        .authorize(agent_id, &cedar.action, &cedar.resource_type, &cedar.resource_id)
+        .authorize(
+            agent_id,
+            &cedar.action,
+            &cedar.resource_type,
+            &cedar.resource_id,
+        )
         .await?;
 
     if !authz.allowed {
@@ -513,7 +495,11 @@ pub async fn run(
             // Checkpoint and complete.
             let conv_json = serde_json::to_string(&messages).unwrap_or_default();
             if let Err(e) = client
-                .agent_action(&agent_id, "Checkpoint", json!({ "conversation": conv_json }))
+                .agent_action(
+                    &agent_id,
+                    "Checkpoint",
+                    json!({ "conversation": conv_json }),
+                )
                 .await
             {
                 eprintln!("Warning: checkpoint failed: {e}");
@@ -576,15 +562,10 @@ pub async fn run(
                     println!("  Use `temper decide` to approve or deny.");
 
                     // Transition agent to Blocked.
-                    let reason = format!(
-                        "Tool '{tool_name}' denied. Decision {decision_id} pending."
-                    );
+                    let reason =
+                        format!("Tool '{tool_name}' denied. Decision {decision_id} pending.");
                     if let Err(e) = client
-                        .agent_action(
-                            &agent_id,
-                            "Block",
-                            json!({ "reason": reason }),
-                        )
+                        .agent_action(&agent_id, "Block", json!({ "reason": reason }))
                         .await
                     {
                         eprintln!("Warning: block transition failed: {e}");
@@ -604,17 +585,13 @@ pub async fn run(
                             eprintln!("Warning: ToolCall retry transition failed: {e}");
                         }
                         // Unblock agent.
-                        if let Err(e) = client
-                            .agent_action(&agent_id, "Unblock", json!({}))
-                            .await
-                        {
+                        if let Err(e) = client.agent_action(&agent_id, "Unblock", json!({})).await {
                             eprintln!("Warning: unblock transition failed: {e}");
                         }
 
                         // Re-execute the tool call.
                         let retry_result =
-                            execute_tool_call(&client, &agent_id, tool_name, tool_input)
-                                .await?;
+                            execute_tool_call(&client, &agent_id, tool_name, tool_input).await?;
                         match retry_result {
                             ToolResult::Success(output) => {
                                 tool_results.push(ContentBlock::ToolResult {
@@ -658,9 +635,7 @@ pub async fn run(
                         {
                             eprintln!("Warning: fail transition failed: {e}");
                         }
-                        anyhow::bail!(
-                            "Agent failed: tool '{tool_name}' denied by human"
-                        );
+                        anyhow::bail!("Agent failed: tool '{tool_name}' denied by human");
                     }
                 }
             }
@@ -675,7 +650,11 @@ pub async fn run(
         // Checkpoint conversation after each turn.
         let conv_json = serde_json::to_string(&messages).unwrap_or_default();
         if let Err(e) = client
-            .agent_action(&agent_id, "Checkpoint", json!({ "conversation": conv_json }))
+            .agent_action(
+                &agent_id,
+                "Checkpoint",
+                json!({ "conversation": conv_json }),
+            )
             .await
         {
             eprintln!("Warning: checkpoint failed: {e}");

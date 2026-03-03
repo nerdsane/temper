@@ -57,8 +57,7 @@ pub struct AnthropicClient {
 impl AnthropicClient {
     /// Create a new client reading `ANTHROPIC_API_KEY` from the environment.
     pub fn new(model: &str) -> Result<Self> {
-        let api_key =
-            std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?;
+        let api_key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?;
         Ok(Self {
             client: reqwest::Client::new(),
             api_key,

@@ -175,7 +175,10 @@ pub async fn execute_tool(tool_name: &str, tool_input: &serde_json::Value) -> Re
             tokio::fs::write(path, content)
                 .await
                 .with_context(|| format!("Failed to write file: {path}"))?;
-            Ok(format!("Written {len} bytes to {path}", len = content.len()))
+            Ok(format!(
+                "Written {len} bytes to {path}",
+                len = content.len()
+            ))
         }
         "file_list" => {
             let path = tool_input

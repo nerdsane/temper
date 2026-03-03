@@ -1015,16 +1015,19 @@ async fn handle_authorize(
     let security_ctx = security_context_from_headers(&headers, Some(&body.agent_id), None);
     let resource_attrs = std::collections::BTreeMap::new();
 
-    match state.authorize_with_context(&security_ctx, &body.action, &body.resource_type, &resource_attrs) {
-        Ok(()) => {
-            (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({
-                    "allowed": true,
-                })),
-            )
-                .into_response()
-        }
+    match state.authorize_with_context(
+        &security_ctx,
+        &body.action,
+        &body.resource_type,
+        &resource_attrs,
+    ) {
+        Ok(()) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "allowed": true,
+            })),
+        )
+            .into_response(),
         Err(reason) => {
             let tenant = headers
                 .get("x-tenant-id")
