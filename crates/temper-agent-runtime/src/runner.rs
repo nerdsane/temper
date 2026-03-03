@@ -102,6 +102,19 @@ impl AgentRunner {
         self.execute_agent_loop(agent_id, goal, role, model).await
     }
 
+    /// Complete an agent (transition to terminal state).
+    pub async fn complete_agent(&self, agent_id: &str) -> Result<()> {
+        self.client
+            .action(
+                "Agents",
+                agent_id,
+                "Complete",
+                json!({ "result": "interactive session ended" }),
+            )
+            .await?;
+        Ok(())
+    }
+
     // ── Internal helpers ────────────────────────────────────────────────
 
     /// Create an Agent entity and transition it to Working.
@@ -605,6 +618,67 @@ impl AgentRunner {
                 Ok(ToolResult::Error(e.to_string()))
             }
         }
+    }
+
+    /// Run a single conversational turn for interactive mode.
+    ///
+    /// Pushes the user message onto `messages`, runs the LLM tool-call loop
+    /// until it returns text (end_turn), and returns the assistant's response.
+    /// No plan decomposition — the user is the planner in interactive mode.
+    pub async fn run_turn(
+        &self,
+        agent_id: &str,
+        system_prompt: &str,
+        user_message: &str,
+        messages: &mut Vec<Message>,
+    ) -> Result<String> {
+        // Build tool schemas.
+        let tool_defs = self.tools.list_tools();
+        let tool_schemas: Vec<serde_json::Value> = tool_defs
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                })
+            })
+            .collect();
+
+        // Push user message.
+        messages.push(Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: user_message.to_string(),
+            }],
+        });
+
+        // Run tool-call loop (max 30 turns).
+        let result = self
+            .run_task_loop(agent_id, system_prompt, &tool_schemas, messages, 30)
+            .await?;
+
+        Ok(result)
+    }
+
+    /// Create a new agent entity for interactive mode and return its ID.
+    pub async fn create_interactive_agent(&self, role: &str, model: &str) -> Result<String> {
+        let agent_id = uuid::Uuid::now_v7().to_string();
+        self.client
+            .create("Agents", json!({ "id": &agent_id }))
+            .await?;
+        self.client
+            .action(
+                "Agents",
+                &agent_id,
+                "Assign",
+                json!({ "role": role, "goal": "interactive session", "model": model }),
+            )
+            .await?;
+        self.client
+            .action("Agents", &agent_id, "Start", json!({}))
+            .await?;
+        Ok(agent_id)
     }
 
     /// Checkpoint the agent's conversation state.

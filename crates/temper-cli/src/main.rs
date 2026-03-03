@@ -91,9 +91,9 @@ enum Commands {
         /// Tenant name
         #[arg(short, long, default_value = "default")]
         tenant: String,
-        /// Agent goal (what to accomplish)
+        /// Agent goal (omit for interactive REPL)
         #[arg(short, long)]
-        goal: String,
+        goal: Option<String>,
         /// Agent role
         #[arg(short, long, default_value = "developer")]
         role: String,
@@ -180,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
             agent::run(
                 port,
                 &tenant,
-                &goal,
+                goal.as_deref(),
                 &role,
                 &model,
                 agent_id,
@@ -379,7 +379,7 @@ mod tests {
             } => {
                 assert_eq!(port, 3000);
                 assert_eq!(tenant, "default");
-                assert_eq!(goal, "List files");
+                assert_eq!(goal, Some("List files".to_string()));
                 assert_eq!(role, "developer");
                 assert_eq!(model, "claude-sonnet-4-20250514");
                 assert_eq!(agent_id, None);
@@ -390,6 +390,16 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn test_cli_parse_agent_interactive() {
+        let cli = Cli::parse_from(["temper", "agent"]);
+        match cli.command {
+            Commands::Agent { goal, .. } => {
+                assert_eq!(goal, None);
+            }
+            _ => panic!("expected Agent command"),
+        }
+    }
     fn test_cli_parse_agent_with_resume() {
         let cli = Cli::parse_from([
             "temper",
@@ -419,7 +429,7 @@ mod tests {
             } => {
                 assert_eq!(port, 8080);
                 assert_eq!(tenant, "my-app");
-                assert_eq!(goal, "Build feature");
+                assert_eq!(goal, Some("Build feature".to_string()));
                 assert_eq!(role, "engineer");
                 assert_eq!(model, "claude-opus-4-20250514");
                 assert_eq!(agent_id, Some("abc-123".to_string()));

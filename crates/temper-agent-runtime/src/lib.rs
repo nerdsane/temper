@@ -24,7 +24,7 @@
 pub mod providers;
 pub mod runner;
 pub mod tools;
-
+pub mod sandbox;
 pub use providers::LlmProvider;
 pub use providers::anthropic::AnthropicProvider;
 pub use providers::codex::CodexProvider;
@@ -32,3 +32,5 @@ pub use runner::AgentRunner;
 pub use tools::local::LocalToolRegistry;
 pub use tools::temper::TemperToolRegistry;
 pub use tools::{ToolDef, ToolRegistry, ToolResult};
+pub use sandbox::AgentSandbox;
+pub use tools::sandbox::SandboxToolRegistry;

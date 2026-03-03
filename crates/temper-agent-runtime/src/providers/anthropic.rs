@@ -274,7 +274,6 @@ fn extract_deltas(data: &str) -> (Option<String>, Option<String>) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
