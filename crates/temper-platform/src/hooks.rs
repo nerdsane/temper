@@ -156,10 +156,7 @@ fn handle_generate_cedar_policy(
         .get("scope")
         .and_then(|v| v.as_str())
         .unwrap_or("narrow");
-    let tenant = params
-        .get("tenant")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let tenant = params.get("tenant").and_then(|v| v.as_str()).unwrap_or("");
 
     if agent_id.is_empty() || action_name.is_empty() || resource_type.is_empty() {
         return Err(format!(
@@ -167,7 +164,8 @@ fn handle_generate_cedar_policy(
         ));
     }
 
-    let generated_policy = generate_cedar_permit(agent_id, action_name, resource_type, resource_id, scope);
+    let generated_policy =
+        generate_cedar_permit(agent_id, action_name, resource_type, resource_id, scope);
 
     tracing::info!(
         entity_id = entity_id,
@@ -261,7 +259,8 @@ mod tests {
 
     #[test]
     fn test_generate_cedar_permit_narrow() {
-        let policy = generate_cedar_permit("agent-1", "submitOrder", "Order", "order-123", "narrow");
+        let policy =
+            generate_cedar_permit("agent-1", "submitOrder", "Order", "order-123", "narrow");
         assert!(policy.contains("Agent::\"agent-1\""));
         assert!(policy.contains("Action::\"submitOrder\""));
         assert!(policy.contains("Order::\"order-123\""));
@@ -269,7 +268,8 @@ mod tests {
 
     #[test]
     fn test_generate_cedar_permit_medium() {
-        let policy = generate_cedar_permit("agent-1", "submitOrder", "Order", "order-123", "medium");
+        let policy =
+            generate_cedar_permit("agent-1", "submitOrder", "Order", "order-123", "medium");
         assert!(policy.contains("Agent::\"agent-1\""));
         assert!(policy.contains("Action::\"submitOrder\""));
         assert!(policy.contains("resource is Order"));
