@@ -100,7 +100,10 @@ pub fn build_api_router() -> Router<ServerState> {
         .route("/decisions", get(handle_list_all_decisions))
         .route("/decisions/stream", get(handle_all_decisions_stream))
         // Agent progress SSE endpoint
-        .route("/agents/{agent_id}/stream", get(handle_agent_progress_stream))
+        .route(
+            "/agents/{agent_id}/stream",
+            get(handle_agent_progress_stream),
+        )
 }
 
 async fn authorize_tenant_decision_management(

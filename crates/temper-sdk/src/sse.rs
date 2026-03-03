@@ -18,9 +18,7 @@ pub fn parse_sse_stream(
             loop {
                 match stream.next().await {
                     Some(Ok(chunk)) => {
-                        buffer.push_str(
-                            &String::from_utf8_lossy(&chunk),
-                        );
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                         // Process complete lines.
                         while let Some(newline_pos) = buffer.find('\n') {
@@ -101,8 +99,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_sse_empty_stream() {
-        let byte_stream =
-            stream::iter(Vec::<reqwest::Result<bytes::Bytes>>::new());
+        let byte_stream = stream::iter(Vec::<reqwest::Result<bytes::Bytes>>::new());
         let mut events = Box::pin(parse_sse_stream(byte_stream));
         assert!(events.next().await.is_none());
     }

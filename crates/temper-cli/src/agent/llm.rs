@@ -69,7 +69,6 @@ impl AnthropicClient {
     }
 
     /// Send a messages request and return the parsed response (non-streaming).
-    #[allow(dead_code)]
     pub async fn send(
         &self,
         system: &str,
@@ -242,7 +241,9 @@ impl AnthropicClient {
                             match delta_type {
                                 "text_delta" => {
                                     if in_text_block {
-                                        if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                                        if let Some(text) =
+                                            delta.get("text").and_then(|v| v.as_str())
+                                        {
                                             // Print text to stdout in real-time.
                                             print!("{text}");
                                             std::io::stdout().flush().ok();
@@ -288,8 +289,7 @@ impl AnthropicClient {
                 "message_delta" => {
                     if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.data) {
                         if let Some(delta) = payload.get("delta") {
-                            if let Some(reason) =
-                                delta.get("stop_reason").and_then(|v| v.as_str())
+                            if let Some(reason) = delta.get("stop_reason").and_then(|v| v.as_str())
                             {
                                 stop_reason = reason.to_string();
                             }
@@ -307,7 +307,10 @@ impl AnthropicClient {
         }
 
         // Ensure trailing newline after streaming text.
-        if content_blocks.iter().any(|b| matches!(b, ContentBlock::Text { .. })) {
+        if content_blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { .. }))
+        {
             println!();
         }
 

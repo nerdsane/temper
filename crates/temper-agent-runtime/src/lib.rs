@@ -25,8 +25,8 @@ pub mod providers;
 pub mod runner;
 pub mod tools;
 
-pub use providers::anthropic::AnthropicProvider;
 pub use providers::LlmProvider;
+pub use providers::anthropic::AnthropicProvider;
 pub use runner::AgentRunner;
 pub use tools::local::LocalToolRegistry;
 pub use tools::temper::TemperToolRegistry;

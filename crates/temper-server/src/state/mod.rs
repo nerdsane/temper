@@ -89,7 +89,8 @@ pub struct DesignTimeEvent {
 }
 
 fn env_bool(name: &str, default: bool) -> bool {
-    match std::env::var(name) { // determinism-ok: read once at startup, not per simulation step
+    match std::env::var(name) {
+        // determinism-ok: read once at startup, not per simulation step
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "0" | "false" | "off" | "no" => false,
             "1" | "true" | "on" | "yes" => true,

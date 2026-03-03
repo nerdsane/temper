@@ -4,7 +4,7 @@
 //! Used by remote/sandboxed executor deployments.
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use temper_sdk::TemperClient;
 
 use super::{CedarMapping, ToolDef, ToolRegistry, ToolResult};
@@ -149,10 +149,7 @@ impl ToolRegistry for TemperToolRegistry {
                     .get("entity_type")
                     .and_then(|v| v.as_str())
                     .context("entity_create: missing 'entity_type' parameter")?;
-                let fields = input
-                    .get("fields")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
+                let fields = input.get("fields").cloned().unwrap_or_else(|| json!({}));
                 match self.client.create(entity_type, fields).await {
                     Ok(result) => Ok(ToolResult::Success(
                         serde_json::to_string_pretty(&result).unwrap_or_default(),
@@ -173,10 +170,7 @@ impl ToolRegistry for TemperToolRegistry {
                     .get("action")
                     .and_then(|v| v.as_str())
                     .context("entity_action: missing 'action' parameter")?;
-                let params = input
-                    .get("params")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
+                let params = input.get("params").cloned().unwrap_or_else(|| json!({}));
                 match self.client.action(entity_type, id, action, params).await {
                     Ok(result) => Ok(ToolResult::Success(
                         serde_json::to_string_pretty(&result).unwrap_or_default(),

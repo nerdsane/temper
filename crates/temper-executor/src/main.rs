@@ -50,11 +50,7 @@ struct Cli {
 
 /// Unique executor identity for claiming agents.
 fn executor_id() -> String {
-    format!(
-        "executor-{}-{}",
-        hostname(),
-        std::process::id()
-    )
+    format!("executor-{}-{}", hostname(), std::process::id())
 }
 
 /// Best-effort hostname for executor identity.
@@ -98,11 +94,7 @@ async fn main() -> Result<()> {
 }
 
 /// Connect to the SSE event stream and process agent events.
-async fn run_event_loop(
-    cli: &Cli,
-    exec_id: &str,
-    semaphore: &Arc<Semaphore>,
-) -> Result<()> {
+async fn run_event_loop(cli: &Cli, exec_id: &str, semaphore: &Arc<Semaphore>) -> Result<()> {
     let client = TemperClient::new(&cli.temper_url, &cli.tenant);
 
     info!("Connecting to SSE event stream...");
@@ -206,9 +198,7 @@ async fn run_event_loop(
         tokio::spawn(async move {
             let _permit = permit; // Held until task completes.
 
-            if let Err(e) =
-                run_agent(&temper_url, &tenant, &agent_id, &tool_mode, &model).await
-            {
+            if let Err(e) = run_agent(&temper_url, &tenant, &agent_id, &tool_mode, &model).await {
                 error!(agent_id = %agent_id, "Agent execution failed: {e}");
             }
         });

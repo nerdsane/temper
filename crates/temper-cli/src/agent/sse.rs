@@ -19,7 +19,6 @@ pub struct SseEvent {
     /// The event data (from `data:` field(s), joined with newlines).
     pub data: String,
     /// The event ID (from `id:` field).
-    #[allow(dead_code)]
     pub id: Option<String>,
 }
 
@@ -39,7 +38,6 @@ impl SseClient {
     }
 
     /// Create a new SSE client with a shared reqwest client.
-    #[allow(dead_code)]
     pub fn with_client(url: &str, client: Client) -> Self {
         Self {
             url: url.to_string(),
@@ -111,7 +109,9 @@ impl SseStream {
         loop {
             // Find the next line boundary.
             let newline_pos = self.buffer.find('\n')?;
-            let line = self.buffer[..newline_pos].trim_end_matches('\r').to_string();
+            let line = self.buffer[..newline_pos]
+                .trim_end_matches('\r')
+                .to_string();
             self.buffer = self.buffer[newline_pos + 1..].to_string();
 
             if line.is_empty() {

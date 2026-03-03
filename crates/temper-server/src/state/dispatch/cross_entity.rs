@@ -107,9 +107,7 @@ impl crate::state::ServerState {
             }
 
             // Scalar field: resolve a single entity ID.
-            let target_id = field_value
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let target_id = field_value.and_then(|v| v.as_str()).unwrap_or("");
 
             if target_id.is_empty() {
                 // Empty string: vacuous truth — guard passes.
@@ -194,7 +192,8 @@ impl crate::state::ServerState {
             let initial_action = req.initial_action.clone();
             let agent = agent_ctx.clone();
 
-            tokio::spawn(async move { // determinism-ok: spawn dispatch is a background side-effect
+            tokio::spawn(async move {
+                // determinism-ok: spawn dispatch is a background side-effect
                 let initial_fields = serde_json::json!({
                     "parent_type": parent_t,
                     "parent_id": parent_i,

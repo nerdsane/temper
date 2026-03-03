@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use temper_sdk::TemperClient;
 
 use super::{CedarMapping, ToolDef, ToolRegistry, ToolResult};
@@ -164,7 +164,9 @@ impl ToolRegistry for LocalToolRegistry {
                     .context("file_read: missing 'path' parameter")?;
                 match tokio::fs::read_to_string(path).await {
                     Ok(content) => Ok(ToolResult::Success(content)),
-                    Err(e) => Ok(ToolResult::Error(format!("Failed to read file {path}: {e}"))),
+                    Err(e) => Ok(ToolResult::Error(format!(
+                        "Failed to read file {path}: {e}"
+                    ))),
                 }
             }
             "file_write" => {
@@ -190,22 +192,18 @@ impl ToolRegistry for LocalToolRegistry {
                 }
             }
             "file_list" => {
-                let path = input
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(".");
+                let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
                 match tokio::fs::read_dir(path).await {
                     Ok(mut dir) => {
                         let mut entries = Vec::new();
                         while let Ok(Some(entry)) = dir.next_entry().await {
                             let name = entry.file_name().to_string_lossy().to_string();
                             let file_type = entry.file_type().await.ok();
-                            let suffix =
-                                if file_type.as_ref().is_some_and(|ft| ft.is_dir()) {
-                                    "/"
-                                } else {
-                                    ""
-                                };
+                            let suffix = if file_type.as_ref().is_some_and(|ft| ft.is_dir()) {
+                                "/"
+                            } else {
+                                ""
+                            };
                             entries.push(format!("{name}{suffix}"));
                         }
                         entries.sort();
@@ -246,9 +244,7 @@ impl ToolRegistry for LocalToolRegistry {
                         }
                         Ok(ToolResult::Success(result))
                     }
-                    Err(e) => Ok(ToolResult::Error(format!(
-                        "Failed to execute command: {e}"
-                    ))),
+                    Err(e) => Ok(ToolResult::Error(format!("Failed to execute command: {e}"))),
                 }
             }
             "entity_list" => {
@@ -295,10 +291,7 @@ impl ToolRegistry for LocalToolRegistry {
                     .get("action")
                     .and_then(|v| v.as_str())
                     .context("entity_action: missing 'action' parameter")?;
-                let params = input
-                    .get("params")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
+                let params = input.get("params").cloned().unwrap_or_else(|| json!({}));
                 match self.client.action(entity_type, id, action, params).await {
                     Ok(result) => Ok(ToolResult::Success(
                         serde_json::to_string_pretty(&result).unwrap_or_default(),

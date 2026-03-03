@@ -26,8 +26,7 @@ pub struct AnthropicProvider {
 impl AnthropicProvider {
     /// Create a new provider reading `ANTHROPIC_API_KEY` from the environment.
     pub fn new(model: &str) -> Result<Self> {
-        let api_key =
-            std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?; // determinism-ok: CLI/executor code, not simulation-visible
+        let api_key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?; // determinism-ok: CLI/executor code, not simulation-visible
         Ok(Self {
             client: reqwest::Client::new(),
             api_key,
@@ -230,8 +229,7 @@ impl LlmProvider for AnthropicProvider {
                 "message_delta" => {
                     if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.data) {
                         if let Some(delta) = payload.get("delta") {
-                            if let Some(reason) =
-                                delta.get("stop_reason").and_then(|v| v.as_str())
+                            if let Some(reason) = delta.get("stop_reason").and_then(|v| v.as_str())
                             {
                                 stop_reason = reason.to_string();
                             }
@@ -272,10 +270,7 @@ fn extract_deltas(data: &str) -> (Option<String>, Option<String>) {
 
     match delta_type {
         "text_delta" => {
-            let text = delta
-                .get("text")
-                .and_then(|v| v.as_str())
-                .map(String::from);
+            let text = delta.get("text").and_then(|v| v.as_str()).map(String::from);
             (text, None)
         }
         "input_json_delta" => {
@@ -349,10 +344,7 @@ impl SseByteStream {
 impl Stream for SseByteStream {
     type Item = Result<SseEvent>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Some(event) = self.try_parse_event() {
             return Poll::Ready(Some(Ok(event)));
         }

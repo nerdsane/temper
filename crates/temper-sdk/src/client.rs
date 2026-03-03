@@ -151,9 +151,7 @@ impl TemperClient {
             .with_context(|| format!("Failed to get {entity_type}('{id}')"))?;
 
         self.check_status(&resp, "get", entity_type)?;
-        resp.json()
-            .await
-            .context("Failed to parse get response")
+        resp.json().await.context("Failed to parse get response")
     }
 
     /// Create a new entity.
@@ -177,9 +175,7 @@ impl TemperClient {
             .with_context(|| format!("Failed to create {entity_type}"))?;
 
         self.check_status(&resp, "create", entity_type)?;
-        resp.json()
-            .await
-            .context("Failed to parse create response")
+        resp.json().await.context("Failed to parse create response")
     }
 
     /// Patch (update) an existing entity's fields.
@@ -195,9 +191,7 @@ impl TemperClient {
             .with_context(|| format!("Failed to patch {entity_type}('{id}')"))?;
 
         self.check_status(&resp, "patch", entity_type)?;
-        resp.json()
-            .await
-            .context("Failed to parse patch response")
+        resp.json().await.context("Failed to parse patch response")
     }
 
     /// Invoke an OData action on an entity.
@@ -256,7 +250,10 @@ impl TemperClient {
             .await
             .context("Failed to call /api/authorize")?;
 
-        let resp_json: Value = resp.json().await.context("Failed to parse authorize response")?;
+        let resp_json: Value = resp
+            .json()
+            .await
+            .context("Failed to parse authorize response")?;
 
         Ok(AuthzResponse {
             allowed: resp_json
@@ -294,10 +291,7 @@ impl TemperClient {
                 "{}/api/tenants/{}/decisions?status={s}",
                 self.base_url, self.tenant
             ),
-            None => format!(
-                "{}/api/tenants/{}/decisions",
-                self.base_url, self.tenant
-            ),
+            None => format!("{}/api/tenants/{}/decisions", self.base_url, self.tenant),
         };
 
         let resp = self
@@ -308,7 +302,10 @@ impl TemperClient {
             .await
             .context("Failed to fetch decisions")?;
 
-        let body: Value = resp.json().await.context("Failed to parse decisions response")?;
+        let body: Value = resp
+            .json()
+            .await
+            .context("Failed to parse decisions response")?;
         Ok(body
             .get("decisions")
             .and_then(|v| v.as_array())
@@ -336,9 +333,7 @@ impl TemperClient {
     // ── SSE ──────────────────────────────────────────────────────────
 
     /// Open an SSE connection and return a stream of entity events.
-    pub async fn events_stream(
-        &self,
-    ) -> Result<impl Stream<Item = Result<EntityEvent>>> {
+    pub async fn events_stream(&self) -> Result<impl Stream<Item = Result<EntityEvent>>> {
         let url = format!("{}/api/events", self.base_url);
         let resp = self
             .http
@@ -358,17 +353,9 @@ impl TemperClient {
     ///
     /// Note: consumes the response body on error, so this must be called before
     /// reading the response body. We take `&Response` and only read body on error.
-    fn check_status(
-        &self,
-        resp: &reqwest::Response,
-        operation: &str,
-        context: &str,
-    ) -> Result<()> {
+    fn check_status(&self, resp: &reqwest::Response, operation: &str, context: &str) -> Result<()> {
         if !resp.status().is_success() {
-            anyhow::bail!(
-                "{operation} {context} failed with status {}",
-                resp.status()
-            );
+            anyhow::bail!("{operation} {context} failed with status {}", resp.status());
         }
         Ok(())
     }

@@ -61,12 +61,7 @@ impl AgentRunner {
     /// Run a new agent with a specific model.
     ///
     /// Like [`run`](Self::run) but allows specifying the LLM model name.
-    pub async fn run_with_model(
-        &self,
-        goal: &str,
-        role: &str,
-        model: &str,
-    ) -> Result<String> {
+    pub async fn run_with_model(&self, goal: &str, role: &str, model: &str) -> Result<String> {
         let agent_id = uuid::Uuid::now_v7().to_string();
 
         info!(agent_id = %agent_id, "Creating agent");
@@ -86,18 +81,12 @@ impl AgentRunner {
         info!(agent_id = %agent_id, "Resuming agent");
 
         let agent = self.client.get("Agents", agent_id).await?;
-        let status = agent
-            .get("Status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let status = agent.get("Status").and_then(|v| v.as_str()).unwrap_or("");
         let role = agent
             .get("role")
             .and_then(|v| v.as_str())
             .unwrap_or("assistant");
-        let goal = agent
-            .get("goal")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let goal = agent.get("goal").and_then(|v| v.as_str()).unwrap_or("");
         let model = agent
             .get("model")
             .and_then(|v| v.as_str())
@@ -116,16 +105,8 @@ impl AgentRunner {
     // ── Internal helpers ────────────────────────────────────────────────
 
     /// Create an Agent entity and transition it to Working.
-    async fn create_agent(
-        &self,
-        id: &str,
-        role: &str,
-        goal: &str,
-        model: &str,
-    ) -> Result<()> {
-        self.client
-            .create("Agents", json!({ "id": id }))
-            .await?;
+    async fn create_agent(&self, id: &str, role: &str, goal: &str, model: &str) -> Result<()> {
+        self.client.create("Agents", json!({ "id": id })).await?;
         self.client
             .action(
                 "Agents",
@@ -134,9 +115,7 @@ impl AgentRunner {
                 json!({ "role": role, "goal": goal, "model": model }),
             )
             .await?;
-        self.client
-            .action("Agents", id, "Start", json!({}))
-            .await?;
+        self.client.action("Agents", id, "Start", json!({})).await?;
         Ok(())
     }
 
@@ -167,11 +146,8 @@ impl AgentRunner {
         info!(plan_id = %plan_id, "Plan created");
 
         // Checkpoint plan_id on the agent.
-        self.checkpoint(
-            agent_id,
-            &format!("{{\"plan_id\":\"{plan_id}\"}}"),
-        )
-        .await;
+        self.checkpoint(agent_id, &format!("{{\"plan_id\":\"{plan_id}\"}}"))
+            .await;
 
         let tasks = self.decompose_goal(goal, role, &tool_schemas).await?;
         info!(count = tasks.len(), "Tasks planned");
@@ -217,10 +193,7 @@ impl AgentRunner {
         let max_turns_per_task = 30;
 
         for (idx, task_entity) in spawned_tasks.iter().enumerate() {
-            let task_id = task_entity
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let task_id = task_entity.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let task_title = task_entity
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -244,12 +217,7 @@ impl AgentRunner {
             // Claim the task.
             if let Err(e) = self
                 .client
-                .action(
-                    "Tasks",
-                    task_id,
-                    "Claim",
-                    json!({ "agent_id": agent_id }),
-                )
+                .action("Tasks", task_id, "Claim", json!({ "agent_id": agent_id }))
                 .await
             {
                 warn!("Task.Claim failed: {e}");
@@ -325,12 +293,7 @@ impl AgentRunner {
         let summary = format!("Completed {} tasks for goal: {goal}", spawned_tasks.len());
         if let Err(e) = self
             .client
-            .action(
-                "Plans",
-                &plan_id,
-                "Complete",
-                json!({ "summary": summary }),
-            )
+            .action("Plans", &plan_id, "Complete", json!({ "summary": summary }))
             .await
         {
             warn!("Plan.Complete failed: {e}");
@@ -426,10 +389,8 @@ impl AgentRunner {
             .trim_end_matches("```")
             .trim();
 
-        let tasks: Vec<serde_json::Value> =
-            serde_json::from_str(json_text).unwrap_or_else(|_| {
-                vec![json!({ "title": goal, "description": goal })]
-            });
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(json_text)
+            .unwrap_or_else(|_| vec![json!({ "title": goal, "description": goal })]);
 
         Ok(tasks)
     }
@@ -498,9 +459,7 @@ impl AgentRunner {
             for (tool_use_id, tool_name, tool_input) in &tool_uses {
                 info!(tool = %tool_name, "Executing tool");
 
-                let result = self
-                    .execute_tool(agent_id, tool_name, tool_input)
-                    .await?;
+                let result = self.execute_tool(agent_id, tool_name, tool_input).await?;
 
                 match result {
                     ToolResult::Success(output) => {
@@ -630,12 +589,7 @@ impl AgentRunner {
             }
             Ok(ToolResult::Error(err)) => {
                 self.client
-                    .action(
-                        "ToolCalls",
-                        &tc_id,
-                        "Fail",
-                        json!({ "error": &err }),
-                    )
+                    .action("ToolCalls", &tc_id, "Fail", json!({ "error": &err }))
                     .await?;
                 Ok(ToolResult::Error(err))
             }
