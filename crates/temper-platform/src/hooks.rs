@@ -178,7 +178,9 @@ fn handle_generate_cedar_policy(
 
     // Validate and reload the policy set via ServerState.
     {
-        let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        let Ok(mut policies) = state.server.tenant_policies.write() else {
+            return Err("tenant_policies lock poisoned".to_string());
+        };
         let mut next_policies = policies.clone();
         let entry = next_policies.entry(tenant.to_string()).or_default();
         if !entry.is_empty() {
