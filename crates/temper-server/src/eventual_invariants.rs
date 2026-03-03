@@ -135,104 +135,108 @@ pub fn spawn_eventual_recheck(
     state: crate::state::ServerState,
     interval: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move { // determinism-ok: background convergence task
-        let mut ticker = tokio::time::interval(interval); // determinism-ok: convergence polling
-        loop {
-            ticker.tick().await;
+    tokio::spawn(
+        async move {
+            // determinism-ok: background convergence task
+            let mut ticker = tokio::time::interval(interval); // determinism-ok: convergence polling
+            loop {
+                ticker.tick().await;
 
-            let due_items = {
-                let tracker = state.eventual_tracker.read().unwrap();
-                tracker.due_for_recheck()
-            };
+                let due_items = {
+                    let tracker = state.eventual_tracker.read().unwrap();
+                    tracker.due_for_recheck()
+                };
 
-            for (key, inv) in due_items {
-                let recheck_span = tracing::info_span!(
-                    "eventual.recheck_item",
-                    invariant = %inv.name,
-                    tenant = %inv.tenant,
-                    entity_type = %inv.entity_type,
-                    entity_id = %inv.entity_id,
-                    check_count = inv.check_count,
-                );
-                let tenant = temper_runtime::tenant::TenantId::new(&inv.tenant);
+                for (key, inv) in due_items {
+                    let recheck_span = tracing::info_span!(
+                        "eventual.recheck_item",
+                        invariant = %inv.name,
+                        tenant = %inv.tenant,
+                        entity_type = %inv.entity_type,
+                        entity_id = %inv.entity_id,
+                        check_count = inv.check_count,
+                    );
+                    let tenant = temper_runtime::tenant::TenantId::new(&inv.tenant);
 
-                // Re-read the related entity and check if the invariant now holds
-                let converged = check_invariant_convergence(&state, &tenant, &inv)
-                    .instrument(recheck_span)
-                    .await;
+                    // Re-read the related entity and check if the invariant now holds
+                    let converged = check_invariant_convergence(&state, &tenant, &inv)
+                        .instrument(recheck_span)
+                        .await;
 
-                if converged {
+                    if converged {
+                        if let Ok(mut tracker) = state.eventual_tracker.write() {
+                            tracker.resolve(&key);
+                        }
+                        state.metrics.record_cross_invariant_check(
+                            &inv.tenant,
+                            &inv.entity_type,
+                            "eventual_converged",
+                        );
+                        // Observability: emit WideEvent for invariant convergence
+                        let wide = wide_event::from_invariant_check(
+                            &inv.name,
+                            &inv.entity_type,
+                            &inv.entity_id,
+                            &inv.tenant,
+                            inv.check_count as u32,
+                            "converged",
+                            0,
+                        );
+                        wide_event::emit_span(&wide);
+                        wide_event::emit_metrics(&wide);
+                        tracing::info!(
+                            invariant = %inv.name,
+                            tenant = %inv.tenant,
+                            entity_type = %inv.entity_type,
+                            entity_id = %inv.entity_id,
+                            "eventual invariant converged"
+                        );
+                    } else {
+                        if let Ok(mut tracker) = state.eventual_tracker.write() {
+                            tracker.increment_check(&key);
+                        }
+                    }
+                }
+
+                // Clean up exhausted invariants
+                let exhausted = {
+                    let tracker = state.eventual_tracker.read().unwrap();
+                    tracker.exhausted()
+                };
+                for (key, inv) in exhausted {
                     if let Ok(mut tracker) = state.eventual_tracker.write() {
                         tracker.resolve(&key);
                     }
-                    state.metrics.record_cross_invariant_check(
+                    state.metrics.record_cross_invariant_violation(
                         &inv.tenant,
-                        &inv.entity_type,
-                        "eventual_converged",
+                        &inv.name,
+                        "eventual_convergence_failed",
                     );
-                    // Observability: emit WideEvent for invariant convergence
+                    // Observability: emit WideEvent for invariant convergence failure
                     let wide = wide_event::from_invariant_check(
                         &inv.name,
                         &inv.entity_type,
                         &inv.entity_id,
                         &inv.tenant,
                         inv.check_count as u32,
-                        "converged",
+                        "failed",
                         0,
                     );
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
-                    tracing::info!(
+                    tracing::error!(
                         invariant = %inv.name,
                         tenant = %inv.tenant,
                         entity_type = %inv.entity_type,
                         entity_id = %inv.entity_id,
-                        "eventual invariant converged"
+                        checks = inv.check_count,
+                        "eventual invariant failed to converge within budget"
                     );
-                } else {
-                    if let Ok(mut tracker) = state.eventual_tracker.write() {
-                        tracker.increment_check(&key);
-                    }
                 }
-            }
-
-            // Clean up exhausted invariants
-            let exhausted = {
-                let tracker = state.eventual_tracker.read().unwrap();
-                tracker.exhausted()
-            };
-            for (key, inv) in exhausted {
-                if let Ok(mut tracker) = state.eventual_tracker.write() {
-                    tracker.resolve(&key);
-                }
-                state.metrics.record_cross_invariant_violation(
-                    &inv.tenant,
-                    &inv.name,
-                    "eventual_convergence_failed",
-                );
-                // Observability: emit WideEvent for invariant convergence failure
-                let wide = wide_event::from_invariant_check(
-                    &inv.name,
-                    &inv.entity_type,
-                    &inv.entity_id,
-                    &inv.tenant,
-                    inv.check_count as u32,
-                    "failed",
-                    0,
-                );
-                wide_event::emit_span(&wide);
-                wide_event::emit_metrics(&wide);
-                tracing::error!(
-                    invariant = %inv.name,
-                    tenant = %inv.tenant,
-                    entity_type = %inv.entity_type,
-                    entity_id = %inv.entity_id,
-                    checks = inv.check_count,
-                    "eventual invariant failed to converge within budget"
-                );
             }
         }
-    }.instrument(tracing::info_span!("eventual.recheck")))
+        .instrument(tracing::info_span!("eventual.recheck")),
+    )
 }
 
 /// Check if a pending eventual invariant has converged.

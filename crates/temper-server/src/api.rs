@@ -556,7 +556,6 @@ async fn handle_list_decisions(
     _headers: HeaderMap,
     Query(params): Query<DecisionListParams>,
 ) -> impl IntoResponse {
-
     // Query Turso directly (single source of truth).
     if let Some(turso) = state.turso_opt() {
         match turso
@@ -881,7 +880,6 @@ async fn handle_decision_stream(
     Path(tenant): Path<String>,
     _headers: HeaderMap,
 ) -> impl IntoResponse {
-
     let rx = state.pending_decision_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
         match result {
@@ -911,7 +909,6 @@ async fn handle_list_all_decisions(
     _headers: HeaderMap,
     Query(params): Query<DecisionListParams>,
 ) -> impl IntoResponse {
-
     // Query Turso directly (single source of truth).
     if let Some(turso) = state.turso_opt() {
         match turso.query_all_decisions(params.status.as_deref()).await {
@@ -971,7 +968,6 @@ async fn handle_all_decisions_stream(
     State(state): State<ServerState>,
     _headers: HeaderMap,
 ) -> impl IntoResponse {
-
     let rx = state.pending_decision_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
         Ok(pd) => {

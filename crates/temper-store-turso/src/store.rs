@@ -1299,7 +1299,11 @@ impl EventStore for TursoEventStore {
         drop(rows);
 
         if current_seq != expected_sequence {
-            tracing::error!(expected = expected_sequence, actual = current_seq, "concurrency violation on append");
+            tracing::error!(
+                expected = expected_sequence,
+                actual = current_seq,
+                "concurrency violation on append"
+            );
             let _ = tx.rollback().await;
             return Err(PersistenceError::ConcurrencyViolation {
                 expected: expected_sequence,
@@ -1310,16 +1314,14 @@ impl EventStore for TursoEventStore {
         let mut new_seq = expected_sequence;
         for event in events {
             new_seq += 1;
-            let payload_json = serde_json::to_string(&event.payload)
-                .map_err(|e| {
-                    tracing::error!(error = %e, "failed to serialize event payload");
-                    PersistenceError::Serialization(e.to_string())
-                })?;
-            let metadata_json = serde_json::to_string(&event.metadata)
-                .map_err(|e| {
-                    tracing::error!(error = %e, "failed to serialize event metadata");
-                    PersistenceError::Serialization(e.to_string())
-                })?;
+            let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
+                tracing::error!(error = %e, "failed to serialize event payload");
+                PersistenceError::Serialization(e.to_string())
+            })?;
+            let metadata_json = serde_json::to_string(&event.metadata).map_err(|e| {
+                tracing::error!(error = %e, "failed to serialize event metadata");
+                PersistenceError::Serialization(e.to_string())
+            })?;
 
             let insert_result = tx
                 .execute(
@@ -1384,20 +1386,18 @@ impl EventStore for TursoEventStore {
             let payload_json = row.get::<String>(2).map_err(storage_error)?;
             let metadata_json = row.get::<Option<String>>(3).map_err(storage_error)?;
 
-            let payload = serde_json::from_str(&payload_json)
-                .map_err(|e| {
-                    tracing::error!(error = %e, "failed to deserialize event payload");
-                    PersistenceError::Serialization(e.to_string())
-                })?;
+            let payload = serde_json::from_str(&payload_json).map_err(|e| {
+                tracing::error!(error = %e, "failed to deserialize event payload");
+                PersistenceError::Serialization(e.to_string())
+            })?;
             let metadata_raw = metadata_json.ok_or_else(|| {
                 tracing::error!("missing event metadata");
                 PersistenceError::Serialization("missing event metadata".to_string())
             })?;
-            let metadata: EventMetadata = serde_json::from_str(&metadata_raw)
-                .map_err(|e| {
-                    tracing::error!(error = %e, "failed to deserialize event metadata");
-                    PersistenceError::Serialization(e.to_string())
-                })?;
+            let metadata: EventMetadata = serde_json::from_str(&metadata_raw).map_err(|e| {
+                tracing::error!(error = %e, "failed to deserialize event metadata");
+                PersistenceError::Serialization(e.to_string())
+            })?;
 
             out.push(PersistenceEnvelope {
                 sequence_nr: seq,

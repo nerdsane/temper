@@ -142,19 +142,23 @@ impl crate::state::ServerState {
             let eid = entity_id.to_string();
             let action = sched.action.clone();
             let delay = std::time::Duration::from_secs(sched.delay_seconds);
-            tokio::spawn(async move { // determinism-ok: timer delivery is a background side-effect
-                tokio::time::sleep(delay).await; // determinism-ok: scheduled delay
-                let _ = state
-                    .dispatch_tenant_action(
-                        &t,
-                        &et,
-                        &eid,
-                        &action,
-                        serde_json::json!({"__scheduled": true}),
-                        &AgentContext::default(),
-                    )
-                    .await;
-            }.instrument(tracing::info_span!("dispatch.scheduled_actions")));
+            tokio::spawn(
+                async move {
+                    // determinism-ok: timer delivery is a background side-effect
+                    tokio::time::sleep(delay).await; // determinism-ok: scheduled delay
+                    let _ = state
+                        .dispatch_tenant_action(
+                            &t,
+                            &et,
+                            &eid,
+                            &action,
+                            serde_json::json!({"__scheduled": true}),
+                            &AgentContext::default(),
+                        )
+                        .await;
+                }
+                .instrument(tracing::info_span!("dispatch.scheduled_actions")),
+            );
         }
     }
 
@@ -323,7 +327,8 @@ impl crate::state::ServerState {
         if let Some(ref dispatcher) = self.webhook_dispatcher {
             let dispatcher = Arc::clone(dispatcher);
             let entry = trajectory_entry;
-            tokio::spawn(async move { // determinism-ok: external side-effect, no simulation-visible state
+            tokio::spawn(async move {
+                // determinism-ok: external side-effect, no simulation-visible state
                 dispatcher.dispatch(&entry);
             });
         }

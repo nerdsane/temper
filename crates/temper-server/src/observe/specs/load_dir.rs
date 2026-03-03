@@ -1,11 +1,11 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
-use tracing::instrument;
 use temper_spec::automaton::LintSeverity;
 use temper_spec::cross_invariant::{
     CrossInvariantLintSeverity, lint_cross_invariants, parse_cross_invariants,
 };
+use tracing::instrument;
 
 use crate::reaction::registry::parse_reactions;
 use crate::state::ServerState;
