@@ -41,11 +41,11 @@ pub(crate) async fn list_evolution_records(
                             val["derived_from"] = serde_json::json!(df);
                         }
                         // Merge data fields into the response.
-                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&r.data) {
-                            if let Some(obj) = data.as_object() {
-                                for (k, v) in obj {
-                                    val[k] = v.clone();
-                                }
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&r.data)
+                            && let Some(obj) = data.as_object()
+                        {
+                            for (k, v) in obj {
+                                val[k] = v.clone();
                             }
                         }
                         val
@@ -98,11 +98,11 @@ pub(crate) async fn list_evolution_insights(
                             "timestamp": r.timestamp,
                         });
                         // Extract insight fields from JSON data.
-                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&r.data) {
-                            if let Some(obj) = data.as_object() {
-                                for (k, v) in obj {
-                                    val[k] = v.clone();
-                                }
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&r.data)
+                            && let Some(obj) = data.as_object()
+                        {
+                            for (k, v) in obj {
+                                val[k] = v.clone();
                             }
                         }
                         val

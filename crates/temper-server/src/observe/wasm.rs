@@ -241,20 +241,20 @@ pub async fn list_wasm_modules(
     let invocation_stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> = {
         let mut stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> =
             std::collections::BTreeMap::new();
-        if let Some(turso) = state.turso_opt() {
-            if let Ok(rows) = turso.load_recent_wasm_invocations(10_000).await {
-                for row in rows {
-                    let module = row.module_name.clone();
-                    let success = row.success;
-                    let ts = Some(row.created_at.clone());
-                    let (total, s_count, last_ts) = stats.entry(module).or_insert((0, 0, None));
-                    *total += 1;
-                    if success {
-                        *s_count += 1;
-                    }
-                    if ts.is_some() {
-                        *last_ts = ts;
-                    }
+        if let Some(turso) = state.turso_opt()
+            && let Ok(rows) = turso.load_recent_wasm_invocations(10_000).await
+        {
+            for row in rows {
+                let module = row.module_name.clone();
+                let success = row.success;
+                let ts = Some(row.created_at.clone());
+                let (total, s_count, last_ts) = stats.entry(module).or_insert((0, 0, None));
+                *total += 1;
+                if success {
+                    *s_count += 1;
+                }
+                if ts.is_some() {
+                    *last_ts = ts;
                 }
             }
         }
@@ -311,15 +311,15 @@ pub async fn list_wasm_invocations(
                 let filtered: Vec<serde_json::Value> = rows
                     .into_iter()
                     .filter(|e| {
-                        if let Some(ref mn) = params.module_name {
-                            if e.module_name != *mn {
-                                return false;
-                            }
+                        if let Some(ref mn) = params.module_name
+                            && e.module_name != *mn
+                        {
+                            return false;
                         }
-                        if let Some(s) = params.success {
-                            if e.success != s {
-                                return false;
-                            }
+                        if let Some(s) = params.success
+                            && e.success != s
+                        {
+                            return false;
                         }
                         true
                     })
