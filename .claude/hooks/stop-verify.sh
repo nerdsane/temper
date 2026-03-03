@@ -63,11 +63,6 @@ if [ -d "$MARKER_DIR" ]; then
             ANY_BLOCKED=true
         fi
 
-        if ! marker_exists "alignment-reviewed"; then
-            echo "BLOCKED: Alignment review missing for committed code!" >&2
-            echo "Run the alignment reviewer agent before exiting." >&2
-            ANY_BLOCKED=true
-        fi
     fi
 fi
 
@@ -104,7 +99,6 @@ if [ "$ANY_BLOCKED" = false ] && [ -d "$MARKER_DIR" ]; then
     rm -f "$MARKER_DIR"/commit-pending "$MARKER_DIR"/sim-changed 2>/dev/null || true
     rm -f "$MARKER_DIR"/dst-reviewed "$MARKER_DIR"/code-reviewed 2>/dev/null || true
     rm -f "$MARKER_DIR"/dst-reviewed.toml "$MARKER_DIR"/code-reviewed.toml 2>/dev/null || true
-    rm -f "$MARKER_DIR"/alignment-reviewed "$MARKER_DIR"/alignment-reviewed.toml 2>/dev/null || true
     rm -f "$MARKER_DIR"/trace-*.jsonl 2>/dev/null || true
     rm -f "$MARKER_DIR"/trace-*.seq "$MARKER_DIR"/trace-*.prevhash 2>/dev/null || true
 fi

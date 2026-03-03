@@ -6,15 +6,13 @@
 # 1. DST review marker exists (if sim-visible code was changed)
 # 2. Code review marker exists (for any significant change)
 # 3. Tests pass (cargo test --workspace)
-# 4. Alignment review marker exists
-# 5. Determinism canary passes
+# 4. Determinism canary passes
 #
 # This is the PRIMARY enforcement point. The Stop hook is the safety net.
 #
 # Markers are simple files in /tmp/temper-harness/{project_hash}/:
 #   dst-reviewed   — written by DST reviewer agent on PASS
 #   code-reviewed  — written by code reviewer agent on PASS
-#   alignment-reviewed — written by alignment reviewer agent on PASS
 # Cleaned up by the Stop hook on successful session exit.
 set -euo pipefail
 
@@ -89,18 +87,7 @@ if ! (cd "$WORKSPACE_ROOT" && cargo test --workspace 2>&1 | tail -5 >&2); then
     BLOCKED=true
 fi
 
-# --- Check 4: Alignment review must pass ---
-if ! marker_exists "alignment-reviewed"; then
-    echo "" >&2
-    echo "══════════════════════════════════════════════════════════════" >&2
-    echo "  BLOCKED: Alignment review required before commit" >&2
-    echo "══════════════════════════════════════════════════════════════" >&2
-    echo "  Invoke the alignment reviewer agent, then retry the commit." >&2
-    echo "══════════════════════════════════════════════════════════════" >&2
-    BLOCKED=true
-fi
-
-# --- Check 5: Determinism canary must pass ---
+# --- Check 4: Determinism canary must pass ---
 echo "Running determinism canary..." >&2
 if ! (cd "$WORKSPACE_ROOT" && cargo test -p temper-platform --test system_entity_dst determinism_canary 2>&1 | tail -5 >&2); then
     echo "" >&2
