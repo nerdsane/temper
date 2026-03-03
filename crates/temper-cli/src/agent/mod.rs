@@ -428,15 +428,13 @@ pub async fn run(
     let mut messages: Vec<Message> = Vec::new();
 
     // Check for resumed conversation.
-    if let Ok(agent) = client.get_agent(&agent_id).await {
-        if let Some(conv) = agent.get("conversation").and_then(|v| v.as_str()) {
-            if !conv.is_empty() {
-                if let Ok(restored) = serde_json::from_str::<Vec<Message>>(conv) {
-                    println!("Restored conversation ({} messages)", restored.len());
-                    messages = restored;
-                }
-            }
-        }
+    if let Ok(agent) = client.get_agent(&agent_id).await
+        && let Some(conv) = agent.get("conversation").and_then(|v| v.as_str())
+        && !conv.is_empty()
+        && let Ok(restored) = serde_json::from_str::<Vec<Message>>(conv)
+    {
+        println!("Restored conversation ({} messages)", restored.len());
+        messages = restored;
     }
 
     // If no conversation history, start with the user goal.
