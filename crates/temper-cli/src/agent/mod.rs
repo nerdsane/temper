@@ -8,7 +8,9 @@
 pub mod login;
 
 use anyhow::Result;
-use temper_agent_runtime::{AgentRunner, AnthropicProvider, CodexProvider, LlmProvider, LocalToolRegistry};
+use temper_agent_runtime::{
+    AgentRunner, AnthropicProvider, CodexProvider, LlmProvider, LocalToolRegistry,
+};
 use temper_sdk::TemperClient;
 
 /// Run the `temper agent` command.
@@ -76,7 +78,10 @@ mod tests {
 
     #[test]
     fn test_resolve_provider_explicit() {
-        assert_eq!(resolve_provider(Some("openai-codex"), "anything"), "openai-codex");
+        assert_eq!(
+            resolve_provider(Some("openai-codex"), "anything"),
+            "openai-codex"
+        );
         assert_eq!(resolve_provider(Some("anthropic"), "gpt-4o"), "anthropic");
     }
 
@@ -91,7 +96,13 @@ mod tests {
 
     #[test]
     fn test_resolve_provider_auto_detect_anthropic() {
-        assert_eq!(resolve_provider(None, "claude-sonnet-4-20250514"), "anthropic");
-        assert_eq!(resolve_provider(None, "claude-opus-4-20250514"), "anthropic");
+        assert_eq!(
+            resolve_provider(None, "claude-sonnet-4-20250514"),
+            "anthropic"
+        );
+        assert_eq!(
+            resolve_provider(None, "claude-opus-4-20250514"),
+            "anthropic"
+        );
     }
 }

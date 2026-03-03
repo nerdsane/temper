@@ -110,9 +110,7 @@ async fn run_openai_login() -> Result<()> {
 
     // 5. Serve and wait with timeout.
     let server = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .ok();
+        axum::serve(listener, app).await.ok();
     });
 
     let (code, cb_state) = tokio::select! {
@@ -159,7 +157,10 @@ async fn finish_login(verifier: &str, expected_state: &str, code: &str, state: &
         anyhow::bail!("Token exchange failed ({status}): {body}");
     }
 
-    let token_resp: serde_json::Value = resp.json().await.context("Failed to parse token response")?;
+    let token_resp: serde_json::Value = resp
+        .json()
+        .await
+        .context("Failed to parse token response")?;
 
     let access_token = token_resp["access_token"]
         .as_str()
