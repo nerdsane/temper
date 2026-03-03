@@ -88,10 +88,8 @@ mod tests {
 
     #[test]
     fn lookup_unknown_returns_empty() {
-        let registry = IntegrationRegistry::from_configs(vec![test_config(
-            "fulfillment",
-            "SubmitOrder",
-        )]);
+        let registry =
+            IntegrationRegistry::from_configs(vec![test_config("fulfillment", "SubmitOrder")]);
         assert!(registry.lookup("Unknown").is_empty());
     }
 

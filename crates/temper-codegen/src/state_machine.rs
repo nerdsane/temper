@@ -19,7 +19,10 @@ pub fn generate_state_machine(entity_name: &str, sm: &StateMachine) -> String {
     out.push_str("}\n\n");
 
     // Display impl
-    out.push_str(&format!("impl std::fmt::Display for {}Status {{\n", entity_name));
+    out.push_str(&format!(
+        "impl std::fmt::Display for {}Status {{\n",
+        entity_name
+    ));
     out.push_str("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n");
     out.push_str("        match self {\n");
     for state in &sm.states {
@@ -41,9 +44,7 @@ pub fn generate_state_machine(entity_name: &str, sm: &StateMachine) -> String {
     out.push_str(&format!("impl {}Transitions {{\n", entity_name));
 
     // can_transition method
-    out.push_str(&format!(
-        "    /// Check if a transition is valid from the current state.\n"
-    ));
+    out.push_str("    /// Check if a transition is valid from the current state.\n");
     out.push_str(&format!(
         "    pub fn can_transition(current: {}Status, action: &str) -> bool {{\n",
         entity_name
@@ -72,9 +73,7 @@ pub fn generate_state_machine(entity_name: &str, sm: &StateMachine) -> String {
     out.push_str("    }\n\n");
 
     // target_state method
-    out.push_str(&format!(
-        "    /// Get the target state for a transition.\n"
-    ));
+    out.push_str("    /// Get the target state for a transition.\n");
     out.push_str(&format!(
         "    pub fn target_state(action: &str) -> Option<{}Status> {{\n",
         entity_name

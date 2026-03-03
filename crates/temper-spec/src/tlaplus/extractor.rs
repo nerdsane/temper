@@ -74,7 +74,8 @@ fn extract_list_after(source: &str, keyword: &str) -> Vec<String> {
             continue;
         }
         if in_section {
-            if trimmed.is_empty() || trimmed.starts_with("VARIABLE") || trimmed.starts_with("----") {
+            if trimmed.is_empty() || trimmed.starts_with("VARIABLE") || trimmed.starts_with("----")
+            {
                 break;
             }
             // Strip TLA+ line comments (\*)
@@ -84,7 +85,9 @@ fn extract_list_after(source: &str, keyword: &str) -> Vec<String> {
                 trimmed
             };
             for item in without_comment.split(',') {
-                let item = item.trim().trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                let item = item
+                    .trim()
+                    .trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
                 if !item.is_empty() {
                     result.push(item.to_string());
                 }
@@ -116,12 +119,11 @@ fn extract_states(source: &str) -> Result<Vec<String>, TlaExtractError> {
         // Fallback: look for status = "xxx" patterns in Init and transitions
         for line in source.lines() {
             let trimmed = line.trim();
-            if trimmed.contains("status =") || trimmed.contains("status' =") {
-                if let Some(s) = extract_quoted_string(trimmed) {
-                    if !states.contains(&s) {
-                        states.push(s);
-                    }
-                }
+            if (trimmed.contains("status =") || trimmed.contains("status' ="))
+                && let Some(s) = extract_quoted_string(trimmed)
+                && !states.contains(&s)
+            {
+                states.push(s);
             }
             if trimmed.contains("status \\in") {
                 states.extend(extract_inline_set(trimmed));
@@ -201,7 +203,7 @@ fn is_action_definition(trimmed: &str) -> bool {
 fn extract_action_name(trimmed: &str) -> Option<String> {
     let name_part = trimmed.split("==").next().unwrap_or("").trim();
     let clean = name_part.split('(').next().unwrap_or(name_part).trim();
-    if !clean.is_empty() && clean.chars().next().map_or(false, |c| c.is_uppercase()) {
+    if !clean.is_empty() && clean.chars().next().is_some_and(|c| c.is_uppercase()) {
         Some(name_part.to_string())
     } else {
         None
@@ -210,7 +212,11 @@ fn extract_action_name(trimmed: &str) -> Option<String> {
 
 /// Save a completed action as a Transition (helper to reduce repetition).
 fn save_action(
-    name: &str, guard: &str, effect: &str, states: &[String], out: &mut Vec<Transition>,
+    name: &str,
+    guard: &str,
+    effect: &str,
+    states: &[String],
+    out: &mut Vec<Transition>,
 ) {
     out.push(build_transition(name, guard, effect, states));
 }
@@ -227,7 +233,13 @@ fn extract_transitions(source: &str, states: &[String]) -> Vec<Transition> {
 
         if is_section_boundary(trimmed) || is_next_state_relation(trimmed) {
             if let Some(name) = current_action.take() {
-                save_action(&name, &current_guard, &current_effect, states, &mut transitions);
+                save_action(
+                    &name,
+                    &current_guard,
+                    &current_effect,
+                    states,
+                    &mut transitions,
+                );
             }
             break;
         }
@@ -238,7 +250,13 @@ fn extract_transitions(source: &str, states: &[String]) -> Vec<Transition> {
 
         if is_action_definition(trimmed) {
             if let Some(name) = current_action.take() {
-                save_action(&name, &current_guard, &current_effect, states, &mut transitions);
+                save_action(
+                    &name,
+                    &current_guard,
+                    &current_effect,
+                    states,
+                    &mut transitions,
+                );
             }
             if let Some(action_name) = extract_action_name(trimmed) {
                 current_action = Some(action_name);
@@ -253,9 +271,16 @@ fn extract_transitions(source: &str, states: &[String]) -> Vec<Transition> {
         }
 
         if in_action {
-            if trimmed.contains(" ==") && !trimmed.starts_with("/\\") && !trimmed.starts_with("\\/") {
+            if trimmed.contains(" ==") && !trimmed.starts_with("/\\") && !trimmed.starts_with("\\/")
+            {
                 if let Some(name) = current_action.take() {
-                    save_action(&name, &current_guard, &current_effect, states, &mut transitions);
+                    save_action(
+                        &name,
+                        &current_guard,
+                        &current_effect,
+                        states,
+                        &mut transitions,
+                    );
                 }
                 in_action = false;
                 continue;
@@ -265,7 +290,13 @@ fn extract_transitions(source: &str, states: &[String]) -> Vec<Transition> {
     }
 
     if let Some(name) = current_action.take() {
-        save_action(&name, &current_guard, &current_effect, states, &mut transitions);
+        save_action(
+            &name,
+            &current_guard,
+            &current_effect,
+            states,
+            &mut transitions,
+        );
     }
     transitions
 }
@@ -290,12 +321,7 @@ fn categorize_line(line: &str, guard: &mut String, effect: &mut String) {
     }
 }
 
-fn build_transition(
-    name: &str,
-    guard: &str,
-    effect: &str,
-    states: &[String],
-) -> Transition {
+fn build_transition(name: &str, guard: &str, effect: &str, states: &[String]) -> Transition {
     let from_states = extract_from_states(guard, states);
     let to_state = extract_to_state(effect, states);
     // Check if the raw action definition had parameters by looking for
@@ -325,12 +351,13 @@ fn extract_from_states(guard: &str, states: &[String]) -> Vec<String> {
     for line in guard.lines() {
         let trimmed = line.trim();
 
-        if trimmed.contains("status =") && !trimmed.contains("status' =") {
-            if let Some(s) = extract_quoted_string(trimmed) {
-                if states.contains(&s) && !result.contains(&s) {
-                    result.push(s);
-                }
-            }
+        if trimmed.contains("status =")
+            && !trimmed.contains("status' =")
+            && let Some(s) = extract_quoted_string(trimmed)
+            && states.contains(&s)
+            && !result.contains(&s)
+        {
+            result.push(s);
         }
 
         if trimmed.contains("status \\in") {
@@ -352,12 +379,12 @@ fn extract_to_state(effect: &str, states: &[String]) -> Option<String> {
     // Pattern: status' = "Xxx"
     for line in effect.lines() {
         let trimmed = line.trim();
-        if trimmed.contains("status'") && trimmed.contains('=') {
-            if let Some(s) = extract_quoted_string(trimmed) {
-                if states.contains(&s) {
-                    return Some(s);
-                }
-            }
+        if trimmed.contains("status'")
+            && trimmed.contains('=')
+            && let Some(s) = extract_quoted_string(trimmed)
+            && states.contains(&s)
+        {
+            return Some(s);
         }
     }
     None
@@ -476,7 +503,8 @@ fn extract_liveness(source: &str) -> Vec<LivenessProperty> {
             continue;
         }
 
-        if trimmed.starts_with("\\*") && in_liveness
+        if trimmed.starts_with("\\*")
+            && in_liveness
             && (trimmed.contains("Specification") || trimmed.contains("Model checking"))
         {
             in_liveness = false;
@@ -561,11 +589,18 @@ mod tests {
         assert!(transition_names.contains(&"ConfirmOrder"));
         assert!(transition_names.contains(&"ShipOrder"));
         assert!(transition_names.contains(&"DeliverOrder"));
-        assert!(transition_names.contains(&"CancelOrder"), "got: {transition_names:?}");
+        assert!(
+            transition_names.contains(&"CancelOrder"),
+            "got: {transition_names:?}"
+        );
         assert!(transition_names.contains(&"InitiateReturn"));
 
         // Verify SubmitOrder transition details
-        let submit = sm.transitions.iter().find(|t| t.name == "SubmitOrder").unwrap();
+        let submit = sm
+            .transitions
+            .iter()
+            .find(|t| t.name == "SubmitOrder")
+            .unwrap();
         assert_eq!(submit.to_state, Some("Submitted".to_string()));
 
         // Invariants
@@ -578,8 +613,15 @@ mod tests {
         assert!(inv_names.contains(&"ShipRequiresPayment"));
 
         // Liveness
-        assert!(!sm.liveness_properties.is_empty(), "should have liveness properties");
-        let live_names: Vec<&str> = sm.liveness_properties.iter().map(|l| l.name.as_str()).collect();
+        assert!(
+            !sm.liveness_properties.is_empty(),
+            "should have liveness properties"
+        );
+        let live_names: Vec<&str> = sm
+            .liveness_properties
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect();
         assert!(
             live_names.contains(&"SubmittedProgress"),
             "should have SubmittedProgress, got: {live_names:?}"
@@ -612,7 +654,10 @@ mod debug {
         let sm = extract_state_machine(tla).unwrap();
         for t in &sm.transitions {
             if t.name.contains("Cancel") || t.name.contains("Initiate") {
-                eprintln!("{}: from={:?} to={:?} has_params={}", t.name, t.from_states, t.to_state, t.has_parameters);
+                eprintln!(
+                    "{}: from={:?} to={:?} has_params={}",
+                    t.name, t.from_states, t.to_state, t.has_parameters
+                );
             }
         }
     }

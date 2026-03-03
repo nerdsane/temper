@@ -26,15 +26,24 @@ fn cascade_page_all_levels_pass() {
     }
 
     assert!(
-        result.level_result(CascadeLevel::ModelCheck).unwrap().passed,
+        result
+            .level_result(CascadeLevel::ModelCheck)
+            .unwrap()
+            .passed,
         "L1 Model Check should pass"
     );
     assert!(
-        result.level_result(CascadeLevel::Simulation).unwrap().passed,
+        result
+            .level_result(CascadeLevel::Simulation)
+            .unwrap()
+            .passed,
         "L2 Simulation should pass"
     );
     assert!(
-        result.level_result(CascadeLevel::PropertyTest).unwrap().passed,
+        result
+            .level_result(CascadeLevel::PropertyTest)
+            .unwrap()
+            .passed,
         "L3 Property Tests should pass"
     );
     assert!(result.all_passed, "Page cascade should pass all levels");
@@ -49,22 +58,38 @@ fn cascade_escalation_policy_all_levels_pass() {
     let result = cascade.run();
 
     for level in &result.levels {
-        assert!(level.passed, "EscalationPolicy cascade level failed: {}", level.summary);
+        assert!(
+            level.passed,
+            "EscalationPolicy cascade level failed: {}",
+            level.summary
+        );
     }
 
     assert!(
-        result.level_result(CascadeLevel::ModelCheck).unwrap().passed,
+        result
+            .level_result(CascadeLevel::ModelCheck)
+            .unwrap()
+            .passed,
         "L1 Model Check should pass"
     );
     assert!(
-        result.level_result(CascadeLevel::Simulation).unwrap().passed,
+        result
+            .level_result(CascadeLevel::Simulation)
+            .unwrap()
+            .passed,
         "L2 Simulation should pass"
     );
     assert!(
-        result.level_result(CascadeLevel::PropertyTest).unwrap().passed,
+        result
+            .level_result(CascadeLevel::PropertyTest)
+            .unwrap()
+            .passed,
         "L3 Property Tests should pass"
     );
-    assert!(result.all_passed, "EscalationPolicy cascade should pass all levels");
+    assert!(
+        result.all_passed,
+        "EscalationPolicy cascade should pass all levels"
+    );
 }
 
 #[test]
@@ -76,22 +101,38 @@ fn cascade_remediation_all_levels_pass() {
     let result = cascade.run();
 
     for level in &result.levels {
-        assert!(level.passed, "Remediation cascade level failed: {}", level.summary);
+        assert!(
+            level.passed,
+            "Remediation cascade level failed: {}",
+            level.summary
+        );
     }
 
     assert!(
-        result.level_result(CascadeLevel::ModelCheck).unwrap().passed,
+        result
+            .level_result(CascadeLevel::ModelCheck)
+            .unwrap()
+            .passed,
         "L1 Model Check should pass"
     );
     assert!(
-        result.level_result(CascadeLevel::Simulation).unwrap().passed,
+        result
+            .level_result(CascadeLevel::Simulation)
+            .unwrap()
+            .passed,
         "L2 Simulation should pass"
     );
     assert!(
-        result.level_result(CascadeLevel::PropertyTest).unwrap().passed,
+        result
+            .level_result(CascadeLevel::PropertyTest)
+            .unwrap()
+            .passed,
         "L3 Property Tests should pass"
     );
-    assert!(result.all_passed, "Remediation cascade should pass all levels");
+    assert!(
+        result.all_passed,
+        "Remediation cascade should pass all levels"
+    );
 }
 
 #[test]
@@ -103,20 +144,36 @@ fn cascade_postmortem_all_levels_pass() {
     let result = cascade.run();
 
     for level in &result.levels {
-        assert!(level.passed, "Postmortem cascade level failed: {}", level.summary);
+        assert!(
+            level.passed,
+            "Postmortem cascade level failed: {}",
+            level.summary
+        );
     }
 
     assert!(
-        result.level_result(CascadeLevel::ModelCheck).unwrap().passed,
+        result
+            .level_result(CascadeLevel::ModelCheck)
+            .unwrap()
+            .passed,
         "L1 Model Check should pass"
     );
     assert!(
-        result.level_result(CascadeLevel::Simulation).unwrap().passed,
+        result
+            .level_result(CascadeLevel::Simulation)
+            .unwrap()
+            .passed,
         "L2 Simulation should pass"
     );
     assert!(
-        result.level_result(CascadeLevel::PropertyTest).unwrap().passed,
+        result
+            .level_result(CascadeLevel::PropertyTest)
+            .unwrap()
+            .passed,
         "L3 Property Tests should pass"
     );
-    assert!(result.all_passed, "Postmortem cascade should pass all levels");
+    assert!(
+        result.all_passed,
+        "Postmortem cascade should pass all levels"
+    );
 }

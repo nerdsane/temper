@@ -1,0 +1,90 @@
+[automaton]
+name = "GmailAuth"
+states = ["Disconnected", "AwaitingAuth", "Exchanging", "Authenticated", "Refreshing", "Expired"]
+initial = "Disconnected"
+
+[[action]]
+name = "StartOAuth"
+kind = "input"
+from = ["Disconnected", "Expired"]
+to = "AwaitingAuth"
+
+[[action]]
+name = "OAuthCallback"
+kind = "input"
+from = ["AwaitingAuth"]
+to = "Exchanging"
+params = ["code"]
+effect = [{ type = "trigger", name = "exchange_code" }]
+
+[[action]]
+name = "ExchangeSucceeded"
+kind = "input"
+from = ["Exchanging"]
+to = "Authenticated"
+params = ["access_token", "refresh_token"]
+effect = [{ type = "schedule", action = "RefreshToken", delay_seconds = 2700 }]
+
+[[action]]
+name = "ExchangeFailed"
+kind = "input"
+from = ["Exchanging"]
+to = "Disconnected"
+
+[[action]]
+name = "RefreshToken"
+kind = "input"
+from = ["Authenticated"]
+to = "Refreshing"
+effect = [{ type = "trigger", name = "refresh_token" }]
+
+[[action]]
+name = "RefreshSucceeded"
+kind = "input"
+from = ["Refreshing"]
+to = "Authenticated"
+effect = [{ type = "schedule", action = "RefreshToken", delay_seconds = 2700 }]
+
+[[action]]
+name = "RefreshFailed"
+kind = "input"
+from = ["Refreshing"]
+to = "Expired"
+
+[[integration]]
+name = "exchange_code"
+trigger = "exchange_code"
+type = "wasm"
+module = "http_fetch"
+on_success = "ExchangeSucceeded"
+on_failure = "ExchangeFailed"
+url = "https://oauth2.googleapis.com/token"
+method = "POST"
+headers = '{"Content-Type": "application/x-www-form-urlencoded"}'
+
+[[integration]]
+name = "refresh_token"
+trigger = "refresh_token"
+type = "wasm"
+module = "http_fetch"
+on_success = "RefreshSucceeded"
+on_failure = "RefreshFailed"
+url = "https://oauth2.googleapis.com/token"
+method = "POST"
+headers = '{"Authorization": "Bearer {secret:gmail_refresh_token}"}'
+
+[[webhook]]
+name = "oauth_callback"
+path = "oauth/callback"
+method = "GET"
+action = "OAuthCallback"
+entity_lookup = "query_param"
+entity_param = "state"
+
+[webhook.extract]
+code = "query.code"
+
+[[invariant]]
+name = "DisconnectedIsRecoverable"
+when = ["Disconnected"]
+assert = "ordering(Disconnected, Expired)"

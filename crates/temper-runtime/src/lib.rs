@@ -1,10 +1,11 @@
 pub mod actor;
+pub mod buggify;
 pub mod mailbox;
-pub mod supervision;
 pub mod persistence;
 pub mod scheduler;
-pub mod tenant;
+pub mod supervision;
 mod system;
+pub mod tenant;
 
 pub use system::ActorSystem;
-pub use tenant::{TenantId, QualifiedEntityId};
+pub use tenant::{QualifiedEntityId, TenantId};

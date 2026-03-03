@@ -20,11 +20,20 @@ pub enum EntityMsg {
     Action {
         name: String,
         params: serde_json::Value,
+        /// Pre-resolved cross-entity state booleans (injected by dispatch layer).
+        cross_entity_booleans: BTreeMap<String, bool>,
     },
     /// Get the current entity state.
     GetState,
     /// Get a specific field value.
     GetField { field: String },
+    /// Update entity fields (PATCH: merge, PUT: replace).
+    UpdateFields {
+        fields: serde_json::Value,
+        replace: bool,
+    },
+    /// Delete this entity.
+    Delete,
 }
 
 impl Message for EntityMsg {}
@@ -46,6 +55,9 @@ pub struct EntityState {
     /// Named boolean variables (e.g., "assignee_set", "has_address").
     #[serde(default)]
     pub booleans: BTreeMap<String, bool>,
+    /// Named list variables (e.g., "tags", "approvers").
+    #[serde(default)]
+    pub lists: BTreeMap<String, Vec<String>>,
     /// All entity fields as a JSON object.
     pub fields: serde_json::Value,
     /// Event log (append-only history of all transitions).
@@ -70,6 +82,15 @@ pub struct EntityEvent {
     pub params: serde_json::Value,
 }
 
+/// Default value for `spec_governed`: actions are spec-governed unless explicitly marked otherwise.
+fn default_spec_governed() -> bool {
+    true
+}
+/// Serde skip predicate: skip serializing `spec_governed` when it is `true` (the default).
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
 /// The response returned from an action or query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityResponse {
@@ -79,4 +100,16 @@ pub struct EntityResponse {
     pub state: EntityState,
     /// Error message if the action failed.
     pub error: Option<String>,
+    /// Custom effects emitted during this transition (for hook dispatch).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_effects: Vec<String>,
+    /// Scheduled actions to fire after delays (for timer dispatch).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduled_actions: Vec<crate::entity_actor::effects::ScheduledAction>,
+    /// Spawn requests for child entities (executed by dispatch pipeline).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawn_requests: Vec<crate::entity_actor::effects::SpawnRequest>,
+    /// Whether the action was governed by a state-machine spec. Defaults to `true`.
+    #[serde(default = "default_spec_governed", skip_serializing_if = "is_true")]
+    pub spec_governed: bool,
 }

@@ -6,28 +6,15 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ODataError {
     /// The URL path could not be parsed.
-    InvalidPath {
-        message: String,
-    },
+    InvalidPath { message: String },
     /// A query option could not be parsed.
-    InvalidQueryOption {
-        option: String,
-        message: String,
-    },
+    InvalidQueryOption { option: String, message: String },
     /// A $filter expression could not be parsed.
-    InvalidFilter {
-        message: String,
-        position: usize,
-    },
+    InvalidFilter { message: String, position: usize },
     /// An unsupported query option was encountered.
-    UnsupportedOption {
-        option: String,
-    },
+    UnsupportedOption { option: String },
     /// A value could not be parsed (e.g. invalid GUID, date, number).
-    InvalidValue {
-        expected: String,
-        found: String,
-    },
+    InvalidValue { expected: String, found: String },
 }
 
 impl fmt::Display for ODataError {
@@ -63,10 +50,7 @@ mod tests {
         let err = ODataError::InvalidPath {
             message: "unexpected segment".into(),
         };
-        assert_eq!(
-            err.to_string(),
-            "Invalid OData path: unexpected segment"
-        );
+        assert_eq!(err.to_string(), "Invalid OData path: unexpected segment");
     }
 
     #[test]

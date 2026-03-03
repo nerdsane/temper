@@ -51,6 +51,18 @@ impl Message {
     }
 }
 
+/// Trait for chat completion clients (real and mock).
+///
+/// Enables testing of Claude-powered agents without hitting the real API.
+pub trait ChatClient: Send + Sync {
+    /// Send a chat request and return the assistant's text response.
+    fn chat(
+        &self,
+        messages: &[Message],
+        system: &str,
+    ) -> impl std::future::Future<Output = Result<String, ClaudeError>> + Send;
+}
+
 /// Client for the Anthropic Claude Messages API.
 pub struct ClaudeClient {
     api_key: String,
@@ -115,7 +127,7 @@ impl ClaudeClient {
     /// Send a chat request to the Claude Messages API.
     ///
     /// Returns the assistant's text response.
-    pub async fn chat(&self, messages: &[Message], system: &str) -> Result<String, ClaudeError> {
+    async fn chat_impl(&self, messages: &[Message], system: &str) -> Result<String, ClaudeError> {
         let request_body = MessagesRequest {
             model: &self.model,
             max_tokens: 4096,
@@ -160,6 +172,54 @@ impl ClaudeClient {
     }
 }
 
+impl ChatClient for ClaudeClient {
+    async fn chat(&self, messages: &[Message], system: &str) -> Result<String, ClaudeError> {
+        self.chat_impl(messages, system).await
+    }
+}
+
+/// Mock Claude client for testing.
+///
+/// Returns canned responses in order. When all responses are consumed,
+/// returns the last one repeatedly. If no responses are configured,
+/// returns a default placeholder.
+pub struct MockClaudeClient {
+    responses: std::sync::Mutex<Vec<String>>,
+    default_response: String,
+}
+
+impl MockClaudeClient {
+    /// Create a mock client with the given canned responses.
+    ///
+    /// Responses are returned in FIFO order. When exhausted, returns
+    /// the `default_response`.
+    pub fn new(responses: Vec<String>, default_response: impl Into<String>) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(responses),
+            default_response: default_response.into(),
+        }
+    }
+
+    /// Create a mock that always returns the same response.
+    pub fn fixed(response: impl Into<String>) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(Vec::new()),
+            default_response: response.into(),
+        }
+    }
+}
+
+impl ChatClient for MockClaudeClient {
+    async fn chat(&self, _messages: &[Message], _system: &str) -> Result<String, ClaudeError> {
+        let mut responses = self.responses.lock().unwrap_or_else(|e| e.into_inner());
+        if responses.is_empty() {
+            Ok(self.default_response.clone())
+        } else {
+            Ok(responses.remove(0))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +247,41 @@ mod tests {
         let asst_msg = Message::assistant("hi there");
         assert_eq!(asst_msg.role, "assistant");
         assert_eq!(asst_msg.content, "hi there");
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_fixed_response() {
+        let mock = MockClaudeClient::fixed("I am a mock response");
+        let result = mock.chat(&[Message::user("hello")], "system").await;
+        assert_eq!(result.unwrap(), "I am a mock response");
+
+        // Second call returns the same fixed response.
+        let result2 = mock.chat(&[Message::user("again")], "system").await;
+        assert_eq!(result2.unwrap(), "I am a mock response");
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_sequential_responses() {
+        let mock = MockClaudeClient::new(
+            vec!["first".to_string(), "second".to_string()],
+            "default".to_string(),
+        );
+
+        let r1 = mock.chat(&[Message::user("q1")], "sys").await.unwrap();
+        assert_eq!(r1, "first");
+
+        let r2 = mock.chat(&[Message::user("q2")], "sys").await.unwrap();
+        assert_eq!(r2, "second");
+
+        // Exhausted, returns default.
+        let r3 = mock.chat(&[Message::user("q3")], "sys").await.unwrap();
+        assert_eq!(r3, "default");
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_empty_returns_default() {
+        let mock = MockClaudeClient::new(vec![], "fallback");
+        let result = mock.chat(&[], "sys").await.unwrap();
+        assert_eq!(result, "fallback");
     }
 }

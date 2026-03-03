@@ -1,26 +1,49 @@
 //! Webhook dispatcher: sends HTTP requests to integration endpoints.
+//!
+//! Supports exponential backoff retry and dead-letter queue for
+//! permanently failed deliveries.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use tracing::{info, warn};
 
-use super::types::{IntegrationConfig, IntegrationEvent, IntegrationResult, IntegrationStatus};
+use super::dead_letter::DeadLetterQueue;
+use super::types::{
+    DeadLetterEntry, IntegrationConfig, IntegrationEvent, IntegrationResult, IntegrationStatus,
+};
 
 /// Dispatches webhook HTTP requests to integration endpoints.
+///
+/// Optionally routes permanently failed deliveries to a dead-letter queue.
 pub struct WebhookDispatcher {
     /// HTTP client (shared across dispatches).
     client: reqwest::Client,
+    /// Dead-letter queue for permanently failed deliveries.
+    dlq: Option<Arc<dyn DeadLetterQueue>>,
 }
 
 impl WebhookDispatcher {
-    /// Create a new dispatcher.
+    /// Create a new dispatcher without a dead-letter queue.
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
+            dlq: None,
+        }
+    }
+
+    /// Create a new dispatcher with a dead-letter queue.
+    pub fn with_dlq(dlq: Arc<dyn DeadLetterQueue>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            dlq: Some(dlq),
         }
     }
 
     /// Dispatch a single integration event, respecting retry policy.
+    ///
+    /// If all retries are exhausted and a DLQ is configured, the event
+    /// is enqueued for later inspection or manual replay.
     pub async fn dispatch(
         &self,
         config: &IntegrationConfig,
@@ -62,6 +85,22 @@ impl WebhookDispatcher {
                     );
                 }
             }
+        }
+
+        // All retries exhausted — route to dead-letter queue if configured.
+        if let Some(dlq) = &self.dlq {
+            let entry = DeadLetterEntry {
+                integration_name: config.name.clone(),
+                event: event.clone(),
+                error: last_error.clone(),
+                attempts: config.retry.max_retries + 1,
+                failed_at: chrono::Utc::now(),
+            };
+            dlq.enqueue(entry).await;
+            warn!(
+                integration = %config.name,
+                "permanently failed delivery enqueued to dead-letter queue"
+            );
         }
 
         IntegrationResult {

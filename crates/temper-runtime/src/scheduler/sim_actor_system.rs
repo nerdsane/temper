@@ -14,10 +14,45 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::clock::{LogicalClock, SimClock};
-use super::context::{install_sim_context, SimContextGuard};
+use super::context::{SimContextGuard, install_sim_context};
 use super::id_gen::DeterministicIdGen;
 use super::sim_handler::SimActorHandler;
 use super::{DeterministicRng, FaultConfig, SimScheduler};
+
+/// Configures how integration callbacks are delivered in simulation.
+///
+/// Maps `(entity_type, trigger_name)` → callback action name. When a simulated
+/// entity emits a custom effect matching a trigger, the system auto-schedules
+/// the configured callback action on the next tick. This lets DST explore both
+/// success and failure paths without executing real WASM modules.
+#[derive(Debug, Clone, Default)]
+pub struct SimIntegrationResponses {
+    /// Maps (entity_type, trigger_name) → callback action name.
+    responses: BTreeMap<(String, String), String>,
+}
+
+impl SimIntegrationResponses {
+    /// Create an empty integration response map.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Configure a success callback for a trigger.
+    pub fn on_trigger(mut self, entity_type: &str, trigger: &str, callback_action: &str) -> Self {
+        self.responses.insert(
+            (entity_type.to_string(), trigger.to_string()),
+            callback_action.to_string(),
+        );
+        self
+    }
+
+    /// Look up the callback action for a trigger.
+    pub fn get_callback(&self, entity_type: &str, trigger: &str) -> Option<&str> {
+        self.responses
+            .get(&(entity_type.to_string(), trigger.to_string()))
+            .map(|s| s.as_str())
+    }
+}
 
 /// Configuration for a [`SimActorSystem`] run.
 #[derive(Debug, Clone)]
@@ -37,7 +72,7 @@ impl Default for SimActorSystemConfig {
         Self {
             seed: 42,
             max_ticks: 500,
-            faults: FaultConfig::none(),
+            faults: FaultConfig::light(),
             max_actions_per_actor: 50,
         }
     }
@@ -58,6 +93,25 @@ pub struct ActorInvariantViolation {
     pub description: String,
     /// At what tick.
     pub tick: u64,
+}
+
+/// Complete recording of a simulation run for determinism comparison.
+///
+/// Captures every state transition, every event, and every final state so that
+/// two runs with the same seed can be compared for byte-exact equality.
+/// This is the FoundationDB principle: same seed MUST produce identical output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRecord {
+    /// Seed used.
+    pub seed: u64,
+    /// Every state transition that occurred: (tick, actor_id, action, from_status, to_status).
+    pub transitions: Vec<(u64, String, String, String, String)>,
+    /// Every event recorded by each actor (actor_id -> [event JSON strings]).
+    pub events: BTreeMap<String, Vec<String>>,
+    /// Final states: (actor_id, status, item_count, event_count, counters_json).
+    pub final_states: Vec<(String, String, usize, usize, String)>,
+    /// All invariant check results: (actor_id, invariant_name, passed).
+    pub invariant_results: Vec<(String, String, bool)>,
 }
 
 /// Result of a simulation run.
@@ -93,13 +147,21 @@ pub struct SimActorSystem {
     action_counts: BTreeMap<String, usize>,
     scheduler: SimScheduler,
     clock: Arc<LogicalClock>,
-    id_gen: Arc<DeterministicIdGen>,
+    _id_gen: Arc<DeterministicIdGen>,
     _guard: SimContextGuard,
     rng: DeterministicRng,
     invariant_checker: Option<InvariantChecker>,
     violations: Vec<ActorInvariantViolation>,
     total_transitions: u64,
     total_messages: u64,
+    /// Recorded transitions for RunRecord: (tick, actor_id, action, from_status, to_status).
+    recorded_transitions: Vec<(u64, String, String, String, String)>,
+    /// Recorded invariant results for RunRecord: (actor_id, invariant_name, passed).
+    recorded_invariants: Vec<(String, String, bool)>,
+    /// Integration callback configuration for WASM trigger simulation.
+    integration_responses: SimIntegrationResponses,
+    /// Pending integration callbacks to deliver: (actor_id, callback_action).
+    pending_integration_callbacks: Vec<(String, String)>,
 }
 
 impl SimActorSystem {
@@ -117,13 +179,17 @@ impl SimActorSystem {
             action_counts: BTreeMap::new(),
             scheduler,
             clock,
-            id_gen,
+            _id_gen: id_gen,
             _guard: guard,
             rng,
             invariant_checker: None,
             violations: Vec::new(),
             total_transitions: 0,
             total_messages: 0,
+            recorded_transitions: Vec::new(),
+            recorded_invariants: Vec::new(),
+            integration_responses: SimIntegrationResponses::new(),
+            pending_integration_callbacks: Vec::new(),
         }
     }
 
@@ -141,6 +207,16 @@ impl SimActorSystem {
     /// `Some(description)` if an invariant is violated.
     pub fn set_invariant_checker(&mut self, checker: InvariantChecker) {
         self.invariant_checker = Some(checker);
+    }
+
+    /// Configure integration callback responses for WASM trigger simulation.
+    ///
+    /// When an actor emits a custom effect (trigger), the simulation system
+    /// looks up the configured callback and auto-schedules it on the next tick.
+    /// This lets DST explore both success and failure paths without executing
+    /// real WASM modules.
+    pub fn set_integration_responses(&mut self, responses: SimIntegrationResponses) {
+        self.integration_responses = responses;
     }
 
     // ===================================================================
@@ -171,11 +247,21 @@ impl SimActorSystem {
             Ok(_) => {
                 let status_after = handler.current_status();
                 let item_count = handler.current_item_count();
+                let tick = self.clock.tick();
 
                 // Only count as transition if status or items actually changed
-                let count = self.action_counts.get_mut(actor_id).unwrap();
+                let count = self.action_counts.get_mut(actor_id).unwrap(); // ci-ok: actor always in action_counts
                 *count += 1;
                 self.total_transitions += 1;
+
+                // Record the transition
+                self.recorded_transitions.push((
+                    tick,
+                    actor_id.to_string(),
+                    action.to_string(),
+                    status_before.clone(),
+                    status_after.clone(),
+                ));
 
                 // Check invariants
                 self.check_invariants(
@@ -184,12 +270,20 @@ impl SimActorSystem {
                     &status_before,
                     &status_after,
                     item_count,
-                    self.clock.tick(),
+                    tick,
                 );
+
+                // Schedule integration callbacks for any custom effects
+                self.schedule_integration_callbacks(actor_id);
             }
             Err(_) => {
                 // Failed action — invariants should still hold on unchanged state
             }
+        }
+
+        // Deliver any pending integration callbacks
+        if !self.pending_integration_callbacks.is_empty() {
+            self.deliver_integration_callbacks();
         }
 
         result
@@ -284,7 +378,7 @@ impl SimActorSystem {
 
             // Get valid actions
             let valid = {
-                let handler = self.actors.get(&actor_id).unwrap();
+                let handler = self.actors.get(&actor_id).unwrap(); // ci-ok: actor_id from self.actors.keys()
                 handler.valid_actions()
             };
 
@@ -297,12 +391,7 @@ impl SimActorSystem {
             let action = valid[action_idx].clone();
 
             // Execute through the scheduler for fault injection
-            self.scheduler.send(
-                "sim-driver",
-                &actor_id,
-                &action,
-                "{}",
-            );
+            self.scheduler.send("sim-driver", &actor_id, &action, "{}");
             self.total_messages += 1;
 
             let delivered = self.scheduler.tick();
@@ -317,8 +406,18 @@ impl SimActorSystem {
                         Ok(_) => {
                             let status_after = handler.current_status();
                             let item_count = handler.current_item_count();
-                            *self.action_counts.get_mut(&msg.to).unwrap() += 1;
+                            let tick = self.clock.tick();
+                            *self.action_counts.get_mut(&msg.to).unwrap() += 1; // ci-ok: actor always in action_counts
                             self.total_transitions += 1;
+
+                            // Record the transition
+                            self.recorded_transitions.push((
+                                tick,
+                                msg.to.clone(),
+                                msg.msg_type.clone(),
+                                status_before.clone(),
+                                status_after.clone(),
+                            ));
 
                             self.check_invariants(
                                 &msg.to,
@@ -326,14 +425,22 @@ impl SimActorSystem {
                                 &status_before,
                                 &status_after,
                                 item_count,
-                                self.clock.tick(),
+                                tick,
                             );
+
+                            // Schedule integration callbacks for any custom effects
+                            self.schedule_integration_callbacks(&msg.to);
                         }
                         Err(_) => {
                             // Action failed — expected for invalid transitions
                         }
                     }
                 }
+            }
+
+            // Deliver any pending integration callbacks
+            if !self.pending_integration_callbacks.is_empty() {
+                self.deliver_integration_callbacks();
             }
 
             // Drain any remaining scheduled messages
@@ -364,6 +471,113 @@ impl SimActorSystem {
         }
     }
 
+    /// Run random exploration and return a full [`RunRecord`] alongside the result.
+    ///
+    /// This is the recording variant of [`run_random()`]. The `RunRecord` captures
+    /// every transition, every event, and every final state for determinism
+    /// comparison. Two calls with the same seed MUST produce identical records.
+    pub fn run_random_recorded(&mut self) -> (SimActorResult, RunRecord) {
+        let result = self.run_random();
+
+        // Collect events from each actor
+        let events: BTreeMap<String, Vec<String>> = self
+            .actors
+            .iter()
+            .map(|(id, handler)| {
+                let events_val = handler.events_json();
+                let event_strings = match events_val {
+                    serde_json::Value::Array(arr) => arr
+                        .iter()
+                        .map(|v| serde_json::to_string(v).unwrap_or_default())
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                (id.clone(), event_strings)
+            })
+            .collect();
+
+        // Collect final states with counters serialized as JSON
+        let final_states: Vec<_> = self
+            .actors
+            .iter()
+            .map(|(id, handler)| {
+                let status = handler.current_status();
+                let item_count = handler.current_item_count();
+                let event_count = handler.event_count();
+                // Serialize the full events_json as a proxy for counters
+                // since SimActorHandler doesn't expose counters directly.
+                // The events contain all state change details.
+                let counters_json =
+                    serde_json::to_string(&handler.events_json()).unwrap_or_default();
+                (id.clone(), status, item_count, event_count, counters_json)
+            })
+            .collect();
+
+        let record = RunRecord {
+            seed: self.config.seed,
+            transitions: self.recorded_transitions.clone(),
+            events,
+            final_states,
+            invariant_results: self.recorded_invariants.clone(),
+        };
+
+        (result, record)
+    }
+
+    // ===================================================================
+    // Integration callback scheduling
+    // ===================================================================
+
+    /// Check for pending integration callbacks and schedule them.
+    ///
+    /// After a successful action, the handler may have emitted custom effects
+    /// (integration triggers). This method looks up configured callbacks and
+    /// queues them for delivery on the next tick.
+    fn schedule_integration_callbacks(&mut self, actor_id: &str) {
+        let handler = match self.actors.get(actor_id) {
+            Some(h) => h,
+            None => return,
+        };
+
+        let callbacks = handler.pending_callbacks();
+        if callbacks.is_empty() {
+            return;
+        }
+
+        // Derive entity_type from actor_id (convention: "EntityType:EntityId" or just id)
+        // For simplicity, check against all registered entity_type patterns.
+        for trigger in &callbacks {
+            // Try matching with the actor_id as-is for the entity_type lookup
+            if let Some(callback_action) =
+                self.integration_responses.get_callback(actor_id, trigger)
+            {
+                self.pending_integration_callbacks
+                    .push((actor_id.to_string(), callback_action.to_string()));
+            }
+            // Also try splitting on ':' (e.g., "Order:o1" → entity_type = "Order")
+            else if let Some(colon_pos) = actor_id.find(':') {
+                let entity_type = &actor_id[..colon_pos];
+                if let Some(callback_action) = self
+                    .integration_responses
+                    .get_callback(entity_type, trigger)
+                {
+                    self.pending_integration_callbacks
+                        .push((actor_id.to_string(), callback_action.to_string()));
+                }
+            }
+        }
+    }
+
+    /// Deliver any pending integration callbacks by executing them as actions.
+    fn deliver_integration_callbacks(&mut self) {
+        let callbacks: Vec<(String, String)> =
+            self.pending_integration_callbacks.drain(..).collect();
+        for (actor_id, callback_action) in callbacks {
+            // Execute the callback as a regular step (this checks invariants too)
+            let _ = self.step(&actor_id, &callback_action, "{}");
+        }
+    }
+
     // ===================================================================
     // Invariant checking
     // ===================================================================
@@ -381,8 +595,7 @@ impl SimActorSystem {
         if let Some(handler) = self.actors.get(actor_id) {
             let invariants: Vec<_> = handler.spec_invariants().to_vec();
             for inv in &invariants {
-                let triggered = inv.when.is_empty()
-                    || inv.when.iter().any(|s| s == status_after);
+                let triggered = inv.when.is_empty() || inv.when.iter().any(|s| s == status_after);
                 if !triggered {
                     continue;
                 }
@@ -402,7 +615,45 @@ impl SimActorSystem {
                         // `when` states), a transition should not have fired.
                         inv.when.iter().any(|s| s == status_before)
                     }
+                    super::sim_handler::SpecAssert::OrderingConstraint { before, after } => {
+                        // If the entity is now in the "after" state, check
+                        // that "before" was visited in event history.
+                        if status_after == after.as_str() {
+                            let events = handler.events_json();
+                            if let Some(arr) = events.as_array() {
+                                let visited_before = arr.iter().any(|e| {
+                                    e.get("to_status").and_then(|s| s.as_str())
+                                        == Some(before.as_str())
+                                });
+                                !visited_before // violated if "before" was never visited
+                            } else {
+                                false
+                            }
+                        } else {
+                            false // Not in the "after" state, invariant doesn't apply
+                        }
+                    }
+                    super::sim_handler::SpecAssert::NeverState { state } => {
+                        // Violated if the entity is currently in the forbidden state.
+                        status_after == state.as_str()
+                    }
+                    super::sim_handler::SpecAssert::CounterCompare { var, op, value } => {
+                        // Only the "items" counter is passed to check_invariants.
+                        // Other counters require expanding the SimActorHandler trait.
+                        let counter_val = if var == "items" { item_count } else { 0 };
+                        let passed = match op {
+                            super::sim_handler::CompareOp::Gt => counter_val > *value,
+                            super::sim_handler::CompareOp::Gte => counter_val >= *value,
+                            super::sim_handler::CompareOp::Lt => counter_val < *value,
+                            super::sim_handler::CompareOp::Lte => counter_val <= *value,
+                            super::sim_handler::CompareOp::Eq => counter_val == *value,
+                        };
+                        !passed // violated if comparison fails
+                    }
                 };
+
+                self.recorded_invariants
+                    .push((actor_id.to_string(), inv.name.clone(), !violated));
 
                 if violated {
                     self.violations.push(ActorInvariantViolation {
@@ -418,17 +669,17 @@ impl SimActorSystem {
         }
 
         // 2. Check manual invariant checker (backward-compatible).
-        if let Some(ref checker) = self.invariant_checker {
-            if let Some(desc) = checker(actor_id, action, status_after, item_count) {
-                self.violations.push(ActorInvariantViolation {
-                    actor_id: actor_id.to_string(),
-                    action: action.to_string(),
-                    status_before: status_before.to_string(),
-                    status_after: status_after.to_string(),
-                    description: desc,
-                    tick,
-                });
-            }
+        if let Some(ref checker) = self.invariant_checker
+            && let Some(desc) = checker(actor_id, action, status_after, item_count)
+        {
+            self.violations.push(ActorInvariantViolation {
+                actor_id: actor_id.to_string(),
+                action: action.to_string(),
+                status_before: status_before.to_string(),
+                status_after: status_after.to_string(),
+                description: desc,
+                tick,
+            });
         }
     }
 }

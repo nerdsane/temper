@@ -6,30 +6,50 @@ license.workspace = true
 rust-version.workspace = true
 description = "HTTP server assembly for Temper entity services"
 
+[features]
+default = []
+observe = ["temper-verify"]
+sim = ["dep:temper-store-sim"]
+
 [dependencies]
 temper-runtime = { workspace = true }
 temper-odata = { workspace = true }
 temper-spec = { workspace = true }
 temper-jit = { workspace = true }
 temper-store-postgres = { workspace = true }
+temper-store-turso = { workspace = true }
+temper-store-redis = { workspace = true }
 temper-observe = { workspace = true }
 temper-authz = { workspace = true }
+temper-evolution = { workspace = true }
+temper-wasm = { workspace = true }
+temper-mcp = { workspace = true }
+temper-verify = { workspace = true, optional = true }
+temper-store-sim = { workspace = true, optional = true }
 axum = { workspace = true }
 hyper = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 opentelemetry = { workspace = true }
+reqwest = { workspace = true }
+sqlx = { workspace = true }
+aes-gcm = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+wiremock = { workspace = true }
+temper-store-sim = { workspace = true }
+temper-server = { path = ".", features = ["sim"] }
 
 [[bench]]
 name = "actor_throughput"

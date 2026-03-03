@@ -83,7 +83,7 @@ impl QueryOptimizer {
 
         // Detect repeated operations (N+1 pattern: same op appears 3+ times
         // in a single trace).
-        for (_trace_id, ops) in &trace_ops {
+        for ops in trace_ops.values() {
             let mut counts: std::collections::HashMap<&str, usize> =
                 std::collections::HashMap::new();
             for op in ops {
@@ -93,11 +93,7 @@ impl QueryOptimizer {
             for (op, count) in counts {
                 if count >= 3 {
                     // Extract entity set name from the operation (e.g., "GET /Orders" -> "Orders").
-                    let entity_set = op
-                        .split('/')
-                        .last()
-                        .unwrap_or(op)
-                        .to_string();
+                    let entity_set = op.split('/').next_back().unwrap_or(op).to_string();
 
                     recommendations.push(OptimizationRecommendation {
                         optimizer: "QueryOptimizer".to_string(),
@@ -151,7 +147,7 @@ impl QueryOptimizer {
 
                 let entity_set = operation
                     .split('/')
-                    .last()
+                    .next_back()
                     .unwrap_or(&operation)
                     .to_string();
 

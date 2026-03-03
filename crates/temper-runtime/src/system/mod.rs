@@ -1,5 +1,5 @@
-use crate::actor::cell::ActorCell;
 use crate::actor::actor_ref::{ActorId, ActorRef};
+use crate::actor::cell::ActorCell;
 use crate::actor::traits::Actor;
 
 /// The ActorSystem is the top-level container for all actors.
@@ -19,11 +19,7 @@ impl ActorSystem {
 
     /// Spawn a new top-level actor in this system.
     /// Returns an ActorRef for communicating with the actor.
-    pub fn spawn<A: Actor>(
-        &self,
-        actor: A,
-        name: impl Into<String>,
-    ) -> ActorRef<A::Msg> {
+    pub fn spawn<A: Actor>(&self, actor: A, name: impl Into<String>) -> ActorRef<A::Msg> {
         let actor_name = name.into();
         let path = format!("/{}/{}", self.name, actor_name);
         let id = ActorId::new(&actor_name, &path);
@@ -70,7 +66,10 @@ mod tests {
         type Msg = CounterMsg;
         type State = i64;
 
-        async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<Self::State, ActorError> {
+        async fn pre_start(
+            &self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<Self::State, ActorError> {
             Ok(0)
         }
 
@@ -166,7 +165,10 @@ mod tests {
         type Msg = FaultyMsg;
         type State = u32; // counts how many messages processed
 
-        async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<Self::State, ActorError> {
+        async fn pre_start(
+            &self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<Self::State, ActorError> {
             self.started.notify_one();
             Ok(0)
         }

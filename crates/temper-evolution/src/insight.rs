@@ -43,15 +43,18 @@ pub fn generate_digest(insights: &[InsightRecord]) -> String {
     digest.push_str("TEMPER PRODUCT INTELLIGENCE DIGEST\n");
     digest.push_str("===================================\n\n");
 
-    let unmet: Vec<&InsightRecord> = insights.iter()
+    let unmet: Vec<&InsightRecord> = insights
+        .iter()
         .filter(|i| i.category == InsightCategory::UnmetIntent)
         .collect();
 
-    let friction: Vec<&InsightRecord> = insights.iter()
+    let friction: Vec<&InsightRecord> = insights
+        .iter()
         .filter(|i| i.category == InsightCategory::Friction)
         .collect();
 
-    let workarounds: Vec<&InsightRecord> = insights.iter()
+    let workarounds: Vec<&InsightRecord> = insights
+        .iter()
         .filter(|i| i.category == InsightCategory::Workaround)
         .collect();
 
@@ -114,7 +117,10 @@ mod tests {
         };
 
         let score = compute_priority_score(&signal);
-        assert!(score > 0.3, "high volume + low success should score high, got {score}");
+        assert!(
+            score > 0.3,
+            "high volume + low success should score high, got {score}"
+        );
     }
 
     #[test]

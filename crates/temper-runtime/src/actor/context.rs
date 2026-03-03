@@ -1,12 +1,11 @@
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::HashMap; // determinism-ok: production actor context, not on simulation path
 
 use tokio::sync::oneshot;
 
 use super::actor_ref::{ActorId, ActorRef};
 use super::errors::ActorError;
 use super::traits::{Actor, Message};
-
 
 /// Context available to an actor during message handling.
 /// Provides access to the actor's identity, child management,
@@ -19,7 +18,7 @@ pub struct ActorContext<A: Actor> {
     pub(crate) reply_channel: Option<oneshot::Sender<Result<Box<dyn Any + Send>, ActorError>>>,
 
     /// Children spawned by this actor.
-    pub(crate) children: HashMap<String, Box<dyn Any + Send>>,
+    pub(crate) children: HashMap<String, Box<dyn Any + Send>>, // determinism-ok: key-based lookup only; iteration order not observed
 
     _phantom: std::marker::PhantomData<A>,
 }
@@ -29,7 +28,7 @@ impl<A: Actor> ActorContext<A> {
         Self {
             id,
             reply_channel: None,
-            children: HashMap::new(),
+            children: HashMap::new(), // determinism-ok: map order is not used
             _phantom: std::marker::PhantomData,
         }
     }

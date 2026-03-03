@@ -10,8 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use temper_codegen::generate_entity_module;
 use temper_spec::csdl::parse_csdl;
-use temper_spec::model::build_spec_model;
-
+use temper_spec::model::{SpecSource, build_spec_model_mixed};
 
 /// Run the `temper codegen` command.
 ///
@@ -40,21 +39,35 @@ pub fn run(specs_dir: &str, output_dir: &str) -> Result<()> {
     // Parse CSDL
     let csdl = parse_csdl(&csdl_xml)
         .with_context(|| format!("Failed to parse CSDL from {}", csdl_path.display()))?;
-    println!(
-        "  Parsed {} schema(s) from CSDL",
-        csdl.schemas.len()
-    );
+    println!("  Parsed {} schema(s) from CSDL", csdl.schemas.len());
 
-    // Read TLA+ spec files
+    // Read IOA spec files (primary format)
+    let ioa_sources = read_ioa_sources(specs_path)?;
+    if !ioa_sources.is_empty() {
+        println!("  Found {} IOA spec file(s)", ioa_sources.len());
+    }
+
+    // Read TLA+ spec files (legacy format)
     let tla_sources = read_tla_sources(specs_path)?;
-    if tla_sources.is_empty() {
-        println!("  No TLA+ spec files found (state machines will be skipped)");
-    } else {
+    if !tla_sources.is_empty() {
         println!("  Found {} TLA+ spec file(s)", tla_sources.len());
     }
 
+    if ioa_sources.is_empty() && tla_sources.is_empty() {
+        println!("  No spec files found (state machines will be skipped)");
+    }
+
+    // Merge sources: IOA takes precedence over TLA+ for the same entity name
+    let mut sources: HashMap<String, SpecSource> = tla_sources
+        .into_iter()
+        .map(|(k, v)| (k, SpecSource::Tla(v)))
+        .collect();
+    for (name, ioa_text) in ioa_sources {
+        sources.insert(name, SpecSource::Ioa(ioa_text));
+    }
+
     // Build the unified spec model
-    let spec = build_spec_model(csdl, tla_sources);
+    let spec = build_spec_model_mixed(csdl, sources);
 
     // Report validation results
     if !spec.validation.errors.is_empty() {
@@ -78,8 +91,12 @@ pub fn run(specs_dir: &str, output_dir: &str) -> Result<()> {
     }
 
     // Create output directory
-    fs::create_dir_all(output_path)
-        .with_context(|| format!("Failed to create output directory: {}", output_path.display()))?;
+    fs::create_dir_all(output_path).with_context(|| {
+        format!(
+            "Failed to create output directory: {}",
+            output_path.display()
+        )
+    })?;
 
     // Collect all entity type names from non-vocabulary schemas
     let entity_names: Vec<String> = spec
@@ -95,7 +112,10 @@ pub fn run(specs_dir: &str, output_dir: &str) -> Result<()> {
         return Ok(());
     }
 
-    println!("\n  Generating code for {} entity type(s)...", entity_names.len());
+    println!(
+        "\n  Generating code for {} entity type(s)...",
+        entity_names.len()
+    );
 
     let mut generated_count = 0;
     let mut mod_entries = Vec::new();
@@ -137,6 +157,42 @@ pub fn run(specs_dir: &str, output_dir: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read all `.ioa.toml` files from the specs directory and return a map of
+/// entity name (derived from file stem, PascalCase) to IOA TOML source text.
+fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
+    let mut sources = HashMap::new();
+
+    if !specs_dir.is_dir() {
+        return Ok(sources);
+    }
+
+    for entry in fs::read_dir(specs_dir)
+        .with_context(|| format!("Failed to read specs directory: {}", specs_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+
+        if let Some(stem) = file_name.strip_suffix(".ioa.toml") {
+            let entity_name = to_pascal_case(stem);
+            let source = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read IOA file: {}", path.display()))?;
+
+            println!(
+                "  Read IOA spec: {} -> entity '{}'",
+                path.display(),
+                entity_name
+            );
+            sources.insert(entity_name, source);
+        }
+    }
+
+    Ok(sources)
+}
+
 /// Read all `.tla` files from the specs directory and return a map of
 /// entity name (derived from file stem, PascalCase) to TLA+ source text.
 fn read_tla_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
@@ -163,7 +219,11 @@ fn read_tla_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
             let source = fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read TLA+ file: {}", path.display()))?;
 
-            println!("  Read TLA+ spec: {} -> entity '{}'", path.display(), entity_name);
+            println!(
+                "  Read TLA+ spec: {} -> entity '{}'",
+                path.display(),
+                entity_name
+            );
             sources.insert(entity_name, source);
         }
     }
@@ -175,7 +235,7 @@ fn read_tla_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
 ///
 /// "order" -> "Order", "order_item" -> "OrderItem"
 fn to_pascal_case(s: &str) -> String {
-    s.split(|c: char| c == '_' || c == '-')
+    s.split(['_', '-'])
         .map(|word| {
             let mut chars = word.chars();
             match chars.next() {
@@ -228,24 +288,21 @@ mod tests {
     #[test]
     fn test_codegen_from_reference_specs() {
         // Use the example specs that ship with the project
-        let specs_dir = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../test-fixtures/specs"
-        );
+        let specs_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-fixtures/specs");
         let specs_path = Path::new(specs_dir);
 
         // Verify the reference specs exist before testing
         if !specs_path.join("model.csdl.xml").exists() {
             // If reference specs don't exist, skip (don't fail CI)
-            eprintln!("Skipping codegen test: reference specs not found at {}", specs_dir);
+            eprintln!(
+                "Skipping codegen test: reference specs not found at {}",
+                specs_dir
+            );
             return;
         }
 
         // Create a temp output directory
-        let tmp = std::env::temp_dir().join(format!(
-            "temper_test_codegen_{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("temper_test_codegen_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
 
         let result = run(specs_dir, tmp.to_str().unwrap());
@@ -302,7 +359,10 @@ mod tests {
         let result = run(tmp.to_str().unwrap(), tmp.join("out").to_str().unwrap());
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("CSDL model file not found"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("CSDL model file not found"),
             "should report missing CSDL"
         );
 

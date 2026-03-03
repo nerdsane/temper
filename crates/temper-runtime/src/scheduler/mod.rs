@@ -19,17 +19,22 @@
 //! - [`sim_actor_system`]: `SimActorSystem` — runs real handlers through the scheduler
 
 pub mod clock;
-pub mod id_gen;
 pub mod context;
-pub mod sim_handler;
+pub mod id_gen;
 pub mod sim_actor_system;
+pub mod sim_handler;
 
 // Re-export key types from submodules.
-pub use clock::{SimClock, WallClock, LogicalClock};
-pub use id_gen::{SimIdGen, RealIdGen, DeterministicIdGen};
-pub use context::{sim_now, sim_uuid, install_sim_context, install_deterministic_context, SimContextGuard};
-pub use sim_handler::{SimActorHandler, SpecInvariant, SpecAssert};
-pub use sim_actor_system::{SimActorSystem, SimActorSystemConfig, SimActorResult, ActorInvariantViolation};
+pub use clock::{LogicalClock, SimClock, WallClock};
+pub use context::{
+    SimContextGuard, install_deterministic_context, install_sim_context, sim_now, sim_uuid,
+};
+pub use id_gen::{DeterministicIdGen, RealIdGen, SimIdGen};
+pub use sim_actor_system::{
+    ActorInvariantViolation, RunRecord, SimActorResult, SimActorSystem, SimActorSystemConfig,
+    SimIntegrationResponses,
+};
+pub use sim_handler::{CompareOp, SimActorHandler, SpecAssert, SpecInvariant};
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
@@ -47,7 +52,9 @@ impl DeterministicRng {
     /// Create a new PRNG with the given seed. A zero seed is replaced with 1.
     pub fn new(seed: u64) -> Self {
         // Ensure non-zero state
-        Self { state: if seed == 0 { 1 } else { seed } }
+        Self {
+            state: if seed == 0 { 1 } else { seed },
+        }
     }
 
     /// Generate next pseudo-random u64.
@@ -116,7 +123,9 @@ impl PartialOrd for SimMessage {
 impl Ord for SimMessage {
     fn cmp(&self, other: &Self) -> Ordering {
         // BinaryHeap is a max-heap; we want min-heap (earliest delivery first)
-        other.deliver_at.cmp(&self.deliver_at)
+        other
+            .deliver_at
+            .cmp(&self.deliver_at)
             .then_with(|| other.id.cmp(&self.id))
     }
 }
@@ -234,7 +243,8 @@ impl SimScheduler {
 
     /// Register an actor in the simulation.
     pub fn register_actor(&mut self, actor_id: &str) {
-        self.actor_states.insert(actor_id.to_string(), SimActorState::Running);
+        self.actor_states
+            .insert(actor_id.to_string(), SimActorState::Running);
         self.mailboxes.entry(actor_id.to_string()).or_default();
     }
 
@@ -258,7 +268,9 @@ impl SimScheduler {
         }
 
         let delay = if self.rng.chance(self.fault_config.message_delay_prob) {
-            1 + self.rng.next_bound(self.fault_config.max_delay_ticks as usize) as u64
+            1 + self
+                .rng
+                .next_bound(self.fault_config.max_delay_ticks as usize) as u64
         } else {
             1 // Deliver on next tick
         };
@@ -275,6 +287,44 @@ impl SimScheduler {
         self.pending.push(msg);
     }
 
+    /// Send a message with an explicit delivery time (for scheduled actions).
+    ///
+    /// Unlike [`send()`], this bypasses fault injection delay — the delay is
+    /// intentional, not a fault. Message drop and crash faults still apply.
+    pub fn send_at(
+        &mut self,
+        from: &str,
+        to: &str,
+        msg_type: &str,
+        payload: &str,
+        deliver_at: SimTime,
+    ) {
+        let id = self.next_msg_id;
+        self.next_msg_id += 1;
+
+        // Apply message drop fault (timer delivery is not guaranteed).
+        if self.rng.chance(self.fault_config.message_drop_prob) {
+            self.dropped.push(SimMessage {
+                from: from.to_string(),
+                to: to.to_string(),
+                msg_type: msg_type.to_string(),
+                payload: payload.to_string(),
+                deliver_at,
+                id,
+            });
+            return;
+        }
+
+        self.pending.push(SimMessage {
+            from: from.to_string(),
+            to: to.to_string(),
+            msg_type: msg_type.to_string(),
+            payload: payload.to_string(),
+            deliver_at,
+            id,
+        });
+    }
+
     /// Advance one tick: deliver all messages due at current_time + 1.
     /// Returns the messages delivered this tick.
     pub fn tick(&mut self) -> Vec<SimMessage> {
@@ -285,7 +335,7 @@ impl SimScheduler {
         // Deliver all messages due at or before current time
         while let Some(msg) = self.pending.peek() {
             if msg.deliver_at <= self.current_time {
-                let msg = self.pending.pop().unwrap();
+                let msg = self.pending.pop().unwrap(); // ci-ok: guarded by peek() above
                 let to = msg.to.clone();
 
                 // Check if target actor is running
@@ -317,13 +367,16 @@ impl SimScheduler {
 
         // Maybe crash an actor after delivery
         if self.rng.chance(self.fault_config.actor_crash_prob) {
-            let running: Vec<String> = self.actor_states.iter()
+            let running: Vec<String> = self
+                .actor_states
+                .iter()
                 .filter(|(_, s)| **s == SimActorState::Running)
                 .map(|(k, _)| k.clone())
                 .collect();
             if !running.is_empty() {
                 let idx = self.rng.next_bound(running.len());
-                self.actor_states.insert(running[idx].clone(), SimActorState::Crashed);
+                self.actor_states
+                    .insert(running[idx].clone(), SimActorState::Crashed);
             }
         }
 
@@ -447,7 +500,11 @@ mod tests {
 
             sched.run_until_quiescent(100);
 
-            sched.delivered_log().iter().map(|m| m.msg_type.clone()).collect()
+            sched
+                .delivered_log()
+                .iter()
+                .map(|m| m.msg_type.clone())
+                .collect()
         }
 
         let run1 = run_scenario(42);
@@ -467,14 +524,21 @@ mod tests {
             }
 
             sched.run_until_quiescent(100);
-            sched.delivered_log().iter().map(|m| m.msg_type.clone()).collect()
+            sched
+                .delivered_log()
+                .iter()
+                .map(|m| m.msg_type.clone())
+                .collect()
         }
 
         let run1 = run_scenario(42);
         let run2 = run_scenario(999);
         // With light faults (10% delay), different seeds should likely produce different orders
         // This isn't guaranteed for every pair, but is overwhelmingly likely with 20 messages
-        assert_ne!(run1, run2, "Different seeds should usually produce different orders");
+        assert_ne!(
+            run1, run2,
+            "Different seeds should usually produce different orders"
+        );
     }
 
     #[test]
@@ -511,7 +575,9 @@ mod tests {
         assert_eq!(sched.total_delivered(), 1);
 
         // But one of the actors should now be crashed
-        let crashed = sched.actor_states.values()
+        let crashed = sched
+            .actor_states
+            .values()
             .filter(|s| **s == SimActorState::Crashed)
             .count();
         assert!(crashed > 0, "Should have at least one crashed actor");
@@ -524,7 +590,9 @@ mod tests {
         sched.register_actor("b");
 
         // Manually crash actor-b
-        sched.actor_states.insert("b".to_string(), SimActorState::Crashed);
+        sched
+            .actor_states
+            .insert("b".to_string(), SimActorState::Crashed);
 
         sched.send("a", "b", "msg", "{}");
         sched.tick();
@@ -583,9 +651,16 @@ mod tests {
 
         // Run more ticks
         sched.run_until_quiescent(20);
-        assert_eq!(sched.total_delivered(), 1, "Message should eventually arrive");
+        assert_eq!(
+            sched.total_delivered(),
+            1,
+            "Message should eventually arrive"
+        );
         if delivered_at_1 == 0 {
-            assert!(sched.current_time() > 1, "Delivery should be delayed beyond tick 1");
+            assert!(
+                sched.current_time() > 1,
+                "Delivery should be delayed beyond tick 1"
+            );
         }
     }
 
@@ -610,5 +685,50 @@ mod tests {
         // Just verify it completed without panic and some messages got through
         let total = sched.total_delivered() + sched.total_dropped();
         assert!(total > 0, "Should have processed some messages");
+    }
+
+    #[test]
+    fn test_send_at_delivers_at_specified_time() {
+        let mut sched = SimScheduler::new(1, FaultConfig::none());
+        sched.register_actor("a");
+        sched.register_actor("b");
+
+        // Schedule a message at time 5
+        sched.send_at("a", "b", "Scheduled", "{}", 5);
+
+        // Ticks 1-4: nothing delivered
+        for _ in 1..5 {
+            sched.tick();
+            assert_eq!(
+                sched.total_delivered(),
+                0,
+                "should not deliver before deliver_at"
+            );
+        }
+
+        // Tick 5: message delivered
+        sched.tick();
+        assert_eq!(sched.total_delivered(), 1);
+
+        let msg = sched.receive("b").unwrap();
+        assert_eq!(msg.msg_type, "Scheduled");
+        assert_eq!(msg.deliver_at, 5);
+    }
+
+    #[test]
+    fn test_send_at_respects_message_drop() {
+        let config = FaultConfig {
+            message_drop_prob: 1.0,
+            ..FaultConfig::none()
+        };
+        let mut sched = SimScheduler::new(42, config);
+        sched.register_actor("a");
+        sched.register_actor("b");
+
+        sched.send_at("a", "b", "Scheduled", "{}", 3);
+        sched.run_until_quiescent(10);
+
+        assert_eq!(sched.total_delivered(), 0);
+        assert_eq!(sched.total_dropped(), 1);
     }
 }

@@ -9,9 +9,9 @@
 //!   └─ temper.verify.{Entity} (cascade_passed, l1, l2, l3)
 //! ```
 
+use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::trace::{Span, Status, Tracer};
-use opentelemetry::KeyValue;
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
@@ -38,6 +38,8 @@ pub struct DeployInput {
     pub csdl_xml: String,
     /// Pre-authored entity specs.
     pub entities: Vec<EntitySpecSource>,
+    /// WASM modules for integration handlers: module_name → wasm_bytes.
+    pub wasm_modules: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 /// Result of a verify-and-deploy operation.
@@ -79,10 +81,7 @@ impl DeployPipeline {
     /// 5. Broadcast deployment status
     ///
     /// Emits a parent `temper.deploy` span with child spans per entity.
-    pub fn verify_and_deploy(
-        state: &PlatformState,
-        input: &DeployInput,
-    ) -> DeployResult {
+    pub fn verify_and_deploy(state: &PlatformState, input: &DeployInput) -> DeployResult {
         let tracer = global::tracer("temper");
         let mut deploy_span = tracer
             .span_builder("temper.deploy")
@@ -136,6 +135,44 @@ impl DeployPipeline {
                 continue;
             }
 
+            // Validate WASM integration modules: every type="wasm" integration
+            // must reference a module present in `input.wasm_modules`.
+            if let Ok(ref automaton) = parse_result {
+                let mut wasm_ok = true;
+                for integration in &automaton.integrations {
+                    if integration.integration_type == "wasm"
+                        && let Some(ref module_name) = integration.module
+                        && !input.wasm_modules.contains_key(module_name)
+                    {
+                        state.broadcast(PlatformEvent::VerifyStatus {
+                                    tenant: input.tenant_name.clone(),
+                                    level: format!("{} WASM", entity.entity_type),
+                                    status: VerifyStepStatus::Failed,
+                                    summary: format!(
+                                        "WASM module '{}' required by integration '{}' not found in deploy input",
+                                        module_name, integration.name,
+                                    ),
+                                });
+                        wasm_ok = false;
+                    }
+                }
+                if !wasm_ok {
+                    entity_span.set_status(Status::Error {
+                        description: "missing WASM modules".into(),
+                    });
+                    entity_span.set_attribute(KeyValue::new("temper.cascade_passed", false));
+                    entity_span.end();
+                    entity_results.push(EntityDeployResult {
+                        entity_name: entity.entity_type.clone(),
+                        verified: false,
+                        ioa_source: entity.ioa_source.clone(),
+                        cascade: None,
+                    });
+                    all_passed = false;
+                    continue;
+                }
+            }
+
             // Run verification cascade
             state.broadcast(PlatformEvent::VerifyStatus {
                 tenant: input.tenant_name.clone(),
@@ -143,6 +180,29 @@ impl DeployPipeline {
                 status: VerifyStepStatus::Running,
                 summary: format!("Running model check for {}", entity.entity_type),
             });
+
+            // Generate suggested Cedar policies for WASM integrations (Tier 2).
+            // These are informational — the developer must approve before they take effect.
+            if let Ok(ref automaton) = parse_result {
+                let has_wasm = automaton
+                    .integrations
+                    .iter()
+                    .any(|i| i.integration_type == "wasm");
+                if has_wasm {
+                    let suggestions = suggest_cedar_policies(std::slice::from_ref(entity));
+                    if !suggestions.is_empty() {
+                        state.broadcast(PlatformEvent::VerifyStatus {
+                            tenant: input.tenant_name.clone(),
+                            level: format!("{} Cedar", entity.entity_type),
+                            status: VerifyStepStatus::Passed,
+                            summary: format!(
+                                "Generated {} suggested Cedar policies for WASM integrations",
+                                suggestions.len()
+                            ),
+                        });
+                    }
+                }
+            }
 
             let cascade = VerificationCascade::from_ioa(&entity.ioa_source)
                 .with_sim_seeds(5)
@@ -199,31 +259,46 @@ impl DeployPipeline {
                         .map(|r| (r.entity_name.as_str(), r.ioa_source.as_str()))
                         .collect();
 
-                    // Register tenant in the live registry
-                    {
+                    // Register tenant in the live registry.
+                    let register_result = {
                         let mut registry = state.registry.write().unwrap();
-                        registry.register_tenant(
+                        registry.try_register_tenant(
                             TenantId::new(&input.tenant_name),
                             csdl,
                             input.csdl_xml.clone(),
                             &ioa_pairs,
-                        );
+                        )
+                    };
+
+                    match register_result {
+                        Ok(()) => {
+                            state.broadcast(PlatformEvent::DeployStatus {
+                                tenant: input.tenant_name.clone(),
+                                success: true,
+                                summary: format!(
+                                    "Deployed {} entities for tenant '{}'",
+                                    input.entities.len(),
+                                    input.tenant_name,
+                                ),
+                            });
+
+                            state.broadcast(PlatformEvent::TenantRegistered {
+                                tenant: input.tenant_name.clone(),
+                                entity_count: input.entities.len(),
+                            });
+                        }
+                        Err(e) => {
+                            all_passed = false;
+                            deploy_span.set_status(Status::Error {
+                                description: format!("registry registration failed: {e}").into(),
+                            });
+                            state.broadcast(PlatformEvent::DeployStatus {
+                                tenant: input.tenant_name.clone(),
+                                success: false,
+                                summary: format!("Tenant registration failed: {e}"),
+                            });
+                        }
                     }
-
-                    state.broadcast(PlatformEvent::DeployStatus {
-                        tenant: input.tenant_name.clone(),
-                        success: true,
-                        summary: format!(
-                            "Deployed {} entities for tenant '{}'",
-                            input.entities.len(),
-                            input.tenant_name,
-                        ),
-                    });
-
-                    state.broadcast(PlatformEvent::TenantRegistered {
-                        tenant: input.tenant_name.clone(),
-                        entity_count: input.entities.len(),
-                    });
                 }
                 Err(e) => {
                     all_passed = false;
@@ -273,6 +348,65 @@ impl DeployPipeline {
             summary,
         }
     }
+}
+
+/// Generate suggested Cedar policies for WASM integrations.
+///
+/// When an entity spec includes WASM integrations, this generates Cedar
+/// policy suggestions that the developer can approve, modify, or reject.
+/// These are Tier 2 policies in the policy lifecycle.
+pub fn suggest_cedar_policies(entities: &[EntitySpecSource]) -> Vec<String> {
+    let mut suggestions = Vec::new();
+
+    for entity in entities {
+        let parse_result = automaton::parse_automaton(&entity.ioa_source);
+        let Ok(automaton) = parse_result else {
+            continue;
+        };
+
+        for integration in &automaton.integrations {
+            if integration.integration_type != "wasm" {
+                continue;
+            }
+            let Some(ref module_name) = integration.module else {
+                continue;
+            };
+
+            // Suggest http_call policy for the module
+            suggestions.push(format!(
+                r#"// Suggested: Allow {module} to make outbound HTTP calls
+// Triggered by: {entity_type}.{trigger}
+permit(
+    principal is Agent,
+    action == Action::"http_call",
+    resource is HttpEndpoint
+) when {{
+    context.module == "{module}"
+}};"#,
+                module = module_name,
+                entity_type = entity.entity_type,
+                trigger = integration.trigger,
+            ));
+
+            // Suggest access_secret policy for the module
+            suggestions.push(format!(
+                r#"// Suggested: Allow {module} to access secrets
+// Triggered by: {entity_type}.{trigger}
+permit(
+    principal is Agent,
+    action == Action::"access_secret",
+    resource is Secret
+) when {{
+    context.module == "{module}"
+}};"#,
+                module = module_name,
+                entity_type = entity.entity_type,
+                trigger = integration.trigger,
+            ));
+        }
+    }
+
+    suggestions
 }
 
 #[cfg(test)]
@@ -330,6 +464,7 @@ kind = "internal"
                 entity_type: "Task".into(),
                 ioa_source: TASK_IOA.into(),
             }],
+            wasm_modules: std::collections::BTreeMap::new(),
         }
     }
 
@@ -340,7 +475,11 @@ kind = "internal"
 
         let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
 
-        assert!(result.success, "Pipeline should succeed: {}", result.summary);
+        assert!(
+            result.success,
+            "Pipeline should succeed: {}",
+            result.summary
+        );
         assert_eq!(result.tenant, "test-tenant");
         assert_eq!(result.entity_results.len(), 1);
         assert!(result.entity_results[0].verified);
@@ -376,6 +515,7 @@ kind = "internal"
             tenant_name: "empty-tenant".into(),
             csdl_xml: TASK_CSDL.into(),
             entities: vec![],
+            wasm_modules: std::collections::BTreeMap::new(),
         };
         let result = DeployPipeline::verify_and_deploy(&state, &input);
 
@@ -414,8 +554,15 @@ kind = "internal"
             }
         }
 
-        assert!(!verify_msgs.is_empty(), "Should have verify status broadcasts");
-        assert_eq!(deploy_msgs.len(), 1, "Should have exactly one deploy status");
+        assert!(
+            !verify_msgs.is_empty(),
+            "Should have verify status broadcasts"
+        );
+        assert_eq!(
+            deploy_msgs.len(),
+            1,
+            "Should have exactly one deploy status"
+        );
     }
 
     #[test]
@@ -433,7 +580,11 @@ kind = "internal"
         // Verifies that OTEL span instrumentation doesn't panic with no-op tracer.
         let state = PlatformState::new(None);
         let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
-        assert!(result.success, "Pipeline should succeed with no-op OTEL: {}", result.summary);
+        assert!(
+            result.success,
+            "Pipeline should succeed with no-op OTEL: {}",
+            result.summary
+        );
     }
 
     #[test]
@@ -453,11 +604,16 @@ kind = "internal"
                     ioa_source: TASK_IOA.replace("Task", "Bug"),
                 },
             ],
+            wasm_modules: std::collections::BTreeMap::new(),
         };
 
         let result = DeployPipeline::verify_and_deploy(&state, &input);
 
-        assert!(result.success, "Pipeline should succeed: {}", result.summary);
+        assert!(
+            result.success,
+            "Pipeline should succeed: {}",
+            result.summary
+        );
         assert_eq!(result.entity_results.len(), 2);
 
         let registry = state.registry.read().unwrap();
@@ -477,6 +633,7 @@ kind = "internal"
                 entity_type: "Bad".into(),
                 ioa_source: "this is not valid TOML".into(),
             }],
+            wasm_modules: std::collections::BTreeMap::new(),
         };
 
         let result = DeployPipeline::verify_and_deploy(&state, &input);

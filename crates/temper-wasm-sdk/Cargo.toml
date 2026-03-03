@@ -1,0 +1,13 @@
+[package]
+name = "temper-wasm-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "SDK for writing Temper WASM integration modules"
+license = "MIT OR Apache-2.0"
+rust-version = "1.92"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+serde_json = "1"

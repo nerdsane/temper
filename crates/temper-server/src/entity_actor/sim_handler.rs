@@ -9,9 +9,10 @@
 use std::sync::Arc;
 
 use temper_jit::table::{EvalContext, TransitionTable};
-use temper_runtime::scheduler::{sim_now, SimActorHandler, SpecAssert, SpecInvariant};
+use temper_runtime::scheduler::{CompareOp, SimActorHandler, SpecAssert, SpecInvariant};
 
-use super::types::{EntityEvent, EntityState};
+use super::effects::ScheduledAction;
+use super::types::EntityState;
 
 /// Simulation handler wrapping a real TransitionTable.
 ///
@@ -22,6 +23,10 @@ pub struct EntityActorHandler {
     table: Arc<TransitionTable>,
     state: EntityState,
     invariants: Vec<SpecInvariant>,
+    /// Custom effects from the last successful action (integration triggers).
+    last_custom_effects: Vec<String>,
+    /// Scheduled actions from the last successful action (timer requests).
+    last_scheduled_actions: Vec<ScheduledAction>,
 }
 
 impl EntityActorHandler {
@@ -41,6 +46,7 @@ impl EntityActorHandler {
             item_count: 0,
             counters: std::collections::BTreeMap::new(),
             booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
             fields: serde_json::json!({}),
             events: Vec::new(),
             sequence_nr: 0,
@@ -50,20 +56,14 @@ impl EntityActorHandler {
             table,
             state,
             invariants: Vec::new(),
+            last_custom_effects: Vec::new(),
+            last_scheduled_actions: Vec::new(),
         }
     }
 
     /// Build an [`EvalContext`] from the current entity state.
     fn eval_context(&self) -> EvalContext {
-        let mut ctx = EvalContext::default();
-        ctx.counters.insert("items".to_string(), self.state.item_count);
-        for (k, v) in &self.state.counters {
-            ctx.counters.insert(k.clone(), *v);
-        }
-        for (k, v) in &self.state.booleans {
-            ctx.booleans.insert(k.clone(), *v);
-        }
-        ctx
+        super::effects::build_eval_context(&self.state)
     }
 
     /// Attach spec invariants parsed from I/O Automaton TOML source.
@@ -91,25 +91,37 @@ impl EntityActorHandler {
     }
 }
 
-/// Parse an assertion expression from the IOA spec into a [`SpecAssert`].
+/// Map a shared [`ParsedAssert`] to the runtime [`SpecAssert`].
 ///
-/// Returns `None` for expressions that the framework cannot check automatically.
+/// Uses [`temper_spec::automaton::parse_assert_expr`] as the single parser,
+/// then maps the result to the runtime type. Returns `None` for expressions
+/// that the framework cannot check automatically.
 fn parse_assert_expr(expr: &str) -> Option<SpecAssert> {
-    let trimmed = expr.trim();
+    use temper_spec::automaton::{AssertCompareOp, ParsedAssert, parse_assert_expr as parse};
 
-    // Pattern: "items > 0" or "var > 0"
-    if trimmed.contains("> 0") {
-        let var = trimmed.split('>').next()?.trim().to_string();
-        return Some(SpecAssert::CounterPositive { var });
+    let parsed = parse(expr)?;
+    match parsed {
+        ParsedAssert::CounterPositive { var } => Some(SpecAssert::CounterPositive { var }),
+        ParsedAssert::NoFurtherTransitions => Some(SpecAssert::NoFurtherTransitions),
+        ParsedAssert::OrderingConstraint { before, after } => {
+            Some(SpecAssert::OrderingConstraint { before, after })
+        }
+        ParsedAssert::NeverState { state } => Some(SpecAssert::NeverState { state }),
+        ParsedAssert::CounterCompare { var, op, value } => {
+            let runtime_op = match op {
+                AssertCompareOp::Gt => CompareOp::Gt,
+                AssertCompareOp::Gte => CompareOp::Gte,
+                AssertCompareOp::Lt => CompareOp::Lt,
+                AssertCompareOp::Lte => CompareOp::Lte,
+                AssertCompareOp::Eq => CompareOp::Eq,
+            };
+            Some(SpecAssert::CounterCompare {
+                var,
+                op: runtime_op,
+                value,
+            })
+        }
     }
-
-    // Pattern: "no_further_transitions"
-    if trimmed == "no_further_transitions" {
-        return Some(SpecAssert::NoFurtherTransitions);
-    }
-
-    // Unrecognized expression — caller needs a manual checker.
-    None
 }
 
 impl SimActorHandler for EntityActorHandler {
@@ -119,6 +131,7 @@ impl SimActorHandler for EntityActorHandler {
         self.state.item_count = 0;
         self.state.counters.clear();
         self.state.booleans.clear();
+        self.state.lists.clear();
         self.state.events.clear();
         self.state.sequence_nr = 0;
         self.state.fields = serde_json::json!({
@@ -129,111 +142,27 @@ impl SimActorHandler for EntityActorHandler {
         Ok(serde_json::to_value(&self.state).unwrap_or_default())
     }
 
-    fn handle_message(
-        &mut self,
-        action: &str,
-        params: &str,
-    ) -> Result<serde_json::Value, String> {
+    fn handle_message(&mut self, action: &str, params: &str) -> Result<serde_json::Value, String> {
         let params_value: serde_json::Value =
             serde_json::from_str(params).unwrap_or(serde_json::json!({}));
 
-        // Same evaluate() call as production EntityActor::handle()
-        let ctx = self.eval_context();
-        let result = self.table.evaluate_ctx(&self.state.status, &ctx, action);
+        // Unified process_action — THE SAME CODE as production.
+        // FoundationDB DST principle: one function for all paths.
+        let result =
+            super::effects::process_action(&mut self.state, &self.table, action, &params_value);
 
-        match result {
-            Some(transition_result) if transition_result.success => {
-                let from_status = self.state.status.clone();
-                let to_status = transition_result.new_state.clone();
-
-                // Apply effects — identical logic to production actor.rs
-                for effect in &transition_result.effects {
-                    match effect {
-                        temper_jit::table::Effect::SetState(s) => {
-                            self.state.status = s.clone();
-                        }
-                        temper_jit::table::Effect::IncrementItems => {
-                            self.state.item_count += 1;
-                            *self.state.counters.entry("items".to_string()).or_default() += 1;
-                        }
-                        temper_jit::table::Effect::DecrementItems => {
-                            self.state.item_count = self.state.item_count.saturating_sub(1);
-                            let c = self.state.counters.entry("items".to_string()).or_default();
-                            *c = c.saturating_sub(1);
-                        }
-                        temper_jit::table::Effect::IncrementCounter(var) => {
-                            *self.state.counters.entry(var.clone()).or_default() += 1;
-                            // Keep legacy item_count in sync.
-                            if var == "items" {
-                                self.state.item_count += 1;
-                            }
-                        }
-                        temper_jit::table::Effect::DecrementCounter(var) => {
-                            let c = self.state.counters.entry(var.clone()).or_default();
-                            *c = c.saturating_sub(1);
-                            if var == "items" {
-                                self.state.item_count = self.state.item_count.saturating_sub(1);
-                            }
-                        }
-                        temper_jit::table::Effect::SetBool { var, value } => {
-                            self.state.booleans.insert(var.clone(), *value);
-                        }
-                        temper_jit::table::Effect::EmitEvent(_) => {
-                            // No telemetry in simulation
-                        }
-                        temper_jit::table::Effect::Custom(_) => {
-                            // Custom effects are handled by post-transition hooks
-                        }
-                    }
-                }
-
-                // If no SetState effect, use the transition result's new_state
-                if self.state.status == from_status && !to_status.is_empty() {
-                    self.state.status = to_status;
-                }
-
-                // Update fields: status + action params + counters + booleans
-                if let Some(obj) = self.state.fields.as_object_mut() {
-                    obj.insert(
-                        "Status".to_string(),
-                        serde_json::Value::String(self.state.status.clone()),
-                    );
-                    // Project action params into fields
-                    if let Some(p) = params_value.as_object() {
-                        for (k, v) in p {
-                            obj.insert(k.clone(), v.clone());
-                        }
-                    }
-                    // Sync counters into fields
-                    for (k, v) in &self.state.counters {
-                        obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
-                    }
-                    // Sync booleans into fields
-                    for (k, v) in &self.state.booleans {
-                        obj.insert(k.clone(), serde_json::Value::Bool(*v));
-                    }
-                }
-
-                // Record event with sim_now() timestamp (deterministic)
-                let event = EntityEvent {
-                    action: action.to_string(),
-                    from_status,
-                    to_status: self.state.status.clone(),
-                    timestamp: sim_now(),
-                    params: params_value,
-                };
+        if result.success {
+            // Capture custom effects for integration callback scheduling
+            self.last_custom_effects = result.custom_effects;
+            self.last_scheduled_actions = result.scheduled_actions;
+            if let Some(event) = result.event {
                 self.state.events.push(event);
-
-                Ok(serde_json::to_value(&self.state).unwrap_or_default())
             }
-            Some(_) => {
-                // Guard failed
-                Err(format!(
-                    "Action '{}' not valid from state '{}'",
-                    action, self.state.status
-                ))
-            }
-            None => Err(format!("Unknown action: {}", action)),
+            Ok(serde_json::to_value(&self.state).unwrap_or_default())
+        } else {
+            self.last_custom_effects.clear();
+            self.last_scheduled_actions.clear();
+            Err(result.error.unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -272,6 +201,10 @@ impl SimActorHandler for EntityActorHandler {
 
     fn spec_invariants(&self) -> &[SpecInvariant] {
         &self.invariants
+    }
+
+    fn pending_callbacks(&self) -> Vec<String> {
+        self.last_custom_effects.clone()
     }
 }
 
@@ -337,9 +270,15 @@ mod tests {
 
         let actions = handler.valid_actions();
         assert!(actions.contains(&"AddItem".to_string()), "got: {actions:?}");
-        assert!(actions.contains(&"CancelOrder".to_string()), "got: {actions:?}");
+        assert!(
+            actions.contains(&"CancelOrder".to_string()),
+            "got: {actions:?}"
+        );
         // SubmitOrder requires items > 0, so not valid with 0 items
-        assert!(!actions.contains(&"SubmitOrder".to_string()), "got: {actions:?}");
+        assert!(
+            !actions.contains(&"SubmitOrder".to_string()),
+            "got: {actions:?}"
+        );
     }
 
     #[test]
@@ -353,18 +292,27 @@ mod tests {
 
         let actions = handler.valid_actions();
         assert!(actions.contains(&"AddItem".to_string()));
-        assert!(actions.contains(&"SubmitOrder".to_string()), "got: {actions:?}");
-        assert!(actions.contains(&"RemoveItem".to_string()), "got: {actions:?}");
+        assert!(
+            actions.contains(&"SubmitOrder".to_string()),
+            "got: {actions:?}"
+        );
+        assert!(
+            actions.contains(&"RemoveItem".to_string()),
+            "got: {actions:?}"
+        );
     }
 
     #[test]
     fn handler_with_ioa_invariants_parses_spec() {
         let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let handler = EntityActorHandler::new("Order", "o1", order_table())
-            .with_ioa_invariants(ORDER_IOA);
+        let handler =
+            EntityActorHandler::new("Order", "o1", order_table()).with_ioa_invariants(ORDER_IOA);
 
         let invariants = handler.spec_invariants();
-        assert!(!invariants.is_empty(), "should have parsed invariants from IOA spec");
+        assert!(
+            !invariants.is_empty(),
+            "should have parsed invariants from IOA spec"
+        );
 
         let names: Vec<&str> = invariants.iter().map(|i| i.name.as_str()).collect();
         assert!(

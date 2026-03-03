@@ -137,6 +137,21 @@ pub struct IntegrationResult {
     pub duration: Duration,
 }
 
+/// An entry in the dead-letter queue for permanently failed deliveries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeadLetterEntry {
+    /// The integration config name that failed.
+    pub integration_name: String,
+    /// The event that could not be delivered.
+    pub event: IntegrationEvent,
+    /// Final error message after all retries exhausted.
+    pub error: String,
+    /// Number of attempts made before giving up.
+    pub attempts: u32,
+    /// When this entry was created (after final failure).
+    pub failed_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 /// A transition table: state machine transitions as DATA, not code.
 /// Can be hot-swapped per-actor without restart.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TransitionTable {
     /// The entity this table governs (e.g. "Order").
     pub entity_name: String,
@@ -26,9 +26,36 @@ pub struct TransitionTable {
     /// Pre-built index: action name → indices into `rules`.
     ///
     /// Eliminates the O(N) linear scan + Vec allocation in [`evaluate_ctx()`].
-    /// Rebuilt automatically during construction; skipped during (de)serialization.
-    #[serde(skip, default)]
+    /// Rebuilt automatically during construction and deserialization.
+    #[serde(skip)]
     pub(crate) rule_index: BTreeMap<String, Vec<usize>>,
+}
+
+impl<'de> Deserialize<'de> for TransitionTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Helper struct for deserializing the persistent fields only.
+        #[derive(Deserialize)]
+        struct TransitionTableRaw {
+            entity_name: String,
+            states: Vec<String>,
+            initial_state: String,
+            rules: Vec<TransitionRule>,
+        }
+
+        let raw = TransitionTableRaw::deserialize(deserializer)?;
+        let mut table = TransitionTable {
+            entity_name: raw.entity_name,
+            states: raw.states,
+            initial_state: raw.initial_state,
+            rules: raw.rules,
+            rule_index: BTreeMap::new(),
+        };
+        table.rebuild_index();
+        Ok(table)
+    }
 }
 
 /// A single transition rule.
@@ -57,8 +84,20 @@ pub enum Guard {
     ItemCountMin(usize),
     /// A named counter must be >= N.
     CounterMin { var: String, min: usize },
+    /// A named counter must be < N.
+    CounterMax { var: String, max: usize },
     /// A named boolean variable must be true.
     BoolTrue(String),
+    /// A named list variable must contain a specific value.
+    ListContains { var: String, value: String },
+    /// A named list variable must have at least N elements.
+    ListLengthMin { var: String, min: usize },
+    /// Another entity must be in one of the required statuses (pre-resolved as boolean).
+    CrossEntityStateIn {
+        entity_type: String,
+        entity_id_source: String,
+        required_status: Vec<String>,
+    },
     /// All inner guards must pass.
     And(Vec<Guard>),
 }
@@ -80,12 +119,25 @@ pub enum Effect {
     SetBool { var: String, value: bool },
     /// Emit a named event.
     EmitEvent(String),
+    /// Append a value to a named list variable (value from action params).
+    ListAppend(String),
+    /// Remove a value from a named list variable by index (index from action params).
+    ListRemoveAt(String),
     /// Domain-specific custom effect (e.g., "DeploySpecs", "NotifyAdmin").
     ///
     /// Dispatched by post-transition hooks registered at startup.
     /// The actor runtime ignores unknown custom effects — they are only
     /// meaningful to the hook that registered for them.
     Custom(String),
+    /// Schedule a delayed action (timer fires after delay_seconds).
+    ScheduleAction { action: String, delay_seconds: u64 },
+    /// Spawn a child entity as a post-transition effect.
+    SpawnEntity {
+        entity_type: String,
+        entity_id_source: String,
+        initial_action: Option<String>,
+        store_id_in: Option<String>,
+    },
 }
 
 /// The result of evaluating a transition.
@@ -109,6 +161,8 @@ pub struct EvalContext {
     pub counters: BTreeMap<String, usize>,
     /// Named boolean values (e.g., "assignee_set" -> true).
     pub booleans: BTreeMap<String, bool>,
+    /// Named list values (e.g., "tags" -> ["urgent", "review"]).
+    pub lists: BTreeMap<String, Vec<String>>,
 }
 
 impl TransitionTable {
@@ -147,14 +201,23 @@ impl Guard {
         match self {
             Guard::Always => true,
             Guard::StateIn(states) => states.iter().any(|s| s == current_state),
-            Guard::ItemCountMin(n) => {
-                ctx.counters.get("items").copied().unwrap_or(0) >= *n
+            Guard::ItemCountMin(n) => ctx.counters.get("items").copied().unwrap_or(0) >= *n,
+            Guard::CounterMin { var, min } => ctx.counters.get(var).copied().unwrap_or(0) >= *min,
+            Guard::CounterMax { var, max } => ctx.counters.get(var).copied().unwrap_or(0) < *max,
+            Guard::BoolTrue(var) => ctx.booleans.get(var).copied().unwrap_or(false),
+            Guard::ListContains { var, value } => {
+                ctx.lists.get(var).is_some_and(|list| list.contains(value))
             }
-            Guard::CounterMin { var, min } => {
-                ctx.counters.get(var).copied().unwrap_or(0) >= *min
+            Guard::ListLengthMin { var, min } => {
+                ctx.lists.get(var).map_or(0, |list| list.len()) >= *min
             }
-            Guard::BoolTrue(var) => {
-                ctx.booleans.get(var).copied().unwrap_or(false)
+            Guard::CrossEntityStateIn {
+                entity_type,
+                entity_id_source,
+                ..
+            } => {
+                let key = format!("__xref:{}:{}", entity_type, entity_id_source);
+                ctx.booleans.get(&key).copied().unwrap_or(false)
             }
             Guard::And(guards) => guards.iter().all(|g| g.check(current_state, ctx)),
         }

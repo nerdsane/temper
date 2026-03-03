@@ -15,15 +15,25 @@ temper-spec = { workspace = true }
 temper-codegen = { workspace = true }
 temper-verify = { workspace = true }
 temper-platform = { workspace = true }
-temper-server = { workspace = true }
+temper-server = { workspace = true, features = ["observe"] }
+temper-mcp = { workspace = true }
 temper-runtime = { workspace = true }
 temper-jit = { workspace = true }
 temper-observe = { workspace = true }
 temper-store-postgres = { workspace = true }
+temper-store-turso = { workspace = true }
+temper-store-redis = { workspace = true }
+temper-evolution = { workspace = true }
 sqlx = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"

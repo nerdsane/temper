@@ -18,20 +18,20 @@
 //! - [`memory`] -- In-memory adapter for testing.
 //! - [`trajectory`] -- Trajectory context and outcome types.
 
+pub mod clickhouse;
 pub mod error;
 pub mod memory;
 pub mod otel;
 pub mod schema;
 pub mod store;
 pub mod trajectory;
-pub mod clickhouse;
 pub mod wide_event;
 
 // Re-export the most commonly used types at the crate root.
+pub use clickhouse::ClickHouseStore;
 pub use error::ObserveError;
 pub use memory::InMemoryStore;
 pub use schema::{LOG_COLUMNS, METRIC_COLUMNS, SPAN_COLUMNS};
 pub use store::{ObservabilityStore, ResultRow, ResultSet, SqlParam};
 pub use trajectory::{TrajectoryContext, TrajectoryOutcome};
-pub use clickhouse::ClickHouseStore;
-pub use wide_event::{WideEvent, from_transition, emit_span, emit_metrics};
+pub use wide_event::{WideEvent, emit_metrics, emit_span, from_transition};

@@ -13,10 +13,16 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+mod common;
+
+use common::http::{body_json, body_string};
 use temper_platform::bootstrap::bootstrap_system_tenant;
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
-use temper_server::registry::SpecRegistry;
+use temper_runtime::tenant::TenantId;
+use temper_server::registry::{
+    EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
+};
 use temper_spec::csdl::parse_csdl;
 
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
@@ -74,27 +80,32 @@ const TASK_CSDL_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </edmx:DataServices>
 </edmx:Edmx>"#;
 
-/// Helper to read a response body as JSON.
-async fn body_json(response: axum::http::Response<Body>) -> serde_json::Value {
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    serde_json::from_slice(&body).unwrap()
-}
-
-/// Helper to read a response body as string.
-async fn body_string(response: axum::http::Response<Body>) -> String {
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    String::from_utf8(body.to_vec()).unwrap()
-}
-
 /// Build a SpecRegistry with a single user tenant.
+///
+/// Marks all entities as verification-passed so the verification gate allows
+/// operations. This simulates the compile-first path where specs have already
+/// been verified by `temper verify` before being served.
 fn build_user_registry(tenant: &str, ioa_specs: &[(&str, &str)]) -> SpecRegistry {
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
     let mut registry = SpecRegistry::new();
     registry.register_tenant(tenant, csdl, CSDL_XML.to_string(), ioa_specs);
+    let tenant_id = TenantId::new(tenant);
+    for (entity_type, _) in ioa_specs {
+        registry.set_verification_status(
+            &tenant_id,
+            entity_type,
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: true,
+                levels: vec![EntityLevelSummary {
+                    level: "L0 SMT".to_string(),
+                    passed: true,
+                    summary: "Pre-verified".to_string(),
+                    details: None,
+                }],
+                verified_at: "2026-02-18T00:00:00Z".to_string(),
+            }),
+        );
+    }
     registry
 }
 
@@ -139,7 +150,7 @@ async fn e2e_compile_first_order_lifecycle() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Orders('{entity_id}')/Temper.Example.CancelOrder"
             ))
             .header("Content-Type", "application/json")
@@ -157,7 +168,7 @@ async fn e2e_compile_first_order_lifecycle() {
     let response = app
         .clone()
         .oneshot(
-            Request::get(&format!("/tdata/Orders('{entity_id}')"))
+            Request::get(format!("/tdata/Orders('{entity_id}')"))
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::empty())
                 .unwrap(),
@@ -223,8 +234,35 @@ async fn e2e_compile_first_two_tenants() {
     let csdl_beta = parse_csdl(TASK_CSDL_XML).expect("Task CSDL should parse");
 
     let mut registry = SpecRegistry::new();
-    registry.register_tenant("alpha", csdl_alpha, CSDL_XML.to_string(), &[("Order", ORDER_IOA)]);
-    registry.register_tenant("beta", csdl_beta, TASK_CSDL_XML.to_string(), &[("Task", TASK_IOA)]);
+    registry.register_tenant(
+        "alpha",
+        csdl_alpha,
+        CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA)],
+    );
+    registry.register_tenant(
+        "beta",
+        csdl_beta,
+        TASK_CSDL_XML.to_string(),
+        &[("Task", TASK_IOA)],
+    );
+    // Mark entities as pre-verified for compile-first tests
+    for (tenant, entity) in &[("alpha", "Order"), ("beta", "Task")] {
+        registry.set_verification_status(
+            &TenantId::new(*tenant),
+            entity,
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: true,
+                levels: vec![EntityLevelSummary {
+                    level: "L0 SMT".to_string(),
+                    passed: true,
+                    summary: "Pre-verified".to_string(),
+                    details: None,
+                }],
+                verified_at: "2026-02-18T00:00:00Z".to_string(),
+            }),
+        );
+    }
 
     let state = PlatformState::with_registry(registry, None);
     bootstrap_system_tenant(&state);
@@ -258,7 +296,7 @@ async fn e2e_compile_first_two_tenants() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Orders('{alpha_id}')/Temper.Example.CancelOrder"
             ))
             .header("Content-Type", "application/json")
@@ -300,7 +338,7 @@ async fn e2e_compile_first_two_tenants() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Tasks('{beta_id}')/Temper.Example.StartWork"
             ))
             .header("Content-Type", "application/json")
@@ -431,7 +469,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Orders('{order_id}')/Temper.Example.CancelOrder"
             ))
             .header("Content-Type", "application/json")
@@ -472,7 +510,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Projects('{proj_id}')/Temper.System.UpdateSpecs"
             ))
             .header("Content-Type", "application/json")

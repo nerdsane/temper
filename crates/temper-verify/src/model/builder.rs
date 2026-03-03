@@ -5,7 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use temper_spec::automaton::{self, Automaton};
+use temper_spec::automaton::{
+    self, Automaton, ParsedAssert, parse_assert_expr, parse_bool_initial,
+    parse_counter_initial_usize, parse_list_initial,
+};
 
 use super::types::{
     InvariantKind, LivenessKind, ModelEffect, ModelGuard, ResolvedInvariant, ResolvedLiveness,
@@ -27,23 +30,30 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
     let states = automaton.automaton.states.clone();
     let initial_status = automaton.automaton.initial.clone();
 
-    // Extract initial counter and boolean values from [[state]] declarations.
+    // Extract initial values from [[state]] declarations.
     let mut initial_counters = BTreeMap::new();
     let mut initial_booleans = BTreeMap::new();
+    let mut initial_lists = BTreeMap::new();
     let mut counter_bounds = BTreeMap::new();
 
     for sv in &automaton.state {
         match sv.var_type.as_str() {
             "counter" => {
-                let init_val: usize = sv.initial.parse().unwrap_or(0);
+                let init_val = parse_counter_initial_usize(&sv.initial);
                 initial_counters.insert(sv.name.clone(), init_val);
                 counter_bounds.insert(sv.name.clone(), max_counter);
             }
             "bool" => {
-                let init_val = sv.initial == "true";
+                let init_val = parse_bool_initial(&sv.initial);
                 initial_booleans.insert(sv.name.clone(), init_val);
             }
-            _ => {} // "status", "set", "string" — not modelled in verification
+            "list" | "set" => {
+                initial_lists.insert(sv.name.clone(), parse_list_initial(&sv.initial));
+            }
+            _ => {
+                // Keep verification robust against partially modeled types.
+                // Semantic linting reports unsupported state variable types.
+            }
         }
     }
 
@@ -59,6 +69,7 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
         initial_status,
         initial_counters,
         initial_booleans,
+        initial_lists,
         counter_bounds,
         default_max_counter: max_counter,
     }
@@ -90,8 +101,7 @@ fn resolve_transitions(
                             effects.push(ModelEffect::IncrementCounter(var.clone()));
                         }
                     }
-                } else if name_lower.contains("removeitem") || name_lower.contains("remove_item")
-                {
+                } else if name_lower.contains("removeitem") || name_lower.contains("remove_item") {
                     effects.push(ModelEffect::DecrementCounter("items".to_string()));
                     for var in counter_vars.keys() {
                         if var != "items" {
@@ -116,20 +126,36 @@ fn resolve_transitions(
 fn translate_guards(guards: &[automaton::Guard]) -> ModelGuard {
     let model_guards: Vec<ModelGuard> = guards
         .iter()
-        .filter_map(|g| match g {
-            automaton::Guard::MinCount { var, min } => Some(ModelGuard::CounterMin {
+        .map(|g| match g {
+            automaton::Guard::StateIn { values } => ModelGuard::StateIn(values.clone()),
+            automaton::Guard::MinCount { var, min } => ModelGuard::CounterMin {
                 var: var.clone(),
                 min: *min,
-            }),
-            automaton::Guard::IsTrue { var } => Some(ModelGuard::BoolTrue(var.clone())),
-            // StateIn and MaxCount are handled by from_states and counter_bounds
-            _ => None,
+            },
+            automaton::Guard::MaxCount { var, max } => ModelGuard::CounterMax {
+                var: var.clone(),
+                max: *max,
+            },
+            automaton::Guard::IsTrue { var } => ModelGuard::BoolTrue(var.clone()),
+            automaton::Guard::ListContains { var, value } => ModelGuard::ListContains {
+                var: var.clone(),
+                value: value.clone(),
+            },
+            automaton::Guard::ListLengthMin { var, min } => ModelGuard::ListLengthMin {
+                var: var.clone(),
+                min: *min,
+            },
+            automaton::Guard::CrossEntityState { .. } => {
+                // Cross-entity guards are runtime-only (pre-resolved at dispatch).
+                // For model checking, treat as always-true (permissive).
+                ModelGuard::Always
+            }
         })
         .collect();
 
     match model_guards.len() {
         0 => ModelGuard::Always,
-        1 => model_guards.into_iter().next().unwrap(),
+        1 => model_guards.into_iter().next().unwrap(), // ci-ok: len() == 1
         _ => ModelGuard::And(model_guards),
     }
 }
@@ -149,18 +175,21 @@ fn translate_effects(effects: &[automaton::Effect]) -> Vec<ModelEffect> {
                 var: var.clone(),
                 value: *value,
             }),
+            automaton::Effect::ListAppend { var } => Some(ModelEffect::ListAppend(var.clone())),
+            automaton::Effect::ListRemoveAt { var } => Some(ModelEffect::ListRemoveAt(var.clone())),
             automaton::Effect::Emit { .. } => None, // Emit is runtime-only
+            automaton::Effect::Trigger { .. } => None, // Trigger is runtime-only (WASM dispatch)\
+            automaton::Effect::Schedule { .. } => None, // Schedule is runtime-only (timer dispatch)
+            automaton::Effect::Spawn { .. } => None, // Spawn is runtime-only (dispatch pipeline)
         })
         .collect()
 }
 
 /// Translate IOA invariants into resolved invariants.
 ///
-/// Invariant classification:
-/// - `"items > 0"` or `"counter_name > 0"` → `CounterPositive`
-/// - bare identifier (e.g. `"payment_captured"`) → `BoolRequired`
-/// - `"no_further_transitions"` → `NoFurtherTransitions`
-/// - everything else → `Implication` (fallback)
+/// Uses [`parse_assert_expr`] from `temper-spec` as the primary classifier,
+/// then falls back to known boolean variable names. Unrecognized expressions
+/// become `Unverifiable` (with a warning) instead of silently passing.
 ///
 /// A `TypeInvariant` (StatusInSet) is always auto-included.
 fn resolve_invariants(automaton: &Automaton) -> Vec<ResolvedInvariant> {
@@ -174,13 +203,7 @@ fn resolve_invariants(automaton: &Automaton) -> Vec<ResolvedInvariant> {
         kind: InvariantKind::StatusInSet,
     });
 
-    // Collect known variable names for classification
-    let counter_names: Vec<&str> = automaton
-        .state
-        .iter()
-        .filter(|s| s.var_type == "counter")
-        .map(|s| s.name.as_str())
-        .collect();
+    // Collect known boolean variable names for fallback classification
     let bool_names: Vec<&str> = automaton
         .state
         .iter()
@@ -191,36 +214,33 @@ fn resolve_invariants(automaton: &Automaton) -> Vec<ResolvedInvariant> {
     for inv in &automaton.invariants {
         let expr = inv.assert.trim();
 
-        // "no_further_transitions" → NoFurtherTransitions
-        if expr == "no_further_transitions" {
+        // Primary: use the shared assertion parser
+        if let Some(parsed) = parse_assert_expr(expr) {
+            let kind = match parsed {
+                ParsedAssert::CounterPositive { var } => InvariantKind::CounterPositive { var },
+                ParsedAssert::NoFurtherTransitions => InvariantKind::NoFurtherTransitions,
+                ParsedAssert::NeverState { state } => InvariantKind::NeverState { state },
+                ParsedAssert::CounterCompare { var, op, value } => {
+                    InvariantKind::CounterCompare { var, op, value }
+                }
+                ParsedAssert::OrderingConstraint { .. } => {
+                    // Not encodable at model level (requires path history tracking).
+                    // The runtime sim_handler handles this directly.
+                    InvariantKind::Unverifiable {
+                        expression: expr.to_string(),
+                    }
+                }
+            };
             result.push(ResolvedInvariant {
                 name: inv.name.clone(),
                 trigger_states: inv.when.clone(),
                 required_states: vec![],
-                kind: InvariantKind::NoFurtherTransitions,
+                kind,
             });
             continue;
         }
 
-        // "var > 0" → CounterPositive
-        if expr.contains("> 0") {
-            let var = expr.split('>').next().unwrap_or("").trim();
-            if !var.is_empty()
-                && (counter_names.contains(&var) || var == "items" || var == "item_count")
-            {
-                result.push(ResolvedInvariant {
-                    name: inv.name.clone(),
-                    trigger_states: inv.when.clone(),
-                    required_states: vec![],
-                    kind: InvariantKind::CounterPositive {
-                        var: var.to_string(),
-                    },
-                });
-                continue;
-            }
-        }
-
-        // Bare identifier → BoolRequired (if it's a known boolean)
+        // Fallback: bare identifier → BoolRequired (if it's a known boolean)
         if !expr.contains(' ') && bool_names.contains(&expr) {
             result.push(ResolvedInvariant {
                 name: inv.name.clone(),
@@ -233,12 +253,14 @@ fn resolve_invariants(automaton: &Automaton) -> Vec<ResolvedInvariant> {
             continue;
         }
 
-        // Fallback: treat as Implication
+        // Unrecognized: explicit Unverifiable instead of silent Implication
         result.push(ResolvedInvariant {
             name: inv.name.clone(),
             trigger_states: inv.when.clone(),
             required_states: vec![],
-            kind: InvariantKind::Implication,
+            kind: InvariantKind::Unverifiable {
+                expression: expr.to_string(),
+            },
         });
     }
 
@@ -312,6 +334,7 @@ mod tests {
             status: "Draft".to_string(),
             counters: BTreeMap::from([("items".to_string(), 0)]),
             booleans: BTreeMap::from([("has_address".to_string(), false)]),
+            lists: BTreeMap::new(),
         };
         let mut actions = Vec::new();
         model.actions(&state, &mut actions);
@@ -329,6 +352,7 @@ mod tests {
             status: "Submitted".to_string(),
             counters: BTreeMap::from([("items".to_string(), 1)]),
             booleans: BTreeMap::from([("has_address".to_string(), true)]),
+            lists: BTreeMap::new(),
         };
         let mut actions = Vec::new();
         model.actions(&state, &mut actions);
@@ -346,6 +370,7 @@ mod tests {
             status: "Draft".to_string(),
             counters: BTreeMap::from([("items".to_string(), 1)]),
             booleans: BTreeMap::from([("has_address".to_string(), false)]),
+            lists: BTreeMap::new(),
         };
         let action = super::super::types::TemperModelAction {
             name: "SubmitOrder".to_string(),
@@ -365,6 +390,7 @@ mod tests {
             status: "Draft".to_string(),
             counters: BTreeMap::from([("items".to_string(), 0)]),
             booleans: BTreeMap::from([("has_address".to_string(), false)]),
+            lists: BTreeMap::new(),
         };
         let action = super::super::types::TemperModelAction {
             name: "AddItem".to_string(),
@@ -379,39 +405,52 @@ mod tests {
     fn test_properties_are_generated() {
         let model = build_order_model();
         let props = model.properties();
-        assert!(
-            !props.is_empty(),
-            "Model should have at least one property"
-        );
+        assert!(!props.is_empty(), "Model should have at least one property");
     }
 
     #[test]
     fn test_counter_positive_invariant_resolved() {
         let model = build_order_model();
-        let counter_pos = model.invariants.iter().find(|i| {
-            matches!(i.kind, InvariantKind::CounterPositive { .. })
-        });
-        assert!(counter_pos.is_some(), "Should have a CounterPositive invariant");
+        let counter_pos = model
+            .invariants
+            .iter()
+            .find(|i| matches!(i.kind, InvariantKind::CounterPositive { .. }));
+        assert!(
+            counter_pos.is_some(),
+            "Should have a CounterPositive invariant"
+        );
     }
 
     #[test]
     fn test_no_further_transitions_invariant_resolved() {
         let model = build_order_model();
-        let nft = model.invariants.iter().find(|i| {
-            matches!(i.kind, InvariantKind::NoFurtherTransitions)
-        });
-        assert!(nft.is_some(), "Should have a NoFurtherTransitions invariant");
+        let nft = model
+            .invariants
+            .iter()
+            .find(|i| matches!(i.kind, InvariantKind::NoFurtherTransitions));
+        assert!(
+            nft.is_some(),
+            "Should have a NoFurtherTransitions invariant"
+        );
     }
 
     #[test]
-    fn test_undeclared_bool_invariant_falls_back_to_implication() {
+    fn test_undeclared_bool_invariant_falls_back_to_unverifiable() {
         // payment_captured is NOT declared as a [[state]] bool var in the spec,
-        // so "ShipRequiresPayment" falls back to Implication (we can't model it).
+        // so "ShipRequiresPayment" falls back to Unverifiable (we can't model it).
         let model = build_order_model();
-        let ship_inv = model.invariants.iter().find(|i| i.name == "ShipRequiresPayment");
-        assert!(ship_inv.is_some(), "Should have ShipRequiresPayment invariant");
-        assert!(matches!(ship_inv.unwrap().kind, InvariantKind::Implication),
-            "Undeclared bool should fall back to Implication");
+        let ship_inv = model
+            .invariants
+            .iter()
+            .find(|i| i.name == "ShipRequiresPayment");
+        assert!(
+            ship_inv.is_some(),
+            "Should have ShipRequiresPayment invariant"
+        );
+        assert!(
+            matches!(ship_inv.unwrap().kind, InvariantKind::Unverifiable { .. }),
+            "Undeclared bool should fall back to Unverifiable"
+        );
     }
 
     #[test]

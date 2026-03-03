@@ -14,9 +14,12 @@ use axum::http::{Request, StatusCode};
 use temper_runtime::tenant::TenantId;
 use tower::ServiceExt;
 
-use temper_platform::bootstrap::{bootstrap_system_tenant, SYSTEM_TENANT};
-use temper_platform::router::build_platform_router;
-use temper_platform::state::PlatformState;
+mod common;
+
+use common::http::{body_json, body_string};
+use common::platform::{bootstrapped_router, bootstrapped_state};
+use temper_platform::bootstrap::SYSTEM_TENANT;
+use temper_server::dispatch::AgentContext;
 
 // =========================================================================
 // Dispatch-level tests — prove shared registry
@@ -26,8 +29,7 @@ use temper_platform::state::PlatformState;
 /// visible to `ServerState.dispatch_tenant_action()`.
 #[tokio::test]
 async fn e2e_bootstrap_visible_to_dispatch() {
-    let state = PlatformState::new(None);
-    bootstrap_system_tenant(&state);
+    let state = bootstrapped_state();
 
     let tenant = TenantId::new(SYSTEM_TENANT);
 
@@ -41,26 +43,37 @@ async fn e2e_bootstrap_visible_to_dispatch() {
             "p1",
             "UpdateSpecs",
             serde_json::json!({}),
+            &AgentContext::default(),
         )
         .await
         .expect("dispatch should find temper-system tenant in registry");
 
-    assert!(response.success, "UpdateSpecs should succeed: {:?}", response.error);
+    assert!(
+        response.success,
+        "UpdateSpecs should succeed: {:?}",
+        response.error
+    );
     assert_eq!(response.state.status, "Building");
 }
 
 /// Full Project lifecycle through dispatch: Created → Building → Verified → Archived.
 #[tokio::test]
 async fn e2e_project_lifecycle_via_dispatch() {
-    let state = PlatformState::new(None);
-    bootstrap_system_tenant(&state);
+    let state = bootstrapped_state();
 
     let tenant = TenantId::new(SYSTEM_TENANT);
 
     // Created → Building
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Project", "p2", "UpdateSpecs", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Project",
+            "p2",
+            "UpdateSpecs",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "UpdateSpecs: {:?}", r.error);
@@ -69,7 +82,14 @@ async fn e2e_project_lifecycle_via_dispatch() {
     // Building → Verified
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Project", "p2", "Verify", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Project",
+            "p2",
+            "Verify",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "Verify: {:?}", r.error);
@@ -78,7 +98,14 @@ async fn e2e_project_lifecycle_via_dispatch() {
     // Verified → Archived
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Project", "p2", "Archive", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Project",
+            "p2",
+            "Archive",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "Archive: {:?}", r.error);
@@ -96,15 +123,21 @@ async fn e2e_project_lifecycle_via_dispatch() {
 /// Full Tenant lifecycle through dispatch: Pending → Active → Suspended → Active → Archived.
 #[tokio::test]
 async fn e2e_tenant_lifecycle_via_dispatch() {
-    let state = PlatformState::new(None);
-    bootstrap_system_tenant(&state);
+    let state = bootstrapped_state();
 
     let tenant = TenantId::new(SYSTEM_TENANT);
 
     // Pending → Active
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Tenant", "t1", "Deploy", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Tenant",
+            "t1",
+            "Deploy",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "Deploy: {:?}", r.error);
@@ -113,7 +146,14 @@ async fn e2e_tenant_lifecycle_via_dispatch() {
     // Active → Suspended
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Tenant", "t1", "Suspend", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Tenant",
+            "t1",
+            "Suspend",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "Suspend: {:?}", r.error);
@@ -122,7 +162,14 @@ async fn e2e_tenant_lifecycle_via_dispatch() {
     // Suspended → Active
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Tenant", "t1", "Reactivate", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Tenant",
+            "t1",
+            "Reactivate",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "Reactivate: {:?}", r.error);
@@ -131,7 +178,14 @@ async fn e2e_tenant_lifecycle_via_dispatch() {
     // Active → Archived
     let r = state
         .server
-        .dispatch_tenant_action(&tenant, "Tenant", "t1", "Archive", serde_json::json!({}))
+        .dispatch_tenant_action(
+            &tenant,
+            "Tenant",
+            "t1",
+            "Archive",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
         .await
         .unwrap();
     assert!(r.success, "Archive: {:?}", r.error);
@@ -141,59 +195,155 @@ async fn e2e_tenant_lifecycle_via_dispatch() {
 /// Complete platform workflow — all 5 system entity types through dispatch.
 #[tokio::test]
 async fn e2e_full_platform_scenario() {
-    let state = PlatformState::new(None);
-    bootstrap_system_tenant(&state);
+    let state = bootstrapped_state();
 
     let tenant = TenantId::new(SYSTEM_TENANT);
 
     // 1. Project: UpdateSpecs → Building, Verify → Verified
-    let r = state.server.dispatch_tenant_action(&tenant, "Project", "proj-1", "UpdateSpecs", serde_json::json!({})).await.unwrap();
+    let r = state
+        .server
+        .dispatch_tenant_action(
+            &tenant,
+            "Project",
+            "proj-1",
+            "UpdateSpecs",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
+        .await
+        .unwrap();
     assert!(r.success);
-    let r = state.server.dispatch_tenant_action(&tenant, "Project", "proj-1", "Verify", serde_json::json!({})).await.unwrap();
+    let r = state
+        .server
+        .dispatch_tenant_action(
+            &tenant,
+            "Project",
+            "proj-1",
+            "Verify",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
+        .await
+        .unwrap();
     assert!(r.success);
     assert_eq!(r.state.status, "Verified");
 
     // 2. Collaborator: Accept → Active, ChangeRole → Active (non-transitioning)
-    let r = state.server.dispatch_tenant_action(&tenant, "Collaborator", "col-1", "Accept", serde_json::json!({})).await.unwrap();
+    let r = state
+        .server
+        .dispatch_tenant_action(
+            &tenant,
+            "Collaborator",
+            "col-1",
+            "Accept",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
+        .await
+        .unwrap();
     assert!(r.success);
     assert_eq!(r.state.status, "Active");
-    let r = state.server.dispatch_tenant_action(&tenant, "Collaborator", "col-1", "ChangeRole", serde_json::json!({"role": "editor"})).await.unwrap();
+    let r = state
+        .server
+        .dispatch_tenant_action(
+            &tenant,
+            "Collaborator",
+            "col-1",
+            "ChangeRole",
+            serde_json::json!({"role": "editor"}),
+            &AgentContext::default(),
+        )
+        .await
+        .unwrap();
     assert!(r.success);
     assert_eq!(r.state.status, "Active");
 
     // 3. Tenant: Deploy → Active
-    let r = state.server.dispatch_tenant_action(&tenant, "Tenant", "tenant-1", "Deploy", serde_json::json!({})).await.unwrap();
+    let r = state
+        .server
+        .dispatch_tenant_action(
+            &tenant,
+            "Tenant",
+            "tenant-1",
+            "Deploy",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
+        .await
+        .unwrap();
     assert!(r.success);
     assert_eq!(r.state.status, "Active");
 
     // 4. Version: MarkDeployed → Deployed
-    let r = state.server.dispatch_tenant_action(&tenant, "Version", "v-1", "MarkDeployed", serde_json::json!({})).await.unwrap();
+    let r = state
+        .server
+        .dispatch_tenant_action(
+            &tenant,
+            "Version",
+            "v-1",
+            "MarkDeployed",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
+        .await
+        .unwrap();
     assert!(r.success);
     assert_eq!(r.state.status, "Deployed");
 
     // 5. CatalogEntry: Publish → Published
-    let r = state.server.dispatch_tenant_action(&tenant, "CatalogEntry", "cat-1", "Publish", serde_json::json!({})).await.unwrap();
+    let r = state
+        .server
+        .dispatch_tenant_action(
+            &tenant,
+            "CatalogEntry",
+            "cat-1",
+            "Publish",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
+        .await
+        .unwrap();
     assert!(r.success);
     assert_eq!(r.state.status, "Published");
 
     // Verify final states via get_tenant_entity_state
-    let proj = state.server.get_tenant_entity_state(&tenant, "Project", "proj-1").await.unwrap();
+    let proj = state
+        .server
+        .get_tenant_entity_state(&tenant, "Project", "proj-1")
+        .await
+        .unwrap();
     assert_eq!(proj.state.status, "Verified");
     assert_eq!(proj.state.events.len(), 2);
 
-    let col = state.server.get_tenant_entity_state(&tenant, "Collaborator", "col-1").await.unwrap();
+    let col = state
+        .server
+        .get_tenant_entity_state(&tenant, "Collaborator", "col-1")
+        .await
+        .unwrap();
     assert_eq!(col.state.status, "Active");
     assert_eq!(col.state.events.len(), 2);
 
-    let ten = state.server.get_tenant_entity_state(&tenant, "Tenant", "tenant-1").await.unwrap();
+    let ten = state
+        .server
+        .get_tenant_entity_state(&tenant, "Tenant", "tenant-1")
+        .await
+        .unwrap();
     assert_eq!(ten.state.status, "Active");
     assert_eq!(ten.state.events.len(), 1);
 
-    let ver = state.server.get_tenant_entity_state(&tenant, "Version", "v-1").await.unwrap();
+    let ver = state
+        .server
+        .get_tenant_entity_state(&tenant, "Version", "v-1")
+        .await
+        .unwrap();
     assert_eq!(ver.state.status, "Deployed");
     assert_eq!(ver.state.events.len(), 1);
 
-    let cat = state.server.get_tenant_entity_state(&tenant, "CatalogEntry", "cat-1").await.unwrap();
+    let cat = state
+        .server
+        .get_tenant_entity_state(&tenant, "CatalogEntry", "cat-1")
+        .await
+        .unwrap();
     assert_eq!(cat.state.status, "Published");
     assert_eq!(cat.state.events.len(), 1);
 }
@@ -202,28 +352,10 @@ async fn e2e_full_platform_scenario() {
 // HTTP-level tests — same production code through axum
 // =========================================================================
 
-/// Helper to read a response body as JSON.
-async fn body_json(response: axum::http::Response<Body>) -> serde_json::Value {
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    serde_json::from_slice(&body).unwrap()
-}
-
-/// Helper to read a response body as string.
-async fn body_string(response: axum::http::Response<Body>) -> String {
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    String::from_utf8(body.to_vec()).unwrap()
-}
-
 /// Full Project lifecycle through HTTP: POST create → POST UpdateSpecs → POST Verify → GET state.
 #[tokio::test]
 async fn e2e_http_project_lifecycle() {
-    let state = PlatformState::new(None);
-    bootstrap_system_tenant(&state);
-    let app = build_platform_router(state);
+    let app = bootstrapped_router();
 
     // POST /tdata/Projects → 201, creates a new Project entity
     let response = app
@@ -253,7 +385,7 @@ async fn e2e_http_project_lifecycle() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Projects('{entity_id}')/Temper.System.UpdateSpecs"
             ))
             .header("Content-Type", "application/json")
@@ -270,7 +402,7 @@ async fn e2e_http_project_lifecycle() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(&format!(
+            Request::post(format!(
                 "/tdata/Projects('{entity_id}')/Temper.System.Verify"
             ))
             .header("Content-Type", "application/json")
@@ -304,7 +436,7 @@ async fn e2e_http_project_lifecycle() {
     let response = app
         .clone()
         .oneshot(
-            Request::get(&format!("/tdata/Projects('{entity_id}')"))
+            Request::get(format!("/tdata/Projects('{entity_id}')"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -318,9 +450,7 @@ async fn e2e_http_project_lifecycle() {
 /// Metadata and service document show all system entity types after bootstrap.
 #[tokio::test]
 async fn e2e_http_metadata_shows_system_entities() {
-    let state = PlatformState::new(None);
-    bootstrap_system_tenant(&state);
-    let app = build_platform_router(state);
+    let app = bootstrapped_router();
 
     // GET /tdata/$metadata → body contains all 5 entity types
     let response = app
@@ -334,7 +464,13 @@ async fn e2e_http_metadata_shows_system_entities() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_string(response).await;
-    for entity_type in &["Project", "Tenant", "CatalogEntry", "Collaborator", "Version"] {
+    for entity_type in &[
+        "Project",
+        "Tenant",
+        "CatalogEntry",
+        "Collaborator",
+        "Version",
+    ] {
         assert!(
             body.contains(entity_type),
             "metadata should contain {entity_type}"
@@ -355,7 +491,13 @@ async fn e2e_http_metadata_shows_system_entities() {
         .iter()
         .map(|v| v["name"].as_str().unwrap())
         .collect();
-    for entity_set in &["Projects", "Tenants", "CatalogEntries", "Collaborators", "Versions"] {
+    for entity_set in &[
+        "Projects",
+        "Tenants",
+        "CatalogEntries",
+        "Collaborators",
+        "Versions",
+    ] {
         assert!(
             sets.contains(entity_set),
             "service document should contain {entity_set}, got: {sets:?}"

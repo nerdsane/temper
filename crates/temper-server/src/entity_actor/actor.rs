@@ -8,6 +8,7 @@
 //! - Stateright model checking (Level 1)
 //! - Deterministic simulation (Level 2)
 //! - Property-based tests (Level 3)
+//!
 //! So if it passes verification, it works correctly here.
 //!
 //! ## TigerStyle Principles Applied
@@ -21,14 +22,17 @@
 //! - **Deterministic**: Same input -> same output. No randomness in transition logic.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use temper_jit::table::TransitionTable;
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
-use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::persistence::{
+    EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
+};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
-use temper_store_postgres::PostgresEventStore;
+
+use crate::event_store::ServerEventStore;
 
 use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_PER_ENTITY,
@@ -36,15 +40,19 @@ use super::types::{
 };
 
 /// The entity actor -- processes actions through a TransitionTable.
-/// Optionally persists events to PostgreSQL. Wide events are emitted
+/// Optionally persists events to the configured backend. Wide events are emitted
 /// via the OTEL SDK (no-op when OTEL is not initialised).
 pub struct EntityActor {
+    tenant: String,
     entity_type: String,
     entity_id: String,
-    table: Arc<TransitionTable>,
+    /// Live reference to the transition table. Reads through `RwLock` so that
+    /// hot-swapped tables are visible on the next action dispatch without
+    /// restarting the actor.
+    table: Arc<RwLock<TransitionTable>>,
     initial_fields: serde_json::Value,
     /// Optional event store for persistence. None = in-memory only.
-    event_store: Option<Arc<PostgresEventStore>>,
+    event_store: Option<Arc<ServerEventStore>>,
     /// Trace ID for correlating all events from this actor.
     trace_id: String,
 }
@@ -54,10 +62,11 @@ impl EntityActor {
     pub fn new(
         entity_type: impl Into<String>,
         entity_id: impl Into<String>,
-        table: Arc<TransitionTable>,
+        table: Arc<RwLock<TransitionTable>>,
         initial_fields: serde_json::Value,
     ) -> Self {
         Self {
+            tenant: "default".into(),
             entity_type: entity_type.into(),
             entity_id: entity_id.into(),
             table,
@@ -67,15 +76,16 @@ impl EntityActor {
         }
     }
 
-    /// Create a new entity actor with Postgres persistence.
+    /// Create a new entity actor with persistence.
     pub fn with_persistence(
         entity_type: impl Into<String>,
         entity_id: impl Into<String>,
-        table: Arc<TransitionTable>,
+        table: Arc<RwLock<TransitionTable>>,
         initial_fields: serde_json::Value,
-        store: Arc<PostgresEventStore>,
+        store: Arc<ServerEventStore>,
     ) -> Self {
         Self {
+            tenant: "default".into(),
             entity_type: entity_type.into(),
             entity_id: entity_id.into(),
             table,
@@ -85,17 +95,30 @@ impl EntityActor {
         }
     }
 
-    /// Persistence ID for this entity: "EntityType:EntityId".
-    fn persistence_id(&self) -> String {
-        format!("{}:{}", self.entity_type, self.entity_id)
+    /// Set the tenant for this actor (must be called before spawning).
+    pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.tenant = tenant.into();
+        self
     }
 
-    /// Persist an event to Postgres (if store is configured).
-    async fn persist_event(store: &PostgresEventStore, persistence_id: &str, state: &mut EntityState, event: &EntityEvent) {
+    /// Persistence ID for this entity: "tenant:EntityType:EntityId".
+    fn persistence_id(&self) -> String {
+        format!("{}:{}:{}", self.tenant, self.entity_type, self.entity_id)
+    }
+
+    /// Persist an event to the configured event store.
+    async fn persist_event(
+        store: &ServerEventStore,
+        persistence_id: &str,
+        state: &mut EntityState,
+        event: &EntityEvent,
+    ) -> Result<u64, PersistenceError> {
+        let payload = serde_json::to_value(event)
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
         let envelope = PersistenceEnvelope {
             sequence_nr: state.sequence_nr + 1,
             event_type: event.action.clone(),
-            payload: serde_json::to_value(event).unwrap_or_default(),
+            payload,
             metadata: EventMetadata {
                 event_id: sim_uuid(),
                 causation_id: sim_uuid(),
@@ -105,21 +128,26 @@ impl EntityActor {
             },
         };
 
-        match store.append(persistence_id, state.sequence_nr, &[envelope]).await {
+        match store
+            .append(persistence_id, state.sequence_nr, &[envelope])
+            .await
+        {
             Ok(new_seq) => {
                 state.sequence_nr = new_seq;
                 tracing::debug!(entity = %state.entity_id, seq = new_seq, "event persisted");
+                Ok(new_seq)
             }
             Err(e) => {
                 tracing::error!(
                     entity = %state.entity_id, error = %e,
                     "failed to persist event — state advanced but not durable"
                 );
+                Err(e)
             }
         }
     }
 
-    /// Replay events from Postgres to rebuild state (called in pre_start).
+    /// Replay events from the configured store to rebuild state (called in pre_start).
     ///
     /// Re-evaluates each event through the `TransitionTable` to reconstruct
     /// all state variables (status, counters, booleans). This is option 2 from
@@ -127,7 +155,7 @@ impl EntityActor {
     /// effects, so replay produces the same state as the original execution.
     async fn replay_events(
         table: &TransitionTable,
-        store: &PostgresEventStore,
+        store: &ServerEventStore,
         persistence_id: &str,
         state: &mut EntityState,
     ) {
@@ -137,57 +165,25 @@ impl EntityActor {
                     if let Ok(event) = serde_json::from_value::<EntityEvent>(env.payload.clone()) {
                         // Re-evaluate through TransitionTable to get effects.
                         // Build the same EvalContext the handler would have used.
-                        let mut eval_ctx = temper_jit::table::EvalContext::default();
-                        eval_ctx
-                            .counters
-                            .insert("items".to_string(), state.item_count);
-                        for (k, v) in &state.counters {
-                            eval_ctx.counters.insert(k.clone(), *v);
-                        }
-                        for (k, v) in &state.booleans {
-                            eval_ctx.booleans.insert(k.clone(), *v);
-                        }
+                        let eval_ctx = super::effects::build_eval_context(state);
 
                         if let Some(result) =
                             table.evaluate_ctx(&state.status, &eval_ctx, &event.action)
                         {
                             if result.success {
-                                // Apply effects — same logic as handle()
-                                for effect in &result.effects {
-                                    match effect {
-                                        temper_jit::table::Effect::SetState(s) => {
-                                            state.status = s.clone();
-                                        }
-                                        temper_jit::table::Effect::IncrementItems => {
-                                            state.item_count += 1;
-                                        }
-                                        temper_jit::table::Effect::DecrementItems => {
-                                            state.item_count =
-                                                state.item_count.saturating_sub(1);
-                                        }
-                                        temper_jit::table::Effect::IncrementCounter(var) => {
-                                            *state.counters.entry(var.clone()).or_insert(0) += 1;
-                                        }
-                                        temper_jit::table::Effect::DecrementCounter(var) => {
-                                            let val =
-                                                state.counters.entry(var.clone()).or_insert(0);
-                                            *val = val.saturating_sub(1);
-                                        }
-                                        temper_jit::table::Effect::SetBool { var, value } => {
-                                            state.booleans.insert(var.clone(), *value);
-                                        }
-                                        temper_jit::table::Effect::EmitEvent(_)
-                                        | temper_jit::table::Effect::Custom(_) => {}
-                                    }
-                                }
-
-                                // If no SetState effect, use to_status from result
+                                // Shared effect application — same code as handle() and simulation.
                                 let from_status = event.from_status.clone();
-                                if state.status == from_status
-                                    && !result.new_state.is_empty()
-                                {
-                                    state.status = result.new_state;
-                                }
+                                let (_custom_effects, _scheduled_actions, _spawn_requests) =
+                                    super::effects::apply_effects(
+                                        state,
+                                        &result.effects,
+                                        &event.params,
+                                    );
+                                super::effects::apply_new_state_fallback(
+                                    state,
+                                    &from_status,
+                                    &result.new_state,
+                                );
                             }
                         } else {
                             // TransitionTable doesn't know this action — fall back
@@ -195,33 +191,28 @@ impl EntityActor {
                             state.status = event.to_status.clone();
                         }
 
-                        // Project replayed event params into fields
-                        if let Some(obj) = state.fields.as_object_mut() {
-                            if let Some(p) = event.params.as_object() {
-                                for (k, v) in p {
-                                    obj.insert(k.clone(), v.clone());
-                                }
-                            }
-                        }
-
                         state.events.push(event);
                     }
                     state.sequence_nr = env.sequence_nr;
                 }
                 if !envelopes.is_empty() {
-                    if let Some(obj) = state.fields.as_object_mut() {
-                        obj.insert(
-                            "Status".into(),
-                            serde_json::Value::String(state.status.clone()),
-                        );
-                        // Sync final counter/boolean state into fields
-                        for (k, v) in &state.counters {
-                            obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
-                        }
-                        for (k, v) in &state.booleans {
-                            obj.insert(k.clone(), serde_json::Value::Bool(*v));
+                    // Sync all state into fields after full replay
+                    super::effects::sync_fields(state, &serde_json::json!({}));
+
+                    // Restore initial fields from the first Created event.
+                    // Replay effects own their projected keys, so only fill gaps.
+                    if let Some(created_event) =
+                        state.events.first().filter(|e| e.action == "Created")
+                        && let (Some(fields_obj), Some(params_obj)) = (
+                            state.fields.as_object_mut(),
+                            created_event.params.as_object(),
+                        )
+                    {
+                        for (k, v) in params_obj {
+                            fields_obj.entry(k.clone()).or_insert_with(|| v.clone());
                         }
                     }
+
                     tracing::info!(
                         entity = %state.entity_id,
                         replayed = envelopes.len(),
@@ -248,21 +239,26 @@ impl Actor for EntityActor {
     type State = EntityState;
 
     async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<Self::State, ActorError> {
+        // Snapshot the table for consistent startup (initial state + replay).
+        // This is a cheap clone — TransitionTable is a few Vecs of strings.
+        let table = self.table.read().expect("table lock poisoned").clone();
+
         let mut fields = self.initial_fields.clone();
         if let Some(obj) = fields.as_object_mut() {
             obj.entry("Id".to_string())
                 .or_insert(serde_json::Value::String(self.entity_id.clone()));
             obj.entry("Status".to_string())
-                .or_insert(serde_json::Value::String(self.table.initial_state.clone()));
+                .or_insert(serde_json::Value::String(table.initial_state.clone()));
         }
 
         let mut state = EntityState {
             entity_type: self.entity_type.clone(),
             entity_id: self.entity_id.clone(),
-            status: self.table.initial_state.clone(),
+            status: table.initial_state.clone(),
             item_count: 0,
             counters: BTreeMap::new(),
             booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
             fields,
             events: Vec::new(),
             sequence_nr: 0,
@@ -272,7 +268,31 @@ impl Actor for EntityActor {
         // Re-evaluates each event through the TransitionTable to reconstruct
         // all state variables (status, counters, booleans) — not just item_count.
         if let Some(ref store) = self.event_store {
-            Self::replay_events(&self.table, store, &self.persistence_id(), &mut state).await;
+            Self::replay_events(&table, store, &self.persistence_id(), &mut state).await;
+        }
+
+        // Persist a bootstrap Created event for first-time entities so initial
+        // fields are durable and replayable.
+        if self.event_store.is_some() && state.events.is_empty() {
+            let created = EntityEvent {
+                action: "Created".to_string(),
+                from_status: String::new(),
+                to_status: state.status.clone(),
+                timestamp: sim_now(),
+                params: self.initial_fields.clone(),
+            };
+
+            if let Some(ref store) = self.event_store {
+                Self::persist_event(store, &self.persistence_id(), &mut state, &created)
+                    .await
+                    .map_err(|e| {
+                        ActorError::custom(format!(
+                            "failed to persist bootstrap Created event for {}:{}: {}",
+                            self.entity_type, self.entity_id, e
+                        ))
+                    })?;
+            }
+            state.events.push(created);
         }
 
         Ok(state)
@@ -285,27 +305,38 @@ impl Actor for EntityActor {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
-            EntityMsg::Action { name, params } => {
+            EntityMsg::Action {
+                name,
+                params,
+                cross_entity_booleans,
+            } => {
                 // Capture start time for span duration (DST-safe: sim_now()
                 // returns logical clock in simulation, wall clock in production).
                 let action_start = sim_now();
 
+                // Snapshot the current table for this action dispatch.
+                // On the next action, any hot-swapped table will be picked up.
+                let table = self.table.read().expect("table lock poisoned").clone();
+
                 // TigerStyle: Assert preconditions before every transition.
                 // These run in production, not just tests.
                 debug_assert!(
-                    self.table.states.contains(&state.status),
+                    table.states.contains(&state.status),
                     "PRECONDITION: status '{}' not in valid states {:?}",
-                    state.status, self.table.states
+                    state.status,
+                    table.states
                 );
                 debug_assert!(
                     state.events.len() < MAX_EVENTS_PER_ENTITY,
                     "PRECONDITION: event budget exhausted ({} >= {})",
-                    state.events.len(), MAX_EVENTS_PER_ENTITY
+                    state.events.len(),
+                    MAX_EVENTS_PER_ENTITY
                 );
                 debug_assert!(
                     state.item_count <= MAX_ITEMS_PER_ENTITY,
                     "PRECONDITION: item budget exceeded ({} > {})",
-                    state.item_count, MAX_ITEMS_PER_ENTITY
+                    state.item_count,
+                    MAX_ITEMS_PER_ENTITY
                 );
 
                 // TigerStyle: Budget enforcement (not just assertions -- hard limits)
@@ -313,200 +344,149 @@ impl Actor for EntityActor {
                     ctx.reply(EntityResponse {
                         success: false,
                         state: state.clone(),
-                        error: Some(format!("Event budget exhausted ({MAX_EVENTS_PER_ENTITY} max)")),
+                        error: Some(format!(
+                            "Event budget exhausted ({MAX_EVENTS_PER_ENTITY} max)"
+                        )),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
                     });
                     return Ok(());
                 }
 
-                let mut eval_ctx = temper_jit::table::EvalContext::default();
-                eval_ctx.counters.insert("items".to_string(), state.item_count);
-                for (k, v) in &state.counters {
-                    eval_ctx.counters.insert(k.clone(), *v);
-                }
-                for (k, v) in &state.booleans {
-                    eval_ctx.booleans.insert(k.clone(), *v);
-                }
-                let result = self.table.evaluate_ctx(&state.status, &eval_ctx, &name);
                 let event_count_before = state.events.len();
+                let state_before = state.clone();
+                let result = super::effects::process_action_with_xref(
+                    state,
+                    &table,
+                    &name,
+                    &params,
+                    &cross_entity_booleans,
+                );
 
-                match result {
-                    Some(transition_result) if transition_result.success => {
-                        let from_status = state.status.clone();
-                        let to_status = transition_result.new_state.clone();
+                if result.success {
+                    // process_action returned a successful transition with event.
+                    let event = result
+                        .event
+                        .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
 
-                        // Apply effects
-                        for effect in &transition_result.effects {
-                            match effect {
-                                temper_jit::table::Effect::SetState(s) => {
-                                    state.status = s.clone();
-                                }
-                                temper_jit::table::Effect::IncrementItems => {
-                                    state.item_count += 1;
-                                }
-                                temper_jit::table::Effect::DecrementItems => {
-                                    state.item_count = state.item_count.saturating_sub(1);
-                                }
-                                temper_jit::table::Effect::IncrementCounter(var) => {
-                                    *state.counters.entry(var.clone()).or_insert(0) += 1;
-                                }
-                                temper_jit::table::Effect::DecrementCounter(var) => {
-                                    let val = state.counters.entry(var.clone()).or_insert(0);
-                                    *val = val.saturating_sub(1);
-                                }
-                                temper_jit::table::Effect::SetBool { var, value } => {
-                                    state.booleans.insert(var.clone(), *value);
-                                }
-                                temper_jit::table::Effect::EmitEvent(evt) => {
-                                    tracing::info!(
-                                        entity_type = %state.entity_type,
-                                        entity_id = %state.entity_id,
-                                        event = %evt,
-                                        "event emitted"
-                                    );
-                                }
-                                temper_jit::table::Effect::Custom(name) => {
-                                    tracing::info!(
-                                        entity_type = %state.entity_type,
-                                        entity_id = %state.entity_id,
-                                        effect = %name,
-                                        "custom effect (dispatched by post-transition hook)"
-                                    );
-                                }
-                            }
-                        }
-
-                        // If no SetState effect, use the transition result's new_state
-                        if state.status == from_status && !to_status.is_empty() {
-                            state.status = to_status.clone();
-                        }
-
-                        // Update fields: status + action params + counters + booleans
-                        if let Some(obj) = state.fields.as_object_mut() {
-                            obj.insert("Status".to_string(), serde_json::Value::String(state.status.clone()));
-                            // Project action params into fields
-                            if let Some(p) = params.as_object() {
-                                for (k, v) in p {
-                                    obj.insert(k.clone(), v.clone());
-                                }
-                            }
-                            // Sync counters into fields
-                            for (k, v) in &state.counters {
-                                obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
-                            }
-                            // Sync booleans into fields
-                            for (k, v) in &state.booleans {
-                                obj.insert(k.clone(), serde_json::Value::Bool(*v));
-                            }
-                        }
-
-                        // Record event
-                        let event = EntityEvent {
-                            action: name.clone(),
-                            from_status,
-                            to_status: state.status.clone(),
-                            timestamp: sim_now(),
-                            params: params.clone(),
-                        };
-
-                        // Persist to Postgres (if configured)
-                        if let Some(ref store) = self.event_store {
-                            Self::persist_event(store, &self.persistence_id(), state, &event).await;
-                        }
-
-                        // Telemetry as Views: emit wide event → OTEL span + metrics.
-                        // Duration covers evaluate + effects + persist (the full
-                        // actor-side work). DST-safe: sim_now() diff is 0 in
-                        // simulation (same logical tick), real wall-clock in production.
-                        let action_end = sim_now();
-                        let duration_ns = (action_end - action_start)
-                            .num_nanoseconds()
-                            .unwrap_or(0)
-                            .max(0) as u64;
-                        let wide = wide_event::from_transition(
-                            &state.entity_type, &state.entity_id, &name,
-                            &event.from_status, &state.status, true, duration_ns,
-                            &event.params, state.item_count, &self.trace_id,
-                        );
-                        wide_event::emit_span(&wide);
-                        wide_event::emit_metrics(&wide);
-
-                        state.events.push(event);
-
-                        // TigerStyle: Assert postconditions after every transition.
-                        debug_assert!(
-                            self.table.states.contains(&state.status),
-                            "POSTCONDITION: status '{}' not in valid states after {}",
-                            state.status, name
-                        );
-                        debug_assert!(
-                            state.events.len() == event_count_before + 1,
-                            "POSTCONDITION: event log must grow by exactly 1 (was {}, now {})",
-                            event_count_before, state.events.len()
-                        );
-                        debug_assert!(
-                            state.events.last().unwrap().action == name,
-                            "POSTCONDITION: last event must be the action that just fired"
-                        );
-
-                        tracing::info!(
-                            entity = %state.entity_id,
-                            action = %name,
-                            to = %state.status,
-                            events = state.events.len(),
-                            "transition applied"
-                        );
-
-                        ctx.reply(EntityResponse {
-                            success: true,
-                            state: state.clone(),
-                            error: None,
-                        });
-                    }
-                    Some(_) => {
-                        // Transition failed (guard not met) — emit telemetry
-                        let action_end = sim_now();
-                        let duration_ns = (action_end - action_start)
-                            .num_nanoseconds()
-                            .unwrap_or(0)
-                            .max(0) as u64;
-                        let wide = wide_event::from_transition(
-                            &state.entity_type, &state.entity_id, &name,
-                            &state.status, &state.status, false, duration_ns,
-                            &params, state.item_count, &self.trace_id,
-                        );
-                        wide_event::emit_span(&wide);
-                        wide_event::emit_metrics(&wide);
-
+                    // Persist to Postgres (if configured)
+                    if let Some(ref store) = self.event_store
+                        && let Err(e) =
+                            Self::persist_event(store, &self.persistence_id(), state, &event).await
+                    {
+                        // Roll back speculative in-memory state if durability failed.
+                        *state = state_before;
                         ctx.reply(EntityResponse {
                             success: false,
                             state: state.clone(),
-                            error: Some(format!(
-                                "Action '{}' not valid from state '{}'",
-                                name, state.status
-                            )),
+                            error: Some(format!("persistence failed: {e}")),
+                            custom_effects: vec![],
+                            scheduled_actions: vec![],
+                            spawn_requests: vec![],
+                            spec_governed: true,
                         });
+                        return Ok(());
                     }
-                    None => {
-                        // Unknown action — emit telemetry
-                        let action_end = sim_now();
-                        let duration_ns = (action_end - action_start)
-                            .num_nanoseconds()
-                            .unwrap_or(0)
-                            .max(0) as u64;
-                        let wide = wide_event::from_transition(
-                            &state.entity_type, &state.entity_id, &name,
-                            &state.status, &state.status, false, duration_ns,
-                            &params, state.item_count, &self.trace_id,
-                        );
-                        wide_event::emit_span(&wide);
-                        wide_event::emit_metrics(&wide);
 
-                        ctx.reply(EntityResponse {
-                            success: false,
-                            state: state.clone(),
-                            error: Some(format!("Unknown action: {}", name)),
-                        });
-                    }
+                    // Telemetry as Views: emit wide event → OTEL span + metrics.
+                    // Duration covers evaluate + effects + persist (the full
+                    // actor-side work). DST-safe: sim_now() diff is 0 in
+                    // simulation (same logical tick), real wall-clock in production.
+                    let action_end = sim_now();
+                    let duration_ns = (action_end - action_start)
+                        .num_nanoseconds()
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let wide = wide_event::from_transition(
+                        &state.entity_type,
+                        &state.entity_id,
+                        &name,
+                        &event.from_status,
+                        &state.status,
+                        true,
+                        duration_ns,
+                        &event.params,
+                        state.item_count,
+                        &self.trace_id,
+                    );
+                    wide_event::emit_span(&wide);
+                    wide_event::emit_metrics(&wide);
+
+                    state.events.push(event);
+
+                    // TigerStyle: Assert postconditions after every transition.
+                    debug_assert!(
+                        table.states.contains(&state.status),
+                        "POSTCONDITION: status '{}' not in valid states after {}",
+                        state.status,
+                        name
+                    );
+                    debug_assert!(
+                        state.events.len() == event_count_before + 1,
+                        "POSTCONDITION: event log must grow by exactly 1 (was {}, now {})",
+                        event_count_before,
+                        state.events.len()
+                    );
+                    debug_assert!(
+                        state
+                            .events
+                            .last()
+                            .expect("events non-empty after push")
+                            .action
+                            == name, // ci-ok: post-assertion, events.len() just checked
+                        "POSTCONDITION: last event must be the action that just fired"
+                    );
+
+                    tracing::info!(
+                        entity = %state.entity_id,
+                        action = %name,
+                        to = %state.status,
+                        events = state.events.len(),
+                        "transition applied"
+                    );
+
+                    ctx.reply(EntityResponse {
+                        success: true,
+                        state: state.clone(),
+                        error: None,
+                        custom_effects: result.custom_effects,
+                        scheduled_actions: result.scheduled_actions,
+                        spawn_requests: result.spawn_requests,
+                        spec_governed: true,
+                    });
+                } else {
+                    // Transition failed — emit telemetry
+                    let action_end = sim_now();
+                    let duration_ns = (action_end - action_start)
+                        .num_nanoseconds()
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let wide = wide_event::from_transition(
+                        &state.entity_type,
+                        &state.entity_id,
+                        &name,
+                        &state.status,
+                        &state.status,
+                        false,
+                        duration_ns,
+                        &params,
+                        state.item_count,
+                        &self.trace_id,
+                    );
+                    wide_event::emit_span(&wide);
+                    wide_event::emit_metrics(&wide);
+
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: result.error,
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
                 }
             }
             EntityMsg::GetState => {
@@ -514,11 +494,60 @@ impl Actor for EntityActor {
                     success: true,
                     state: state.clone(),
                     error: None,
+                    custom_effects: vec![],
+                    scheduled_actions: vec![],
+                    spawn_requests: vec![],
+                    spec_governed: true,
                 });
             }
             EntityMsg::GetField { field } => {
-                let value = state.fields.get(&field).cloned().unwrap_or(serde_json::Value::Null);
+                let value = state
+                    .fields
+                    .get(&field)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 ctx.reply(value);
+            }
+            EntityMsg::UpdateFields { fields, replace } => {
+                if replace {
+                    // PUT: replace all fields (preserve Id and Status)
+                    let id = state.entity_id.clone();
+                    let status = state.status.clone();
+                    state.fields = fields;
+                    if let Some(obj) = state.fields.as_object_mut() {
+                        obj.insert("Id".to_string(), serde_json::Value::String(id));
+                        obj.insert("Status".to_string(), serde_json::Value::String(status));
+                    }
+                } else {
+                    // PATCH: merge fields into existing
+                    if let (Some(existing), Some(updates)) =
+                        (state.fields.as_object_mut(), fields.as_object())
+                    {
+                        for (k, v) in updates {
+                            existing.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                ctx.reply(EntityResponse {
+                    success: true,
+                    state: state.clone(),
+                    error: None,
+                    custom_effects: vec![],
+                    scheduled_actions: vec![],
+                    spawn_requests: vec![],
+                    spec_governed: true,
+                });
+            }
+            EntityMsg::Delete => {
+                ctx.reply(EntityResponse {
+                    success: true,
+                    state: state.clone(),
+                    error: None,
+                    custom_effects: vec![],
+                    scheduled_actions: vec![],
+                    spawn_requests: vec![],
+                    spec_governed: true,
+                });
             }
         }
         Ok(())
@@ -538,13 +567,13 @@ impl Actor for EntityActor {
 mod tests {
     use super::*;
     use std::time::Duration;
-    use temper_runtime::ActorSystem;
     use temper_jit::table::TransitionTable;
+    use temper_runtime::ActorSystem;
 
     const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 
-    fn order_table() -> Arc<TransitionTable> {
-        Arc::new(TransitionTable::from_ioa_source(ORDER_IOA))
+    fn order_table() -> Arc<RwLock<TransitionTable>> {
+        Arc::new(RwLock::new(TransitionTable::from_ioa_source(ORDER_IOA)))
     }
 
     // =============================================
@@ -582,6 +611,7 @@ mod tests {
                 EntityMsg::Action {
                     name: "AddItem".into(),
                     params: serde_json::json!({"ProductId": "prod-1"}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
                 },
                 Duration::from_secs(1),
             )
@@ -597,6 +627,7 @@ mod tests {
                 EntityMsg::Action {
                     name: "SubmitOrder".into(),
                     params: serde_json::json!({"ShippingAddressId": "addr-1"}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
                 },
                 Duration::from_secs(1),
             )
@@ -620,6 +651,7 @@ mod tests {
                 EntityMsg::Action {
                     name: "SubmitOrder".into(),
                     params: serde_json::json!({}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
                 },
                 Duration::from_secs(1),
             )
@@ -637,7 +669,7 @@ mod tests {
         let actor_ref = system.spawn(actor, "order-4");
 
         // Draft -> AddItem -> SubmitOrder -> ConfirmOrder -> ProcessOrder -> ShipOrder -> DeliverOrder
-        let actions = vec![
+        let actions = [
             ("AddItem", serde_json::json!({})),
             ("SubmitOrder", serde_json::json!({})),
             ("ConfirmOrder", serde_json::json!({})),
@@ -646,7 +678,7 @@ mod tests {
             ("DeliverOrder", serde_json::json!({})),
         ];
 
-        let expected_states = vec![
+        let expected_states = [
             "Draft",      // after AddItem
             "Submitted",  // after SubmitOrder
             "Confirmed",  // after ConfirmOrder
@@ -661,13 +693,17 @@ mod tests {
                     EntityMsg::Action {
                         name: action.into(),
                         params,
+                        cross_entity_booleans: std::collections::BTreeMap::new(),
                     },
                     Duration::from_secs(1),
                 )
                 .await
                 .unwrap();
             assert!(r.success, "step {i} ({action}) failed: {:?}", r.error);
-            assert_eq!(r.state.status, expected_states[i], "step {i} ({action}) wrong state");
+            assert_eq!(
+                r.state.status, expected_states[i],
+                "step {i} ({action}) wrong state"
+            );
         }
 
         // Verify full event log
@@ -691,6 +727,7 @@ mod tests {
                 EntityMsg::Action {
                     name: "CancelOrder".into(),
                     params: serde_json::json!({"Reason": "changed mind"}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
                 },
                 Duration::from_secs(1),
             )
@@ -708,12 +745,19 @@ mod tests {
         let actor_ref = system.spawn(actor, "order-6");
 
         // Drive to Shipped
-        for action in &["AddItem", "SubmitOrder", "ConfirmOrder", "ProcessOrder", "ShipOrder"] {
+        for action in &[
+            "AddItem",
+            "SubmitOrder",
+            "ConfirmOrder",
+            "ProcessOrder",
+            "ShipOrder",
+        ] {
             let _: EntityResponse = actor_ref
                 .ask(
                     EntityMsg::Action {
                         name: action.to_string(),
                         params: serde_json::json!({}),
+                        cross_entity_booleans: std::collections::BTreeMap::new(),
                     },
                     Duration::from_secs(1),
                 )
@@ -727,6 +771,7 @@ mod tests {
                 EntityMsg::Action {
                     name: "CancelOrder".into(),
                     params: serde_json::json!({}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
                 },
                 Duration::from_secs(1),
             )
@@ -753,17 +798,39 @@ mod tests {
 
         // Cancel order A
         let _: EntityResponse = a1
-            .ask(EntityMsg::Action { name: "CancelOrder".into(), params: serde_json::json!({}) }, Duration::from_secs(1))
-            .await.unwrap();
+            .ask(
+                EntityMsg::Action {
+                    name: "CancelOrder".into(),
+                    params: serde_json::json!({}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
 
         // Add item to order B
         let _: EntityResponse = a2
-            .ask(EntityMsg::Action { name: "AddItem".into(), params: serde_json::json!({}) }, Duration::from_secs(1))
-            .await.unwrap();
+            .ask(
+                EntityMsg::Action {
+                    name: "AddItem".into(),
+                    params: serde_json::json!({}),
+                    cross_entity_booleans: std::collections::BTreeMap::new(),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
 
         // Verify independence
-        let r1: EntityResponse = a1.ask(EntityMsg::GetState, Duration::from_secs(1)).await.unwrap();
-        let r2: EntityResponse = a2.ask(EntityMsg::GetState, Duration::from_secs(1)).await.unwrap();
+        let r1: EntityResponse = a1
+            .ask(EntityMsg::GetState, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let r2: EntityResponse = a2
+            .ask(EntityMsg::GetState, Duration::from_secs(1))
+            .await
+            .unwrap();
 
         assert_eq!(r1.state.status, "Cancelled");
         assert_eq!(r2.state.status, "Draft");

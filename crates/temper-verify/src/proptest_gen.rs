@@ -11,8 +11,10 @@
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use stateright::Model;
 
+use temper_spec::automaton::AssertCompareOp;
+
 use crate::model::{
-    build_model_from_ioa, InvariantKind, TemperModel, TemperModelAction, TemperModelState,
+    InvariantKind, TemperModel, TemperModelAction, TemperModelState, build_model_from_ioa,
 };
 
 // ---------------------------------------------------------------------------
@@ -20,7 +22,7 @@ use crate::model::{
 // ---------------------------------------------------------------------------
 
 /// Result of running property-based tests on a state machine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PropTestResult {
     /// Total number of test cases executed.
     pub total_cases: u64,
@@ -31,7 +33,7 @@ pub struct PropTestResult {
 }
 
 /// Details of a property-test failure.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PropTestFailure {
     /// Name of the invariant that was violated.
     pub invariant: String,
@@ -51,8 +53,7 @@ pub struct PropTestFailure {
 /// the first invariant that is violated.
 fn check_invariants(model: &TemperModel, state: &TemperModelState) -> Result<(), String> {
     for inv in &model.invariants {
-        let triggered = inv.trigger_states.is_empty()
-            || inv.trigger_states.contains(&state.status);
+        let triggered = inv.trigger_states.is_empty() || inv.trigger_states.contains(&state.status);
         if !triggered {
             continue;
         }
@@ -82,6 +83,19 @@ fn check_invariants(model: &TemperModel, state: &TemperModelState) -> Result<(),
                     !valid_required.contains(&&state.status)
                 }
             }
+            InvariantKind::CounterCompare { var, op, value } => {
+                let val = state.counters.get(var).copied().unwrap_or(0);
+                let holds = match op {
+                    AssertCompareOp::Gt => val > *value,
+                    AssertCompareOp::Gte => val >= *value,
+                    AssertCompareOp::Lt => val < *value,
+                    AssertCompareOp::Lte => val <= *value,
+                    AssertCompareOp::Eq => val == *value,
+                };
+                !holds
+            }
+            InvariantKind::NeverState { state: forbidden } => state.status == *forbidden,
+            InvariantKind::Unverifiable { .. } => false, // not checkable, never violated
         };
 
         if violated {
@@ -103,11 +117,7 @@ fn enabled_actions(model: &TemperModel, state: &TemperModelState) -> Vec<TemperM
 // ---------------------------------------------------------------------------
 
 /// Run property-based tests from I/O Automaton TOML source.
-pub fn run_prop_tests_from_ioa(
-    ioa_toml: &str,
-    num_cases: u64,
-    max_steps: usize,
-) -> PropTestResult {
+pub fn run_prop_tests_from_ioa(ioa_toml: &str, num_cases: u64, max_steps: usize) -> PropTestResult {
     let model = build_model_from_ioa(ioa_toml, 2);
     run_prop_tests_on_model(&model, num_cases, max_steps)
 }
@@ -122,9 +132,7 @@ pub fn run_prop_tests_on_model(
     let init_state = &init_states[0];
 
     for case_idx in 0..num_cases {
-        let mut rng_state: u64 = case_idx
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
+        let mut rng_state: u64 = case_idx.wrapping_mul(6364136223846793005).wrapping_add(1);
 
         let mut state = init_state.clone();
         let mut action_seq: Vec<String> = Vec::new();
@@ -256,9 +264,7 @@ pub fn run_prop_tests_with_shrinking_on_model(
                 proptest::test_runner::TestError::Fail(reason, minimal_value) => {
                     (reason.to_string(), Some(minimal_value))
                 }
-                proptest::test_runner::TestError::Abort(reason) => {
-                    (reason.to_string(), None)
-                }
+                proptest::test_runner::TestError::Abort(reason) => (reason.to_string(), None),
             };
 
             let (invariant, action_sequence, final_state) =
@@ -324,8 +330,8 @@ fn replay_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{InvariantKind, ModelGuard, ResolvedInvariant, ResolvedTransition};
     use std::collections::BTreeMap;
-    use crate::model::{InvariantKind, ResolvedInvariant, ResolvedTransition, ModelGuard, ModelEffect};
 
     const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 
@@ -368,7 +374,10 @@ mod tests {
         let model = build_broken_model();
         let result = run_prop_tests_on_model(&model, 100, 10);
         assert!(!result.passed, "broken model should fail prop tests");
-        let failure = result.failure.as_ref().expect("should have failure details");
+        let failure = result
+            .failure
+            .as_ref()
+            .expect("should have failure details");
         assert!(!failure.invariant.is_empty());
         assert!(!failure.action_sequence.is_empty());
         assert!(!failure.final_state.is_empty());
@@ -419,7 +428,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn build_broken_model() -> TemperModel {
-        let mut model = TemperModel {
+        TemperModel {
             states: vec!["A".to_string(), "B".to_string()],
             transitions: vec![ResolvedTransition {
                 name: "GoB".to_string(),
@@ -446,10 +455,9 @@ mod tests {
             initial_status: "A".to_string(),
             initial_counters: BTreeMap::new(),
             initial_booleans: BTreeMap::new(),
+            initial_lists: BTreeMap::new(),
             counter_bounds: BTreeMap::new(),
             default_max_counter: 2,
-        };
-
-        model
+        }
     }
 }

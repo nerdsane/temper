@@ -2,7 +2,11 @@
 //!
 //! Also provides conversion to the existing TemperModel and TransitionTable
 //! formats, so the verification cascade and runtime work unchanged.
+//!
+//! The hand-rolled TOML parser lives in [`super::toml_parser`] to keep this
+//! module focused on the public API and validation logic.
 
+use super::toml_parser;
 use super::types::*;
 use crate::tlaplus::{Invariant as TlaInvariant, StateMachine, Transition};
 
@@ -20,7 +24,7 @@ pub fn parse_automaton(toml_str: &str) -> Result<Automaton, AutomatonParseError>
     // TOML parsing — we use a minimal manual approach since we don't have
     // the toml crate. Parse the TOML as serde_json via a two-step conversion.
     // For now, use serde_json with our own simple TOML-to-JSON converter.
-    let automaton: Automaton = parse_toml_to_automaton(toml_str)?;
+    let automaton: Automaton = toml_parser::parse_toml_to_automaton(toml_str)?;
     validate(&automaton)?;
     Ok(automaton)
 }
@@ -66,7 +70,9 @@ pub fn to_state_machine(automaton: &Automaton) -> StateMachine {
             let trigger = if inv.when.is_empty() {
                 String::new()
             } else {
-                let states = inv.when.iter()
+                let states = inv
+                    .when
+                    .iter()
                     .map(|s| format!("\"{s}\""))
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -86,11 +92,7 @@ pub fn to_state_machine(automaton: &Automaton) -> StateMachine {
         invariants,
         liveness_properties: vec![],
         constants: vec![],
-        variables: automaton
-            .state
-            .iter()
-            .map(|s| s.name.clone())
-            .collect(),
+        variables: automaton.state.iter().map(|s| s.name.clone()).collect(),
     }
 }
 
@@ -99,11 +101,34 @@ fn format_guards(guards: &[Guard]) -> String {
         .iter()
         .map(|g| match g {
             Guard::StateIn { values } => {
-                format!("status \\in {{{}}}", values.iter().map(|v| format!("\"{v}\"")).collect::<Vec<_>>().join(", "))
+                format!(
+                    "status \\in {{{}}}",
+                    values
+                        .iter()
+                        .map(|s| format!("\"{s}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
-            Guard::MinCount { var, min } => format!("Cardinality({var}) > {}", min.saturating_sub(1)),
-            Guard::MaxCount { var, max } => format!("Cardinality({var}) < {max}"),
+            Guard::MinCount { var, min } => format!("{var} >= {min}"),
+            Guard::MaxCount { var, max } => format!("{var} < {max}"),
             Guard::IsTrue { var } => format!("{var} = TRUE"),
+            Guard::ListContains { var, value } => format!("{value} \\in {var}"),
+            Guard::ListLengthMin { var, min } => format!("Len({var}) >= {min}"),
+            Guard::CrossEntityState {
+                entity_type,
+                entity_id_source,
+                required_status,
+            } => {
+                format!(
+                    "{entity_type}[{entity_id_source}].status \\in {{{}}}",
+                    required_status
+                        .iter()
+                        .map(|s| format!("\"{s}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
         })
         .collect::<Vec<_>>()
         .join(" /\\ ")
@@ -115,357 +140,92 @@ fn format_effects(effects: &[Effect]) -> String {
         .map(|e| match e {
             Effect::Increment { var } => format!("{var}' = {var} + 1"),
             Effect::Decrement { var } => format!("{var}' = {var} - 1"),
-            Effect::SetBool { var, value } => format!("{var}' = {value}"),
-            Effect::Emit { event } => format!("emit({event})"),
+            Effect::SetBool { var, value } => {
+                format!("{var}' = {}", if *value { "TRUE" } else { "FALSE" })
+            }
+            Effect::Emit { event } => format!("Emit(\"{event}\")"),
+            Effect::Trigger { name } => format!("Trigger(\"{name}\")"),
+            Effect::Schedule {
+                action,
+                delay_seconds,
+            } => format!("Schedule(\"{action}\", {delay_seconds})"),
+            Effect::ListAppend { var } => format!("ListAppend({var})"),
+            Effect::ListRemoveAt { var } => format!("ListRemoveAt({var})"),
+            Effect::Spawn {
+                entity_type,
+                entity_id_source,
+                ..
+            } => {
+                format!("Spawn({entity_type}, {entity_id_source})")
+            }
         })
         .collect::<Vec<_>>()
         .join(" /\\ ")
 }
 
 fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
-    let states = &automaton.automaton.states;
-
-    // Initial state must be in the state set
-    if !states.contains(&automaton.automaton.initial) {
+    // 1. Initial state must be in the states list.
+    if !automaton
+        .automaton
+        .states
+        .contains(&automaton.automaton.initial)
+    {
         return Err(AutomatonParseError::Validation(format!(
-            "initial state '{}' not in states {:?}",
-            automaton.automaton.initial, states
+            "initial state '{}' is not in states list",
+            automaton.automaton.initial
         )));
     }
 
-    // All action from/to states must be in the state set
+    // 2. All `from` and `to` states in actions must be declared states.
     for action in &automaton.actions {
         for from in &action.from {
-            if !states.contains(from) {
+            if !automaton.automaton.states.contains(from) {
                 return Err(AutomatonParseError::Validation(format!(
-                    "action '{}' references unknown from-state '{}'",
-                    action.name, from
+                    "action '{}' references undeclared from-state '{from}'",
+                    action.name
                 )));
             }
         }
-        if let Some(ref to) = action.to {
-            if !states.contains(to) {
+        if let Some(to) = &action.to
+            && !automaton.automaton.states.contains(to)
+        {
+            return Err(AutomatonParseError::Validation(format!(
+                "action '{}' references undeclared to-state '{to}'",
+                action.name
+            )));
+        }
+    }
+
+    // 3. Validate WASM integrations.
+    let action_names: Vec<&str> = automaton.actions.iter().map(|a| a.name.as_str()).collect();
+    for ig in &automaton.integrations {
+        if ig.integration_type == "wasm" {
+            if ig.module.is_none() {
                 return Err(AutomatonParseError::Validation(format!(
-                    "action '{}' references unknown to-state '{}'",
-                    action.name, to
+                    "integration '{}' is type 'wasm' but missing 'module' field",
+                    ig.name
+                )));
+            }
+            if let Some(ref cb) = ig.on_success
+                && !action_names.contains(&cb.as_str())
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "integration '{}' on_success references unknown action '{cb}'",
+                    ig.name
+                )));
+            }
+            if let Some(ref cb) = ig.on_failure
+                && !action_names.contains(&cb.as_str())
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "integration '{}' on_failure references unknown action '{cb}'",
+                    ig.name
                 )));
             }
         }
     }
 
     Ok(())
-}
-
-// =========================================================================
-// Minimal TOML parser (since we don't have the `toml` crate)
-// =========================================================================
-
-/// Parse TOML into an Automaton struct.
-///
-/// This is a minimal parser that handles the subset of TOML we use:
-/// - `[automaton]` table with name, states, initial
-/// - `[[action]]` array of tables
-/// - `[[invariant]]` array of tables
-/// - Simple key = "value" and key = ["array"] syntax
-fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError> {
-    let mut meta_name = String::new();
-    let mut meta_states: Vec<String> = Vec::new();
-    let mut meta_initial = String::new();
-    let mut state_vars: Vec<StateVar> = Vec::new();
-    let mut actions: Vec<Action> = Vec::new();
-    let mut invariants: Vec<Invariant> = Vec::new();
-    let mut liveness_props: Vec<Liveness> = Vec::new();
-    let mut integrations: Vec<Integration> = Vec::new();
-
-    let mut current_section = "";
-    let mut current_action: Option<Action> = None;
-    let mut current_invariant: Option<Invariant> = None;
-    let mut current_state_var: Option<StateVar> = None;
-    let mut current_liveness: Option<Liveness> = None;
-    let mut current_integration: Option<Integration> = None;
-
-    for line in input.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        // Section headers
-        if trimmed == "[automaton]" {
-            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
-            current_section = "automaton";
-            continue;
-        }
-        if trimmed == "[[state]]" {
-            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
-            current_state_var = Some(StateVar {
-                name: String::new(),
-                var_type: "string".into(),
-                initial: String::new(),
-            });
-            current_section = "state";
-            continue;
-        }
-        if trimmed == "[[action]]" {
-            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
-            current_action = Some(Action {
-                name: String::new(),
-                kind: "internal".into(),
-                from: Vec::new(),
-                to: None,
-                guard: Vec::new(),
-                effect: Vec::new(),
-                params: Vec::new(),
-                hint: None,
-            });
-            current_section = "action";
-            continue;
-        }
-        if trimmed == "[[invariant]]" {
-            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
-            current_invariant = Some(Invariant {
-                name: String::new(),
-                when: Vec::new(),
-                assert: String::new(),
-            });
-            current_section = "invariant";
-            continue;
-        }
-        if trimmed == "[[liveness]]" {
-            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
-            if let Some(ig) = current_integration.take() {
-                if !ig.name.is_empty() {
-                    integrations.push(ig);
-                }
-            }
-            current_liveness = Some(Liveness {
-                name: String::new(),
-                from: Vec::new(),
-                reaches: Vec::new(),
-                has_actions: None,
-            });
-            current_section = "liveness";
-            continue;
-        }
-        if trimmed == "[[integration]]" {
-            flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
-            if let Some(ig) = current_integration.take() {
-                if !ig.name.is_empty() {
-                    integrations.push(ig);
-                }
-            }
-            current_integration = Some(Integration {
-                name: String::new(),
-                trigger: String::new(),
-                integration_type: "webhook".to_string(),
-            });
-            current_section = "integration";
-            continue;
-        }
-
-        // Key-value pairs
-        if let Some((key, value)) = parse_kv(trimmed) {
-            match current_section {
-                "automaton" => match key {
-                    "name" => meta_name = value.clone(),
-                    "initial" => meta_initial = value.clone(),
-                    "states" => meta_states = parse_string_array(&value),
-                    _ => {}
-                },
-                "state" => {
-                    if let Some(ref mut sv) = current_state_var {
-                        match key {
-                            "name" => sv.name = value.clone(),
-                            "type" => sv.var_type = value.clone(),
-                            "initial" => sv.initial = value.clone(),
-                            _ => {}
-                        }
-                    }
-                }
-                "action" => {
-                    if let Some(ref mut a) = current_action {
-                        match key {
-                            "name" => a.name = value.clone(),
-                            "kind" => a.kind = value.clone(),
-                            "from" => a.from = parse_string_array(&value),
-                            "to" => a.to = Some(value.clone()),
-                            "params" => a.params = parse_string_array(&value),
-                            "hint" => a.hint = Some(value.clone()),
-                            "guard" => {
-                                // Format: "items > 0" → MinCount
-                                if value.contains('>') {
-                                    let parts: Vec<&str> = value.split('>').collect();
-                                    if parts.len() == 2 {
-                                        let var = parts[0].trim().to_string();
-                                        let min: usize = parts[1].trim().parse().unwrap_or(1);
-                                        a.guard.push(Guard::MinCount { var, min: min + 1 });
-                                    }
-                                }
-                                // Format: "min var n" → MinCount
-                                else if value.starts_with("min ") {
-                                    let parts: Vec<&str> = value.splitn(3, ' ').collect();
-                                    if parts.len() == 3 {
-                                        let var = parts[1].to_string();
-                                        let min: usize = parts[2].parse().unwrap_or(1);
-                                        a.guard.push(Guard::MinCount { var, min });
-                                    }
-                                }
-                                // Format: "is_true var" → IsTrue
-                                else if value.starts_with("is_true ") {
-                                    let var = value.strip_prefix("is_true ").unwrap_or("").trim().to_string();
-                                    if !var.is_empty() {
-                                        a.guard.push(Guard::IsTrue { var });
-                                    }
-                                }
-                            }
-                            "effect" => {
-                                // Format: "increment var" → Increment
-                                if value.starts_with("increment ") {
-                                    let var = value.strip_prefix("increment ").unwrap_or("").trim().to_string();
-                                    if !var.is_empty() {
-                                        a.effect.push(Effect::Increment { var });
-                                    }
-                                }
-                                // Format: "decrement var" → Decrement
-                                else if value.starts_with("decrement ") {
-                                    let var = value.strip_prefix("decrement ").unwrap_or("").trim().to_string();
-                                    if !var.is_empty() {
-                                        a.effect.push(Effect::Decrement { var });
-                                    }
-                                }
-                                // Format: "set var true/false" → SetBool
-                                else if value.starts_with("set ") {
-                                    let parts: Vec<&str> = value.splitn(3, ' ').collect();
-                                    if parts.len() == 3 {
-                                        let var = parts[1].to_string();
-                                        let val = parts[2].trim() == "true";
-                                        a.effect.push(Effect::SetBool { var, value: val });
-                                    }
-                                }
-                                // Format: "emit event_name" → Emit
-                                else if value.starts_with("emit ") {
-                                    let event = value.strip_prefix("emit ").unwrap_or("").trim().to_string();
-                                    if !event.is_empty() {
-                                        a.effect.push(Effect::Emit { event });
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                "invariant" => {
-                    if let Some(ref mut inv) = current_invariant {
-                        match key {
-                            "name" => inv.name = value.clone(),
-                            "when" => inv.when = parse_string_array(&value),
-                            "assert" => inv.assert = value.clone(),
-                            _ => {}
-                        }
-                    }
-                }
-                "liveness" => {
-                    if let Some(ref mut l) = current_liveness {
-                        match key {
-                            "name" => l.name = value.clone(),
-                            "from" => l.from = parse_string_array(&value),
-                            "reaches" => l.reaches = parse_string_array(&value),
-                            "has_actions" => l.has_actions = Some(value == "true"),
-                            _ => {}
-                        }
-                    }
-                }
-                "integration" => {
-                    if let Some(ref mut ig) = current_integration {
-                        match key {
-                            "name" => ig.name = value.clone(),
-                            "trigger" => ig.trigger = value.clone(),
-                            "type" => ig.integration_type = value.clone(),
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    flush_all(&mut current_action, &mut actions, &mut current_invariant, &mut invariants, &mut current_state_var, &mut state_vars, &mut current_liveness, &mut liveness_props);
-    if let Some(ig) = current_integration.take() {
-        if !ig.name.is_empty() {
-            integrations.push(ig);
-        }
-    }
-
-    Ok(Automaton {
-        automaton: AutomatonMeta {
-            name: meta_name,
-            states: meta_states,
-            initial: meta_initial,
-        },
-        state: state_vars,
-        actions,
-        invariants,
-        liveness: liveness_props,
-        integrations,
-    })
-}
-
-fn flush_all(
-    action: &mut Option<Action>,
-    actions: &mut Vec<Action>,
-    invariant: &mut Option<Invariant>,
-    invariants: &mut Vec<Invariant>,
-    state_var: &mut Option<StateVar>,
-    state_vars: &mut Vec<StateVar>,
-    liveness: &mut Option<Liveness>,
-    liveness_props: &mut Vec<Liveness>,
-) {
-    if let Some(a) = action.take() {
-        if !a.name.is_empty() {
-            actions.push(a);
-        }
-    }
-    if let Some(inv) = invariant.take() {
-        if !inv.name.is_empty() {
-            invariants.push(inv);
-        }
-    }
-    if let Some(sv) = state_var.take() {
-        if !sv.name.is_empty() {
-            state_vars.push(sv);
-        }
-    }
-    if let Some(l) = liveness.take() {
-        if !l.name.is_empty() {
-            liveness_props.push(l);
-        }
-    }
-}
-
-fn parse_kv(line: &str) -> Option<(&str, String)> {
-    let eq = line.find('=')?;
-    let key = line[..eq].trim();
-    let raw_value = line[eq + 1..].trim();
-    let value = raw_value
-        .trim_matches('"')
-        .trim_matches('\'')
-        .to_string();
-    Some((key, value))
-}
-
-fn parse_string_array(value: &str) -> Vec<String> {
-    let trimmed = value.trim();
-    if trimmed.starts_with('[') && trimmed.ends_with(']') {
-        let inner = &trimmed[1..trimmed.len() - 1];
-        inner
-            .split(',')
-            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    } else {
-        vec![trimmed.trim_matches('"').to_string()]
-    }
 }
 
 #[cfg(test)]
@@ -497,7 +257,11 @@ mod tests {
     #[test]
     fn test_submit_order_has_guard() {
         let automaton = parse_automaton(ORDER_IOA).unwrap();
-        let submit = automaton.actions.iter().find(|a| a.name == "SubmitOrder").unwrap();
+        let submit = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "SubmitOrder")
+            .unwrap();
         assert_eq!(submit.from, vec!["Draft"]);
         assert_eq!(submit.to, Some("Submitted".to_string()));
         assert!(!submit.guard.is_empty(), "SubmitOrder should have a guard");
@@ -506,7 +270,11 @@ mod tests {
     #[test]
     fn test_cancel_from_multiple_states() {
         let automaton = parse_automaton(ORDER_IOA).unwrap();
-        let cancel = automaton.actions.iter().find(|a| a.name == "CancelOrder").unwrap();
+        let cancel = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "CancelOrder")
+            .unwrap();
         assert_eq!(cancel.from.len(), 3);
         assert!(cancel.from.contains(&"Draft".to_string()));
         assert!(cancel.from.contains(&"Submitted".to_string()));
@@ -517,7 +285,11 @@ mod tests {
     fn test_invariants_parsed() {
         let automaton = parse_automaton(ORDER_IOA).unwrap();
         assert!(!automaton.invariants.is_empty());
-        let names: Vec<&str> = automaton.invariants.iter().map(|i| i.name.as_str()).collect();
+        let names: Vec<&str> = automaton
+            .invariants
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
         assert!(names.contains(&"SubmitRequiresItems"), "got: {names:?}");
     }
 
@@ -530,7 +302,11 @@ mod tests {
         assert!(!sm.transitions.is_empty());
         assert!(!sm.invariants.is_empty());
 
-        let submit = sm.transitions.iter().find(|t| t.name == "SubmitOrder").unwrap();
+        let submit = sm
+            .transitions
+            .iter()
+            .find(|t| t.name == "SubmitOrder")
+            .unwrap();
         assert_eq!(submit.from_states, vec!["Draft"]);
         assert_eq!(submit.to_state, Some("Submitted".to_string()));
     }
@@ -616,5 +392,340 @@ trigger = "SubmitOrder"
     fn test_no_integrations_defaults_empty() {
         let automaton = parse_automaton(ORDER_IOA).expect("should parse");
         assert!(automaton.integrations.is_empty() || !automaton.integrations.is_empty());
+    }
+
+    #[test]
+    fn test_trigger_effect_parsed() {
+        let toml = r#"
+[automaton]
+name = "Order"
+states = ["Submitted", "ChargePending", "Confirmed", "PaymentFailed"]
+initial = "Submitted"
+
+[[action]]
+name = "ChargePayment"
+from = ["Submitted"]
+to = "ChargePending"
+effect = "trigger charge_payment"
+
+[[action]]
+name = "ChargeSucceeded"
+kind = "input"
+from = ["ChargePending"]
+to = "Confirmed"
+
+[[action]]
+name = "ChargeFailed"
+kind = "input"
+from = ["ChargePending"]
+to = "PaymentFailed"
+"#;
+        let automaton = parse_automaton(toml).expect("should parse");
+        let charge = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "ChargePayment")
+            .unwrap();
+        assert_eq!(charge.effect.len(), 1);
+        match &charge.effect[0] {
+            Effect::Trigger { name } => assert_eq!(name, "charge_payment"),
+            other => panic!("expected Trigger effect, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wasm_integration_parsed() {
+        let toml = r#"
+[automaton]
+name = "Order"
+states = ["Submitted", "ChargePending", "Confirmed", "PaymentFailed"]
+initial = "Submitted"
+
+[[action]]
+name = "ChargePayment"
+from = ["Submitted"]
+to = "ChargePending"
+effect = "trigger charge_payment"
+
+[[action]]
+name = "ChargeSucceeded"
+kind = "input"
+from = ["ChargePending"]
+to = "Confirmed"
+
+[[action]]
+name = "ChargeFailed"
+kind = "input"
+from = ["ChargePending"]
+to = "PaymentFailed"
+
+[[integration]]
+name = "charge_payment"
+trigger = "charge_payment"
+type = "wasm"
+module = "stripe_charge"
+on_success = "ChargeSucceeded"
+on_failure = "ChargeFailed"
+"#;
+        let automaton = parse_automaton(toml).expect("should parse");
+        assert_eq!(automaton.integrations.len(), 1);
+        let ig = &automaton.integrations[0];
+        assert_eq!(ig.name, "charge_payment");
+        assert_eq!(ig.integration_type, "wasm");
+        assert_eq!(ig.module.as_deref(), Some("stripe_charge"));
+        assert_eq!(ig.on_success.as_deref(), Some("ChargeSucceeded"));
+        assert_eq!(ig.on_failure.as_deref(), Some("ChargeFailed"));
+    }
+
+    #[test]
+    fn test_wasm_integration_missing_module_rejected() {
+        let toml = r#"
+[automaton]
+name = "Order"
+states = ["Submitted", "ChargePending"]
+initial = "Submitted"
+
+[[action]]
+name = "ChargePayment"
+from = ["Submitted"]
+to = "ChargePending"
+
+[[integration]]
+name = "charge_payment"
+trigger = "charge_payment"
+type = "wasm"
+"#;
+        let result = parse_automaton(toml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("missing 'module'"), "got: {err}");
+    }
+
+    #[test]
+    fn test_wasm_integration_unknown_callback_rejected() {
+        let toml = r#"
+[automaton]
+name = "Order"
+states = ["Submitted", "ChargePending", "Confirmed"]
+initial = "Submitted"
+
+[[action]]
+name = "ChargePayment"
+from = ["Submitted"]
+to = "ChargePending"
+
+[[integration]]
+name = "charge_payment"
+trigger = "charge_payment"
+type = "wasm"
+module = "stripe_charge"
+on_success = "NonExistentAction"
+"#;
+        let result = parse_automaton(toml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("NonExistentAction"),
+            "should mention missing action, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_valid_state_var_types_accepted() {
+        let spec = r#"
+[automaton]
+name = "Task"
+states = ["Open", "Done"]
+initial = "Open"
+
+[[state]]
+name = "is_done"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "attempt_count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Complete"
+kind = "input"
+from = ["Open"]
+to = "Done"
+effect = "set is_done true"
+"#;
+        let result = parse_automaton(spec);
+        assert!(
+            result.is_ok(),
+            "bool and counter types should be accepted: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_extended_guard_syntax_parsed() {
+        let spec = r#"
+[automaton]
+name = "Ticket"
+states = ["Open", "Queued", "Closed"]
+initial = "Open"
+
+[[action]]
+name = "Queue"
+from = ["Open"]
+to = "Queued"
+guard = "max retries 3"
+
+[[action]]
+name = "Escalate"
+from = ["Queued"]
+to = "Queued"
+guard = "list_contains labels urgent"
+
+[[action]]
+name = "Close"
+from = ["Queued"]
+to = "Closed"
+guard = "list_length_min labels 1"
+"#;
+
+        let automaton = parse_automaton(spec).expect("extended guard forms should parse");
+        let queue = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "Queue")
+            .unwrap();
+        assert!(matches!(
+            queue.guard.as_slice(),
+            [Guard::MaxCount { var, max }] if var == "retries" && *max == 3
+        ));
+
+        let escalate = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "Escalate")
+            .unwrap();
+        assert!(matches!(
+            escalate.guard.as_slice(),
+            [Guard::ListContains { var, value }] if var == "labels" && value == "urgent"
+        ));
+
+        let close = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "Close")
+            .unwrap();
+        assert!(matches!(
+            close.guard.as_slice(),
+            [Guard::ListLengthMin { var, min }] if var == "labels" && *min == 1
+        ));
+    }
+
+    #[test]
+    fn test_integration_config_captures_unknown_keys() {
+        let toml = r#"
+[automaton]
+name = "Weather"
+states = ["Idle", "Fetching", "Ready", "Failed"]
+initial = "Idle"
+
+[[action]]
+name = "FetchWeather"
+from = ["Idle"]
+to = "Fetching"
+effect = "trigger fetch_weather"
+
+[[action]]
+name = "FetchSucceeded"
+kind = "input"
+from = ["Fetching"]
+to = "Ready"
+
+[[action]]
+name = "FetchFailed"
+kind = "input"
+from = ["Fetching"]
+to = "Failed"
+
+[[integration]]
+name = "fetch_weather"
+trigger = "fetch_weather"
+type = "wasm"
+module = "http_fetch"
+on_success = "FetchSucceeded"
+on_failure = "FetchFailed"
+url = "https://api.open-meteo.com/v1/forecast"
+method = "GET"
+"#;
+        let automaton = parse_automaton(toml).expect("should parse");
+        assert_eq!(automaton.integrations.len(), 1);
+        let ig = &automaton.integrations[0];
+        assert_eq!(ig.name, "fetch_weather");
+        assert_eq!(ig.integration_type, "wasm");
+        assert_eq!(ig.module.as_deref(), Some("http_fetch"));
+        assert_eq!(
+            ig.config.get("url").map(String::as_str),
+            Some("https://api.open-meteo.com/v1/forecast")
+        );
+        assert_eq!(ig.config.get("method").map(String::as_str), Some("GET"));
+        // Known keys should NOT be in config
+        assert!(!ig.config.contains_key("name"));
+        assert!(!ig.config.contains_key("trigger"));
+        assert!(!ig.config.contains_key("type"));
+        assert!(!ig.config.contains_key("module"));
+    }
+
+    #[test]
+    fn test_invalid_guard_number_rejected() {
+        let spec = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Submitted"]
+initial = "Draft"
+
+[[action]]
+name = "SubmitOrder"
+from = ["Draft"]
+to = "Submitted"
+guard = "items > nope"
+"#;
+
+        let err = parse_automaton(spec).expect_err("invalid numeric guard should fail");
+        assert!(err.to_string().contains("right side must be an integer"));
+    }
+
+    #[test]
+    fn test_parse_schedule_effect() {
+        let spec = r#"
+[automaton]
+name = "OAuthToken"
+states = ["Active", "Refreshing", "Expired"]
+initial = "Active"
+
+[[action]]
+name = "Activate"
+from = ["Refreshing"]
+to = "Active"
+effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
+"#;
+
+        let automaton = parse_automaton(spec).expect("should parse schedule effect");
+        let activate = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "Activate")
+            .unwrap();
+        assert_eq!(activate.effect.len(), 1);
+        match &activate.effect[0] {
+            Effect::Schedule {
+                action,
+                delay_seconds,
+            } => {
+                assert_eq!(action, "Refresh");
+                assert_eq!(*delay_seconds, 2700);
+            }
+            other => panic!("expected Schedule, got: {:?}", other),
+        }
     }
 }

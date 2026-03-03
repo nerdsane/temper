@@ -20,22 +20,35 @@ fn cascade_order_all_levels_pass() {
     let result = cascade.run();
 
     for level in &result.levels {
-        assert!(level.passed, "Order cascade level failed: {}", level.summary);
+        assert!(
+            level.passed,
+            "Order cascade level failed: {}",
+            level.summary
+        );
     }
 
     // L1: Stateright model check
     assert!(
-        result.level_result(CascadeLevel::ModelCheck).unwrap().passed,
+        result
+            .level_result(CascadeLevel::ModelCheck)
+            .unwrap()
+            .passed,
         "L1 Model Check should pass"
     );
     // L2: Deterministic simulation
     assert!(
-        result.level_result(CascadeLevel::Simulation).unwrap().passed,
+        result
+            .level_result(CascadeLevel::Simulation)
+            .unwrap()
+            .passed,
         "L2 Simulation should pass"
     );
     // L3: Property tests
     assert!(
-        result.level_result(CascadeLevel::PropertyTest).unwrap().passed,
+        result
+            .level_result(CascadeLevel::PropertyTest)
+            .unwrap()
+            .passed,
         "L3 Property Tests should pass"
     );
     assert!(result.all_passed, "Order cascade should pass all levels");
@@ -50,19 +63,32 @@ fn cascade_payment_all_levels_pass() {
     let result = cascade.run();
 
     for level in &result.levels {
-        assert!(level.passed, "Payment cascade level failed: {}", level.summary);
+        assert!(
+            level.passed,
+            "Payment cascade level failed: {}",
+            level.summary
+        );
     }
 
     assert!(
-        result.level_result(CascadeLevel::ModelCheck).unwrap().passed,
+        result
+            .level_result(CascadeLevel::ModelCheck)
+            .unwrap()
+            .passed,
         "L1 Model Check should pass"
     );
     assert!(
-        result.level_result(CascadeLevel::Simulation).unwrap().passed,
+        result
+            .level_result(CascadeLevel::Simulation)
+            .unwrap()
+            .passed,
         "L2 Simulation should pass"
     );
     assert!(
-        result.level_result(CascadeLevel::PropertyTest).unwrap().passed,
+        result
+            .level_result(CascadeLevel::PropertyTest)
+            .unwrap()
+            .passed,
         "L3 Property Tests should pass"
     );
     assert!(result.all_passed, "Payment cascade should pass all levels");
@@ -77,19 +103,32 @@ fn cascade_shipment_all_levels_pass() {
     let result = cascade.run();
 
     for level in &result.levels {
-        assert!(level.passed, "Shipment cascade level failed: {}", level.summary);
+        assert!(
+            level.passed,
+            "Shipment cascade level failed: {}",
+            level.summary
+        );
     }
 
     assert!(
-        result.level_result(CascadeLevel::ModelCheck).unwrap().passed,
+        result
+            .level_result(CascadeLevel::ModelCheck)
+            .unwrap()
+            .passed,
         "L1 Model Check should pass"
     );
     assert!(
-        result.level_result(CascadeLevel::Simulation).unwrap().passed,
+        result
+            .level_result(CascadeLevel::Simulation)
+            .unwrap()
+            .passed,
         "L2 Simulation should pass"
     );
     assert!(
-        result.level_result(CascadeLevel::PropertyTest).unwrap().passed,
+        result
+            .level_result(CascadeLevel::PropertyTest)
+            .unwrap()
+            .passed,
         "L3 Property Tests should pass"
     );
     assert!(result.all_passed, "Shipment cascade should pass all levels");

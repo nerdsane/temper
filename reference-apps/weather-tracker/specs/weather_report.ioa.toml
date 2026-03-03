@@ -1,0 +1,52 @@
+[automaton]
+name = "WeatherReport"
+states = ["Collecting", "Fetching", "Ready", "Archived"]
+initial = "Collecting"
+
+[[action]]
+name = "FetchWeatherData"
+kind = "input"
+from = ["Collecting"]
+to = "Fetching"
+effect = "trigger fetch_open_meteo"
+hint = "Initiate weather data fetch from Open-Meteo API for this report's location."
+
+[[action]]
+name = "FetchSucceeded"
+kind = "input"
+from = ["Fetching"]
+to = "Ready"
+params = ["Temperature", "Humidity", "WindSpeed", "Precipitation", "Conditions"]
+hint = "Callback from WASM module with weather data from Open-Meteo."
+
+[[action]]
+name = "FetchFailed"
+kind = "input"
+from = ["Fetching"]
+to = "Collecting"
+hint = "Callback when Open-Meteo fetch fails. Returns to Collecting for retry."
+
+[[action]]
+name = "ArchiveReport"
+kind = "input"
+from = ["Ready"]
+to = "Archived"
+hint = "Move this report to historical archives."
+
+[[invariant]]
+name = "ArchivedIsTerminal"
+when = ["Archived"]
+assert = "no_further_transitions"
+
+[[liveness]]
+name = "EventuallyReady"
+from = ["Collecting"]
+reaches = ["Ready", "Archived"]
+
+[[integration]]
+name = "fetch_open_meteo"
+trigger = "fetch_open_meteo"
+type = "wasm"
+module = "fetch_open_meteo"
+on_success = "FetchSucceeded"
+on_failure = "FetchFailed"

@@ -36,16 +36,13 @@ impl TransitionTable {
         ctx: &EvalContext,
         action: &str,
     ) -> Option<TransitionResult> {
-        let indices = match self.rule_index.get(action) {
-            Some(idx) => idx,
-            None => return None,
-        };
+        let indices = self.rule_index.get(action)?;
 
         for &i in indices {
             let rule = &self.rules[i];
 
-            let state_ok = rule.from_states.is_empty()
-                || rule.from_states.iter().any(|s| s == current_state);
+            let state_ok =
+                rule.from_states.is_empty() || rule.from_states.iter().any(|s| s == current_state);
 
             if !state_ok {
                 continue;
@@ -148,6 +145,19 @@ mod tests {
     }
 
     #[test]
+    fn guard_counter_max() {
+        let guard = Guard::CounterMax {
+            var: "retries".into(),
+            max: 3,
+        };
+        let mut ctx = EvalContext::default();
+        ctx.counters.insert("retries".into(), 2);
+        assert!(guard.check("Draft", &ctx));
+        ctx.counters.insert("retries".into(), 3);
+        assert!(!guard.check("Draft", &ctx));
+    }
+
+    #[test]
     fn guard_and_combinator() {
         let guard = Guard::And(vec![
             Guard::StateIn(vec!["Draft".into()]),
@@ -158,6 +168,31 @@ mod tests {
         assert!(!guard.evaluate("Shipped", 2));
         assert!(!guard.evaluate("Draft", 0));
         assert!(!guard.evaluate("Shipped", 0));
+    }
+
+    #[test]
+    fn test_serde_roundtrip_preserves_rule_index() {
+        let table = order_table();
+
+        // Serialize → deserialize roundtrip
+        let json = serde_json::to_string(&table).expect("serialize");
+        let restored: TransitionTable = serde_json::from_str(&json).expect("deserialize");
+
+        // rule_index must be rebuilt, not empty
+        assert!(
+            !restored.rule_index.is_empty(),
+            "rule_index should be non-empty after deserialization"
+        );
+
+        // Evaluate must still work on the deserialized table
+        let result = restored.evaluate("Draft", 2, "SubmitOrder");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(
+            r.success,
+            "SubmitOrder from Draft should succeed after roundtrip"
+        );
+        assert_eq!(r.new_state, "Submitted");
     }
 
     #[test]

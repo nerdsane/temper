@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://temper.dev/schemas/verification.v1.schema.json",
+  "title": "verification.v1",
+  "description": "Model-agnostic verification report for Temper harness checks and evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "run_id",
+    "generated_at",
+    "repository",
+    "agent",
+    "summary",
+    "checks"
+  ],
+  "properties": {
+    "schema": {
+      "const": "verification.v1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "project_hash",
+        "commit_head",
+        "branch",
+        "dirty"
+      ],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "project_hash": { "type": "string", "minLength": 1 },
+        "commit_head": { "type": "string", "minLength": 1 },
+        "branch": { "type": "string", "minLength": 1 },
+        "dirty": { "type": "boolean" }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "model",
+        "session_id"
+      ],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "session_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "overall_result",
+        "checks_total",
+        "checks_passed",
+        "checks_failed",
+        "checks_warned",
+        "checks_skipped",
+        "checks_unknown",
+        "blocking_failures",
+        "overall_hardness"
+      ],
+      "properties": {
+        "overall_result": { "$ref": "#/$defs/result" },
+        "checks_total": { "type": "integer", "minimum": 0 },
+        "checks_passed": { "type": "integer", "minimum": 0 },
+        "checks_failed": { "type": "integer", "minimum": 0 },
+        "checks_warned": { "type": "integer", "minimum": 0 },
+        "checks_skipped": { "type": "integer", "minimum": 0 },
+        "checks_unknown": { "type": "integer", "minimum": 0 },
+        "blocking_failures": { "type": "integer", "minimum": 0 },
+        "overall_hardness": { "$ref": "#/$defs/hardness" }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/check" }
+    }
+  },
+  "$defs": {
+    "result": {
+      "type": "string",
+      "enum": ["pass", "fail", "warn", "skip", "unknown"]
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["edit", "commit", "push", "exit", "review", "trace", "pow", "git", "config", "ci", "wiring", "unknown"]
+    },
+    "evidence_class": {
+      "type": "string",
+      "enum": ["mechanical", "heuristic", "attestation", "inferred"]
+    },
+    "hardness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accidental_regression",
+        "adversarial_bypass",
+        "portability"
+      ],
+      "properties": {
+        "accidental_regression": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "adversarial_bypass": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "portability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifacts"],
+      "properties": {
+        "artifacts": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "stage",
+        "blocking",
+        "result",
+        "evidence_class",
+        "hardness",
+        "detail",
+        "evidence"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "stage": { "$ref": "#/$defs/stage" },
+        "blocking": { "type": "boolean" },
+        "result": { "$ref": "#/$defs/result" },
+        "evidence_class": { "$ref": "#/$defs/evidence_class" },
+        "hardness": { "$ref": "#/$defs/hardness" },
+        "detail": { "type": "string" },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    }
+  }
+}

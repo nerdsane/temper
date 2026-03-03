@@ -37,6 +37,14 @@ A pre-built rule index yields sub-30ns action evaluation, while end-to-end bench
 through the full HTTP stack with PostgreSQL persistence show ~18ms per action and
 ~2,200 persisted actions per second under concurrent load.
 
+Beyond serving as a framework for building applications, the same architecture
+positions Temper as an operating layer for autonomous agents.  When every
+state-changing action flows through a governed, verified state machine -- with
+Cedar authorization enforcing default-deny policies, a pending decision flow
+surfacing denied actions for human approval, and trajectory logging recording
+every transition with agent identity -- the result is an auditable, secure
+execution environment where agents operate within formally verified boundaries.
+
 The framework is implemented as a 16-crate Rust workspace with 440+ tests and a
 reference e-commerce application (three entity types, seven verified specifications
 across different SaaS domains).  We do not claim this approach generalizes to all
@@ -75,6 +83,13 @@ address:
    that differ from human browsing.  N+1 query patterns, suboptimal cache TTLs,
    and shard hotspots manifest at runtime.  The system should be able to
    detect and correct these autonomously.
+
+4. **Governance under autonomy.**  An agent acting as an enterprise employee
+   or personal assistant must operate within boundaries: which APIs it can
+   call, which data it can modify, which external systems it can reach.
+   These boundaries must be enforceable (not advisory), auditable (every
+   action recorded with agent identity), and evolvable (new permissions
+   granted as needs arise, not anticipated upfront).
 
 Temper's key insight is that **specifications, not code, should be the durable
 artifact** — and that **specifications themselves should be generated from
@@ -258,6 +273,19 @@ operations into Cedar requests, supporting four principal kinds: `Customer`,
 `Agent`, `Admin`, and `System`.  System principals bypass all policy checks.
 Per-entity Cedar policies are referenced from CSDL annotations, keeping the
 security specification co-located with the data model.
+
+For autonomous agents, Cedar operates in a default-deny posture.  When an agent
+attempts an action that no policy permits, the authorization denial is captured
+as a pending decision and surfaced to the human (or an oversight agent) for
+review.  The human approves at one of three scopes -- narrow (this agent, this
+action, this exact resource), medium (this agent, this action, any resource of
+this type), or broad (this agent, any action on this resource type) -- and
+Temper generates the corresponding Cedar policy and hot-loads it into the
+authorization engine.  Over time, the policy set converges on what the agent
+actually needs.  This reactive governance model avoids requiring the human to
+anticipate all agent permissions upfront; instead, policies emerge from the
+agent's actual operational needs, with the human retaining approval authority
+over every expansion of scope.
 
 ---
 
@@ -1194,6 +1222,14 @@ Temper makes the following contributions:
    infrastructure as code, and a complete O-P-A-D-I evolution chain showing
    how production observations lead to spec improvements.
 
+10. An agent governance layer where autonomous agents operate within formally
+    verified state machines, Cedar authorization enforces default-deny policies
+    with reactive human approval, every action is recorded with agent identity
+    in an auditable trajectory log, and agents can generate and submit their
+    own specifications through a programmatic API -- positioning Temper as the
+    operating layer for autonomous agents acting as enterprise employees or
+    personal assistants.
+
 ### 12.2 Conversational Development Vision
 
 The development loop described in Section 11.3 (converse, generate, verify, deploy)
@@ -1306,30 +1342,50 @@ The three levels of disclosure mirror compiler/database conventions:
 3. **Cascade details** ("show me verification details"): L0-L3 results,
    state counts, counterexample traces — the `EXPLAIN ANALYZE` view
 
-#### Two-Context Separation
+#### Two Deployment Shapes
 
-The system maintains two separated contexts:
+The architecture supports two deployment shapes that share the same
+governance, verification, and auditability infrastructure:
 
-1. **Developer Chat** (design-time).  The developer builds and evolves the
-   application through conversation.  The system interviews, generates specs,
-   verifies, and deploys — the developer controls *what* the application
-   does without needing to understand *how* verification works.
+**Shape 1: Enterprise API.**  A developer (human or agent) builds an
+application through Temper -- entity types, state machines, authorization
+policies, integrations.  Other agents, belonging to other users, consume
+that application through the OData API.  This is the traditional two-sided
+model: one side builds, the other side uses.  The developer retains the
+approval gate for all behavioral changes.  When consuming agents encounter
+capabilities the system lacks, their unmet intents surface to the developer:
 
-2. **Production Chat** (runtime).  End users interact with the deployed
-   application.  The agent operates within the current specifications — it
-   cannot modify the entity model.  When users attempt something the system
-   can't do, the intent is captured and surfaced to the developer:
+```
+User: "Split my order into two shipments"
+Agent: (no matching action) → "I can't do that yet"
+→ Intent captured → Developer notified:
+  "Users are asking to split orders (47 attempts this week).
+   Should I add a SplitOrder action?"
+→ Developer approves/rejects → If approved: verify → deploy
+```
 
-   ```
-   User: "Split my order into two shipments"
-   Agent: (no matching action) → "I can't do that yet"
-   → Intent captured → Developer notified:
-     "Users are asking to split orders (47 attempts this week).
-      Should I add a SplitOrder action?"
-   → Developer approves/rejects → If approved: verify → deploy
-   ```
+**Shape 2: Agent as developer and operator.**  In the personal assistant
+and enterprise employee use cases, the agent is both the developer and the
+user of its own specifications.  When a personal assistant agent needs to
+manage a project, it generates a project management spec (issues, states,
+transitions, invariants), submits it to Temper via the spec loading API,
+the verification cascade validates it, and the agent operates through the
+deployed API.  When a coding agent needs to coordinate a deployment, it
+generates a deployment spec with integration hooks to CI/CD systems,
+governed by Cedar policies that the human approved.
 
-   The developer retains the approval gate for all behavioral changes.
+What separates this from the first shape is the role separation:
+the agent is the developer *and* the operator, but the **policy setter**
+is a separate entity -- the human, or an oversight agent.  The agent
+builds and executes; the human governs what is allowed.  Cedar's
+default-deny posture ensures the agent cannot exceed its authorization
+without explicit human approval.
+
+Multiple agents belonging to the same human or organization may share a
+single Temper instance if they need shared state -- one agent's completed
+step is visible to another agent as a state transition in the shared
+trajectory log.  Or agents may each run their own instance.  Sharing is
+optional; governance is not.
 
 #### Conversational Development Pipeline
 
@@ -1354,10 +1410,26 @@ gate that only surfaces when something is wrong.
 
 Several additional directions remain open:
 
-- **Runtime deploy endpoint.**  An HTTP API for submitting specs at runtime
-  would enable hot-reload without server restart.  The verification cascade
-  would run server-side before registration, bridging the gap between the
-  self-hosted path and the full conversational pipeline.
+- **Agent REPL interface.**  A sandboxed code execution environment--in the
+  style of Symbolica's Agentica or Cloudflare's Code Mode--where agents
+  write code against Temper's typed API surface rather than calling tools
+  via JSON.  The sandbox mediates all external access through Temper,
+  ensuring that every state-changing operation flows through the governed,
+  verified layer.  The REPL becomes the agent's only tool for mutation.
+
+- **Security review agents.**  Delegating governance from the human to an
+  oversight agent that reviews WASM integration modules and policy expansion
+  requests against organizational rules.  The approval flow remains the same;
+  the approver changes from human to agent (or a combination).
+
+- **Formal verification of integrations.**  Extending the four-level
+  verification cascade to cover WASM integration modules, not just state
+  machine specifications.  An agent's external API calls would be provably
+  correct, not just authorized.
+
+- **Cross-agent coordination primitives.**  Explicit mechanisms for agents
+  to observe each other's state and coordinate through shared Temper state,
+  beyond the implicit visibility provided by the shared trajectory log.
 
 - **Distributed clustering.**  The current actor system is single-node;
   actor mailboxes are local `mpsc` channels.  The `temper-store-redis` crate
@@ -1365,10 +1437,6 @@ Several additional directions remain open:
   in-memory stubs, but Redis-backed implementations are not yet wired in.
   Extending `temper-runtime` with Redis-backed mailboxes, a cluster membership
   protocol, and remote actor references would enable horizontal scaling.
-
-- **WASM actor bodies.**  Compiling actor message handlers to WebAssembly
-  would allow hot-loading new actor logic without restarting the host process,
-  complementing the JIT transition table layer.
 
 - **Cloud deployment.**  Packaging the platform as a managed service with
   popular hosting platforms (vercel, railway, fly.io, cloudflare, cloud providers, etc).

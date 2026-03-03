@@ -72,14 +72,14 @@ impl SecurityContext {
                 "x-temper-acting-for" => acting_for = Some(value.clone()),
                 "x-temper-correlation-id" => correlation_id = value.clone(),
                 k if k.starts_with("x-temper-attr-") => {
-                    let attr_name = k.strip_prefix("x-temper-attr-").unwrap();
+                    let attr_name = k.strip_prefix("x-temper-attr-").unwrap(); // ci-ok: guarded by starts_with
                     attributes.insert(
                         attr_name.to_string(),
                         serde_json::Value::String(value.clone()),
                     );
                 }
                 k if k.starts_with("x-temper-ctx-") => {
-                    let ctx_name = k.strip_prefix("x-temper-ctx-").unwrap();
+                    let ctx_name = k.strip_prefix("x-temper-ctx-").unwrap(); // ci-ok: guarded by starts_with
                     context_attrs.insert(
                         ctx_name.to_string(),
                         serde_json::Value::String(value.clone()),
@@ -116,6 +116,35 @@ impl SecurityContext {
             correlation_id: uuid::Uuid::now_v7().to_string(),
         }
     }
+
+    /// Enrich security context with agent identity headers.
+    ///
+    /// If the principal is anonymous and an agent_id is present, promotes
+    /// the principal kind to `Agent` with role `"wasm_module"`.
+    /// Merges agent_id and session_id into `context_attrs` for Cedar evaluation.
+    pub fn with_agent_context(mut self, agent_id: Option<&str>, session_id: Option<&str>) -> Self {
+        if let Some(aid) = agent_id {
+            self.context_attrs.insert(
+                "agentId".to_string(),
+                serde_json::Value::String(aid.to_string()),
+            );
+            // Promote anonymous principals to Agent kind
+            if self.principal.id == "anonymous" {
+                self.principal.id = aid.to_string();
+                self.principal.kind = PrincipalKind::Agent;
+                if self.principal.role.is_none() {
+                    self.principal.role = Some("wasm_module".to_string());
+                }
+            }
+        }
+        if let Some(sid) = session_id {
+            self.context_attrs.insert(
+                "sessionId".to_string(),
+                serde_json::Value::String(sid.to_string()),
+            );
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -126,7 +155,10 @@ mod tests {
     fn test_context_from_headers_customer() {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "cust-123".to_string()),
-            ("X-Temper-Principal-Kind".to_string(), "customer".to_string()),
+            (
+                "X-Temper-Principal-Kind".to_string(),
+                "customer".to_string(),
+            ),
         ];
 
         let ctx = SecurityContext::from_headers(&headers);
@@ -140,7 +172,10 @@ mod tests {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "agent-1".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-            ("X-Temper-Agent-Role".to_string(), "customer_agent".to_string()),
+            (
+                "X-Temper-Agent-Role".to_string(),
+                "customer_agent".to_string(),
+            ),
             ("X-Temper-Acting-For".to_string(), "cust-456".to_string()),
         ];
 
@@ -155,8 +190,14 @@ mod tests {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
-            ("X-Temper-Attr-ApprovalLimit".to_string(), "10000".to_string()),
-            ("X-Temper-Ctx-RateLimitExceeded".to_string(), "false".to_string()),
+            (
+                "X-Temper-Attr-ApprovalLimit".to_string(),
+                "10000".to_string(),
+            ),
+            (
+                "X-Temper-Ctx-RateLimitExceeded".to_string(),
+                "false".to_string(),
+            ),
         ];
 
         let ctx = SecurityContext::from_headers(&headers);
@@ -170,5 +211,52 @@ mod tests {
         let ctx = SecurityContext::system();
         assert_eq!(ctx.principal.id, "system");
         assert_eq!(ctx.principal.kind, PrincipalKind::System);
+    }
+
+    #[test]
+    fn test_with_agent_context_promotes_anonymous() {
+        let ctx = SecurityContext::from_headers(&[])
+            .with_agent_context(Some("stripe_charge"), Some("sess-1"));
+
+        assert_eq!(ctx.principal.id, "stripe_charge");
+        assert_eq!(ctx.principal.kind, PrincipalKind::Agent);
+        assert_eq!(ctx.principal.role, Some("wasm_module".to_string()));
+        assert_eq!(
+            ctx.context_attrs.get("agentId"),
+            Some(&serde_json::Value::String("stripe_charge".to_string()))
+        );
+        assert_eq!(
+            ctx.context_attrs.get("sessionId"),
+            Some(&serde_json::Value::String("sess-1".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_with_agent_context_preserves_explicit_principal() {
+        let headers = vec![
+            ("X-Temper-Principal-Id".to_string(), "cust-123".to_string()),
+            (
+                "X-Temper-Principal-Kind".to_string(),
+                "customer".to_string(),
+            ),
+        ];
+        let ctx = SecurityContext::from_headers(&headers).with_agent_context(Some("agent-1"), None);
+
+        // Should NOT overwrite explicit customer principal
+        assert_eq!(ctx.principal.id, "cust-123");
+        assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
+        // But agentId should be in context attrs
+        assert_eq!(
+            ctx.context_attrs.get("agentId"),
+            Some(&serde_json::Value::String("agent-1".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_with_agent_context_none_values() {
+        let ctx = SecurityContext::system().with_agent_context(None, None);
+        assert_eq!(ctx.principal.id, "system");
+        assert!(!ctx.context_attrs.contains_key("agentId"));
+        assert!(!ctx.context_attrs.contains_key("sessionId"));
     }
 }

@@ -5,9 +5,9 @@
 //!
 //! Run with: `cargo bench -p temper-server --bench actor_throughput`
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use temper_runtime::ActorSystem;
 use temper_server::ServerState;
 use temper_spec::csdl::parse_csdl;
@@ -17,7 +17,7 @@ const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.tom
 
 fn build_state(name: &str) -> ServerState {
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
-    let mut ioa_sources = HashMap::new();
+    let mut ioa_sources = BTreeMap::new();
     ioa_sources.insert("Order".to_string(), ORDER_IOA.to_string());
     let system = ActorSystem::new(name);
     ServerState::with_specs(system, csdl, CSDL_XML.to_string(), ioa_sources)
@@ -37,7 +37,12 @@ fn bench_actor(c: &mut Criterion) {
                 rt.block_on(async {
                     black_box(
                         state
-                            .dispatch_action("Order", &format!("o-{id}"), "AddItem", serde_json::json!({"ProductId": "p1"}))
+                            .dispatch_action(
+                                "Order",
+                                &format!("o-{id}"),
+                                "AddItem",
+                                serde_json::json!({"ProductId": "p1"}),
+                            )
                             .await
                             .unwrap(),
                     )
@@ -59,9 +64,15 @@ fn bench_actor(c: &mut Criterion) {
                         let s = state.clone();
                         let eid = format!("o-{batch}-{i}");
                         handles.push(tokio::spawn(async move {
-                            s.dispatch_action("Order", &eid, "AddItem", serde_json::json!({"ProductId": "p1"}))
-                                .await
-                                .unwrap()
+                            // determinism-ok: benchmark concurrency, not simulation
+                            s.dispatch_action(
+                                "Order",
+                                &eid,
+                                "AddItem",
+                                serde_json::json!({"ProductId": "p1"}),
+                            )
+                            .await
+                            .unwrap()
                         }));
                     }
                     for h in handles {

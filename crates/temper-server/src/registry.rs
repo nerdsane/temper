@@ -1,18 +1,138 @@
 //! Per-tenant specification registry.
 //!
 //! The [`SpecRegistry`] maps `(TenantId, EntityType)` to parsed specifications
-//! and transition tables. It replaces the flat `HashMap<String, TransitionTable>`
+//! and transition tables. It replaces the flat `BTreeMap<String, TransitionTable>` // determinism-ok
 //! in `ServerState`, enabling multi-tenant deployments where each tenant has
 //! its own entity types and specs.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
-use temper_spec::automaton::{self, Automaton, Integration};
+use temper_spec::automaton::{self, Automaton, Integration, Webhook};
+use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy, parse_cross_invariants};
 use temper_spec::csdl::CsdlDocument;
+
+use crate::reaction::ReactionRegistry;
+use crate::reaction::types::ReactionRule;
+
+/// Verification status for a single entity type.
+#[derive(Debug, Clone, serde::Serialize)]
+pub enum VerificationStatus {
+    /// Verification has not started yet.
+    Pending,
+    /// Verification is currently running.
+    Running,
+    /// Verification completed with results.
+    Completed(EntityVerificationResult),
+}
+
+/// Summary of verification results for an entity type.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EntityVerificationResult {
+    /// Whether all levels passed.
+    pub all_passed: bool,
+    /// Per-level summaries.
+    pub levels: Vec<EntityLevelSummary>,
+    /// ISO-8601 timestamp when verification completed.
+    pub verified_at: String,
+}
+
+/// Summary of a single verification level.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EntityLevelSummary {
+    /// Level name (e.g. "L0 SMT", "L1 Model Check").
+    pub level: String,
+    /// Whether this level passed.
+    pub passed: bool,
+    /// Human-readable summary.
+    pub summary: String,
+    /// Detailed violation information (populated only for failed levels).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Vec<VerificationDetail>>,
+}
+
+/// A single verification violation detail.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VerificationDetail {
+    /// Violation kind: "liveness_violation", "invariant_violation", "counterexample", "proptest_failure".
+    pub kind: String,
+    /// Property or invariant name that was violated.
+    pub property: String,
+    /// Human-readable description of the violation.
+    pub description: String,
+    /// Actor ID that triggered the violation (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+}
+
+/// Errors raised while registering tenant specifications.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryError {
+    /// cross-invariants TOML failed to parse.
+    CrossInvariantParse { tenant: String, source: String },
+    /// An IOA source failed to parse.
+    IoaParse {
+        tenant: String,
+        entity_type: String,
+        source: String,
+    },
+}
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CrossInvariantParse { tenant, source } => {
+                write!(
+                    f,
+                    "failed to parse cross-invariants for tenant '{tenant}': {source}"
+                )
+            }
+            Self::IoaParse {
+                tenant,
+                entity_type,
+                source,
+            } => {
+                write!(
+                    f,
+                    "failed to parse IOA for tenant '{tenant}', entity '{entity_type}': {source}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
+/// A compiled relation edge from CSDL navigation metadata.
+#[derive(Debug, Clone)]
+pub struct RelationEdge {
+    /// Source entity type that owns the FK field.
+    pub from_entity: String,
+    /// Navigation property name on the source entity.
+    pub navigation_property: String,
+    /// Target entity type.
+    pub to_entity: String,
+    /// FK field on source entity (e.g. `OrderId`).
+    pub source_field: String,
+    /// Referenced key on target entity (usually `Id`).
+    pub target_field: String,
+    /// Whether the relationship allows null references.
+    pub nullable: bool,
+    /// Delete policy applied to this edge.
+    pub delete_policy: DeletePolicy,
+}
+
+/// Tenant-scoped relation graph compiled from CSDL.
+#[derive(Debug, Clone, Default)]
+pub struct RelationGraph {
+    /// Outgoing edges keyed by source entity type.
+    pub outgoing: BTreeMap<String, Vec<RelationEdge>>,
+    /// Incoming edges keyed by target entity type.
+    pub incoming: BTreeMap<String, Vec<RelationEdge>>,
+}
 
 /// A registered tenant with its specs and entity configuration.
 #[derive(Debug, Clone)]
@@ -25,6 +145,18 @@ pub struct TenantConfig {
     pub entity_set_map: BTreeMap<String, String>,
     /// Per-entity-type specs.
     pub entities: BTreeMap<String, EntitySpec>,
+    /// Reaction rules for cross-entity coordination.
+    pub reactions: Vec<ReactionRule>,
+    /// Tenant relation graph compiled from CSDL.
+    pub relation_graph: RelationGraph,
+    /// Optional parsed cross-entity invariant spec.
+    pub cross_invariants: Option<CrossInvariantSpec>,
+    /// Raw `cross-invariants.toml` source, if provided.
+    pub cross_invariants_source: Option<String>,
+    /// Indexed webhook routes: path -> (entity_type, Webhook).
+    pub webhook_routes: BTreeMap<String, (String, Webhook)>,
+    /// Per-entity verification status (design-time observation).
+    pub verification: BTreeMap<String, VerificationStatus>,
 }
 
 /// A registered entity type's spec and transition table.
@@ -94,6 +226,11 @@ impl SpecRegistry {
     /// `ioa_sources` maps entity type name to IOA TOML source string.
     /// Each source is parsed into an [`Automaton`] and compiled into a
     /// [`TransitionTable`].
+    ///
+    /// If the tenant already exists, existing entity tables are hot-swapped
+    /// via their [`SwapController`] so that live actors see the new table on
+    /// their next action dispatch — no restart required. New entities are
+    /// added; entities not in the new spec set are removed.
     pub fn register_tenant(
         &mut self,
         tenant: impl Into<TenantId>,
@@ -101,7 +238,80 @@ impl SpecRegistry {
         csdl_xml: String,
         ioa_sources: &[(&str, &str)],
     ) {
+        self.try_register_tenant_with_reactions_and_constraints(
+            tenant,
+            csdl,
+            csdl_xml,
+            ioa_sources,
+            Vec::new(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible variant of [`register_tenant`](Self::register_tenant).
+    pub fn try_register_tenant(
+        &mut self,
+        tenant: impl Into<TenantId>,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+    ) -> Result<(), RegistryError> {
+        self.try_register_tenant_with_reactions_and_constraints(
+            tenant,
+            csdl,
+            csdl_xml,
+            ioa_sources,
+            Vec::new(),
+            None,
+        )
+    }
+
+    /// Register a tenant with CSDL, IOA specs, reaction rules, and optional
+    /// cross-entity invariant definitions.
+    pub fn register_tenant_with_reactions_and_constraints(
+        &mut self,
+        tenant: impl Into<TenantId>,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+        reactions: Vec<ReactionRule>,
+        cross_invariants_source: Option<String>,
+    ) {
+        self.try_register_tenant_with_reactions_and_constraints(
+            tenant,
+            csdl,
+            csdl_xml,
+            ioa_sources,
+            reactions,
+            cross_invariants_source,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible variant of [`register_tenant_with_reactions_and_constraints`](Self::register_tenant_with_reactions_and_constraints).
+    pub fn try_register_tenant_with_reactions_and_constraints(
+        &mut self,
+        tenant: impl Into<TenantId>,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+        reactions: Vec<ReactionRule>,
+        cross_invariants_source: Option<String>,
+    ) -> Result<(), RegistryError> {
         let tenant = tenant.into();
+        let tenant_name = tenant.to_string();
+        let cross_invariants = cross_invariants_source
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| {
+                parse_cross_invariants(s).map_err(|e| RegistryError::CrossInvariantParse {
+                    tenant: tenant_name.clone(),
+                    source: e.to_string(),
+                })
+            })
+            .transpose()?;
+        let relation_graph = build_relation_graph(&csdl, cross_invariants.as_ref());
 
         // Build entity set map from CSDL
         let mut entity_set_map = BTreeMap::new();
@@ -118,34 +328,167 @@ impl SpecRegistry {
             }
         }
 
-        // Parse and compile each IOA spec
-        let mut entities = BTreeMap::new();
-        for (entity_type, ioa_source) in ioa_sources {
-            let automaton = automaton::parse_automaton(ioa_source)
-                .unwrap_or_else(|e| panic!("failed to parse IOA for {entity_type}: {e}"));
-            let table = TransitionTable::from_automaton(&automaton);
+        if let Some(existing_config) = self.tenants.get_mut(&tenant) {
+            // Hot-reload path: swap tables on existing entities, add new ones.
+            existing_config.csdl = Arc::new(csdl);
+            existing_config.csdl_xml = Arc::new(csdl_xml);
+            existing_config.entity_set_map = entity_set_map;
+            existing_config.reactions = reactions;
+            existing_config.relation_graph = relation_graph;
+            existing_config.cross_invariants = cross_invariants;
+            existing_config.cross_invariants_source = cross_invariants_source;
 
-            let integrations = automaton.integrations.clone();
-            entities.insert(
-                entity_type.to_string(),
-                EntitySpec {
-                    automaton,
-                    integrations,
-                    swap: Arc::new(SwapController::new(table)),
-                    ioa_source: ioa_source.to_string(),
+            for (entity_type, ioa_source) in ioa_sources {
+                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
+                    RegistryError::IoaParse {
+                        tenant: tenant_name.clone(),
+                        entity_type: (*entity_type).to_string(),
+                        source: e.to_string(),
+                    }
+                })?;
+                let table = TransitionTable::from_automaton(&automaton);
+                let integrations = automaton.integrations.clone();
+
+                if let Some(existing_spec) = existing_config.entities.get_mut(*entity_type) {
+                    // Hot-swap: write new table into the SAME RwLock that actors hold.
+                    let result = existing_spec.swap_controller().swap(table);
+                    tracing::info!(
+                        entity_type,
+                        ?result,
+                        "hot-swapped transition table for existing entity"
+                    );
+                    // Update metadata on the existing spec.
+                    existing_spec.automaton = automaton;
+                    existing_spec.integrations = integrations;
+                    existing_spec.ioa_source = ioa_source.to_string();
+                } else {
+                    // New entity type — create fresh EntitySpec.
+                    existing_config.entities.insert(
+                        entity_type.to_string(),
+                        EntitySpec {
+                            automaton,
+                            integrations,
+                            swap: Arc::new(SwapController::new(table)),
+                            ioa_source: ioa_source.to_string(),
+                        },
+                    );
+                }
+            }
+
+            // Remove entities no longer in the spec set.
+            let new_entity_types: std::collections::BTreeSet<String> =
+                ioa_sources.iter().map(|(t, _)| t.to_string()).collect();
+            existing_config
+                .entities
+                .retain(|k, _| new_entity_types.contains(k));
+
+            // Rebuild webhook route index.
+            existing_config.webhook_routes = build_webhook_routes(&existing_config.entities);
+
+            // Reset verification to Pending for re-verification.
+            existing_config.verification = existing_config
+                .entities
+                .keys()
+                .map(|k| (k.clone(), VerificationStatus::Pending))
+                .collect();
+        } else {
+            // First registration: create new TenantConfig.
+            let mut entities = BTreeMap::new();
+            for (entity_type, ioa_source) in ioa_sources {
+                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
+                    RegistryError::IoaParse {
+                        tenant: tenant_name.clone(),
+                        entity_type: (*entity_type).to_string(),
+                        source: e.to_string(),
+                    }
+                })?;
+                let table = TransitionTable::from_automaton(&automaton);
+                let integrations = automaton.integrations.clone();
+                entities.insert(
+                    entity_type.to_string(),
+                    EntitySpec {
+                        automaton,
+                        integrations,
+                        swap: Arc::new(SwapController::new(table)),
+                        ioa_source: ioa_source.to_string(),
+                    },
+                );
+            }
+
+            let verification = entities
+                .keys()
+                .map(|k| (k.clone(), VerificationStatus::Pending))
+                .collect();
+
+            let webhook_routes = build_webhook_routes(&entities);
+            self.tenants.insert(
+                tenant,
+                TenantConfig {
+                    csdl: Arc::new(csdl),
+                    csdl_xml: Arc::new(csdl_xml),
+                    entity_set_map,
+                    entities,
+                    reactions,
+                    relation_graph,
+                    cross_invariants,
+                    cross_invariants_source,
+                    webhook_routes,
+                    verification,
                 },
             );
         }
 
-        self.tenants.insert(
+        Ok(())
+    }
+
+    /// Register a tenant with CSDL, IOA specs, and reaction rules.
+    pub fn register_tenant_with_reactions(
+        &mut self,
+        tenant: impl Into<TenantId>,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+        reactions: Vec<ReactionRule>,
+    ) {
+        self.try_register_tenant_with_reactions_and_constraints(
             tenant,
-            TenantConfig {
-                csdl: Arc::new(csdl),
-                csdl_xml: Arc::new(csdl_xml),
-                entity_set_map,
-                entities,
-            },
-        );
+            csdl,
+            csdl_xml,
+            ioa_sources,
+            reactions,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible variant of [`register_tenant_with_reactions`](Self::register_tenant_with_reactions).
+    pub fn try_register_tenant_with_reactions(
+        &mut self,
+        tenant: impl Into<TenantId>,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+        reactions: Vec<ReactionRule>,
+    ) -> Result<(), RegistryError> {
+        self.try_register_tenant_with_reactions_and_constraints(
+            tenant,
+            csdl,
+            csdl_xml,
+            ioa_sources,
+            reactions,
+            None,
+        )
+    }
+
+    /// Build a [`ReactionRegistry`] from all tenants' reaction rules.
+    pub fn build_reaction_registry(&self) -> ReactionRegistry {
+        let mut registry = ReactionRegistry::new();
+        for (tenant, config) in &self.tenants {
+            if !config.reactions.is_empty() {
+                registry.register_tenant_rules(tenant.clone(), config.reactions.clone());
+            }
+        }
+        registry
     }
 
     /// Look up a tenant's configuration.
@@ -157,34 +500,38 @@ impl SpecRegistry {
     ///
     /// Returns a snapshot of the current table. If a hot-swap has occurred
     /// since the last call, this returns the new table.
-    pub fn get_table(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> Option<Arc<TransitionTable>> {
+    pub fn get_table(&self, tenant: &TenantId, entity_type: &str) -> Option<Arc<TransitionTable>> {
         self.tenants
             .get(tenant)
             .and_then(|tc| tc.entities.get(entity_type))
             .map(|es| es.table())
     }
 
-    /// Look up the entity type name for an entity set in a tenant.
-    pub fn resolve_entity_type(
+    /// Get a live reference to the transition table's `RwLock`.
+    ///
+    /// Unlike [`get_table()`](Self::get_table) which returns a cloned snapshot,
+    /// this returns the `Arc<RwLock<TransitionTable>>` from the [`SwapController`].
+    /// Actors holding this reference will see hot-swapped tables on their next read.
+    pub fn get_table_live(
         &self,
         tenant: &TenantId,
-        entity_set: &str,
-    ) -> Option<String> {
+        entity_type: &str,
+    ) -> Option<Arc<RwLock<TransitionTable>>> {
+        self.tenants
+            .get(tenant)
+            .and_then(|tc| tc.entities.get(entity_type))
+            .map(|es| es.swap_controller().current())
+    }
+
+    /// Look up the entity type name for an entity set in a tenant.
+    pub fn resolve_entity_type(&self, tenant: &TenantId, entity_set: &str) -> Option<String> {
         self.tenants
             .get(tenant)
             .and_then(|tc| tc.entity_set_map.get(entity_set).cloned())
     }
 
     /// Look up the IOA spec for a tenant and entity type.
-    pub fn get_spec(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> Option<&EntitySpec> {
+    pub fn get_spec(&self, tenant: &TenantId, entity_type: &str) -> Option<&EntitySpec> {
         self.tenants
             .get(tenant)
             .and_then(|tc| tc.entities.get(entity_type))
@@ -209,6 +556,109 @@ impl SpecRegistry {
             .map(|tc| tc.entities.keys().map(|k| k.as_str()).collect())
             .unwrap_or_default()
     }
+
+    /// Set verification status for a specific entity type.
+    pub fn set_verification_status(
+        &mut self,
+        tenant: &TenantId,
+        entity_type: &str,
+        status: VerificationStatus,
+    ) {
+        if let Some(config) = self.tenants.get_mut(tenant) {
+            config.verification.insert(entity_type.to_string(), status);
+        }
+    }
+
+    /// Get verification status for a specific entity type.
+    pub fn get_verification_status(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Option<&VerificationStatus> {
+        self.tenants
+            .get(tenant)
+            .and_then(|tc| tc.verification.get(entity_type))
+    }
+
+    /// Get all verification statuses for a tenant.
+    pub fn verification_statuses(
+        &self,
+        tenant: &TenantId,
+    ) -> Option<&BTreeMap<String, VerificationStatus>> {
+        self.tenants.get(tenant).map(|tc| &tc.verification)
+    }
+}
+
+/// Build webhook route index from parsed entity specs.
+fn build_webhook_routes(
+    entities: &BTreeMap<String, EntitySpec>,
+) -> BTreeMap<String, (String, Webhook)> {
+    let mut routes = BTreeMap::new();
+    for (entity_type, spec) in entities {
+        for wh in &spec.automaton.webhooks {
+            routes.insert(wh.path.clone(), (entity_type.clone(), wh.clone()));
+        }
+    }
+    routes
+}
+
+fn build_relation_graph(
+    csdl: &CsdlDocument,
+    cross_invariants: Option<&CrossInvariantSpec>,
+) -> RelationGraph {
+    let mut overrides = BTreeMap::<(String, String), DeletePolicy>::new();
+    let default_policy = cross_invariants
+        .map(|spec| {
+            for ov in &spec.relation_overrides {
+                overrides.insert(
+                    (ov.from_entity.clone(), ov.navigation_property.clone()),
+                    ov.delete_policy,
+                );
+            }
+            spec.default_delete_policy
+        })
+        .unwrap_or(DeletePolicy::Restrict);
+
+    let mut graph = RelationGraph::default();
+    for schema in &csdl.schemas {
+        for et in &schema.entity_types {
+            for nav in &et.navigation_properties {
+                let target = nav_target_entity(&nav.type_name);
+                for rc in &nav.referential_constraints {
+                    let delete_policy = overrides
+                        .get(&(et.name.clone(), nav.name.clone()))
+                        .copied()
+                        .unwrap_or(default_policy);
+                    let edge = RelationEdge {
+                        from_entity: et.name.clone(),
+                        navigation_property: nav.name.clone(),
+                        to_entity: target.clone(),
+                        source_field: rc.property.clone(),
+                        target_field: rc.referenced_property.clone(),
+                        nullable: nav.nullable,
+                        delete_policy,
+                    };
+                    graph
+                        .outgoing
+                        .entry(et.name.clone())
+                        .or_default()
+                        .push(edge.clone());
+                    graph.incoming.entry(target.clone()).or_default().push(edge);
+                }
+            }
+        }
+    }
+    graph
+}
+
+fn nav_target_entity(type_name: &str) -> String {
+    let raw = type_name.trim();
+    let inner = if raw.starts_with("Collection(") && raw.ends_with(')') {
+        &raw[11..raw.len() - 1]
+    } else {
+        raw
+    };
+    inner.rsplit('.').next().unwrap_or(inner).to_string()
 }
 
 #[cfg(test)]
@@ -337,9 +787,7 @@ mod tests {
 
         registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
 
-        let spec = registry
-            .get_spec(&TenantId::new("alpha"), "Order")
-            .unwrap();
+        let spec = registry.get_spec(&TenantId::new("alpha"), "Order").unwrap();
         assert_eq!(spec.automaton.automaton.name, "Order");
         assert!(!spec.ioa_source.is_empty());
     }

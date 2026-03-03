@@ -1,55 +1,279 @@
-# Temper
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/mascot-vectorized-light.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/mascot-vectorized.svg">
+    <img src="assets/mascot-vectorized.svg" width="140" alt="Temper">
+  </picture>
+</p>
+<h1 align="center">Temper</h1>
 
-**This is research, not a product.**
+<p align="center">
+  <em>The operating system for agents.</em>
+</p>
 
-Temper explores a hypothesis: most enterprise SaaS backends are state machines at their core -- an order moves through Draft, Submitted, Shipped, Delivered; a subscription cycles between Active, PastDue, Cancelled. If the state machine is the essential artifact, the surrounding infrastructure (persistence, API, authorization, webhooks, observability) follows mechanically from the specification.
-
-The question is how far this can be pushed. This codebase is an attempt to find out.
+<p align="center">
+  <a href="https://github.com/nerdsane/temper/actions/workflows/ci.yml"><img src="https://github.com/nerdsane/temper/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.92%2B-orange" alt="Rust"></a>
+  <a href="#whats-implemented"><img src="https://img.shields.io/badge/tests-757-green" alt="Tests"></a>
+</p>
 
 ---
 
-## Overview
+Temper is to agents what an operating system is to processes.
 
-An actor-based framework where I/O Automaton specifications define entity behavior, a four-level verification cascade validates correctness before deployment, and a conversational platform generates specifications from developer interviews.
+A process doesn't access memory, disk, or network directly — it goes through the OS, which mediates access and enforces rules. Temper does the same thing for agents: every state-changing action an agent takes — creating entities, transitioning state, calling external APIs — flows through Temper, which **verifies** it before it runs, **authorizes** it when it runs, and **records** it after it runs.
 
-- Specifications are declarative: states, transitions, guards, invariants, integrations
-- Verification is automated: SMT symbolic checking, exhaustive model checking, deterministic simulation, property-based testing
-- The HTTP API is derived from the data model -- agents can discover it through a metadata endpoint
-- Production usage feeds back through an evolution engine that captures unmet user intents
+The vision: Temper becomes the only tool an agent needs for stateful operations. Instead of giving agents raw API keys, direct database access, and arbitrary code execution, you give them Temper — and Temper handles governance, persistence, verification, and auditability. As Temper matures, agents' other tools for direct mutation get replaced by governed equivalents.
 
-A reference e-commerce application exercises the full stack: three entity types (Order, Payment, Shipment) verified through the cascade, persisted to Postgres, traced to ClickHouse. Four additional fixture specs (support ticket, approval workflow, subscription management, issue tracker) test the pattern across domains.
+Agents generate the specs. Agents operate through them. Humans set the policies.
 
-## Scope
+## What Agents Get
 
-This approach works for applications whose core logic is state machine shaped. That covers a meaningful subset of enterprise SaaS, but not all backend systems. The state model is a finite automaton (status + counters + booleans) -- no floating-point, no strings, no cross-entity invariants. Some of these are fundamental to the approach; others are engineering work not yet done.
+- **Verified state** — The agent describes what it needs (entities, states, transitions, rules). Temper generates a state machine, proves it correct across all reachable states, and deploys an API. The agent can't put the system into a bad state because the bad states were ruled out before the spec was loaded.
 
-| Limitation | Status |
-|-----|-------|
-| Single-node only | Redis traits designed, not wired |
-| No cross-entity invariants | Integration engine orchestrates |
-| No temporal guards | Planned via integration engine |
-| Spec generation requires an LLM | Specs are also hand-writable |
-| No UI layer | OData API; any frontend works |
+- **Governed access** — Cedar authorization evaluates every action. Default-deny. When the agent tries something not yet permitted, the denial surfaces to the human: *"Your agent tried to call the Stripe API. Allow?"* The human approves, Temper generates the policy. Over time, permissions converge on what the agent actually needs.
 
-[docs/POSITIONING.md](docs/POSITIONING.md) has a fuller discussion.
+- **Complete audit trail** — Every action carries agent identity, before/after state, and the authorization decision that governed it. The agent can query its own history. Multiple agents sharing a Temper instance see each other's state changes.
 
-## Running
+- **WASM integrations** — When the agent needs to reach an external system (payment API, notification service, weather data), it declares the integration in the spec. The call executes through a sandboxed WASM module, gated by Cedar policies. No raw API keys. No direct network access. In the vision, these modules are formally verified and reviewed by independent governance agents — the same way state machine specs are verified today.
 
-```bash
-cargo test --workspace
+- **Persistent state + event sourcing** — State survives restarts. Every transition is an event in a durable journal (Postgres or Turso/libSQL). Long-running workflows pick up where they left off.
 
-DATABASE_URL=postgres://user:pass@localhost/db cargo run -- serve \
-  --specs-dir reference-apps/ecommerce/specs --tenant ecommerce
+- **Self-describing API** — The generated OData v4 API includes a `$metadata` endpoint. Agents discover the full surface — entity types, available actions, valid transitions — without documentation.
 
-./scripts/bench.sh
+## How It Works
+
+Agents interact with Temper through a sandboxed REPL — the **Monty** sandbox. It exposes two MCP tools: `search` for read-only spec queries, and `execute` for everything else. The agent writes Python code against a typed `temper` object; the sandbox mediates all access to the Temper server. No filesystem access, no network access, no imports — just the `temper` API.
+
+```python
+# 1. Start the server
+await temper.start_server()
+
+# 2. Describe what you need — Temper verifies and deploys it
+await temper.submit_specs("my-app", {
+    "Order.ioa.toml": order_spec,      # generated by the agent
+    "model.csdl.xml": data_model       # generated by the agent
+})
+# → Verification cascade runs (L0-L3)
+# → API is live if all levels pass
+
+# 3. Operate through the verified API
+await temper.create("my-app", "Orders", {"title": "New order"})
+await temper.action("my-app", "Orders", "order-1", "SubmitOrder", {"items": 3})
+
+# 4. If Cedar denies an action, wait for human approval
+decision = await temper.poll_decision("my-app", "PD-abc123")
+# → Human approves via Observe UI → retry succeeds
 ```
+
+Everything the agent does goes through this REPL. Every action is verified, authorized, and recorded.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Agent (Claude Code, Cursor, OpenClaw, LangChain, etc.)       │
+└──────────────┬───────────────────────────────────────────────┘
+               │  MCP (search + execute)
+               ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Monty Sandbox (Python REPL)                                 │
+│  temper.start_server() · submit_specs() · action() · ...     │
+└──────────────┬───────────────────────────────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Temper Core                                                 │
+│                                                              │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐             │
+│  │ Spec Parse  │→│  Verify    │→│  Deploy     │             │
+│  │ IOA + CSDL  │  │ L0-L3     │  │ Actor RT   │             │
+│  └────────────┘  └────────────┘  └─────┬──────┘             │
+│                                        │                     │
+│  ┌────────────┐  ┌────────────┐  ┌─────▼──────┐             │
+│  │ Cedar      │  │ WASM       │  │ OData API  │             │
+│  │ AuthZ      │  │ Integrations│  │ (auto-gen) │             │
+│  └────────────┘  └────────────┘  └────────────┘             │
+│                                                              │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐             │
+│  │ Event      │  │ OTEL       │  │ Evolution  │             │
+│  │ Sourcing   │  │ Telemetry  │  │ Engine     │             │
+│  └────────────┘  └────────────┘  └────────────┘             │
+└──────────────────────────────────────────────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Storage: Postgres or Turso/libSQL                           │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### The Verification Cascade
+
+Every spec passes four levels before reaching production. No exceptions.
+
+| Level | Method | What It Proves |
+|-------|--------|----------------|
+| **L0** | Z3 SMT | Guards satisfiable, invariants inductive, no unreachable states |
+| **L1** | Stateright model checking | Exhaustive state space exploration, safety + liveness properties |
+| **L2** | Deterministic simulation | Fault injection (message delays, drops, crashes), reproducible via seeded PRNG |
+| **L3** | Property-based testing | Random action sequences with shrinking to minimal counterexamples |
+
+An agent can't ship an order without payment captured — not because someone reviewed the code, but because the invariant was proven to hold across all reachable states before the spec was loaded.
+
+## Two Use Cases
+
+### 1. Agent OS — the agent builds and operates
+
+A personal assistant agent needs to manage projects? It generates a project management spec — issues, states, transitions, invariants — submits it through the Monty REPL, the verification cascade validates it, and the agent operates through the deployed API.
+
+A coding agent needs to coordinate deployments? It generates a deployment spec with WASM integration hooks to CI/CD, governed by Cedar policies the human approved.
+
+The agent is both builder and operator. The human is the policy setter. Cedar's default-deny posture means the agent can't exceed its authorization without explicit human approval.
+
+**This is what "agent OS" means:** Temper doesn't tell the agent what to do. It mediates the agent's access to state and external systems, ensures actions are authorized, and maintains a verifiable record of everything that happened. The same way an OS doesn't tell a process what to compute — it governs access to shared resources and prevents processes from corrupting each other's state.
+
+### 2. Agent-built applications
+
+An agent (or a team of agents) builds a full application on Temper — entity types, state machines, authorization policies, WASM integrations. Other agents or users consume that application through the generated OData API.
+
+Same verification. Same governance. Same audit trail. The difference is role separation: the building agent and the consuming agents are different entities, potentially belonging to different organizations.
+
+When consuming agents or users encounter something the application can't do yet, the system captures it as an **unmet intent** and surfaces it to the developer side:
+
+```
+User agent: "Split my order into two shipments"
+Application: (no matching action) → unmet intent recorded
+
+→ Developer agent notified:
+  "Users are asking to split orders (47 attempts this week).
+   Should I add a SplitOrder action?"
+→ Developer agent (or human) approves
+→ Spec updated → verification cascade → hot-deploy
+→ Next attempt succeeds
+```
+
+The application evolves from production feedback. Developer agents implement the changes. Every change is gated by the verification cascade. The **Evolution Engine** tracks the full chain: observation → problem → analysis → decision → impact.
+
+## How Temper Is Different
+
+Temper often gets compared to things it isn't. Here's how it differs from what's out there:
+
+- **Not an agent framework** (LangChain, CrewAI, OpenClaw, AutoGen) — Temper doesn't build agents. It's the operating layer agents run on top of. You bring your own agent; Temper governs what it can do.
+
+- **Not a workflow engine** (Temporal, Inngest) — Workflow engines orchestrate steps. Temper verifies the *state machine itself* before it runs — proving invariants hold across all reachable states, not just the happy path. The runtime enforces the verified spec on every transition.
+
+- **Not an API framework** (Rails, Django, FastAPI) — Temper generates the API from specifications. There are no controllers to write, no routes to define, no middleware to configure. The spec is the app.
+
+- **Not a database** — Temper uses Postgres or Turso for persistence. It adds a verified state machine layer and event sourcing on top.
+
+## What's Under the Specs
+
+Agents generate specs — nobody writes them by hand. But if you want to understand what gets generated, here's what an I/O Automaton spec looks like:
+
+```toml
+[automaton]
+name = "Order"
+states = ["Draft", "Submitted", "Shipped", "Delivered", "Cancelled"]
+initial = "Draft"
+
+[[state]]
+name = "items"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "SubmitOrder"
+from = ["Draft"]
+to = "Submitted"
+guard = "items > 0"
+
+[[invariant]]
+name = "SubmitRequiresItems"
+when = ["Submitted", "Shipped", "Delivered"]
+assert = "items > 0"
+
+[[integration]]
+name = "notify_fulfillment"
+trigger = "SubmitOrder"
+type = "wasm"
+module = "notify_service"
+on_success = "NotifySucceeded"
+on_failure = "NotifyFailed"
+```
+
+States, transitions, guards, invariants, and WASM integrations — all in one declarative file. The verification cascade operates on this directly. The runtime derives a transition table from it. The framework never hardcodes entity-specific logic.
+
+## What's Implemented
+
+| Feature | Status |
+|---------|--------|
+| I/O Automaton spec parser (states, actions, guards, invariants, integrations) | **Done** |
+| CSDL data model parser (OData-compatible entity types) | **Done** |
+| Verification cascade — L0 Z3 SMT, L1 Stateright, L2 DST with fault injection, L3 proptest | **Done** |
+| Actor runtime with event sourcing, deterministic scheduling, bounded mailboxes | **Done** |
+| OData v4 API generation (CRUD, $filter, $select, $expand, bound actions) | **Done** |
+| Cedar authorization (default-deny, per-action policies, agent identity) | **Done** |
+| OTEL observability (wide events, dual projection to metrics + spans) | **Done** |
+| Postgres and Turso/libSQL storage backends (multi-tenant) | **Done** |
+| MCP integration — Monty sandbox with `search` and `execute` tools | **Done** |
+| WASM sandboxed integrations (resource budgets, Cedar-gated) | **Done** |
+| Evolution Engine — O-P-A-D-I record chain, unmet intent capture, approval gate | **Done** |
+| JIT transition tables with hot-swap (live spec updates, zero downtime) | **Done** |
+| Agent governance UX (default-deny, human approval flow, pending decisions) | **Done** |
+| Observe dashboard — Next.js UI for decisions, agents, entities, specs, evolution | **Done** |
+| Programmatic spec submission API (agents generate and deploy specs) | **Done** |
+| Cross-entity choreography via reaction engine | **Done** |
+
+757 tests across 19 crates.
+
+## Roadmap
+
+- [ ] **Temper as sole agent tool** — Full coverage of stateful operations so agents can drop direct DB/API/shell access in favor of governed equivalents
+- [ ] **Formal verification of WASM modules** — Extend the verification cascade to integration code, not just state machine specs
+- [ ] **Governance agents** — Delegate security review to oversight agents that evaluate WASM modules and policy expansion requests
+- [ ] **Cross-entity invariants** — Formal verification of properties that span multiple entity types (reaction engine provides choreography today; formal proofs are next)
+- [ ] **Distributed deployment** — Multi-node actor placement (storage traits designed, cluster protocol needed)
+- [ ] **Cross-agent coordination** — Shared verified state as an explicit coordination primitive between agents
 
 ## Documentation
 
-- [docs/PAPER.md](docs/PAPER.md) -- Research paper
-- [docs/POSITIONING.md](docs/POSITIONING.md) -- The observation that motivated this work
-- [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md) -- Technical reference
+| Document | Description |
+|----------|-------------|
+| [Research Paper](docs/PAPER.md) | The full argument for spec-first, agent-governed development |
+| [Positioning](docs/POSITIONING.md) | Why state machines are the essential artifact |
+| [Agent Guide](docs/AGENT_GUIDE.md) | Technical reference for building with Temper |
+| [Architecture Decisions](docs/adrs/) | ADRs documenting major design choices |
 
-## Status
+<details>
+<summary>Crate overview (19 crates)</summary>
 
-441 tests across 16 crates. Functional end-to-end: spec parsing, verification cascade, actor dispatch, Postgres persistence, OTEL telemetry. The open questions are about generality, not functionality.
+| Crate | Purpose |
+|-------|---------|
+| **temper-spec** | IOA TOML + CSDL parsers, compiles to StateMachine IR |
+| **temper-verify** | L0-L3 verification cascade (Z3, Stateright, DST, proptest) |
+| **temper-jit** | TransitionTable builder, hot-swap controller, shadow testing |
+| **temper-runtime** | Actor system, bounded mailboxes, event sourcing, SimScheduler |
+| **temper-server** | HTTP/axum, OData routing, entity dispatch, webhooks, idempotency |
+| **temper-odata** | OData v4: path parsing, query options, $filter/$select/$expand |
+| **temper-authz** | Cedar-based authorization on every action |
+| **temper-observe** | OTEL spans + metrics, trajectory tracking |
+| **temper-evolution** | O-P-A-D-I record chain, Evolution Engine |
+| **temper-wasm** | WASM sandboxed integrations with per-call resource budgets |
+| **temper-mcp** | MCP server, Monty sandbox (search + execute) |
+| **temper-platform** | Hosting platform, verify-deploy pipeline, system OData API |
+| **temper-optimize** | Query + cache optimizer, N+1 detection, safety checker |
+| **temper-store-postgres** | Postgres event journal + snapshots (multi-tenant) |
+| **temper-store-turso** | Turso/libSQL event journal + snapshots |
+| **temper-store-redis** | Distributed mailbox, placement, cache traits (stubs) |
+| **temper-cli** | CLI: parse, verify, serve, mcp, decide |
+| **temper-wasm-sdk** | SDK crate for writing WASM integration modules |
+| **temper-macros** | Proc macros: `#[derive(Message)]`, `#[derive(DomainEvent)]` |
+
+</details>
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.

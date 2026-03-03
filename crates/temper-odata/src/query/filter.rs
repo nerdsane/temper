@@ -2,8 +2,8 @@
 //!
 //! Tokenizes and parses OData `$filter` expressions into a [`FilterExpr`] AST.
 
-use crate::error::ODataError;
 use super::types::{BinaryOperator, FilterExpr, ODataValue, UnaryOperator};
+use crate::error::ODataError;
 
 /// Parse a `$filter` expression string into a [`FilterExpr`] AST.
 pub fn parse_filter(input: &str) -> Result<FilterExpr, ODataError> {
@@ -85,9 +85,7 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
 
         // Number (possibly negative, possibly decimal)
         if chars[i].is_ascii_digit()
-            || (chars[i] == '-'
-                && i + 1 < chars.len()
-                && chars[i + 1].is_ascii_digit())
+            || (chars[i] == '-' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit())
         {
             let mut num = String::new();
             if chars[i] == '-' {
@@ -342,7 +340,9 @@ impl<'a> FilterParser<'a> {
     // -- Helpers --
 
     fn peek_text_is(&self, text: &str) -> bool {
-        self.peek().map(|t| t.text.as_str() == text).unwrap_or(false)
+        self.peek()
+            .map(|t| t.text.as_str() == text)
+            .unwrap_or(false)
     }
 
     fn peek_comparison_op(&self) -> Option<BinaryOperator> {
@@ -398,15 +398,25 @@ mod tests {
         // `A eq 1 and B eq 2 or C eq 3` should parse as `(A eq 1 and B eq 2) or (C eq 3)`
         let expr = parse_filter("A eq 1 and B eq 2 or C eq 3").unwrap();
         match &expr {
-            FilterExpr::BinaryOp { op: BinaryOperator::Or, left, right } => {
+            FilterExpr::BinaryOp {
+                op: BinaryOperator::Or,
+                left,
+                right,
+            } => {
                 // Left should be the 'and' node
                 match left.as_ref() {
-                    FilterExpr::BinaryOp { op: BinaryOperator::And, .. } => {}
+                    FilterExpr::BinaryOp {
+                        op: BinaryOperator::And,
+                        ..
+                    } => {}
                     other => panic!("expected And on left, got {other:?}"),
                 }
                 // Right should be a comparison
                 match right.as_ref() {
-                    FilterExpr::BinaryOp { op: BinaryOperator::Eq, .. } => {}
+                    FilterExpr::BinaryOp {
+                        op: BinaryOperator::Eq,
+                        ..
+                    } => {}
                     other => panic!("expected Eq on right, got {other:?}"),
                 }
             }
@@ -439,12 +449,16 @@ mod tests {
     fn filter_not_operator() {
         let expr = parse_filter("not Active eq true").unwrap();
         match &expr {
-            FilterExpr::UnaryOp { op: UnaryOperator::Not, operand } => {
-                match operand.as_ref() {
-                    FilterExpr::BinaryOp { op: BinaryOperator::Eq, .. } => {}
-                    other => panic!("expected Eq inside not, got {other:?}"),
-                }
-            }
+            FilterExpr::UnaryOp {
+                op: UnaryOperator::Not,
+                operand,
+            } => match operand.as_ref() {
+                FilterExpr::BinaryOp {
+                    op: BinaryOperator::Eq,
+                    ..
+                } => {}
+                other => panic!("expected Eq inside not, got {other:?}"),
+            },
             other => panic!("expected Not at top, got {other:?}"),
         }
     }
@@ -453,12 +467,17 @@ mod tests {
     fn filter_parenthesized_expression() {
         let expr = parse_filter("(A eq 1 or B eq 2) and C eq 3").unwrap();
         match &expr {
-            FilterExpr::BinaryOp { op: BinaryOperator::And, left, .. } => {
-                match left.as_ref() {
-                    FilterExpr::BinaryOp { op: BinaryOperator::Or, .. } => {}
-                    other => panic!("expected Or in parens, got {other:?}"),
-                }
-            }
+            FilterExpr::BinaryOp {
+                op: BinaryOperator::And,
+                left,
+                ..
+            } => match left.as_ref() {
+                FilterExpr::BinaryOp {
+                    op: BinaryOperator::Or,
+                    ..
+                } => {}
+                other => panic!("expected Or in parens, got {other:?}"),
+            },
             other => panic!("expected And at top, got {other:?}"),
         }
     }

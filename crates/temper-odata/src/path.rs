@@ -75,11 +75,7 @@ pub fn parse_path(path: &str) -> Result<ODataPath, ODataError> {
     }
 
     // Must start with /
-    let path = if path.starts_with('/') {
-        &path[1..]
-    } else {
-        path
-    };
+    let path = path.strip_prefix('/').unwrap_or(path);
 
     // $metadata
     if path == "$metadata" {
@@ -180,20 +176,13 @@ fn parse_entity_segment(segment: &str) -> Result<ODataPath, ODataError> {
 /// - A qualified bound action: `Namespace.Action` (contains a dot, no parentheses at end)
 /// - A qualified bound function: `Namespace.Function()` (contains a dot, ends with `()`)
 /// - Another entity set access with key: `Items(123)`
-fn parse_continuation_segment(
-    segment: &str,
-    parent: ODataPath,
-) -> Result<ODataPath, ODataError> {
+fn parse_continuation_segment(segment: &str, parent: ODataPath) -> Result<ODataPath, ODataError> {
     // Check if this is a qualified name (contains dot) — bound operation
     if segment.contains('.') {
         // Bound function: ends with ()
-        if segment.ends_with("()") {
-            let qualified_name = &segment[..segment.len() - 2];
+        if let Some(qualified_name) = segment.strip_suffix("()") {
             // Extract just the operation name (last part after final dot)
-            let function_name = qualified_name
-                .rsplit('.')
-                .next()
-                .unwrap_or(qualified_name);
+            let function_name = qualified_name.rsplit('.').next().unwrap_or(qualified_name);
             return Ok(ODataPath::BoundFunction {
                 parent: Box::new(parent),
                 function: function_name.to_string(),
@@ -335,7 +324,7 @@ fn validate_identifier(s: &str) -> Result<(), ODataError> {
     }
 
     // Must start with a letter or underscore
-    let first = s.chars().next().unwrap();
+    let first = s.chars().next().unwrap(); // ci-ok: empty string checked above
     if !first.is_ascii_alphabetic() && first != '_' {
         return Err(ODataError::InvalidPath {
             message: format!("invalid identifier '{s}': must start with a letter or underscore"),
@@ -346,9 +335,7 @@ fn validate_identifier(s: &str) -> Result<(), ODataError> {
     for ch in s.chars() {
         if !ch.is_ascii_alphanumeric() && ch != '_' {
             return Err(ODataError::InvalidPath {
-                message: format!(
-                    "invalid identifier '{s}': contains invalid character '{ch}'"
-                ),
+                message: format!("invalid identifier '{s}': contains invalid character '{ch}'"),
             });
         }
     }
@@ -431,8 +418,7 @@ mod tests {
 
     #[test]
     fn parse_bound_function() {
-        let result =
-            parse_path("/Orders('abc-123')/Temper.Example.GetOrderTotal()").unwrap();
+        let result = parse_path("/Orders('abc-123')/Temper.Example.GetOrderTotal()").unwrap();
         assert_eq!(
             result,
             ODataPath::BoundFunction {

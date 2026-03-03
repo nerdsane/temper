@@ -174,7 +174,10 @@ async fn webhook_dispatcher_sends_json_body() {
 
     Mock::given(method("POST"))
         .and(path("/webhook"))
-        .and(wiremock::matchers::header("content-type", "application/json"))
+        .and(wiremock::matchers::header(
+            "content-type",
+            "application/json",
+        ))
         .respond_with(ResponseTemplate::new(200))
         .expect(1)
         .mount(&server)

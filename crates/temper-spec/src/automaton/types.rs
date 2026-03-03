@@ -5,6 +5,7 @@
 //! effect (state change program).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// A complete I/O Automaton specification for a single entity type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +27,12 @@ pub struct Automaton {
     /// Integration declarations (external triggers).
     #[serde(default, rename = "integration")]
     pub integrations: Vec<Integration>,
+    /// Inbound webhook declarations (external callback receivers).
+    #[serde(default, rename = "webhook")]
+    pub webhooks: Vec<Webhook>,
+    /// Context entity declarations for Cedar authorization.
+    #[serde(default, rename = "context_entity")]
+    pub context_entities: Vec<ContextEntityDecl>,
 }
 
 /// Automaton metadata.
@@ -104,6 +111,22 @@ pub enum Guard {
     /// A boolean variable must be true.
     #[serde(rename = "is_true")]
     IsTrue { var: String },
+    /// A list variable must contain a specific value.
+    #[serde(rename = "list_contains")]
+    ListContains { var: String, value: String },
+    /// A list variable must have at least N elements.
+    #[serde(rename = "list_length_min")]
+    ListLengthMin { var: String, min: usize },
+    /// Another entity must be in one of the required statuses.
+    #[serde(rename = "cross_entity_state")]
+    CrossEntityState {
+        /// The target entity type (e.g., "TestWorkflow").
+        entity_type: String,
+        /// Field name on the current entity holding the target entity ID.
+        entity_id_source: String,
+        /// Target must be in one of these statuses (any match passes).
+        required_status: Vec<String>,
+    },
 }
 
 /// An effect (state change in the post-state).
@@ -122,6 +145,30 @@ pub enum Effect {
     /// Emit a named event (output action).
     #[serde(rename = "emit")]
     Emit { event: String },
+    /// Append a value to a list variable (value comes from action params).
+    #[serde(rename = "list_append")]
+    ListAppend { var: String },
+    /// Remove a value from a list variable by index (index from action params).
+    #[serde(rename = "list_remove_at")]
+    ListRemoveAt { var: String },
+    /// Trigger a named WASM integration (post-transition async execution).
+    #[serde(rename = "trigger")]
+    Trigger { name: String },
+    /// Schedule a delayed action on the same entity.
+    #[serde(rename = "schedule")]
+    Schedule { action: String, delay_seconds: u64 },
+    /// Spawn a child entity as a post-transition effect.
+    #[serde(rename = "spawn")]
+    Spawn {
+        /// The child entity type to create.
+        entity_type: String,
+        /// Source for the child entity ID: field name from params, or "{uuid}" for auto-generated.
+        entity_id_source: String,
+        /// Optional action to dispatch on the child after creation.
+        initial_action: Option<String>,
+        /// Optional field on the parent to store the child's ID.
+        store_id_in: Option<String>,
+    },
 }
 
 /// A safety invariant.
@@ -159,19 +206,89 @@ pub struct Liveness {
 /// An integration declaration (external system trigger).
 ///
 /// Integrations declare that a state machine event should trigger an external
-/// action (e.g., a webhook call). They are metadata only — they do not affect
-/// state transitions or verification.
+/// action (e.g., a webhook call or WASM module invocation). They are metadata
+/// only — they do not affect state transitions or verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Integration {
-    /// Integration name (e.g., "notify_fulfillment").
+    /// Integration name (e.g., "notify_fulfillment", "charge_payment").
     pub name: String,
-    /// The event that triggers this integration (action name from EmitEvent).
+    /// The event that triggers this integration (action name or trigger name).
     pub trigger: String,
-    /// Integration type: "webhook" (extensible to other types later).
+    /// Integration type: "webhook" or "wasm".
     #[serde(rename = "type", default = "default_webhook")]
     pub integration_type: String,
+    /// WASM module name (required when `type = "wasm"`).
+    #[serde(default)]
+    pub module: Option<String>,
+    /// Action to dispatch on successful WASM execution (required when `type = "wasm"`).
+    #[serde(default)]
+    pub on_success: Option<String>,
+    /// Action to dispatch on failed WASM execution (required when `type = "wasm"`).
+    #[serde(default)]
+    pub on_failure: Option<String>,
+    /// Arbitrary config passed to the WASM module at invocation time.
+    /// Common keys: `url`, `method`, `headers`.
+    #[serde(flatten, default)]
+    pub config: BTreeMap<String, String>,
 }
 
 fn default_webhook() -> String {
     "webhook".to_string()
+}
+
+/// Default method for webhooks.
+fn default_post() -> String {
+    "POST".to_string()
+}
+
+/// Default entity lookup strategy.
+fn default_query_param() -> String {
+    "query_param".to_string()
+}
+
+/// An inbound webhook declaration.
+///
+/// Webhooks allow external systems (OAuth providers, payment gateways) to
+/// call back into Temper, triggering entity actions. They are metadata-only
+/// — they do not affect verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Webhook {
+    /// Webhook name (e.g., "oauth_callback").
+    pub name: String,
+    /// URL path suffix (e.g., "oauth/callback").
+    pub path: String,
+    /// HTTP method (default: POST).
+    #[serde(default = "default_post")]
+    pub method: String,
+    /// Action to dispatch when webhook is called.
+    pub action: String,
+    /// How to find the target entity: "query_param", "body_field", "header", "path_param".
+    #[serde(default = "default_query_param")]
+    pub entity_lookup: String,
+    /// Which parameter holds the entity ID.
+    #[serde(default)]
+    pub entity_param: Option<String>,
+    /// Parameter extraction map (e.g., {"code": "query.code"}).
+    #[serde(default)]
+    pub extract: BTreeMap<String, String>,
+    /// Optional HMAC secret for transport-layer validation (supports {secret:key} templates).
+    #[serde(default)]
+    pub hmac_secret: Option<String>,
+    /// Header containing the HMAC signature from the external system.
+    #[serde(default)]
+    pub hmac_header: Option<String>,
+}
+
+/// A context entity declaration for Cedar authorization.
+///
+/// Declares that another entity's status should be available in the Cedar
+/// authorization context when evaluating policies for this entity type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextEntityDecl {
+    /// Label for this context entity (e.g., "parent_agent").
+    pub name: String,
+    /// The target entity type to look up (e.g., "LeadAgent").
+    pub entity_type: String,
+    /// Field on this entity holding the target entity's ID.
+    pub id_field: String,
 }

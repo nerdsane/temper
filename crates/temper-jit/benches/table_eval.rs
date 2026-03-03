@@ -3,7 +3,7 @@
 //! Measures the hot-path evaluation performance of the JIT transition table
 //! using the real Order I/O Automaton specification.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use temper_jit::table::types::{EvalContext, TransitionTable};
 
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
@@ -87,11 +87,7 @@ fn bench_evaluate_ctx(c: &mut Criterion) {
         b.iter(|| {
             for &(state, action, items) in &actions {
                 let ctx = ctx_with_items(items);
-                black_box(table.evaluate_ctx(
-                    black_box(state),
-                    black_box(&ctx),
-                    black_box(action),
-                ));
+                black_box(table.evaluate_ctx(black_box(state), black_box(&ctx), black_box(action)));
             }
         })
     });

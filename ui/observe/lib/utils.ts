@@ -1,0 +1,108 @@
+const SENSITIVE_KEYS = new Set([
+  "authorization",
+  "api_key",
+  "apikey",
+  "token",
+  "secret",
+  "password",
+  "cookie",
+  "credential",
+  "key",
+  "bearer",
+  "jwt",
+  "session_token",
+  "access_token",
+  "refresh_token",
+  "private_key",
+]);
+
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEYS.has(key.toLowerCase());
+}
+
+/** Recursively redact sensitive fields from an object (returns a new object). */
+export function redactSensitiveFields(obj: unknown): unknown {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj !== "object") return obj;
+  if (Array.isArray(obj)) return obj.map(redactSensitiveFields);
+
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+    if (isSensitiveKey(key)) {
+      result[key] = "[redacted]";
+    } else if (typeof value === "object" && value !== null) {
+      result[key] = redactSensitiveFields(value);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+/** Stringify and truncate JSON to maxLen characters. */
+export function truncateJson(value: unknown, maxLen = 2000): string {
+  const str = JSON.stringify(value, null, 2);
+  if (str.length <= maxLen) return str;
+  return str.slice(0, maxLen) + "\n... [truncated]";
+}
+
+/** Generate a Cedar policy preview matching the Rust generate_policy() logic. */
+export function generatePolicyPreview(
+  agentId: string,
+  action: string,
+  resourceType: string,
+  resourceId: string,
+  scope: "narrow" | "medium" | "broad",
+): string {
+  switch (scope) {
+    case "narrow":
+      return `permit(\n  principal == Agent::"${agentId}",\n  action == Action::"${action}",\n  resource == ${resourceType}::"${resourceId}"\n);`;
+    case "medium":
+      return `permit(\n  principal == Agent::"${agentId}",\n  action == Action::"${action}",\n  resource is ${resourceType}\n);`;
+    case "broad":
+      return `permit(\n  principal == Agent::"${agentId}",\n  action,\n  resource is ${resourceType}\n);`;
+  }
+}
+
+/** Group items into "Today" / "Yesterday" / "Older" buckets by date. */
+export function groupByDate<T>(
+  items: T[],
+  getDate: (item: T) => string | undefined,
+): Map<string, T[]> {
+  const now = new Date();
+  const todayStr = now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = yesterday.toDateString();
+
+  const groups = new Map<string, T[]>();
+
+  for (const item of items) {
+    const dateStr = getDate(item);
+    if (!dateStr) {
+      const bucket = "Older";
+      if (!groups.has(bucket)) groups.set(bucket, []);
+      groups.get(bucket)!.push(item);
+      continue;
+    }
+    const itemDate = new Date(dateStr).toDateString();
+    let bucket: string;
+    if (itemDate === todayStr) {
+      bucket = "Today";
+    } else if (itemDate === yesterdayStr) {
+      bucket = "Yesterday";
+    } else {
+      bucket = "Older";
+    }
+    if (!groups.has(bucket)) groups.set(bucket, []);
+    groups.get(bucket)!.push(item);
+  }
+
+  // Return in order: Today, Yesterday, Older (only non-empty)
+  const ordered = new Map<string, T[]>();
+  for (const key of ["Today", "Yesterday", "Older"]) {
+    const vals = groups.get(key);
+    if (vals && vals.length > 0) ordered.set(key, vals);
+  }
+  return ordered;
+}

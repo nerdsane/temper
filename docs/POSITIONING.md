@@ -92,19 +92,41 @@ Performance through the full OData HTTP stack with Postgres: ~28ns for rule eval
 
 Some of these are fundamental to the approach (finite automaton = no strings in state). Others are engineering work (Redis wiring, temporal guards). Being clear about which is which matters.
 
-## 6. The Agent Angle
+## 6. The Agent Operating Layer
 
-There's a trendline worth paying attention to: agents are getting better at generating structured artifacts. Code, schemas, configurations. If you accept that trajectory, a few things follow.
+There's a stronger claim than "agents can generate specs" or "agents can consume the API." It's this: **Temper is the operating layer for autonomous agents.**
 
-Agents could generate the specifications. The conversational platform already demonstrates this path -- a developer describes their domain, and the system produces IOA TOML, CSDL, and Cedar policies. The verification cascade catches errors that neither the agent nor the developer would notice through inspection alone.
+Agents today run with whatever tools they're given. They call APIs directly, write to databases, execute code in sandboxes. There is no shared governance model. There is no formal verification of what an agent is about to do. There is no audit trail that connects an agent's intent to its effects. When something goes wrong, you grep through logs.
 
-Verification could replace code review for this class of problems. A four-level cascade that explores every reachable state, injects faults, and throws random sequences is more thorough than human review of imperative code. When it fails, it reports domain-level explanations ("cancelled is final conflicts with cancel-from-done"), not stack traces.
+The thesis: every state-changing action an agent takes should flow through a governed, verified, auditable layer. Not optionally. By design.
 
-The OData API is already agent-friendly. Self-describing via `$metadata`, structured, standard. Production agents in temper-platform use it today.
+### The agent is both developer and operator
 
-No generated code means no technical debt to accumulate. A spec change produces a new TransitionTable, verified and hot-swapped. The old logic simply ceases to exist.
+In the personal assistant and enterprise employee use cases, the agent builds its own specifications. When an agent needs to execute a multi-step plan -- process an expense report, coordinate a deployment, manage a customer interaction -- it generates an IOA specification describing the states, transitions, guards, and integrations of that plan. Temper verifies the spec through the four-level cascade before the agent can execute through it. The agent's plan itself is a verified state machine.
 
-Whether this adds up to something meaningful depends on how much of the enterprise SaaS design space actually fits the state machine pattern. The five specs above suggest the coverage is broader than you might expect. But five is not a proof.
+The agent then operates through the verified spec: calling actions, transitioning state, triggering integrations. The spec is the contract. The verification cascade is the proof. The runtime enforces the contract on every action.
+
+### The human is the policy setter
+
+Cedar policies define what agents can and cannot do. The default posture is deny-all. When an agent attempts something not yet permitted, the denial surfaces to the human: "Your agent tried to call the Stripe API and was blocked. Allow?" The human approves with a scope -- narrow, medium, or broad -- and Temper generates the Cedar policy and hot-loads it. Over time, the policy set converges on what the agent actually needs. The human doesn't anticipate permissions upfront; they respond as needs arise.
+
+### Everything is recorded
+
+Every action an agent takes through Temper is a state transition. Every transition is persisted with the agent's identity, the before/after state, whether authorization succeeded or was denied, and the Cedar policy that governed the decision. This gives you an audit trail, agent self-awareness (the agent can query its own state), and cross-agent visibility (multiple agents sharing a Temper instance see each other's state changes).
+
+### External access is governed
+
+When agents need to call outside systems, they do so through integrations declared in the IOA spec. Cedar policies govern which external calls are permitted. WASM modules for integrations run in a sandbox. In the vision, these modules can be reviewed by a security agent or formally verified -- the same way state machine specs are verified today.
+
+### The interface is a REPL
+
+The vision for how agents interact with Temper is a sandboxed code execution environment -- in the style of Symbolica's Agentica or Cloudflare's Code Mode. Agents write code against a typed API surface; the sandbox mediates all external access through Temper. The REPL is the only tool the agent is given for state-changing operations.
+
+### What this means
+
+Agents generating specifications is already possible -- the spec submission API and verification cascade exist today. Cedar default-deny governance, pending decision approval flows, per-agent audit trails, and the observe dashboard for agent activity -- these are built and working. The REPL interface and security review agents are the vision, not yet implemented.
+
+The question is not whether agents need governance. The question is whether governance can be formal, verified, and transparent rather than ad hoc. That is what Temper is for.
 
 ## 7. The Evolution Loop
 
@@ -118,4 +140,4 @@ The O-P-A-D-I record chain (Observation, Proposal, Approval, Deployment, Impact)
 
 ---
 
-*This document describes the current state of the project. The five verified specs, the benchmark numbers, and the test counts reflect what exists today. What we haven't tested is whether this pattern holds across a broader set of real-world applications -- that's the next thing to figure out.*
+*This document describes the current state of the project. The five verified specs, the benchmark numbers, and the test counts reflect what exists today. The agent operating layer -- Cedar governance, pending decisions, audit trails -- is built and working. The REPL interface and security review agents are the next things to build. Whether this pattern holds across a broader set of real-world agent deployments is the next thing to find out.*

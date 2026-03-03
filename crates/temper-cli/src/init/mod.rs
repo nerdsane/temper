@@ -5,7 +5,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-
 /// Minimal CSDL template for a new project.
 const CSDL_TEMPLATE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
@@ -38,13 +37,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-temper-runtime = { path = "../../crates/temper-runtime" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-anyhow = "1"
+# Add Temper dependencies here (published crate, workspace path, etc.).
 "#;
 
 /// Run the `temper init <name>` command.
@@ -118,7 +111,7 @@ pub fn run(name: &str) -> Result<()> {
 /// Examples: "my-app" -> "Temper.MyApp", "hello_world" -> "Temper.HelloWorld"
 fn to_namespace(name: &str) -> String {
     let pascal: String = name
-        .split(|c: char| c == '-' || c == '_')
+        .split(['-', '_'])
         .map(|word| {
             let mut chars = word.chars();
             match chars.next() {
@@ -147,10 +140,8 @@ mod tests {
 
     #[test]
     fn test_init_creates_directory_structure() {
-        let project_dir = std::env::temp_dir().join(format!(
-            "temper_test_init_project_{}",
-            std::process::id()
-        ));
+        let project_dir =
+            std::env::temp_dir().join(format!("temper_test_init_project_{}", std::process::id()));
         // Clean up in case of previous failed run
         let _ = fs::remove_dir_all(&project_dir);
 
@@ -192,10 +183,8 @@ mod tests {
 
     #[test]
     fn test_init_fails_if_directory_exists() {
-        let project_dir = std::env::temp_dir().join(format!(
-            "temper_test_init_exists_{}",
-            std::process::id()
-        ));
+        let project_dir =
+            std::env::temp_dir().join(format!("temper_test_init_exists_{}", std::process::id()));
         let _ = fs::remove_dir_all(&project_dir);
         fs::create_dir_all(&project_dir).unwrap();
 

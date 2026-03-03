@@ -3,8 +3,8 @@
 //! Parses `$filter`, `$select`, `$expand`, `$orderby`, `$top`, `$skip`, and `$count`
 //! from a URL query string into a structured [`QueryOptions`].
 
-use crate::error::ODataError;
 use super::filter::parse_filter;
+use crate::error::ODataError;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -92,10 +92,7 @@ pub enum FilterExpr {
     /// A literal value.
     Literal(ODataValue),
     /// A function call, e.g. `contains(Name, 'foo')`.
-    FunctionCall {
-        name: String,
-        args: Vec<FilterExpr>,
-    },
+    FunctionCall { name: String, args: Vec<FilterExpr> },
 }
 
 /// Binary operators in `$filter`.
@@ -280,7 +277,9 @@ fn parse_orderby(value: &str) -> Result<Vec<OrderByClause>, ODataError> {
                     other => {
                         return Err(ODataError::InvalidQueryOption {
                             option: "$orderby".into(),
-                            message: format!("invalid direction '{other}', expected 'asc' or 'desc'"),
+                            message: format!(
+                                "invalid direction '{other}', expected 'asc' or 'desc'"
+                            ),
                         });
                     }
                 };
@@ -441,10 +440,13 @@ fn split_by_semicolon(s: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 fn parse_usize(option: &str, value: &str) -> Result<usize, ODataError> {
-    value.trim().parse::<usize>().map_err(|_| ODataError::InvalidQueryOption {
-        option: option.into(),
-        message: format!("expected a non-negative integer, got '{value}'"),
-    })
+    value
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| ODataError::InvalidQueryOption {
+            option: option.into(),
+            message: format!("expected a non-negative integer, got '{value}'"),
+        })
 }
 
 fn parse_bool(option: &str, value: &str) -> Result<bool, ODataError> {
@@ -513,8 +515,7 @@ mod tests {
 
     #[test]
     fn top_skip_count() {
-        let opts =
-            parse_query_options("$top=10&$skip=20&$count=true").unwrap();
+        let opts = parse_query_options("$top=10&$skip=20&$count=true").unwrap();
         assert_eq!(opts.top, Some(10));
         assert_eq!(opts.skip, Some(20));
         assert_eq!(opts.count, Some(true));
@@ -536,18 +537,13 @@ mod tests {
 
     #[test]
     fn expand_with_nested_options() {
-        let opts = parse_query_options(
-            "$expand=Items($select=Id,Quantity;$orderby=Quantity desc)",
-        )
-        .unwrap();
+        let opts = parse_query_options("$expand=Items($select=Id,Quantity;$orderby=Quantity desc)")
+            .unwrap();
         let expand = opts.expand.unwrap();
         assert_eq!(expand.len(), 1);
         assert_eq!(expand[0].property, "Items");
         let nested = expand[0].options.as_ref().unwrap();
-        assert_eq!(
-            nested.select,
-            Some(vec!["Id".into(), "Quantity".into()])
-        );
+        assert_eq!(nested.select, Some(vec!["Id".into(), "Quantity".into()]));
         assert_eq!(
             nested.orderby,
             Some(vec![OrderByClause {
@@ -576,10 +572,7 @@ mod tests {
         .unwrap();
 
         assert!(opts.filter.is_some());
-        assert_eq!(
-            opts.select,
-            Some(vec!["Id".into(), "Name".into()])
-        );
+        assert_eq!(opts.select, Some(vec!["Id".into(), "Name".into()]));
         assert_eq!(
             opts.orderby,
             Some(vec![OrderByClause {

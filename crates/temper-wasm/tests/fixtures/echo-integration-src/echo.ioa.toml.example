@@ -1,0 +1,35 @@
+[automaton]
+name = "EchoTest"
+states = ["Idle", "Pending", "Done", "Failed"]
+initial = "Idle"
+
+[[action]]
+name = "TriggerEcho"
+from = ["Idle"]
+to = "Pending"
+effect = "trigger echo_call"
+
+[[action]]
+name = "EchoSucceeded"
+kind = "input"
+from = ["Pending"]
+to = "Done"
+
+[[action]]
+name = "EchoFailed"
+kind = "input"
+from = ["Pending"]
+to = "Failed"
+
+[[action]]
+name = "Reset"
+from = ["Done", "Failed"]
+to = "Idle"
+
+[[integration]]
+name = "echo_call"
+trigger = "echo_call"
+type = "wasm"
+module = "echo_integration"
+on_success = "EchoSucceeded"
+on_failure = "EchoFailed"

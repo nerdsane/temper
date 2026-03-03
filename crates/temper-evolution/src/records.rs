@@ -1,4 +1,4 @@
-//! Evolution record types: O, P, A, D, I.
+//! Evolution record types: O, P, A, D, I, FR.
 //!
 //! Each record is immutable, timestamped, and links to its predecessors.
 //! Records are the system's institutional memory — every change to the
@@ -24,6 +24,8 @@ pub enum RecordType {
     Decision,
     /// Insight: product intelligence derived from trajectory analysis.
     Insight,
+    /// FeatureRequest: platform gap detected, needs developer review.
+    FeatureRequest,
 }
 
 impl RecordType {
@@ -35,6 +37,7 @@ impl RecordType {
             RecordType::Analysis => "A",
             RecordType::Decision => "D",
             RecordType::Insight => "I",
+            RecordType::FeatureRequest => "FR",
         }
     }
 }
@@ -107,6 +110,8 @@ pub enum ObservationClass {
     Security,
     /// Trajectory pattern anomaly.
     Trajectory,
+    /// Authorization denial event (Cedar policy denied a WASM call).
+    AuthzDenied,
     /// Resource usage anomaly (CPU, memory, connections).
     ResourceUsage,
 }
@@ -257,6 +262,8 @@ pub enum InsightCategory {
     Friction,
     /// Agents are hacking around a gap.
     Workaround,
+    /// Platform-level capability gap (feeds into FeatureRequest creation).
+    PlatformGap,
 }
 
 /// Signal data for an insight.
@@ -272,6 +279,60 @@ pub struct InsightSignal {
     pub trend: String,
     /// Growth rate (week-over-week).
     pub growth_rate: Option<f64>,
+}
+
+// ============================================================
+// Feature Request Record (FR-Record) — Platform Gap Intelligence
+// ============================================================
+
+/// Category of platform capability gap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlatformGapCategory {
+    /// Unknown MCP method called.
+    MissingMethod,
+    /// Method exists but is governance-blocked for agents.
+    GovernanceBlocked,
+    /// Integration type not supported.
+    UnsupportedIntegration,
+    /// General platform limitation.
+    MissingCapability,
+}
+
+/// Disposition of a feature request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeatureRequestDisposition {
+    /// Just detected, not yet reviewed.
+    Open,
+    /// Developer has seen it.
+    Acknowledged,
+    /// Developer intends to implement.
+    Planned,
+    /// Developer decided not to.
+    WontFix,
+    /// Implemented.
+    Resolved,
+}
+
+/// A feature request record derived from platform-level gaps.
+///
+/// Created when the platform itself can't do something (unknown MCP method,
+/// unsupported integration type, missing capability). Extends the O-P-A-D-I
+/// chain to O-P-A-D-I-FR.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureRequestRecord {
+    pub header: RecordHeader,
+    /// What kind of platform gap.
+    pub category: PlatformGapCategory,
+    /// Human-readable description of the gap.
+    pub description: String,
+    /// How many times this gap was hit.
+    pub frequency: u64,
+    /// Links to trajectory timestamps.
+    pub trajectory_refs: Vec<String>,
+    /// Current disposition.
+    pub disposition: FeatureRequestDisposition,
+    /// Developer notes (set on review).
+    pub developer_notes: Option<String>,
 }
 
 // ============================================================
@@ -322,14 +383,12 @@ mod tests {
         let o_header = RecordHeader::new(RecordType::Observation, "sentinel");
         let o_id = o_header.id.clone();
 
-        let p_header = RecordHeader::new(RecordType::Problem, "agent")
-            .derived_from(&o_id);
+        let p_header = RecordHeader::new(RecordType::Problem, "agent").derived_from(&o_id);
 
         assert_eq!(p_header.derived_from, Some(o_id.clone()));
         assert!(p_header.id.starts_with("P-"));
 
-        let a_header = RecordHeader::new(RecordType::Analysis, "agent")
-            .derived_from(&p_header.id);
+        let a_header = RecordHeader::new(RecordType::Analysis, "agent").derived_from(&p_header.id);
         assert!(a_header.id.starts_with("A-"));
         assert_eq!(a_header.derived_from, Some(p_header.id));
     }
@@ -340,7 +399,8 @@ mod tests {
             header: RecordHeader::new(RecordType::Observation, "sentinel:latency"),
             source: "sentinel:latency".to_string(),
             classification: ObservationClass::Performance,
-            evidence_query: "SELECT p99(duration_ns) FROM spans WHERE operation = 'handle'".to_string(),
+            evidence_query: "SELECT p99(duration_ns) FROM spans WHERE operation = 'handle'"
+                .to_string(),
             threshold_field: Some("p99".to_string()),
             threshold_value: Some(100_000_000.0),
             observed_value: Some(450_000_000.0),
@@ -414,7 +474,13 @@ mod tests {
         };
 
         assert_eq!(decision.decision, Decision::Approved);
-        assert!(decision.verification_results.as_ref().unwrap().stateright_pass);
+        assert!(
+            decision
+                .verification_results
+                .as_ref()
+                .unwrap()
+                .stateright_pass
+        );
     }
 
     #[test]
@@ -424,5 +490,68 @@ mod tests {
         assert_eq!(RecordType::Analysis.prefix(), "A");
         assert_eq!(RecordType::Decision.prefix(), "D");
         assert_eq!(RecordType::Insight.prefix(), "I");
+        assert_eq!(RecordType::FeatureRequest.prefix(), "FR");
+    }
+
+    #[test]
+    fn test_feature_request_record() {
+        let record = FeatureRequestRecord {
+            header: RecordHeader::new(RecordType::FeatureRequest, "insight-generator"),
+            category: PlatformGapCategory::MissingMethod,
+            description: "Agents tried 'send_email' 47 times".to_string(),
+            frequency: 47,
+            trajectory_refs: vec!["2024-01-01T00:00:00Z".to_string()],
+            disposition: FeatureRequestDisposition::Open,
+            developer_notes: None,
+        };
+
+        assert!(record.header.id.starts_with("FR-"));
+        assert_eq!(record.category, PlatformGapCategory::MissingMethod);
+        assert_eq!(record.frequency, 47);
+        assert_eq!(record.disposition, FeatureRequestDisposition::Open);
+    }
+
+    #[test]
+    fn test_feature_request_serialization() {
+        let record = FeatureRequestRecord {
+            header: RecordHeader::new(RecordType::FeatureRequest, "insight-generator"),
+            category: PlatformGapCategory::GovernanceBlocked,
+            description: "Method 'set_policy' blocked for agents".to_string(),
+            frequency: 12,
+            trajectory_refs: vec![],
+            disposition: FeatureRequestDisposition::Acknowledged,
+            developer_notes: Some("Will add a scoped version".to_string()),
+        };
+
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: FeatureRequestRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.header.id, record.header.id);
+        assert_eq!(
+            deserialized.category,
+            PlatformGapCategory::GovernanceBlocked
+        );
+        assert_eq!(
+            deserialized.disposition,
+            FeatureRequestDisposition::Acknowledged
+        );
+    }
+
+    #[test]
+    fn test_insight_category_platform_gap() {
+        let record = InsightRecord {
+            header: RecordHeader::new(RecordType::Insight, "insight-generator"),
+            category: InsightCategory::PlatformGap,
+            signal: InsightSignal {
+                intent: "unknown method 'send_email'".to_string(),
+                volume: 47,
+                success_rate: 0.0,
+                trend: "growing".to_string(),
+                growth_rate: Some(0.25),
+            },
+            recommendation: "Consider adding email integration capability".to_string(),
+            priority_score: 0.9,
+        };
+
+        assert_eq!(record.category, InsightCategory::PlatformGap);
     }
 }

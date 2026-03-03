@@ -4,7 +4,6 @@ use super::context::ActorContext;
 use super::errors::ActorError;
 use crate::supervision::SupervisionStrategy;
 
-
 /// Marker trait for actor messages.
 /// Messages must be Send + 'static to cross async boundaries.
 pub trait Message: Send + Debug + 'static {}
