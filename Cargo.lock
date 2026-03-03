@@ -5118,12 +5118,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
- "bytes",
  "chrono",
  "clap",
  "dirs",
  "dotenvy",
- "futures-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -5145,7 +5143,6 @@ dependencies = [
  "temper-verify",
  "tempfile",
  "tokio",
- "tokio-stream",
  "uuid",
 ]
 

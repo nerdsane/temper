@@ -160,49 +160,44 @@ impl LlmProvider for AnthropicProvider {
 
             match event_type {
                 "content_block_start" => {
-                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                        if let Some(block) = payload.get("content_block") {
-                            let block_type =
-                                block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                            match block_type {
-                                "text" => {
-                                    in_text_block = true;
-                                    in_tool_block = false;
-                                    current_text.clear();
-                                }
-                                "tool_use" => {
-                                    in_text_block = false;
-                                    in_tool_block = true;
-                                    current_tool_id = block
-                                        .get("id")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    current_tool_name = block
-                                        .get("name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    current_tool_json.clear();
-                                }
-                                _ => {}
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.data)
+                        && let Some(block) = payload.get("content_block")
+                    {
+                        let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        match block_type {
+                            "text" => {
+                                in_text_block = true;
+                                in_tool_block = false;
+                                current_text.clear();
                             }
+                            "tool_use" => {
+                                in_text_block = false;
+                                in_tool_block = true;
+                                current_tool_id = block
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                current_tool_name = block
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                current_tool_json.clear();
+                            }
+                            _ => {}
                         }
                     }
                 }
                 "content_block_delta" => {
                     let (text_delta, json_delta) = extract_deltas(&event.data);
 
-                    if in_text_block {
-                        if let Some(text) = text_delta {
-                            current_text.push_str(&text);
-                            on_delta(text);
-                        }
+                    if in_text_block && let Some(text) = text_delta {
+                        current_text.push_str(&text);
+                        on_delta(text);
                     }
-                    if in_tool_block {
-                        if let Some(json_part) = json_delta {
-                            current_tool_json.push_str(&json_part);
-                        }
+                    if in_tool_block && let Some(json_part) = json_delta {
+                        current_tool_json.push_str(&json_part);
                     }
                 }
                 "content_block_stop" => {
@@ -227,13 +222,11 @@ impl LlmProvider for AnthropicProvider {
                     }
                 }
                 "message_delta" => {
-                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                        if let Some(delta) = payload.get("delta") {
-                            if let Some(reason) = delta.get("stop_reason").and_then(|v| v.as_str())
-                            {
-                                stop_reason = reason.to_string();
-                            }
-                        }
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.data)
+                        && let Some(delta) = payload.get("delta")
+                        && let Some(reason) = delta.get("stop_reason").and_then(|v| v.as_str())
+                    {
+                        stop_reason = reason.to_string();
                     }
                 }
                 "message_stop" => break,

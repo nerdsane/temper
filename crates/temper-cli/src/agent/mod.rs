@@ -5,10 +5,6 @@
 //! while executing tools locally. All durable state lives on the server.
 //! The CLI is stateless — crash and restart with `--agent-id` to resume.
 
-pub mod llm;
-pub mod sse;
-pub mod tools;
-
 use anyhow::Result;
 use temper_agent_runtime::{AgentRunner, AnthropicProvider, LocalToolRegistry};
 use temper_sdk::TemperClient;
