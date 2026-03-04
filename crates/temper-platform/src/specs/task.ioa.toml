@@ -1,0 +1,118 @@
+# Task Entity — I/O Automaton Specification
+#
+# Represents a discrete unit of work within a plan.
+# Tracks the full lifecycle from creation through claiming,
+# execution, review, and completion. Spawned by Plan
+# via the AddTask action.
+
+[automaton]
+name = "Task"
+states = ["Open", "Claimed", "InProgress", "Review", "Done", "Cancelled"]
+initial = "Open"
+
+# --- State Variables ---
+
+[[state]]
+name = "agent_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "plan_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "title"
+type = "string"
+initial = ""
+
+[[state]]
+name = "description"
+type = "string"
+initial = ""
+
+[[state]]
+name = "deliverable"
+type = "string"
+initial = ""
+
+[[state]]
+name = "feedback"
+type = "string"
+initial = ""
+
+# --- Actions: Task Lifecycle ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Open"]
+params = ["title", "description", "plan_id"]
+hint = "Initialize task fields when spawned by a plan."
+
+[[action]]
+name = "Claim"
+kind = "input"
+from = ["Open"]
+to = "Claimed"
+params = ["agent_id"]
+hint = "An agent claims this task for execution."
+
+[[action]]
+name = "StartWork"
+kind = "input"
+from = ["Claimed"]
+to = "InProgress"
+hint = "Agent begins active work on the claimed task."
+
+[[action]]
+name = "SubmitForReview"
+kind = "input"
+from = ["InProgress"]
+to = "Review"
+params = ["deliverable"]
+hint = "Agent submits completed work for review."
+
+[[action]]
+name = "Approve"
+kind = "input"
+from = ["Review"]
+to = "Done"
+hint = "Reviewer approves the submitted deliverable."
+effect = [{ type = "emit_event", event = "TaskApproved" }]
+
+[[action]]
+name = "RequestChanges"
+kind = "input"
+from = ["Review"]
+to = "InProgress"
+params = ["feedback"]
+hint = "Reviewer requests changes, sending task back to in-progress with feedback."
+
+[[action]]
+name = "Unclaim"
+kind = "input"
+from = ["Claimed"]
+to = "Open"
+hint = "Release the claim, making the task available again. Clears agent_id."
+
+[[action]]
+name = "Cancel"
+kind = "input"
+from = ["Open", "Claimed", "InProgress"]
+to = "Cancelled"
+params = ["reason"]
+hint = "Cancel the task. Can be cancelled from Open, Claimed, or InProgress."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "DoneIsFinal"
+when = ["Done"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "CancelledIsFinal"
+when = ["Cancelled"]
+assert = "no_further_transitions"

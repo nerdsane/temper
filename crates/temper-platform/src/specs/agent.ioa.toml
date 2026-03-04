@@ -1,0 +1,147 @@
+# Agent Entity — I/O Automaton Specification
+#
+# Represents an autonomous agent session that executes tasks using LLM-driven
+# tool calls. All state is durable — the conversation field provides crash
+# recovery via checkpointing. Cedar governs what tools the agent can use.
+# The CLI is stateless; it reads entity state to resume.
+
+[automaton]
+name = "Agent"
+states = ["Idle", "Assigned", "Working", "Blocked", "Completed", "Failed"]
+initial = "Idle"
+
+# --- State Variables ---
+
+[[state]]
+name = "role"
+type = "string"
+initial = ""
+
+[[state]]
+name = "goal"
+type = "string"
+initial = ""
+
+[[state]]
+name = "model"
+type = "string"
+initial = ""
+
+[[state]]
+name = "task_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "plan_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "result"
+type = "string"
+initial = ""
+
+[[state]]
+name = "block_reason"
+type = "string"
+initial = ""
+
+[[state]]
+name = "conversation"
+type = "string"
+initial = ""
+
+[[state]]
+name = "executor_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "child_agent_ids"
+type = "list"
+initial = "[]"
+
+# --- Actions: Agent Lifecycle ---
+
+[[action]]
+name = "Assign"
+kind = "input"
+from = ["Idle"]
+to = "Assigned"
+params = ["role", "goal", "model"]
+hint = "Assign a role, goal, and model to this agent."
+
+[[action]]
+name = "Start"
+kind = "input"
+from = ["Assigned"]
+to = "Working"
+hint = "Agent begins executing toward the assigned goal."
+
+[[action]]
+name = "Checkpoint"
+kind = "input"
+from = ["Working"]
+params = ["conversation"]
+hint = "Save the current LLM conversation state for crash recovery. Stays in Working."
+
+[[action]]
+name = "Block"
+kind = "input"
+from = ["Working"]
+to = "Blocked"
+params = ["reason"]
+hint = "Agent is blocked waiting for human approval of a denied tool call."
+
+[[action]]
+name = "Unblock"
+kind = "input"
+from = ["Blocked"]
+to = "Working"
+hint = "Blocking issue resolved (decision approved), agent resumes work."
+
+[[action]]
+name = "SpawnChild"
+kind = "input"
+from = ["Working"]
+params = ["child_role", "child_goal", "child_model"]
+hint = "Spawn a child agent to handle a delegated sub-task."
+effect = [
+  { type = "spawn_entity", entity_type = "Agent", entity_id_source = "{uuid}", initial_action = "Assign", store_id_in = "last_child_id" },
+  { type = "list_append", list = "child_agent_ids" },
+  { type = "emit_event", event = "ChildSpawned" }
+]
+
+[[action]]
+name = "Complete"
+kind = "input"
+from = ["Working"]
+to = "Completed"
+params = ["result"]
+hint = "Agent finished the goal successfully with a result summary."
+guard = [
+  { type = "cross_entity_state", entity_type = "Agent", entity_id_source = "child_agent_ids", required_status = ["Completed", "Failed"] }
+]
+
+[[action]]
+name = "Fail"
+kind = "input"
+from = ["Working", "Blocked"]
+to = "Failed"
+params = ["reason"]
+hint = "Agent failed to complete the goal."
+
+[[action]]
+name = "Reset"
+kind = "input"
+from = ["Completed", "Failed"]
+to = "Idle"
+hint = "Reset the agent for reuse. Clears all state variables."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "AssignedRequiresGoal"
+when = ["Assigned", "Working", "Blocked", "Completed", "Failed"]
+assert = "goal != ''"

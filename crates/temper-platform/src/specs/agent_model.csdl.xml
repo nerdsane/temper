@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <EntityType Name="Plan">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="task_count" Type="Edm.String"/>
+        <Property Name="summary" Type="Edm.String"/>
+        <Property Name="reason" Type="Edm.String"/>
+        <NavigationProperty Name="Tasks" Type="Collection(Temper.Task)"/>
+        <NavigationProperty Name="Agents" Type="Collection(Temper.Agent)"/>
+      </EntityType>
+
+      <EntityType Name="Task">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="plan_id" Type="Edm.String"/>
+        <Property Name="agent_id" Type="Edm.String"/>
+        <Property Name="title" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="deliverable" Type="Edm.String"/>
+        <Property Name="feedback" Type="Edm.String"/>
+        <Property Name="reason" Type="Edm.String"/>
+        <NavigationProperty Name="Plan" Type="Temper.Plan">
+          <ReferentialConstraint Property="plan_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Agent" Type="Temper.Agent" Nullable="true">
+          <ReferentialConstraint Property="agent_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+      </EntityType>
+
+      <EntityType Name="Agent">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="role" Type="Edm.String"/>
+        <Property Name="goal" Type="Edm.String"/>
+        <Property Name="model" Type="Edm.String"/>
+        <Property Name="task_id" Type="Edm.String"/>
+        <Property Name="plan_id" Type="Edm.String"/>
+        <Property Name="result" Type="Edm.String"/>
+        <Property Name="block_reason" Type="Edm.String"/>
+        <Property Name="conversation" Type="Edm.String"/>
+        <Property Name="executor_id" Type="Edm.String"/>
+        <Property Name="child_agent_ids" Type="Collection(Edm.String)"/>
+        <Property Name="last_child_id" Type="Edm.String"/>
+        <NavigationProperty Name="Task" Type="Temper.Task" Nullable="true">
+          <ReferentialConstraint Property="task_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Plan" Type="Temper.Plan" Nullable="true">
+          <ReferentialConstraint Property="plan_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+      </EntityType>
+
+      <EntityType Name="ToolCall">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="agent_id" Type="Edm.String"/>
+        <Property Name="tool_name" Type="Edm.String"/>
+        <Property Name="tool_input" Type="Edm.String"/>
+        <Property Name="resource_type" Type="Edm.String"/>
+        <Property Name="resource_id" Type="Edm.String"/>
+        <Property Name="result" Type="Edm.String"/>
+        <Property Name="error" Type="Edm.String"/>
+        <Property Name="decision_id" Type="Edm.String"/>
+        <Property Name="duration_ms" Type="Edm.String"/>
+        <NavigationProperty Name="Agent" Type="Temper.Agent">
+          <ReferentialConstraint Property="agent_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+      </EntityType>
+
+      <EntityContainer Name="Service">
+        <EntitySet Name="Plans" EntityType="Temper.Plan">
+          <NavigationPropertyBinding Path="Tasks" Target="Tasks"/>
+          <NavigationPropertyBinding Path="Agents" Target="Agents"/>
+        </EntitySet>
+        <EntitySet Name="Tasks" EntityType="Temper.Task">
+          <NavigationPropertyBinding Path="Plan" Target="Plans"/>
+          <NavigationPropertyBinding Path="Agent" Target="Agents"/>
+        </EntitySet>
+        <EntitySet Name="Agents" EntityType="Temper.Agent">
+          <NavigationPropertyBinding Path="Task" Target="Tasks"/>
+          <NavigationPropertyBinding Path="Plan" Target="Plans"/>
+        </EntitySet>
+        <EntitySet Name="ToolCalls" EntityType="Temper.ToolCall">
+          <NavigationPropertyBinding Path="Agent" Target="Agents"/>
+        </EntitySet>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>
