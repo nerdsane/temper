@@ -5,6 +5,7 @@
 //! → callback dispatched → entity state transitions.
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
@@ -93,10 +94,11 @@ fn build_echo_test_state() -> ServerState {
 /// persisted artifacts (decisions, trajectories, invocations) can be
 /// queried after dispatch.
 async fn build_echo_test_state_with_turso() -> ServerState {
-    let db_url = format!(
-        "file:/tmp/temper-wasm-dispatch-test-{}.db",
-        std::process::id()
-    );
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after UNIX epoch")
+        .as_nanos();
+    let db_url = format!("file:/tmp/temper-wasm-dispatch-test-{}-{ts}.db", std::process::id());
     // Clean up any leftover DB + WAL/SHM files from a previous run.
     let db_path = db_url.strip_prefix("file:").unwrap_or(&db_url);
     let _ = std::fs::remove_file(db_path);
@@ -108,6 +110,29 @@ async fn build_echo_test_state_with_turso() -> ServerState {
     let mut state = build_echo_test_state();
     state.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
     state
+}
+
+async fn wait_for_status(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    terminal_statuses: &[&str],
+    timeout: Duration,
+) -> String {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let entity = state
+            .get_tenant_entity_state(tenant, entity_type, entity_id)
+            .await
+            .expect("entity should exist");
+        let status = entity.state.status.clone();
+        if terminal_statuses.contains(&status.as_str()) || tokio::time::Instant::now() >= deadline
+        {
+            return status;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 const ADMIN_ONLY_POLICY: &str = r#"
@@ -136,34 +161,47 @@ async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str
         .turso_opt()
         .expect("Turso backend required for authz denial artifact verification");
 
-    // Wait briefly for background tokio::spawn tasks to complete
-    // (pending decision and trajectory persist use tokio::spawn).
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
     // 1. Verify PendingDecision was persisted.
-    let decisions = turso
-        .query_all_decisions(None)
-        .await
-        .expect("query decisions from Turso");
-    let decision = decisions
-        .iter()
-        .filter_map(|data| serde_json::from_str::<PendingDecision>(data).ok())
-        .find(|d| d.resource_id == "echo_integration" && d.action == "http_call")
+    let mut decision = None;
+    for _ in 0..100 {
+        let decisions = turso
+            .query_all_decisions(None)
+            .await
+            .expect("query decisions from Turso");
+        decision = decisions
+            .iter()
+            .filter_map(|data| serde_json::from_str::<PendingDecision>(data).ok())
+            .find(|d| d.resource_id == "echo_integration" && d.action == "http_call");
+        if decision.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let decision = decision
         .expect("expected wasm authz pending decision in Turso");
     assert_eq!(decision.module_name.as_deref(), Some("echo_integration"));
 
     // 2. Verify authz trajectory entry was persisted.
-    let trajectories = turso
-        .load_recent_trajectories(1000)
-        .await
-        .expect("query trajectories from Turso");
-    let authz_traj = trajectories
-        .iter()
-        .find(|t| {
-            t.entity_id == entity_id
-                && t.authz_denied == Some(true)
-                && t.source.as_deref() == Some("Authz")
-        })
+    let mut authz_traj = None;
+    for _ in 0..100 {
+        let trajectories = turso
+            .load_recent_trajectories(1000)
+            .await
+            .expect("query trajectories from Turso");
+        authz_traj = trajectories
+            .iter()
+            .find(|t| {
+                t.entity_id == entity_id
+                    && t.authz_denied == Some(true)
+                    && t.source.as_deref() == Some("Authz")
+            })
+            .cloned();
+        if authz_traj.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let authz_traj = authz_traj
         .expect("expected authz trajectory in Turso");
     assert_eq!(
         authz_traj.denied_module.as_deref(),
@@ -173,19 +211,28 @@ async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str
     // 3. Verify denied WASM invocation was persisted.
     // The wasm_invocation_logs table does not store authz_denied directly;
     // we identify the denied invocation by entity_id + failure + error text.
-    let invocations = turso
-        .load_recent_wasm_invocations(1000)
-        .await
-        .expect("query wasm invocations from Turso");
-    let denied_invocation = invocations
-        .iter()
-        .find(|w| {
-            w.entity_id == entity_id
-                && !w.success
-                && w.error
-                    .as_deref()
-                    .is_some_and(|e| e.contains("authorization denied"))
-        })
+    let mut denied_invocation = None;
+    for _ in 0..100 {
+        let invocations = turso
+            .load_recent_wasm_invocations(1000)
+            .await
+            .expect("query wasm invocations from Turso");
+        denied_invocation = invocations
+            .iter()
+            .find(|w| {
+                w.entity_id == entity_id
+                    && !w.success
+                    && w.error
+                        .as_deref()
+                        .is_some_and(|e| e.contains("authorization denied"))
+            })
+            .cloned();
+        if denied_invocation.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let denied_invocation = denied_invocation
         .expect("expected denied wasm invocation in Turso");
     assert_eq!(denied_invocation.module_name, "echo_integration");
 }
@@ -232,18 +279,15 @@ async fn wasm_integration_dispatches_callback() {
     // Poll for the callback to be dispatched asynchronously.
     // The WASM module is invoked in a tokio::spawn task, and its callback
     // (EchoSucceeded or EchoFailed) is dispatched back to the entity actor.
-    let mut final_status = String::new();
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let entity = state
-            .get_tenant_entity_state(&tenant, "EchoTest", "echo-1")
-            .await
-            .expect("entity should exist");
-        final_status = entity.state.status.clone();
-        if final_status == "Done" || final_status == "Failed" {
-            break;
-        }
-    }
+    let final_status = wait_for_status(
+        &state,
+        &tenant,
+        "EchoTest",
+        "echo-1",
+        &["Done", "Failed"],
+        Duration::from_secs(20),
+    )
+    .await;
 
     // The echo module calls https://echo.example.com/ping via ProductionWasmHost.
     // ProductionWasmHost makes a real HTTP call that will fail (DNS resolution).
@@ -280,18 +324,15 @@ async fn wasm_missing_module_dispatches_failure_callback() {
     assert_eq!(response.state.status, "Pending");
 
     // Poll for the failure callback.
-    let mut final_status = String::new();
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let entity = state
-            .get_tenant_entity_state(&tenant, "EchoTest", "echo-missing")
-            .await
-            .expect("entity should exist");
-        final_status = entity.state.status.clone();
-        if final_status == "Failed" || final_status == "Done" {
-            break;
-        }
-    }
+    let final_status = wait_for_status(
+        &state,
+        &tenant,
+        "EchoTest",
+        "echo-missing",
+        &["Failed", "Done"],
+        Duration::from_secs(20),
+    )
+    .await;
 
     assert_eq!(
         final_status, "Failed",
@@ -330,18 +371,15 @@ async fn wasm_authz_denial_records_governance_artifacts_async_mode() {
         .expect("TriggerEcho should succeed");
     assert_eq!(response.state.status, "Pending");
 
-    let mut final_status = String::new();
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let entity = state
-            .get_tenant_entity_state(&tenant, "EchoTest", "echo-authz-async")
-            .await
-            .expect("entity should exist");
-        final_status = entity.state.status.clone();
-        if final_status == "Failed" {
-            break;
-        }
-    }
+    let final_status = wait_for_status(
+        &state,
+        &tenant,
+        "EchoTest",
+        "echo-authz-async",
+        &["Failed"],
+        Duration::from_secs(20),
+    )
+    .await;
     assert_eq!(final_status, "Failed");
     assert_wasm_authz_denial_artifacts(&state, "echo-authz-async").await;
 }
