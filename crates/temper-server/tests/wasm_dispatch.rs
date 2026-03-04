@@ -98,7 +98,10 @@ async fn build_echo_test_state_with_turso() -> ServerState {
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after UNIX epoch")
         .as_nanos();
-    let db_url = format!("file:/tmp/temper-wasm-dispatch-test-{}-{ts}.db", std::process::id());
+    let db_url = format!(
+        "file:/tmp/temper-wasm-dispatch-test-{}-{ts}.db",
+        std::process::id()
+    );
     // Clean up any leftover DB + WAL/SHM files from a previous run.
     let db_path = db_url.strip_prefix("file:").unwrap_or(&db_url);
     let _ = std::fs::remove_file(db_path);
@@ -127,8 +130,7 @@ async fn wait_for_status(
             .await
             .expect("entity should exist");
         let status = entity.state.status.clone();
-        if terminal_statuses.contains(&status.as_str()) || tokio::time::Instant::now() >= deadline
-        {
+        if terminal_statuses.contains(&status.as_str()) || tokio::time::Instant::now() >= deadline {
             return status;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -177,8 +179,7 @@ async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let decision = decision
-        .expect("expected wasm authz pending decision in Turso");
+    let decision = decision.expect("expected wasm authz pending decision in Turso");
     assert_eq!(decision.module_name.as_deref(), Some("echo_integration"));
 
     // 2. Verify authz trajectory entry was persisted.
@@ -201,8 +202,7 @@ async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let authz_traj = authz_traj
-        .expect("expected authz trajectory in Turso");
+    let authz_traj = authz_traj.expect("expected authz trajectory in Turso");
     assert_eq!(
         authz_traj.denied_module.as_deref(),
         Some("echo_integration")
@@ -232,8 +232,7 @@ async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let denied_invocation = denied_invocation
-        .expect("expected denied wasm invocation in Turso");
+    let denied_invocation = denied_invocation.expect("expected denied wasm invocation in Turso");
     assert_eq!(denied_invocation.module_name, "echo_integration");
 }
 
