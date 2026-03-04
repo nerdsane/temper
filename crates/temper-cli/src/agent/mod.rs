@@ -14,8 +14,7 @@ pub mod login;
 
 use anyhow::Result;
 use temper_agent_runtime::{
-    AgentRunner, AgentSandbox, AnthropicProvider, CodexProvider, LlmProvider,
-    SandboxToolRegistry,
+    AgentRunner, AgentSandbox, AnthropicProvider, CodexProvider, LlmProvider, SandboxToolRegistry,
 };
 use temper_sdk::TemperClient;
 
@@ -101,9 +100,7 @@ async fn run_interactive(runner: &AgentRunner, role: &str, model: &str) -> Resul
     let mut rl = DefaultEditor::new()?;
 
     // Try to load history (ignore errors — file may not exist yet).
-    let history_dir = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".temper");
+    let history_dir = dirs::home_dir().unwrap_or_default().join(".temper");
     std::fs::create_dir_all(&history_dir).ok();
     let history_path = history_dir.join("agent-history.txt");
     let _ = rl.load_history(&history_path);
@@ -129,7 +126,10 @@ async fn run_interactive(runner: &AgentRunner, role: &str, model: &str) -> Resul
 
         rl.add_history_entry(&line)?;
 
-        match runner.run_turn(&agent_id, SYSTEM_PROMPT, trimmed, &mut messages).await {
+        match runner
+            .run_turn(&agent_id, SYSTEM_PROMPT, trimmed, &mut messages)
+            .await
+        {
             Ok(response) => {
                 println!("\n{response}\n");
             }

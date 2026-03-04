@@ -6,8 +6,8 @@
 //! - [`TemperToolRegistry`]: entity CRUD only (for sandboxed executors)
 
 pub mod local;
-pub mod temper;
 pub mod sandbox;
+pub mod temper;
 use anyhow::Result;
 use serde_json::Value;
 
