@@ -38,7 +38,11 @@ pub async fn run_repl(config: &ReplConfig, code: &str) -> Result<String> {
             let principal_id = principal_id.clone();
             async move {
                 // Strip self arg (dataclass method calls include self as args[0])
-                let args = if args.is_empty() { &args[..] } else { &args[1..] };
+                let args = if args.is_empty() {
+                    &args[..]
+                } else {
+                    &args[1..]
+                };
                 dispatch_temper_method(
                     &http,
                     &base_url,

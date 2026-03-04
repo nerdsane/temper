@@ -63,7 +63,9 @@ impl AgentSandbox {
             code,
             "agent.py",
             &[("temper", "Temper", 1), ("tools", "Tools", 2)],
-            |function_name: String, args: Vec<MontyObject>, kwargs: Vec<(MontyObject, MontyObject)>| {
+            |function_name: String,
+             args: Vec<MontyObject>,
+             kwargs: Vec<(MontyObject, MontyObject)>| {
                 let http = http.clone();
                 let server_url = server_url.clone();
                 let tenant = tenant.clone();
@@ -126,8 +128,15 @@ async fn dispatch_method(
             .await
         }
         "Tools" => {
-            dispatch::dispatch_tools_method(http, server_url, tenant, principal_id, function_name, args)
-                .await
+            dispatch::dispatch_tools_method(
+                http,
+                server_url,
+                tenant,
+                principal_id,
+                function_name,
+                args,
+            )
+            .await
         }
         _ => Err(format!(
             "unknown namespace '{namespace}' for method '{function_name}'. \

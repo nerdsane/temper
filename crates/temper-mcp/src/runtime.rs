@@ -206,14 +206,12 @@ impl RuntimeContext {
                     .and_then(Value::as_array)
                     .map(|arr| {
                         arr.iter()
-                            .filter(|a| {
-                                match a.get("from") {
-                                    Some(Value::String(s)) => s == &state,
-                                    Some(Value::Array(arr)) => {
-                                        arr.iter().any(|v| v.as_str() == Some(state.as_str()))
-                                    }
-                                    _ => false,
+                            .filter(|a| match a.get("from") {
+                                Some(Value::String(s)) => s == &state,
+                                Some(Value::Array(arr)) => {
+                                    arr.iter().any(|v| v.as_str() == Some(state.as_str()))
                                 }
+                                _ => false,
                             })
                             .cloned()
                             .collect()

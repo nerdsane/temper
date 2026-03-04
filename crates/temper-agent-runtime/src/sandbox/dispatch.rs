@@ -47,7 +47,16 @@ pub(crate) async fn dispatch_tools_method(
     };
 
     // Cedar authorization check via server.
-    authorize_tool(http, server_url, tenant, principal_id, action, resource_type, &resource_id).await?;
+    authorize_tool(
+        http,
+        server_url,
+        tenant,
+        principal_id,
+        action,
+        resource_type,
+        &resource_id,
+    )
+    .await?;
 
     // Execute locally.
     match method {
@@ -174,9 +183,7 @@ async fn authorize_tool(
         ));
     }
 
-    eprintln!(
-        "  [governance] tools.{action}(\"{resource_id}\") needs approval: {decision_id}"
-    );
+    eprintln!("  [governance] tools.{action}(\"{resource_id}\") needs approval: {decision_id}");
     eprintln!("  [governance] Waiting for human decision via `temper decide` or Observe UI...");
 
     let poll_url = format!("{server_url}/api/tenants/{tenant}/decisions?status=all");
@@ -215,10 +222,7 @@ async fn authorize_tool(
 
         for d in &decisions {
             if d.get("id").and_then(Value::as_str) == Some(&decision_id) {
-                let status = d
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let status = d.get("status").and_then(Value::as_str).unwrap_or("");
 
                 match status {
                     "Approved" | "approved" => {

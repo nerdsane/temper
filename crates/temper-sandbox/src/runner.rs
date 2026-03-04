@@ -35,7 +35,10 @@ where
     Fut: Future<Output = Result<Value, String>>,
 {
     let program = wrap_user_code(code);
-    let param_names: Vec<String> = dataclasses.iter().map(|(name, _, _)| name.to_string()).collect();
+    let param_names: Vec<String> = dataclasses
+        .iter()
+        .map(|(name, _, _)| name.to_string())
+        .collect();
     let runner = MontyRun::new(program, filename, param_names, vec![])
         .map_err(|e| anyhow!(format_monty_exception(&e)))?;
 

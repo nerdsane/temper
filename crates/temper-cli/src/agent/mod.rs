@@ -98,7 +98,9 @@ pub async fn run(
                         } else {
                             model
                         };
-                        eprintln!("  ANTHROPIC_API_KEY not set — using OpenAI (temper login openai)");
+                        eprintln!(
+                            "  ANTHROPIC_API_KEY not set — using OpenAI (temper login openai)"
+                        );
                         Box::new(CodexProvider::new(openai_model)?)
                     } else {
                         anyhow::bail!(

@@ -5,8 +5,8 @@
 
 use monty::MontyObject;
 use reqwest::Method;
-use sha2::{Digest, Sha256};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::helpers::{
     escape_odata_key, expect_json_object_arg, expect_string_arg, optional_string_arg,
@@ -170,8 +170,16 @@ pub async fn dispatch_temper_method(
                 Some(s) => format!("/api/tenants/{tenant}/decisions?status={s}"),
                 None => format!("/api/tenants/{tenant}/decisions"),
             };
-            temper_governance_request(http, base_url, tenant, principal_id, Method::GET, &path, None)
-                .await
+            temper_governance_request(
+                http,
+                base_url,
+                tenant,
+                principal_id,
+                Method::GET,
+                &path,
+                None,
+            )
+            .await
         }
         "get_decision_status" => {
             let decision_id = expect_string_arg(args, 0, "decision_id", method)?;
@@ -188,8 +196,7 @@ pub async fn dispatch_temper_method(
             if let Some(decisions) = result.get("decisions").and_then(Value::as_array) {
                 for d in decisions {
                     if d.get("id").and_then(Value::as_str) == Some(&decision_id) {
-                        let status =
-                            d.get("status").and_then(Value::as_str).unwrap_or("unknown");
+                        let status = d.get("status").and_then(Value::as_str).unwrap_or("unknown");
                         return Ok(serde_json::json!({
                             "decision_id": decision_id,
                             "status": status,
@@ -257,8 +264,16 @@ pub async fn dispatch_temper_method(
         "compile_wasm" => {
             let module_name = expect_string_arg(args, 0, "module_name", method)?;
             let rust_source = expect_string_arg(args, 1, "rust_source", method)?;
-            compile_and_upload_wasm(http, base_url, tenant, principal_id, &module_name, &rust_source, binary_path)
-                .await
+            compile_and_upload_wasm(
+                http,
+                base_url,
+                tenant,
+                principal_id,
+                &module_name,
+                &rust_source,
+                binary_path,
+            )
+            .await
         }
         // --- Evolution observability (read-only) ---
         "get_trajectories" => {
@@ -280,7 +295,16 @@ pub async fn dispatch_temper_method(
                 path.push('?');
                 path.push_str(&params.join("&"));
             }
-            temper_request(http, base_url, tenant, principal_id, Method::GET, &path, None).await
+            temper_request(
+                http,
+                base_url,
+                tenant,
+                principal_id,
+                Method::GET,
+                &path,
+                None,
+            )
+            .await
         }
         "get_insights" => {
             temper_request(
@@ -300,7 +324,16 @@ pub async fn dispatch_temper_method(
                 Some(rt) => format!("/observe/evolution/records?record_type={rt}"),
                 None => "/observe/evolution/records".to_string(),
             };
-            temper_request(http, base_url, tenant, principal_id, Method::GET, &path, None).await
+            temper_request(
+                http,
+                base_url,
+                tenant,
+                principal_id,
+                Method::GET,
+                &path,
+                None,
+            )
+            .await
         }
         "check_sentinel" => {
             temper_request(
@@ -452,8 +485,7 @@ temper-wasm-sdk = {{ path = "{sdk_path}" }}
         return Err(format!("compilation failed:\n{stderr}"));
     }
 
-    let wasm_path =
-        build_dir.join("target/wasm32-unknown-unknown/release/temper_user_module.wasm");
+    let wasm_path = build_dir.join("target/wasm32-unknown-unknown/release/temper_user_module.wasm");
     let wasm_bytes = tokio::fs::read(&wasm_path)
         .await
         .map_err(|e| format!("failed to read compiled WASM: {e}"))?;
