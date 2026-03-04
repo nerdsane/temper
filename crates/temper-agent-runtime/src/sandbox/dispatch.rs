@@ -267,10 +267,10 @@ impl AgentSandbox {
             return serde_json::from_str(&text).or(Ok(Value::String(text)));
         }
 
-        if status == reqwest::StatusCode::FORBIDDEN {
-            if let Some(structured) = format_authz_denied(&text) {
-                return Ok(structured);
-            }
+        if status == reqwest::StatusCode::FORBIDDEN
+            && let Some(structured) = format_authz_denied(&text)
+        {
+            return Ok(structured);
         }
 
         Err(format_http_error(status, &text))

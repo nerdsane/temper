@@ -166,21 +166,21 @@ impl LlmProvider for CodexProvider {
             match event_type {
                 // Text output deltas.
                 "response.output_text.delta" => {
-                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                        if let Some(delta) = payload.get("delta").and_then(|v| v.as_str()) {
-                            in_text_output = true;
-                            current_text.push_str(delta);
-                            on_delta(delta.to_string());
-                        }
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.data)
+                        && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
+                    {
+                        in_text_output = true;
+                        current_text.push_str(delta);
+                        on_delta(delta.to_string());
                     }
                 }
 
                 // Function call argument deltas.
                 "response.function_call_arguments.delta" => {
-                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                        if let Some(delta) = payload.get("delta").and_then(|v| v.as_str()) {
-                            current_tool_args.push_str(delta);
-                        }
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.data)
+                        && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
+                    {
+                        current_tool_args.push_str(delta);
                     }
                 }
 
