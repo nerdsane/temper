@@ -25,6 +25,7 @@ use crate::http::{temper_governance_request, temper_request, temper_request_byte
 /// - `kwargs`: Keyword arguments (currently rejected)
 /// - `entity_set_resolver`: Optional closure to resolve entity type to set name
 /// - `binary_path`: Optional path to temper binary (for compile_wasm SDK resolution)
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch_temper_method(
     http: &reqwest::Client,
     base_url: &str,
