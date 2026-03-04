@@ -8,6 +8,7 @@ description = "MCP stdio server for Temper Code Mode tools"
 
 [dependencies]
 temper-spec = { workspace = true }
+temper-sandbox = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

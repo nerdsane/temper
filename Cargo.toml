@@ -24,6 +24,7 @@ members = [
     "crates/temper-wasm",
     "crates/temper-wasm-sdk",
     "crates/temper-sdk",
+    "crates/temper-sandbox",
     "crates/temper-agent-runtime",
     "crates/temper-executor",
     "reference-apps/ecommerce",
@@ -129,6 +130,7 @@ temper-platform = { path = "crates/temper-platform" }
 temper-wasm = { path = "crates/temper-wasm" }
 temper-wasm-sdk = { path = "crates/temper-wasm-sdk" }
 temper-sdk = { path = "crates/temper-sdk" }
+temper-sandbox = { path = "crates/temper-sandbox" }
 temper-agent-runtime = { path = "crates/temper-agent-runtime" }
 
 # WASM runtime

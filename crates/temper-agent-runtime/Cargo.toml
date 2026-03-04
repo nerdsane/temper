@@ -8,6 +8,7 @@ description = "Temper Agent Runtime — core agent execution loop with pluggable
 
 [dependencies]
 temper-sdk = { workspace = true }
+temper-sandbox = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }

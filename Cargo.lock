@@ -5218,6 +5218,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "temper-sandbox",
  "temper-sdk",
  "tokio",
  "tokio-stream",
@@ -5356,6 +5357,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "temper-runtime",
+ "temper-sandbox",
  "temper-server",
  "temper-spec",
  "temper-store-turso",
@@ -5456,6 +5458,19 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "temper-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "monty",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "tokio",
  "uuid",
 ]
 

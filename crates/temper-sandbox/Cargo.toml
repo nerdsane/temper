@@ -1,0 +1,18 @@
+[package]
+name = "temper-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Shared Monty sandbox infrastructure for Temper MCP and agent runtime"
+
+[dependencies]
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["time", "process", "fs"] }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+
+# pydantic/monty Rust sandbox crate
+monty = { git = "https://github.com/pydantic/monty.git", package = "monty", rev = "87f8f3104e9f0da0bf03f59a745b1e364d39d3bf" }

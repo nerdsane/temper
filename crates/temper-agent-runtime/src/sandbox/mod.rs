@@ -1,30 +1,20 @@
 //! Embedded Monty sandbox for agent code execution.
 //!
 //! The agent's single tool is `execute_code` — run Python in the sandbox.
-//! Entity operations go through `temper.*` (HTTP to server).
+//! Entity operations go through `temper.*` (HTTP to server via temper-sandbox).
 //! Local tools (bash, file I/O) go through a governed `tools.*` namespace
 //! with Cedar authorization first, then local execution.
 
-mod convert;
 pub(crate) mod dispatch;
-pub(crate) mod helpers;
 
-use std::collections::BTreeMap;
-
-use anyhow::{Context, Result, anyhow, bail};
-use monty::{
-    DictPairs, ExcType, ExternalResult, LimitedTracker, MontyException, MontyObject, MontyRun,
-    PrintWriter, RunProgress,
-};
+use anyhow::Result;
+use monty::MontyObject;
 use serde_json::Value;
-
-use self::convert::{json_to_monty_object, monty_object_to_json};
-use self::helpers::{default_limits, format_monty_exception, wrap_user_code};
 
 /// Embedded Monty sandbox for agent Python execution.
 ///
 /// Provides two dispatch namespaces:
-/// - `temper.*` → HTTP to Temper server (entity CRUD, governance)
+/// - `temper.*` → HTTP to Temper server (entity CRUD, governance, evolution, WASM, navigation)
 /// - `tools.*` → Cedar-gated local execution (bash, file I/O)
 pub struct AgentSandbox {
     /// HTTP client for server communication.
@@ -34,7 +24,7 @@ pub struct AgentSandbox {
     /// Tenant name.
     pub(crate) tenant: String,
     /// Agent principal ID for Cedar authorization.
-    pub(crate) principal_id: Option<String>,
+    pub(crate) principal_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl AgentSandbox {
@@ -44,8 +34,18 @@ impl AgentSandbox {
             http: reqwest::Client::new(),
             server_url: server_url.to_string(),
             tenant: tenant.to_string(),
-            principal_id,
+            principal_id: std::sync::Arc::new(std::sync::Mutex::new(principal_id)),
         }
+    }
+
+    /// Set the agent principal ID (call after agent entity is created).
+    pub fn set_principal_id(&self, id: String) {
+        *self.principal_id.lock().unwrap() = Some(id); // ci-ok: infallible lock
+    }
+
+    /// Get a clone of the principal ID Arc for sharing.
+    pub fn principal_id_handle(&self) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
+        self.principal_id.clone()
     }
 
     /// Execute Python code in the sandbox.
@@ -54,148 +54,91 @@ impl AgentSandbox {
     /// - `temper.*` methods for entity operations (HTTP to server)
     /// - `tools.*` methods for local operations (Cedar-gated)
     pub async fn run_code(&self, code: &str) -> Result<String> {
-        let program = wrap_user_code(code);
-        let runner = MontyRun::new(
-            program,
+        let http = self.http.clone();
+        let server_url = self.server_url.clone();
+        let tenant = self.tenant.clone();
+        let principal_id_arc = self.principal_id.clone();
+
+        temper_sandbox::runner::run_sandbox(
+            code,
             "agent.py",
-            vec!["temper".to_string(), "tools".to_string()],
-            vec![],
-        )
-        .map_err(|e| anyhow!(format_monty_exception(&e)))?;
-
-        let temper_object = MontyObject::Dataclass {
-            name: "Temper".to_string(),
-            type_id: 1,
-            field_names: vec![],
-            attrs: DictPairs::from(Vec::<(MontyObject, MontyObject)>::new()),
-            frozen: true,
-        };
-
-        let tools_object = MontyObject::Dataclass {
-            name: "Tools".to_string(),
-            type_id: 2,
-            field_names: vec![],
-            attrs: DictPairs::from(Vec::<(MontyObject, MontyObject)>::new()),
-            frozen: true,
-        };
-
-        let tracker = LimitedTracker::new(default_limits());
-
-        // Start the Monty program. PrintWriter is created in its own scope
-        // so it's dropped before any async work, keeping the future Send.
-        let mut progress = {
-            let mut print = PrintWriter::Disabled;
-            runner
-                .start(vec![temper_object, tools_object], tracker, &mut print)
-                .map_err(|e| anyhow!(format_monty_exception(&e)))?
-        };
-
-        let mut pending_results: BTreeMap<u32, ExternalResult> = BTreeMap::new();
-
-        loop {
-            match progress {
-                RunProgress::Complete(result) => {
-                    let value = monty_object_to_json(&result);
-                    return serde_json::to_string(&value)
-                        .context("failed to serialize sandbox output as JSON string");
-                }
-                RunProgress::FunctionCall {
-                    function_name,
-                    args,
-                    kwargs,
-                    call_id,
-                    method_call,
-                    state,
-                    ..
-                } => {
-                    if !method_call {
-                        bail!(
-                            "sandbox denied external function call '{}'. \
-                             Only temper.<method> and tools.<method> are allowed",
-                            function_name
-                        );
-                    }
-
-                    let result = self.dispatch_method(&function_name, &args, &kwargs).await;
-                    let ext_result = match result {
-                        Ok(value) => ExternalResult::Return(json_to_monty_object(&value)),
-                        Err(message) => ExternalResult::Error(MontyException::new(
-                            ExcType::RuntimeError,
-                            Some(message),
-                        )),
-                    };
-
-                    pending_results.insert(call_id, ext_result);
-                    // Fresh PrintWriter per call — Disabled has no state, and
-                    // this avoids holding a non-Send type across await points.
-                    let mut print = PrintWriter::Disabled;
-                    progress = state
-                        .run_pending(&mut print)
-                        .map_err(|e| anyhow!(format_monty_exception(&e)))?;
-                }
-                RunProgress::ResolveFutures(state) => {
-                    let mut ready: Vec<(u32, ExternalResult)> = Vec::new();
-                    for call_id in state.pending_call_ids() {
-                        if let Some(result) = pending_results.remove(call_id) {
-                            ready.push((*call_id, result));
-                        }
-                    }
-
-                    if ready.is_empty() {
-                        bail!(
-                            "sandbox is waiting on unresolved external calls: {:?}",
-                            state.pending_call_ids()
-                        );
-                    }
-
-                    let mut print = PrintWriter::Disabled;
-                    progress = state
-                        .resume(ready, &mut print)
-                        .map_err(|e| anyhow!(format_monty_exception(&e)))?;
-                }
-                RunProgress::OsCall { function, .. } => {
-                    bail!(
-                        "sandbox blocked OS access ({function:?}). \
-                         Use tools.bash(), tools.read(), tools.write(), or tools.ls() instead."
-                    );
-                }
-            }
-        }
-    }
-
-    /// Route a method call to the appropriate namespace.
-    async fn dispatch_method(
-        &self,
-        function_name: &str,
-        args: &[MontyObject],
-        kwargs: &[(MontyObject, MontyObject)],
-    ) -> Result<Value, String> {
-        // Determine namespace from self (args[0]) Dataclass name.
-        let namespace = args
-            .first()
-            .and_then(|a| match a {
-                MontyObject::Dataclass { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .unwrap_or("unknown");
-
-        match namespace {
-            "Temper" => {
-                self.dispatch_temper_method(function_name, args, kwargs)
+            &[("temper", "Temper", 1), ("tools", "Tools", 2)],
+            |function_name: String, args: Vec<MontyObject>, kwargs: Vec<(MontyObject, MontyObject)>| {
+                let http = http.clone();
+                let server_url = server_url.clone();
+                let tenant = tenant.clone();
+                let principal_id_arc = principal_id_arc.clone();
+                async move {
+                    dispatch_method(
+                        &http,
+                        &server_url,
+                        &tenant,
+                        &principal_id_arc,
+                        &function_name,
+                        &args,
+                        &kwargs,
+                    )
                     .await
-            }
-            "Tools" => self.dispatch_tools_method(function_name, args).await,
-            _ => Err(format!(
-                "unknown namespace '{namespace}' for method '{function_name}'. \
-                 Use temper.<method> or tools.<method>."
-            )),
+                }
+            },
+        )
+        .await
+    }
+}
+
+/// Route a method call to the appropriate namespace.
+async fn dispatch_method(
+    http: &reqwest::Client,
+    server_url: &str,
+    tenant: &str,
+    principal_id: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    function_name: &str,
+    args: &[MontyObject],
+    kwargs: &[(MontyObject, MontyObject)],
+) -> Result<Value, String> {
+    // Determine namespace from self (args[0]) Dataclass name.
+    let namespace = args
+        .first()
+        .and_then(|a| match a {
+            MontyObject::Dataclass { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .unwrap_or("unknown");
+
+    match namespace {
+        "Temper" => {
+            // Strip self arg
+            let args = if args.is_empty() { args } else { &args[1..] };
+            let pid = {
+                principal_id.lock().unwrap().clone() // ci-ok: infallible lock
+            };
+            temper_sandbox::dispatch::dispatch_temper_method(
+                http,
+                server_url,
+                tenant,
+                pid.as_deref(),
+                function_name,
+                args,
+                kwargs,
+                None, // No entity set resolver for agent (uses entity type directly)
+                None, // No binary path for agent
+            )
+            .await
         }
+        "Tools" => {
+            dispatch::dispatch_tools_method(http, server_url, tenant, principal_id, function_name, args)
+                .await
+        }
+        _ => Err(format!(
+            "unknown namespace '{namespace}' for method '{function_name}'. \
+             Use temper.<method> or tools.<method>."
+        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::helpers::wrap_user_code;
+    use temper_sandbox::helpers::wrap_user_code;
 
     #[test]
     fn test_wrap_user_code_basic() {

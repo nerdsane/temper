@@ -3,7 +3,8 @@
 use monty::{DictPairs, MontyObject};
 use serde_json::{Map, Value, json};
 
-pub(crate) fn json_to_monty_object(value: &Value) -> MontyObject {
+/// Convert a JSON [`Value`] into a [`MontyObject`].
+pub fn json_to_monty_object(value: &Value) -> MontyObject {
     match value {
         Value::Null => MontyObject::None,
         Value::Bool(v) => MontyObject::Bool(*v),
@@ -32,7 +33,8 @@ pub(crate) fn json_to_monty_object(value: &Value) -> MontyObject {
     }
 }
 
-pub(crate) fn monty_object_to_json(value: &MontyObject) -> Value {
+/// Convert a [`MontyObject`] into a JSON [`Value`].
+pub fn monty_object_to_json(value: &MontyObject) -> Value {
     match value {
         MontyObject::Ellipsis => json!({"$ellipsis": true}),
         MontyObject::None => Value::Null,

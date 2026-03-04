@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 
-mod convert;
 mod protocol;
 mod runtime;
 mod sandbox;

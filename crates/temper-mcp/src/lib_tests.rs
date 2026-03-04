@@ -1,5 +1,5 @@
-use super::sandbox::format_authz_denied;
 use super::*;
+use temper_sandbox::helpers::format_authz_denied;
 
 use std::collections::BTreeMap;
 use std::fs;

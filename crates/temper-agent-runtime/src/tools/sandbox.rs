@@ -21,6 +21,11 @@ impl SandboxToolRegistry {
     pub fn new(sandbox: AgentSandbox) -> Self {
         Self { sandbox }
     }
+
+    /// Set the agent principal ID on the underlying sandbox.
+    pub fn set_principal_id(&self, id: String) {
+        self.sandbox.set_principal_id(id);
+    }
 }
 
 #[async_trait::async_trait]
@@ -35,9 +40,24 @@ impl ToolRegistry for SandboxToolRegistry {
                 - `await temper.get(\"EntityType\", \"id\")` — get entity\n\
                 - `await temper.create(\"EntityType\", {\"field\": \"value\"})` — create entity\n\
                 - `await temper.action(\"EntityType\", \"id\", \"ActionName\", {})` — invoke action\n\
+                - `await temper.patch(\"EntityType\", \"id\", {\"field\": \"new_value\"})` — patch entity\n\n\
+                Navigation:\n\
+                - `await temper.navigate(\"path\")` — navigate OData path\n\n\
+                Developer methods:\n\
                 - `await temper.submit_specs({\"File.ioa.toml\": \"...\"})` — load specs\n\
+                - `await temper.get_policies()` — list Cedar policies\n\n\
+                WASM integration:\n\
+                - `await temper.upload_wasm(\"module_name\", \"/path/to/module.wasm\")` — upload WASM\n\
+                - `await temper.compile_wasm(\"module_name\", \"rust source\")` — compile and upload WASM\n\n\
+                Governance:\n\
                 - `await temper.get_decisions()` — list governance decisions\n\
+                - `await temper.get_decision_status(\"PD-xxx\")` — get decision status\n\
                 - `await temper.poll_decision(\"PD-xxx\")` — wait for decision\n\n\
+                Evolution observability:\n\
+                - `await temper.get_trajectories()` — list trajectory spans\n\
+                - `await temper.get_insights()` — get evolution insights\n\
+                - `await temper.get_evolution_records()` — list evolution records\n\
+                - `await temper.check_sentinel()` — trigger sentinel check\n\n\
                 Local methods (Cedar-governed):\n\
                 - `await tools.bash(\"command\")` — run shell command\n\
                 - `await tools.read(\"path\")` — read file\n\

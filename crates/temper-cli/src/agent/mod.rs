@@ -20,16 +20,44 @@ use temper_sdk::TemperClient;
 
 /// System prompt for the sandbox agent.
 const SYSTEM_PROMPT: &str = "\
-You are a Temper agent. You interact with the world through Python code execution.
+You are a Temper agent with full access to the local filesystem and shell. \
+You MUST use the `execute_code` tool to accomplish tasks — never say you can't access files. \
+Always act first by exploring with tools, then report what you found or did.
 
-Available namespaces:
+IMPORTANT: When the user asks you to do something, call `execute_code` immediately. \
+Do NOT ask clarifying questions unless truly ambiguous. Explore the filesystem to find what you need.
+
+Available namespaces inside execute_code:
+
+Entity methods:
 - `await temper.list(\"EntityType\")` — list entities
 - `await temper.get(\"EntityType\", \"id\")` — get entity
 - `await temper.create(\"EntityType\", {\"field\": \"value\"})` — create entity
 - `await temper.action(\"EntityType\", \"id\", \"ActionName\", {})` — invoke action
+- `await temper.patch(\"EntityType\", \"id\", {\"field\": \"new_value\"})` — patch entity
+
+Navigation:
+- `await temper.navigate(\"path\")` — navigate OData path
+- `await temper.navigate(\"path\", '{\"key\": \"value\"}')` — navigate with params
+
+Developer methods:
 - `await temper.submit_specs({\"File.ioa.toml\": \"...\"})` — load specs
+- `await temper.get_policies()` — list Cedar policies
+
+WASM integration:
+- `await temper.upload_wasm(\"module_name\", \"/path/to/module.wasm\")` — upload WASM module
+- `await temper.compile_wasm(\"module_name\", \"rust source code\")` — compile and upload WASM
+
+Governance:
 - `await temper.get_decisions()` — list governance decisions
+- `await temper.get_decision_status(\"PD-xxx\")` — get single decision status
 - `await temper.poll_decision(\"PD-xxx\")` — wait for decision
+
+Evolution observability:
+- `await temper.get_trajectories()` — list trajectory spans
+- `await temper.get_insights()` — get evolution insights
+- `await temper.get_evolution_records()` — list O/P/A/D/I records
+- `await temper.check_sentinel()` — trigger sentinel check
 
 Local methods (Cedar-governed):
 - `await tools.bash(\"command\")` — run shell command
@@ -55,14 +83,41 @@ pub async fn run(
     let base_url = format!("http://127.0.0.1:{port}");
     let client = TemperClient::new(&base_url, tenant);
 
-    let llm: Box<dyn LlmProvider> = match resolve_provider(provider, model) {
+    let resolved = resolve_provider(provider, model);
+    let llm: Box<dyn LlmProvider> = match resolved {
         "openai-codex" => Box::new(CodexProvider::new(model)?),
-        _ => Box::new(AnthropicProvider::new(model)?),
+        _ => {
+            // Try Anthropic first; if no API key, fall back to OpenAI if logged in.
+            match AnthropicProvider::new(model) {
+                Ok(p) => Box::new(p),
+                Err(_) if provider.is_none() => {
+                    use temper_agent_runtime::providers::codex::auth;
+                    if auth::load_credentials()?.is_some() {
+                        let openai_model = if model.starts_with("claude") {
+                            "gpt-5.3-codex"
+                        } else {
+                            model
+                        };
+                        eprintln!("  ANTHROPIC_API_KEY not set — using OpenAI (temper login openai)");
+                        Box::new(CodexProvider::new(openai_model)?)
+                    } else {
+                        anyhow::bail!(
+                            "No LLM credentials found.\n\n\
+                             Either:\n  \
+                             - Set ANTHROPIC_API_KEY in your environment, or\n  \
+                             - Run `temper login openai` to authenticate with your ChatGPT subscription"
+                        );
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
     };
 
     let sandbox = AgentSandbox::new(&base_url, tenant, None);
+    let principal_handle = sandbox.principal_id_handle();
     let tools = SandboxToolRegistry::new(sandbox);
-    let runner = AgentRunner::new(client, llm, Box::new(tools));
+    let runner = AgentRunner::new(client, llm, Box::new(tools), principal_handle);
 
     match (agent_id, goal) {
         (Some(id), _) => {
@@ -115,7 +170,7 @@ async fn run_interactive(runner: &AgentRunner, role: &str, model: &str) -> Resul
         let line = match rl.readline("temper> ") {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Eof) => break,
-            Err(rustyline::error::ReadlineError::Interrupted) => continue,
+            Err(rustyline::error::ReadlineError::Interrupted) => break,
             Err(e) => return Err(e.into()),
         };
 
@@ -130,8 +185,9 @@ async fn run_interactive(runner: &AgentRunner, role: &str, model: &str) -> Resul
             .run_turn(&agent_id, SYSTEM_PROMPT, trimmed, &mut messages)
             .await
         {
-            Ok(response) => {
-                println!("\n{response}\n");
+            Ok(_) => {
+                // Response already printed by streaming callback.
+                println!();
             }
             Err(e) => {
                 eprintln!("Error: {e}\n");
