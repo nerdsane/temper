@@ -25,6 +25,8 @@ pub struct AgentRunner {
     client: TemperClient,
     provider: Box<dyn LlmProvider>,
     tools: Box<dyn ToolRegistry>,
+    /// Shared handle to set the agent principal ID on the sandbox.
+    principal_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl AgentRunner {
@@ -33,12 +35,19 @@ impl AgentRunner {
         client: TemperClient,
         provider: Box<dyn LlmProvider>,
         tools: Box<dyn ToolRegistry>,
+        principal_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     ) -> Self {
         Self {
             client,
             provider,
             tools,
+            principal_id,
         }
+    }
+
+    /// Set the agent principal ID (propagates to the sandbox).
+    fn bind_agent_id(&self, agent_id: &str) {
+        *self.principal_id.lock().unwrap() = Some(agent_id.to_string()); // ci-ok: infallible lock
     }
 
     /// Run a new agent with the given goal and role.
@@ -99,6 +108,7 @@ impl AgentRunner {
             return Ok(());
         }
 
+        self.bind_agent_id(agent_id);
         self.execute_agent_loop(agent_id, goal, role, model).await
     }
 
@@ -129,6 +139,7 @@ impl AgentRunner {
             )
             .await?;
         self.client.action("Agents", id, "Start", json!({})).await?;
+        self.bind_agent_id(id);
         Ok(())
     }
 
@@ -678,6 +689,7 @@ impl AgentRunner {
         self.client
             .action("Agents", &agent_id, "Start", json!({}))
             .await?;
+        self.bind_agent_id(&agent_id);
         Ok(agent_id)
     }
 

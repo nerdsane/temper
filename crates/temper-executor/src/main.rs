@@ -229,7 +229,8 @@ async fn run_agent(
         ))),
     };
 
-    let runner = AgentRunner::new(client, Box::new(provider), tools);
+    let principal_id = std::sync::Arc::new(std::sync::Mutex::new(Some(agent_id.to_string())));
+    let runner = AgentRunner::new(client, Box::new(provider), tools, principal_id);
     runner.resume(agent_id).await?;
 
     info!(agent_id = %agent_id, "Agent execution completed");

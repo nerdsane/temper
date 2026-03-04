@@ -15,7 +15,8 @@
 //! let client = TemperClient::new("http://127.0.0.1:4200", "default");
 //! let provider = AnthropicProvider::new("claude-sonnet-4-6")?;
 //! let tools = LocalToolRegistry::new(TemperClient::new("http://127.0.0.1:4200", "default"));
-//! let runner = AgentRunner::new(client, Box::new(provider), Box::new(tools));
+//! let pid = std::sync::Arc::new(std::sync::Mutex::new(None));
+//! let runner = AgentRunner::new(client, Box::new(provider), Box::new(tools), pid);
 //! runner.run("Build a REST API", "developer").await?;
 //! # Ok(())
 //! # }

@@ -73,9 +73,9 @@ enum Commands {
         /// Load an app: --app name=specs-dir (repeatable)
         #[arg(long)]
         app: Vec<String>,
-        /// Also start the Observe UI (Next.js dev server in observe/)
+        /// Skip the Observe UI (Next.js dev server in observe/)
         #[arg(long)]
-        observe: bool,
+        no_observe: bool,
         /// Directory containing IOA TOML and CSDL specs to load at startup (legacy, use --app)
         #[arg(long)]
         specs_dir: Option<String>,
@@ -146,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
             port,
             storage,
             app,
-            observe,
+            no_observe,
             specs_dir,
             tenant,
         } => {
@@ -166,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
             {
                 apps.push((tenant.clone(), dir.clone()));
             }
-            serve::run(port, apps, storage, storage_explicit, observe).await?
+            serve::run(port, apps, storage, storage_explicit, !no_observe).await?
         }
         Commands::Agent {
             port,

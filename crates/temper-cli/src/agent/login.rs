@@ -192,7 +192,7 @@ async fn finish_login(verifier: &str, expected_state: &str, code: &str, state: &
 
     println!();
     println!("Authenticated with OpenAI successfully.");
-    println!("You can now use: temper agent --model gpt-4.1-2025-04-14 --goal \"...\"");
+    println!("You can now use: temper agent --model gpt-5.3-codex --goal \"...\"");
 
     Ok(())
 }
