@@ -184,7 +184,7 @@ async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str
                 && !w.success
                 && w.error
                     .as_deref()
-                    .map_or(false, |e| e.contains("authorization denied"))
+                    .is_some_and(|e| e.contains("authorization denied"))
         })
         .expect("expected denied wasm invocation in Turso");
     assert_eq!(denied_invocation.module_name, "echo_integration");
