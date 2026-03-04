@@ -390,7 +390,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_cli_parse_agent_interactive() {
         let cli = Cli::parse_from(["temper", "agent"]);
         match cli.command {
@@ -400,6 +399,8 @@ mod tests {
             _ => panic!("expected Agent command"),
         }
     }
+
+    #[test]
     fn test_cli_parse_agent_with_resume() {
         let cli = Cli::parse_from([
             "temper",
