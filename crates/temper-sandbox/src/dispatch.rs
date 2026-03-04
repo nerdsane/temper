@@ -400,7 +400,7 @@ async fn compile_and_upload_wasm(
             .to_string());
     }
 
-    let build_id = uuid::Uuid::new_v4();
+    let build_id = uuid::Uuid::new_v4(); // determinism-ok: build directory uniqueness
     let build_dir = std::path::PathBuf::from(format!("/tmp/temper-wasm-build-{build_id}"));
     let src_dir = build_dir.join("src");
     tokio::fs::create_dir_all(&src_dir)

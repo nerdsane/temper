@@ -5355,7 +5355,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
  "temper-runtime",
  "temper-sandbox",
  "temper-server",
@@ -5364,7 +5363,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "uuid",
 ]
 
 [[package]]

@@ -73,7 +73,7 @@ pub async fn temper_governance_request(
     body: Option<&Value>,
 ) -> Result<Value, String> {
     let url = format!("{base_url}{path}");
-    let admin_id = principal_id.unwrap_or("mcp-governance-admin");
+    let admin_id = principal_id.unwrap_or("governance-admin");
     let mut request = http
         .request(method, &url)
         .header("X-Tenant-Id", tenant)
