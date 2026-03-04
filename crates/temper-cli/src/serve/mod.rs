@@ -301,6 +301,14 @@ pub async fn run(
     // Bootstrap the system tenant (Project, Tenant, CatalogEntry, etc.)
     temper_platform::bootstrap_system_tenant(&state);
 
+    // Bootstrap agent specs (Agent, Plan, Task, ToolCall) for the default tenant.
+    temper_platform::bootstrap_agent_specs(&state, "default");
+
+    // Also bootstrap agent specs for each --app tenant so agents work within user apps.
+    for (tenant, _dir) in &apps {
+        temper_platform::bootstrap_agent_specs(&state, tenant);
+    }
+
     let router = build_platform_router(state.clone());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await

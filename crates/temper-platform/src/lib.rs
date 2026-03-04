@@ -23,6 +23,6 @@ pub mod spec_store;
 pub mod state;
 
 // Re-export primary types at crate root.
-pub use bootstrap::bootstrap_system_tenant;
+pub use bootstrap::{bootstrap_agent_specs, bootstrap_system_tenant};
 pub use protocol::{PlatformEvent, VerifyStepStatus};
 pub use state::PlatformState;

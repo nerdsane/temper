@@ -1,0 +1,49 @@
+# TestWorkflow Entity — I/O Automaton Specification
+#
+# A child workflow spawned by LeadPlan to execute tests.
+# Reports pass/fail results back to the parent pipeline.
+
+[automaton]
+name = "TestWorkflow"
+states = ["Pending", "Running", "Passed", "Failed"]
+initial = "Pending"
+
+# --- Actions: Test Lifecycle ---
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Pending"]
+to = "Running"
+hint = "Start executing the test suite."
+effect = [{ type = "emit_event", event = "TestsStarted" }]
+
+[[action]]
+name = "RecordPass"
+kind = "input"
+from = ["Running"]
+to = "Passed"
+params = ["test_count", "coverage"]
+hint = "Record a passing test run with count and coverage metrics."
+effect = [{ type = "emit_event", event = "TestsPassed" }]
+
+[[action]]
+name = "RecordFail"
+kind = "input"
+from = ["Running"]
+to = "Failed"
+params = ["failures", "error_log"]
+hint = "Record a failed test run with failure details."
+effect = [{ type = "emit_event", event = "TestsFailed" }]
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "PassedIsFinal"
+when = ["Passed"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "FailedIsFinal"
+when = ["Failed"]
+assert = "no_further_transitions"

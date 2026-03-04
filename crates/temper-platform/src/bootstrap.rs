@@ -47,6 +47,21 @@ const SYSTEM_SPECS: &[(&str, &str)] = &[
     ("GovernanceDecision", GOVERNANCE_DECISION_IOA),
 ];
 
+// Embed agent specs at compile time.
+const AGENT_IOA: &str = include_str!("specs/agent.ioa.toml");
+const PLAN_IOA: &str = include_str!("specs/plan.ioa.toml");
+const TASK_IOA: &str = include_str!("specs/task.ioa.toml");
+const TOOL_CALL_IOA: &str = include_str!("specs/tool_call.ioa.toml");
+const AGENT_CSDL: &str = include_str!("specs/agent_model.csdl.xml");
+
+/// Agent entity specs as (entity_type, ioa_source) pairs.
+const AGENT_SPECS: &[(&str, &str)] = &[
+    ("Agent", AGENT_IOA),
+    ("Plan", PLAN_IOA),
+    ("Task", TASK_IOA),
+    ("ToolCall", TOOL_CALL_IOA),
+];
+
 /// Bootstrap the system tenant.
 ///
 /// 1. Validates all system specs parse correctly
@@ -114,6 +129,73 @@ pub fn bootstrap_system_tenant(state: &PlatformState) {
     tracing::info!(
         "temper-system tenant bootstrapped: {:?}",
         SYSTEM_SPECS.iter().map(|(t, _)| *t).collect::<Vec<_>>()
+    );
+}
+
+/// Bootstrap agent entity specs (Agent, Plan, Task, ToolCall) for a tenant.
+///
+/// Parses and verifies the agent IOA specs, then registers them under the
+/// given tenant. These are platform infrastructure specs that power the
+/// agent runtime — they auto-load so users don't need `--app` flags.
+///
+/// Panics if agent specs fail to parse or verify (fatal startup error).
+pub fn bootstrap_agent_specs(state: &PlatformState, tenant: &str) {
+    tracing::info!(
+        "Bootstrapping agent specs for tenant '{}' with {} entities",
+        tenant,
+        AGENT_SPECS.len()
+    );
+
+    // Validate all agent specs parse.
+    for (entity_type, ioa_source) in AGENT_SPECS {
+        automaton::parse_automaton(ioa_source)
+            .unwrap_or_else(|e| panic!("Agent spec {entity_type} failed to parse: {e}"));
+    }
+
+    // Run verification cascade on each.
+    for (entity_type, ioa_source) in AGENT_SPECS {
+        let cascade = VerificationCascade::from_ioa(ioa_source)
+            .with_sim_seeds(3)
+            .with_prop_test_cases(50);
+        let result = cascade.run();
+        assert!(
+            result.all_passed,
+            "Agent spec {entity_type} failed verification cascade"
+        );
+    }
+
+    // Parse agent CSDL.
+    let csdl = parse_csdl(AGENT_CSDL).expect("Agent CSDL failed to parse");
+
+    // Register agent specs under the given tenant.
+    let tenant_id = TenantId::new(tenant);
+    {
+        let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
+        registry.register_tenant(tenant_id.clone(), csdl, AGENT_CSDL.to_string(), AGENT_SPECS);
+        // Mark all agent entities as pre-verified.
+        let now = temper_runtime::scheduler::sim_now().to_rfc3339();
+        for (entity_type, _) in AGENT_SPECS {
+            registry.set_verification_status(
+                &tenant_id,
+                entity_type,
+                VerificationStatus::Completed(EntityVerificationResult {
+                    all_passed: true,
+                    levels: vec![EntityLevelSummary {
+                        level: "Bootstrap".to_string(),
+                        passed: true,
+                        summary: "Pre-verified at bootstrap".to_string(),
+                        details: None,
+                    }],
+                    verified_at: now.clone(),
+                }),
+            );
+        }
+    }
+
+    tracing::info!(
+        "Agent specs bootstrapped for tenant '{}': {:?}",
+        tenant,
+        AGENT_SPECS.iter().map(|(t, _)| *t).collect::<Vec<_>>()
     );
 }
 
@@ -272,5 +354,75 @@ mod tests {
         assert!(registry.get_table(&tenant, "Insight").is_some());
         assert!(registry.get_table(&tenant, "FeatureRequest").is_some());
         assert!(registry.get_table(&tenant, "GovernanceDecision").is_some());
+    }
+
+    // ── Agent Spec Tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_agent_specs_parse() {
+        for (entity_type, ioa_source) in AGENT_SPECS {
+            let result = automaton::parse_automaton(ioa_source);
+            assert!(
+                result.is_ok(),
+                "Agent spec {} failed to parse: {:?}",
+                entity_type,
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_csdl_parses() {
+        let result = parse_csdl(AGENT_CSDL);
+        assert!(
+            result.is_ok(),
+            "Agent CSDL failed to parse: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_agent_spec_entity_names() {
+        for (entity_type, ioa_source) in AGENT_SPECS {
+            let automaton = automaton::parse_automaton(ioa_source).unwrap();
+            assert_eq!(
+                automaton.automaton.name, *entity_type,
+                "Agent spec name mismatch: expected {entity_type}, got {}",
+                automaton.automaton.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_specs_verify() {
+        for (entity_type, ioa_source) in AGENT_SPECS {
+            let cascade = VerificationCascade::from_ioa(ioa_source)
+                .with_sim_seeds(3)
+                .with_prop_test_cases(50);
+            let result = cascade.run();
+            assert!(
+                result.all_passed,
+                "Agent spec {} failed verification",
+                entity_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_agent_specs_registers_tenant() {
+        let state = PlatformState::new(None);
+        bootstrap_agent_specs(&state, "test-agent");
+        let registry = state.registry.read().unwrap();
+        let tenant = TenantId::new("test-agent");
+        assert!(registry.get_tenant(&tenant).is_some());
+        assert!(registry.get_table(&tenant, "Agent").is_some());
+        assert!(registry.get_table(&tenant, "Plan").is_some());
+        assert!(registry.get_table(&tenant, "Task").is_some());
+        assert!(registry.get_table(&tenant, "ToolCall").is_some());
+    }
+
+    #[test]
+    fn test_agent_specs_count() {
+        assert_eq!(AGENT_SPECS.len(), 4);
     }
 }

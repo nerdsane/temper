@@ -6,9 +6,9 @@
 - Related:
   - ADR-0015: Agent OS cross-entity primitives (spawn, cross-entity guards)
   - ADR-0020: `temper agent` CLI command (agent loop foundation)
-  - `packages/temper-pi/demo/specs/Agent.ioa.toml`
-  - `packages/temper-pi/demo/specs/Plan.ioa.toml`
-  - `packages/temper-pi/demo/specs/Task.ioa.toml`
+  - `crates/temper-platform/src/specs/agent.ioa.toml`
+  - `crates/temper-platform/src/specs/plan.ioa.toml`
+  - `crates/temper-platform/src/specs/task.ioa.toml`
   - `crates/temper-cli/src/agent/mod.rs`
   - `crates/temper-server/src/state/dispatch/cross_entity.rs`
 
