@@ -8,11 +8,11 @@
   - ADR-0020: Temper agent CLI command
   - `crates/temper-cli/src/agent/mod.rs` (inline TemperClient to extract)
   - `crates/temper-mcp/` (dispatch surface the SDK mirrors)
-  - `packages/temper-pi/` (TypeScript SDK home)
+  - `packages/temper-sdk-ts/` (TypeScript SDK home)
 
 ## Context
 
-The `temper agent` CLI command (ADR-0020) contains an inline `TemperClient` struct that wraps HTTP calls to the Temper server. This client is useful beyond the CLI — any Rust code that interacts with Temper entities needs the same HTTP surface. Similarly, the TypeScript `temper-pi` package has REPL and agent tooling but no general-purpose client for entity CRUD, governance, and SSE event streaming.
+The `temper agent` CLI command (ADR-0020) contains an inline `TemperClient` struct that wraps HTTP calls to the Temper server. This client is useful beyond the CLI — any Rust code that interacts with Temper entities needs the same HTTP surface. Similarly, the TypeScript SDK (`packages/temper-sdk-ts/`) needs a general-purpose client for entity CRUD, governance, and SSE event streaming.
 
 Duplicating HTTP client logic across consumers leads to drift and maintenance burden. A thin, dedicated SDK in both Rust and TypeScript gives all consumers a single, tested client.
 
@@ -37,11 +37,11 @@ The CLI's inline client is replaced with `use temper_sdk::TemperClient`.
 
 **Why this approach**: Extraction, not invention. The API surface already works in production via `temper agent`. The SDK just makes it reusable.
 
-### Sub-Decision 3: TypeScript SDK in temper-pi
+### Sub-Decision 3: TypeScript SDK in temper-sdk-ts
 
-A new `TemperClient` class in `packages/temper-pi/src/client.ts`, re-exported from `index.ts`. Uses `fetch` (no extra dependencies). Includes `AsyncGenerator`-based SSE support via `watchEvents()`.
+A new `TemperClient` class in `packages/temper-sdk-ts/src/client.ts`, re-exported from `index.ts`. Uses `fetch` (no extra dependencies). Includes `AsyncGenerator`-based SSE support via `watchEvents()`.
 
-**Why this approach**: The temper-pi package already hosts Temper's TypeScript tooling. Adding the client there avoids a new package and leverages existing build/test infrastructure.
+**Why this approach**: A standalone `@temper/sdk` package keeps the SDK independent of any specific agent framework. It has zero runtime dependencies — just `fetch`.
 
 ### Sub-Decision 4: SSE Subscription Support
 
@@ -85,4 +85,4 @@ Rust uses `ClientBuilder` with `base_url()`, `tenant()`, `principal()` methods. 
 
 1. **Generate SDK from OpenAPI spec** — The server does not currently emit an OpenAPI spec. Building one just for SDK generation is premature.
 2. **Keep client inline in CLI** — Works for one consumer but forces duplication when the agent executor binary needs the same client.
-3. **Separate npm package for TypeScript SDK** — Adds package management overhead for a single class. temper-pi is the natural home.
+3. **Keep TypeScript SDK in temper-pi** — temper-pi was removed as the Pi framework is no longer used. A standalone `@temper/sdk` package is cleaner.
