@@ -18,7 +18,7 @@ use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy, parse_cross
 use temper_spec::csdl::CsdlDocument;
 
 use crate::reaction::ReactionRegistry;
-use crate::reaction::types::ReactionRule;
+use crate::reaction::types::{ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver};
 
 /// Verification status for a single entity type.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -483,12 +483,20 @@ impl SpecRegistry {
         )
     }
 
-    /// Build a [`ReactionRegistry`] from all tenants' reaction rules.
+    /// Build a [`ReactionRegistry`] from all tenants' reaction rules,
+    /// including synthesized rules from `[[agent_trigger]]` sections.
     pub fn build_reaction_registry(&self) -> ReactionRegistry {
         let mut registry = ReactionRegistry::new();
         for (tenant, config) in &self.tenants {
-            if !config.reactions.is_empty() {
-                registry.register_tenant_rules(tenant.clone(), config.reactions.clone());
+            let mut rules = config.reactions.clone();
+            // Synthesize reaction rules from agent triggers in each entity spec.
+            for (entity_type, spec) in &config.entities {
+                for trigger in &spec.automaton.agent_triggers {
+                    rules.extend(synthesize_agent_trigger_reactions(entity_type, trigger));
+                }
+            }
+            if !rules.is_empty() {
+                registry.register_tenant_rules(tenant.clone(), rules);
             }
         }
         registry
@@ -605,6 +613,68 @@ fn build_webhook_routes(
         }
     }
     routes
+}
+
+/// Synthesize reaction rules from an `[[agent_trigger]]` declaration.
+///
+/// Each trigger produces two chained reactions:
+/// 1. Source entity action → Agent.Assign (CreateIfMissing resolver creates the Agent)
+/// 2. Agent.Assign → Agent.Start (SameId resolver starts the just-assigned Agent)
+///
+/// The executor's SSE loop picks up the spawned agent automatically.
+fn synthesize_agent_trigger_reactions(
+    entity_type: &str,
+    trigger: &temper_spec::automaton::AgentTrigger,
+) -> Vec<ReactionRule> {
+    let model = trigger
+        .agent_model
+        .clone()
+        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+    let agent_type_id = trigger.agent_type_id.clone().unwrap_or_default();
+
+    let mut params = serde_json::json!({
+        "role": trigger.agent_role,
+        "goal": trigger.agent_goal,
+        "model": model,
+    });
+    if !agent_type_id.is_empty() {
+        params["agent_type_id"] = serde_json::Value::String(agent_type_id);
+    }
+
+    vec![
+        // Rule 1: Source action → create + assign Agent
+        ReactionRule {
+            name: format!("{}:agent_trigger:{}", entity_type, trigger.name),
+            when: ReactionTrigger {
+                entity_type: entity_type.to_string(),
+                action: Some(trigger.on_action.clone()),
+                to_state: trigger.to_state.clone(),
+            },
+            then: ReactionTarget {
+                entity_type: "Agent".to_string(),
+                action: "Assign".to_string(),
+                params,
+            },
+            resolve_target: TargetResolver::CreateIfMissing {
+                id_field: "id".to_string(),
+            },
+        },
+        // Rule 2: Agent.Assign → Agent.Start (auto-start the assigned agent)
+        ReactionRule {
+            name: format!("{}:agent_trigger:{}:start", entity_type, trigger.name),
+            when: ReactionTrigger {
+                entity_type: "Agent".to_string(),
+                action: Some("Assign".to_string()),
+                to_state: Some("Assigned".to_string()),
+            },
+            then: ReactionTarget {
+                entity_type: "Agent".to_string(),
+                action: "Start".to_string(),
+                params: serde_json::json!({}),
+            },
+            resolve_target: TargetResolver::SameId,
+        },
+    ]
 }
 
 fn build_relation_graph(

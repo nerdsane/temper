@@ -62,6 +62,11 @@ name = "child_agent_ids"
 type = "list"
 initial = "[]"
 
+[[state]]
+name = "agent_type_id"
+type = "string"
+initial = ""
+
 # --- Actions: Agent Lifecycle ---
 
 [[action]]
@@ -69,8 +74,8 @@ name = "Assign"
 kind = "input"
 from = ["Idle"]
 to = "Assigned"
-params = ["role", "goal", "model"]
-hint = "Assign a role, goal, and model to this agent."
+params = ["role", "goal", "model", "agent_type_id"]
+hint = "Assign a role, goal, and model to this agent. Optionally reference an AgentType."
 
 [[action]]
 name = "Start"
@@ -105,12 +110,12 @@ hint = "Blocking issue resolved (decision approved), agent resumes work."
 name = "SpawnChild"
 kind = "input"
 from = ["Working"]
-params = ["child_role", "child_goal", "child_model"]
+params = ["role", "goal", "model", "agent_type_id"]
 hint = "Spawn a child agent to handle a delegated sub-task."
 effect = [
-  { type = "spawn_entity", entity_type = "Agent", entity_id_source = "{uuid}", initial_action = "Assign", store_id_in = "last_child_id" },
-  { type = "list_append", list = "child_agent_ids" },
-  { type = "emit_event", event = "ChildSpawned" }
+  { type = "spawn", entity_type = "Agent", entity_id_source = "{uuid}", initial_action = "Assign", store_id_in = "last_child_id" },
+  { type = "list_append", var = "child_agent_ids" },
+  { type = "emit", event = "ChildSpawned" }
 ]
 
 [[action]]

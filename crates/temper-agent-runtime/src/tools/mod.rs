@@ -56,4 +56,10 @@ pub trait ToolRegistry: Send + Sync {
 
     /// Map a tool invocation to a Cedar resource for authorization.
     fn to_cedar(&self, name: &str, input: &Value) -> CedarMapping;
+
+    /// Set the agent ID for this tool registry.
+    ///
+    /// Called by the runner to propagate the current agent's identity so
+    /// tools like `spawn_child_agent` can reference the parent agent.
+    fn set_agent_id(&self, _id: &str) {}
 }

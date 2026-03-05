@@ -33,6 +33,9 @@ pub struct Automaton {
     /// Context entity declarations for Cedar authorization.
     #[serde(default, rename = "context_entity")]
     pub context_entities: Vec<ContextEntityDecl>,
+    /// Agent trigger declarations (auto-spawn agents on state transitions).
+    #[serde(default, rename = "agent_trigger")]
+    pub agent_triggers: Vec<AgentTrigger>,
 }
 
 /// Automaton metadata.
@@ -291,4 +294,32 @@ pub struct ContextEntityDecl {
     pub entity_type: String,
     /// Field on this entity holding the target entity's ID.
     pub id_field: String,
+}
+
+/// An agent trigger declaration.
+///
+/// When the specified action fires (optionally reaching a target state),
+/// an Agent entity is auto-spawned and assigned the given role, goal, and
+/// model. At registration time, these are synthesized into ReactionRules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTrigger {
+    /// Trigger name (e.g., "test_on_ready").
+    pub name: String,
+    /// Action name that triggers agent spawning (e.g., "MarkReady").
+    pub on_action: String,
+    /// Optional target state filter (e.g., "Ready"). If set, the trigger
+    /// only fires when the action transitions to this state.
+    #[serde(default)]
+    pub to_state: Option<String>,
+    /// Role for the spawned agent.
+    pub agent_role: String,
+    /// Goal template for the spawned agent. May contain `${field}` placeholders
+    /// that are resolved from the source entity's fields.
+    pub agent_goal: String,
+    /// Optional LLM model override for the spawned agent.
+    #[serde(default)]
+    pub agent_model: Option<String>,
+    /// Optional AgentType ID for the spawned agent.
+    #[serde(default)]
+    pub agent_type_id: Option<String>,
 }

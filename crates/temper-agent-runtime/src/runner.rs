@@ -1,13 +1,18 @@
 //! Core agent execution loop.
 //!
-//! [`AgentRunner`] orchestrates the full agent lifecycle:
-//! 1. Create Agent entity, Assign, Start
-//! 2. Create Plan, Activate
-//! 3. LLM decomposes goal into tasks (Plan.AddTask)
-//! 4. For each task: Claim, StartWork, tool-call loop, SubmitForReview, Approve
-//! 5. Plan.Complete, Agent.Complete
+//! [`AgentRunner`] wraps an LLM, a tool registry, and a Temper client.
+//! The public API is three methods:
+//!
+//! - [`AgentRunner::create_agent`] — create + start an Agent entity
+//! - [`AgentRunner::send`] — push a message, run the tool-call loop, return
+//! - [`AgentRunner::complete_agent`] — transition to terminal state
+//!
+//! Goal mode and interactive mode are the same agent — one sends a goal
+//! once, the other sends user messages in a REPL loop. Both use the same
+//! sandbox, same system prompt, same code-mode capabilities.
 
 use std::io::Write;
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde_json::json;
@@ -16,6 +21,31 @@ use tracing::{info, warn};
 
 use crate::providers::{ContentBlock, LlmProvider, Message};
 use crate::tools::{ToolRegistry, ToolResult};
+
+/// Events emitted by the agent runner for UI rendering.
+///
+/// The runtime stays UI-free — it fires events and the CLI renders them.
+#[derive(Debug, Clone)]
+pub enum AgentEvent {
+    /// LLM call started (show thinking spinner).
+    LlmCallStart,
+    /// LLM call ended with full response text.
+    LlmCallEnd { full_text: String },
+    /// Tool execution started.
+    ToolStart { name: String },
+    /// Tool execution ended.
+    ToolEnd {
+        name: String,
+        success: bool,
+        duration_ms: u64,
+    },
+    /// Governance allowed — Cedar policy permitted the action.
+    GovernanceAllowed { action: String, resource: String },
+    /// Governance wait — human approval needed.
+    GovernanceWait { decision_id: String, action: String },
+    /// Governance resolved.
+    GovernanceResolved { approved: bool },
+}
 
 /// Core agent execution runner.
 ///
@@ -27,10 +57,14 @@ pub struct AgentRunner {
     tools: Box<dyn ToolRegistry>,
     /// Shared handle to set the agent principal ID on the sandbox.
     principal_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Callback for streaming text deltas from the LLM.
+    on_delta: Arc<dyn Fn(String) + Send + Sync>,
+    /// Callback for agent lifecycle events (tool start/end, governance, etc.).
+    on_event: Option<Arc<dyn Fn(AgentEvent) + Send + Sync>>,
 }
 
 impl AgentRunner {
-    /// Create a new agent runner.
+    /// Create a new agent runner with default (stdout) streaming.
     pub fn new(
         client: TemperClient,
         provider: Box<dyn LlmProvider>,
@@ -42,64 +76,127 @@ impl AgentRunner {
             provider,
             tools,
             principal_id,
+            on_delta: Arc::new(|text| {
+                print!("{text}");
+                std::io::stdout().flush().ok();
+            }),
+            on_event: None,
         }
     }
 
-    /// Set the agent principal ID (propagates to the sandbox).
+    /// Set the streaming text delta callback.
+    pub fn with_on_delta(mut self, f: Arc<dyn Fn(String) + Send + Sync>) -> Self {
+        self.on_delta = f;
+        self
+    }
+
+    /// Set the event callback for UI rendering.
+    pub fn with_on_event(mut self, f: Arc<dyn Fn(AgentEvent) + Send + Sync>) -> Self {
+        self.on_event = Some(f);
+        self
+    }
+
+    /// Emit an agent event if a handler is registered.
+    fn emit(&self, event: AgentEvent) {
+        if let Some(ref handler) = self.on_event {
+            handler(event);
+        }
+    }
+
+    /// Set the agent principal ID (propagates to the sandbox and tools).
     fn bind_agent_id(&self, agent_id: &str) {
         *self.principal_id.lock().unwrap() = Some(agent_id.to_string()); // ci-ok: infallible lock
+        self.tools.set_agent_id(agent_id);
     }
 
-    /// Run a new agent with the given goal and role.
+    /// Create an Agent entity and transition it to Working.
     ///
-    /// Creates the Agent entity, plans tasks via LLM, executes each task,
-    /// and returns the agent ID on completion.
-    pub async fn run(&self, goal: &str, role: &str) -> Result<String> {
-        let model = "claude-sonnet-4-6";
+    /// Returns the agent ID. Both goal mode and interactive mode use this
+    /// — there is no separate "interactive agent" concept.
+    pub async fn create_agent(
+        &self,
+        role: &str,
+        goal: &str,
+        model: &str,
+    ) -> Result<String> {
         let agent_id = uuid::Uuid::now_v7().to_string();
-
         info!(agent_id = %agent_id, "Creating agent");
-        self.create_agent(&agent_id, role, goal, model).await?;
-
-        self.execute_agent_loop(&agent_id, goal, role, model)
+        self.client
+            .create("Agents", json!({ "id": &agent_id }))
             .await?;
-
+        self.client
+            .action(
+                "Agents",
+                &agent_id,
+                "Assign",
+                json!({ "role": role, "goal": goal, "model": model }),
+            )
+            .await?;
+        self.client
+            .action("Agents", &agent_id, "Start", json!({}))
+            .await?;
+        self.bind_agent_id(&agent_id);
         Ok(agent_id)
     }
 
-    /// Run a new agent with a specific model.
+    /// Send a message and run the tool-call loop (interactive mode).
     ///
-    /// Like [`run`](Self::run) but allows specifying the LLM model name.
-    pub async fn run_with_model(&self, goal: &str, role: &str, model: &str) -> Result<String> {
-        let agent_id = uuid::Uuid::now_v7().to_string();
+    /// In interactive mode, the loop exits when the LLM produces a text
+    /// response without tool calls — that's the agent's reply to the user.
+    pub async fn send(
+        &self,
+        agent_id: &str,
+        system_prompt: &str,
+        message: &str,
+        messages: &mut Vec<Message>,
+        max_turns: usize,
+    ) -> Result<String> {
+        messages.push(Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: message.to_string(),
+            }],
+        });
+        self.run_loop(agent_id, system_prompt, messages, max_turns, false)
+            .await
+    }
 
-        info!(agent_id = %agent_id, "Creating agent");
-        self.create_agent(&agent_id, role, goal, model).await?;
-
-        self.execute_agent_loop(&agent_id, goal, role, model)
-            .await?;
-
-        Ok(agent_id)
+    /// Send a goal and run the tool-call loop (autonomous mode).
+    ///
+    /// In autonomous mode, the loop does NOT exit on text-only responses.
+    /// The agent must exhaust its turn budget or the caller decides when
+    /// to stop. Text-only responses get a continuation prompt injected
+    /// so the agent keeps working.
+    pub async fn send_autonomous(
+        &self,
+        agent_id: &str,
+        system_prompt: &str,
+        goal: &str,
+        messages: &mut Vec<Message>,
+        max_turns: usize,
+    ) -> Result<String> {
+        messages.push(Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: goal.to_string(),
+            }],
+        });
+        self.run_loop(agent_id, system_prompt, messages, max_turns, true)
+            .await
     }
 
     /// Resume an existing agent by ID.
     ///
-    /// Reads the agent's current state and continues execution from where
-    /// it left off.
-    pub async fn resume(&self, agent_id: &str) -> Result<()> {
+    /// Reads the agent's current state and continues the tool-call loop
+    /// from where it left off.
+    pub async fn resume(&self, agent_id: &str, system_prompt: &str) -> Result<()> {
         info!(agent_id = %agent_id, "Resuming agent");
 
         let agent = self.client.get("Agents", agent_id).await?;
-        let status = agent.get("Status").and_then(|v| v.as_str()).unwrap_or("");
-        let role = agent
-            .get("role")
+        let status = agent.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let goal = entity_field(&agent, "goal")
             .and_then(|v| v.as_str())
-            .unwrap_or("assistant");
-        let goal = agent.get("goal").and_then(|v| v.as_str()).unwrap_or("");
-        let model = agent
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("claude-sonnet-4-6");
+            .unwrap_or("");
 
         info!(status = %status, "Agent status");
 
@@ -109,49 +206,99 @@ impl AgentRunner {
         }
 
         self.bind_agent_id(agent_id);
-        self.execute_agent_loop(agent_id, goal, role, model).await
+        let mut messages = Vec::new();
+        let result = self
+            .send_autonomous(agent_id, system_prompt, goal, &mut messages, 200)
+            .await?;
+
+        let truncated: String = result.chars().take(2000).collect();
+        self.complete_with_retry(agent_id, &truncated).await;
+        Ok(())
     }
 
     /// Complete an agent (transition to terminal state).
-    pub async fn complete_agent(&self, agent_id: &str) -> Result<()> {
+    pub async fn complete_agent(&self, agent_id: &str, result: &str) -> Result<()> {
         self.client
             .action(
                 "Agents",
                 agent_id,
                 "Complete",
-                json!({ "result": "interactive session ended" }),
+                json!({ "result": result }),
             )
             .await?;
         Ok(())
+    }
+
+    /// Complete the agent, retrying if cross-entity guard blocks (children not finished).
+    ///
+    /// The Agent.Complete action has a cross-entity guard requiring all child agents
+    /// to be in Completed or Failed state. If children are still running, this retries
+    /// with 5-second intervals up to a budget of 60 retries (5 minutes).
+    async fn complete_with_retry(&self, agent_id: &str, result: &str) {
+        const MAX_RETRIES: u32 = 60;
+        const RETRY_INTERVAL_SECS: u64 = 5;
+
+        for attempt in 0..=MAX_RETRIES {
+            match self
+                .client
+                .action(
+                    "Agents",
+                    agent_id,
+                    "Complete",
+                    json!({ "result": result }),
+                )
+                .await
+            {
+                Ok(_) => {
+                    if attempt > 0 {
+                        info!(
+                            agent_id = %agent_id,
+                            attempts = attempt + 1,
+                            "Agent.Complete succeeded after retries"
+                        );
+                    }
+                    return;
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+                    let is_guard_failure = err_str.contains("guard")
+                        || err_str.contains("cross_entity")
+                        || err_str.contains("precondition");
+                    if !is_guard_failure || attempt == MAX_RETRIES {
+                        warn!(
+                            agent_id = %agent_id,
+                            attempt = attempt + 1,
+                            "Agent.Complete failed: {e}"
+                        );
+                        return;
+                    }
+                    info!(
+                        agent_id = %agent_id,
+                        attempt = attempt + 1,
+                        "Agent.Complete blocked (children not finished), retrying in {RETRY_INTERVAL_SECS}s"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(RETRY_INTERVAL_SECS)).await;
+                }
+            }
+        }
     }
 
     // ── Internal helpers ────────────────────────────────────────────────
 
-    /// Create an Agent entity and transition it to Working.
-    async fn create_agent(&self, id: &str, role: &str, goal: &str, model: &str) -> Result<()> {
-        self.client.create("Agents", json!({ "id": id })).await?;
-        self.client
-            .action(
-                "Agents",
-                id,
-                "Assign",
-                json!({ "role": role, "goal": goal, "model": model }),
-            )
-            .await?;
-        self.client.action("Agents", id, "Start", json!({})).await?;
-        self.bind_agent_id(id);
-        Ok(())
-    }
-
-    /// Execute the full agent loop: plan, execute tasks, complete.
-    async fn execute_agent_loop(
+    /// Run the LLM tool-call loop.
+    ///
+    /// Sends messages to the LLM with available tools. When the LLM calls
+    /// tools, executes them through Cedar authorization and returns results.
+    /// Continues until the LLM produces a text response (end_turn) or the
+    /// turn budget is exhausted.
+    async fn run_loop(
         &self,
         agent_id: &str,
-        goal: &str,
-        role: &str,
-        _model: &str,
-    ) -> Result<()> {
-        // Build tool schemas for the LLM.
+        system_prompt: &str,
+        messages: &mut Vec<Message>,
+        max_turns: usize,
+        autonomous: bool,
+    ) -> Result<String> {
         let tool_defs = self.tools.list_tools();
         let tool_schemas: Vec<serde_json::Value> = tool_defs
             .iter()
@@ -163,284 +310,52 @@ impl AgentRunner {
                 })
             })
             .collect();
-
-        // ── Phase 1: Planning ─────────────────────────────────────────
-        info!("Phase 1: Planning");
-        let plan_id = self.create_plan(goal).await?;
-        info!(plan_id = %plan_id, "Plan created");
-
-        // Checkpoint plan_id on the agent.
-        self.checkpoint(agent_id, &format!("{{\"plan_id\":\"{plan_id}\"}}"))
-            .await;
-
-        let tasks = self.decompose_goal(goal, role, &tool_schemas).await?;
-        info!(count = tasks.len(), "Tasks planned");
-
-        // Add tasks to the plan.
-        for task in &tasks {
-            let title = task
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Untitled");
-            let description = task
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if let Err(e) = self
-                .client
-                .action(
-                    "Plans",
-                    &plan_id,
-                    "AddTask",
-                    json!({ "title": title, "description": description }),
-                )
-                .await
-            {
-                warn!("AddTask failed: {e}");
-            }
-        }
-
-        // Brief pause for spawn dispatch.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        // Query spawned tasks.
-        let filter = format!("plan_id eq '{plan_id}'");
-        let spawned_tasks = self
-            .client
-            .list_filtered("Tasks", &filter)
-            .await
-            .unwrap_or_default();
-        info!(count = spawned_tasks.len(), "Spawned tasks");
-
-        // ── Phase 2: Execution ────────────────────────────────────────
-        info!("Phase 2: Execution");
-        let max_turns_per_task = 30;
-
-        for (idx, task_entity) in spawned_tasks.iter().enumerate() {
-            let task_id = task_entity.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let task_title = task_entity
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Untitled");
-            let task_desc = task_entity
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            if task_id.is_empty() {
-                continue;
-            }
-
-            info!(
-                task = idx + 1,
-                total = spawned_tasks.len(),
-                title = task_title,
-                "Executing task"
-            );
-
-            // Claim the task.
-            if let Err(e) = self
-                .client
-                .action("Tasks", task_id, "Claim", json!({ "agent_id": agent_id }))
-                .await
-            {
-                warn!("Task.Claim failed: {e}");
-                continue;
-            }
-
-            // Start work.
-            if let Err(e) = self
-                .client
-                .action("Tasks", task_id, "StartWork", json!({}))
-                .await
-            {
-                warn!("Task.StartWork failed: {e}");
-                continue;
-            }
-
-            // Build task-scoped system prompt.
-            let task_prompt = format!(
-                "You are a Temper agent with role '{role}'. \
-                 You are working on task: {task_title}\n\
-                 Task description: {task_desc}\n\n\
-                 Overall goal: {goal}\n\n\
-                 You have tools to interact with the filesystem, execute shell commands, \
-                 and manage Temper entities. \
-                 Focus on completing this specific task. When done, provide a summary of what you accomplished."
-            );
-
-            let mut task_messages = vec![Message {
-                role: "user".to_string(),
-                content: vec![ContentBlock::Text {
-                    text: format!("Work on this task: {task_title}\n\nDescription: {task_desc}"),
-                }],
-            }];
-
-            let deliverable = self
-                .run_task_loop(
-                    agent_id,
-                    &task_prompt,
-                    &tool_schemas,
-                    &mut task_messages,
-                    max_turns_per_task,
-                )
-                .await?;
-
-            // Submit for review.
-            let truncated_deliverable: String = deliverable.chars().take(2000).collect();
-            if let Err(e) = self
-                .client
-                .action(
-                    "Tasks",
-                    task_id,
-                    "SubmitForReview",
-                    json!({ "deliverable": truncated_deliverable }),
-                )
-                .await
-            {
-                warn!("Task.SubmitForReview failed: {e}");
-            }
-
-            // Auto-approve.
-            if let Err(e) = self
-                .client
-                .action("Tasks", task_id, "Approve", json!({}))
-                .await
-            {
-                warn!("Task.Approve failed: {e}");
-            }
-
-            info!(title = task_title, "Task completed");
-        }
-
-        // ── Completion ────────────────────────────────────────────────
-        let summary = format!("Completed {} tasks for goal: {goal}", spawned_tasks.len());
-        if let Err(e) = self
-            .client
-            .action("Plans", &plan_id, "Complete", json!({ "summary": summary }))
-            .await
-        {
-            warn!("Plan.Complete failed: {e}");
-        }
-
-        let result_text = format!(
-            "Plan {plan_id} completed with {} tasks.",
-            spawned_tasks.len()
-        );
-        if let Err(e) = self
-            .client
-            .action(
-                "Agents",
-                agent_id,
-                "Complete",
-                json!({ "result": result_text }),
-            )
-            .await
-        {
-            warn!("Agent.Complete failed: {e}");
-        }
-
-        info!(plan_id = %plan_id, "Agent completed");
-        Ok(())
-    }
-
-    /// Create a Plan entity and activate it.
-    async fn create_plan(&self, description: &str) -> Result<String> {
-        let plan_id = uuid::Uuid::now_v7().to_string();
-        self.client
-            .create("Plans", json!({ "id": plan_id }))
-            .await?;
-        self.client
-            .action(
-                "Plans",
-                &plan_id,
-                "Activate",
-                json!({ "description": description }),
-            )
-            .await?;
-        Ok(plan_id)
-    }
-
-    /// Ask the LLM to decompose a goal into tasks.
-    async fn decompose_goal(
-        &self,
-        goal: &str,
-        role: &str,
-        _tool_schemas: &[serde_json::Value],
-    ) -> Result<Vec<serde_json::Value>> {
-        let planning_prompt = format!(
-            "You are a Temper agent with role '{role}'. Your goal: {goal}\n\n\
-             Decompose this goal into a list of discrete tasks. \
-             Respond with ONLY a JSON array of objects, each with \"title\" and \"description\" fields. \
-             Example: [{{\"title\": \"Set up project\", \"description\": \"Initialize the project structure\"}}]\n\n\
-             Keep the list focused and actionable. Each task should be a meaningful unit of work."
-        );
-
-        let messages = vec![Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Text {
-                text: format!("Decompose this goal into tasks: {goal}"),
-            }],
-        }];
-
-        let response = self
-            .provider
-            .send_streaming(
-                &planning_prompt,
-                &messages,
-                &[],
-                Box::new(|text| {
-                    print!("{text}");
-                    std::io::stdout().flush().ok();
-                }),
-            )
-            .await?;
-
-        let plan_text = response
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
-
-        let json_text = plan_text
-            .trim()
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
-
-        let tasks: Vec<serde_json::Value> = serde_json::from_str(json_text)
-            .unwrap_or_else(|_| vec![json!({ "title": goal, "description": goal })]);
-
-        Ok(tasks)
-    }
-
-    /// Run the LLM tool-call loop for a single task.
-    async fn run_task_loop(
-        &self,
-        agent_id: &str,
-        system_prompt: &str,
-        tool_schemas: &[serde_json::Value],
-        messages: &mut Vec<Message>,
-        max_turns: usize,
-    ) -> Result<String> {
         for turn in 0..max_turns {
+            self.emit(AgentEvent::LlmCallStart);
+            let on_delta = self.on_delta.clone();
             let response = self
                 .provider
                 .send_streaming(
                     system_prompt,
                     messages,
-                    tool_schemas,
-                    Box::new(|text| {
-                        print!("{text}");
-                        std::io::stdout().flush().ok();
-                    }),
+                    &tool_schemas,
+                    Box::new(move |text| on_delta(text)),
                 )
                 .await?;
+
+            info!(
+                stop_reason = %response.stop_reason,
+                content_blocks = response.content.len(),
+                "LLM response received"
+            );
+            for (i, block) in response.content.iter().enumerate() {
+                match block {
+                    ContentBlock::Text { text } => {
+                        info!(block = i, len = text.len(), "  text block");
+                    }
+                    ContentBlock::ToolUse { id, name, .. } => {
+                        info!(block = i, tool = %name, id = %id, "  tool_use block");
+                    }
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        info!(block = i, id = %tool_use_id, "  tool_result block");
+                    }
+                }
+            }
+
+            // Handle empty LLM response — inject continuation prompt instead of exiting.
+            if response.content.is_empty() {
+                warn!("LLM returned empty content array — injecting continuation");
+                self.emit(AgentEvent::LlmCallEnd {
+                    full_text: String::new(),
+                });
+                messages.push(Message {
+                    role: "user".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "Continue. Use execute_code to proceed with the task.".to_string(),
+                    }],
+                });
+                continue;
+            }
 
             messages.push(Message {
                 role: "assistant".to_string(),
@@ -458,7 +373,7 @@ impl AgentRunner {
                 })
                 .collect();
 
-            if tool_uses.is_empty() || response.stop_reason == "end_turn" {
+            if tool_uses.is_empty() {
                 let result_text = response
                     .content
                     .iter()
@@ -469,6 +384,24 @@ impl AgentRunner {
                     .collect::<Vec<_>>()
                     .join("\n");
 
+                self.emit(AgentEvent::LlmCallEnd {
+                    full_text: result_text.clone(),
+                });
+
+                if autonomous {
+                    // In autonomous mode, text-only is not an exit — keep working.
+                    info!("Autonomous mode: text-only response, injecting continuation");
+                    messages.push(Message {
+                        role: "user".to_string(),
+                        content: vec![ContentBlock::Text {
+                            text: "You returned text without calling execute_code. \
+                                   Use execute_code now to continue working on the goal."
+                                .to_string(),
+                        }],
+                    });
+                    continue;
+                }
+
                 self.checkpoint(
                     agent_id,
                     &serde_json::to_string(messages).unwrap_or_default(),
@@ -478,29 +411,36 @@ impl AgentRunner {
                 return Ok(result_text);
             }
 
+            self.emit(AgentEvent::LlmCallEnd {
+                full_text: String::new(),
+            });
+
             // Execute tool calls.
             let mut tool_results = Vec::new();
             for (tool_use_id, tool_name, tool_input) in &tool_uses {
+                self.emit(AgentEvent::ToolStart {
+                    name: tool_name.clone(),
+                });
                 info!(tool = %tool_name, "Executing tool");
 
+                let start_time = std::time::Instant::now(); // determinism-ok: CLI timing
                 let result = self.execute_tool(agent_id, tool_name, tool_input).await?;
+                let tool_duration = start_time.elapsed().as_millis() as u64;
 
-                match result {
-                    ToolResult::Success(output) => {
-                        tool_results.push(ContentBlock::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
-                            content: output,
-                            is_error: None,
-                        });
-                    }
-                    ToolResult::Error(err) => {
-                        tool_results.push(ContentBlock::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
-                            content: format!("Error: {err}"),
-                            is_error: Some(true),
-                        });
-                    }
-                }
+                let (success, content, is_error) = match result {
+                    ToolResult::Success(output) => (true, output, None),
+                    ToolResult::Error(err) => (false, format!("Error: {err}"), Some(true)),
+                };
+                self.emit(AgentEvent::ToolEnd {
+                    name: tool_name.clone(),
+                    success,
+                    duration_ms: tool_duration,
+                });
+                tool_results.push(ContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content,
+                    is_error,
+                });
             }
 
             messages.push(Message {
@@ -574,7 +514,7 @@ impl AgentRunner {
             )));
         }
 
-        // Authorized.
+        // Governance events are emitted by the sandbox dispatch layer via GovernanceContext.
         self.client
             .action("ToolCalls", &tc_id, "Authorize", json!({}))
             .await?;
@@ -631,68 +571,6 @@ impl AgentRunner {
         }
     }
 
-    /// Run a single conversational turn for interactive mode.
-    ///
-    /// Pushes the user message onto `messages`, runs the LLM tool-call loop
-    /// until it returns text (end_turn), and returns the assistant's response.
-    /// No plan decomposition — the user is the planner in interactive mode.
-    pub async fn run_turn(
-        &self,
-        agent_id: &str,
-        system_prompt: &str,
-        user_message: &str,
-        messages: &mut Vec<Message>,
-    ) -> Result<String> {
-        // Build tool schemas.
-        let tool_defs = self.tools.list_tools();
-        let tool_schemas: Vec<serde_json::Value> = tool_defs
-            .iter()
-            .map(|t| {
-                json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": t.input_schema,
-                })
-            })
-            .collect();
-
-        // Push user message.
-        messages.push(Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Text {
-                text: user_message.to_string(),
-            }],
-        });
-
-        // Run tool-call loop (max 30 turns).
-        let result = self
-            .run_task_loop(agent_id, system_prompt, &tool_schemas, messages, 30)
-            .await?;
-
-        Ok(result)
-    }
-
-    /// Create a new agent entity for interactive mode and return its ID.
-    pub async fn create_interactive_agent(&self, role: &str, model: &str) -> Result<String> {
-        let agent_id = uuid::Uuid::now_v7().to_string();
-        self.client
-            .create("Agents", json!({ "id": &agent_id }))
-            .await?;
-        self.client
-            .action(
-                "Agents",
-                &agent_id,
-                "Assign",
-                json!({ "role": role, "goal": "interactive session", "model": model }),
-            )
-            .await?;
-        self.client
-            .action("Agents", &agent_id, "Start", json!({}))
-            .await?;
-        self.bind_agent_id(&agent_id);
-        Ok(agent_id)
-    }
-
     /// Checkpoint the agent's conversation state.
     async fn checkpoint(&self, agent_id: &str, conversation: &str) {
         if let Err(e) = self
@@ -708,4 +586,15 @@ impl AgentRunner {
             warn!("Checkpoint failed: {e}");
         }
     }
+}
+
+/// Resolve a property from an OData entity response.
+///
+/// Checks the top-level object first, then falls back to the `fields`
+/// sub-object — matching the resolution strategy used by the server's
+/// `query_eval::resolve_property`.
+fn entity_field<'a>(entity: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    entity
+        .get(key)
+        .or_else(|| entity.get("fields").and_then(|f| f.get(key)))
 }

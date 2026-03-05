@@ -1,0 +1,102 @@
+# Schedule Entity — I/O Automaton Specification
+#
+# Defines a recurring agent execution schedule. When Active, the executor's
+# schedule ticker evaluates the cron expression and fires the Fire action
+# when due, which spawns an Agent child via spawn effect.
+
+[automaton]
+name = "Schedule"
+states = ["Draft", "Active", "Paused", "Completed"]
+initial = "Draft"
+
+# --- State Variables ---
+
+[[state]]
+name = "agent_type_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "agent_role"
+type = "string"
+initial = ""
+
+[[state]]
+name = "goal_template"
+type = "string"
+initial = ""
+
+[[state]]
+name = "cron_expr"
+type = "string"
+initial = ""
+
+[[state]]
+name = "last_run"
+type = "string"
+initial = ""
+
+[[state]]
+name = "run_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "max_runs"
+type = "string"
+initial = "0"
+
+# --- Actions ---
+
+[[action]]
+name = "Activate"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+params = ["agent_type_id", "agent_role", "goal_template", "cron_expr", "max_runs"]
+hint = "Activate this schedule with a cron expression and agent configuration."
+
+[[action]]
+name = "Fire"
+kind = "input"
+from = ["Active"]
+params = ["last_run", "role", "goal", "model", "agent_type_id"]
+hint = "Fire the schedule — spawns an Agent child. Stays Active unless max_runs reached."
+effect = [
+  { type = "spawn", entity_type = "Agent", entity_id_source = "{uuid}", initial_action = "Assign", store_id_in = "last_agent_id" },
+  { type = "increment", var = "run_count" },
+  { type = "emit", event = "ScheduleFired" }
+]
+
+[[action]]
+name = "Complete"
+kind = "input"
+from = ["Active"]
+to = "Completed"
+hint = "Schedule reached max_runs or was manually completed."
+
+[[action]]
+name = "Pause"
+kind = "input"
+from = ["Active"]
+to = "Paused"
+hint = "Temporarily pause the schedule."
+
+[[action]]
+name = "Resume"
+kind = "input"
+from = ["Paused"]
+to = "Active"
+hint = "Resume a paused schedule."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ActiveRequiresCron"
+when = ["Active"]
+assert = "cron_expr != ''"
+
+[[invariant]]
+name = "ActiveRequiresGoal"
+when = ["Active"]
+assert = "goal_template != ''"
