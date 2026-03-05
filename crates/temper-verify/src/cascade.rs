@@ -331,10 +331,24 @@ impl VerificationCascade {
                 verification.states_explored,
             )
         } else {
+            let mut parts = Vec::new();
+            if !verification.counterexamples.is_empty() {
+                parts.push(format!(
+                    "{} counterexample(s)",
+                    verification.counterexamples.len()
+                ));
+            }
+            if !verification.dead_transitions.is_empty() {
+                parts.push(format!(
+                    "{} dead transition(s): {}",
+                    verification.dead_transitions.len(),
+                    verification.dead_transitions.join(", ")
+                ));
+            }
             format!(
-                "L1 Model Check FAILED: {} states explored, {} counterexample(s)",
+                "L1 Model Check FAILED: {} states explored, {}",
                 verification.states_explored,
-                verification.counterexamples.len(),
+                parts.join("; "),
             )
         };
 
