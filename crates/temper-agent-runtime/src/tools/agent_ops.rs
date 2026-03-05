@@ -65,10 +65,7 @@ pub async fn execute_spawn_child(
 ///
 /// Fetches the parent agent, reads `child_agent_ids`, then queries each
 /// child (up to [`MAX_CHILDREN_BUDGET`]) for its status.
-pub async fn execute_check_children(
-    client: &TemperClient,
-    agent_id: &str,
-) -> Result<ToolResult> {
+pub async fn execute_check_children(client: &TemperClient, agent_id: &str) -> Result<ToolResult> {
     if agent_id.is_empty() {
         return Ok(ToolResult::Error(
             "check_children_status: no agent_id set".to_string(),

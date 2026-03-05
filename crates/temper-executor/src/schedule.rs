@@ -16,11 +16,7 @@ const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 /// Runs on a 60-second interval. For each Active Schedule entity, parses the
 /// cron expression and fires `Schedule.Fire` if the cron is due. The Fire action's
 /// spawn effect creates an Agent entity, which the SSE event loop picks up.
-pub async fn run_schedule_ticker(
-    temper_url: &str,
-    tenant: &str,
-    shutting_down: &Arc<AtomicBool>,
-) {
+pub async fn run_schedule_ticker(temper_url: &str, tenant: &str, shutting_down: &Arc<AtomicBool>) {
     use chrono::Utc; // determinism-ok: executor process, not simulation-visible
     use cron::Schedule;
     use std::str::FromStr;
@@ -119,8 +115,7 @@ pub async fn run_schedule_ticker(
             let now_str = now.to_rfc3339();
 
             // Resolve model from AgentType instead of hardcoding.
-            let model =
-                resolve_agent_type_model(&client, &agent_type_id, DEFAULT_MODEL).await;
+            let model = resolve_agent_type_model(&client, &agent_type_id, DEFAULT_MODEL).await;
 
             info!(
                 schedule_id = %sched_id,
