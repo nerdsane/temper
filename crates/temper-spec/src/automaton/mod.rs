@@ -24,7 +24,9 @@ pub use assert_parser::{AssertCompareOp, ParsedAssert, parse_assert_expr};
 pub use initial::{
     parse_bool_initial, parse_counter_initial_usize, parse_list_initial, parse_var_initial_json,
 };
-pub use lint::{LintFinding, LintSeverity, lint_automaton};
+pub use lint::{
+    BundleLintFinding, LintFinding, LintSeverity, lint_automata_bundle, lint_automaton,
+};
 pub use metadata::SpecMetadata;
 pub use parser::{parse_automaton, to_state_machine};
 pub use types::*;
