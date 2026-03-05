@@ -244,6 +244,16 @@ pub(super) fn build_verification_stream_response(
                                                 actor_id: None,
                                             });
                                         }
+                                        for transition in &mc.dead_transitions {
+                                            dets.push(crate::registry::VerificationDetail {
+                                                kind: "dead_transition".into(),
+                                                property: transition.clone(),
+                                                description:
+                                                    "Transition is unreachable in model check"
+                                                        .into(),
+                                                actor_id: None,
+                                            });
+                                        }
                                     }
                                     if let Some(pt) = &l.prop_test
                                         && let Some(failure) = &pt.failure

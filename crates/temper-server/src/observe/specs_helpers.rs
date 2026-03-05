@@ -1,5 +1,5 @@
 use axum::http::StatusCode;
-use temper_spec::automaton::{LintSeverity, lint_automaton};
+use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
 use temper_spec::cross_invariant::{CrossInvariantLintFinding, CrossInvariantLintSeverity};
 
 #[derive(Debug, Clone)]
@@ -32,6 +32,7 @@ pub(super) fn lint_loaded_specs(
 ) -> Result<Vec<EntityLintFinding>, (StatusCode, String)> {
     let mut findings = Vec::new();
     let mut entity_set_types = std::collections::BTreeSet::new();
+    let mut parsed_automata = std::collections::BTreeMap::new();
 
     for schema in &csdl.schemas {
         for container in &schema.entity_containers {
@@ -63,6 +64,7 @@ pub(super) fn lint_loaded_specs(
                 message: finding.message,
             });
         }
+        parsed_automata.insert(entity_name.clone(), automaton);
 
         if !entity_set_types.contains(entity_name) {
             findings.push(EntityLintFinding {
@@ -72,6 +74,15 @@ pub(super) fn lint_loaded_specs(
                 message: "spec has no corresponding entity set in model.csdl.xml".to_string(),
             });
         }
+    }
+
+    for finding in lint_automata_bundle(&parsed_automata) {
+        findings.push(EntityLintFinding {
+            entity: finding.entity,
+            code: finding.code,
+            severity: finding.severity,
+            message: finding.message,
+        });
     }
 
     for entity_type in &entity_set_types {
