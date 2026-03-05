@@ -17,7 +17,7 @@ reqwest = { workspace = true }
 thiserror = { workspace = true }
 
 # pydantic/monty Rust sandbox crate
-monty = { git = "https://github.com/pydantic/monty.git", package = "monty", rev = "87f8f3104e9f0da0bf03f59a745b1e364d39d3bf" }
+monty = { git = "https://github.com/pydantic/monty.git", package = "monty", rev = "bf7c7ef" }
 
 [dev-dependencies]
 axum = { workspace = true }

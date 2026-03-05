@@ -88,6 +88,12 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Terminal UI (Goose-style composable crates)
+console = "0.16"
+indicatif = "0.18"
+termimad = "0.30"
+dialoguer = "0.11"
+
 # Proc macro support (for temper-codegen)
 syn = { version = "2", features = ["full"] }
 quote = "1"

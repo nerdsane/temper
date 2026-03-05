@@ -8,8 +8,8 @@ use std::future::Future;
 
 use anyhow::{Context, Result, anyhow, bail};
 use monty::{
-    DictPairs, ExcType, ExternalResult, LimitedTracker, MontyException, MontyObject, MontyRun,
-    PrintWriter, RunProgress,
+    DictPairs, ExcType, ExtFunctionResult, LimitedTracker, MontyException, MontyObject, MontyRun,
+    NameLookupResult, PrintWriter, RunProgress,
 };
 use serde_json::Value;
 
@@ -39,7 +39,7 @@ where
         .iter()
         .map(|(name, _, _)| name.to_string())
         .collect();
-    let runner = MontyRun::new(program, filename, param_names, vec![])
+    let runner = MontyRun::new(program, filename, param_names)
         .map_err(|e| anyhow!(format_monty_exception(&e)))?;
 
     let objects: Vec<MontyObject> = dataclasses
@@ -64,7 +64,7 @@ where
             .map_err(|e| anyhow!(format_monty_exception(&e)))?
     };
 
-    let mut pending_results: BTreeMap<u32, ExternalResult> = BTreeMap::new();
+    let mut pending_results: BTreeMap<u32, ExtFunctionResult> = BTreeMap::new();
 
     loop {
         match progress {
@@ -73,27 +73,23 @@ where
                 return serde_json::to_string(&value)
                     .context("failed to serialize sandbox output as JSON string");
             }
-            RunProgress::FunctionCall {
-                function_name,
-                args,
-                kwargs,
-                call_id,
-                method_call,
-                state,
-                ..
-            } => {
-                if !method_call {
+            RunProgress::FunctionCall(call) => {
+                if !call.method_call {
                     bail!(
                         "sandbox denied external function call '{}'. \
                          Only dataclass.<method> calls are allowed",
-                        function_name
+                        call.function_name
                     );
                 }
 
-                let result = dispatch(function_name, args, kwargs).await;
+                let call_id = call.call_id;
+                let fn_name = call.function_name.clone();
+                let args = call.args.clone();
+                let kwargs = call.kwargs.clone();
+                let result = dispatch(fn_name, args, kwargs).await;
                 let ext_result = match result {
-                    Ok(value) => ExternalResult::Return(json_to_monty_object(&value)),
-                    Err(message) => ExternalResult::Error(MontyException::new(
+                    Ok(value) => ExtFunctionResult::Return(json_to_monty_object(&value)),
+                    Err(message) => ExtFunctionResult::Error(MontyException::new(
                         ExcType::RuntimeError,
                         Some(message),
                     )),
@@ -101,12 +97,12 @@ where
 
                 pending_results.insert(call_id, ext_result);
                 let mut print = PrintWriter::Disabled;
-                progress = state
-                    .run_pending(&mut print)
+                progress = call
+                    .resume(ExtFunctionResult::Future(call_id), &mut print)
                     .map_err(|e| anyhow!(format_monty_exception(&e)))?;
             }
             RunProgress::ResolveFutures(state) => {
-                let mut ready: Vec<(u32, ExternalResult)> = Vec::new();
+                let mut ready: Vec<(u32, ExtFunctionResult)> = Vec::new();
                 for call_id in state.pending_call_ids() {
                     if let Some(result) = pending_results.remove(call_id) {
                         ready.push((*call_id, result));
@@ -125,10 +121,17 @@ where
                     .resume(ready, &mut print)
                     .map_err(|e| anyhow!(format_monty_exception(&e)))?;
             }
-            RunProgress::OsCall { function, .. } => {
+            RunProgress::NameLookup(lookup) => {
+                let mut print = PrintWriter::Disabled;
+                progress = lookup
+                    .resume(NameLookupResult::Undefined, &mut print)
+                    .map_err(|e| anyhow!(format_monty_exception(&e)))?;
+            }
+            RunProgress::OsCall(os_call) => {
                 bail!(
-                    "sandbox blocked OS access ({function:?}). \
-                     Filesystem/network/env access is disabled in the sandbox."
+                    "sandbox blocked OS access ({:?}). \
+                     Filesystem/network/env access is disabled in the sandbox.",
+                    os_call.function
                 );
             }
         }

@@ -84,6 +84,7 @@ pub fn monty_object_to_json(value: &MontyObject) -> Value {
             }
             Value::Object(out)
         }
+        MontyObject::Function { name, .. } => Value::String(format!("<function {name}>")),
         MontyObject::Repr(value) => Value::String(value.clone()),
         MontyObject::Cycle(_, placeholder) => Value::String(placeholder.clone()),
     }
