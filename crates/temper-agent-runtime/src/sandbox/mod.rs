@@ -102,6 +102,7 @@ impl AgentSandbox {
 }
 
 /// Route a method call to the appropriate namespace.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_method(
     http: &reqwest::Client,
     server_url: &str,
@@ -142,42 +143,42 @@ async fn dispatch_method(
             .await?;
 
             // Intercept Cedar denials and run governance resolver.
-            if result.get("denied").and_then(Value::as_bool) == Some(true) {
-                if let Some(ctx) = governance {
-                    let decision_id = result
-                        .get("pending_decision")
-                        .or_else(|| result.get("decision_id"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
+            if result.get("denied").and_then(Value::as_bool) == Some(true)
+                && let Some(ctx) = governance
+            {
+                let decision_id = result
+                    .get("pending_decision")
+                    .or_else(|| result.get("decision_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
 
-                    if !decision_id.is_empty() {
-                        // Wait for approval via inline prompt + polling.
-                        dispatch::resolve_temper_denial(
-                            http,
-                            server_url,
-                            tenant,
-                            decision_id,
-                            &format!("temper.{function_name}"),
-                            function_name,
-                            "SpecSubmission",
-                            ctx,
-                        )
-                        .await?;
+                if !decision_id.is_empty() {
+                    // Wait for approval via inline prompt + polling.
+                    dispatch::resolve_temper_denial(
+                        http,
+                        server_url,
+                        tenant,
+                        decision_id,
+                        &format!("temper.{function_name}"),
+                        function_name,
+                        "SpecSubmission",
+                        ctx,
+                    )
+                    .await?;
 
-                        // Approved — retry the original call.
-                        return temper_sandbox::dispatch::dispatch_temper_method(
-                            http,
-                            server_url,
-                            tenant,
-                            pid.as_deref(),
-                            function_name,
-                            args,
-                            kwargs,
-                            None,
-                            None,
-                        )
-                        .await;
-                    }
+                    // Approved — retry the original call.
+                    return temper_sandbox::dispatch::dispatch_temper_method(
+                        http,
+                        server_url,
+                        tenant,
+                        pid.as_deref(),
+                        function_name,
+                        args,
+                        kwargs,
+                        None,
+                        None,
+                    )
+                    .await;
                 }
             }
 
