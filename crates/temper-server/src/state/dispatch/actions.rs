@@ -377,6 +377,7 @@ impl crate::state::ServerState {
                 entity_type,
                 entity_id,
                 &response.spawn_requests,
+                &action_params,
                 agent_ctx,
             );
         }

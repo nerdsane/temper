@@ -168,6 +168,7 @@ impl crate::state::ServerState {
         parent_type: &str,
         parent_id: &str,
         spawn_requests: &[crate::entity_actor::effects::SpawnRequest],
+        action_params: &serde_json::Value,
         agent_ctx: &AgentContext,
     ) {
         use crate::entity_actor::effects::MAX_SPAWNS_PER_TRANSITION;
@@ -190,14 +191,25 @@ impl crate::state::ServerState {
             let child_type = req.entity_type.clone();
             let child_id = req.entity_id.clone();
             let initial_action = req.initial_action.clone();
+            let parent_params = action_params.clone();
             let agent = agent_ctx.clone();
 
             tokio::spawn(async move {
                 // determinism-ok: spawn dispatch is a background side-effect
-                let initial_fields = serde_json::json!({
-                    "parent_type": parent_t,
-                    "parent_id": parent_i,
-                });
+                let mut parent_fields = serde_json::Map::new();
+                parent_fields.insert(
+                    "parent_type".to_string(),
+                    serde_json::Value::String(parent_t.clone()),
+                );
+                parent_fields.insert(
+                    "parent_id".to_string(),
+                    serde_json::Value::String(parent_i.clone()),
+                );
+                parent_fields.insert(
+                    format!("{}_id", to_snake_case(&parent_t)),
+                    serde_json::Value::String(parent_i.clone()),
+                );
+                let initial_fields = serde_json::Value::Object(parent_fields.clone());
 
                 match state
                     .get_or_create_tenant_entity(&t, &child_type, &child_id, initial_fields)
@@ -212,25 +224,31 @@ impl crate::state::ServerState {
                             "spawned child entity"
                         );
 
-                        if let Some(action) = initial_action
-                            && let Err(e) = state
+                        if let Some(action) = initial_action {
+                            let mut initial_action_params =
+                                parent_params.as_object().cloned().unwrap_or_default();
+                            for (key, value) in parent_fields {
+                                initial_action_params.insert(key, value);
+                            }
+                            if let Err(e) = state
                                 .dispatch_tenant_action(
                                     &t,
                                     &child_type,
                                     &child_id,
                                     &action,
-                                    serde_json::json!({}),
+                                    serde_json::Value::Object(initial_action_params),
                                     &agent,
                                 )
                                 .await
-                        {
-                            tracing::error!(
-                                child_type = %child_type,
-                                child_id = %child_id,
-                                action = %action,
-                                error = %e,
-                                "failed to dispatch initial action on spawned entity"
-                            );
+                            {
+                                tracing::error!(
+                                    child_type = %child_type,
+                                    child_id = %child_id,
+                                    action = %action,
+                                    error = %e,
+                                    "failed to dispatch initial action on spawned entity"
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -245,4 +263,21 @@ impl crate::state::ServerState {
             });
         }
     }
+}
+
+fn to_snake_case(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    for (index, ch) in value.chars().enumerate() {
+        match ch {
+            'A'..='Z' => {
+                if index > 0 {
+                    result.push('_');
+                }
+                result.push(ch.to_ascii_lowercase());
+            }
+            '-' | ' ' => result.push('_'),
+            _ => result.push(ch.to_ascii_lowercase()),
+        }
+    }
+    result
 }
