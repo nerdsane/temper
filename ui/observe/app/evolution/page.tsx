@@ -262,7 +262,7 @@ export default function EvolutionPage() {
         <div className="h-3.5 bg-zinc-800/40 rounded w-64 mb-6" />
         <div className="grid grid-cols-5 gap-3 mb-6">
           {[0, 1, 2, 3, 4].map((i) => (
-            <div key={i} className="bg-[#111115] rounded-lg p-3.5">
+            <div key={i} className="glass rounded-lg p-4">
               <div className="h-3 bg-zinc-800/50 rounded w-20 mb-2" />
               <div className="h-8 bg-zinc-800/50 rounded w-10" />
             </div>
@@ -340,7 +340,7 @@ export default function EvolutionPage() {
       {/* Record Summary */}
       <div className="grid grid-cols-5 gap-3 mb-6">
         {summaryCards.map((card) => (
-          <div key={card.label} className="bg-[#111115] rounded-lg p-3.5">
+          <div key={card.label} className="glass rounded-lg p-4">
             <div className="text-xs text-zinc-600">{card.label}</div>
             <div className={`text-4xl font-bold font-mono mt-0.5 ${card.color}`}>
               {card.value}
@@ -353,7 +353,7 @@ export default function EvolutionPage() {
       <div className="mb-6">
         <h2 className="text-base font-semibold text-zinc-200 mb-3 tracking-tight">Insights</h2>
         {!insights || insights.insights.length === 0 ? (
-          <div className="bg-[#111115] rounded-lg p-6 text-center">
+          <div className="glass rounded-lg p-6 text-center">
             <p className="text-sm text-zinc-500">No insights yet. Run a sentinel check or wait for trajectory patterns.</p>
           </div>
         ) : (
@@ -405,7 +405,7 @@ export default function EvolutionPage() {
           )}
         </div>
         {!unmetIntents || unmetIntents.intents.length === 0 ? (
-          <div className="bg-[#111115] rounded-lg p-6 text-center">
+          <div className="glass rounded-lg p-6 text-center">
             <p className="text-sm text-zinc-500">No unmet intents detected. The system is meeting all agent needs.</p>
           </div>
         ) : (
@@ -465,11 +465,11 @@ export default function EvolutionPage() {
           </div>
         </div>
         {filteredRecords.length === 0 ? (
-          <div className="bg-[#111115] rounded-lg p-6 text-center">
+          <div className="glass rounded-lg p-6 text-center">
             <p className="text-sm text-zinc-500">No records found.</p>
           </div>
         ) : (
-          <div className="bg-[#111115] rounded-lg overflow-hidden max-h-96 overflow-y-auto">
+          <div className="glass rounded-lg overflow-hidden max-h-96 overflow-y-auto">
             {filteredRecords.map((record) => (
               <ExpandableRecord key={record.id} record={record} />
             ))}
@@ -490,7 +490,7 @@ export default function EvolutionPage() {
           </button>
         </div>
         {sentinelResult === null ? (
-          <div className="bg-[#111115] rounded-lg p-6 text-center">
+          <div className="glass rounded-lg p-6 text-center">
             <p className="text-sm text-zinc-500">Click &quot;Run Health Check&quot; to check system health and generate insights.</p>
           </div>
         ) : sentinelResult.alerts_count === 0 && sentinelResult.insights_count === 0 ? (

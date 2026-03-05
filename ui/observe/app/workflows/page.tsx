@@ -159,8 +159,8 @@ export default function WorkflowsPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
             </div>
-            <h3 className="text-[15px] font-semibold text-zinc-200 mb-1">No app workflows</h3>
-            <p className="text-[13px] text-zinc-500">
+            <h3 className="text-base font-semibold text-zinc-200 mb-1">No app workflows</h3>
+            <p className="text-sm text-zinc-500">
               Start the server with{" "}
               <code className="font-mono text-[11px] bg-white/[0.04] px-1.5 py-0.5 rounded">
                 temper serve --app name=specs-dir

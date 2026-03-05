@@ -18,6 +18,7 @@ import type {
   SpecSummary,
 } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
+import StatCard from "@/components/StatCard";
 import {
   redactSensitiveFields,
   generatePolicyPreview,
@@ -25,27 +26,6 @@ import {
 } from "@/lib/utils";
 
 const ALL_TENANTS = "__all__";
-
-function StatCard({
-  label,
-  value,
-  color,
-}: {
-  label: string;
-  value: string | number;
-  color?: string;
-}) {
-  return (
-    <div className="glass rounded p-3.5">
-      <div className="text-[12px] text-zinc-600">{label}</div>
-      <div
-        className={`text-4xl font-bold font-mono mt-0.5 ${color ?? "text-zinc-100"}`}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
 
 const SCOPE_LABELS: Record<PolicyScope, string> = {
   narrow: "Narrow -- exact resource only",
@@ -98,7 +78,7 @@ function DecisionCard({
       <div className="flex items-start justify-between mb-3">
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-pink-400 animate-pulse" />
-          <span className="text-sm font-mono text-zinc-200">
+          <span className="text-sm font-mono text-zinc-200 truncate max-w-[200px]" title={decision.agent_id}>
             {decision.agent_id}
           </span>
           {showTenant && (
@@ -123,7 +103,7 @@ function DecisionCard({
           <span className="text-[10px] text-zinc-600 uppercase tracking-wider w-16">
             Resource
           </span>
-          <span className="text-[13px] font-mono text-zinc-300">
+          <span className="text-[13px] font-mono text-zinc-300 truncate max-w-[280px] inline-block" title={`${decision.resource_type}::${decision.resource_id}`}>
             {decision.resource_type}::{decision.resource_id}
           </span>
         </div>
@@ -234,13 +214,13 @@ function HistoryRow({
             {decision.tenant}
           </td>
         )}
-        <td className="px-3.5 py-2.5 font-mono text-zinc-300">
+        <td className="px-3.5 py-2.5 font-mono text-zinc-300 max-w-[160px] truncate" title={decision.agent_id}>
           {decision.agent_id}
         </td>
-        <td className="px-3.5 py-2.5 font-mono text-teal-400">
+        <td className="px-3.5 py-2.5 font-mono text-teal-400 max-w-[120px] truncate" title={decision.action}>
           {decision.action}
         </td>
-        <td className="px-3.5 py-2.5 font-mono text-zinc-400">
+        <td className="px-3.5 py-2.5 font-mono text-zinc-400 max-w-[200px] truncate" title={`${decision.resource_type}::${decision.resource_id}`}>
           {decision.resource_type}::{decision.resource_id}
         </td>
         <td className="px-3.5 py-2.5">
@@ -304,6 +284,7 @@ export default function DecisionsPage() {
   const [tenants, setTenants] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [acting, setActing] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [liveDecisions, setLiveDecisions] = useState<PendingDecision[]>([]);
 
   const loadInitial = useCallback(async () => {
@@ -365,11 +346,13 @@ export default function DecisionsPage() {
   const handleApprove = useCallback(
     async (id: string, scope: PolicyScope, decisionTenant: string) => {
       setActing(true);
+      setActionError(null);
       try {
         await approveDecision(decisionTenant, id, scope);
         await decisionsPoll.refresh();
       } catch (err) {
-        console.error("Failed to approve decision:", err);
+        const msg = err instanceof Error ? err.message : "Failed to approve decision";
+        setActionError(msg);
       } finally {
         setActing(false);
       }
@@ -380,11 +363,13 @@ export default function DecisionsPage() {
   const handleDeny = useCallback(
     async (id: string, decisionTenant: string) => {
       setActing(true);
+      setActionError(null);
       try {
         await denyDecision(decisionTenant, id);
         await decisionsPoll.refresh();
       } catch (err) {
-        console.error("Failed to deny decision:", err);
+        const msg = err instanceof Error ? err.message : "Failed to deny decision";
+        setActionError(msg);
       } finally {
         setActing(false);
       }
@@ -416,7 +401,7 @@ export default function DecisionsPage() {
         <div className="h-3.5 bg-zinc-800/40 rounded w-64 mb-6" />
         <div className="grid grid-cols-4 gap-3 mb-6">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="glass rounded p-3.5">
+            <div key={i} className="glass rounded-lg p-4">
               <div className="h-3 bg-zinc-800/50 rounded w-20 mb-2" />
               <div className="h-8 bg-zinc-800/50 rounded w-10" />
             </div>
@@ -516,6 +501,14 @@ export default function DecisionsPage() {
         <StatCard label="Total" value={data?.total ?? 0} />
       </div>
 
+      {/* Action error banner */}
+      {actionError && (
+        <div role="alert" className="mb-4 flex items-center justify-between gap-2 rounded bg-pink-500/10 border border-pink-500/20 px-4 py-2.5">
+          <p className="text-sm text-pink-400">{actionError}</p>
+          <button onClick={() => setActionError(null)} className="text-pink-400 hover:text-pink-300 text-xs flex-shrink-0" aria-label="Dismiss error">Dismiss</button>
+        </div>
+      )}
+
       {/* Pending Decisions */}
       {pendingDecisions.length > 0 && (
         <div className="mb-6">
@@ -544,7 +537,7 @@ export default function DecisionsPage() {
       )}
 
       {pendingDecisions.length === 0 && statusFilter === "all" && (
-        <div className="glass rounded p-6 text-center mb-6">
+        <div className="glass rounded-lg p-6 text-center mb-6">
           <p className="text-sm text-zinc-500">
             No pending decisions. All clear.
           </p>
@@ -569,8 +562,8 @@ export default function DecisionsPage() {
                     {decisions.length}
                   </span>
                 </div>
-                <div className="glass rounded overflow-hidden max-h-96 overflow-y-auto">
-                  <table className="w-full text-[13px]">
+                <div className="glass rounded overflow-hidden max-h-96 overflow-y-auto overflow-x-auto">
+                  <table className="w-full text-[13px] table-fixed">
                     <thead className="sticky top-0 bg-[#111115]/90 backdrop-blur-sm z-10">
                       <tr className="border-b border-white/[0.06]">
                         {showTenantBadge && (

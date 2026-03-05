@@ -59,15 +59,14 @@ code, .font-mono {
   animation: fadeIn 0.3s ease-out forwards;
 }
 
-/* Live animation keyframes */
+/* ── Highlight flash (teal bg pulse on new items) */
 @keyframes highlight-flash {
   0% { background-color: rgba(45, 212, 191, 0.12); }
   100% { background-color: transparent; }
 }
-@keyframes slide-in-right {
-  from { opacity: 0; transform: translateX(12px); }
-  to { opacity: 1; transform: translateX(0); }
-}
+.animate-highlight-new { animation: highlight-flash 0.8s ease-out forwards; }
+
+/* ── Status flash (box-shadow pulse on state change) */
 @keyframes status-flash-teal {
   0% { box-shadow: 0 0 0 0 rgba(45, 212, 191, 0.4); }
   50% { box-shadow: 0 0 8px 2px rgba(45, 212, 191, 0.2); }
@@ -78,27 +77,25 @@ code, .font-mono {
   50% { box-shadow: 0 0 8px 2px rgba(244, 114, 182, 0.2); }
   100% { box-shadow: 0 0 0 0 transparent; }
 }
-
-.animate-highlight-new { animation: highlight-flash 0.8s ease-out forwards; }
-.animate-slide-in { animation: slide-in-right 0.25s ease-out forwards; }
 .animate-flash-teal { animation: status-flash-teal 0.6s ease-out forwards; }
 .animate-flash-pink { animation: status-flash-pink 0.6s ease-out forwards; }
 
-/* Panel slide-in from right edge */
+/* ── Nudge entrance (subtle 12px slide for list items) */
+@keyframes nudge-in-right {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.animate-slide-in { animation: nudge-in-right 0.25s ease-out forwards; }
+.animate-item-slide-in { animation: nudge-in-right 0.3s ease-out forwards; }
+
+/* ── Panel entrance (full slide from right edge) */
 @keyframes panel-slide-in-right {
   from { opacity: 0; transform: translateX(100%); }
   to { opacity: 1; transform: translateX(0); }
 }
 .animate-slide-in-right { animation: panel-slide-in-right 0.2s ease-out forwards; }
 
-/* Per-item slide in for failed intents */
-@keyframes item-slide-in {
-  from { opacity: 0; transform: translateX(8px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-.animate-item-slide-in { animation: item-slide-in 0.3s ease-out forwards; }
-
-/* Toast slide-in from bottom */
+/* ── Toast entrance (slide up from bottom) */
 @keyframes slide-in-up {
   from { opacity: 0; transform: translateY(12px) scale(0.95); }
   to { opacity: 1; transform: translateY(0) scale(1); }
@@ -117,4 +114,18 @@ code, .font-mono {
 /* Display font utility */
 .font-display {
   font-family: var(--font-display), system-ui, sans-serif;
+}
+
+/* Reduced motion: disable all custom animations for users who prefer it */
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .animate-highlight-new,
+  .animate-slide-in,
+  .animate-flash-teal,
+  .animate-flash-pink,
+  .animate-slide-in-right,
+  .animate-item-slide-in,
+  .animate-slide-in-up {
+    animation: none !important;
+  }
 }

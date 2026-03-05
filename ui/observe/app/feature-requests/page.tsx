@@ -235,7 +235,7 @@ export default function FeatureRequestsPage() {
         <div className="h-3.5 bg-zinc-800/40 rounded w-72 mb-6" />
         <div className="grid grid-cols-4 gap-3 mb-6">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="bg-[#111115] rounded-lg p-3.5">
+            <div key={i} className="glass rounded-lg p-4">
               <div className="h-3 bg-zinc-800/50 rounded w-20 mb-2" />
               <div className="h-8 bg-zinc-800/50 rounded w-10" />
             </div>
@@ -284,25 +284,25 @@ export default function FeatureRequestsPage() {
 
       {/* Summary Cards */}
       <div className="grid grid-cols-4 gap-3 mb-6">
-        <div className="bg-[#111115] rounded-lg p-3.5">
+        <div className="glass rounded-lg p-4">
           <div className="text-xs text-zinc-600">Open</div>
           <div className={`text-4xl font-bold font-mono mt-0.5 ${counts.open > 0 ? "text-yellow-400" : "text-zinc-100"}`}>
             {counts.open}
           </div>
         </div>
-        <div className="bg-[#111115] rounded-lg p-3.5">
+        <div className="glass rounded-lg p-4">
           <div className="text-xs text-zinc-600">Planned</div>
           <div className="text-4xl font-bold font-mono mt-0.5 text-lime-400">
             {counts.planned}
           </div>
         </div>
-        <div className="bg-[#111115] rounded-lg p-3.5">
+        <div className="glass rounded-lg p-4">
           <div className="text-xs text-zinc-600">Resolved</div>
           <div className="text-4xl font-bold font-mono mt-0.5 text-teal-400">
             {counts.resolved}
           </div>
         </div>
-        <div className="bg-[#111115] rounded-lg p-3.5">
+        <div className="glass rounded-lg p-4">
           <div className="text-xs text-zinc-600">Total</div>
           <div className="text-4xl font-bold font-mono mt-0.5 text-zinc-100">
             {counts.total}
@@ -331,7 +331,7 @@ export default function FeatureRequestsPage() {
 
       {/* Request Cards */}
       {filteredRequests.length === 0 ? (
-        <div className="bg-[#111115] rounded-lg p-6 text-center">
+        <div className="glass rounded-lg p-6 text-center">
           <p className="text-sm text-zinc-500">
             {activeTab === "all"
               ? "No feature requests yet. They will appear as platform gaps are detected."

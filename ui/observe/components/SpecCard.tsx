@@ -57,7 +57,7 @@ export default function SpecCard({ spec }: SpecCardProps) {
         onAnimationEnd={() => setCardFlash("")}
       >
         <div className="flex items-start justify-between mb-2.5">
-          <h3 className="text-base font-semibold text-zinc-100 tracking-tight">{spec.entity_type}</h3>
+          <h3 className="text-base font-semibold text-zinc-100 tracking-tight truncate min-w-0" title={spec.entity_type}>{spec.entity_type}</h3>
           <div className="flex gap-1.5">
             <VerificationBadge spec={spec} />
             <span className="text-[10px] font-mono bg-teal-500/10 text-teal-400 px-2 py-0.5 rounded-full">

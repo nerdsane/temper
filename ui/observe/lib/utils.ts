@@ -64,6 +64,20 @@ export function generatePolicyPreview(
   }
 }
 
+/** Text color class for a success rate percentage. */
+export function rateColor(rate: number): string {
+  if (rate >= 80) return "text-teal-400";
+  if (rate >= 50) return "text-amber-400";
+  return "text-pink-400";
+}
+
+/** Background color class for a success rate bar. */
+export function rateBgColor(rate: number): string {
+  if (rate >= 80) return "bg-teal-400";
+  if (rate >= 50) return "bg-amber-400";
+  return "bg-pink-400";
+}
+
 /** Group items into "Today" / "Yesterday" / "Older" buckets by date. */
 export function groupByDate<T>(
   items: T[],
