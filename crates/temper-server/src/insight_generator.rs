@@ -267,6 +267,13 @@ pub(crate) fn generate_unmet_intents(
 
         if !entry.success {
             let error_pattern = categorize_error(entry.error.as_deref());
+
+            // AuthzDenied = governance decision, not a capability gap.
+            // These belong in the Decisions view, not Unmet Intents.
+            if error_pattern == "AuthzDenied" || entry.authz_denied == Some(true) {
+                continue;
+            }
+
             let key = (entry.entity_type.clone(), error_pattern.clone());
             let accum = failures.entry(key).or_insert_with(|| UnmetIntentAccum {
                 entity_type: entry.entity_type.clone(),
@@ -293,10 +300,6 @@ pub(crate) fn generate_unmet_intents(
                     "EntitySetNotFound" => {
                         format!("Consider creating '{}' entity type.", accum.entity_type,)
                     }
-                    "AuthzDenied" => format!(
-                        "Consider adding Cedar permit policy for actions on '{}'.",
-                        accum.entity_type,
-                    ),
                     _ => format!(
                         "Investigate failures for '{}' (pattern: {}).",
                         accum.entity_type, accum.error_pattern,
@@ -366,6 +369,12 @@ pub(crate) fn generate_feature_requests(
         }
 
         let error_pattern = categorize_error(entry.error.as_deref());
+
+        // AuthzDenied = governance decision, not a feature request.
+        if error_pattern == "AuthzDenied" || entry.authz_denied == Some(true) {
+            continue;
+        }
+
         let key = (entry.action.clone(), error_pattern.clone());
         let accum = groups.entry(key).or_insert_with(|| PlatformGapAccum {
             action: entry.action.clone(),
@@ -387,7 +396,6 @@ pub(crate) fn generate_feature_requests(
 
         let category = match accum.error_pattern.as_str() {
             "EntitySetNotFound" => PlatformGapCategory::MissingCapability,
-            "AuthzDenied" => PlatformGapCategory::GovernanceBlocked,
             "ActionNotFound" => PlatformGapCategory::MissingMethod,
             _ => PlatformGapCategory::MissingCapability,
         };
