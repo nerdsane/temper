@@ -17,8 +17,8 @@
 //! temper-executor --detach --health-port 4201
 //! ```
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use axum::extract::State as AxumState;
@@ -499,7 +499,11 @@ async fn run_schedule_ticker(temper_url: &str, tenant: &str, shutting_down: &Arc
             let field = |key: &str| -> &str {
                 sched
                     .get(key)
-                    .or_else(|| sched.get("fields").and_then(|f: &serde_json::Value| f.get(key)))
+                    .or_else(|| {
+                        sched
+                            .get("fields")
+                            .and_then(|f: &serde_json::Value| f.get(key))
+                    })
                     .and_then(|v: &serde_json::Value| v.as_str())
                     .unwrap_or_default()
             };
@@ -612,9 +616,12 @@ fn daemonize() -> Result<()> {
 
     // Write PID file.
     let pid_file = pid_dir.join("executor.pid");
-    fs::write(&pid_file, child.id().to_string())
-        .context("Failed to write PID file")?;
-    eprintln!("Executor daemonized. PID={}, PID file={}", child.id(), pid_file.display());
+    fs::write(&pid_file, child.id().to_string()).context("Failed to write PID file")?;
+    eprintln!(
+        "Executor daemonized. PID={}, PID file={}",
+        child.id(),
+        pid_file.display()
+    );
 
     // The parent exits immediately.
     std::process::exit(0);

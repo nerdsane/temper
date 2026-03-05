@@ -113,12 +113,7 @@ impl AgentRunner {
     ///
     /// Returns the agent ID. Both goal mode and interactive mode use this
     /// — there is no separate "interactive agent" concept.
-    pub async fn create_agent(
-        &self,
-        role: &str,
-        goal: &str,
-        model: &str,
-    ) -> Result<String> {
+    pub async fn create_agent(&self, role: &str, goal: &str, model: &str) -> Result<String> {
         let agent_id = uuid::Uuid::now_v7().to_string();
         info!(agent_id = %agent_id, "Creating agent");
         self.client
@@ -219,12 +214,7 @@ impl AgentRunner {
     /// Complete an agent (transition to terminal state).
     pub async fn complete_agent(&self, agent_id: &str, result: &str) -> Result<()> {
         self.client
-            .action(
-                "Agents",
-                agent_id,
-                "Complete",
-                json!({ "result": result }),
-            )
+            .action("Agents", agent_id, "Complete", json!({ "result": result }))
             .await?;
         Ok(())
     }
@@ -241,12 +231,7 @@ impl AgentRunner {
         for attempt in 0..=MAX_RETRIES {
             match self
                 .client
-                .action(
-                    "Agents",
-                    agent_id,
-                    "Complete",
-                    json!({ "result": result }),
-                )
+                .action("Agents", agent_id, "Complete", json!({ "result": result }))
                 .await
             {
                 Ok(_) => {

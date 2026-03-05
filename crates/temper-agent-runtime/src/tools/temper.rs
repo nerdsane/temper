@@ -287,9 +287,7 @@ impl ToolRegistry for TemperToolRegistry {
                     .cloned()
                     .unwrap_or_default();
                 if child_ids.is_empty() {
-                    return Ok(ToolResult::Success(
-                        "No child agents spawned.".to_string(),
-                    ));
+                    return Ok(ToolResult::Success("No child agents spawned.".to_string()));
                 }
                 let mut statuses = Vec::new();
                 for cid in &child_ids {

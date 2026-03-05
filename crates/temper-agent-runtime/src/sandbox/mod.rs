@@ -5,7 +5,7 @@
 //! Local tools (bash, file I/O) go through a governed `tools.*` namespace
 //! with Cedar authorization first, then local execution.
 
-pub(crate) mod dispatch;
+pub mod dispatch;
 
 use anyhow::Result;
 use monty::MontyObject;
@@ -16,6 +16,7 @@ use serde_json::Value;
 /// Provides two dispatch namespaces:
 /// - `temper.*` → HTTP to Temper server (entity CRUD, governance, evolution, WASM, navigation)
 /// - `tools.*` → Cedar-gated local execution (bash, file I/O)
+#[derive(Clone)]
 pub struct AgentSandbox {
     /// HTTP client for server communication.
     pub(crate) http: reqwest::Client,
@@ -25,6 +26,8 @@ pub struct AgentSandbox {
     pub(crate) tenant: String,
     /// Agent principal ID for Cedar authorization.
     pub(crate) principal_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Optional governance context (event callback + inline resolver).
+    pub(crate) governance: Option<dispatch::GovernanceContext>,
 }
 
 impl AgentSandbox {
@@ -35,7 +38,14 @@ impl AgentSandbox {
             server_url: server_url.to_string(),
             tenant: tenant.to_string(),
             principal_id: std::sync::Arc::new(std::sync::Mutex::new(principal_id)),
+            governance: None,
         }
+    }
+
+    /// Set the governance context (event callback + optional inline resolver).
+    pub fn with_governance(mut self, ctx: dispatch::GovernanceContext) -> Self {
+        self.governance = Some(ctx);
+        self
     }
 
     /// Set the agent principal ID (call after agent entity is created).
@@ -58,6 +68,7 @@ impl AgentSandbox {
         let server_url = self.server_url.clone();
         let tenant = self.tenant.clone();
         let principal_id_arc = self.principal_id.clone();
+        let governance = self.governance.clone();
 
         temper_sandbox::runner::run_sandbox(
             code,
@@ -70,6 +81,7 @@ impl AgentSandbox {
                 let server_url = server_url.clone();
                 let tenant = tenant.clone();
                 let principal_id_arc = principal_id_arc.clone();
+                let governance = governance.clone();
                 async move {
                     dispatch_method(
                         &http,
@@ -79,6 +91,7 @@ impl AgentSandbox {
                         &function_name,
                         &args,
                         &kwargs,
+                        governance.as_ref(),
                     )
                     .await
                 }
@@ -97,6 +110,7 @@ async fn dispatch_method(
     function_name: &str,
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
+    governance: Option<&dispatch::GovernanceContext>,
 ) -> Result<Value, String> {
     // Determine namespace from self (args[0]) Dataclass name.
     let namespace = args
@@ -114,7 +128,7 @@ async fn dispatch_method(
             let pid = {
                 principal_id.lock().unwrap().clone() // ci-ok: infallible lock
             };
-            temper_sandbox::dispatch::dispatch_temper_method(
+            let result = temper_sandbox::dispatch::dispatch_temper_method(
                 http,
                 server_url,
                 tenant,
@@ -125,7 +139,49 @@ async fn dispatch_method(
                 None, // No entity set resolver for agent (uses entity type directly)
                 None, // No binary path for agent
             )
-            .await
+            .await?;
+
+            // Intercept Cedar denials and run governance resolver.
+            if result.get("denied").and_then(Value::as_bool) == Some(true) {
+                if let Some(ctx) = governance {
+                    let decision_id = result
+                        .get("pending_decision")
+                        .or_else(|| result.get("decision_id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+
+                    if !decision_id.is_empty() {
+                        // Wait for approval via inline prompt + polling.
+                        dispatch::resolve_temper_denial(
+                            http,
+                            server_url,
+                            tenant,
+                            decision_id,
+                            &format!("temper.{function_name}"),
+                            function_name,
+                            "SpecSubmission",
+                            ctx,
+                        )
+                        .await?;
+
+                        // Approved — retry the original call.
+                        return temper_sandbox::dispatch::dispatch_temper_method(
+                            http,
+                            server_url,
+                            tenant,
+                            pid.as_deref(),
+                            function_name,
+                            args,
+                            kwargs,
+                            None,
+                            None,
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            Ok(result)
         }
         "Tools" => {
             dispatch::dispatch_tools_method(
@@ -135,6 +191,7 @@ async fn dispatch_method(
                 principal_id,
                 function_name,
                 args,
+                governance,
             )
             .await
         }
