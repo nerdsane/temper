@@ -351,41 +351,7 @@ impl ToolRegistry for LocalToolRegistry {
                     .unwrap() // ci-ok: infallible lock
                     .clone()
                     .unwrap_or_default();
-                if agent_id.is_empty() {
-                    return Ok(ToolResult::Error(
-                        "spawn_child_agent: no agent_id set — cannot spawn child".to_string(),
-                    ));
-                }
-                let role = input
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .context("spawn_child_agent: missing 'role' parameter")?;
-                let goal = input
-                    .get("goal")
-                    .and_then(|v| v.as_str())
-                    .context("spawn_child_agent: missing 'goal' parameter")?;
-                let model = input
-                    .get("model")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("claude-sonnet-4-6");
-                match self
-                    .client
-                    .action(
-                        "Agents",
-                        &agent_id,
-                        "SpawnChild",
-                        json!({ "role": role, "goal": goal, "model": model }),
-                    )
-                    .await
-                {
-                    Ok(result) => Ok(ToolResult::Success(format!(
-                        "Child agent spawned. {}",
-                        serde_json::to_string_pretty(&result).unwrap_or_default()
-                    ))),
-                    Err(e) => Ok(ToolResult::Error(format!(
-                        "Failed to spawn child agent: {e}"
-                    ))),
-                }
+                super::agent_ops::execute_spawn_child(&self.client, &agent_id, &input).await
             }
             "check_children_status" => {
                 let agent_id = self
@@ -394,65 +360,7 @@ impl ToolRegistry for LocalToolRegistry {
                     .unwrap() // ci-ok: infallible lock
                     .clone()
                     .unwrap_or_default();
-                if agent_id.is_empty() {
-                    return Ok(ToolResult::Error(
-                        "check_children_status: no agent_id set".to_string(),
-                    ));
-                }
-                let agent = self.client.get("Agents", &agent_id).await?;
-                let child_ids = agent
-                    .get("child_agent_ids")
-                    .or_else(|| agent.get("fields").and_then(|f| f.get("child_agent_ids")))
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                if child_ids.is_empty() {
-                    return Ok(ToolResult::Success("No child agents spawned.".to_string()));
-                }
-                let mut statuses = Vec::new();
-                for cid in &child_ids {
-                    let id = cid.as_str().unwrap_or_default();
-                    match self.client.get("Agents", id).await {
-                        Ok(child) => {
-                            let status = child
-                                .get("status")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown");
-                            let role = child
-                                .get("role")
-                                .or_else(|| child.get("fields").and_then(|f| f.get("role")))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let goal = child
-                                .get("goal")
-                                .or_else(|| child.get("fields").and_then(|f| f.get("goal")))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let result = child
-                                .get("result")
-                                .or_else(|| child.get("fields").and_then(|f| f.get("result")))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            statuses.push(json!({
-                                "id": id,
-                                "status": status,
-                                "role": role,
-                                "goal": goal,
-                                "result": result,
-                            }));
-                        }
-                        Err(e) => {
-                            statuses.push(json!({
-                                "id": id,
-                                "status": "error",
-                                "error": e.to_string(),
-                            }));
-                        }
-                    }
-                }
-                Ok(ToolResult::Success(
-                    serde_json::to_string_pretty(&statuses).unwrap_or_default(),
-                ))
+                super::agent_ops::execute_check_children(&self.client, &agent_id).await
             }
             other => Ok(ToolResult::Error(format!("Unknown tool: {other}"))),
         }
@@ -496,16 +404,8 @@ impl ToolRegistry for LocalToolRegistry {
                     .unwrap_or("unknown")
                     .to_string(),
             },
-            "spawn_child_agent" => CedarMapping {
-                resource_type: "Entity".to_string(),
-                action: "SpawnChild".to_string(),
-                resource_id: "Agents".to_string(),
-            },
-            "check_children_status" => CedarMapping {
-                resource_type: "Entity".to_string(),
-                action: "entity_get".to_string(),
-                resource_id: "Agents".to_string(),
-            },
+            "spawn_child_agent" => super::agent_ops::cedar_spawn_child(),
+            "check_children_status" => super::agent_ops::cedar_check_children(),
             "entity_list" | "entity_get" | "entity_action" => CedarMapping {
                 resource_type: "Entity".to_string(),
                 action: name.to_string(),

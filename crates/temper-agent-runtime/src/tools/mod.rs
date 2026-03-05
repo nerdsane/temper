@@ -5,6 +5,7 @@
 //! - [`LocalToolRegistry`]: file I/O, shell, + entity operations (for CLI/local executor)
 //! - [`TemperToolRegistry`]: entity CRUD only (for sandboxed executors)
 
+pub mod agent_ops;
 pub mod local;
 pub mod sandbox;
 pub mod temper;
