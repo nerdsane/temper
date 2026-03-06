@@ -47,6 +47,27 @@ pub enum AgentEvent {
     GovernanceResolved { approved: bool },
 }
 
+/// Tool name for the agent completion signal.
+const DONE_TOOL_NAME: &str = "signal_done";
+
+/// Schema for the `signal_done` tool (injected in autonomous mode only).
+fn done_tool_schema() -> serde_json::Value {
+    json!({
+        "name": DONE_TOOL_NAME,
+        "description": "Signal that you have completed the goal. Call this when your work is done.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "A summary of what was accomplished."
+                }
+            },
+            "required": ["summary"]
+        }
+    })
+}
+
 /// Core agent execution runner.
 ///
 /// Wraps a [`TemperClient`], an [`LlmProvider`], and a [`ToolRegistry`]
@@ -285,7 +306,7 @@ impl AgentRunner {
         autonomous: bool,
     ) -> Result<String> {
         let tool_defs = self.tools.list_tools();
-        let tool_schemas: Vec<serde_json::Value> = tool_defs
+        let mut tool_schemas: Vec<serde_json::Value> = tool_defs
             .iter()
             .map(|t| {
                 json!({
@@ -295,6 +316,9 @@ impl AgentRunner {
                 })
             })
             .collect();
+        if autonomous {
+            tool_schemas.push(done_tool_schema());
+        }
         for turn in 0..max_turns {
             self.emit(AgentEvent::LlmCallStart);
             let on_delta = self.on_delta.clone();
@@ -333,10 +357,17 @@ impl AgentRunner {
                 self.emit(AgentEvent::LlmCallEnd {
                     full_text: String::new(),
                 });
+                let text = if autonomous {
+                    "If you have completed the goal, call \
+                     signal_done(summary=\"...\") to finish. \
+                     Otherwise, continue working by calling execute_code."
+                } else {
+                    "Continue. Use execute_code to proceed."
+                };
                 messages.push(Message {
                     role: "user".to_string(),
                     content: vec![ContentBlock::Text {
-                        text: "Continue. Use execute_code to proceed with the task.".to_string(),
+                        text: text.to_string(),
                     }],
                 });
                 continue;
@@ -374,13 +405,13 @@ impl AgentRunner {
                 });
 
                 if autonomous {
-                    // In autonomous mode, text-only is not an exit — keep working.
                     info!("Autonomous mode: text-only response, injecting continuation");
                     messages.push(Message {
                         role: "user".to_string(),
                         content: vec![ContentBlock::Text {
-                            text: "You returned text without calling execute_code. \
-                                   Use execute_code now to continue working on the goal."
+                            text: "If you have completed the goal, call \
+                                   signal_done(summary=\"...\") to finish. \
+                                   Otherwise, continue working by calling execute_code."
                                 .to_string(),
                         }],
                     });
@@ -402,7 +433,61 @@ impl AgentRunner {
 
             // Execute tool calls.
             let mut tool_results = Vec::new();
+            let mut done_summary: Option<String> = None;
             for (tool_use_id, tool_name, tool_input) in &tool_uses {
+                // Intercept signal_done — runner-level, not dispatched to sandbox.
+                if tool_name == DONE_TOOL_NAME {
+                    let summary = tool_input
+                        .get("summary")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Goal completed")
+                        .to_string();
+                    info!(summary = %summary, "Agent signaled done");
+
+                    // Create ToolCall entity for observability.
+                    let tc_id = uuid::Uuid::now_v7().to_string();
+                    let _ = self
+                        .client
+                        .create(
+                            "ToolCalls",
+                            json!({
+                                "id": tc_id,
+                                "agent_id": agent_id,
+                                "tool_name": DONE_TOOL_NAME,
+                                "tool_input": serde_json::to_string(tool_input)
+                                    .unwrap_or_default(),
+                                "resource_type": "Agent",
+                                "resource_id": agent_id,
+                            }),
+                        )
+                        .await;
+                    let _ = self
+                        .client
+                        .action("ToolCalls", &tc_id, "Authorize", json!({}))
+                        .await;
+                    let _ = self
+                        .client
+                        .action("ToolCalls", &tc_id, "Execute", json!({}))
+                        .await;
+                    let _ = self
+                        .client
+                        .action(
+                            "ToolCalls",
+                            &tc_id,
+                            "Complete",
+                            json!({ "result": &summary, "duration_ms": "0" }),
+                        )
+                        .await;
+
+                    tool_results.push(ContentBlock::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        content: format!("Done: {summary}"),
+                        is_error: None,
+                    });
+                    done_summary = Some(summary);
+                    break;
+                }
+
                 self.emit(AgentEvent::ToolStart {
                     name: tool_name.clone(),
                 });
@@ -433,6 +518,16 @@ impl AgentRunner {
                 content: tool_results,
             });
 
+            // If the agent signaled done, checkpoint and exit.
+            if let Some(summary) = done_summary {
+                self.checkpoint(
+                    agent_id,
+                    &serde_json::to_string(messages).unwrap_or_default(),
+                )
+                .await;
+                return Ok(summary);
+            }
+
             // Checkpoint after each turn.
             self.checkpoint(
                 agent_id,
@@ -457,9 +552,12 @@ impl AgentRunner {
     ) -> Result<ToolResult> {
         let cedar = self.tools.to_cedar(tool_name, tool_input);
 
-        // Create ToolCall entity.
+        // Create ToolCall entity for observability (fire-and-forget — registry
+        // may be replaced by submit_specs during execution, making ToolCall
+        // entity ops return 404, which must not crash the agent).
         let tc_id = uuid::Uuid::now_v7().to_string();
-        self.client
+        let _ = self
+            .client
             .create(
                 "ToolCalls",
                 json!({
@@ -471,7 +569,7 @@ impl AgentRunner {
                     "resource_id": &cedar.resource_id,
                 }),
             )
-            .await?;
+            .await;
 
         // Cedar authorization.
         let authz = self
@@ -486,28 +584,31 @@ impl AgentRunner {
 
         if !authz.allowed {
             let decision_id = authz.decision_id.unwrap_or_default();
-            self.client
+            let _ = self
+                .client
                 .action(
                     "ToolCalls",
                     &tc_id,
                     "Deny",
                     json!({ "decision_id": decision_id }),
                 )
-                .await?;
+                .await;
             return Ok(ToolResult::Error(format!(
                 "Tool '{tool_name}' denied by Cedar policy. Decision: {decision_id}"
             )));
         }
 
         // Governance events are emitted by the sandbox dispatch layer via GovernanceContext.
-        self.client
+        let _ = self
+            .client
             .action("ToolCalls", &tc_id, "Authorize", json!({}))
-            .await?;
+            .await;
 
         // Execute.
-        self.client
+        let _ = self
+            .client
             .action("ToolCalls", &tc_id, "Execute", json!({}))
-            .await?;
+            .await;
 
         let start = std::time::Instant::now(); // determinism-ok: executor code, not simulation-visible
         let result = self.tools.execute(tool_name, tool_input.clone()).await;
@@ -526,31 +627,34 @@ impl AgentRunner {
                 } else {
                     output.clone()
                 };
-                self.client
+                let _ = self
+                    .client
                     .action(
                         "ToolCalls",
                         &tc_id,
                         "Complete",
                         json!({ "result": truncated, "duration_ms": duration_ms.to_string() }),
                     )
-                    .await?;
+                    .await;
                 Ok(ToolResult::Success(output))
             }
             Ok(ToolResult::Error(err)) => {
-                self.client
+                let _ = self
+                    .client
                     .action("ToolCalls", &tc_id, "Fail", json!({ "error": &err }))
-                    .await?;
+                    .await;
                 Ok(ToolResult::Error(err))
             }
             Err(e) => {
-                self.client
+                let _ = self
+                    .client
                     .action(
                         "ToolCalls",
                         &tc_id,
                         "Fail",
                         json!({ "error": e.to_string() }),
                     )
-                    .await?;
+                    .await;
                 Ok(ToolResult::Error(e.to_string()))
             }
         }
