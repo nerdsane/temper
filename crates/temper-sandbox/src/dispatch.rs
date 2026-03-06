@@ -76,9 +76,7 @@ pub async fn dispatch_temper_method(
             .await?;
             Ok(body.get("value").cloned().unwrap_or(body))
         }
-        "get_agent_id" => {
-            Ok(serde_json::json!(principal_id.unwrap_or("")))
-        }
+        "get_agent_id" => Ok(serde_json::json!(principal_id.unwrap_or(""))),
         "get" => {
             let entity = expect_string_arg(args, 0, "entity_type", method)?;
             let entity_id = expect_string_arg(args, 1, "entity_id", method)?;
