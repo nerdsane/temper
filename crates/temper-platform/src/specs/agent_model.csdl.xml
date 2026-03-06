@@ -9,6 +9,7 @@
         <Property Name="Status" Type="Edm.String"/>
         <Property Name="description" Type="Edm.String"/>
         <Property Name="task_count" Type="Edm.String"/>
+        <Property Name="last_task_id" Type="Edm.String"/>
         <Property Name="summary" Type="Edm.String"/>
         <Property Name="reason" Type="Edm.String"/>
         <NavigationProperty Name="Tasks" Type="Collection(Temper.Task)"/>
@@ -106,6 +107,36 @@
         </NavigationProperty>
       </EntityType>
 
+      <EntityType Name="Harness">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="name" Type="Edm.String"/>
+        <Property Name="intent" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="spec_bundle" Type="Edm.String"/>
+        <Property Name="cedar_policies" Type="Edm.String"/>
+        <Property Name="version" Type="Edm.String"/>
+        <Property Name="verification_result" Type="Edm.String"/>
+        <Property Name="created_by" Type="Edm.String"/>
+        <Property Name="reason" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="Policy">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="name" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="cedar_statement" Type="Edm.String"/>
+        <Property Name="harness_id" Type="Edm.String"/>
+        <Property Name="proposed_by" Type="Edm.String"/>
+        <Property Name="reason" Type="Edm.String"/>
+        <NavigationProperty Name="Harness" Type="Temper.Harness" Nullable="true">
+          <ReferentialConstraint Property="harness_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+      </EntityType>
+
       <EntityContainer Name="Service">
         <EntitySet Name="AgentTypes" EntityType="Temper.AgentType"/>
         <EntitySet Name="Schedules" EntityType="Temper.Schedule">
@@ -126,6 +157,10 @@
         </EntitySet>
         <EntitySet Name="ToolCalls" EntityType="Temper.ToolCall">
           <NavigationPropertyBinding Path="Agent" Target="Agents"/>
+        </EntitySet>
+        <EntitySet Name="Harnesses" EntityType="Temper.Harness"/>
+        <EntitySet Name="Policies" EntityType="Temper.Policy">
+          <NavigationPropertyBinding Path="Harness" Target="Harnesses"/>
         </EntitySet>
       </EntityContainer>
 

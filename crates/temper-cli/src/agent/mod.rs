@@ -92,7 +92,9 @@ Use the `execute_code` tool to run Python code in the sandbox.
 
 Entity methods:
 - `await temper.list(\"EntityType\")` — list entities
+- `await temper.list(\"EntityType\", \"status eq 'Active'\")` — list with OData filter
 - `await temper.get(\"EntityType\", \"id\")` — get entity
+- `await temper.get_agent_id()` — get your own agent ID
 - `await temper.create(\"EntityType\", {\"field\": \"value\"})` — create entity
 - `await temper.action(\"EntityType\", \"id\", \"ActionName\", {})` — invoke action
 - `await temper.patch(\"EntityType\", \"id\", {\"field\": \"new_value\"})` — patch entity
@@ -129,6 +131,67 @@ Local methods (Cedar-governed, local filesystem only):
 - `await tools.read(\"path\")` — read file
 - `await tools.write(\"path\", \"content\")` — write file
 - `await tools.ls(\"path\")` — list directory
+
+== STRUCTURED WORK: PLANS & TASKS ==
+
+For complex goals, decompose your work into a Plan with Tasks. This creates \
+a governed audit trail and lets you track progress through Temper entities.
+
+Plan lifecycle:
+  import uuid
+  agent_id = await temper.get_agent_id()
+  plan_id = str(uuid.uuid4())
+  await temper.create(\"Plans\", {\"id\": plan_id})
+  await temper.action(\"Plans\", plan_id, \"Activate\", {\"description\": \"your goal\"})
+  await temper.action(\"Plans\", plan_id, \"AddTask\", {\"title\": \"...\", \"description\": \"...\"})
+  # AddTask spawns a Task child entity. Read plan to get the task ID:
+  plan = await temper.get(\"Plans\", plan_id)
+  task_id = plan[\"last_task_id\"]  # ID of the last spawned task
+  # When all tasks are done:
+  await temper.action(\"Plans\", plan_id, \"Complete\", {\"summary\": \"what was accomplished\"})
+
+Task lifecycle (for each task):
+  await temper.action(\"Tasks\", task_id, \"Claim\", {\"agent_id\": agent_id})
+  await temper.action(\"Tasks\", task_id, \"StartWork\", {})
+  # ... do the actual work via execute_code ...
+  await temper.action(\"Tasks\", task_id, \"SubmitForReview\", {\"deliverable\": \"summary of work\"})
+  await temper.action(\"Tasks\", task_id, \"Approve\", {})
+
+Use Plans for goals with 3+ steps. Skip for simple queries or interactive chat.
+
+== HARNESS: GROUPING SPECS & POLICIES ==
+
+A Harness groups IOA specs, Cedar policies, and cross-entity rules into a \
+single deployable, approvable unit. The human approves the harness as a whole.
+
+Creating a harness:
+  import uuid, json
+  harness_id = str(uuid.uuid4())
+  await temper.create(\"Harnesses\", {\"id\": harness_id})
+  await temper.action(\"Harnesses\", harness_id, \"Define\", {
+    \"name\": \"My Application\",
+    \"intent\": \"the original human request\",
+    \"spec_bundle\": json.dumps({\"Entity.ioa.toml\": \"...\", \"model.csdl.xml\": \"...\"}),
+    \"cedar_policies\": json.dumps([\"permit(...) when { ... };\"])
+  })
+  # After verification, deploy:
+  await temper.action(\"Harnesses\", harness_id, \"Deploy\", {})
+  # To update: Revise -> re-Define -> re-Deploy
+
+== POLICY: GOVERNED CEDAR AUTHORIZATION ==
+
+Propose Cedar policies through a governed lifecycle. Humans approve before activation.
+
+  policy_id = str(uuid.uuid4())
+  await temper.create(\"Policies\", {\"id\": policy_id})
+  await temper.action(\"Policies\", policy_id, \"Propose\", {
+    \"name\": \"Allow support agents to escalate\",
+    \"description\": \"Enables the Escalate action for support role\",
+    \"cedar_statement\": 'permit(principal, action == \"Ticket.Escalate\", resource) when { principal.role == \"support\" };',
+    \"proposed_by\": agent_id
+  })
+  # Human approves via Observe UI, then:
+  await temper.action(\"Policies\", policy_id, \"Activate\", {})
 
 Write Python code to accomplish the user's request. Use `return` to send results back.";
 

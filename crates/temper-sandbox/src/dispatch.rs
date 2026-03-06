@@ -55,18 +55,29 @@ pub async fn dispatch_temper_method(
         // --- Entity CRUD ---
         "list" => {
             let entity = expect_string_arg(args, 0, "entity_type", method)?;
+            let filter = optional_string_arg(args, 1);
             let set = resolve_set(&entity);
+            let path = match filter {
+                Some(f) => {
+                    let encoded = f.replace(' ', "%20").replace('\'', "%27");
+                    format!("/tdata/{set}?$filter={encoded}")
+                }
+                None => format!("/tdata/{set}"),
+            };
             let body = temper_request(
                 http,
                 base_url,
                 tenant,
                 principal_id,
                 Method::GET,
-                &format!("/tdata/{set}"),
+                &path,
                 None,
             )
             .await?;
             Ok(body.get("value").cloned().unwrap_or(body))
+        }
+        "get_agent_id" => {
+            Ok(serde_json::json!(principal_id.unwrap_or("")))
         }
         "get" => {
             let entity = expect_string_arg(args, 0, "entity_type", method)?;
@@ -401,7 +412,7 @@ pub async fn dispatch_temper_method(
         )),
         _ => Err(format!(
             "unknown temper method '{method}'. Available: \
-             list, get, create, action, patch, navigate, \
+             list, get, create, action, patch, navigate, get_agent_id, \
              submit_specs, get_policies, \
              upload_wasm, compile_wasm, \
              get_decisions, get_decision_status, poll_decision, \
