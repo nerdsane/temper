@@ -92,8 +92,7 @@ pub struct DesignTimeEvent {
 }
 
 fn env_bool(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        // determinism-ok: read once at startup
+    match std::env::var(name) { // determinism-ok: read once at startup
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "0" | "false" | "off" | "no" => false,
             "1" | "true" | "on" | "yes" => true,
@@ -147,6 +146,7 @@ pub struct ServerState {
     /// Metrics collector for the /observe endpoints.
     pub metrics: Arc<MetricsCollector>,
     /// In-memory evolution record store (O/P/A/D/I records).
+    #[allow(deprecated)] // ADR-0025 Phase 4: remove after chain validation replaced
     pub record_store: Arc<RecordStore>,
     /// Optional Postgres evolution record store (source of truth when configured).
     pub pg_record_store: Option<Arc<PostgresRecordStore>>,
@@ -193,6 +193,7 @@ pub struct ServerState {
     pub single_tenant_mode: bool,
 }
 
+#[allow(deprecated)] // ADR-0025 Phase 4: RecordStore used until chain validation replaced
 impl ServerState {
     /// Create ServerState from CSDL XML and optional specification sources.
     pub fn new(system: ActorSystem, csdl: CsdlDocument, csdl_xml: String) -> Self {
