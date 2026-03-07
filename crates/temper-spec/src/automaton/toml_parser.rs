@@ -285,7 +285,7 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
                                 }
                                 // Format: array of inline tables [{ type = "schedule", ... }]
                                 else if value.trim().starts_with('[') && value.contains('{') {
-                                    parse_effect_array(&value, &mut a.effect);
+                                    parse_effect_array(&value, &mut a.effect)?;
                                 }
                             }
                             _ => {}
@@ -362,6 +362,7 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
         integrations,
         webhooks: extract_webhooks(input),
         context_entities: Vec::new(),
+        agent_triggers: extract_agent_triggers(input),
     })
 }
 
@@ -377,6 +378,18 @@ fn extract_webhooks(source: &str) -> Vec<super::types::Webhook> {
     }
     toml::from_str::<WebhookWrapper>(source)
         .map(|w| w.webhooks)
+        .unwrap_or_default()
+}
+
+/// Extract `[[agent_trigger]]` sections from TOML source via serde.
+fn extract_agent_triggers(source: &str) -> Vec<super::types::AgentTrigger> {
+    #[derive(serde::Deserialize)]
+    struct AgentTriggerWrapper {
+        #[serde(default, rename = "agent_trigger")]
+        agent_triggers: Vec<super::types::AgentTrigger>,
+    }
+    toml::from_str::<AgentTriggerWrapper>(source)
+        .map(|w| w.agent_triggers)
         .unwrap_or_default()
 }
 
@@ -546,10 +559,10 @@ pub(super) fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseErr
 /// Parse an effect array in inline table format.
 ///
 /// Handles: `[{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]`
-fn parse_effect_array(value: &str, effects: &mut Vec<Effect>) {
+fn parse_effect_array(value: &str, effects: &mut Vec<Effect>) -> Result<(), AutomatonParseError> {
     let trimmed = value.trim();
     if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
-        return;
+        return Ok(());
     }
     let inner = &trimmed[1..trimmed.len() - 1];
 
@@ -590,7 +603,7 @@ fn parse_effect_array(value: &str, effects: &mut Vec<Effect>) {
                     effects.push(Effect::SetBool { var, value });
                 }
             }
-            "emit" => {
+            "emit" | "emit_event" => {
                 if let Some(event) = fields.get("event").cloned() {
                     effects.push(Effect::Emit { event });
                 }
@@ -601,16 +614,24 @@ fn parse_effect_array(value: &str, effects: &mut Vec<Effect>) {
                 }
             }
             "list_append" => {
-                if let Some(var) = fields.get("var").cloned() {
+                let var = fields
+                    .get("var")
+                    .cloned()
+                    .or_else(|| fields.get("list").cloned());
+                if let Some(var) = var {
                     effects.push(Effect::ListAppend { var });
                 }
             }
             "list_remove_at" => {
-                if let Some(var) = fields.get("var").cloned() {
+                let var = fields
+                    .get("var")
+                    .cloned()
+                    .or_else(|| fields.get("list").cloned());
+                if let Some(var) = var {
                     effects.push(Effect::ListRemoveAt { var });
                 }
             }
-            "spawn" => {
+            "spawn" | "spawn_entity" => {
                 let entity_type = fields.get("entity_type").cloned().unwrap_or_default();
                 let entity_id_source = fields.get("entity_id_source").cloned().unwrap_or_default();
                 let initial_action = fields.get("initial_action").cloned();
@@ -624,9 +645,14 @@ fn parse_effect_array(value: &str, effects: &mut Vec<Effect>) {
                     });
                 }
             }
-            _ => {}
+            _ => {
+                return Err(AutomatonParseError::Validation(format!(
+                    "unsupported effect type '{effect_type}'"
+                )));
+            }
         }
     }
+    Ok(())
 }
 
 /// Parse a guard array in inline table format.
@@ -704,16 +730,45 @@ fn parse_guard_array(value: &str, guards: &mut Vec<Guard>) -> Result<(), Automat
 /// Split inline tables from a TOML array (e.g., "{a = 1}, {b = 2}").
 fn split_inline_tables(s: &str) -> Vec<&str> {
     let mut result = Vec::new();
-    let mut depth = 0;
-    let mut start = 0;
+    let mut depth: usize = 0;
+    let mut start = None;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+
     for (i, c) in s.char_indices() {
+        if in_double_quote && c == '\\' {
+            escaped = !escaped;
+            continue;
+        }
+
+        if c == '"' && !in_single_quote && !escaped {
+            in_double_quote = !in_double_quote;
+        } else if c == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+        }
+
+        if c != '\\' {
+            escaped = false;
+        }
+
+        if in_single_quote || in_double_quote {
+            continue;
+        }
+
         match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
+            '{' => {
                 if depth == 0 {
-                    result.push(&s[start..=i]);
-                    start = i + 1;
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0
+                    && let Some(start_idx) = start.take()
+                {
+                    result.push(&s[start_idx..=i]);
                 }
             }
             _ => {}

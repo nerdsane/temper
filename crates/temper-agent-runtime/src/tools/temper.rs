@@ -3,6 +3,8 @@
 //! Provides entity CRUD operations only — no local filesystem or shell access.
 //! Used by remote/sandboxed executor deployments.
 
+use std::sync::{Arc, Mutex};
+
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use temper_sdk::TemperClient;
@@ -15,17 +17,26 @@ use super::{CedarMapping, ToolDef, ToolRegistry, ToolResult};
 /// filesystem or shell access.
 pub struct TemperToolRegistry {
     client: TemperClient,
+    /// The current agent's ID, set by the runner.
+    agent_id: Arc<Mutex<Option<String>>>,
 }
 
 impl TemperToolRegistry {
     /// Create a new Temper-only tool registry.
     pub fn new(client: TemperClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            agent_id: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl ToolRegistry for TemperToolRegistry {
+    fn set_agent_id(&self, id: &str) {
+        *self.agent_id.lock().unwrap() = Some(id.to_string()); // ci-ok: infallible lock
+    }
+
     fn list_tools(&self) -> Vec<ToolDef> {
         vec![
             ToolDef {
@@ -108,6 +119,41 @@ impl ToolRegistry for TemperToolRegistry {
                     "required": ["entity_type", "id", "action"]
                 }),
             },
+            ToolDef {
+                name: "spawn_child_agent".to_string(),
+                description: "Spawn a child agent to handle a delegated sub-task. The child \
+                    runs autonomously and must complete before this agent can complete."
+                    .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "role": {
+                            "type": "string",
+                            "description": "Role for the child agent (e.g., 'researcher', 'tester')."
+                        },
+                        "goal": {
+                            "type": "string",
+                            "description": "Goal for the child agent — what it should accomplish."
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "LLM model for the child (e.g., 'claude-sonnet-4-6'). Optional."
+                        }
+                    },
+                    "required": ["role", "goal"]
+                }),
+            },
+            ToolDef {
+                name: "check_children_status".to_string(),
+                description: "Check the status of all child agents spawned by this agent. \
+                    Returns each child's ID, status, role, goal, and result."
+                    .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
         ]
     }
 
@@ -178,19 +224,41 @@ impl ToolRegistry for TemperToolRegistry {
                     Err(e) => Ok(ToolResult::Error(e.to_string())),
                 }
             }
+            "spawn_child_agent" => {
+                let agent_id = self
+                    .agent_id
+                    .lock()
+                    .unwrap() // ci-ok: infallible lock
+                    .clone()
+                    .unwrap_or_default();
+                super::agent_ops::execute_spawn_child(&self.client, &agent_id, &input).await
+            }
+            "check_children_status" => {
+                let agent_id = self
+                    .agent_id
+                    .lock()
+                    .unwrap() // ci-ok: infallible lock
+                    .clone()
+                    .unwrap_or_default();
+                super::agent_ops::execute_check_children(&self.client, &agent_id).await
+            }
             other => Ok(ToolResult::Error(format!("Unknown tool: {other}"))),
         }
     }
 
     fn to_cedar(&self, name: &str, input: &Value) -> CedarMapping {
-        CedarMapping {
-            resource_type: "Entity".to_string(),
-            action: name.to_string(),
-            resource_id: input
-                .get("entity_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
+        match name {
+            "spawn_child_agent" => super::agent_ops::cedar_spawn_child(),
+            "check_children_status" => super::agent_ops::cedar_check_children(),
+            _ => CedarMapping {
+                resource_type: "Entity".to_string(),
+                action: name.to_string(),
+                resource_id: input
+                    .get("entity_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+            },
         }
     }
 }
@@ -204,7 +272,7 @@ mod tests {
         let client = TemperClient::new("http://localhost:4200", "default");
         let registry = TemperToolRegistry::new(client);
         let tools = registry.list_tools();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 6);
     }
 
     #[test]
@@ -217,5 +285,24 @@ mod tests {
         );
         assert_eq!(mapping.resource_type, "Entity");
         assert_eq!(mapping.resource_id, "Tasks");
+    }
+
+    #[test]
+    fn test_cedar_spawn_child() {
+        let client = TemperClient::new("http://localhost:4200", "default");
+        let registry = TemperToolRegistry::new(client);
+        let mapping = registry.to_cedar("spawn_child_agent", &json!({}));
+        assert_eq!(mapping.resource_type, "Entity");
+        assert_eq!(mapping.action, "SpawnChild");
+        assert_eq!(mapping.resource_id, "Agents");
+    }
+
+    #[test]
+    fn test_set_agent_id() {
+        let client = TemperClient::new("http://localhost:4200", "default");
+        let registry = TemperToolRegistry::new(client);
+        registry.set_agent_id("agent-123");
+        let id = registry.agent_id.lock().unwrap().clone(); // ci-ok: infallible lock
+        assert_eq!(id, Some("agent-123".to_string()));
     }
 }

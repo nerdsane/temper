@@ -6,31 +6,10 @@ import { fetchTrajectories, fetchEntities, subscribeEntityEvents } from "@/lib/a
 import { usePolling, useRelativeTime } from "@/lib/hooks";
 import type { TrajectoryResponse, EntityStateChange, EntitySummary } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
+import StatCard from "@/components/StatCard";
 import StatusBadge from "@/components/StatusBadge";
 import EntityDetailPanel from "@/components/EntityDetailPanel";
-
-function StatCard({ label, value, color }: { label: string; value: string | number; color?: string }) {
-  return (
-    <div className="glass rounded p-3.5">
-      <div className="text-[12px] text-zinc-600">{label}</div>
-      <div className={`text-4xl font-bold font-mono mt-0.5 ${color ?? "text-zinc-100"}`}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function rateColor(rate: number): string {
-  if (rate >= 80) return "text-teal-400";
-  if (rate >= 50) return "text-amber-400";
-  return "text-pink-400";
-}
-
-function rateBgColor(rate: number): string {
-  if (rate >= 80) return "bg-teal-400";
-  if (rate >= 50) return "bg-amber-400";
-  return "bg-pink-400";
-}
+import { rateColor, rateBgColor } from "@/lib/utils";
 
 export default function ActivityPage() {
   const [initialLoading, setInitialLoading] = useState(true);
@@ -188,7 +167,7 @@ export default function ActivityPage() {
         <div className="h-3.5 bg-zinc-800/40 rounded w-64 mb-6" />
         <div className="grid grid-cols-4 gap-3 mb-6">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="glass rounded p-3.5">
+            <div key={i} className="glass rounded-lg p-4">
               <div className="h-3 bg-zinc-800/50 rounded w-20 mb-2" />
               <div className="h-8 bg-zinc-800/50 rounded w-10" />
             </div>
@@ -461,7 +440,7 @@ export default function ActivityPage() {
           Failed Intents
         </h2>
         {!data || data.failed_intents.length === 0 ? (
-          <div className="glass rounded p-6 text-center">
+          <div className="glass rounded-lg p-6 text-center">
             <p className="text-sm text-zinc-500">No failed intents recorded.</p>
           </div>
         ) : (

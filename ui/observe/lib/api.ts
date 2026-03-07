@@ -126,36 +126,63 @@ export async function fetchWorkflows(): Promise<WorkflowsResponse> {
   return res.json();
 }
 
+/** Create a reconnecting EventSource that re-establishes the connection on error. */
+function createReconnectingEventSource(
+  url: string,
+  eventName: string,
+  onMessage: (data: string) => void,
+): () => void {
+  let source: EventSource | null = null;
+  let closed = false;
+  let retryDelay = 1000;
+
+  function connect() {
+    if (closed) return;
+    source = new EventSource(url);
+    source.addEventListener(eventName, (e) => {
+      retryDelay = 1000; // reset on successful message
+      onMessage((e as MessageEvent).data);
+    });
+    source.onerror = () => {
+      source?.close();
+      if (!closed) {
+        setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 30000);
+      }
+    };
+  }
+
+  connect();
+  return () => {
+    closed = true;
+    source?.close();
+  };
+}
+
 /** Subscribe to design-time SSE events. Returns a cleanup function. */
 export function subscribeDesignTimeEvents(
   onEvent: (event: DesignTimeEvent) => void,
 ): () => void {
-  const source = new EventSource(`${API_BASE}/observe/design-time/stream`);
-  source.addEventListener("design_time", (e) => {
-    try {
-      const data = JSON.parse((e as MessageEvent).data) as DesignTimeEvent;
-      onEvent(data);
-    } catch {
-      // Ignore parse errors
-    }
-  });
-  return () => source.close();
+  return createReconnectingEventSource(
+    `${API_BASE}/observe/design-time/stream`,
+    "design_time",
+    (raw) => {
+      try { onEvent(JSON.parse(raw) as DesignTimeEvent); } catch { /* ignore parse errors */ }
+    },
+  );
 }
 
 /** Subscribe to runtime entity state change events. Returns a cleanup function. */
 export function subscribeEntityEvents(
   onEvent: (event: EntityStateChange) => void,
 ): () => void {
-  const source = new EventSource(`${API_BASE}/observe/events/stream`);
-  source.addEventListener("state_change", (e) => {
-    try {
-      const data = JSON.parse((e as MessageEvent).data) as EntityStateChange;
-      onEvent(data);
-    } catch {
-      // Ignore parse errors
-    }
-  });
-  return () => source.close();
+  return createReconnectingEventSource(
+    `${API_BASE}/observe/events/stream`,
+    "state_change",
+    (raw) => {
+      try { onEvent(JSON.parse(raw) as EntityStateChange); } catch { /* ignore parse errors */ }
+    },
+  );
 }
 
 /** Fetch trajectory stats and failed intents */
@@ -279,14 +306,13 @@ export async function denyDecision(tenant: string, decisionId: string): Promise<
 
 /** Subscribe to pending decision SSE stream */
 export function subscribePendingDecisions(tenant: string, onEvent: (decision: PendingDecision) => void): () => void {
-  const source = new EventSource(`${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions/stream`);
-  source.addEventListener("pending_decision", (e) => {
-    try {
-      const data = JSON.parse((e as MessageEvent).data) as PendingDecision;
-      onEvent(data);
-    } catch { /* ignore parse errors */ }
-  });
-  return () => source.close();
+  return createReconnectingEventSource(
+    `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions/stream`,
+    "pending_decision",
+    (raw) => {
+      try { onEvent(JSON.parse(raw) as PendingDecision); } catch { /* ignore parse errors */ }
+    },
+  );
 }
 
 /** Fetch all decisions across all tenants */
@@ -304,14 +330,13 @@ export async function fetchAllDecisions(params?: {
 
 /** Subscribe to all pending decisions across all tenants */
 export function subscribeAllPendingDecisions(onEvent: (decision: PendingDecision) => void): () => void {
-  const source = new EventSource(`${API_BASE}/api/decisions/stream`);
-  source.addEventListener("pending_decision", (e) => {
-    try {
-      const data = JSON.parse((e as MessageEvent).data) as PendingDecision;
-      onEvent(data);
-    } catch { /* ignore parse errors */ }
-  });
-  return () => source.close();
+  return createReconnectingEventSource(
+    `${API_BASE}/api/decisions/stream`,
+    "pending_decision",
+    (raw) => {
+      try { onEvent(JSON.parse(raw) as PendingDecision); } catch { /* ignore parse errors */ }
+    },
+  );
 }
 
 /** Fetch agent list with stats */
@@ -377,14 +402,13 @@ export async function triggerExtendedSentinelCheck(): Promise<ExtendedSentinelCh
 
 /** Subscribe to evolution SSE events */
 export function subscribeEvolutionEvents(onEvent: (event: Record<string, unknown>) => void): () => void {
-  const source = new EventSource(`${API_BASE}/observe/evolution/stream`);
-  source.addEventListener("evolution_event", (e) => {
-    try {
-      const data = JSON.parse((e as MessageEvent).data);
-      onEvent(data);
-    } catch { /* ignore parse errors */ }
-  });
-  return () => source.close();
+  return createReconnectingEventSource(
+    `${API_BASE}/observe/evolution/stream`,
+    "evolution_event",
+    (raw) => {
+      try { onEvent(JSON.parse(raw)); } catch { /* ignore parse errors */ }
+    },
+  );
 }
 
 /** Fetch feature requests, optionally filtered by disposition */

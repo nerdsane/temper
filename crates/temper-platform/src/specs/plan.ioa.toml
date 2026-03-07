@@ -22,6 +22,11 @@ name = "task_count"
 type = "counter"
 initial = "0"
 
+[[state]]
+name = "last_task_id"
+type = "string"
+initial = ""
+
 # --- Actions: Plan Lifecycle ---
 
 [[action]]
@@ -39,8 +44,9 @@ from = ["Active"]
 params = ["title", "description"]
 hint = "Add a new task to the active plan. Spawns a Task child entity and increments task_count."
 effect = [
-  { type = "spawn_entity", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create", store_id_in = "last_task_id" },
-  { type = "emit_event", event = "TaskAdded" }
+  { type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create", store_id_in = "last_task_id" },
+  { type = "increment", var = "task_count" },
+  { type = "emit", event = "TaskAdded" }
 ]
 
 [[action]]
@@ -65,7 +71,7 @@ to = "Completed"
 params = ["summary"]
 guard = "task_count > 0"
 hint = "Mark the plan as successfully completed. Requires at least one task."
-effect = [{ type = "emit_event", event = "PlanCompleted" }]
+effect = [{ type = "emit", event = "PlanCompleted" }]
 
 [[action]]
 name = "Fail"
@@ -74,7 +80,7 @@ from = ["Active", "Paused"]
 to = "Failed"
 params = ["reason"]
 hint = "Mark the plan as failed from Active or Paused state."
-effect = [{ type = "emit_event", event = "PlanFailed" }]
+effect = [{ type = "emit", event = "PlanFailed" }]
 
 # --- Safety Invariants ---
 

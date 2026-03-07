@@ -226,6 +226,7 @@ pub(crate) async fn handle_load_dir(
                 &ioa_pairs,
                 reactions,
                 cross_invariants_toml.clone(),
+                body.merge,
             )
             .map_err(|e| {
                 (

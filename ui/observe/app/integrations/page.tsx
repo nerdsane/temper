@@ -5,29 +5,8 @@ import { fetchWasmModules, fetchWasmInvocations } from "@/lib/api";
 import { usePolling, useRelativeTime } from "@/lib/hooks";
 import type { WasmModulesResponse, WasmInvocationsResponse } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
-
-function StatCard({ label, value, color }: { label: string; value: string | number; color?: string }) {
-  return (
-    <div className="glass rounded p-3.5">
-      <div className="text-[12px] text-zinc-600">{label}</div>
-      <div className={`text-4xl font-bold font-mono mt-0.5 ${color ?? "text-zinc-100"}`}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function rateColor(rate: number): string {
-  if (rate >= 80) return "text-teal-400";
-  if (rate >= 50) return "text-amber-400";
-  return "text-pink-400";
-}
-
-function rateBgColor(rate: number): string {
-  if (rate >= 80) return "bg-teal-400";
-  if (rate >= 50) return "bg-amber-400";
-  return "bg-pink-400";
-}
+import StatCard from "@/components/StatCard";
+import { rateColor, rateBgColor } from "@/lib/utils";
 
 export default function IntegrationsPage() {
   const [initialLoading, setInitialLoading] = useState(true);
@@ -96,7 +75,7 @@ export default function IntegrationsPage() {
         <div className="h-3.5 bg-zinc-800/40 rounded w-72 mb-6" />
         <div className="grid grid-cols-3 gap-3 mb-6">
           {[0, 1, 2].map((i) => (
-            <div key={i} className="glass rounded p-3.5">
+            <div key={i} className="glass rounded-lg p-4">
               <div className="h-3 bg-zinc-800/50 rounded w-20 mb-2" />
               <div className="h-8 bg-zinc-800/50 rounded w-10" />
             </div>
@@ -229,7 +208,7 @@ export default function IntegrationsPage() {
 
       {/* Empty state for modules */}
       {modules && modules.modules.length === 0 && (
-        <div className="glass rounded p-8 text-center mb-6">
+        <div className="glass rounded-lg p-6 text-center mb-6">
           <div className="text-zinc-500 text-sm">No WASM modules uploaded yet.</div>
           <p className="text-zinc-600 text-xs mt-1">
             Upload modules via POST /api/wasm/modules/:name
@@ -246,7 +225,7 @@ export default function IntegrationsPage() {
           )}
         </h2>
         {!invocations || invocations.invocations.length === 0 ? (
-          <div className="glass rounded p-6 text-center">
+          <div className="glass rounded-lg p-6 text-center">
             <p className="text-sm text-zinc-500">No invocations recorded yet.</p>
           </div>
         ) : (

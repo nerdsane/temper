@@ -4,6 +4,7 @@
 //! Temper entity operations (`entity_list`, `entity_get`, `entity_action`).
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -17,17 +18,26 @@ use super::{CedarMapping, ToolDef, ToolRegistry, ToolResult};
 /// filesystem and shell access.
 pub struct LocalToolRegistry {
     client: TemperClient,
+    /// The current agent's ID, set by the runner.
+    agent_id: Arc<Mutex<Option<String>>>,
 }
 
 impl LocalToolRegistry {
     /// Create a new local tool registry backed by the given Temper client.
     pub fn new(client: TemperClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            agent_id: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl ToolRegistry for LocalToolRegistry {
+    fn set_agent_id(&self, id: &str) {
+        *self.agent_id.lock().unwrap() = Some(id.to_string()); // ci-ok: infallible lock
+    }
+
     fn list_tools(&self) -> Vec<ToolDef> {
         vec![
             ToolDef {
@@ -150,6 +160,41 @@ impl ToolRegistry for LocalToolRegistry {
                         }
                     },
                     "required": ["entity_type", "id", "action"]
+                }),
+            },
+            ToolDef {
+                name: "spawn_child_agent".to_string(),
+                description: "Spawn a child agent to handle a delegated sub-task. The child \
+                    runs autonomously and must complete before this agent can complete."
+                    .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "role": {
+                            "type": "string",
+                            "description": "Role for the child agent (e.g., 'researcher', 'tester')."
+                        },
+                        "goal": {
+                            "type": "string",
+                            "description": "Goal for the child agent — what it should accomplish."
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "LLM model for the child (e.g., 'claude-sonnet-4-6'). Optional."
+                        }
+                    },
+                    "required": ["role", "goal"]
+                }),
+            },
+            ToolDef {
+                name: "check_children_status".to_string(),
+                description: "Check the status of all child agents spawned by this agent. \
+                    Returns each child's ID, status, role, goal, and result."
+                    .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
                 }),
             },
         ]
@@ -299,6 +344,24 @@ impl ToolRegistry for LocalToolRegistry {
                     Err(e) => Ok(ToolResult::Error(e.to_string())),
                 }
             }
+            "spawn_child_agent" => {
+                let agent_id = self
+                    .agent_id
+                    .lock()
+                    .unwrap() // ci-ok: infallible lock
+                    .clone()
+                    .unwrap_or_default();
+                super::agent_ops::execute_spawn_child(&self.client, &agent_id, &input).await
+            }
+            "check_children_status" => {
+                let agent_id = self
+                    .agent_id
+                    .lock()
+                    .unwrap() // ci-ok: infallible lock
+                    .clone()
+                    .unwrap_or_default();
+                super::agent_ops::execute_check_children(&self.client, &agent_id).await
+            }
             other => Ok(ToolResult::Error(format!("Unknown tool: {other}"))),
         }
     }
@@ -341,6 +404,8 @@ impl ToolRegistry for LocalToolRegistry {
                     .unwrap_or("unknown")
                     .to_string(),
             },
+            "spawn_child_agent" => super::agent_ops::cedar_spawn_child(),
+            "check_children_status" => super::agent_ops::cedar_check_children(),
             "entity_list" | "entity_get" | "entity_action" => CedarMapping {
                 resource_type: "Entity".to_string(),
                 action: name.to_string(),
@@ -368,7 +433,7 @@ mod tests {
         let client = TemperClient::new("http://localhost:4200", "default");
         let registry = LocalToolRegistry::new(client);
         let tools = registry.list_tools();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 9);
     }
 
     #[test]

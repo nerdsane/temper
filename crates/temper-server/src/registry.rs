@@ -15,10 +15,10 @@ use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::{self, Automaton, Integration, Webhook};
 use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy, parse_cross_invariants};
-use temper_spec::csdl::CsdlDocument;
+use temper_spec::csdl::{CsdlDocument, emit_csdl_xml, merge_csdl};
 
 use crate::reaction::ReactionRegistry;
-use crate::reaction::types::ReactionRule;
+use crate::reaction::types::{ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver};
 
 /// Verification status for a single entity type.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -247,6 +247,7 @@ impl SpecRegistry {
             ioa_sources,
             Vec::new(),
             None,
+            false,
         )
         .unwrap_or_else(|e| panic!("{e}"));
     }
@@ -266,6 +267,7 @@ impl SpecRegistry {
             ioa_sources,
             Vec::new(),
             None,
+            false,
         )
     }
 
@@ -287,11 +289,20 @@ impl SpecRegistry {
             ioa_sources,
             reactions,
             cross_invariants_source,
+            false,
         )
         .unwrap_or_else(|e| panic!("{e}"));
     }
 
     /// Fallible variant of [`register_tenant_with_reactions_and_constraints`](Self::register_tenant_with_reactions_and_constraints).
+    ///
+    /// When `merge` is `true`, the new specs are **merged** into the existing
+    /// tenant config rather than replacing it.  Existing entity types, CSDL
+    /// schemas, and entity-set-map entries that are not part of the new
+    /// submission are preserved.  This is the correct mode for
+    /// `load-inline` (agent `submit_specs`), where the agent only submits
+    /// its own entities and should not wipe platform types.
+    #[allow(clippy::too_many_arguments)]
     #[instrument(skip_all, fields(otel.name = "registry.try_register_tenant_with_reactions_and_constraints"))]
     pub fn try_register_tenant_with_reactions_and_constraints(
         &mut self,
@@ -301,6 +312,7 @@ impl SpecRegistry {
         ioa_sources: &[(&str, &str)],
         reactions: Vec<ReactionRule>,
         cross_invariants_source: Option<String>,
+        merge: bool,
     ) -> Result<(), RegistryError> {
         let tenant = tenant.into();
         let tenant_name = tenant.to_string();
@@ -333,9 +345,20 @@ impl SpecRegistry {
 
         if let Some(existing_config) = self.tenants.get_mut(&tenant) {
             // Hot-reload path: swap tables on existing entities, add new ones.
-            existing_config.csdl = Arc::new(csdl);
-            existing_config.csdl_xml = Arc::new(csdl_xml);
-            existing_config.entity_set_map = entity_set_map;
+            if merge {
+                // Merge mode: combine incoming CSDL/entity-set-map with existing.
+                let merged_csdl = merge_csdl(&existing_config.csdl, &csdl);
+                existing_config.csdl_xml = Arc::new(emit_csdl_xml(&merged_csdl));
+                existing_config.csdl = Arc::new(merged_csdl);
+                for (k, v) in entity_set_map {
+                    existing_config.entity_set_map.insert(k, v);
+                }
+            } else {
+                // Replace mode: full replacement (for load-dir where directory is truth).
+                existing_config.csdl = Arc::new(csdl);
+                existing_config.csdl_xml = Arc::new(csdl_xml);
+                existing_config.entity_set_map = entity_set_map;
+            }
             existing_config.reactions = reactions;
             existing_config.relation_graph = relation_graph;
             existing_config.cross_invariants = cross_invariants;
@@ -378,22 +401,33 @@ impl SpecRegistry {
                 }
             }
 
-            // Remove entities no longer in the spec set.
-            let new_entity_types: std::collections::BTreeSet<String> =
-                ioa_sources.iter().map(|(t, _)| t.to_string()).collect();
-            existing_config
-                .entities
-                .retain(|k, _| new_entity_types.contains(k));
+            if !merge {
+                // Replace mode: remove entities no longer in the spec set.
+                let new_entity_types: std::collections::BTreeSet<String> =
+                    ioa_sources.iter().map(|(t, _)| t.to_string()).collect();
+                existing_config
+                    .entities
+                    .retain(|k, _| new_entity_types.contains(k));
+            }
 
             // Rebuild webhook route index.
             existing_config.webhook_routes = build_webhook_routes(&existing_config.entities);
 
-            // Reset verification to Pending for re-verification.
-            existing_config.verification = existing_config
-                .entities
-                .keys()
-                .map(|k| (k.clone(), VerificationStatus::Pending))
-                .collect();
+            if merge {
+                // Merge mode: only reset verification for entities in this submission.
+                for (entity_type, _) in ioa_sources {
+                    existing_config
+                        .verification
+                        .insert(entity_type.to_string(), VerificationStatus::Pending);
+                }
+            } else {
+                // Replace mode: reset verification for all entities.
+                existing_config.verification = existing_config
+                    .entities
+                    .keys()
+                    .map(|k| (k.clone(), VerificationStatus::Pending))
+                    .collect();
+            }
         } else {
             // First registration: create new TenantConfig.
             let mut entities = BTreeMap::new();
@@ -460,6 +494,7 @@ impl SpecRegistry {
             ioa_sources,
             reactions,
             None,
+            false,
         )
         .unwrap_or_else(|e| panic!("{e}"));
     }
@@ -480,15 +515,24 @@ impl SpecRegistry {
             ioa_sources,
             reactions,
             None,
+            false,
         )
     }
 
-    /// Build a [`ReactionRegistry`] from all tenants' reaction rules.
+    /// Build a [`ReactionRegistry`] from all tenants' reaction rules,
+    /// including synthesized rules from `[[agent_trigger]]` sections.
     pub fn build_reaction_registry(&self) -> ReactionRegistry {
         let mut registry = ReactionRegistry::new();
         for (tenant, config) in &self.tenants {
-            if !config.reactions.is_empty() {
-                registry.register_tenant_rules(tenant.clone(), config.reactions.clone());
+            let mut rules = config.reactions.clone();
+            // Synthesize reaction rules from agent triggers in each entity spec.
+            for (entity_type, spec) in &config.entities {
+                for trigger in &spec.automaton.agent_triggers {
+                    rules.extend(synthesize_agent_trigger_reactions(entity_type, trigger));
+                }
+            }
+            if !rules.is_empty() {
+                registry.register_tenant_rules(tenant.clone(), rules);
             }
         }
         registry
@@ -605,6 +649,68 @@ fn build_webhook_routes(
         }
     }
     routes
+}
+
+/// Synthesize reaction rules from an `[[agent_trigger]]` declaration.
+///
+/// Each trigger produces two chained reactions:
+/// 1. Source entity action → Agent.Assign (CreateIfMissing resolver creates the Agent)
+/// 2. Agent.Assign → Agent.Start (SameId resolver starts the just-assigned Agent)
+///
+/// The executor's SSE loop picks up the spawned agent automatically.
+fn synthesize_agent_trigger_reactions(
+    entity_type: &str,
+    trigger: &temper_spec::automaton::AgentTrigger,
+) -> Vec<ReactionRule> {
+    let model = trigger
+        .agent_model
+        .clone()
+        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+    let agent_type_id = trigger.agent_type_id.clone().unwrap_or_default();
+
+    let mut params = serde_json::json!({
+        "role": trigger.agent_role,
+        "goal": trigger.agent_goal,
+        "model": model,
+    });
+    if !agent_type_id.is_empty() {
+        params["agent_type_id"] = serde_json::Value::String(agent_type_id);
+    }
+
+    vec![
+        // Rule 1: Source action → create + assign Agent
+        ReactionRule {
+            name: format!("{}:agent_trigger:{}", entity_type, trigger.name),
+            when: ReactionTrigger {
+                entity_type: entity_type.to_string(),
+                action: Some(trigger.on_action.clone()),
+                to_state: trigger.to_state.clone(),
+            },
+            then: ReactionTarget {
+                entity_type: "Agent".to_string(),
+                action: "Assign".to_string(),
+                params,
+            },
+            resolve_target: TargetResolver::CreateIfMissing {
+                id_field: "id".to_string(),
+            },
+        },
+        // Rule 2: Agent.Assign → Agent.Start (auto-start the assigned agent)
+        ReactionRule {
+            name: format!("{}:agent_trigger:{}:start", entity_type, trigger.name),
+            when: ReactionTrigger {
+                entity_type: "Agent".to_string(),
+                action: Some("Assign".to_string()),
+                to_state: Some("Assigned".to_string()),
+            },
+            then: ReactionTarget {
+                entity_type: "Agent".to_string(),
+                action: "Start".to_string(),
+                params: serde_json::json!({}),
+            },
+            resolve_target: TargetResolver::SameId,
+        },
+    ]
 }
 
 fn build_relation_graph(
@@ -795,5 +901,92 @@ mod tests {
         let spec = registry.get_spec(&TenantId::new("alpha"), "Order").unwrap();
         assert_eq!(spec.automaton.automaton.name, "Order");
         assert!(!spec.ioa_source.is_empty());
+    }
+
+    /// Minimal CSDL with a single EntityType + EntitySet for merge tests.
+    fn task_csdl() -> (CsdlDocument, String) {
+        let xml = r#"<?xml version="1.0"?>
+        <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+          <edmx:DataServices>
+            <Schema Namespace="Temper.Example" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+              <EntityType Name="Task">
+                <Key><PropertyRef Name="Id"/></Key>
+                <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+              </EntityType>
+              <EntityContainer Name="ExampleService">
+                <EntitySet Name="Tasks" EntityType="Temper.Example.Task"/>
+              </EntityContainer>
+            </Schema>
+          </edmx:DataServices>
+        </edmx:Edmx>"#;
+        (parse_csdl(xml).unwrap(), xml.to_string())
+    }
+
+    #[test]
+    fn merge_preserves_existing_entities_and_entity_set_map() {
+        let mut registry = SpecRegistry::new();
+        let (csdl, xml) = minimal_csdl();
+        registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
+        let tenant = TenantId::new("alpha");
+
+        let (new_csdl, new_xml) = task_csdl();
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                "alpha",
+                new_csdl,
+                new_xml,
+                &[("Task", ORDER_IOA)],
+                Vec::new(),
+                None,
+                true,
+            )
+            .expect("merge should succeed");
+
+        assert!(
+            registry.get_table(&tenant, "Order").is_some(),
+            "Order survives merge"
+        );
+        assert!(
+            registry.get_table(&tenant, "Task").is_some(),
+            "Task added by merge"
+        );
+
+        let config = registry.get_tenant(&tenant).unwrap();
+        assert!(config.entity_set_map.contains_key("Orders"));
+        assert!(config.entity_set_map.contains_key("Tasks"));
+        assert!(matches!(
+            config.verification.get("Task"),
+            Some(VerificationStatus::Pending)
+        ));
+    }
+
+    #[test]
+    fn replace_removes_entities_not_in_new_spec_set() {
+        let mut registry = SpecRegistry::new();
+        let (csdl, xml) = minimal_csdl();
+        registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
+        let tenant = TenantId::new("alpha");
+
+        let (csdl2, xml2) = minimal_csdl();
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                "alpha",
+                csdl2,
+                xml2,
+                &[("Task", ORDER_IOA)],
+                Vec::new(),
+                None,
+                false,
+            )
+            .expect("replace should succeed");
+
+        assert!(
+            registry.get_table(&tenant, "Order").is_none(),
+            "Order removed in replace"
+        );
+        assert!(
+            registry.get_table(&tenant, "Task").is_some(),
+            "Task exists after replace"
+        );
     }
 }

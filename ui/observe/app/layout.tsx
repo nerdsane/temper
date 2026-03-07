@@ -20,8 +20,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`dark ${GeistMono.variable} ${spaceGrotesk.variable}`}>
-      <body className={`${spaceGrotesk.className} antialiased`}>
+    <html lang="en" className={`dark ${GeistMono.variable} ${spaceGrotesk.variable}`} suppressHydrationWarning>
+      <body className={`${spaceGrotesk.className} antialiased`} suppressHydrationWarning>
         <ConnectionProvider>
           <DecisionNotifierProvider>
             <div className="flex h-screen overflow-hidden">

@@ -6,27 +6,7 @@ import { fetchAgents } from "@/lib/api";
 import { usePolling, useRelativeTime } from "@/lib/hooks";
 import type { AgentsResponse } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
-
-function StatCard({
-  label,
-  value,
-  color,
-}: {
-  label: string;
-  value: string | number;
-  color?: string;
-}) {
-  return (
-    <div className="glass rounded p-3.5">
-      <div className="text-[12px] text-zinc-600">{label}</div>
-      <div
-        className={`text-4xl font-bold font-mono mt-0.5 ${color ?? "text-zinc-100"}`}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
+import StatCard from "@/components/StatCard";
 
 function rateColor(rate: number): string {
   if (rate >= 80) return "text-teal-400";
@@ -91,7 +71,7 @@ export default function AgentsPage() {
         <div className="h-3.5 bg-zinc-800/40 rounded w-64 mb-6" />
         <div className="grid grid-cols-4 gap-3 mb-6">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="glass rounded p-3.5">
+            <div key={i} className="glass rounded-lg p-4">
               <div className="h-3 bg-zinc-800/50 rounded w-20 mb-2" />
               <div className="h-8 bg-zinc-800/50 rounded w-10" />
             </div>
@@ -234,7 +214,7 @@ export default function AgentsPage() {
           </table>
         </div>
       ) : (
-        <div className="glass rounded p-6 text-center">
+        <div className="glass rounded-lg p-6 text-center">
           <p className="text-sm text-zinc-500">
             No agent activity recorded yet.
           </p>

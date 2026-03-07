@@ -118,7 +118,7 @@ export default function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
+      <nav className="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto" aria-label="Main navigation">
         {navItems.map((item) => (
           <Link
             key={item.href}
@@ -134,13 +134,13 @@ export default function Sidebar() {
             <NavIcon icon={item.icon} />
             {item.label}
             {item.label === "Decisions" && pendingCount > 0 && (
-              <span className="ml-auto text-[10px] font-mono bg-pink-500/20 text-pink-400 px-1.5 py-0.5 rounded-full min-w-[20px] text-center">
-                {pendingCount}
+              <span className="ml-auto text-[10px] font-mono bg-pink-500/20 text-pink-400 px-1.5 py-0.5 rounded-full min-w-[20px] text-center" aria-label={`${pendingCount} pending decisions`}>
+                {pendingCount > 99 ? "99+" : pendingCount}
               </span>
             )}
             {item.label === "Evolution" && unmetCount > 0 && (
-              <span className="ml-auto text-[10px] font-mono bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded-full min-w-[20px] text-center">
-                {unmetCount}
+              <span className="ml-auto text-[10px] font-mono bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded-full min-w-[20px] text-center" aria-label={`${unmetCount} unmet intents`}>
+                {unmetCount > 99 ? "99+" : unmetCount}
               </span>
             )}
           </Link>

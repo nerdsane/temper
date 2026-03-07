@@ -8,6 +8,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::build_spec_model;
 
@@ -42,6 +43,68 @@ pub fn run(specs_dir: &str) -> Result<()> {
 
     // Run IOA verification cascade if IOA files found
     if !ioa_sources.is_empty() {
+        let mut parsed_automata = std::collections::BTreeMap::new();
+        let mut lint_error_count = 0usize;
+        let mut lint_error_lines = Vec::new();
+
+        for (entity_name, ioa_source) in &ioa_sources {
+            let automaton = temper_spec::automaton::parse_automaton(ioa_source)
+                .with_context(|| format!("Failed to parse IOA spec for '{entity_name}'"))?;
+
+            for finding in lint_automaton(&automaton) {
+                match finding.severity {
+                    LintSeverity::Error => {
+                        lint_error_count += 1;
+                        lint_error_lines.push(format!(
+                            "{entity_name}: {} — {}",
+                            finding.code, finding.message
+                        ));
+                        println!(
+                            "\n  [lint:error] {entity_name}: {} — {}",
+                            finding.code, finding.message
+                        );
+                    }
+                    LintSeverity::Warning => {
+                        println!(
+                            "\n  [lint:warn] {entity_name}: {} — {}",
+                            finding.code, finding.message
+                        );
+                    }
+                }
+            }
+
+            parsed_automata.insert(entity_name.clone(), automaton);
+        }
+
+        for finding in lint_automata_bundle(&parsed_automata) {
+            match finding.severity {
+                LintSeverity::Error => {
+                    lint_error_count += 1;
+                    lint_error_lines.push(format!(
+                        "{}: {} — {}",
+                        finding.entity, finding.code, finding.message
+                    ));
+                    println!(
+                        "\n  [lint:error] {}: {} — {}",
+                        finding.entity, finding.code, finding.message
+                    );
+                }
+                LintSeverity::Warning => {
+                    println!(
+                        "\n  [lint:warn] {}: {} — {}",
+                        finding.entity, finding.code, finding.message
+                    );
+                }
+            }
+        }
+
+        if lint_error_count > 0 {
+            anyhow::bail!(
+                "IOA lint failed with {lint_error_count} error(s): {}",
+                lint_error_lines.join(" | ")
+            );
+        }
+
         println!("\nRunning IOA verification cascade...");
         for (entity_name, ioa_source) in &ioa_sources {
             println!("\n  Verifying {entity_name}...");
@@ -215,5 +278,70 @@ mod tests {
 
         let result = run(specs_dir);
         result.expect("verify should pass on reference specs");
+    }
+
+    #[test]
+    fn test_verify_fails_on_broken_spawn_contract_with_exact_lint_code() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let specs_dir = tmp.path();
+
+        let csdl = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Broken" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Plan">
+        <Key><PropertyRef Name="Id" /></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false" />
+        <Property Name="status" Type="Edm.String" />
+      </EntityType>
+      <EntityType Name="Task">
+        <Key><PropertyRef Name="Id" /></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false" />
+        <Property Name="status" Type="Edm.String" />
+      </EntityType>
+      <EntityContainer Name="Service">
+        <EntitySet Name="Plans" EntityType="Temper.Broken.Plan" />
+        <EntitySet Name="Tasks" EntityType="Temper.Broken.Task" />
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+        let plan = r#"
+[automaton]
+name = "Plan"
+states = ["Active"]
+initial = "Active"
+
+[[action]]
+name = "AddTask"
+kind = "input"
+from = ["Active"]
+params = ["title"]
+effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
+"#;
+        let task = r#"
+[automaton]
+name = "Task"
+states = ["Open"]
+initial = "Open"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Open"]
+params = ["title", "description", "plan_id"]
+"#;
+
+        fs::write(specs_dir.join("model.csdl.xml"), csdl).expect("write csdl");
+        fs::write(specs_dir.join("plan.ioa.toml"), plan).expect("write plan");
+        fs::write(specs_dir.join("task.ioa.toml"), task).expect("write task");
+
+        let result = run(specs_dir.to_str().expect("tmp path utf-8"));
+        let err = result.expect_err("verify should fail on broken spawn contract");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("spawn_initial_action_params_unmapped"),
+            "expected exact lint code in error, got: {msg}"
+        );
     }
 }

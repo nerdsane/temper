@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use temper_runtime::tenant::TenantId;
 use temper_server::reaction::registry::parse_reactions;
 use temper_server::registry::SpecRegistry;
-use temper_spec::automaton::{LintSeverity, lint_automaton, parse_automaton};
+use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton, parse_automaton};
 use temper_spec::cross_invariant::{
     CrossInvariantLintSeverity, lint_cross_invariants, parse_cross_invariants,
 };
@@ -31,6 +31,7 @@ pub(super) fn lint_tenant_specs(
 ) -> Result<Vec<TenantLintFinding>> {
     let mut findings = Vec::new();
     let mut entity_set_types = std::collections::BTreeSet::new();
+    let mut parsed_automata = std::collections::BTreeMap::new();
 
     for schema in &csdl.schemas {
         for container in &schema.entity_containers {
@@ -56,6 +57,7 @@ pub(super) fn lint_tenant_specs(
                 message: finding.message,
             });
         }
+        parsed_automata.insert(entity.clone(), automaton);
         if !entity_set_types.contains(entity) {
             findings.push(TenantLintFinding {
                 entity: entity.clone(),
@@ -64,6 +66,15 @@ pub(super) fn lint_tenant_specs(
                 message: "spec has no corresponding entity set in model.csdl.xml".to_string(),
             });
         }
+    }
+
+    for finding in lint_automata_bundle(&parsed_automata) {
+        findings.push(TenantLintFinding {
+            entity: finding.entity,
+            code: finding.code,
+            severity: finding.severity,
+            message: finding.message,
+        });
     }
 
     for entity_type in &entity_set_types {
@@ -191,6 +202,7 @@ pub(super) fn load_into_registry(
             &ioa_pairs,
             reactions,
             cross_invariants_toml.clone(),
+            false,
         )
         .with_context(|| format!("Failed to register tenant '{tenant}'"))?;
 

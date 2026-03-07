@@ -7,7 +7,7 @@
 
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
-use temper_spec::automaton;
+use temper_spec::automaton::{self, LintSeverity, lint_automata_bundle, lint_automaton};
 use temper_spec::csdl::parse_csdl;
 use temper_verify::cascade::VerificationCascade;
 
@@ -49,18 +49,55 @@ const SYSTEM_SPECS: &[(&str, &str)] = &[
 
 // Embed agent specs at compile time.
 const AGENT_IOA: &str = include_str!("specs/agent.ioa.toml");
+const AGENT_TYPE_IOA: &str = include_str!("specs/agent_type.ioa.toml");
 const PLAN_IOA: &str = include_str!("specs/plan.ioa.toml");
 const TASK_IOA: &str = include_str!("specs/task.ioa.toml");
 const TOOL_CALL_IOA: &str = include_str!("specs/tool_call.ioa.toml");
+const SCHEDULE_IOA: &str = include_str!("specs/schedule.ioa.toml");
+const HARNESS_IOA: &str = include_str!("specs/harness.ioa.toml");
+const POLICY_IOA: &str = include_str!("specs/policy.ioa.toml");
 const AGENT_CSDL: &str = include_str!("specs/agent_model.csdl.xml");
 
 /// Agent entity specs as (entity_type, ioa_source) pairs.
 const AGENT_SPECS: &[(&str, &str)] = &[
     ("Agent", AGENT_IOA),
+    ("AgentType", AGENT_TYPE_IOA),
     ("Plan", PLAN_IOA),
     ("Task", TASK_IOA),
     ("ToolCall", TOOL_CALL_IOA),
+    ("Schedule", SCHEDULE_IOA),
+    ("Harness", HARNESS_IOA),
+    ("Policy", POLICY_IOA),
 ];
+
+fn parse_and_lint_specs_or_panic(spec_kind: &str, specs: &[(&str, &str)]) {
+    let mut automata = std::collections::BTreeMap::new();
+
+    for (entity_type, ioa_source) in specs {
+        let parsed = automaton::parse_automaton(ioa_source)
+            .unwrap_or_else(|e| panic!("{spec_kind} spec {entity_type} failed to parse: {e}"));
+
+        for finding in lint_automaton(&parsed) {
+            if matches!(finding.severity, LintSeverity::Error) {
+                panic!(
+                    "{spec_kind} spec {entity_type} failed lint [{}]: {}",
+                    finding.code, finding.message
+                );
+            }
+        }
+
+        automata.insert((*entity_type).to_string(), parsed);
+    }
+
+    for finding in lint_automata_bundle(&automata) {
+        if matches!(finding.severity, LintSeverity::Error) {
+            panic!(
+                "{spec_kind} spec {} failed bundle lint [{}]: {}",
+                finding.entity, finding.code, finding.message
+            );
+        }
+    }
+}
 
 /// Bootstrap the system tenant.
 ///
@@ -75,11 +112,8 @@ pub fn bootstrap_system_tenant(state: &PlatformState) {
         SYSTEM_SPECS.len()
     );
 
-    // Validate all specs parse
-    for (entity_type, ioa_source) in SYSTEM_SPECS {
-        automaton::parse_automaton(ioa_source)
-            .unwrap_or_else(|e| panic!("System spec {entity_type} failed to parse: {e}"));
-    }
+    // Validate and lint all system specs.
+    parse_and_lint_specs_or_panic("System", SYSTEM_SPECS);
 
     // Run verification cascade on each (lightweight — system specs are simple)
     for (entity_type, ioa_source) in SYSTEM_SPECS {
@@ -146,11 +180,8 @@ pub fn bootstrap_agent_specs(state: &PlatformState, tenant: &str) {
         AGENT_SPECS.len()
     );
 
-    // Validate all agent specs parse.
-    for (entity_type, ioa_source) in AGENT_SPECS {
-        automaton::parse_automaton(ioa_source)
-            .unwrap_or_else(|e| panic!("Agent spec {entity_type} failed to parse: {e}"));
-    }
+    // Validate and lint all agent specs.
+    parse_and_lint_specs_or_panic("Agent", AGENT_SPECS);
 
     // Run verification cascade on each.
     for (entity_type, ioa_source) in AGENT_SPECS {
@@ -416,6 +447,7 @@ mod tests {
         let tenant = TenantId::new("test-agent");
         assert!(registry.get_tenant(&tenant).is_some());
         assert!(registry.get_table(&tenant, "Agent").is_some());
+        assert!(registry.get_table(&tenant, "AgentType").is_some());
         assert!(registry.get_table(&tenant, "Plan").is_some());
         assert!(registry.get_table(&tenant, "Task").is_some());
         assert!(registry.get_table(&tenant, "ToolCall").is_some());
@@ -423,6 +455,6 @@ mod tests {
 
     #[test]
     fn test_agent_specs_count() {
-        assert_eq!(AGENT_SPECS.len(), 4);
+        assert_eq!(AGENT_SPECS.len(), 8);
     }
 }

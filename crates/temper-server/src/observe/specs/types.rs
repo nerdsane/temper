@@ -7,6 +7,11 @@ pub(crate) struct LoadDirRequest {
     pub(crate) tenant: String,
     /// Path to the specs directory containing model.csdl.xml and *.ioa.toml files.
     pub(crate) specs_dir: String,
+    /// When `true`, merge incoming specs with existing tenant config instead of
+    /// replacing. Used by `load-inline` so that agent-submitted specs don't
+    /// wipe platform entity types.
+    #[serde(default)]
+    pub(crate) merge: bool,
 }
 
 /// Request body for POST /api/specs/load-inline.

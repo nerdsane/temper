@@ -1,0 +1,92 @@
+# Policy Entity -- I/O Automaton Specification
+#
+# Governed lifecycle for Cedar authorization policies.
+# Agents propose policies; humans approve them before they go active.
+# Provides audit trail: who proposed what policy, when, and why.
+
+[automaton]
+name = "Policy"
+states = ["Draft", "Proposed", "Approved", "Active", "Revoked"]
+initial = "Draft"
+
+# --- State Variables ---
+
+[[state]]
+name = "name"
+type = "string"
+initial = ""
+
+[[state]]
+name = "description"
+type = "string"
+initial = ""
+
+[[state]]
+name = "cedar_statement"
+type = "string"
+initial = ""
+
+[[state]]
+name = "harness_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "proposed_by"
+type = "string"
+initial = ""
+
+[[state]]
+name = "reason"
+type = "string"
+initial = ""
+
+# --- Actions ---
+
+[[action]]
+name = "Propose"
+kind = "input"
+from = ["Draft"]
+to = "Proposed"
+params = ["name", "description", "cedar_statement", "proposed_by"]
+hint = "Propose a Cedar policy for human approval."
+effect = [{ type = "emit", event = "PolicyProposed" }]
+
+[[action]]
+name = "Approve"
+kind = "input"
+from = ["Proposed"]
+to = "Approved"
+hint = "Human approves the proposed policy."
+
+[[action]]
+name = "Reject"
+kind = "input"
+from = ["Proposed"]
+to = "Draft"
+params = ["reason"]
+hint = "Reject the proposal. Agent can revise and re-propose."
+
+[[action]]
+name = "Activate"
+kind = "input"
+from = ["Approved"]
+to = "Active"
+hint = "Install the Cedar policy into the authorization engine."
+effect = [{ type = "emit", event = "PolicyActivated" }]
+
+[[action]]
+name = "Revoke"
+kind = "input"
+from = ["Active"]
+to = "Revoked"
+params = ["reason"]
+hint = "Revoke an active policy. Removes it from the authorization engine."
+effect = [{ type = "emit", event = "PolicyRevoked" }]
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "RevokedIsFinal"
+when = ["Revoked"]
+assert = "no_further_transitions"

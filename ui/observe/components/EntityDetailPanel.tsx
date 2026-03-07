@@ -53,10 +53,11 @@ export default function EntityDetailPanel({
       <div
         className="fixed inset-0 bg-black/40 z-40"
         onClick={onClose}
+        aria-hidden="true"
       />
 
       {/* Panel */}
-      <div className="fixed top-0 right-0 h-full w-96 z-50 bg-[#0a0a0c]/95 backdrop-blur-sm border-l border-white/[0.06] animate-slide-in-right overflow-y-auto">
+      <div role="dialog" aria-label={`${entityType} ${entityId} details`} className="fixed top-0 right-0 h-full w-96 z-50 bg-[#0a0a0c]/95 backdrop-blur-sm border-l border-white/[0.06] animate-slide-in-right overflow-y-auto">
         {/* Header */}
         <div className="sticky top-0 bg-[#0a0a0c]/95 backdrop-blur-sm z-10 px-5 py-4 border-b border-white/[0.06]">
           <div className="flex items-center justify-between">
@@ -70,6 +71,7 @@ export default function EntityDetailPanel({
             </div>
             <button
               onClick={onClose}
+              aria-label="Close panel"
               className="w-7 h-7 flex items-center justify-center rounded bg-white/[0.04] hover:bg-white/[0.08] text-zinc-500 hover:text-zinc-300 transition-colors flex-shrink-0"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -34,7 +34,7 @@ export default function ErrorDisplay({
           {retry && (
             <button
               onClick={retry}
-              className="px-3.5 py-1.5 bg-teal-500 hover:bg-teal-400 text-white text-sm rounded-md transition-colors"
+              className="px-3.5 py-1.5 bg-teal-500 hover:bg-teal-400 text-white text-sm rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-teal-400 focus:ring-offset-2 focus:ring-offset-[#0a0a0c]"
             >
               Retry
             </button>

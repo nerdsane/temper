@@ -35,6 +35,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+console = { workspace = true }
+indicatif = { workspace = true }
+termimad = { workspace = true }
+dialoguer = { workspace = true }
 rustyline = "15"
 dirs = "6"
 dotenvy = { workspace = true }

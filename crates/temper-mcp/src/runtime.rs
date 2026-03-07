@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use monty::{
-    DictPairs, ExcType, ExternalResult, LimitedTracker, MontyException, MontyObject, MontyRun,
-    PrintWriter, RunProgress,
+    DictPairs, ExcType, ExtFunctionResult, LimitedTracker, MontyException, MontyObject, MontyRun,
+    NameLookupResult, PrintWriter, RunProgress,
 };
 use serde_json::Value;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -58,7 +58,7 @@ impl RuntimeContext {
 
     pub(crate) fn run_search(&self, code: &str) -> Result<String> {
         let program = wrap_user_code(code);
-        let runner = MontyRun::new(program, "search.py", vec!["spec".to_string()], vec![])
+        let runner = MontyRun::new(program, "search.py", vec!["spec".to_string()])
             .map_err(|e| anyhow!(format_monty_exception(&e)))?;
 
         let spec_object = MontyObject::Dataclass {
@@ -75,7 +75,7 @@ impl RuntimeContext {
             .start(vec![spec_object], tracker, &mut print)
             .map_err(|e| anyhow!(format_monty_exception(&e)))?;
 
-        let mut pending_results: BTreeMap<u32, ExternalResult> = BTreeMap::new();
+        let mut pending_results: BTreeMap<u32, ExtFunctionResult> = BTreeMap::new();
 
         loop {
             match progress {
@@ -84,37 +84,31 @@ impl RuntimeContext {
                     return serde_json::to_string(&value)
                         .context("failed to serialize search output as JSON string");
                 }
-                RunProgress::FunctionCall {
-                    function_name,
-                    args,
-                    call_id,
-                    method_call,
-                    state,
-                    ..
-                } => {
-                    if !method_call {
+                RunProgress::FunctionCall(call) => {
+                    if !call.method_call {
                         bail!(
                             "search sandbox denied external function call '{}'. Only spec.<method> is allowed",
-                            function_name
+                            call.function_name
                         );
                     }
 
-                    let result = self.dispatch_spec_method(&function_name, &args);
+                    let call_id = call.call_id;
+                    let result = self.dispatch_spec_method(&call.function_name, &call.args);
                     let ext_result = match result {
-                        Ok(value) => ExternalResult::Return(json_to_monty_object(&value)),
-                        Err(message) => ExternalResult::Error(MontyException::new(
+                        Ok(value) => ExtFunctionResult::Return(json_to_monty_object(&value)),
+                        Err(message) => ExtFunctionResult::Error(MontyException::new(
                             ExcType::RuntimeError,
                             Some(message),
                         )),
                     };
 
                     pending_results.insert(call_id, ext_result);
-                    progress = state
-                        .run_pending(&mut print)
+                    progress = call
+                        .resume(ExtFunctionResult::Future(call_id), &mut print)
                         .map_err(|e| anyhow!(format_monty_exception(&e)))?;
                 }
                 RunProgress::ResolveFutures(state) => {
-                    let mut ready: Vec<(u32, ExternalResult)> = Vec::new();
+                    let mut ready: Vec<(u32, ExtFunctionResult)> = Vec::new();
                     for call_id in state.pending_call_ids() {
                         if let Some(result) = pending_results.remove(call_id) {
                             ready.push((*call_id, result));
@@ -132,9 +126,15 @@ impl RuntimeContext {
                         .resume(ready, &mut print)
                         .map_err(|e| anyhow!(format_monty_exception(&e)))?;
                 }
-                RunProgress::OsCall { function, .. } => {
+                RunProgress::NameLookup(lookup) => {
+                    progress = lookup
+                        .resume(NameLookupResult::Undefined, &mut print)
+                        .map_err(|e| anyhow!(format_monty_exception(&e)))?;
+                }
+                RunProgress::OsCall(os_call) => {
                     bail!(
-                        "search sandbox blocked OS access ({function:?}). Filesystem/network/env access is disabled"
+                        "search sandbox blocked OS access ({:?}). Filesystem/network/env access is disabled",
+                        os_call.function
                     );
                 }
             }

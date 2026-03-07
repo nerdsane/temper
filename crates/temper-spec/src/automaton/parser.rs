@@ -728,4 +728,93 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
             other => panic!("expected Schedule, got: {:?}", other),
         }
     }
+
+    #[test]
+    fn test_unknown_inline_effect_type_rejected() {
+        let spec = r#"
+[automaton]
+name = "Broken"
+states = ["Draft", "Done"]
+initial = "Draft"
+
+[[action]]
+name = "Complete"
+from = ["Draft"]
+to = "Done"
+effect = [{ type = "mystery_effect", value = "x" }]
+"#;
+        let err = parse_automaton(spec).expect_err("unknown inline effect type should fail");
+        assert!(
+            err.to_string()
+                .contains("unsupported effect type 'mystery_effect'")
+        );
+    }
+
+    #[test]
+    fn test_legacy_inline_effect_aliases_supported() {
+        let spec = r#"
+[automaton]
+name = "Plan"
+states = ["Active"]
+initial = "Active"
+
+[[action]]
+name = "AddTask"
+from = ["Active"]
+effect = [
+  { type = "spawn_entity", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" },
+  { type = "emit_event", event = "TaskAdded" }
+]
+"#;
+        let automaton = parse_automaton(spec).expect("legacy aliases should parse");
+        let add_task = automaton
+            .actions
+            .iter()
+            .find(|a| a.name == "AddTask")
+            .expect("AddTask action should exist");
+        assert!(matches!(
+            add_task.effect.first(),
+            Some(Effect::Spawn { .. })
+        ));
+        assert!(matches!(add_task.effect.get(1), Some(Effect::Emit { .. })));
+    }
+
+    #[test]
+    fn test_agent_trigger_parsed() {
+        let spec = r#"
+[automaton]
+name = "Project"
+states = ["Draft", "Ready"]
+initial = "Draft"
+
+[[action]]
+name = "MarkReady"
+from = ["Draft"]
+to = "Ready"
+
+[[agent_trigger]]
+name = "test_on_ready"
+on_action = "MarkReady"
+to_state = "Ready"
+agent_role = "tester"
+agent_goal = "Run integration tests"
+agent_type_id = "tester-type-1"
+"#;
+        let automaton = parse_automaton(spec).expect("agent_trigger should parse");
+        assert_eq!(automaton.agent_triggers.len(), 1);
+        let trigger = &automaton.agent_triggers[0];
+        assert_eq!(trigger.name, "test_on_ready");
+        assert_eq!(trigger.on_action, "MarkReady");
+        assert_eq!(trigger.to_state, Some("Ready".to_string()));
+        assert_eq!(trigger.agent_role, "tester");
+        assert_eq!(trigger.agent_goal, "Run integration tests");
+        assert_eq!(trigger.agent_type_id, Some("tester-type-1".to_string()));
+        assert!(trigger.agent_model.is_none());
+    }
+
+    #[test]
+    fn test_agent_trigger_defaults_empty() {
+        let automaton = parse_automaton(ORDER_IOA).expect("should parse");
+        assert!(automaton.agent_triggers.is_empty());
+    }
 }

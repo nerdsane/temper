@@ -9,6 +9,7 @@
         <Property Name="Status" Type="Edm.String"/>
         <Property Name="description" Type="Edm.String"/>
         <Property Name="task_count" Type="Edm.String"/>
+        <Property Name="last_task_id" Type="Edm.String"/>
         <Property Name="summary" Type="Edm.String"/>
         <Property Name="reason" Type="Edm.String"/>
         <NavigationProperty Name="Tasks" Type="Collection(Temper.Task)"/>
@@ -34,6 +35,17 @@
         </NavigationProperty>
       </EntityType>
 
+      <EntityType Name="AgentType">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="name" Type="Edm.String"/>
+        <Property Name="system_prompt" Type="Edm.String"/>
+        <Property Name="tool_set" Type="Edm.String"/>
+        <Property Name="model" Type="Edm.String"/>
+        <Property Name="max_turns" Type="Edm.String"/>
+      </EntityType>
+
       <EntityType Name="Agent">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
@@ -49,11 +61,15 @@
         <Property Name="executor_id" Type="Edm.String"/>
         <Property Name="child_agent_ids" Type="Collection(Edm.String)"/>
         <Property Name="last_child_id" Type="Edm.String"/>
+        <Property Name="agent_type_id" Type="Edm.String"/>
         <NavigationProperty Name="Task" Type="Temper.Task" Nullable="true">
           <ReferentialConstraint Property="task_id" ReferencedProperty="id"/>
         </NavigationProperty>
         <NavigationProperty Name="Plan" Type="Temper.Plan" Nullable="true">
           <ReferentialConstraint Property="plan_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="AgentType" Type="Temper.AgentType" Nullable="true">
+          <ReferentialConstraint Property="agent_type_id" ReferencedProperty="id"/>
         </NavigationProperty>
       </EntityType>
 
@@ -75,7 +91,57 @@
         </NavigationProperty>
       </EntityType>
 
+      <EntityType Name="Schedule">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="agent_type_id" Type="Edm.String"/>
+        <Property Name="agent_role" Type="Edm.String"/>
+        <Property Name="goal_template" Type="Edm.String"/>
+        <Property Name="cron_expr" Type="Edm.String"/>
+        <Property Name="last_run" Type="Edm.String"/>
+        <Property Name="run_count" Type="Edm.String"/>
+        <Property Name="max_runs" Type="Edm.String"/>
+        <NavigationProperty Name="AgentType" Type="Temper.AgentType" Nullable="true">
+          <ReferentialConstraint Property="agent_type_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+      </EntityType>
+
+      <EntityType Name="Harness">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="name" Type="Edm.String"/>
+        <Property Name="intent" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="spec_bundle" Type="Edm.String"/>
+        <Property Name="cedar_policies" Type="Edm.String"/>
+        <Property Name="version" Type="Edm.String"/>
+        <Property Name="verification_result" Type="Edm.String"/>
+        <Property Name="created_by" Type="Edm.String"/>
+        <Property Name="reason" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="Policy">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="name" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="cedar_statement" Type="Edm.String"/>
+        <Property Name="harness_id" Type="Edm.String"/>
+        <Property Name="proposed_by" Type="Edm.String"/>
+        <Property Name="reason" Type="Edm.String"/>
+        <NavigationProperty Name="Harness" Type="Temper.Harness" Nullable="true">
+          <ReferentialConstraint Property="harness_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+      </EntityType>
+
       <EntityContainer Name="Service">
+        <EntitySet Name="AgentTypes" EntityType="Temper.AgentType"/>
+        <EntitySet Name="Schedules" EntityType="Temper.Schedule">
+          <NavigationPropertyBinding Path="AgentType" Target="AgentTypes"/>
+        </EntitySet>
         <EntitySet Name="Plans" EntityType="Temper.Plan">
           <NavigationPropertyBinding Path="Tasks" Target="Tasks"/>
           <NavigationPropertyBinding Path="Agents" Target="Agents"/>
@@ -87,9 +153,14 @@
         <EntitySet Name="Agents" EntityType="Temper.Agent">
           <NavigationPropertyBinding Path="Task" Target="Tasks"/>
           <NavigationPropertyBinding Path="Plan" Target="Plans"/>
+          <NavigationPropertyBinding Path="AgentType" Target="AgentTypes"/>
         </EntitySet>
         <EntitySet Name="ToolCalls" EntityType="Temper.ToolCall">
           <NavigationPropertyBinding Path="Agent" Target="Agents"/>
+        </EntitySet>
+        <EntitySet Name="Harnesses" EntityType="Temper.Harness"/>
+        <EntitySet Name="Policies" EntityType="Temper.Policy">
+          <NavigationPropertyBinding Path="Harness" Target="Harnesses"/>
         </EntitySet>
       </EntityContainer>
 

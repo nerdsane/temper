@@ -28,11 +28,12 @@ pub fn wrap_user_code(code: &str) -> String {
 
 /// Default resource limits for sandbox execution.
 ///
-/// 180s allows time for governance operations like poll_decision,
-/// where the agent waits for human approval.
+/// 30 minutes allows agents to run complex multi-step workflows
+/// including governance waits (poll_decision) where the agent
+/// blocks on human approval.
 pub fn default_limits() -> ResourceLimits {
     ResourceLimits::new()
-        .max_duration(Duration::from_secs(180))
+        .max_duration(Duration::from_secs(1800))
         .max_memory(64 * 1024 * 1024)
         .max_allocations(250_000)
 }

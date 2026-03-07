@@ -1,0 +1,75 @@
+# AgentType Entity — I/O Automaton Specification
+#
+# Defines a reusable agent configuration: system prompt, tool set, model,
+# and execution limits. Agents reference an AgentType via agent_type_id to
+# inherit these settings at execution time.
+
+[automaton]
+name = "AgentType"
+states = ["Draft", "Active", "Deprecated"]
+initial = "Draft"
+
+# --- State Variables ---
+
+[[state]]
+name = "name"
+type = "string"
+initial = ""
+
+[[state]]
+name = "system_prompt"
+type = "string"
+initial = ""
+
+[[state]]
+name = "tool_set"
+type = "string"
+initial = "local"
+
+[[state]]
+name = "model"
+type = "string"
+initial = "claude-sonnet-4-6"
+
+[[state]]
+name = "max_turns"
+type = "string"
+initial = "200"
+
+# --- Actions ---
+
+[[action]]
+name = "Define"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+params = ["name", "system_prompt", "tool_set", "model", "max_turns"]
+hint = "Define the agent type configuration and activate it."
+
+[[action]]
+name = "Update"
+kind = "input"
+from = ["Active"]
+params = ["system_prompt", "tool_set", "model", "max_turns"]
+hint = "Update an active agent type's configuration. Stays Active."
+
+[[action]]
+name = "Deprecate"
+kind = "input"
+from = ["Active"]
+to = "Deprecated"
+hint = "Deprecate this agent type. Existing agents continue but no new agents should use it."
+
+[[action]]
+name = "Reactivate"
+kind = "input"
+from = ["Deprecated"]
+to = "Active"
+hint = "Reactivate a deprecated agent type."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ActiveRequiresName"
+when = ["Active"]
+assert = "name != ''"

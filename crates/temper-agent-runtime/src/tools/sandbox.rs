@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::{CedarMapping, ToolDef, ToolRegistry, ToolResult};
 use crate::sandbox::AgentSandbox;
+use crate::sandbox::dispatch::INTEGRATION_GUIDANCE;
 
 /// Tool registry that provides a single `execute_code` tool backed by the
 /// embedded Monty sandbox.
@@ -59,10 +60,14 @@ impl ToolRegistry for SandboxToolRegistry {
                 - `await temper.get_evolution_records()` — list evolution records\n\
                 - `await temper.check_sentinel()` — trigger sentinel check\n\n\
                 Local methods (Cedar-governed):\n\
-                - `await tools.bash(\"command\")` — run shell command\n\
+                - `await tools.bash(\"command\")` — run LOCAL shell command (NO network access)\n\
                 - `await tools.read(\"path\")` — read file\n\
                 - `await tools.write(\"path\", \"content\")` — write file\n\
-                - `await tools.ls(\"path\")` — list directory"
+                - `await tools.ls(\"path\")` — list directory\n\n\
+                IMPORTANT: tools.bash() is for local operations only (files, compilation, grep).\n\
+                All external/network access (APIs, HTTP, databases) MUST use [[integration]] sections \
+                in IOA specs — either the built-in http_fetch module or custom WASM via \
+                temper.compile_wasm()."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -88,9 +93,44 @@ impl ToolRegistry for SandboxToolRegistry {
             return Ok(ToolResult::Success("null".to_string()));
         }
 
-        match self.sandbox.run_code(code).await {
-            Ok(output) => Ok(ToolResult::Success(output)),
-            Err(e) => Ok(ToolResult::Error(e.to_string())),
+        // Run in a spawned task to isolate panics (e.g. Monty heap bugs)
+        // from crashing the agent process. Panics become tool errors that
+        // the LLM can see and work around.
+        let sandbox = self.sandbox.clone();
+        let code = code.to_string();
+        let handle = tokio::task::spawn(async move { sandbox.run_code(&code).await });
+
+        match handle.await {
+            Ok(Ok(output)) => Ok(ToolResult::Success(output)),
+            Ok(Err(e)) => {
+                // The sandbox is the enforcement boundary — it can't do
+                // network I/O, import most stdlib, etc. When it fails, guide
+                // the LLM toward [[integration]] instead of letting it
+                // hallucinate or try increasingly creative workarounds.
+                let err = e.to_string();
+                Ok(ToolResult::Error(format!(
+                    "{err}\n\nIf you need external access (APIs, HTTP, network, databases), \
+                     do NOT retry in the sandbox.\n\n{INTEGRATION_GUIDANCE}"
+                )))
+            }
+            Err(join_err) => {
+                let msg = if join_err.is_panic() {
+                    let panic_val = join_err.into_panic();
+                    let panic_msg = panic_val
+                        .downcast_ref::<String>()
+                        .map(|s| s.as_str())
+                        .or_else(|| panic_val.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown panic");
+                    format!(
+                        "Sandbox runtime crashed: {panic_msg}. \
+                         Try a simpler approach — break the code into smaller \
+                         steps with one await per execute_code call."
+                    )
+                } else {
+                    "Sandbox execution was cancelled".to_string()
+                };
+                Ok(ToolResult::Error(msg))
+            }
         }
     }
 
