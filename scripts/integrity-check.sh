@@ -39,7 +39,7 @@ scan_pattern() {
         # Skip test files if requested
         if [ "$EXCLUDE_TESTS" = true ]; then
             case "$FILE" in
-                */tests/*|*_test.rs|*test_*.rs|*/benches/*) continue ;;
+                */tests/*|*_test.rs|*_tests.rs|*test_*.rs|*/tests.rs|*/benches/*) continue ;;
             esac
         fi
 
