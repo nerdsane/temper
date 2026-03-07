@@ -14,6 +14,19 @@ use temper_evolution::records::{
 
 use crate::state::trajectory::TrajectorySource;
 
+/// Build an `InsightRecord` from a signal, recommendation, and optional priority override.
+fn build_insight(signal: InsightSignal, recommendation: String, priority_override: Option<f64>) -> InsightRecord {
+    let priority = priority_override.unwrap_or_else(|| compute_priority_score(&signal));
+    let category = classify_insight(&signal);
+    InsightRecord {
+        header: RecordHeader::new(RecordType::Insight, "insight-generator"),
+        category,
+        signal,
+        recommendation,
+        priority_score: priority,
+    }
+}
+
 /// Aggregated trajectory signal for a (entity_type, action) pair.
 struct TrajectorySignal {
     entity_type: String,
@@ -124,7 +137,7 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
                 intent: intent_str,
                 volume: signal.total,
                 success_rate,
-                trend: "stable".to_string(),
+                trend: temper_evolution::Trend::Stable,
                 growth_rate: None,
             };
 
@@ -133,16 +146,7 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
             } else {
                 compute_priority_score(&insight_signal).max(0.5)
             };
-            let category = classify_insight(&insight_signal);
-
-            let header = RecordHeader::new(RecordType::Insight, "insight-generator");
-            insights.push(InsightRecord {
-                header,
-                category,
-                signal: insight_signal,
-                recommendation,
-                priority_score: priority,
-            });
+            insights.push(build_insight(insight_signal, recommendation, Some(priority)));
             continue;
         }
 
@@ -161,21 +165,11 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
                 intent: intent_str,
                 volume: signal.total,
                 success_rate,
-                trend: "stable".to_string(),
+                trend: temper_evolution::Trend::Stable,
                 growth_rate: None,
             };
 
-            let priority = compute_priority_score(&insight_signal);
-            let category = classify_insight(&insight_signal);
-
-            let header = RecordHeader::new(RecordType::Insight, "insight-generator");
-            insights.push(InsightRecord {
-                header,
-                category,
-                signal: insight_signal,
-                recommendation,
-                priority_score: priority,
-            });
+            insights.push(build_insight(insight_signal, recommendation, None));
             continue;
         }
 
@@ -184,7 +178,7 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
             intent: format!("{}.{}", signal.entity_type, signal.action),
             volume: signal.total,
             success_rate,
-            trend: "stable".to_string(),
+            trend: temper_evolution::Trend::Stable,
             growth_rate: None,
         };
 
@@ -228,14 +222,7 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
             }
         };
 
-        let header = RecordHeader::new(RecordType::Insight, "insight-generator");
-        insights.push(InsightRecord {
-            header,
-            category,
-            signal: insight_signal,
-            recommendation,
-            priority_score: priority,
-        });
+        insights.push(build_insight(insight_signal, recommendation, Some(priority)));
     }
 
     // Sort by priority (highest first).
@@ -245,6 +232,39 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     insights
+}
+
+/// A grouped unmet intent from trajectory data.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UnmetIntent {
+    /// Entity type involved.
+    pub entity_type: String,
+    /// Representative action.
+    pub action: String,
+    /// Error pattern category.
+    pub error_pattern: String,
+    /// Number of failures.
+    pub failure_count: u64,
+    /// First occurrence timestamp.
+    pub first_seen: String,
+    /// Most recent occurrence timestamp.
+    pub last_seen: String,
+    /// "open" or "resolved".
+    pub status: String,
+    /// What resolved it (e.g. spec submission timestamp).
+    pub resolved_by: Option<String>,
+    /// Recommendation text.
+    pub recommendation: String,
+}
+
+/// Accumulator for unmet-intent grouping.
+struct UnmetIntentAccum {
+    entity_type: String,
+    action: String,
+    error_pattern: String,
+    count: u64,
+    first_seen: String,
+    last_seen: String,
 }
 
 /// Generate unmet intent summaries from trajectory data.
@@ -328,21 +348,6 @@ pub(crate) fn generate_unmet_intents(
 
 /// Minimum number of platform-source trajectory failures before generating a FR-Record.
 const FEATURE_REQUEST_THRESHOLD: u64 = 3;
-
-/// Stable dedup key for feature-request descriptions.
-#[allow(dead_code)]
-pub(crate) fn feature_request_dedup_key(description: &str) -> String {
-    if let Some(rest) = description.strip_prefix("Agents tried '")
-        && let Some((action, _)) = rest.split_once('\'')
-    {
-        return format!("action:{action}");
-    }
-    description
-        .split(" — ")
-        .next()
-        .unwrap_or(description)
-        .to_string()
-}
 
 /// Generate feature request records from platform-source trajectories.
 ///
@@ -449,34 +454,198 @@ fn categorize_error(error: Option<&str>) -> String {
     }
 }
 
-struct UnmetIntentAccum {
-    entity_type: String,
-    action: String,
-    error_pattern: String,
-    count: u64,
-    first_seen: String,
-    last_seen: String,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::TrajectoryEntry;
 
-/// A grouped unmet intent from trajectory data.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct UnmetIntent {
-    /// Entity type involved.
-    pub entity_type: String,
-    /// Representative action.
-    pub action: String,
-    /// Error pattern category.
-    pub error_pattern: String,
-    /// Number of failures.
-    pub failure_count: u64,
-    /// First occurrence timestamp.
-    pub first_seen: String,
-    /// Most recent occurrence timestamp.
-    pub last_seen: String,
-    /// "open" or "resolved".
-    pub status: String,
-    /// What resolved it (e.g. spec submission timestamp).
-    pub resolved_by: Option<String>,
-    /// Recommendation text.
-    pub recommendation: String,
+    fn entry(entity_type: &str, action: &str, success: bool) -> TrajectoryEntry {
+        TrajectoryEntry {
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            tenant: "test".to_string(),
+            entity_type: entity_type.to_string(),
+            entity_id: "e1".to_string(),
+            action: action.to_string(),
+            success,
+            from_status: None,
+            to_status: None,
+            error: None,
+            agent_id: None,
+            session_id: None,
+            authz_denied: None,
+            denied_resource: None,
+            denied_module: None,
+            source: None,
+            spec_governed: None,
+        }
+    }
+
+    fn failed_entry(entity_type: &str, action: &str, error: &str) -> TrajectoryEntry {
+        TrajectoryEntry {
+            error: Some(error.to_string()),
+            ..entry(entity_type, action, false)
+        }
+    }
+
+    fn authz_denied_entry(entity_type: &str, action: &str) -> TrajectoryEntry {
+        TrajectoryEntry {
+            authz_denied: Some(true),
+            ..entry(entity_type, action, false)
+        }
+    }
+
+    fn platform_failed_entry(entity_type: &str, action: &str, error: &str) -> TrajectoryEntry {
+        TrajectoryEntry {
+            source: Some(TrajectorySource::Platform),
+            ..failed_entry(entity_type, action, error)
+        }
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        assert!(generate_insights(&[]).is_empty());
+        assert!(generate_unmet_intents(&[]).is_empty());
+        assert!(generate_feature_requests(&[]).is_empty());
+    }
+
+    #[test]
+    fn below_threshold_signals_skipped() {
+        // Single entry (total < 2) should produce no insights.
+        let entries = vec![entry("Ticket", "Create", true)];
+        let insights = generate_insights(&entries);
+        assert!(insights.is_empty(), "signals with total < 2 should be skipped");
+    }
+
+    #[test]
+    fn entity_set_not_found_open_unmet_intent() {
+        let entries = vec![
+            failed_entry("Invoice", "Create", "EntitySetNotFound: Invoice"),
+            failed_entry("Invoice", "Create", "EntitySetNotFound: Invoice"),
+        ];
+        let insights = generate_insights(&entries);
+        assert!(!insights.is_empty());
+        assert!(insights[0].signal.intent.contains("not found"));
+        assert!(insights[0].recommendation.contains("Consider creating"));
+    }
+
+    #[test]
+    fn entity_set_not_found_resolved_by_submit_spec() {
+        let entries = vec![
+            failed_entry("Invoice", "Create", "EntitySetNotFound: Invoice"),
+            failed_entry("Invoice", "Create", "EntitySetNotFound: Invoice"),
+            entry("Invoice", "SubmitSpec", true),
+        ];
+        let insights = generate_insights(&entries);
+        assert!(!insights.is_empty());
+        let resolved = insights.iter().find(|i| i.signal.intent.contains("Invoice")).unwrap();
+        assert!(resolved.signal.intent.contains("resolved"));
+        assert!(resolved.recommendation.contains("submitted"));
+    }
+
+    #[test]
+    fn authz_denial_above_threshold_generates_insight() {
+        // > 30% authz denials should trigger an insight.
+        let mut entries = Vec::new();
+        for _ in 0..4 {
+            entries.push(authz_denied_entry("Task", "Delete"));
+        }
+        entries.push(entry("Task", "Delete", true));
+        // 4 denials out of 5 = 80% > 30%
+
+        let insights = generate_insights(&entries);
+        let denial_insight = insights.iter().find(|i| i.signal.intent.contains("denied"));
+        assert!(denial_insight.is_some(), "should generate authz denial insight");
+        assert!(denial_insight.unwrap().recommendation.contains("Cedar permit"));
+    }
+
+    #[test]
+    fn authz_denial_below_threshold_no_special_insight() {
+        // 1 denial out of 10 = 10% < 30% — no special authz insight.
+        let mut entries = Vec::new();
+        entries.push(authz_denied_entry("Task", "Delete"));
+        for _ in 0..9 {
+            entries.push(entry("Task", "Delete", true));
+        }
+
+        let insights = generate_insights(&entries);
+        let denial_insight = insights.iter().find(|i| i.signal.intent.contains("denied"));
+        assert!(denial_insight.is_none(), "should not generate authz denial insight below threshold");
+    }
+
+    #[test]
+    fn insights_sorted_by_priority_descending() {
+        let mut entries = Vec::new();
+        // High failure rate action.
+        for _ in 0..20 {
+            entries.push(failed_entry("Order", "Process", "guard rejected"));
+        }
+        // Low failure rate action.
+        for _ in 0..2 {
+            entries.push(entry("User", "Login", false));
+        }
+
+        let insights = generate_insights(&entries);
+        for window in insights.windows(2) {
+            assert!(
+                window[0].priority_score >= window[1].priority_score,
+                "insights should be sorted by priority descending"
+            );
+        }
+    }
+
+    #[test]
+    fn feature_requests_empty_for_non_platform_source() {
+        let entries = vec![
+            failed_entry("Ticket", "Create", "EntitySetNotFound"),
+            failed_entry("Ticket", "Create", "EntitySetNotFound"),
+            failed_entry("Ticket", "Create", "EntitySetNotFound"),
+        ];
+        assert!(generate_feature_requests(&entries).is_empty(), "non-platform source should not generate FRs");
+    }
+
+    #[test]
+    fn feature_requests_below_threshold_skipped() {
+        // 2 failures < FEATURE_REQUEST_THRESHOLD (3)
+        let entries = vec![
+            platform_failed_entry("Task", "Archive", "EntitySetNotFound"),
+            platform_failed_entry("Task", "Archive", "EntitySetNotFound"),
+        ];
+        assert!(generate_feature_requests(&entries).is_empty());
+    }
+
+    #[test]
+    fn feature_requests_above_threshold_generated() {
+        let entries = vec![
+            platform_failed_entry("Report", "Generate", "ActionNotFound: Generate"),
+            platform_failed_entry("Report", "Generate", "ActionNotFound: Generate"),
+            platform_failed_entry("Report", "Generate", "ActionNotFound: Generate"),
+        ];
+        let frs = generate_feature_requests(&entries);
+        assert_eq!(frs.len(), 1);
+        assert!(frs[0].description.contains("Generate"));
+        assert_eq!(frs[0].frequency, 3);
+    }
+
+    #[test]
+    fn unmet_intents_open_vs_resolved() {
+        let entries = vec![
+            failed_entry("Billing", "Charge", "EntitySetNotFound"),
+            failed_entry("Billing", "Charge", "EntitySetNotFound"),
+            entry("Billing", "SubmitSpec", true),
+        ];
+        let intents = generate_unmet_intents(&entries);
+        assert!(!intents.is_empty());
+        let billing = intents.iter().find(|i| i.entity_type == "Billing").unwrap();
+        assert_eq!(billing.status, "resolved");
+    }
+
+    #[test]
+    fn categorize_error_patterns() {
+        assert_eq!(categorize_error(Some("EntitySetNotFound: X")), "EntitySetNotFound");
+        assert_eq!(categorize_error(Some("Authorization denied")), "AuthzDenied");
+        assert_eq!(categorize_error(Some("ActionNotFound: Y")), "ActionNotFound");
+        assert_eq!(categorize_error(Some("guard rejected")), "GuardRejected");
+        assert_eq!(categorize_error(Some("something else")), "Other");
+        assert_eq!(categorize_error(None), "Unknown");
+    }
 }

@@ -1,20 +1,10 @@
-//! Compatibility facade for OData dispatch handlers.
+//! Shared HTTP request context types.
 //!
-//! The implementation lives under [`crate::odata`]. This module keeps
-//! existing imports stable while the OData stack is split into smaller files.
+//! Canonical home for request-scoped identity and session types extracted
+//! from HTTP headers. These types are used across OData dispatch, authz,
+//! observability, and reaction modules.
 
 use axum::http::HeaderMap;
-
-#[cfg(feature = "observe")]
-pub(crate) use crate::odata::extract_tenant;
-pub use crate::odata::handle_hints;
-pub use crate::odata::handle_metadata;
-pub use crate::odata::handle_odata_delete;
-pub use crate::odata::handle_odata_get;
-pub use crate::odata::handle_odata_patch;
-pub use crate::odata::handle_odata_post;
-pub use crate::odata::handle_odata_put;
-pub use crate::odata::handle_service_document;
 
 /// Agent identity context extracted from HTTP headers.
 ///
@@ -26,6 +16,20 @@ pub struct AgentContext {
     pub agent_id: Option<String>,
     /// Optional session identifier (from `X-Session-Id` header).
     pub session_id: Option<String>,
+}
+
+impl AgentContext {
+    /// Create a system-level agent context for internal operations.
+    ///
+    /// Marks the provenance as `"system"` so that trajectories and events
+    /// attribute the action to the platform itself rather than silently
+    /// dropping identity via `Default`.
+    pub fn system() -> Self {
+        Self {
+            agent_id: Some("system".to_string()),
+            session_id: None,
+        }
+    }
 }
 
 /// Extract agent identity from request headers.

@@ -7,7 +7,7 @@
 
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
-use temper_spec::automaton::{self, LintSeverity, lint_automata_bundle, lint_automaton};
+use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_verify::cascade::VerificationCascade;
 
@@ -70,142 +70,56 @@ const AGENT_SPECS: &[(&str, &str)] = &[
     ("Policy", POLICY_IOA),
 ];
 
-fn parse_and_lint_specs_or_panic(spec_kind: &str, specs: &[(&str, &str)]) {
-    let mut automata = std::collections::BTreeMap::new();
+/// Verify, parse, and register a set of IOA specs under a tenant.
+///
+/// Shared routine that eliminates duplication between system and agent bootstrap:
+/// 1. Validates all specs parse correctly
+/// 2. Runs verification cascade on each
+/// 3. Parses the CSDL schema
+/// 4. Registers the tenant in the SpecRegistry
+/// 5. Marks all entities as pre-verified
+///
+/// Panics if any spec fails to parse or verify (fatal startup error).
+fn bootstrap_tenant_specs(
+    state: &PlatformState,
+    tenant: &str,
+    csdl_source: &str,
+    specs: &[(&str, &str)],
+    label: &str,
+) {
+    tracing::info!(
+        "Bootstrapping {label} specs for tenant '{tenant}' with {} entities",
+        specs.len()
+    );
 
+    // Validate all specs parse.
     for (entity_type, ioa_source) in specs {
-        let parsed = automaton::parse_automaton(ioa_source)
-            .unwrap_or_else(|e| panic!("{spec_kind} spec {entity_type} failed to parse: {e}"));
-
-        for finding in lint_automaton(&parsed) {
-            if matches!(finding.severity, LintSeverity::Error) {
-                panic!(
-                    "{spec_kind} spec {entity_type} failed lint [{}]: {}",
-                    finding.code, finding.message
-                );
-            }
-        }
-
-        automata.insert((*entity_type).to_string(), parsed);
+        automaton::parse_automaton(ioa_source)
+            .unwrap_or_else(|e| panic!("{label} spec {entity_type} failed to parse: {e}"));
     }
-
-    for finding in lint_automata_bundle(&automata) {
-        if matches!(finding.severity, LintSeverity::Error) {
-            panic!(
-                "{spec_kind} spec {} failed bundle lint [{}]: {}",
-                finding.entity, finding.code, finding.message
-            );
-        }
-    }
-}
-
-/// Bootstrap the system tenant.
-///
-/// 1. Validates all system specs parse correctly
-/// 2. Runs verification cascade on each (should always pass — specs are curated)
-/// 3. Registers `temper-system` tenant in the SpecRegistry
-///
-/// Panics if system specs fail to parse or verify (this is a fatal startup error).
-pub fn bootstrap_system_tenant(state: &PlatformState) {
-    tracing::info!(
-        "Bootstrapping temper-system tenant with {} entities",
-        SYSTEM_SPECS.len()
-    );
-
-    // Validate and lint all system specs.
-    parse_and_lint_specs_or_panic("System", SYSTEM_SPECS);
-
-    // Run verification cascade on each (lightweight — system specs are simple)
-    for (entity_type, ioa_source) in SYSTEM_SPECS {
-        let cascade = VerificationCascade::from_ioa(ioa_source)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(50);
-        let result = cascade.run();
-        assert!(
-            result.all_passed,
-            "System spec {entity_type} failed verification cascade"
-        );
-    }
-
-    // Parse system CSDL
-    let csdl = parse_csdl(SYSTEM_CSDL).expect("System CSDL failed to parse");
-
-    // Register system tenant
-    let system_tid = TenantId::new(SYSTEM_TENANT);
-    {
-        let mut registry = state.registry.write().unwrap();
-        registry.register_tenant(
-            system_tid.clone(),
-            csdl,
-            SYSTEM_CSDL.to_string(),
-            SYSTEM_SPECS,
-        );
-        // Mark all system entities as pre-verified (they passed the cascade above).
-        let now = temper_runtime::scheduler::sim_now().to_rfc3339();
-        for (entity_type, _) in SYSTEM_SPECS {
-            registry.set_verification_status(
-                &system_tid,
-                entity_type,
-                VerificationStatus::Completed(EntityVerificationResult {
-                    all_passed: true,
-                    levels: vec![EntityLevelSummary {
-                        level: "Bootstrap".to_string(),
-                        passed: true,
-                        summary: "Pre-verified at bootstrap".to_string(),
-                        details: None,
-                    }],
-                    verified_at: now.clone(),
-                }),
-            );
-        }
-    }
-
-    tracing::info!(
-        "temper-system tenant bootstrapped: {:?}",
-        SYSTEM_SPECS.iter().map(|(t, _)| *t).collect::<Vec<_>>()
-    );
-}
-
-/// Bootstrap agent entity specs (Agent, Plan, Task, ToolCall) for a tenant.
-///
-/// Parses and verifies the agent IOA specs, then registers them under the
-/// given tenant. These are platform infrastructure specs that power the
-/// agent runtime — they auto-load so users don't need `--app` flags.
-///
-/// Panics if agent specs fail to parse or verify (fatal startup error).
-pub fn bootstrap_agent_specs(state: &PlatformState, tenant: &str) {
-    tracing::info!(
-        "Bootstrapping agent specs for tenant '{}' with {} entities",
-        tenant,
-        AGENT_SPECS.len()
-    );
-
-    // Validate and lint all agent specs.
-    parse_and_lint_specs_or_panic("Agent", AGENT_SPECS);
 
     // Run verification cascade on each.
-    for (entity_type, ioa_source) in AGENT_SPECS {
+    for (entity_type, ioa_source) in specs {
         let cascade = VerificationCascade::from_ioa(ioa_source)
             .with_sim_seeds(3)
             .with_prop_test_cases(50);
         let result = cascade.run();
         assert!(
             result.all_passed,
-            "Agent spec {entity_type} failed verification cascade"
+            "{label} spec {entity_type} failed verification cascade"
         );
     }
 
-    // Parse agent CSDL.
-    let csdl = parse_csdl(AGENT_CSDL).expect("Agent CSDL failed to parse");
+    // Parse CSDL schema.
+    let csdl = parse_csdl(csdl_source).unwrap_or_else(|e| panic!("{label} CSDL failed to parse: {e}"));
 
-    // Register agent specs under the given tenant.
+    // Register tenant and mark specs as pre-verified.
     let tenant_id = TenantId::new(tenant);
     {
         let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
-        registry.register_tenant(tenant_id.clone(), csdl, AGENT_CSDL.to_string(), AGENT_SPECS);
-        // Mark all agent entities as pre-verified.
+        registry.register_tenant(tenant_id.clone(), csdl, csdl_source.to_string(), specs);
         let now = temper_runtime::scheduler::sim_now().to_rfc3339();
-        for (entity_type, _) in AGENT_SPECS {
+        for (entity_type, _) in specs {
             registry.set_verification_status(
                 &tenant_id,
                 entity_type,
@@ -224,10 +138,25 @@ pub fn bootstrap_agent_specs(state: &PlatformState, tenant: &str) {
     }
 
     tracing::info!(
-        "Agent specs bootstrapped for tenant '{}': {:?}",
-        tenant,
-        AGENT_SPECS.iter().map(|(t, _)| *t).collect::<Vec<_>>()
+        "{label} specs bootstrapped for tenant '{tenant}': {:?}",
+        specs.iter().map(|(t, _)| *t).collect::<Vec<_>>()
     );
+}
+
+/// Bootstrap the system tenant.
+///
+/// Validates, verifies, and registers all temper-system entity specs.
+/// Panics if system specs fail to parse or verify (fatal startup error).
+pub fn bootstrap_system_tenant(state: &PlatformState) {
+    bootstrap_tenant_specs(state, SYSTEM_TENANT, SYSTEM_CSDL, SYSTEM_SPECS, "System");
+}
+
+/// Bootstrap agent entity specs (Agent, Plan, Task, ToolCall) for a tenant.
+///
+/// Parses and verifies the agent IOA specs, then registers them under the
+/// given tenant. Panics if agent specs fail to parse or verify.
+pub fn bootstrap_agent_specs(state: &PlatformState, tenant: &str) {
+    bootstrap_tenant_specs(state, tenant, AGENT_CSDL, AGENT_SPECS, "Agent");
 }
 
 #[cfg(test)]

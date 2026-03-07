@@ -22,7 +22,7 @@ function jsonResponse(data: unknown, status = 200) {
 
 describe("fetchWithRetry (via fetchSpecs)", () => {
   it("does not retry on 200", async () => {
-    mockFetch.mockResolvedValue(jsonResponse([]));
+    mockFetch.mockResolvedValue(jsonResponse({ specs: [], total: 0 }));
     const result = await fetchSpecs();
     expect(result).toEqual([]);
     expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -37,7 +37,7 @@ describe("fetchWithRetry (via fetchSpecs)", () => {
   it("retries once on 500", async () => {
     mockFetch
       .mockResolvedValueOnce(jsonResponse(null, 500))
-      .mockResolvedValueOnce(jsonResponse(["retried"]));
+      .mockResolvedValueOnce(jsonResponse({ specs: ["retried"], total: 1 }));
 
     const result = await fetchSpecs();
     expect(result).toEqual(["retried"]);
@@ -47,7 +47,7 @@ describe("fetchWithRetry (via fetchSpecs)", () => {
   it("retries once on 429", async () => {
     mockFetch
       .mockResolvedValueOnce(jsonResponse(null, 429))
-      .mockResolvedValueOnce(jsonResponse(["ok"]));
+      .mockResolvedValueOnce(jsonResponse({ specs: ["ok"], total: 1 }));
 
     const result = await fetchSpecs();
     expect(result).toEqual(["ok"]);
@@ -57,7 +57,7 @@ describe("fetchWithRetry (via fetchSpecs)", () => {
   it("retries once on network error", async () => {
     mockFetch
       .mockRejectedValueOnce(new TypeError("fetch failed"))
-      .mockResolvedValueOnce(jsonResponse(["recovered"]));
+      .mockResolvedValueOnce(jsonResponse({ specs: ["recovered"], total: 1 }));
 
     const result = await fetchSpecs();
     expect(result).toEqual(["recovered"]);

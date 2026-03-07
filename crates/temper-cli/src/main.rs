@@ -9,6 +9,7 @@ mod init;
 mod install;
 mod mcp;
 mod serve;
+mod util;
 mod verify;
 
 use clap::{Parser, Subcommand, ValueEnum};

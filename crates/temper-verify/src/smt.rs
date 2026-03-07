@@ -50,7 +50,8 @@ pub struct SmtResult {
 /// 2. Invariant induction: does each invariant hold after every transition?
 /// 3. Unreachable states: can each declared state be reached?
 pub fn verify_symbolic(ioa_toml: &str, max_counter: usize) -> SmtResult {
-    let model = build_model_from_ioa(ioa_toml, max_counter);
+    let model = build_model_from_ioa(ioa_toml, max_counter)
+        .expect("SMT: IOA spec should have been validated before symbolic verification");
     let approximation_notes = approximation_notes();
     let approximate = !approximation_notes.is_empty();
 

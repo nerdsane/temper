@@ -61,13 +61,13 @@ impl CacheOptimizer {
 
         for row in &result_set.rows {
             let hit_rate = row
-                .get("value")
+                .get_in(&result_set.columns, "value")
                 .and_then(serde_json::Value::as_f64)
                 .unwrap_or(1.0);
 
             // Extract key pattern from tags if available.
             let key_pattern = row
-                .get("tags")
+                .get_in(&result_set.columns, "tags")
                 .and_then(|v| v.get("key_pattern"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("*")
@@ -119,12 +119,12 @@ impl CacheOptimizer {
 
         for row in &result_set.rows {
             let miss_count = row
-                .get("value")
+                .get_in(&result_set.columns, "value")
                 .and_then(serde_json::Value::as_f64)
                 .unwrap_or(0.0);
 
             let key_pattern = row
-                .get("tags")
+                .get_in(&result_set.columns, "tags")
                 .and_then(|v| v.get("key_pattern"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("*")

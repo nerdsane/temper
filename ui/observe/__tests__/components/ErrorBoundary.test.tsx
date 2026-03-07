@@ -1,23 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import ErrorBoundary from "@/components/ErrorBoundary";
-import { useState } from "react";
 
 // Suppress React error boundary console.error during tests
 beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
-
-function ThrowOnce() {
-  const [shouldThrow, setShouldThrow] = useState(true);
-  if (shouldThrow) {
-    // This only throws on first render; after error boundary resets and
-    // React re-renders, shouldThrow state resets to true, so we need a
-    // different approach. See the Controllable component below.
-    throw new Error("Test crash");
-  }
-  return <div>Recovered</div>;
-}
 
 // A child that can be controlled from outside via a ref callback
 let throwControl = true;

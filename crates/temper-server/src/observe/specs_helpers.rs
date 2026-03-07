@@ -2,28 +2,14 @@ use axum::http::StatusCode;
 use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
 use temper_spec::cross_invariant::{CrossInvariantLintFinding, CrossInvariantLintSeverity};
 
+pub(super) use temper_spec::naming::to_pascal_case;
+
 #[derive(Debug, Clone)]
 pub(super) struct EntityLintFinding {
     pub(super) entity: String,
     pub(super) code: String,
     pub(super) severity: LintSeverity,
     pub(super) message: String,
-}
-
-/// Convert a string to PascalCase (e.g. "my_entity" -> "MyEntity").
-pub(super) fn to_pascal_case(s: &str) -> String {
-    s.split(['_', '-'])
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => {
-                    let upper: String = first.to_uppercase().collect();
-                    format!("{}{}", upper, chars.collect::<String>())
-                }
-                None => String::new(),
-            }
-        })
-        .collect()
 }
 
 pub(super) fn lint_loaded_specs(

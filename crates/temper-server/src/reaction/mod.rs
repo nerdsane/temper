@@ -10,6 +10,7 @@
 
 pub mod dispatcher;
 pub mod registry;
+pub(crate) mod resolver;
 pub mod sim_dispatcher;
 pub mod types;
 

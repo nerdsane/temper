@@ -9,7 +9,7 @@
 //! They are invoked by the evolution pipeline when high-priority insights
 //! are detected — the developer still holds the approval gate (D-Record).
 
-use crate::agent::claude::{ChatClient, ClaudeClient, ClaudeError, Message};
+use crate::agent::{ChatClient, ClaudeClient, ClaudeError, Message};
 
 /// Formalizes observations into problem statements (O→P).
 ///
@@ -171,7 +171,7 @@ impl<C: ChatClient> AnalysisAgent<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::claude::MockClaudeClient;
+    use crate::agent::MockClaudeClient;
 
     #[test]
     fn test_observation_agent_creation() {

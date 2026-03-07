@@ -1,27 +1,27 @@
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use serde::Deserialize;
+use temper_authz::PrincipalKind;
 use temper_evolution::{Decision, DecisionRecord, RecordHeader, RecordStatus, RecordType};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use tracing::instrument;
 
-use crate::dispatch::AgentContext;
+use crate::authz::{require_observe_auth, security_context_from_headers};
+use crate::request_context::AgentContext;
 use crate::state::ServerState;
 
 /// GET /observe/evolution/records/{id} -- get a single record with chain info.
 #[instrument(skip_all, fields(otel.name = "GET /observe/evolution/records/{id}"))]
-pub(crate) async fn get_evolution_record(
+pub(crate) async fn handle_get_evolution_record(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Query Turso directly (single source of truth).
-    let Some(turso) = state.turso_opt() else {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    };
+    require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
 
-    match turso.get_evolution_record(&id).await {
+    match state.get_evolution_record(&id).await {
         Ok(Some(row)) => {
             let mut record: serde_json::Value =
                 serde_json::from_str(&row.data).unwrap_or_else(|_| serde_json::json!({}));
@@ -38,7 +38,7 @@ pub(crate) async fn get_evolution_record(
                     obj.insert("derived_from".to_string(), serde_json::json!(df));
                 }
             }
-            let chain = validate_chain_turso(turso, &id).await;
+            let chain = validate_chain(&state, &id).await;
             Ok(Json(serde_json::json!({
                 "record": record,
                 "chain": {
@@ -73,18 +73,35 @@ pub(crate) struct DecideRequest {
 /// POST /api/evolution/records/{id}/decide -- create a D-Record for a record.
 ///
 /// The target record (by ID) must exist. Creates a DecisionRecord derived from it.
+/// Admin principals bypass Cedar; other principals require "manage_decisions" on "EvolutionRecord".
 #[instrument(skip_all, fields(otel.name = "POST /api/evolution/records/{id}/decide"))]
 pub(crate) async fn handle_decide(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<DecideRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let Some(turso) = state.turso_opt() else {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    };
+    // Cedar authorization: admin bypass, others need manage_decisions.
+    let security_ctx = security_context_from_headers(&headers, None, None);
+    let tenant_hint = headers
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("system");
+    if !matches!(security_ctx.principal.kind, PrincipalKind::Admin)
+        && let Err(denial) = state.authorize_with_context(
+            &security_ctx,
+            "manage_decisions",
+            "EvolutionRecord",
+            &std::collections::BTreeMap::new(),
+            tenant_hint,
+        )
+    {
+        tracing::warn!(reason = %denial, "unauthorized decide attempt");
+        return Err(StatusCode::FORBIDDEN);
+    }
 
-    // Verify the target record exists in Turso.
-    let exists = turso
+    // Verify the target record exists.
+    let exists = state
         .get_evolution_record(&id)
         .await
         .map_err(|e| {
@@ -130,9 +147,9 @@ pub(crate) async fn handle_decide(
         implementation: None,
     };
 
-    // Persist to Turso.
+    // Persist to the available evolution store.
     let data_json = serde_json::to_string(&d_record).unwrap_or_default();
-    turso
+    state
         .insert_evolution_record(
             &record_id,
             "Decision",
@@ -168,7 +185,7 @@ pub(crate) async fn handle_decide(
             &ed_id,
             "CreateDecision",
             ed_params,
-            &AgentContext::default(),
+            &AgentContext::system(),
         )
         .await
     {
@@ -210,8 +227,8 @@ fn record_type_from_id_prefix(id: &str) -> Option<RecordType> {
     }
 }
 
-async fn validate_chain_turso(
-    turso: &temper_store_turso::TursoEventStore,
+async fn validate_chain(
+    state: &ServerState,
     leaf_id: &str,
 ) -> ChainValidationSummary {
     let mut errors = Vec::new();
@@ -242,7 +259,7 @@ async fn validate_chain_turso(
             RecordType::FeatureRequest => vec![RecordType::Insight],
         };
 
-        let derived_from = match turso.get_evolution_record(&current_id).await {
+        let derived_from = match state.get_evolution_record(&current_id).await {
             Ok(Some(row)) => row.derived_from,
             Ok(None) => {
                 errors.push(format!("record \'{current_id}\' not found"));

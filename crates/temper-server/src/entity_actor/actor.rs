@@ -399,18 +399,18 @@ impl Actor for EntityActor {
                         .num_nanoseconds()
                         .unwrap_or(0)
                         .max(0) as u64;
-                    let wide = wide_event::from_transition(
-                        &state.entity_type,
-                        &state.entity_id,
-                        &name,
-                        &event.from_status,
-                        &state.status,
-                        true,
+                    let wide = wide_event::from_transition(wide_event::TransitionInput {
+                        entity_type: &state.entity_type,
+                        entity_id: &state.entity_id,
+                        operation: &name,
+                        from_status: &event.from_status,
+                        to_status: &state.status,
+                        success: true,
                         duration_ns,
-                        &event.params,
-                        state.item_count,
-                        &self.trace_id,
-                    );
+                        params: &event.params,
+                        item_count: state.item_count,
+                        trace_id: &self.trace_id,
+                    });
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
 
@@ -463,18 +463,18 @@ impl Actor for EntityActor {
                         .num_nanoseconds()
                         .unwrap_or(0)
                         .max(0) as u64;
-                    let wide = wide_event::from_transition(
-                        &state.entity_type,
-                        &state.entity_id,
-                        &name,
-                        &state.status,
-                        &state.status,
-                        false,
+                    let wide = wide_event::from_transition(wide_event::TransitionInput {
+                        entity_type: &state.entity_type,
+                        entity_id: &state.entity_id,
+                        operation: &name,
+                        from_status: &state.status,
+                        to_status: &state.status,
+                        success: false,
                         duration_ns,
-                        &params,
-                        state.item_count,
-                        &self.trace_id,
-                    );
+                        params: &params,
+                        item_count: state.item_count,
+                        trace_id: &self.trace_id,
+                    });
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
 

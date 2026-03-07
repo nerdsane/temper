@@ -96,3 +96,117 @@ fn monty_key_to_string(key: &MontyObject) -> String {
         _ => key.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── json_to_monty_object ──────────────────────────────────
+
+    #[test]
+    fn json_null_to_monty_none() {
+        assert_eq!(json_to_monty_object(&Value::Null), MontyObject::None);
+    }
+
+    #[test]
+    fn json_bool_to_monty() {
+        assert_eq!(json_to_monty_object(&json!(true)), MontyObject::Bool(true));
+        assert_eq!(json_to_monty_object(&json!(false)), MontyObject::Bool(false));
+    }
+
+    #[test]
+    fn json_int_to_monty() {
+        assert_eq!(json_to_monty_object(&json!(42)), MontyObject::Int(42));
+        assert_eq!(json_to_monty_object(&json!(-1)), MontyObject::Int(-1));
+    }
+
+    #[test]
+    fn json_float_to_monty() {
+        assert_eq!(json_to_monty_object(&json!(3.14)), MontyObject::Float(3.14));
+    }
+
+    #[test]
+    fn json_string_to_monty() {
+        assert_eq!(
+            json_to_monty_object(&json!("hello")),
+            MontyObject::String("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn json_array_to_monty_list() {
+        let val = json!([1, "two", null]);
+        let result = json_to_monty_object(&val);
+        match result {
+            MontyObject::List(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], MontyObject::Int(1));
+                assert_eq!(items[1], MontyObject::String("two".to_string()));
+                assert_eq!(items[2], MontyObject::None);
+            }
+            other => panic!("Expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_object_to_monty_dict() {
+        let val = json!({"key": "value"});
+        let result = json_to_monty_object(&val);
+        match result {
+            MontyObject::Dict(pairs) => {
+                let items: Vec<_> = pairs.into_iter().collect();
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].0, MontyObject::String("key".to_string()));
+                assert_eq!(items[0].1, MontyObject::String("value".to_string()));
+            }
+            other => panic!("Expected Dict, got {other:?}"),
+        }
+    }
+
+    // ── monty_object_to_json ──────────────────────────────────
+
+    #[test]
+    fn monty_none_to_json_null() {
+        assert_eq!(monty_object_to_json(&MontyObject::None), Value::Null);
+    }
+
+    #[test]
+    fn monty_bool_to_json() {
+        assert_eq!(monty_object_to_json(&MontyObject::Bool(true)), json!(true));
+    }
+
+    #[test]
+    fn monty_int_to_json() {
+        assert_eq!(monty_object_to_json(&MontyObject::Int(42)), json!(42));
+    }
+
+    #[test]
+    fn monty_string_to_json() {
+        assert_eq!(
+            monty_object_to_json(&MontyObject::String("hi".to_string())),
+            json!("hi")
+        );
+    }
+
+    #[test]
+    fn monty_list_to_json_array() {
+        let list = MontyObject::List(vec![MontyObject::Int(1), MontyObject::Bool(false)]);
+        assert_eq!(monty_object_to_json(&list), json!([1, false]));
+    }
+
+    // ── monty_key_to_string ───────────────────────────────────
+
+    #[test]
+    fn string_key_returns_content() {
+        assert_eq!(
+            monty_key_to_string(&MontyObject::String("name".to_string())),
+            "name"
+        );
+    }
+
+    #[test]
+    fn non_string_key_uses_display() {
+        assert_eq!(monty_key_to_string(&MontyObject::Int(42)), "42");
+    }
+}

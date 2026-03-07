@@ -228,3 +228,116 @@ pub struct TemperModel {
     /// Default upper bound for counters not in counter_bounds.
     pub(crate) default_max_counter: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_display_status_only() {
+        let s = TemperModelState {
+            status: "Draft".into(),
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+        };
+        assert_eq!(s.to_string(), "Draft");
+    }
+
+    #[test]
+    fn state_display_with_counters() {
+        let s = TemperModelState {
+            status: "Active".into(),
+            counters: BTreeMap::from([("items".into(), 3)]),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+        };
+        assert_eq!(s.to_string(), "Active(items=3)");
+    }
+
+    #[test]
+    fn state_display_with_true_booleans() {
+        let s = TemperModelState {
+            status: "Active".into(),
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::from([("ready".into(), true), ("done".into(), false)]),
+            lists: BTreeMap::new(),
+        };
+        assert_eq!(s.to_string(), "Active[ready]");
+    }
+
+    #[test]
+    fn state_display_with_lists() {
+        let s = TemperModelState {
+            status: "Active".into(),
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::from([("tags".into(), vec!["a".into(), "b".into()])]),
+        };
+        assert_eq!(s.to_string(), "Active{tags#2}");
+    }
+
+    #[test]
+    fn state_display_full() {
+        let s = TemperModelState {
+            status: "Active".into(),
+            counters: BTreeMap::from([("items".into(), 2)]),
+            booleans: BTreeMap::from([("ready".into(), true)]),
+            lists: BTreeMap::from([("tags".into(), vec!["x".into()])]),
+        };
+        assert_eq!(s.to_string(), "Active(items=2)[ready]{tags#1}");
+    }
+
+    #[test]
+    fn state_display_all_booleans_false_hides_brackets() {
+        let s = TemperModelState {
+            status: "X".into(),
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::from([("a".into(), false), ("b".into(), false)]),
+            lists: BTreeMap::new(),
+        };
+        assert_eq!(s.to_string(), "X");
+    }
+
+    #[test]
+    fn action_display_with_target() {
+        let a = TemperModelAction {
+            name: "Submit".into(),
+            target_state: Some("Active".into()),
+        };
+        assert_eq!(a.to_string(), "Submit -> Active");
+    }
+
+    #[test]
+    fn action_display_no_target() {
+        let a = TemperModelAction {
+            name: "AddItem".into(),
+            target_state: None,
+        };
+        assert_eq!(a.to_string(), "AddItem");
+    }
+
+    #[test]
+    fn state_serde_roundtrip() {
+        let s = TemperModelState {
+            status: "Draft".into(),
+            counters: BTreeMap::from([("items".into(), 5)]),
+            booleans: BTreeMap::from([("ready".into(), true)]),
+            lists: BTreeMap::from([("tags".into(), vec!["vip".into()])]),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: TemperModelState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn action_serde_roundtrip() {
+        let a = TemperModelAction {
+            name: "Submit".into(),
+            target_state: Some("Active".into()),
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        let back: TemperModelAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, a);
+    }
+}

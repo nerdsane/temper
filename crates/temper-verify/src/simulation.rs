@@ -124,25 +124,32 @@ pub struct InvariantViolation {
 }
 
 /// Run a deterministic simulation from I/O Automaton TOML source.
-pub fn run_simulation_from_ioa(ioa_toml: &str, config: &SimConfig) -> SimulationResult {
-    let model = build_model_from_ioa(ioa_toml, config.max_counter);
-    run_simulation_impl(&model, config)
+///
+/// Returns an error if the IOA TOML fails to parse.
+pub fn run_simulation_from_ioa(
+    ioa_toml: &str,
+    config: &SimConfig,
+) -> Result<SimulationResult, String> {
+    let model = build_model_from_ioa(ioa_toml, config.max_counter)?;
+    Ok(run_simulation_impl(&model, config))
 }
 
 /// Run simulation across multiple seeds from I/O Automaton TOML source.
+///
+/// Returns an error if the IOA TOML fails to parse.
 pub fn run_multi_seed_simulation_from_ioa(
     ioa_toml: &str,
     base_config: &SimConfig,
     num_seeds: u64,
-) -> Vec<SimulationResult> {
-    let model = build_model_from_ioa(ioa_toml, base_config.max_counter);
-    (0..num_seeds)
+) -> Result<Vec<SimulationResult>, String> {
+    let model = build_model_from_ioa(ioa_toml, base_config.max_counter)?;
+    Ok((0..num_seeds)
         .map(|i| {
             let mut config = base_config.clone();
             config.seed = base_config.seed.wrapping_add(i);
             run_simulation_impl(&model, &config)
         })
-        .collect()
+        .collect())
 }
 
 fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationResult {
@@ -406,7 +413,7 @@ mod tests {
             faults: FaultConfig::none(),
         };
 
-        let result = run_simulation_from_ioa(ORDER_IOA, &config);
+        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
         assert!(
             result.all_invariants_held,
             "No invariant violations expected without faults, got: {:?}",
@@ -429,7 +436,7 @@ mod tests {
             faults: FaultConfig::light(),
         };
 
-        let result = run_simulation_from_ioa(ORDER_IOA, &config);
+        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
         assert!(
             result.all_invariants_held,
             "No invariant violations expected with light faults, got: {:?}",
@@ -448,7 +455,7 @@ mod tests {
             faults: FaultConfig::heavy(),
         };
 
-        let result = run_simulation_from_ioa(ORDER_IOA, &config);
+        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
         assert!(
             result.all_invariants_held,
             "Invariants must hold even under heavy faults, got: {:?}",
@@ -471,8 +478,8 @@ mod tests {
             faults: FaultConfig::light(),
         };
 
-        let result1 = run_simulation_from_ioa(ORDER_IOA, &config);
-        let result2 = run_simulation_from_ioa(ORDER_IOA, &config);
+        let result1 = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
+        let result2 = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
 
         assert_eq!(
             result1.total_transitions, result2.total_transitions,
@@ -500,8 +507,8 @@ mod tests {
         let config1 = SimConfig::default().with_seed(42);
         let config2 = SimConfig::default().with_seed(9999);
 
-        let result1 = run_simulation_from_ioa(ORDER_IOA, &config1);
-        let result2 = run_simulation_from_ioa(ORDER_IOA, &config2);
+        let result1 = run_simulation_from_ioa(ORDER_IOA, &config1).unwrap();
+        let result2 = run_simulation_from_ioa(ORDER_IOA, &config2).unwrap();
 
         assert!(result1.total_transitions > 0);
         assert!(result2.total_transitions > 0);
@@ -518,7 +525,7 @@ mod tests {
             faults: FaultConfig::light(),
         };
 
-        let results = run_multi_seed_simulation_from_ioa(ORDER_IOA, &config, 10);
+        let results = run_multi_seed_simulation_from_ioa(ORDER_IOA, &config, 10).unwrap();
         assert_eq!(results.len(), 10);
 
         for (i, result) in results.iter().enumerate() {
@@ -542,10 +549,10 @@ mod tests {
             faults: FaultConfig::none(),
         };
 
-        let result = run_simulation_from_ioa(ORDER_IOA, &config);
+        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
         assert_eq!(result.actor_final_states.len(), 2);
 
-        let model = build_model_from_ioa(ORDER_IOA, config.max_counter);
+        let model = build_model_from_ioa(ORDER_IOA, config.max_counter).unwrap();
 
         for (id, state) in &result.actor_final_states {
             assert!(id.starts_with("entity-"));

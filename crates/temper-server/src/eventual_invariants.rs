@@ -135,9 +135,8 @@ pub fn spawn_eventual_recheck(
     state: crate::state::ServerState,
     interval: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(
+    tokio::spawn(// determinism-ok: background convergence task
         async move {
-            // determinism-ok: background convergence task
             let mut ticker = tokio::time::interval(interval); // determinism-ok: convergence polling
             loop {
                 ticker.tick().await;
@@ -173,15 +172,15 @@ pub fn spawn_eventual_recheck(
                             "eventual_converged",
                         );
                         // Observability: emit WideEvent for invariant convergence
-                        let wide = wide_event::from_invariant_check(
-                            &inv.name,
-                            &inv.entity_type,
-                            &inv.entity_id,
-                            &inv.tenant,
-                            inv.check_count as u32,
-                            "converged",
-                            0,
-                        );
+                        let wide = wide_event::from_invariant_check(wide_event::InvariantCheckInput {
+                            invariant_name: &inv.name,
+                            entity_type: &inv.entity_type,
+                            entity_id: &inv.entity_id,
+                            tenant: &inv.tenant,
+                            check_count: inv.check_count as u32,
+                            outcome: "converged",
+                            duration_ns: 0,
+                        });
                         wide_event::emit_span(&wide);
                         wide_event::emit_metrics(&wide);
                         tracing::info!(
@@ -213,15 +212,15 @@ pub fn spawn_eventual_recheck(
                         "eventual_convergence_failed",
                     );
                     // Observability: emit WideEvent for invariant convergence failure
-                    let wide = wide_event::from_invariant_check(
-                        &inv.name,
-                        &inv.entity_type,
-                        &inv.entity_id,
-                        &inv.tenant,
-                        inv.check_count as u32,
-                        "failed",
-                        0,
-                    );
+                    let wide = wide_event::from_invariant_check(wide_event::InvariantCheckInput {
+                        invariant_name: &inv.name,
+                        entity_type: &inv.entity_type,
+                        entity_id: &inv.entity_id,
+                        tenant: &inv.tenant,
+                        check_count: inv.check_count as u32,
+                        outcome: "failed",
+                        duration_ns: 0,
+                    });
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
                     tracing::error!(

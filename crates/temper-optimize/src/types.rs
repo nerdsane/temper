@@ -82,3 +82,79 @@ pub enum OptAction {
         policy_ids: Vec<String>,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opt_category_serde_roundtrip() {
+        for cat in [
+            OptCategory::QueryPlan,
+            OptCategory::CachePolicy,
+            OptCategory::ActorPlacement,
+            OptCategory::BatchStrategy,
+            OptCategory::PolicyEval,
+        ] {
+            let json = serde_json::to_string(&cat).unwrap();
+            let back: OptCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, cat);
+        }
+    }
+
+    #[test]
+    fn risk_serde_roundtrip() {
+        for risk in [Risk::None, Risk::Low, Risk::Medium] {
+            let json = serde_json::to_string(&risk).unwrap();
+            let back: Risk = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, risk);
+        }
+    }
+
+    #[test]
+    fn opt_action_update_query_plan() {
+        let action = OptAction::UpdateQueryPlan {
+            entity_set: "Orders".into(),
+            new_plan: "idx_scan".into(),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        let back: OptAction = serde_json::from_str(&json).unwrap();
+        match back {
+            OptAction::UpdateQueryPlan { entity_set, new_plan } => {
+                assert_eq!(entity_set, "Orders");
+                assert_eq!(new_plan, "idx_scan");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn opt_action_update_cache_ttl() {
+        let action = OptAction::UpdateCacheTtl {
+            key_pattern: "entity:*".into(),
+            ttl_seconds: 300,
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(json.contains("300"));
+    }
+
+    #[test]
+    fn recommendation_serde_roundtrip() {
+        let rec = OptimizationRecommendation {
+            optimizer: "query".into(),
+            description: "Add index".into(),
+            category: OptCategory::QueryPlan,
+            estimated_improvement: 0.5,
+            risk: Risk::Low,
+            action: OptAction::UpdateQueryPlan {
+                entity_set: "Orders".into(),
+                new_plan: "new".into(),
+            },
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: OptimizationRecommendation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.optimizer, "query");
+        assert_eq!(back.category, OptCategory::QueryPlan);
+        assert_eq!(back.risk, Risk::Low);
+    }
+}

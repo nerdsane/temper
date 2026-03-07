@@ -25,7 +25,9 @@ import {
   groupByDate,
 } from "@/lib/utils";
 
+
 const ALL_TENANTS = "__all__";
+
 
 const SCOPE_LABELS: Record<PolicyScope, string> = {
   narrow: "Narrow -- exact resource only",
@@ -283,7 +285,7 @@ export default function DecisionsPage() {
   const [tenant, setTenant] = useState<string>(ALL_TENANTS);
   const [tenants, setTenants] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [acting, setActing] = useState(false);
+  const [actingIds, setActingIds] = useState<Set<string>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
   const [liveDecisions, setLiveDecisions] = useState<PendingDecision[]>([]);
 
@@ -345,7 +347,7 @@ export default function DecisionsPage() {
 
   const handleApprove = useCallback(
     async (id: string, scope: PolicyScope, decisionTenant: string) => {
-      setActing(true);
+      setActingIds((prev) => new Set(prev).add(id));
       setActionError(null);
       try {
         await approveDecision(decisionTenant, id, scope);
@@ -354,7 +356,11 @@ export default function DecisionsPage() {
         const msg = err instanceof Error ? err.message : "Failed to approve decision";
         setActionError(msg);
       } finally {
-        setActing(false);
+        setActingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
       }
     },
     [decisionsPoll],
@@ -362,7 +368,7 @@ export default function DecisionsPage() {
 
   const handleDeny = useCallback(
     async (id: string, decisionTenant: string) => {
-      setActing(true);
+      setActingIds((prev) => new Set(prev).add(id));
       setActionError(null);
       try {
         await denyDecision(decisionTenant, id);
@@ -371,7 +377,11 @@ export default function DecisionsPage() {
         const msg = err instanceof Error ? err.message : "Failed to deny decision";
         setActionError(msg);
       } finally {
-        setActing(false);
+        setActingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
       }
     },
     [decisionsPoll],
@@ -528,7 +538,7 @@ export default function DecisionsPage() {
                 decision={d}
                 onApprove={handleApprove}
                 onDeny={handleDeny}
-                acting={acting}
+                acting={actingIds.has(d.id)}
                 showTenant={showTenantBadge}
               />
             ))}

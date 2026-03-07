@@ -8,12 +8,6 @@ import type { AgentsResponse } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
 import StatCard from "@/components/StatCard";
 
-function rateColor(rate: number): string {
-  if (rate >= 80) return "text-teal-400";
-  if (rate >= 50) return "text-amber-400";
-  return "text-pink-400";
-}
-
 function rateBgClass(rate: number): string {
   if (rate >= 80) return "bg-teal-500/15 text-teal-400";
   if (rate >= 50) return "bg-amber-500/15 text-amber-400";

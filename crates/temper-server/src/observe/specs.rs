@@ -1,9 +1,10 @@
 //! Spec management endpoints: list, load, and inspect IOA specifications.
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 
+use crate::authz::{observe_tenant_scope, require_observe_auth};
 use crate::registry::VerificationStatus;
 use crate::state::ServerState;
 
@@ -18,11 +19,21 @@ pub(crate) use load_dir::handle_load_dir;
 pub(crate) use load_inline::handle_load_inline;
 
 /// GET /observe/specs -- list all loaded specs across all tenants.
-pub(crate) async fn list_specs(State(state): State<ServerState>) -> Json<Vec<SpecSummary>> {
+pub(crate) async fn handle_list_specs(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_specs", "Spec")?;
+    let tenant_scope = observe_tenant_scope(&state, &headers)?;
     let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
     let mut specs = Vec::new();
 
     for tenant_id in registry.tenant_ids() {
+        if let Some(ref scope) = tenant_scope
+            && tenant_id != scope
+        {
+            continue;
+        }
         for entity_type in registry.entity_types(tenant_id) {
             if let Some(entity_spec) = registry.get_spec(tenant_id, entity_type) {
                 let automaton = &entity_spec.automaton;
@@ -33,7 +44,7 @@ pub(crate) async fn list_specs(State(state): State<ServerState>) -> Json<Vec<Spe
                 {
                     Some(VerificationStatus::Pending) | None => ("pending".to_string(), None, None),
                     Some(VerificationStatus::Running) => ("running".to_string(), None, None),
-                    Some(VerificationStatus::Completed(result)) => {
+                    Some(VerificationStatus::Completed(result) | VerificationStatus::Restored(result)) => {
                         let passed = result.levels.iter().filter(|l| l.passed).count();
                         let total = result.levels.len();
                         let status = if result.all_passed {
@@ -61,19 +72,28 @@ pub(crate) async fn list_specs(State(state): State<ServerState>) -> Json<Vec<Spe
         }
     }
 
-    Json(specs)
+    let total = specs.len();
+    Ok(Json(serde_json::json!({ "specs": specs, "total": total })))
 }
 
 /// GET /observe/specs/{entity} -- full spec detail for a named entity type.
 ///
 /// Searches across all tenants and returns the first match.
-pub(crate) async fn get_spec_detail(
+pub(crate) async fn handle_get_spec_detail(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Path(entity): Path<String>,
 ) -> Result<Json<SpecDetail>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_specs", "Spec")?;
+    let tenant_scope = observe_tenant_scope(&state, &headers)?;
     let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
 
     for tenant_id in registry.tenant_ids() {
+        if let Some(ref scope) = tenant_scope
+            && tenant_id != scope
+        {
+            continue;
+        }
         if let Some(entity_spec) = registry.get_spec(tenant_id, &entity) {
             let automaton = &entity_spec.automaton;
             let detail = SpecDetail {

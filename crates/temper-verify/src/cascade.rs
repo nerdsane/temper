@@ -258,6 +258,7 @@ impl VerificationCascade {
 
     fn build_temper_model(&self) -> TemperModel {
         model::build_model_from_ioa(&self.ioa_source, self.max_counter)
+            .expect("cascade: IOA spec should have been validated before model building")
     }
 
     /// Level 0: SMT symbolic verification.
@@ -378,7 +379,8 @@ impl VerificationCascade {
             &self.ioa_source,
             &base_config,
             self.sim_seeds,
-        );
+        )
+        .expect("cascade: IOA spec should have been validated before simulation");
 
         let invariants_ok = results.iter().all(|r| r.all_invariants_held);
         let liveness_ok = results.iter().all(|r| r.liveness_violations.is_empty());

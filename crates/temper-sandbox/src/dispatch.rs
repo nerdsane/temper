@@ -2,6 +2,12 @@
 //!
 //! Contains all temper methods except `start_server` (MCP-only, spawns child
 //! process) and `show_spec` (MCP-only, reads local spec data).
+//!
+//! Dispatch is split by domain:
+//! - Entity CRUD: `list`, `get`, `create`, `action`, `patch`, `navigate`
+//! - Governance: `get_decisions`, `get_decision_status`, `poll_decision`
+//! - WASM: `upload_wasm`, `compile_wasm`
+//! - Evolution/Observe: `get_trajectories`, `get_insights`, `get_evolution_records`, `check_sentinel`
 
 use monty::MontyObject;
 use reqwest::Method;
@@ -13,30 +19,41 @@ use crate::helpers::{
 };
 use crate::http::{temper_governance_request, temper_request, temper_request_bytes};
 
+/// Shared context for dispatching temper methods.
+pub struct DispatchContext<'a> {
+    /// HTTP client.
+    pub http: &'a reqwest::Client,
+    /// Temper server base URL (e.g. `http://127.0.0.1:3000`).
+    pub base_url: &'a str,
+    /// Tenant ID.
+    pub tenant: &'a str,
+    /// Agent principal ID for Cedar authorization.
+    pub principal_id: Option<&'a str>,
+    /// Optional closure to resolve entity type to entity set name.
+    pub entity_set_resolver: Option<&'a (dyn Fn(&str) -> String + Send + Sync)>,
+    /// Optional path to temper binary (for `compile_wasm` SDK resolution).
+    pub binary_path: Option<&'a std::path::Path>,
+    /// Optional API key for authentication.
+    pub api_key: Option<&'a str>,
+}
+
+impl<'a> DispatchContext<'a> {
+    /// Resolve an entity type name to an entity set name.
+    fn resolve_set(&self, entity_or_set: &str) -> String {
+        if let Some(resolver) = self.entity_set_resolver {
+            resolver(entity_or_set)
+        } else {
+            entity_or_set.to_string()
+        }
+    }
+}
+
 /// Dispatch a `temper.<method>()` call via HTTP to the Temper server.
-///
-/// Parameters:
-/// - `http`: HTTP client
-/// - `base_url`: Temper server base URL (e.g. `http://127.0.0.1:3000`)
-/// - `tenant`: Tenant ID
-/// - `principal_id`: Agent principal ID for Cedar authorization
-/// - `method`: Method name (e.g. `"list"`, `"create"`)
-/// - `args`: Positional arguments from the Monty call (self already stripped)
-/// - `kwargs`: Keyword arguments (currently rejected)
-/// - `entity_set_resolver`: Optional closure to resolve entity type to set name
-/// - `binary_path`: Optional path to temper binary (for compile_wasm SDK resolution)
-#[allow(clippy::too_many_arguments)]
 pub async fn dispatch_temper_method(
-    http: &reqwest::Client,
-    base_url: &str,
-    tenant: &str,
-    principal_id: Option<&str>,
-    api_key: Option<&str>,
+    ctx: &DispatchContext<'_>,
     method: &str,
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
-    entity_set_resolver: Option<&(dyn Fn(&str) -> String + Send + Sync)>,
-    binary_path: Option<&std::path::Path>,
 ) -> Result<Value, String> {
     if !kwargs.is_empty() {
         return Err(format!(
@@ -44,20 +61,51 @@ pub async fn dispatch_temper_method(
         ));
     }
 
-    let resolve_set = |entity_or_set: &str| -> String {
-        if let Some(resolver) = entity_set_resolver {
-            resolver(entity_or_set)
-        } else {
-            entity_or_set.to_string()
-        }
-    };
-
     match method {
         // --- Entity CRUD ---
+        "list" | "get" | "create" | "action" | "patch" | "navigate" | "get_agent_id" => {
+            dispatch_entity(ctx, method, args).await
+        }
+        // --- Spec management ---
+        "submit_specs" | "get_policies" => dispatch_specs(ctx, method, args).await,
+        // --- Governance ---
+        "get_decisions" | "get_decision_status" | "poll_decision" => {
+            dispatch_governance(ctx, method, args).await
+        }
+        // --- WASM ---
+        "upload_wasm" | "compile_wasm" => dispatch_wasm(ctx, method, args).await,
+        // --- Evolution / Observe ---
+        "get_trajectories" | "get_insights" | "get_evolution_records" | "check_sentinel" => {
+            dispatch_evolution(ctx, method, args).await
+        }
+        // --- Blocked methods ---
+        "approve_decision" | "deny_decision" | "set_policy" => Err(format!(
+            "temper.{method}() is not available to agents. \
+             Governance write operations (approve, deny, set_policy) \
+             can only be performed by humans via the Observe UI or `temper decide` CLI."
+        )),
+        _ => Err(format!(
+            "unknown temper method '{method}'. Available: \
+             list, get, create, action, patch, navigate, get_agent_id, \
+             submit_specs, get_policies, \
+             upload_wasm, compile_wasm, \
+             get_decisions, get_decision_status, poll_decision, \
+             get_trajectories, get_insights, get_evolution_records, check_sentinel"
+        )),
+    }
+}
+
+/// Dispatch entity CRUD and navigation methods.
+async fn dispatch_entity(
+    ctx: &DispatchContext<'_>,
+    method: &str,
+    args: &[MontyObject],
+) -> Result<Value, String> {
+    match method {
         "list" => {
             let entity = expect_string_arg(args, 0, "entity_type", method)?;
             let filter = optional_string_arg(args, 1);
-            let set = resolve_set(&entity);
+            let set = ctx.resolve_set(&entity);
             let path = match filter {
                 Some(f) => {
                     let encoded = f.replace(' ', "%20").replace('\'', "%27");
@@ -66,11 +114,11 @@ pub async fn dispatch_temper_method(
                 None => format!("/tdata/{set}"),
             };
             let body = temper_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::GET,
                 &path,
                 None,
@@ -78,18 +126,18 @@ pub async fn dispatch_temper_method(
             .await?;
             Ok(body.get("value").cloned().unwrap_or(body))
         }
-        "get_agent_id" => Ok(serde_json::json!(principal_id.unwrap_or(""))),
+        "get_agent_id" => Ok(serde_json::json!(ctx.principal_id.unwrap_or(""))),
         "get" => {
             let entity = expect_string_arg(args, 0, "entity_type", method)?;
             let entity_id = expect_string_arg(args, 1, "entity_id", method)?;
-            let set = resolve_set(&entity);
+            let set = ctx.resolve_set(&entity);
             let key = escape_odata_key(&entity_id);
             temper_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::GET,
                 &format!("/tdata/{set}('{key}')"),
                 None,
@@ -99,14 +147,14 @@ pub async fn dispatch_temper_method(
         "create" => {
             let entity = expect_string_arg(args, 0, "entity_type", method)?;
             let fields = expect_json_object_arg(args, 1, "fields", method)?;
-            let set = resolve_set(&entity);
+            let set = ctx.resolve_set(&entity);
             let payload = Value::Object(fields);
             temper_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::POST,
                 &format!("/tdata/{set}"),
                 Some(&payload),
@@ -118,15 +166,15 @@ pub async fn dispatch_temper_method(
             let entity_id = expect_string_arg(args, 1, "entity_id", method)?;
             let action_name = expect_string_arg(args, 2, "action_name", method)?;
             let body = expect_json_object_arg(args, 3, "body", method)?;
-            let set = resolve_set(&entity);
+            let set = ctx.resolve_set(&entity);
             let key = escape_odata_key(&entity_id);
             let payload = Value::Object(body);
             temper_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::POST,
                 &format!("/tdata/{set}('{key}')/Temper.{action_name}"),
                 Some(&payload),
@@ -137,31 +185,88 @@ pub async fn dispatch_temper_method(
             let entity = expect_string_arg(args, 0, "entity_type", method)?;
             let entity_id = expect_string_arg(args, 1, "entity_id", method)?;
             let fields = expect_json_object_arg(args, 2, "fields", method)?;
-            let set = resolve_set(&entity);
+            let set = ctx.resolve_set(&entity);
             let key = escape_odata_key(&entity_id);
             let payload = Value::Object(fields);
             temper_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::PATCH,
                 &format!("/tdata/{set}('{key}')"),
                 Some(&payload),
             )
             .await
         }
-        // --- Developer methods ---
+        "navigate" => {
+            let path = expect_string_arg(args, 0, "path", method)?;
+            let params = args.get(1).and_then(|a| {
+                let s = String::try_from(a).ok()?;
+                serde_json::from_str::<serde_json::Map<String, Value>>(&s).ok()
+            });
+
+            if let Some(params) = params {
+                if path.contains('.') {
+                    let payload = Value::Object(params);
+                    return temper_request(
+                        ctx.http,
+                        ctx.base_url,
+                        ctx.tenant,
+                        ctx.principal_id,
+                        ctx.api_key,
+                        Method::POST,
+                        &format!("/tdata/{path}"),
+                        Some(&payload),
+                    )
+                    .await;
+                }
+                return temper_request(
+                    ctx.http,
+                    ctx.base_url,
+                    ctx.tenant,
+                    ctx.principal_id,
+                    ctx.api_key,
+                    Method::GET,
+                    &format!("/tdata/{path}"),
+                    None,
+                )
+                .await;
+            }
+
+            temper_request(
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
+                Method::GET,
+                &format!("/tdata/{path}"),
+                None,
+            )
+            .await
+        }
+        _ => unreachable!("dispatch_entity called with non-entity method"),
+    }
+}
+
+/// Dispatch spec management methods.
+async fn dispatch_specs(
+    ctx: &DispatchContext<'_>,
+    method: &str,
+    args: &[MontyObject],
+) -> Result<Value, String> {
+    match method {
         "submit_specs" => {
             let specs = expect_json_object_arg(args, 0, "specs", method)?;
-            let payload = serde_json::json!({ "tenant": tenant, "specs": specs });
+            let payload = serde_json::json!({ "tenant": ctx.tenant, "specs": specs });
             temper_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::POST,
                 "/api/specs/load-inline",
                 Some(&payload),
@@ -170,30 +275,40 @@ pub async fn dispatch_temper_method(
         }
         "get_policies" => {
             temper_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::GET,
-                &format!("/api/tenants/{tenant}/policies"),
+                &format!("/api/tenants/{}/policies", ctx.tenant),
                 None,
             )
             .await
         }
-        // --- Governance methods ---
+        _ => unreachable!("dispatch_specs called with non-specs method"),
+    }
+}
+
+/// Dispatch governance methods.
+async fn dispatch_governance(
+    ctx: &DispatchContext<'_>,
+    method: &str,
+    args: &[MontyObject],
+) -> Result<Value, String> {
+    match method {
         "get_decisions" => {
             let status = optional_string_arg(args, 0);
             let path = match status {
-                Some(s) => format!("/api/tenants/{tenant}/decisions?status={s}"),
-                None => format!("/api/tenants/{tenant}/decisions"),
+                Some(s) => format!("/api/tenants/{}/decisions?status={s}", ctx.tenant),
+                None => format!("/api/tenants/{}/decisions", ctx.tenant),
             };
             temper_governance_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::GET,
                 &path,
                 None,
@@ -203,20 +318,21 @@ pub async fn dispatch_temper_method(
         "get_decision_status" => {
             let decision_id = expect_string_arg(args, 0, "decision_id", method)?;
             let result = temper_governance_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::GET,
-                &format!("/api/tenants/{tenant}/decisions"),
+                &format!("/api/tenants/{}/decisions", ctx.tenant),
                 None,
             )
             .await?;
             if let Some(decisions) = result.get("decisions").and_then(Value::as_array) {
                 for d in decisions {
                     if d.get("id").and_then(Value::as_str) == Some(&decision_id) {
-                        let status = d.get("status").and_then(Value::as_str).unwrap_or("unknown");
+                        let status =
+                            d.get("status").and_then(Value::as_str).unwrap_or("unknown");
                         return Ok(serde_json::json!({
                             "decision_id": decision_id,
                             "status": status,
@@ -232,39 +348,50 @@ pub async fn dispatch_temper_method(
         }
         "poll_decision" => {
             let decision_id = expect_string_arg(args, 0, "decision_id", method)?;
-            let start = std::time::Instant::now(); // determinism-ok: wall-clock for timeout only
-            loop {
-                let result = temper_governance_request(
-                    http,
-                    base_url,
-                    tenant,
-                    principal_id,
-                    api_key,
-                    Method::GET,
-                    &format!("/api/tenants/{tenant}/decisions"),
-                    None,
-                )
-                .await?;
-                if let Some(decisions) = result.get("decisions").and_then(Value::as_array) {
-                    for d in decisions {
-                        if d.get("id").and_then(Value::as_str) == Some(&decision_id) {
-                            let status = d.get("status").and_then(Value::as_str).unwrap_or("");
-                            if !status.eq_ignore_ascii_case("pending") {
-                                return Ok(d.clone());
-                            }
-                        }
+            let config = crate::governance::PollConfig::default();
+            let http = ctx.http.clone();
+            let base_url = ctx.base_url.to_string();
+            let tenant_str = ctx.tenant.to_string();
+            let pid = ctx.principal_id.map(|s| s.to_string());
+            let api_key = ctx.api_key.map(|s| s.to_string());
+            let (decision, _outcome) = crate::governance::poll_decision(
+                &decision_id,
+                &config,
+                || {
+                    let http = http.clone();
+                    let base_url = base_url.clone();
+                    let tenant_str = tenant_str.clone();
+                    let pid = pid.clone();
+                    let api_key = api_key.clone();
+                    async move {
+                        temper_governance_request(
+                            &http,
+                            &base_url,
+                            &tenant_str,
+                            pid.as_deref(),
+                            api_key.as_deref(),
+                            Method::GET,
+                            &format!("/api/tenants/{tenant_str}/decisions"),
+                            None,
+                        )
+                        .await
                     }
-                }
-                if start.elapsed() > std::time::Duration::from_secs(120) {
-                    return Err(format!(
-                        "poll_decision timed out after 120s: decision {decision_id} still pending. \
-                         Ask the human to approve via the Observe UI or `temper decide` CLI, then retry."
-                    ));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-            }
+                },
+            )
+            .await?;
+            Ok(decision)
         }
-        // --- WASM ---
+        _ => unreachable!("dispatch_governance called with non-governance method"),
+    }
+}
+
+/// Dispatch WASM methods.
+async fn dispatch_wasm(
+    ctx: &DispatchContext<'_>,
+    method: &str,
+    args: &[MontyObject],
+) -> Result<Value, String> {
+    match method {
         "upload_wasm" => {
             let module_name = expect_string_arg(args, 0, "module_name", method)?;
             let wasm_path = expect_string_arg(args, 1, "wasm_path", method)?;
@@ -272,11 +399,11 @@ pub async fn dispatch_temper_method(
                 .await
                 .map_err(|e| format!("failed to read WASM file '{}': {}", wasm_path, e))?;
             temper_request_bytes(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::POST,
                 &format!("/api/wasm/modules/{module_name}"),
                 bytes,
@@ -286,19 +413,19 @@ pub async fn dispatch_temper_method(
         "compile_wasm" => {
             let module_name = expect_string_arg(args, 0, "module_name", method)?;
             let rust_source = expect_string_arg(args, 1, "rust_source", method)?;
-            compile_and_upload_wasm(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
-                &module_name,
-                &rust_source,
-                binary_path,
-            )
-            .await
+            compile_and_upload_wasm(ctx, &module_name, &rust_source).await
         }
-        // --- Evolution observability (read-only) ---
+        _ => unreachable!("dispatch_wasm called with non-wasm method"),
+    }
+}
+
+/// Dispatch evolution and observability methods.
+async fn dispatch_evolution(
+    ctx: &DispatchContext<'_>,
+    method: &str,
+    args: &[MontyObject],
+) -> Result<Value, String> {
+    match method {
         "get_trajectories" => {
             let entity_type = optional_string_arg(args, 0);
             let failed_only = optional_string_arg(args, 1);
@@ -319,11 +446,11 @@ pub async fn dispatch_temper_method(
                 path.push_str(&params.join("&"));
             }
             temper_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::GET,
                 &path,
                 None,
@@ -332,11 +459,11 @@ pub async fn dispatch_temper_method(
         }
         "get_insights" => {
             temper_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::GET,
                 "/observe/evolution/insights",
                 None,
@@ -350,11 +477,11 @@ pub async fn dispatch_temper_method(
                 None => "/observe/evolution/records".to_string(),
             };
             temper_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::GET,
                 &path,
                 None,
@@ -363,92 +490,26 @@ pub async fn dispatch_temper_method(
         }
         "check_sentinel" => {
             temper_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
                 Method::POST,
                 "/api/evolution/sentinel/check",
                 None,
             )
             .await
         }
-        // --- Navigation ---
-        "navigate" => {
-            let path = expect_string_arg(args, 0, "path", method)?;
-            let params = args.get(1).and_then(|a| {
-                let s = String::try_from(a).ok()?;
-                serde_json::from_str::<serde_json::Map<String, Value>>(&s).ok()
-            });
-
-            if let Some(params) = params {
-                if path.contains('.') {
-                    let payload = Value::Object(params);
-                    return temper_request(
-                        http,
-                        base_url,
-                        tenant,
-                        principal_id,
-                        api_key,
-                        Method::POST,
-                        &format!("/tdata/{path}"),
-                        Some(&payload),
-                    )
-                    .await;
-                }
-                return temper_request(
-                    http,
-                    base_url,
-                    tenant,
-                    principal_id,
-                    api_key,
-                    Method::GET,
-                    &format!("/tdata/{path}"),
-                    None,
-                )
-                .await;
-            }
-
-            temper_request(
-                http,
-                base_url,
-                tenant,
-                principal_id,
-                api_key,
-                Method::GET,
-                &format!("/tdata/{path}"),
-                None,
-            )
-            .await
-        }
-        // --- Blocked methods ---
-        "approve_decision" | "deny_decision" | "set_policy" => Err(format!(
-            "temper.{method}() is not available to agents. \
-             Governance write operations (approve, deny, set_policy) \
-             can only be performed by humans via the Observe UI or `temper decide` CLI."
-        )),
-        _ => Err(format!(
-            "unknown temper method '{method}'. Available: \
-             list, get, create, action, patch, navigate, get_agent_id, \
-             submit_specs, get_policies, \
-             upload_wasm, compile_wasm, \
-             get_decisions, get_decision_status, poll_decision, \
-             get_trajectories, get_insights, get_evolution_records, check_sentinel"
-        )),
+        _ => unreachable!("dispatch_evolution called with non-evolution method"),
     }
 }
 
 /// Compile Rust source into a WASM module and upload it to the server.
 async fn compile_and_upload_wasm(
-    http: &reqwest::Client,
-    base_url: &str,
-    tenant: &str,
-    principal_id: Option<&str>,
-    api_key: Option<&str>,
+    ctx: &DispatchContext<'_>,
     module_name: &str,
     rust_source: &str,
-    binary_path: Option<&std::path::Path>,
 ) -> Result<Value, String> {
     // Pre-assertion: check wasm32-unknown-unknown target is available
     let rustup_check = tokio::process::Command::new("rustup")
@@ -471,7 +532,7 @@ async fn compile_and_upload_wasm(
         .await
         .map_err(|e| format!("failed to create build dir: {e}"))?;
 
-    let sdk_path = resolve_sdk_path(binary_path)?;
+    let sdk_path = resolve_sdk_path(ctx.binary_path)?;
 
     let cargo_toml = format!(
         r#"[package]
@@ -525,11 +586,11 @@ temper-wasm-sdk = {{ path = "{sdk_path}" }}
     let hash = format!("{:x}", Sha256::digest(&wasm_bytes));
 
     let upload_result = temper_request_bytes(
-        http,
-        base_url,
-        tenant,
-        principal_id,
-        api_key,
+        ctx.http,
+        ctx.base_url,
+        ctx.tenant,
+        ctx.principal_id,
+        ctx.api_key,
         Method::POST,
         &format!("/api/wasm/modules/{module_name}"),
         wasm_bytes,

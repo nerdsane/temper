@@ -30,7 +30,7 @@ function errorResponse(status: number) {
 describe("fetchSpecs", () => {
   it("returns specs on success", async () => {
     const specs = [{ entity_type: "Ticket", states: ["Open"], actions: [], initial_state: "Open" }];
-    mockFetch.mockReturnValue(jsonResponse(specs));
+    mockFetch.mockReturnValue(jsonResponse({ specs, total: 1 }));
     const result = await fetchSpecs();
     expect(result).toEqual(specs);
     expect(mockFetch).toHaveBeenCalledWith("/observe/specs", { cache: "no-store" });
@@ -71,7 +71,7 @@ describe("fetchSpecDetail", () => {
 describe("fetchEntities", () => {
   it("returns entities on success", async () => {
     const entities = [{ entity_type: "Ticket", entity_id: "TKT-001", actor_status: "active" }];
-    mockFetch.mockReturnValue(jsonResponse(entities));
+    mockFetch.mockReturnValue(jsonResponse({ entities, total: 1 }));
     const result = await fetchEntities();
     expect(result).toEqual(entities);
   });

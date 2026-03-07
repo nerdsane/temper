@@ -32,8 +32,6 @@ pub struct ReachablePath {
 pub struct PathExtractionConfig {
     /// Target states to find paths to. Empty = all terminal states.
     pub target_states: Vec<String>,
-    /// Maximum number of paths per target state.
-    pub max_paths_per_target: usize,
     /// Maximum path length (in transitions).
     pub max_path_length: usize,
 }
@@ -42,7 +40,6 @@ impl Default for PathExtractionConfig {
     fn default() -> Self {
         Self {
             target_states: Vec::new(),
-            max_paths_per_target: 5,
             max_path_length: 20,
         }
     }
@@ -220,7 +217,7 @@ mod tests {
     const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 
     fn build_order_model() -> TemperModel {
-        model::build_model_from_ioa(ORDER_IOA, 2)
+        model::build_model_from_ioa(ORDER_IOA, 2).unwrap()
     }
 
     #[test]

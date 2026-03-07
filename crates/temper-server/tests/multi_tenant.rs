@@ -10,7 +10,7 @@
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
-use temper_server::dispatch::AgentContext;
+use temper_server::request_context::AgentContext;
 use temper_server::registry::{
     EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
 };

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use temper_evolution::InsightCategory;
 use temper_evolution::{
-    Decision, DecisionRecord, InsightRecord, InsightSignal, ObservationClass, ObservationRecord,
+    Decision, DecisionRecord, InsightRecord, InsightSignal, ObservationClass, ObservationRecord, Trend,
     RecordHeader, RecordType, classify_insight, compute_priority_score,
 };
 
@@ -116,7 +116,7 @@ impl UnmetIntentCollector {
             intent: unmet.user_intent.clone(),
             volume: 1, // Single occurrence; aggregation happens in ranked_insights()
             success_rate: 0.0,
-            trend: "growing".into(),
+            trend: Trend::Growing,
             growth_rate: None,
         };
 

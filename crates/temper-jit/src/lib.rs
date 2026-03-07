@@ -1,14 +1,4 @@
-//! temper-jit: JIT compilation and hot-swappable state machine execution for Temper.
-//!
-//! Instead of compiled Rust code, transitions are represented as data (transition tables)
-//! interpreted at runtime. This enables Tier 2 optimization: change how entities behave
-//! without redeployment.
-//!
-//! # Modules
-//!
-//! - [`table`] — Transition tables and rules: state machine transitions as DATA.
-//! - [`swap`] — Hot-swap protocol for live-updating transition tables.
-//! - [`shadow`] — Shadow testing: compare old and new tables for observational equivalence.
+//! JIT transition tables and hot-swap execution for Temper entity state machines.
 
 pub mod shadow;
 pub mod swap;

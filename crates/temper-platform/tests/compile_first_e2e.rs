@@ -128,6 +128,7 @@ async fn e2e_compile_first_order_lifecycle() {
         .oneshot(
             Request::post("/tdata/Orders")
                 .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -154,6 +155,7 @@ async fn e2e_compile_first_order_lifecycle() {
                 "/tdata/Orders('{entity_id}')/Temper.Example.CancelOrder"
             ))
             .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
             .header("X-Tenant-Id", "alpha")
             .body(Body::from(r#"{"Reason": "changed mind"}"#))
             .unwrap(),
@@ -274,6 +276,7 @@ async fn e2e_compile_first_two_tenants() {
         .oneshot(
             Request::post("/tdata/Orders")
                 .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -300,6 +303,7 @@ async fn e2e_compile_first_two_tenants() {
                 "/tdata/Orders('{alpha_id}')/Temper.Example.CancelOrder"
             ))
             .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
             .header("X-Tenant-Id", "alpha")
             .body(Body::from("{}"))
             .unwrap(),
@@ -316,6 +320,7 @@ async fn e2e_compile_first_two_tenants() {
         .oneshot(
             Request::post("/tdata/Tasks")
                 .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
                 .header("X-Tenant-Id", "beta")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -342,6 +347,7 @@ async fn e2e_compile_first_two_tenants() {
                 "/tdata/Tasks('{beta_id}')/Temper.Example.StartWork"
             ))
             .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
             .header("X-Tenant-Id", "beta")
             .body(Body::from("{}"))
             .unwrap(),
@@ -449,6 +455,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
         .oneshot(
             Request::post("/tdata/Orders")
                 .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -473,6 +480,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
                 "/tdata/Orders('{order_id}')/Temper.Example.CancelOrder"
             ))
             .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
             .header("X-Tenant-Id", "alpha")
             .body(Body::from("{}"))
             .unwrap(),
@@ -489,6 +497,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
         .oneshot(
             Request::post("/tdata/Projects")
                 .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
                 .header("X-Tenant-Id", "temper-system")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -514,6 +523,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
                 "/tdata/Projects('{proj_id}')/Temper.System.UpdateSpecs"
             ))
             .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
             .header("X-Tenant-Id", "temper-system")
             .body(Body::from("{}"))
             .unwrap(),

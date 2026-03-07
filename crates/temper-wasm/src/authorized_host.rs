@@ -179,14 +179,7 @@ mod tests {
     }
 
     fn test_ctx() -> WasmAuthzContext {
-        WasmAuthzContext {
-            tenant: "test-tenant".into(),
-            module_name: "stripe_charge".into(),
-            agent_id: Some("agent-1".into()),
-            session_id: None,
-            entity_type: "Order".into(),
-            trigger_action: "submitOrder".into(),
-        }
+        WasmAuthzContext::test_fixture()
     }
 
     #[tokio::test]

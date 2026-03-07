@@ -728,6 +728,9 @@ fn parse_guard_array(value: &str, guards: &mut Vec<Guard>) -> Result<(), Automat
 }
 
 /// Split inline tables from a TOML array (e.g., "{a = 1}, {b = 2}").
+///
+/// Each returned slice starts at `{` and ends at `}`, excluding any
+/// separator characters (`, `) between entries.
 fn split_inline_tables(s: &str) -> Vec<&str> {
     let mut result = Vec::new();
     let mut depth: usize = 0;
@@ -879,4 +882,106 @@ fn join_multiline_arrays(input: &str) -> Vec<String> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_kv ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_kv_simple() {
+        let (key, val) = parse_kv("name = \"Order\"").unwrap();
+        assert_eq!(key, "name");
+        assert_eq!(val, "Order");
+    }
+
+    #[test]
+    fn parse_kv_no_equals() {
+        assert!(parse_kv("no_equals_here").is_none());
+    }
+
+    #[test]
+    fn parse_kv_trims_whitespace() {
+        let (key, val) = parse_kv("  key  =  \"value\"  ").unwrap();
+        assert_eq!(key, "key");
+        assert_eq!(val, "value");
+    }
+
+    // ── parse_string_array ────────────────────────────────────
+
+    #[test]
+    fn parse_string_array_simple() {
+        let arr = parse_string_array("[\"Draft\", \"Active\", \"Done\"]");
+        assert_eq!(arr, vec!["Draft", "Active", "Done"]);
+    }
+
+    #[test]
+    fn parse_string_array_single_value() {
+        let arr = parse_string_array("\"Active\"");
+        assert_eq!(arr, vec!["Active"]);
+    }
+
+    #[test]
+    fn parse_string_array_empty_brackets() {
+        let arr = parse_string_array("[]");
+        assert!(arr.is_empty());
+    }
+
+    // ── split_inline_tables ───────────────────────────────────
+
+    #[test]
+    fn split_inline_tables_two_items() {
+        let result = split_inline_tables("{a = 1}, {b = 2}");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "{a = 1}");
+        assert_eq!(result[1], "{b = 2}");
+    }
+
+    #[test]
+    fn split_inline_tables_empty() {
+        let result = split_inline_tables("");
+        assert!(result.is_empty());
+    }
+
+    // ── parse_inline_fields ───────────────────────────────────
+
+    #[test]
+    fn parse_inline_fields_simple() {
+        let map = parse_inline_fields("type = \"schedule\", action = \"Refresh\"");
+        assert_eq!(map.get("type").unwrap(), "schedule");
+        assert_eq!(map.get("action").unwrap(), "Refresh");
+    }
+
+    #[test]
+    fn parse_inline_fields_empty() {
+        let map = parse_inline_fields("");
+        assert!(map.is_empty());
+    }
+
+    // ── join_multiline_arrays ─────────────────────────────────
+
+    #[test]
+    fn join_multiline_single_line() {
+        let result = join_multiline_arrays("key = [\"a\", \"b\"]");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "key = [\"a\", \"b\"]");
+    }
+
+    #[test]
+    fn join_multiline_continuation() {
+        let input = "effect = [\n  { var = \"x\" },\n]";
+        let result = join_multiline_arrays(input);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].contains("effect = ["));
+        assert!(result[0].contains("]"));
+    }
+
+    #[test]
+    fn join_multiline_no_brackets() {
+        let input = "name = \"Test\"\ninitial = \"Draft\"";
+        let result = join_multiline_arrays(input);
+        assert_eq!(result.len(), 2);
+    }
 }

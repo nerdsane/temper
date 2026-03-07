@@ -13,7 +13,7 @@
 //!   transitions to Approved. Generates a Cedar permit policy from the
 //!   entity's fields and reloads the authz engine.
 
-use crate::deploy::pipeline::{DeployInput, DeployPipeline, EntitySpecSource};
+use crate::deploy::{DeployInput, DeployPipeline, EntitySpecSource};
 use crate::state::PlatformState;
 
 /// Dispatch a custom effect from a system entity transition.

@@ -1,54 +1,41 @@
-/// Convert a string to PascalCase.
-///
-/// "order" -> "Order", "order_item" -> "OrderItem"
-pub(crate) fn to_pascal_case(s: &str) -> String {
-    s.split(['_', '-'])
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => {
-                    let upper: String = first.to_uppercase().collect();
-                    format!("{}{}", upper, chars.collect::<String>())
-                }
-                None => String::new(),
-            }
-        })
-        .collect()
-}
+//! Shared utilities for the CLI crate.
 
-/// Convert a PascalCase or camelCase string to snake_case.
-///
-/// "Order" -> "order", "OrderItem" -> "order_item"
-pub(crate) fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.extend(c.to_lowercase());
-        } else {
-            result.push(c);
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+
+pub(crate) use temper_spec::naming::{to_pascal_case, to_snake_case};
+
+/// Read all `.tla` files from a specs directory and return a map of
+/// entity name (PascalCase from file stem) to TLA+ source text.
+pub(crate) fn read_tla_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
+    let mut sources = HashMap::new();
+
+    if !specs_dir.is_dir() {
+        return Ok(sources);
+    }
+
+    for entry in fs::read_dir(specs_dir)
+        .with_context(|| format!("Failed to read specs directory: {}", specs_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) == Some("tla") {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+
+            let entity_name = to_pascal_case(stem);
+            let source = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read TLA+ file: {}", path.display()))?;
+
+            sources.insert(entity_name, source);
         }
     }
-    result
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_to_pascal_case() {
-        assert_eq!(to_pascal_case("order"), "Order");
-        assert_eq!(to_pascal_case("order_item"), "OrderItem");
-        assert_eq!(to_pascal_case("my-entity"), "MyEntity");
-    }
-
-    #[test]
-    fn test_to_snake_case() {
-        assert_eq!(to_snake_case("Order"), "order");
-        assert_eq!(to_snake_case("OrderItem"), "order_item");
-        assert_eq!(to_snake_case("Customer"), "customer");
-    }
+    Ok(sources)
 }

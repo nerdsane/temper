@@ -5,6 +5,9 @@
 //! in `ServerState`, enabling multi-tenant deployments where each tenant has
 //! its own entity types and specs.
 
+mod relations;
+pub mod types;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
@@ -13,199 +16,16 @@ use tracing::instrument;
 use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
-use temper_spec::automaton::{self, Automaton, Integration, Webhook};
-use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy, parse_cross_invariants};
+use temper_spec::automaton;
+use temper_spec::cross_invariant::parse_cross_invariants;
 use temper_spec::csdl::{CsdlDocument, emit_csdl_xml, merge_csdl};
 
 use crate::reaction::ReactionRegistry;
-use crate::reaction::types::{ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver};
+use crate::reaction::types::ReactionRule;
 
-/// Verification status for a single entity type.
-#[derive(Debug, Clone, serde::Serialize)]
-pub enum VerificationStatus {
-    /// Verification has not started yet.
-    Pending,
-    /// Verification is currently running.
-    Running,
-    /// Verification completed with results.
-    Completed(EntityVerificationResult),
-}
+pub use types::*;
 
-/// Summary of verification results for an entity type.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct EntityVerificationResult {
-    /// Whether all levels passed.
-    pub all_passed: bool,
-    /// Per-level summaries.
-    pub levels: Vec<EntityLevelSummary>,
-    /// ISO-8601 timestamp when verification completed.
-    pub verified_at: String,
-}
-
-/// Summary of a single verification level.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct EntityLevelSummary {
-    /// Level name (e.g. "L0 SMT", "L1 Model Check").
-    pub level: String,
-    /// Whether this level passed.
-    pub passed: bool,
-    /// Human-readable summary.
-    pub summary: String,
-    /// Detailed violation information (populated only for failed levels).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<Vec<VerificationDetail>>,
-}
-
-/// A single verification violation detail.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct VerificationDetail {
-    /// Violation kind: "liveness_violation", "invariant_violation", "counterexample", "proptest_failure".
-    pub kind: String,
-    /// Property or invariant name that was violated.
-    pub property: String,
-    /// Human-readable description of the violation.
-    pub description: String,
-    /// Actor ID that triggered the violation (if applicable).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub actor_id: Option<String>,
-}
-
-/// Errors raised while registering tenant specifications.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RegistryError {
-    /// cross-invariants TOML failed to parse.
-    CrossInvariantParse { tenant: String, source: String },
-    /// An IOA source failed to parse.
-    IoaParse {
-        tenant: String,
-        entity_type: String,
-        source: String,
-    },
-}
-
-impl std::fmt::Display for RegistryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CrossInvariantParse { tenant, source } => {
-                write!(
-                    f,
-                    "failed to parse cross-invariants for tenant '{tenant}': {source}"
-                )
-            }
-            Self::IoaParse {
-                tenant,
-                entity_type,
-                source,
-            } => {
-                write!(
-                    f,
-                    "failed to parse IOA for tenant '{tenant}', entity '{entity_type}': {source}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for RegistryError {}
-
-/// A compiled relation edge from CSDL navigation metadata.
-#[derive(Debug, Clone)]
-pub struct RelationEdge {
-    /// Source entity type that owns the FK field.
-    pub from_entity: String,
-    /// Navigation property name on the source entity.
-    pub navigation_property: String,
-    /// Target entity type.
-    pub to_entity: String,
-    /// FK field on source entity (e.g. `OrderId`).
-    pub source_field: String,
-    /// Referenced key on target entity (usually `Id`).
-    pub target_field: String,
-    /// Whether the relationship allows null references.
-    pub nullable: bool,
-    /// Delete policy applied to this edge.
-    pub delete_policy: DeletePolicy,
-}
-
-/// Tenant-scoped relation graph compiled from CSDL.
-#[derive(Debug, Clone, Default)]
-pub struct RelationGraph {
-    /// Outgoing edges keyed by source entity type.
-    pub outgoing: BTreeMap<String, Vec<RelationEdge>>,
-    /// Incoming edges keyed by target entity type.
-    pub incoming: BTreeMap<String, Vec<RelationEdge>>,
-}
-
-/// A registered tenant with its specs and entity configuration.
-#[derive(Debug, Clone)]
-pub struct TenantConfig {
-    /// The CSDL document describing this tenant's entity model.
-    pub csdl: Arc<CsdlDocument>,
-    /// Raw CSDL XML for serving via `$metadata`.
-    pub csdl_xml: Arc<String>,
-    /// Maps entity set names to entity type names (from CSDL).
-    pub entity_set_map: BTreeMap<String, String>,
-    /// Per-entity-type specs.
-    pub entities: BTreeMap<String, EntitySpec>,
-    /// Reaction rules for cross-entity coordination.
-    pub reactions: Vec<ReactionRule>,
-    /// Tenant relation graph compiled from CSDL.
-    pub relation_graph: RelationGraph,
-    /// Optional parsed cross-entity invariant spec.
-    pub cross_invariants: Option<CrossInvariantSpec>,
-    /// Raw `cross-invariants.toml` source, if provided.
-    pub cross_invariants_source: Option<String>,
-    /// Indexed webhook routes: path -> (entity_type, Webhook).
-    pub webhook_routes: BTreeMap<String, (String, Webhook)>,
-    /// Per-entity verification status (design-time observation).
-    pub verification: BTreeMap<String, VerificationStatus>,
-}
-
-/// A registered entity type's spec and transition table.
-///
-/// The table is wrapped in a [`SwapController`] to enable atomic hot-swap
-/// without restarting actors. Use [`swap_controller()`] to access the
-/// controller for hot-swap operations.
-#[derive(Clone)]
-pub struct EntitySpec {
-    /// The parsed I/O Automaton specification.
-    pub automaton: Automaton,
-    /// Integration declarations from the IOA spec.
-    pub integrations: Vec<Integration>,
-    /// Hot-swappable transition table controller.
-    swap: Arc<SwapController>,
-    /// Raw IOA TOML source (for invariant parsing, display, etc.).
-    pub ioa_source: String,
-}
-
-impl std::fmt::Debug for EntitySpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EntitySpec")
-            .field("automaton", &self.automaton)
-            .field("version", &self.swap.version())
-            .field("ioa_source_len", &self.ioa_source.len())
-            .finish()
-    }
-}
-
-impl EntitySpec {
-    /// Get a snapshot of the current transition table.
-    ///
-    /// This reads through the [`SwapController`] — if a hot-swap happened,
-    /// subsequent calls return the new table.
-    pub fn table(&self) -> Arc<TransitionTable> {
-        let lock = self.swap.current();
-        let table = lock.read().expect("SwapController lock poisoned");
-        // Clone the table out of the RwLock into an Arc for the caller.
-        // This is cheap — TransitionTable is small (a few Vecs of strings).
-        Arc::new(table.clone())
-    }
-
-    /// Get the [`SwapController`] for hot-swap operations.
-    pub fn swap_controller(&self) -> &Arc<SwapController> {
-        &self.swap
-    }
-}
+use relations::{build_relation_graph, build_webhook_routes, synthesize_agent_trigger_reactions};
 
 /// Multi-tenant specification registry.
 ///
@@ -638,147 +458,13 @@ impl SpecRegistry {
     }
 }
 
-/// Build webhook route index from parsed entity specs.
-fn build_webhook_routes(
-    entities: &BTreeMap<String, EntitySpec>,
-) -> BTreeMap<String, (String, Webhook)> {
-    let mut routes = BTreeMap::new();
-    for (entity_type, spec) in entities {
-        for wh in &spec.automaton.webhooks {
-            routes.insert(wh.path.clone(), (entity_type.clone(), wh.clone()));
-        }
-    }
-    routes
-}
-
-/// Synthesize reaction rules from an `[[agent_trigger]]` declaration.
-///
-/// Each trigger produces two chained reactions:
-/// 1. Source entity action → Agent.Assign (CreateIfMissing resolver creates the Agent)
-/// 2. Agent.Assign → Agent.Start (SameId resolver starts the just-assigned Agent)
-///
-/// The executor's SSE loop picks up the spawned agent automatically.
-fn synthesize_agent_trigger_reactions(
-    entity_type: &str,
-    trigger: &temper_spec::automaton::AgentTrigger,
-) -> Vec<ReactionRule> {
-    let model = trigger
-        .agent_model
-        .clone()
-        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
-    let agent_type_id = trigger.agent_type_id.clone().unwrap_or_default();
-
-    let mut params = serde_json::json!({
-        "role": trigger.agent_role,
-        "goal": trigger.agent_goal,
-        "model": model,
-    });
-    if !agent_type_id.is_empty() {
-        params["agent_type_id"] = serde_json::Value::String(agent_type_id);
-    }
-
-    vec![
-        // Rule 1: Source action → create + assign Agent
-        ReactionRule {
-            name: format!("{}:agent_trigger:{}", entity_type, trigger.name),
-            when: ReactionTrigger {
-                entity_type: entity_type.to_string(),
-                action: Some(trigger.on_action.clone()),
-                to_state: trigger.to_state.clone(),
-            },
-            then: ReactionTarget {
-                entity_type: "Agent".to_string(),
-                action: "Assign".to_string(),
-                params,
-            },
-            resolve_target: TargetResolver::CreateIfMissing {
-                id_field: "id".to_string(),
-            },
-        },
-        // Rule 2: Agent.Assign → Agent.Start (auto-start the assigned agent)
-        ReactionRule {
-            name: format!("{}:agent_trigger:{}:start", entity_type, trigger.name),
-            when: ReactionTrigger {
-                entity_type: "Agent".to_string(),
-                action: Some("Assign".to_string()),
-                to_state: Some("Assigned".to_string()),
-            },
-            then: ReactionTarget {
-                entity_type: "Agent".to_string(),
-                action: "Start".to_string(),
-                params: serde_json::json!({}),
-            },
-            resolve_target: TargetResolver::SameId,
-        },
-    ]
-}
-
-fn build_relation_graph(
-    csdl: &CsdlDocument,
-    cross_invariants: Option<&CrossInvariantSpec>,
-) -> RelationGraph {
-    let mut overrides = BTreeMap::<(String, String), DeletePolicy>::new();
-    let default_policy = cross_invariants
-        .map(|spec| {
-            for ov in &spec.relation_overrides {
-                overrides.insert(
-                    (ov.from_entity.clone(), ov.navigation_property.clone()),
-                    ov.delete_policy,
-                );
-            }
-            spec.default_delete_policy
-        })
-        .unwrap_or(DeletePolicy::Restrict);
-
-    let mut graph = RelationGraph::default();
-    for schema in &csdl.schemas {
-        for et in &schema.entity_types {
-            for nav in &et.navigation_properties {
-                let target = nav_target_entity(&nav.type_name);
-                for rc in &nav.referential_constraints {
-                    let delete_policy = overrides
-                        .get(&(et.name.clone(), nav.name.clone()))
-                        .copied()
-                        .unwrap_or(default_policy);
-                    let edge = RelationEdge {
-                        from_entity: et.name.clone(),
-                        navigation_property: nav.name.clone(),
-                        to_entity: target.clone(),
-                        source_field: rc.property.clone(),
-                        target_field: rc.referenced_property.clone(),
-                        nullable: nav.nullable,
-                        delete_policy,
-                    };
-                    graph
-                        .outgoing
-                        .entry(et.name.clone())
-                        .or_default()
-                        .push(edge.clone());
-                    graph.incoming.entry(target.clone()).or_default().push(edge);
-                }
-            }
-        }
-    }
-    graph
-}
-
-fn nav_target_entity(type_name: &str) -> String {
-    let raw = type_name.trim();
-    let inner = if raw.starts_with("Collection(") && raw.ends_with(')') {
-        &raw[11..raw.len() - 1]
-    } else {
-        raw
-    };
-    inner.rsplit('.').next().unwrap_or(inner).to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use temper_spec::csdl::parse_csdl;
 
-    const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
-    const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+    const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
+    const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 
     fn minimal_csdl() -> (CsdlDocument, String) {
         let doc = parse_csdl(CSDL_XML).expect("CSDL should parse");

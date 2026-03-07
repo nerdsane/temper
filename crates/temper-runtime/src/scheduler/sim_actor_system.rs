@@ -683,3 +683,78 @@ impl SimActorSystem {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integration_responses_empty_returns_none() {
+        let responses = SimIntegrationResponses::new();
+        assert!(responses.get_callback("Order", "payment_trigger").is_none());
+    }
+
+    #[test]
+    fn integration_responses_on_trigger_and_get_callback() {
+        let responses = SimIntegrationResponses::new()
+            .on_trigger("Order", "payment_trigger", "ConfirmPayment")
+            .on_trigger("Invoice", "send_trigger", "MarkSent");
+
+        assert_eq!(
+            responses.get_callback("Order", "payment_trigger"),
+            Some("ConfirmPayment")
+        );
+        assert_eq!(
+            responses.get_callback("Invoice", "send_trigger"),
+            Some("MarkSent")
+        );
+        assert!(responses.get_callback("Order", "send_trigger").is_none());
+        assert!(responses.get_callback("Unknown", "payment_trigger").is_none());
+    }
+
+    #[test]
+    fn integration_responses_overwrite() {
+        let responses = SimIntegrationResponses::new()
+            .on_trigger("Order", "trigger", "ActionA")
+            .on_trigger("Order", "trigger", "ActionB");
+
+        assert_eq!(responses.get_callback("Order", "trigger"), Some("ActionB"));
+    }
+
+    #[test]
+    fn config_default_values() {
+        let config = SimActorSystemConfig::default();
+        assert_eq!(config.seed, 42);
+        assert_eq!(config.max_ticks, 500);
+        assert_eq!(config.max_actions_per_actor, 50);
+    }
+
+    #[test]
+    fn run_record_equality() {
+        let r1 = RunRecord {
+            seed: 42,
+            transitions: vec![(1, "a".into(), "Submit".into(), "Draft".into(), "Submitted".into())],
+            events: BTreeMap::new(),
+            final_states: vec![],
+            invariant_results: vec![],
+        };
+        let r2 = r1.clone();
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn run_record_inequality_on_seed() {
+        let r1 = RunRecord {
+            seed: 42,
+            transitions: vec![],
+            events: BTreeMap::new(),
+            final_states: vec![],
+            invariant_results: vec![],
+        };
+        let r2 = RunRecord {
+            seed: 99,
+            ..r1.clone()
+        };
+        assert_ne!(r1, r2);
+    }
+}

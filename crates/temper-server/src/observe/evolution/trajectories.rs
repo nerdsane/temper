@@ -1,10 +1,11 @@
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use serde::Deserialize;
 use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
+use crate::authz::require_observe_auth;
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
 /// Query parameters for the trajectory aggregation endpoint.
@@ -30,13 +31,15 @@ pub(crate) struct TrajectoryQueryParams {
 #[instrument(skip_all, fields(otel.name = "GET /observe/trajectories"))]
 pub(crate) async fn handle_trajectories(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Query(params): Query<TrajectoryQueryParams>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_trajectories", "Trajectory")?;
     let failed_limit = params.failed_limit.unwrap_or(50).min(500);
     let success_filter: Option<bool> = params.success.as_deref().map(|s| s == "true");
 
     // Query Turso directly (single source of truth).
-    if let Some(turso) = state.turso_opt() {
+    if let Some(turso) = state.persistent_store() {
         match turso
             .query_trajectory_stats(
                 params.entity_type.as_deref(),
@@ -47,36 +50,31 @@ pub(crate) async fn handle_trajectories(
             .await
         {
             Ok(stats) => {
-                return Json(serde_json::json!({
+                return Ok(Json(serde_json::json!({
                     "total": stats.total,
                     "success_count": stats.success_count,
                     "error_count": stats.error_count,
                     "success_rate": stats.success_rate,
                     "by_action": stats.by_action,
                     "failed_intents": stats.failed_intents,
-                }));
+                })));
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to query trajectories from Turso");
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
         }
     }
 
     // Fallback: empty response when no Turso configured.
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "total": 0,
         "success_count": 0,
         "error_count": 0,
         "success_rate": 0.0,
         "by_action": {},
         "failed_intents": [],
-    }))
-}
-
-#[allow(dead_code)]
-fn _legacy_postgres_path() {
-    // Removed: Postgres fallback path. All reads go through Turso now.
-    if false {}
+    })))
 }
 
 /// POST /api/evolution/trajectories/unmet -- record an unmet user intent.
@@ -86,8 +84,12 @@ fn _legacy_postgres_path() {
 #[instrument(skip_all, fields(otel.name = "POST /api/evolution/trajectories/unmet"))]
 pub(crate) async fn handle_unmet_intent(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    require_observe_auth(&state, &headers, "write_trajectories", "Trajectory")
+        .map_err(|sc| (sc, "unauthorized".to_string()))?;
+
     let intent = body
         .get("action")
         .or_else(|| body.get("intent"))

@@ -7,11 +7,10 @@ use opentelemetry::trace::{Span, Status, Tracer};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
-use super::common::constraint_violation_response;
+use super::common::run_write_prechecks;
 use super::response::annotate_entity;
-use crate::authz_helpers::{record_authz_denial, security_context_from_headers};
-use crate::constraint_engine::{post_write_invariant_checks, pre_upsert_relation_checks};
-use crate::dispatch::AgentContext;
+use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::{DispatchExtOptions, ServerState};
 
@@ -131,20 +130,23 @@ pub(super) async fn dispatch_bound_action(
     resource_attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
 
     let authz_result =
-        state.authorize_with_context(&security_ctx, action, entity_type, &resource_attrs);
-    if let Err(reason) = authz_result {
+        state.authorize_with_context(&security_ctx, action, entity_type, &resource_attrs, tenant.as_str());
+    if let Err(denial) = authz_result {
+        let reason = denial.to_string();
         let pd = record_authz_denial(
             state,
-            tenant.as_str(),
-            &security_ctx,
-            agent_ctx.agent_id.as_deref(),
-            action,
-            entity_type,
-            key_str,
-            serde_json::to_value(&resource_attrs).unwrap_or_default(),
-            &reason,
-            None,
-            Some(current_state.state.status.clone()),
+            DenialInput {
+                tenant: tenant.as_str(),
+                security_ctx: &security_ctx,
+                agent_id_override: agent_ctx.agent_id.as_deref(),
+                action,
+                resource_type: entity_type,
+                resource_id: key_str,
+                resource_attrs: serde_json::to_value(&resource_attrs).unwrap_or_default(),
+                reason: &reason,
+                module_name: None,
+                from_status: Some(current_state.state.status.clone()),
+            },
         )
         .await;
 
@@ -161,38 +163,22 @@ pub(super) async fn dispatch_bound_action(
     }
 
     let current_fields = current_state.state.fields.clone();
-    if let Err(v) = pre_upsert_relation_checks(
-        state,
-        tenant,
-        entity_type,
-        key_str,
-        "bound_action",
-        &current_fields,
-    )
-    .await
-    {
-        http_span.set_status(Status::error(v.message.clone()));
-        http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
-        let end_time: std::time::SystemTime = sim_now().into();
-        http_span.end_with_timestamp(end_time);
-        return constraint_violation_response(v);
-    }
-    if let Err(v) = post_write_invariant_checks(
+    if let Err(resp) = run_write_prechecks(
         state,
         tenant,
         entity_type,
         key_str,
         action,
-        &current_fields,
         "bound_action",
+        &current_fields,
     )
     .await
     {
-        http_span.set_status(Status::error(v.message.clone()));
+        http_span.set_status(Status::error("ConstraintViolation"));
         http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
         let end_time: std::time::SystemTime = sim_now().into();
         http_span.end_with_timestamp(end_time);
-        return constraint_violation_response(v);
+        return resp;
     }
 
     // Idempotency cache check

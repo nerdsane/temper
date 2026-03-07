@@ -8,7 +8,7 @@ impl ServerState {
     /// Broadcast and persist a design-time event to Turso.
     pub async fn emit_design_time_event(&self, event: DesignTimeEvent) -> Result<(), String> {
         // Persist to Turso.
-        if let Some(turso) = self.turso_opt() {
+        if let Some(turso) = self.persistent_store() {
             turso
                 .insert_design_time_event(
                     &event.kind,
@@ -35,7 +35,7 @@ impl ServerState {
 
     /// Persist a trajectory entry to Turso (single source of truth).
     pub async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String> {
-        let Some(turso) = self.turso_opt() else {
+        let Some(turso) = self.persistent_store() else {
             return Ok(());
         };
         turso
@@ -223,7 +223,7 @@ mod tests {
 
     use crate::event_store::ServerEventStore;
     use crate::registry::SpecRegistry;
-    use crate::secrets_vault::SecretsVault;
+    use crate::secrets::vault::SecretsVault;
     use crate::state::ServerState;
 
     fn make_state() -> ServerState {

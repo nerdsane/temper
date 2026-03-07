@@ -2,13 +2,18 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import EvolutionPage from "@/app/(observe)/evolution/page";
 
-vi.mock("@/lib/api", () => ({
-  fetchEvolutionRecords: vi.fn(),
-  fetchEvolutionInsights: vi.fn(),
-  triggerSentinelCheck: vi.fn(),
-  fetchUnmetIntents: vi.fn().mockResolvedValue({ open_count: 0, intents: [] }),
-  subscribeEvolutionEvents: vi.fn().mockReturnValue(() => {}),
-}));
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    fetchEvolutionRecords: vi.fn(),
+    fetchEvolutionInsights: vi.fn(),
+    triggerSentinelCheck: vi.fn(),
+    fetchUnmetIntents: vi.fn().mockResolvedValue({ open_count: 0, intents: [] }),
+    fetchFeatureRequests: vi.fn().mockResolvedValue([]),
+    subscribeEvolutionEvents: vi.fn().mockReturnValue(() => {}),
+  };
+});
 
 vi.mock("@/lib/hooks", () => ({
   usePolling: vi.fn(),
@@ -56,7 +61,9 @@ const sampleInsights = {
   total: 1,
 };
 
-function setPollingReturns(records: unknown, insights: unknown) {
+const sampleUnmetIntents = { intents: [], open_count: 0, resolved_count: 0 };
+
+function setPollingReturns(records: unknown, insights: unknown, unmet?: unknown) {
   let callIndex = 0;
   const results = [
     {
@@ -73,9 +80,16 @@ function setPollingReturns(records: unknown, insights: unknown) {
       lastUpdated: insights ? new Date() : null,
       refresh: vi.fn(),
     },
+    {
+      data: (unmet ?? sampleUnmetIntents) as never,
+      error: null,
+      loading: false,
+      lastUpdated: new Date(),
+      refresh: vi.fn(),
+    },
   ];
   mockUsePolling.mockImplementation(() => {
-    const result = results[callIndex % 2];
+    const result = results[callIndex % results.length];
     callIndex++;
     return result;
   });
@@ -104,7 +118,7 @@ describe("Evolution page", () => {
     // "Observations" and "Insights" appear in both summary cards and tab buttons
     expect(screen.getAllByText("Observations").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("5")).toBeInTheDocument();
-    expect(screen.getByText("Problems")).toBeInTheDocument();
+    expect(screen.getAllByText("Problems").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("2")).toBeInTheDocument();
     expect(screen.getAllByText("Insights").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("3")).toBeInTheDocument();

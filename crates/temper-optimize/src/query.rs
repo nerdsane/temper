@@ -64,14 +64,15 @@ impl QueryOptimizer {
         let mut trace_ops: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
 
+        let cols = &result_set.columns;
         for row in &result_set.rows {
             let trace_id = row
-                .get("trace_id")
+                .get_in(cols, "trace_id")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string();
             let operation = row
-                .get("operation")
+                .get_in(cols, "operation")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string();
@@ -132,15 +133,16 @@ impl QueryOptimizer {
 
         let slow_threshold_ns: f64 = 50_000_000.0; // 50ms
 
+        let cols = &result_set.columns;
         for row in &result_set.rows {
             let duration = row
-                .get("duration_ns")
+                .get_in(cols, "duration_ns")
                 .and_then(serde_json::Value::as_f64)
                 .unwrap_or(0.0);
 
             if duration > slow_threshold_ns {
                 let operation = row
-                    .get("operation")
+                    .get_in(cols, "operation")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("unknown")
                     .to_string();

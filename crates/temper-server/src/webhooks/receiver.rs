@@ -13,7 +13,7 @@ use axum::response::IntoResponse;
 
 use tracing::instrument;
 
-use crate::dispatch::AgentContext;
+use crate::request_context::AgentContext;
 use crate::state::ServerState;
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::Webhook;
@@ -157,7 +157,7 @@ mod tests {
     use temper_spec::csdl::parse_csdl;
     use tower::ServiceExt;
 
-    const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+    const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
 
     /// IOA spec with a webhook declaration for OAuth callback.
     const ORDER_IOA_WITH_WEBHOOK: &str = r#"

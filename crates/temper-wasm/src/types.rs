@@ -89,3 +89,101 @@ pub struct WasmAuthzContext {
     /// The action that triggered this WASM invocation.
     pub trigger_action: String,
 }
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl WasmAuthzContext {
+    /// Build a test fixture context.
+    pub fn test_fixture() -> Self {
+        Self {
+            tenant: "test-tenant".into(),
+            module_name: "stripe_charge".into(),
+            agent_id: Some("agent-1".into()),
+            session_id: None,
+            entity_type: "Order".into(),
+            trigger_action: "submitOrder".into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invocation_context_serde_roundtrip() {
+        let ctx = WasmInvocationContext {
+            tenant: "t1".into(),
+            entity_type: "Order".into(),
+            entity_id: "ORD-1".into(),
+            trigger_action: "Submit".into(),
+            trigger_params: serde_json::json!({"amount": 100}),
+            entity_state: serde_json::json!({"status": "Draft"}),
+            agent_id: Some("agent-1".into()),
+            session_id: None,
+            integration_config: std::collections::BTreeMap::new(),
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: WasmInvocationContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tenant, "t1");
+        assert_eq!(back.entity_type, "Order");
+        assert_eq!(back.agent_id, Some("agent-1".into()));
+        assert!(back.session_id.is_none());
+    }
+
+    #[test]
+    fn invocation_context_skips_empty_optional_fields() {
+        let ctx = WasmInvocationContext {
+            tenant: "t".into(),
+            entity_type: "E".into(),
+            entity_id: "1".into(),
+            trigger_action: "A".into(),
+            trigger_params: serde_json::Value::Null,
+            entity_state: serde_json::Value::Null,
+            agent_id: None,
+            session_id: None,
+            integration_config: std::collections::BTreeMap::new(),
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        assert!(!json.contains("agent_id"));
+        assert!(!json.contains("session_id"));
+        assert!(!json.contains("integration_config"));
+    }
+
+    #[test]
+    fn invocation_result_serde_roundtrip() {
+        let result = WasmInvocationResult {
+            callback_action: "PaymentConfirmed".into(),
+            callback_params: serde_json::json!({"ref": "tx-123"}),
+            success: true,
+            error: None,
+            duration_ms: 250,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: WasmInvocationResult = serde_json::from_str(&json).unwrap();
+        assert!(back.success);
+        assert_eq!(back.callback_action, "PaymentConfirmed");
+        assert_eq!(back.duration_ms, 250);
+    }
+
+    #[test]
+    fn resource_limits_defaults() {
+        let limits = WasmResourceLimits::default();
+        assert_eq!(limits.max_fuel, 1_000_000_000);
+        assert_eq!(limits.max_memory, 16 * 1024 * 1024);
+        assert_eq!(limits.max_duration, std::time::Duration::from_secs(30));
+        assert_eq!(limits.max_response_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn max_module_size_is_10mb() {
+        assert_eq!(MAX_MODULE_SIZE, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn authz_context_test_fixture() {
+        let ctx = WasmAuthzContext::test_fixture();
+        assert_eq!(ctx.tenant, "test-tenant");
+        assert_eq!(ctx.module_name, "stripe_charge");
+        assert_eq!(ctx.agent_id, Some("agent-1".into()));
+    }
+}

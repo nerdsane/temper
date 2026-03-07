@@ -55,3 +55,61 @@ pub struct LivenessProperty {
     /// Raw TLA+ expression.
     pub expr: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_machine_serde_roundtrip() {
+        let sm = StateMachine {
+            module_name: "OrderSpec".into(),
+            states: vec!["Draft".into(), "Active".into()],
+            transitions: vec![Transition {
+                name: "Submit".into(),
+                from_states: vec!["Draft".into()],
+                to_state: Some("Active".into()),
+                guard_expr: "status = \"Draft\"".into(),
+                has_parameters: false,
+                effect_expr: "status' = \"Active\"".into(),
+            }],
+            invariants: vec![Invariant {
+                name: "TypeOK".into(),
+                expr: "status \\in States".into(),
+            }],
+            liveness_properties: vec![LivenessProperty {
+                name: "Progress".into(),
+                expr: "<>(status = \"Active\")".into(),
+            }],
+            constants: vec!["MaxItems".into()],
+            variables: vec!["status".into()],
+        };
+        let json = serde_json::to_string(&sm).unwrap();
+        let back: StateMachine = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.module_name, "OrderSpec");
+        assert_eq!(back.states.len(), 2);
+        assert_eq!(back.transitions.len(), 1);
+        assert_eq!(back.transitions[0].name, "Submit");
+        assert_eq!(back.transitions[0].to_state, Some("Active".into()));
+        assert_eq!(back.invariants.len(), 1);
+        assert_eq!(back.liveness_properties.len(), 1);
+        assert_eq!(back.constants, vec!["MaxItems"]);
+        assert_eq!(back.variables, vec!["status"]);
+    }
+
+    #[test]
+    fn transition_optional_to_state() {
+        let t = Transition {
+            name: "SelfLoop".into(),
+            from_states: vec!["A".into()],
+            to_state: None,
+            guard_expr: "TRUE".into(),
+            has_parameters: true,
+            effect_expr: "UNCHANGED".into(),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Transition = serde_json::from_str(&json).unwrap();
+        assert!(back.to_state.is_none());
+        assert!(back.has_parameters);
+    }
+}

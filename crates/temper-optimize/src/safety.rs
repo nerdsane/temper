@@ -72,3 +72,58 @@ impl SafetyChecker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{OptAction, OptCategory, OptimizationRecommendation, Risk};
+
+    fn make_rec(risk: Risk, improvement: f64) -> OptimizationRecommendation {
+        OptimizationRecommendation {
+            optimizer: "test".to_string(),
+            description: "test".to_string(),
+            category: OptCategory::CachePolicy,
+            estimated_improvement: improvement,
+            risk,
+            action: OptAction::UpdateCacheTtl {
+                key_pattern: "*".to_string(),
+                ttl_seconds: 60,
+            },
+        }
+    }
+
+    #[test]
+    fn no_risk_always_safe() {
+        let rec = make_rec(Risk::None, 0.0);
+        let result = SafetyChecker::validate(&rec);
+        assert!(result.is_safe);
+    }
+
+    #[test]
+    fn low_risk_above_threshold() {
+        let rec = make_rec(Risk::Low, 0.2);
+        let result = SafetyChecker::validate(&rec);
+        assert!(result.is_safe);
+    }
+
+    #[test]
+    fn low_risk_below_threshold() {
+        let rec = make_rec(Risk::Low, 0.05);
+        let result = SafetyChecker::validate(&rec);
+        assert!(!result.is_safe);
+    }
+
+    #[test]
+    fn low_risk_at_threshold() {
+        let rec = make_rec(Risk::Low, 0.1);
+        let result = SafetyChecker::validate(&rec);
+        assert!(!result.is_safe);
+    }
+
+    #[test]
+    fn medium_risk_always_unsafe() {
+        let rec = make_rec(Risk::Medium, 0.5);
+        let result = SafetyChecker::validate(&rec);
+        assert!(!result.is_safe);
+    }
+}

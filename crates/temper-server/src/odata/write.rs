@@ -11,14 +11,12 @@ use tracing::instrument;
 
 use super::bindings::dispatch_bound_action;
 use super::common::{
-    constraint_violation_response, extract_key, extract_tenant, resolve_entity_type,
-    verification_gate_response,
+    constraint_violation_response, extract_key, extract_tenant, load_entity_or_404,
+    resolve_entity_type, run_write_prechecks, verification_gate_response,
 };
 use super::response::annotate_entity;
-use crate::constraint_engine::{
-    post_write_invariant_checks, pre_delete_relation_checks, pre_upsert_relation_checks,
-};
-use crate::dispatch::{AgentContext, extract_agent_context};
+use super::constraints::pre_delete_relation_checks;
+use crate::request_context::{AgentContext, extract_agent_context};
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
@@ -151,7 +149,10 @@ pub async fn handle_odata_post(
     Query(query_params): Query<std::collections::BTreeMap<String, String>>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let tenant = extract_tenant(&headers, &state);
+    let tenant = match extract_tenant(&headers, &state) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
     let agent_ctx = extract_agent_context(&headers);
     let await_integration = query_params
         .get("await_integration")
@@ -190,30 +191,11 @@ pub async fn handle_odata_post(
                 .unwrap_or_else(|| temper_runtime::scheduler::sim_uuid().to_string());
 
             let initial_fields = body_json.clone();
-            if let Err(v) = pre_upsert_relation_checks(
-                &state,
-                &tenant,
-                &entity_type,
-                &entity_id,
-                "create",
-                &initial_fields,
-            )
-            .await
-            {
-                return constraint_violation_response(v);
-            }
-            if let Err(v) = post_write_invariant_checks(
-                &state,
-                &tenant,
-                &entity_type,
-                &entity_id,
-                "Create",
-                &initial_fields,
-                "create",
-            )
-            .await
-            {
-                return constraint_violation_response(v);
+            if let Err(resp) = run_write_prechecks(
+                &state, &tenant, &entity_type, &entity_id,
+                "Create", "create", &initial_fields,
+            ).await {
+                return resp;
             }
 
             match state
@@ -294,7 +276,10 @@ pub async fn handle_odata_patch(
     axum::extract::Path(path): axum::extract::Path<String>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let tenant = extract_tenant(&headers, &state);
+    let tenant = match extract_tenant(&headers, &state) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
     let odata_path = match parse_odata_path_or_400(&path) {
         Ok(p) => p,
         Err(resp) => return *resp,
@@ -321,15 +306,11 @@ pub async fn handle_odata_patch(
                 Ok(v) => v,
                 Err(resp) => return *resp,
             };
-            let current_state = match state
-                .get_tenant_entity_state(&tenant, &entity_type, &key_str)
-                .await
-            {
+            let current_state = match load_entity_or_404(
+                &state, &tenant, &entity_type, &set_name, &key_str,
+            ).await {
                 Ok(v) => v,
-                Err(e) => {
-                    return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &e)
-                        .into_response();
-                }
+                Err(resp) => return resp,
             };
 
             let mut prospective_fields = current_state.state.fields.clone();
@@ -343,30 +324,11 @@ pub async fn handle_odata_patch(
                 prospective_fields = body_json.clone();
             }
 
-            if let Err(v) = pre_upsert_relation_checks(
-                &state,
-                &tenant,
-                &entity_type,
-                &key_str,
-                "patch",
-                &prospective_fields,
-            )
-            .await
-            {
-                return constraint_violation_response(v);
-            }
-            if let Err(v) = post_write_invariant_checks(
-                &state,
-                &tenant,
-                &entity_type,
-                &key_str,
-                "Patch",
-                &prospective_fields,
-                "patch",
-            )
-            .await
-            {
-                return constraint_violation_response(v);
+            if let Err(resp) = run_write_prechecks(
+                &state, &tenant, &entity_type, &key_str,
+                "Patch", "patch", &prospective_fields,
+            ).await {
+                return resp;
             }
 
             match state
@@ -406,7 +368,10 @@ pub async fn handle_odata_put(
     axum::extract::Path(path): axum::extract::Path<String>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let tenant = extract_tenant(&headers, &state);
+    let tenant = match extract_tenant(&headers, &state) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
     let odata_path = match parse_odata_path_or_400(&path) {
         Ok(p) => p,
         Err(resp) => return *resp,
@@ -434,30 +399,11 @@ pub async fn handle_odata_put(
                 Err(resp) => return *resp,
             };
 
-            if let Err(v) = pre_upsert_relation_checks(
-                &state,
-                &tenant,
-                &entity_type,
-                &key_str,
-                "put",
-                &body_json,
-            )
-            .await
-            {
-                return constraint_violation_response(v);
-            }
-            if let Err(v) = post_write_invariant_checks(
-                &state,
-                &tenant,
-                &entity_type,
-                &key_str,
-                "Put",
-                &body_json,
-                "put",
-            )
-            .await
-            {
-                return constraint_violation_response(v);
+            if let Err(resp) = run_write_prechecks(
+                &state, &tenant, &entity_type, &key_str,
+                "Put", "put", &body_json,
+            ).await {
+                return resp;
             }
 
             match state
@@ -496,7 +442,10 @@ pub async fn handle_odata_delete(
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let tenant = extract_tenant(&headers, &state);
+    let tenant = match extract_tenant(&headers, &state) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
     let odata_path = match parse_odata_path_or_400(&path) {
         Ok(p) => p,
         Err(resp) => return *resp,
@@ -523,28 +472,17 @@ pub async fn handle_odata_delete(
             {
                 return constraint_violation_response(v);
             }
-            let current_state = match state
-                .get_tenant_entity_state(&tenant, &entity_type, &key_str)
-                .await
-            {
+            let current_state = match load_entity_or_404(
+                &state, &tenant, &entity_type, &set_name, &key_str,
+            ).await {
                 Ok(v) => v,
-                Err(e) => {
-                    return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &e)
-                        .into_response();
-                }
+                Err(resp) => return resp,
             };
-            if let Err(v) = post_write_invariant_checks(
-                &state,
-                &tenant,
-                &entity_type,
-                &key_str,
-                "Delete",
-                &current_state.state.fields,
-                "delete",
-            )
-            .await
-            {
-                return constraint_violation_response(v);
+            if let Err(resp) = run_write_prechecks(
+                &state, &tenant, &entity_type, &key_str,
+                "Delete", "delete", &current_state.state.fields,
+            ).await {
+                return resp;
             }
 
             match state

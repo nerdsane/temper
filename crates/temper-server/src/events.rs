@@ -6,12 +6,14 @@
 use std::convert::Infallible;
 
 use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
 use tracing::instrument;
 
+use crate::authz::{observe_tenant_scope, require_observe_auth};
 use crate::state::ServerState;
 
 /// A notification emitted when an entity transitions to a new state.
@@ -42,11 +44,21 @@ pub struct EntityStateChange {
 #[instrument(skip_all, fields(otel.name = "GET /tdata/$events"))]
 pub async fn handle_events(
     State(state): State<ServerState>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    headers: HeaderMap,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_events", "Entity")?;
+    let tenant_scope = observe_tenant_scope(&state, &headers)?;
+    let filter_tenant = tenant_scope.map(|t| t.as_str().to_string());
     let rx = state.event_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| {
+    let stream = BroadcastStream::new(rx).filter_map(move |result| {
         match result {
             Ok(change) => {
+                // Enforce tenant scope: only emit events for the scoped tenant.
+                if let Some(ref tenant) = filter_tenant
+                    && change.tenant != *tenant
+                {
+                    return None;
+                }
                 let data = serde_json::to_string(&change).unwrap_or_default();
                 Some(Ok(Event::default().event("state_change").data(data)))
             }
@@ -55,7 +67,7 @@ pub async fn handle_events(
         }
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 #[cfg(test)]

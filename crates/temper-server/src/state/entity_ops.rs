@@ -70,6 +70,7 @@ impl ServerState {
     }
 
     /// Get or spawn an entity actor (legacy single-tenant).
+    #[deprecated(note = "Use `get_or_spawn_tenant_actor` with explicit tenant")]
     pub fn get_or_spawn_actor(
         &self,
         entity_type: &str,
@@ -201,6 +202,9 @@ impl ServerState {
 
     /// Check authorization for an action using the Cedar ABAC engine.
     ///
+    /// Returns a typed [`AuthzDenial`] on failure, preserving the denial kind
+    /// (policy denied, no matching permit, invalid principal, etc.).
+    ///
     /// Accepts `BTreeMap` for DST compliance; converts at the authz boundary.
     pub fn authorize(
         &self,
@@ -208,38 +212,9 @@ impl ServerState {
         action: &str,
         resource_type: &str,
         resource_attrs: &BTreeMap<String, serde_json::Value>,
-    ) -> Result<(), String> {
+    ) -> Result<(), AuthzDenial> {
         let ctx = SecurityContext::from_headers(headers);
-        let attrs: std::collections::HashMap<_, _> = resource_attrs // determinism-ok: Cedar API requires HashMap
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(); // determinism-ok
-        let authz_start = sim_now();
-        let decision = self
-            .authz
-            .authorize_or_bypass(&ctx, action, resource_type, &attrs);
-        let duration_ns = (sim_now() - authz_start)
-            .num_nanoseconds()
-            .unwrap_or(0)
-            .max(0) as u64;
-        let decision_str = match &decision {
-            AuthzDecision::Allow => "Allow",
-            AuthzDecision::Deny(_) => "Deny",
-        };
-        let wide = wide_event::from_authz_decision(
-            action,
-            resource_type,
-            &format!("{:?}", ctx.principal.kind),
-            decision_str,
-            duration_ns,
-            "default",
-        );
-        wide_event::emit_span(&wide);
-        wide_event::emit_metrics(&wide);
-        match decision {
-            AuthzDecision::Allow => Ok(()),
-            AuthzDecision::Deny(reason) => Err(format!("Authorization denied: {reason}")),
-        }
+        self.authorize_with_context(&ctx, action, resource_type, resource_attrs, "default")
     }
 
     /// Check authorization using a pre-built `SecurityContext`.
@@ -248,7 +223,10 @@ impl ServerState {
     /// method accepts an already-constructed context enriched with agent
     /// identity and resource attributes.
     ///
+    /// Returns a typed [`AuthzDenial`] on failure, preserving the denial kind.
+    ///
     /// Accepts `BTreeMap` for DST compliance; converts at the authz boundary.
+    #[allow(clippy::too_many_arguments)]
     #[instrument(skip_all, fields(otel.name = "entity.authorize_with_context", action, resource_type))]
     pub fn authorize_with_context(
         &self,
@@ -256,7 +234,8 @@ impl ServerState {
         action: &str,
         resource_type: &str,
         resource_attrs: &BTreeMap<String, serde_json::Value>,
-    ) -> Result<(), String> {
+        tenant: &str,
+    ) -> Result<(), AuthzDenial> {
         let attrs: std::collections::HashMap<_, _> = resource_attrs // determinism-ok: Cedar API requires HashMap
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
@@ -273,23 +252,24 @@ impl ServerState {
             AuthzDecision::Allow => "Allow",
             AuthzDecision::Deny(_) => "Deny",
         };
-        let wide = wide_event::from_authz_decision(
+        let wide = wide_event::from_authz_decision(wide_event::AuthzDecisionInput {
             action,
             resource_type,
-            &format!("{:?}", security_ctx.principal.kind),
-            decision_str,
+            principal_kind: &format!("{:?}", security_ctx.principal.kind),
+            decision: decision_str,
             duration_ns,
-            "default",
-        );
+            tenant,
+        });
         wide_event::emit_span(&wide);
         wide_event::emit_metrics(&wide);
         match decision {
             AuthzDecision::Allow => Ok(()),
-            AuthzDecision::Deny(reason) => Err(format!("Authorization denied: {reason}")),
+            AuthzDecision::Deny(denial) => Err(denial),
         }
     }
 
     /// Get the current state of an entity actor (legacy single-tenant).
+    #[deprecated(note = "Use `get_tenant_entity_state` with explicit tenant")]
     pub async fn get_entity_state(
         &self,
         entity_type: &str,
@@ -527,7 +507,7 @@ impl ServerState {
                 ),
                 failed_levels: None,
             }),
-            Some(VerificationStatus::Completed(result)) => {
+            Some(VerificationStatus::Completed(result) | VerificationStatus::Restored(result)) => {
                 if result.all_passed {
                     Ok(())
                 } else {
@@ -595,5 +575,5 @@ impl ServerState {
     }
 }
 
-use temper_authz::{AuthzDecision, SecurityContext};
+use temper_authz::{AuthzDecision, AuthzDenial, SecurityContext};
 use temper_runtime::actor::ActorRef;

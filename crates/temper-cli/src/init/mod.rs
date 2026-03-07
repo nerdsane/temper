@@ -56,11 +56,6 @@ pub fn run(name: &str) -> Result<()> {
     let dirs = [
         root.join("specs").join("policies"),
         root.join("generated"),
-        root.join("evolution").join("observations"),
-        root.join("evolution").join("problems"),
-        root.join("evolution").join("analyses"),
-        root.join("evolution").join("decisions"),
-        root.join("evolution").join("insights"),
         root.join("src"),
     ];
 
@@ -155,11 +150,6 @@ mod tests {
         assert!(project_dir.join("specs/policies").is_dir());
         assert!(project_dir.join("specs/model.csdl.xml").is_file());
         assert!(project_dir.join("generated").is_dir());
-        assert!(project_dir.join("evolution/observations").is_dir());
-        assert!(project_dir.join("evolution/problems").is_dir());
-        assert!(project_dir.join("evolution/analyses").is_dir());
-        assert!(project_dir.join("evolution/decisions").is_dir());
-        assert!(project_dir.join("evolution/insights").is_dir());
         assert!(project_dir.join("Cargo.toml").is_file());
         assert!(project_dir.join("src/main.rs").is_file());
 

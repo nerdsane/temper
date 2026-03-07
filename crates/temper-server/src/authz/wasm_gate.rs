@@ -71,7 +71,7 @@ impl WasmAuthzGate for CedarWasmAuthzGate {
 
         match decision {
             AuthzDecision::Allow => WasmAuthzDecision::Allow,
-            AuthzDecision::Deny(reason) => WasmAuthzDecision::Deny(reason),
+            AuthzDecision::Deny(denial) => WasmAuthzDecision::Deny(denial.to_string()),
         }
     }
 
@@ -96,7 +96,7 @@ impl WasmAuthzGate for CedarWasmAuthzGate {
 
         match decision {
             AuthzDecision::Allow => WasmAuthzDecision::Allow,
-            AuthzDecision::Deny(reason) => WasmAuthzDecision::Deny(reason),
+            AuthzDecision::Deny(denial) => WasmAuthzDecision::Deny(denial.to_string()),
         }
     }
 }
@@ -166,14 +166,7 @@ mod tests {
     use super::*;
 
     fn test_ctx() -> WasmAuthzContext {
-        WasmAuthzContext {
-            tenant: "test-tenant".into(),
-            module_name: "stripe_charge".into(),
-            agent_id: Some("agent-1".into()),
-            session_id: None,
-            entity_type: "Order".into(),
-            trigger_action: "submitOrder".into(),
-        }
+        WasmAuthzContext::test_fixture()
     }
 
     #[test]
@@ -199,7 +192,7 @@ mod tests {
     #[test]
     fn cedar_gate_denies_without_policies() {
         // No policies = no permits = deny (Cedar default-deny semantics)
-        let engine = Arc::new(AuthzEngine::permissive());
+        let engine = Arc::new(AuthzEngine::empty());
         let gate = CedarWasmAuthzGate::new(engine);
         let ctx = test_ctx();
 

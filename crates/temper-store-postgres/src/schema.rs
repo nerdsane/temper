@@ -188,6 +188,95 @@ CREATE TABLE IF NOT EXISTS tenant_secrets (
     PRIMARY KEY (tenant, key_name)
 );";
 
+// ---------------------------------------------------------------------------
+// Row-Level Security (RLS) — tenant isolation
+// ---------------------------------------------------------------------------
+// Defence-in-depth: even if application code has a bug that omits a tenant
+// WHERE clause, RLS prevents cross-tenant data access at the database level.
+//
+// Policies match `current_setting('app.current_tenant', true)` against each
+// row's `tenant` column. The second argument (`true`) makes the function
+// return an empty string instead of raising an error when the setting has not
+// been set on the current session/transaction, so existing non-RLS-aware code
+// paths do not break (queries run by the table owner bypass RLS by default).
+//
+// Deploy note: for RLS to be enforced at runtime, the application connection
+// must use a non-superuser role and execute
+// `SET LOCAL "app.current_tenant" = '<tenant>';` inside each transaction.
+// ---------------------------------------------------------------------------
+
+/// Idempotent DDL to enable RLS and create tenant isolation policies on all
+/// tenant-scoped tables.
+///
+/// Each statement is safe to re-execute; `IF NOT EXISTS` guards the policy
+/// creation, and `ALTER TABLE … ENABLE ROW LEVEL SECURITY` is a no-op when
+/// RLS is already enabled.
+pub const ENABLE_TENANT_RLS: &[&str] = &[
+    // -- events --
+    "ALTER TABLE events ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'events' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON events USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- snapshots --
+    "ALTER TABLE snapshots ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'snapshots' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON snapshots USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- specs --
+    "ALTER TABLE specs ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'specs' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON specs USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- trajectories --
+    "ALTER TABLE trajectories ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'trajectories' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON trajectories USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- design_time_events --
+    "ALTER TABLE design_time_events ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'design_time_events' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON design_time_events USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- tenant_constraints --
+    "ALTER TABLE tenant_constraints ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'tenant_constraints' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON tenant_constraints USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- wasm_modules --
+    "ALTER TABLE wasm_modules ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'wasm_modules' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON wasm_modules USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- wasm_invocation_logs --
+    "ALTER TABLE wasm_invocation_logs ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'wasm_invocation_logs' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON wasm_invocation_logs USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+    // -- tenant_secrets --
+    "ALTER TABLE tenant_secrets ENABLE ROW LEVEL SECURITY",
+    "DO $$ BEGIN \
+       IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'tenant_secrets' AND policyname = 'tenant_isolation') THEN \
+         EXECUTE 'CREATE POLICY tenant_isolation ON tenant_secrets USING (tenant = current_setting(''app.current_tenant'', true))'; \
+       END IF; \
+     END $$",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +464,47 @@ mod tests {
             sql.contains("UNIQUE"),
             "wasm_modules should have UNIQUE constraint"
         );
+    }
+
+    #[test]
+    fn rls_policies_cover_all_tenant_scoped_tables() {
+        let expected_tables = [
+            "events",
+            "snapshots",
+            "specs",
+            "trajectories",
+            "design_time_events",
+            "tenant_constraints",
+            "wasm_modules",
+            "wasm_invocation_logs",
+            "tenant_secrets",
+        ];
+        let all_sql: String = ENABLE_TENANT_RLS.iter().map(|s| s.to_lowercase()).collect();
+        for table in &expected_tables {
+            assert!(
+                all_sql.contains(&format!("alter table {table} enable row level security")),
+                "RLS migration missing ENABLE for table: {table}"
+            );
+            assert!(
+                all_sql.contains(&format!("tablename = '{table}'")),
+                "RLS migration missing policy for table: {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn rls_policies_are_idempotent() {
+        for stmt in ENABLE_TENANT_RLS {
+            let lower = stmt.to_lowercase();
+            // ALTER TABLE ... ENABLE RLS is idempotent by design.
+            // Policy creation is guarded by IF NOT EXISTS check.
+            if lower.contains("create policy") {
+                assert!(
+                    lower.contains("if not exists"),
+                    "RLS policy DDL must be idempotent: {stmt}"
+                );
+            }
+        }
     }
 
     #[test]

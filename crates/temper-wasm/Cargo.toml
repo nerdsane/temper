@@ -17,5 +17,8 @@ reqwest = { workspace = true }
 sha2 = { workspace = true }
 async-trait = { workspace = true }
 
+[features]
+test-helpers = []
+
 [dev-dependencies]
 tokio-test = { workspace = true }

@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_check_model_completes() {
-        let model = build_model_from_ioa(ORDER_IOA, 2);
+        let model = build_model_from_ioa(ORDER_IOA, 2).unwrap();
         let result = check_model(&model);
         assert!(result.is_complete, "checker should complete");
         assert!(
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_check_model_all_properties_hold() {
-        let model = build_model_from_ioa(ORDER_IOA, 2);
+        let model = build_model_from_ioa(ORDER_IOA, 2).unwrap();
         let result = check_model(&model);
         assert!(
             result.all_properties_hold,
@@ -226,7 +226,7 @@ from = ["Active"]
 to = "Completed"
 guard = "task_count > 0"
 "#;
-        let model = build_model_from_ioa(src, 2);
+        let model = build_model_from_ioa(src, 2).unwrap();
         let result = check_model(&model);
         assert!(!result.all_properties_hold);
         assert!(

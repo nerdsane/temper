@@ -23,7 +23,7 @@ temper-observe = { workspace = true }
 temper-authz = { workspace = true }
 temper-evolution = { workspace = true }
 temper-wasm = { workspace = true }
-temper-mcp = { workspace = true }
+temper-sandbox = { workspace = true }
 temper-verify = { workspace = true, optional = true }
 temper-store-sim = { workspace = true, optional = true }
 axum = { workspace = true }
@@ -42,6 +42,7 @@ opentelemetry = { workspace = true }
 reqwest = { workspace = true }
 sqlx = { workspace = true }
 aes-gcm = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
@@ -50,6 +51,7 @@ tokio = { workspace = true, features = ["full"] }
 wiremock = { workspace = true }
 temper-store-sim = { workspace = true }
 temper-server = { path = ".", features = ["sim"] }
+temper-wasm = { workspace = true, features = ["test-helpers"] }
 
 [[bench]]
 name = "actor_throughput"

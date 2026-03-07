@@ -1,15 +1,15 @@
 //! Server state shared across all request handlers.
 
 mod dispatch;
-mod dispatch_blocking;
 mod entity_ops;
+mod evolution;
 pub mod metrics;
 pub mod pending_decisions;
 mod persistence;
 pub mod trajectory;
 pub mod wasm_invocation_log;
 
-pub use dispatch::DispatchExtOptions;
+pub use dispatch::{DispatchCommand, DispatchExtOptions};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{DecisionStatus, PendingDecision, PolicyScope};
@@ -20,7 +20,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use temper_authz::AuthzEngine;
-use temper_evolution::{PostgresRecordStore, RecordStore};
+use temper_evolution::PostgresRecordStore;
+#[allow(deprecated)] // ADR-0025 Phase 4: remove after sentinel/insight dispatch migrated to IOA entities
+use temper_evolution::store::RecordStore;
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::actor::ActorRef;
@@ -34,7 +36,7 @@ use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
 use crate::reaction::ReactionDispatcher;
 use crate::registry::SpecRegistry;
-use crate::secrets_vault::SecretsVault;
+use crate::secrets::vault::SecretsVault;
 use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
 use temper_wasm::WasmEngine;
@@ -89,8 +91,7 @@ pub struct DesignTimeEvent {
 }
 
 fn env_bool(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        // determinism-ok: read once at startup, not per simulation step
+    match std::env::var(name) { // determinism-ok: read once at startup
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "0" | "false" | "off" | "no" => false,
             "1" | "true" | "on" | "yes" => true,
@@ -111,6 +112,7 @@ fn env_timeout() -> Duration {
 
 /// Shared state for the Temper HTTP server.
 #[derive(Clone)]
+// ADR-0025 Phase 4: remove record_store field after IOA entity migration complete
 pub struct ServerState {
     /// The actor system for spawning and managing entity actors.
     pub actor_system: Arc<ActorSystem>,
@@ -183,6 +185,10 @@ pub struct ServerState {
     pub agent_progress_tx: Arc<tokio::sync::broadcast::Sender<AgentProgressEvent>>,
     /// Listening port for HTTP REPL self-referencing calls.
     pub listen_port: Arc<std::sync::OnceLock<u16>>,
+    /// When true, missing `X-Tenant-Id` headers fall back to the first
+    /// registered tenant (legacy single-tenant compat).  When false
+    /// (multi-tenant mode), a missing header is rejected with 400.
+    pub single_tenant_mode: bool,
 }
 
 impl ServerState {
@@ -242,6 +248,7 @@ impl ServerState {
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             listen_port: Arc::new(std::sync::OnceLock::new()),
+            single_tenant_mode: true,
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -269,51 +276,63 @@ impl ServerState {
     }
 
     /// Create ServerState with I/O Automaton TOML specs for transition table resolution.
+    ///
+    /// Returns an error if any IOA spec fails to parse.
     pub fn with_specs(
         system: ActorSystem,
         csdl: CsdlDocument,
         csdl_xml: String,
         ioa_sources: BTreeMap<String, String>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let mut state = Self::new(system, csdl, csdl_xml);
         let mut tables = BTreeMap::new();
         for (entity_type, ioa_source) in &ioa_sources {
-            let table = TransitionTable::from_ioa_source(ioa_source);
+            let table = TransitionTable::try_from_ioa_source(ioa_source)
+                .map_err(|e| format!("entity '{entity_type}': {e}"))?;
             tables.insert(entity_type.clone(), Arc::new(table));
         }
         state.transition_tables = Arc::new(tables);
-        state
+        Ok(state)
     }
 
     /// Create ServerState with specs AND Postgres persistence.
+    ///
+    /// Returns an error if any IOA spec fails to parse.
     pub fn with_persistence(
         system: ActorSystem,
         csdl: CsdlDocument,
         csdl_xml: String,
         ioa_sources: BTreeMap<String, String>,
         store: PostgresEventStore,
-    ) -> Self {
-        let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources);
+    ) -> Result<Self, String> {
+        let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources)?;
         state.event_store = Some(Arc::new(ServerEventStore::Postgres(store)));
-        state
+        Ok(state)
     }
 
     /// Create ServerState with specs and an explicit runtime event store.
+    ///
+    /// Returns an error if any IOA spec fails to parse.
     pub fn with_event_store(
         system: ActorSystem,
         csdl: CsdlDocument,
         csdl_xml: String,
         ioa_sources: BTreeMap<String, String>,
         store: ServerEventStore,
-    ) -> Self {
-        let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources);
+    ) -> Result<Self, String> {
+        let mut state = Self::with_specs(system, csdl, csdl_xml, ioa_sources)?;
         state.event_store = Some(Arc::new(store));
-        state
+        Ok(state)
     }
 
-    /// Create ServerState from a multi-tenant [`SpecRegistry`].
+    /// Create ServerState from a [`SpecRegistry`] in single-tenant compatibility mode.
+    ///
+    /// Used by tests and simple setups.  For multi-tenant production use
+    /// [`from_registry_shared`](Self::from_registry_shared) instead.
     pub fn from_registry(system: ActorSystem, registry: SpecRegistry) -> Self {
-        Self::from_registry_shared(system, Arc::new(RwLock::new(registry)))
+        let mut state = Self::from_registry_shared(system, Arc::new(RwLock::new(registry)));
+        state.single_tenant_mode = true;
+        state
     }
 
     /// Create ServerState from a shared, mutable [`SpecRegistry`].
@@ -364,6 +383,7 @@ impl ServerState {
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             listen_port: Arc::new(std::sync::OnceLock::new()),
+            single_tenant_mode: false,
         };
         state.register_builtin_wasm_modules();
         state
@@ -422,20 +442,40 @@ impl ServerState {
     ///
     /// Panics if the event store is not configured or is not a Turso backend.
     pub fn turso(&self) -> &temper_store_turso::TursoEventStore {
-        self.turso_opt()
+        self.persistent_store()
             .expect("Turso event store is not configured")
     }
 
-    /// Get an optional reference to the Turso event store.
-    pub fn turso_opt(&self) -> Option<&temper_store_turso::TursoEventStore> {
+    /// Get an optional reference to the persistent Turso event store.
+    ///
+    /// Returns `None` when the server is running without Turso (e.g. in-memory
+    /// mode or tests). Callers should degrade gracefully to empty results.
+    pub fn persistent_store(&self) -> Option<&temper_store_turso::TursoEventStore> {
         self.event_store
             .as_ref()
             .and_then(|store| store.turso_store())
     }
 
+    /// Find an entity spec by name across all tenants.
+    ///
+    /// Returns the owning tenant and the IOA source string on success.
+    /// Acquires a read lock on the spec registry.
+    pub fn find_entity_ioa_source(
+        &self,
+        entity: &str,
+    ) -> Option<(temper_runtime::tenant::TenantId, String)> {
+        let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
+        for tenant_id in registry.tenant_ids() {
+            if let Some(entity_spec) = registry.get_spec(tenant_id, entity) {
+                return Some((tenant_id.clone(), entity_spec.ioa_source.clone()));
+            }
+        }
+        None
+    }
+
     /// Load trajectory entries from Turso, converting to domain TrajectoryEntry.
     pub async fn load_trajectory_entries(&self, limit: i64) -> Vec<TrajectoryEntry> {
-        let Some(turso) = self.turso_opt() else {
+        let Some(turso) = self.persistent_store() else {
             return Vec::new();
         };
         match turso.load_recent_trajectories(limit).await {

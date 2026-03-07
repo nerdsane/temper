@@ -132,22 +132,7 @@ pub fn csdl_type_to_rust(type_name: &str, nullable: bool, namespace: &str) -> St
     }
 }
 
-/// Convert PascalCase to snake_case.
-pub fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, ch) in s.chars().enumerate() {
-        if ch.is_uppercase() && i > 0 {
-            // Don't insert underscore between consecutive uppercase (e.g., "ID" -> "id")
-            let prev_upper = s.chars().nth(i - 1).is_some_and(|c| c.is_uppercase());
-            let next_lower = s.chars().nth(i + 1).is_some_and(|c| c.is_lowercase());
-            if !prev_upper || next_lower {
-                result.push('_');
-            }
-        }
-        result.push(ch.to_lowercase().next().unwrap_or(ch));
-    }
-    result
-}
+pub use temper_spec::naming::to_snake_case;
 
 #[cfg(test)]
 mod tests {

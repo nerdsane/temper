@@ -118,7 +118,8 @@ fn enabled_actions(model: &TemperModel, state: &TemperModelState) -> Vec<TemperM
 
 /// Run property-based tests from I/O Automaton TOML source.
 pub fn run_prop_tests_from_ioa(ioa_toml: &str, num_cases: u64, max_steps: usize) -> PropTestResult {
-    let model = build_model_from_ioa(ioa_toml, 2);
+    let model = build_model_from_ioa(ioa_toml, 2)
+        .expect("proptest: IOA spec should have been validated before property testing");
     run_prop_tests_on_model(&model, num_cases, max_steps)
 }
 
@@ -200,7 +201,8 @@ pub fn run_prop_tests_with_shrinking_from_ioa(
     num_cases: u32,
     max_steps: usize,
 ) -> PropTestResult {
-    let model = build_model_from_ioa(ioa_toml, 2);
+    let model = build_model_from_ioa(ioa_toml, 2)
+        .expect("proptest: IOA spec should have been validated before property testing");
     run_prop_tests_with_shrinking_on_model(&model, num_cases, max_steps)
 }
 

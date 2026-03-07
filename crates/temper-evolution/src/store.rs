@@ -8,115 +8,108 @@
 //!
 //! Production deployments would back this with Git + Postgres.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use serde::Serialize;
+
 use crate::records::*;
+
+/// Save a map of serializable records to a sub-directory as individual JSON files.
+fn save_records_to_subdir<T: Serialize>(
+    dir: &Path,
+    sub_name: &str,
+    records: &BTreeMap<RecordId, T>,
+) -> std::io::Result<()> {
+    let sub_dir = dir.join(sub_name);
+    fs::create_dir_all(&sub_dir)?;
+    for (id, record) in records {
+        let path = sub_dir.join(format!("{id}.json"));
+        let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
+        fs::write(&path, json)?;
+    }
+    Ok(())
+}
+
+/// Generate insert and get methods for a record type stored in a named field.
+macro_rules! record_accessors {
+    ($field:ident, $record_ty:ty, $insert_fn:ident, $insert_doc:literal, $get_fn:ident, $get_doc:literal) => {
+        #[doc = $insert_doc]
+        pub fn $insert_fn(&self, record: $record_ty) {
+            self.inner
+                .write()
+                .unwrap() // ci-ok: infallible lock
+                .$field
+                .insert(record.header.id.clone(), record);
+        }
+
+        #[doc = $get_doc]
+        pub fn $get_fn(&self, id: &str) -> Option<$record_ty> {
+            self.inner.read().unwrap().$field.get(id).cloned() // ci-ok: infallible lock
+        }
+    };
+}
 
 /// Stores evolution records. In-memory implementation for now.
 /// Production: Git (source of truth) + Postgres (indexed for querying).
+///
+/// **Deprecated**: Use IOA entity dispatch to the `temper-system` tenant instead (ADR-0025).
+#[deprecated(note = "Use IOA entity dispatch to temper-system tenant (ADR-0025)")]
 #[derive(Clone)]
 pub struct RecordStore {
     inner: Arc<RwLock<StoreInner>>,
 }
 
 struct StoreInner {
-    observations: HashMap<RecordId, ObservationRecord>,
-    problems: HashMap<RecordId, ProblemRecord>,
-    analyses: HashMap<RecordId, AnalysisRecord>,
-    decisions: HashMap<RecordId, DecisionRecord>,
-    insights: HashMap<RecordId, InsightRecord>,
+    observations: BTreeMap<RecordId, ObservationRecord>,
+    problems: BTreeMap<RecordId, ProblemRecord>,
+    analyses: BTreeMap<RecordId, AnalysisRecord>,
+    decisions: BTreeMap<RecordId, DecisionRecord>,
+    insights: BTreeMap<RecordId, InsightRecord>,
 }
 
+#[allow(deprecated)]
 impl RecordStore {
     /// Create a new, empty record store.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(StoreInner {
-                observations: HashMap::new(),
-                problems: HashMap::new(),
-                analyses: HashMap::new(),
-                decisions: HashMap::new(),
-                insights: HashMap::new(),
+                observations: BTreeMap::new(),
+                problems: BTreeMap::new(),
+                analyses: BTreeMap::new(),
+                decisions: BTreeMap::new(),
+                insights: BTreeMap::new(),
             })),
         }
     }
 
-    // --- Insert ---
-
-    /// Insert an observation record into the store.
-    pub fn insert_observation(&self, record: ObservationRecord) {
-        self.inner
-            .write()
-            .unwrap() // ci-ok: infallible lock
-            .observations
-            .insert(record.header.id.clone(), record);
-    }
-
-    /// Insert a problem record into the store.
-    pub fn insert_problem(&self, record: ProblemRecord) {
-        self.inner
-            .write()
-            .unwrap() // ci-ok: infallible lock
-            .problems
-            .insert(record.header.id.clone(), record);
-    }
-
-    /// Insert an analysis record into the store.
-    pub fn insert_analysis(&self, record: AnalysisRecord) {
-        self.inner
-            .write()
-            .unwrap() // ci-ok: infallible lock
-            .analyses
-            .insert(record.header.id.clone(), record);
-    }
-
-    /// Insert a decision record into the store.
-    pub fn insert_decision(&self, record: DecisionRecord) {
-        self.inner
-            .write()
-            .unwrap() // ci-ok: infallible lock
-            .decisions
-            .insert(record.header.id.clone(), record);
-    }
-
-    /// Insert an insight record into the store.
-    pub fn insert_insight(&self, record: InsightRecord) {
-        self.inner
-            .write()
-            .unwrap() // ci-ok: infallible lock
-            .insights
-            .insert(record.header.id.clone(), record);
-    }
-
-    // --- Query ---
-
-    /// Retrieve an observation record by ID.
-    pub fn get_observation(&self, id: &str) -> Option<ObservationRecord> {
-        self.inner.read().unwrap().observations.get(id).cloned() // ci-ok: infallible lock
-    }
-
-    /// Retrieve a problem record by ID.
-    pub fn get_problem(&self, id: &str) -> Option<ProblemRecord> {
-        self.inner.read().unwrap().problems.get(id).cloned() // ci-ok: infallible lock
-    }
-
-    /// Retrieve an analysis record by ID.
-    pub fn get_analysis(&self, id: &str) -> Option<AnalysisRecord> {
-        self.inner.read().unwrap().analyses.get(id).cloned() // ci-ok: infallible lock
-    }
-
-    /// Retrieve a decision record by ID.
-    pub fn get_decision(&self, id: &str) -> Option<DecisionRecord> {
-        self.inner.read().unwrap().decisions.get(id).cloned() // ci-ok: infallible lock
-    }
-
-    /// Retrieve an insight record by ID.
-    pub fn get_insight(&self, id: &str) -> Option<InsightRecord> {
-        self.inner.read().unwrap().insights.get(id).cloned() // ci-ok: infallible lock
-    }
+    record_accessors!(
+        observations, ObservationRecord,
+        insert_observation, "Insert an observation record into the store.",
+        get_observation, "Retrieve an observation record by ID."
+    );
+    record_accessors!(
+        problems, ProblemRecord,
+        insert_problem, "Insert a problem record into the store.",
+        get_problem, "Retrieve a problem record by ID."
+    );
+    record_accessors!(
+        analyses, AnalysisRecord,
+        insert_analysis, "Insert an analysis record into the store.",
+        get_analysis, "Retrieve an analysis record by ID."
+    );
+    record_accessors!(
+        decisions, DecisionRecord,
+        insert_decision, "Insert a decision record into the store.",
+        get_decision, "Retrieve a decision record by ID."
+    );
+    record_accessors!(
+        insights, InsightRecord,
+        insert_insight, "Insert an insight record into the store.",
+        get_insight, "Retrieve an insight record by ID."
+    );
 
     /// Get all open observations (not yet resolved).
     pub fn open_observations(&self) -> Vec<ObservationRecord> {
@@ -167,51 +160,16 @@ impl RecordStore {
     /// Creates subdirectories for each record type.
     pub fn save_to_directory(&self, dir: &Path) -> std::io::Result<()> {
         let inner = self.inner.read().unwrap();
-
-        let sub_dir = dir.join("observations");
-        fs::create_dir_all(&sub_dir)?;
-        for (id, record) in &inner.observations {
-            let path = sub_dir.join(format!("{id}.json"));
-            let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
-            fs::write(&path, json)?;
-        }
-
-        let sub_dir = dir.join("problems");
-        fs::create_dir_all(&sub_dir)?;
-        for (id, record) in &inner.problems {
-            let path = sub_dir.join(format!("{id}.json"));
-            let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
-            fs::write(&path, json)?;
-        }
-
-        let sub_dir = dir.join("analyses");
-        fs::create_dir_all(&sub_dir)?;
-        for (id, record) in &inner.analyses {
-            let path = sub_dir.join(format!("{id}.json"));
-            let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
-            fs::write(&path, json)?;
-        }
-
-        let sub_dir = dir.join("decisions");
-        fs::create_dir_all(&sub_dir)?;
-        for (id, record) in &inner.decisions {
-            let path = sub_dir.join(format!("{id}.json"));
-            let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
-            fs::write(&path, json)?;
-        }
-
-        let sub_dir = dir.join("insights");
-        fs::create_dir_all(&sub_dir)?;
-        for (id, record) in &inner.insights {
-            let path = sub_dir.join(format!("{id}.json"));
-            let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;
-            fs::write(&path, json)?;
-        }
-
+        save_records_to_subdir(dir, "observations", &inner.observations)?;
+        save_records_to_subdir(dir, "problems", &inner.problems)?;
+        save_records_to_subdir(dir, "analyses", &inner.analyses)?;
+        save_records_to_subdir(dir, "decisions", &inner.decisions)?;
+        save_records_to_subdir(dir, "insights", &inner.insights)?;
         Ok(())
     }
 }
 
+#[allow(deprecated)]
 impl Default for RecordStore {
     fn default() -> Self {
         Self::new()
@@ -219,6 +177,7 @@ impl Default for RecordStore {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -262,7 +221,7 @@ mod tests {
                 intent: "low priority".into(),
                 volume: 10,
                 success_rate: 0.5,
-                trend: "stable".into(),
+                trend: Trend::Stable,
                 growth_rate: None,
             },
             recommendation: "fix later".into(),
@@ -283,7 +242,7 @@ mod tests {
                 intent: "high priority".into(),
                 volume: 500,
                 success_rate: 0.1,
-                trend: "growing".into(),
+                trend: Trend::Growing,
                 growth_rate: Some(0.2),
             },
             recommendation: "build now".into(),
@@ -342,7 +301,7 @@ mod tests {
                 intent: "test insight".into(),
                 volume: 100,
                 success_rate: 0.5,
-                trend: "stable".into(),
+                trend: Trend::Stable,
                 growth_rate: None,
             },
             recommendation: "do something".into(),

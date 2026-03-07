@@ -12,6 +12,7 @@ pub mod automaton;
 pub mod cross_invariant;
 pub mod csdl;
 pub mod model;
+pub mod naming;
 
 /// TLA+ specification extractor (legacy — prefer [`automaton`] for new specs).
 pub mod tlaplus;
@@ -28,4 +29,5 @@ pub use cross_invariant::{
 };
 pub use csdl::{CsdlDocument, CsdlParseError, parse_csdl};
 pub use model::{SpecModel, SpecSource, build_spec_model, build_spec_model_mixed};
+pub use naming::{to_pascal_case, to_snake_case};
 pub use tlaplus::{Invariant, StateMachine, Transition, extract_state_machine};

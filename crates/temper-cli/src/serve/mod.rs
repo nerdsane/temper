@@ -7,11 +7,11 @@
 //! Specs are loaded immediately (design-time observation) and verification
 //! runs in the background so the observe UI can stream progress.
 
+mod bootstrap;
 mod loader;
 mod storage;
 
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -25,23 +25,15 @@ use temper_platform::optimization::run_optimization_cycle;
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
-use temper_server::event_store::ServerEventStore;
 use temper_server::registry::{
-    EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
+    EntityLevelSummary, EntityVerificationResult, VerificationStatus,
 };
 use temper_server::state::DesignTimeEvent;
-use temper_server::webhooks::WebhookDispatcher;
-use temper_store_redis::RedisEventStore;
-use temper_store_turso::{TenantStoreRouter, TursoEventStore};
 use temper_verify::cascade::VerificationCascade;
 
 use crate::StorageBackend;
 
-use loader::{load_into_registry, read_ioa_sources};
-use storage::{
-    connect_postgres_store, load_registry_from_postgres, load_registry_from_turso,
-    redact_connection_url, upsert_loaded_specs_to_postgres, upsert_loaded_specs_to_turso,
-};
+use loader::read_ioa_sources;
 
 /// Parsed specs loaded from disk for a tenant.
 struct LoadedTenantSpecs {
@@ -57,6 +49,11 @@ struct LoadedTenantSpecs {
 /// and results stream via SSE (design-time observation).
 ///
 /// `apps` is a list of `(tenant_name, specs_dir)` pairs. Can be empty (no user apps).
+///
+/// Startup is split into explicit phases (see [`bootstrap`] module):
+/// 1. Storage init  2. Registry build  3. Auto-reload  4. Webhooks
+/// 5. Persistence wiring  6. Entity hydration  7. Policy/WASM recovery
+/// 8. Tenant bootstrap  9. Server start
 pub async fn run(
     port: u16,
     apps: Vec<(String, String)>,
@@ -64,135 +61,16 @@ pub async fn run(
     storage_explicit: bool,
     observe: bool,
 ) -> Result<()> {
-    // Initialize observability (OTEL export if OTLP_ENDPOINT or LOGFIRE_TOKEN
-    // is set, otherwise stderr-only logging).
     let _otel_guard = init_observability("temper-platform");
-
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
-    // Select and initialize storage backend.
-    let mut pg_pool: Option<sqlx::PgPool> = None;
-    let event_store: Option<ServerEventStore> = match storage {
-        StorageBackend::Postgres => {
-            if let Ok(database_url) = std::env::var("DATABASE_URL") {
-                let (store, pool) = connect_postgres_store(&database_url).await?;
-                println!(
-                    "  Storage: postgres ({})",
-                    redact_connection_url(&database_url)
-                );
-                pg_pool = Some(pool);
-                Some(store)
-            } else if storage_explicit {
-                anyhow::bail!("DATABASE_URL is required when --storage postgres is selected");
-            } else {
-                println!("  Storage: memory (in-memory only)");
-                println!("  No DATABASE_URL — running in-memory only (state not persisted).");
-                None
-            }
-        }
-        StorageBackend::Turso => {
-            // Multi-tenant cloud mode: TURSO_PLATFORM_URL points at the shared platform DB.
-            if let Ok(platform_url) = std::env::var("TURSO_PLATFORM_URL") {
-                let platform_token = std::env::var("TURSO_PLATFORM_AUTH_TOKEN").ok();
-                let local_base_dir = std::env::var("TURSO_LOCAL_BASE_DIR").ok().or_else(|| {
-                    let home = std::env::var("HOME").ok()?;
-                    Some(format!("{home}/.local/share/temper/tenants"))
-                });
+    // Phase 1: Storage backend
+    let (pg_pool, event_store) = bootstrap::init_storage(storage, storage_explicit).await?;
 
-                let router = TenantStoreRouter::new(
-                    &platform_url,
-                    platform_token.as_deref(),
-                    local_base_dir,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to create tenant store router: {e}"))?;
+    // Phase 2: Registry (restore + disk apps)
+    let registry = bootstrap::build_registry(pg_pool.as_ref(), &event_store, &apps).await?;
 
-                let tenant_count = router.connected_tenants().await.len();
-                println!(
-                    "  Storage: turso-routed ({platform_url}, {tenant_count} tenants connected)"
-                );
-                Some(ServerEventStore::TenantRouted(router))
-            } else {
-                // Single-DB mode (local dev).
-                let turso_url = match std::env::var("TURSO_URL") {
-                    Ok(url) => url,
-                    Err(_) => {
-                        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                        let db_path = Path::new(&home).join(".local/share/temper/agents.db");
-                        let parent_dir = db_path.parent().context(
-                            "Failed to determine parent directory for default Turso DB path",
-                        )?;
-                        fs::create_dir_all(parent_dir).with_context(|| {
-                            format!(
-                                "Failed to create default Turso DB directory: {}",
-                                parent_dir.display()
-                            )
-                        })?;
-                        format!("file:{}", db_path.display())
-                    }
-                };
-                let turso_token = std::env::var("TURSO_AUTH_TOKEN").ok();
-                let store = TursoEventStore::new(&turso_url, turso_token.as_deref())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to connect to Turso/libSQL: {e}"))?;
-                println!("  Storage: turso ({})", turso_url);
-                Some(ServerEventStore::Turso(store))
-            }
-        }
-        StorageBackend::Redis => {
-            let redis_url = std::env::var("REDIS_URL")
-                .context("REDIS_URL is required when --storage redis is selected")?;
-            let store = RedisEventStore::new(&redis_url)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to connect to Redis: {e}"))?;
-            println!("  Storage: redis ({})", redact_connection_url(&redis_url));
-            Some(ServerEventStore::Redis(store))
-        }
-    };
-
-    // Build initial registry from Postgres or Turso (recovery), then override with disk apps.
-    let mut registry = SpecRegistry::new();
-    if let Some(pool) = pg_pool.as_ref() {
-        let restored = load_registry_from_postgres(&mut registry, pool).await?;
-        if restored > 0 {
-            println!("  Restored {restored} specs from Postgres.");
-        }
-    } else if let Some(ServerEventStore::Turso(ref turso)) = event_store {
-        let restored = load_registry_from_turso(&mut registry, turso).await?;
-        if restored > 0 {
-            println!("  Restored {restored} specs from Turso.");
-        }
-    } else if let Some(ServerEventStore::TenantRouted(ref router)) = event_store {
-        let mut total_restored = 0usize;
-        // Restore from platform store (system specs).
-        let restored = load_registry_from_turso(&mut registry, router.platform_store()).await?;
-        total_restored += restored;
-        // Restore from each connected tenant store.
-        for tenant_id in router.connected_tenants().await {
-            if let Ok(store) = router.store_for_tenant(&tenant_id).await {
-                let restored = load_registry_from_turso(&mut registry, &store).await?;
-                total_restored += restored;
-            }
-        }
-        if total_restored > 0 {
-            println!("  Restored {total_restored} specs from Turso (routed).");
-        }
-    }
-
-    for (tenant, specs_dir) in &apps {
-        println!("  Loading app: {tenant} from {specs_dir}");
-        let loaded = load_into_registry(&mut registry, specs_dir, tenant)?;
-        if let Some(pool) = pg_pool.as_ref() {
-            upsert_loaded_specs_to_postgres(pool, tenant, &loaded).await?;
-        } else if let Some(ServerEventStore::Turso(ref turso)) = event_store {
-            upsert_loaded_specs_to_turso(turso, tenant, &loaded).await?;
-        } else if let Some(ServerEventStore::TenantRouted(ref router)) = event_store
-            && let Ok(store) = router.store_for_tenant(tenant).await
-        {
-            upsert_loaded_specs_to_turso(&store, tenant, &loaded).await?;
-        }
-    }
-
+    // Assemble platform state
     let mut state = PlatformState::with_registry(registry, api_key);
     state.api_token = std::env::var("TEMPER_API_KEY").ok();
     if state.api_token.is_some() {
@@ -202,70 +80,18 @@ pub async fn run(
     let data_dir = Path::new(&home).join(".local/share/temper");
     state.server.data_dir = data_dir.clone();
 
-    let specs_registry_path = data_dir.join("specs-registry.json");
-    let mut auto_reloaded = 0usize;
-    if let Ok(content) = fs::read_to_string(&specs_registry_path)
-        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
-        && let Some(entries) = value.as_object()
-    {
-        for (tenant, specs_dir) in entries {
-            let Some(specs_dir) = specs_dir.as_str() else {
-                continue;
-            };
-
-            let loaded = {
-                let mut guard = state.registry.write().unwrap(); // ci-ok: infallible lock
-                load_into_registry(&mut guard, specs_dir, tenant)
-            };
-
-            match loaded {
-                Ok(_) => {
-                    auto_reloaded += 1;
-                }
-                Err(e) => {
-                    eprintln!(
-                        "  Warning: failed to auto-reload app {tenant} from {specs_dir}: {e}"
-                    );
-                }
-            }
-        }
-    }
+    // Phase 3: Auto-reload previously registered specs
+    let auto_reloaded = bootstrap::auto_reload_specs(&state, &data_dir);
     println!(
         "  Auto-reloaded {auto_reloaded} specs entries from {}",
-        specs_registry_path.display()
+        data_dir.join("specs-registry.json").display()
     );
-
-    // Build reaction dispatcher from tenant reaction specs.
     state.server.rebuild_reaction_dispatcher();
 
-    // Load webhooks.toml from each app directory and build a merged dispatcher.
-    {
-        let mut all_configs = Vec::new();
-        for (tenant, specs_dir) in &apps {
-            let path = Path::new(specs_dir).join("webhooks.toml");
-            if path.exists() {
-                match fs::read_to_string(&path) {
-                    Ok(source) => match WebhookDispatcher::from_toml(&source) {
-                        Ok(d) => {
-                            println!("  Loaded webhooks.toml for {tenant}");
-                            all_configs.extend(d.configs().iter().cloned());
-                        }
-                        Err(e) => {
-                            eprintln!("  Warning: failed to parse webhooks.toml for {tenant}: {e}")
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("  Warning: failed to read webhooks.toml for {tenant}: {e}")
-                    }
-                }
-            }
-        }
-        if !all_configs.is_empty() {
-            state.server.webhook_dispatcher = Some(Arc::new(WebhookDispatcher::new(all_configs)));
-        }
-    }
+    // Phase 4: Webhooks
+    state.server.webhook_dispatcher = bootstrap::load_webhooks(&apps);
 
-    // Wire up persistence if available.
+    // Phase 5: Persistence wiring
     if let Some(store) = event_store {
         if let Some(pool) = store.postgres_pool().cloned() {
             state.server.pg_record_store = Some(Arc::new(PostgresRecordStore::new(pool)));
@@ -273,102 +99,18 @@ pub async fn run(
         state.server.event_store = Some(Arc::new(store));
     }
 
-    // Hydrate entities from the event store for each app tenant.
-    if state.server.event_store.is_some() {
-        for (tenant, _dir) in &apps {
-            let tenant_id = temper_runtime::tenant::TenantId::new(tenant.as_str());
-            state.server.hydrate_from_store(&tenant_id).await;
-        }
-        // In TenantRouted mode, also hydrate all registered tenants.
-        if let Some(ref store) = state.server.event_store
-            && let Some(router) = store.tenant_router()
-        {
-            for tenant in router.connected_tenants().await {
-                let tenant_id = TenantId::new(&tenant);
-                state.server.hydrate_from_store(&tenant_id).await;
-            }
-        }
-    }
+    // Phase 6: Entity hydration
+    bootstrap::hydrate_entities(&state, &apps).await;
 
-    // Trajectory data is now read directly from Turso (single source of truth).
+    // Phase 7: Recovery (Cedar policies + WASM modules)
+    bootstrap::recover_cedar_policies(&state).await;
+    bootstrap::recover_wasm_modules(&state).await;
 
-    // Pending decisions are now read directly from Turso (single source of truth).
-
-    // Hydrate Cedar policies from Turso (single-DB or routed).
-    if let Some(ref store) = state.server.event_store {
-        let mut all_policy_rows: Vec<(String, String)> = Vec::new();
-
-        if let Some(turso) = store.turso_store() {
-            // Single-DB mode.
-            match turso.load_tenant_policies().await {
-                Ok(rows) => all_policy_rows.extend(rows),
-                Err(e) => {
-                    eprintln!("  Warning: failed to load Cedar policies from Turso: {e}");
-                }
-            }
-        } else if let Some(router) = store.tenant_router() {
-            // Routed mode: load from platform store + each tenant store.
-            match router.platform_store().load_tenant_policies().await {
-                Ok(rows) => all_policy_rows.extend(rows),
-                Err(e) => {
-                    eprintln!("  Warning: failed to load Cedar policies from platform store: {e}");
-                }
-            }
-            for tenant_id in router.connected_tenants().await {
-                if let Ok(turso) = router.store_for_tenant(&tenant_id).await {
-                    match turso.load_tenant_policies().await {
-                        Ok(rows) => all_policy_rows.extend(rows),
-                        Err(e) => {
-                            eprintln!(
-                                "  Warning: failed to load Cedar policies for tenant {tenant_id}: {e}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        if !all_policy_rows.is_empty() {
-            let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-            for (tenant, policy_text) in &all_policy_rows {
-                policies.insert(tenant.clone(), policy_text.clone());
-            }
-            let mut combined = String::new();
-            for text in policies.values() {
-                combined.push_str(text);
-                combined.push('\n');
-            }
-            if let Err(e) = state.server.authz.reload_policies(&combined) {
-                eprintln!("  Warning: failed to reload Cedar policies: {e}");
-            } else {
-                println!(
-                    "  Restored Cedar policies for {} tenants.",
-                    all_policy_rows.len()
-                );
-            }
-        }
-    }
-
-    // Recover WASM modules from persistent backend (Postgres or Turso).
-    if state.server.event_store.is_some() {
-        match state.server.load_wasm_modules().await {
-            Ok(count) if count > 0 => {
-                println!("  Recovered {count} WASM modules from database.");
-            }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("  Warning: failed to recover WASM modules: {e}");
-            }
-        }
-
-        // WASM invocations are now read directly from Turso (single source of truth).
-    }
-
+    // Startup banner
     println!("Starting Temper platform server...");
     println!();
     println!("  Temper Data API: http://localhost:{port}/tdata");
     println!();
-
     for (tenant, dir) in &apps {
         println!("  App: {tenant} ({dir})");
     }
@@ -377,26 +119,10 @@ pub async fn run(
         println!();
     }
 
-    // Bootstrap the system tenant (Project, Tenant, CatalogEntry, etc.)
-    temper_platform::bootstrap_system_tenant(&state);
+    // Phase 8: Bootstrap system + agent tenants
+    bootstrap::bootstrap_tenants(&state, &apps).await;
 
-    // Bootstrap agent specs (Agent, Plan, Task, ToolCall) for the default tenant.
-    temper_platform::bootstrap_agent_specs(&state, "default");
-
-    // Also bootstrap agent specs for each --app tenant so agents work within user apps.
-    for (tenant, _dir) in &apps {
-        temper_platform::bootstrap_agent_specs(&state, tenant);
-    }
-
-    // In TenantRouted mode, bootstrap agent specs for all registered tenants.
-    if let Some(ref store) = state.server.event_store
-        && let Some(tenant_router) = store.tenant_router()
-    {
-        for tenant in tenant_router.connected_tenants().await {
-            temper_platform::bootstrap_agent_specs(&state, &tenant);
-        }
-    }
-
+    // Phase 9: Bind, start background tasks, serve
     let router = build_platform_router(state.clone());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
@@ -407,13 +133,9 @@ pub async fn run(
         .port();
     let _ = state.server.listen_port.set(actual_port);
 
-    // Optionally start the Observe UI (Next.js dev server).
     if observe {
         spawn_observe_ui(actual_port);
     }
-
-    // Spawn background verification AFTER the server is listening,
-    // so the observe UI can connect and stream results.
     for (tenant, dir) in &apps {
         spawn_background_verification(&state, dir, tenant).await;
     }

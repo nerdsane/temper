@@ -116,3 +116,91 @@ pub fn generate_state_machine(entity_name: &str, sm: &StateMachine) -> String {
 
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use temper_spec::tlaplus::{Invariant, Transition};
+
+    fn test_sm() -> StateMachine {
+        StateMachine {
+            module_name: "OrderSpec".to_string(),
+            states: vec!["Draft".to_string(), "Submitted".to_string(), "Done".to_string()],
+            transitions: vec![
+                Transition {
+                    name: "Submit".to_string(),
+                    from_states: vec!["Draft".to_string()],
+                    to_state: Some("Submitted".to_string()),
+                    guard_expr: String::new(),
+                    effect_expr: String::new(),
+                    has_parameters: false,
+                },
+                Transition {
+                    name: "Complete".to_string(),
+                    from_states: vec!["Submitted".to_string()],
+                    to_state: Some("Done".to_string()),
+                    guard_expr: String::new(),
+                    effect_expr: String::new(),
+                    has_parameters: false,
+                },
+            ],
+            invariants: vec![Invariant {
+                name: "DraftBeforeSubmit".to_string(),
+                expr: String::new(),
+            }],
+            liveness_properties: vec![],
+            constants: vec![],
+            variables: vec![],
+        }
+    }
+
+    #[test]
+    fn generates_state_enum() {
+        let code = generate_state_machine("Order", &test_sm());
+        assert!(code.contains("pub enum OrderStatus {"));
+        assert!(code.contains("    Draft,"));
+        assert!(code.contains("    Submitted,"));
+        assert!(code.contains("    Done,"));
+    }
+
+    #[test]
+    fn generates_display_impl() {
+        let code = generate_state_machine("Order", &test_sm());
+        assert!(code.contains("impl std::fmt::Display for OrderStatus"));
+        assert!(code.contains("Self::Draft => write!(f, \"Draft\")"));
+    }
+
+    #[test]
+    fn generates_transition_table() {
+        let code = generate_state_machine("Order", &test_sm());
+        assert!(code.contains("pub struct OrderTransitions;"));
+        assert!(code.contains("pub fn can_transition(current: OrderStatus, action: &str) -> bool"));
+        assert!(code.contains("(OrderStatus::Draft, \"Submit\") => true,"));
+        assert!(code.contains("(OrderStatus::Submitted, \"Complete\") => true,"));
+        assert!(code.contains("_ => false,"));
+    }
+
+    #[test]
+    fn generates_target_state() {
+        let code = generate_state_machine("Order", &test_sm());
+        assert!(code.contains("pub fn target_state(action: &str) -> Option<OrderStatus>"));
+        assert!(code.contains("\"Submit\" => Some(OrderStatus::Submitted),"));
+        assert!(code.contains("\"Complete\" => Some(OrderStatus::Done),"));
+    }
+
+    #[test]
+    fn generates_invariant_names() {
+        let code = generate_state_machine("Order", &test_sm());
+        assert!(code.contains("pub struct OrderInvariants;"));
+        assert!(code.contains("pub fn invariant_names()"));
+        assert!(code.contains("\"DraftBeforeSubmit\""));
+    }
+
+    #[test]
+    fn no_invariants_skips_section() {
+        let mut sm = test_sm();
+        sm.invariants.clear();
+        let code = generate_state_machine("Order", &sm);
+        assert!(!code.contains("OrderInvariants"));
+    }
+}

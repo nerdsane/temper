@@ -7,13 +7,13 @@
 
 use std::sync::Arc;
 
-use crate::dispatch::AgentContext;
+use crate::request_context::AgentContext;
 use temper_runtime::tenant::TenantId;
 use tracing;
 use tracing::instrument;
 
 use super::registry::ReactionRegistry;
-use super::types::{MAX_REACTION_DEPTH, ReactionResult, TargetResolver};
+use super::types::{MAX_REACTION_DEPTH, ReactionResult};
 
 /// Async reaction dispatcher for production use.
 ///
@@ -73,7 +73,7 @@ impl ReactionDispatcher {
 
         for rule in rules {
             let target_entity_id =
-                match resolve_target_id_async(&rule.resolve_target, entity_id, fields) {
+                match super::resolver::resolve_target_id(&rule.resolve_target, entity_id, fields) {
                     Some(id) => id,
                     None => {
                         tracing::warn!(
@@ -111,7 +111,7 @@ impl ReactionDispatcher {
                     &target_entity_id,
                     &rule.then.action,
                     rule.then.params.clone(),
-                    &AgentContext::default(),
+                    &AgentContext::system(),
                     false,
                 )
                 .await;
@@ -157,7 +157,7 @@ impl ReactionDispatcher {
                         rule_name: rule.name.clone(),
                         success: false,
                         target_status: None,
-                        error: Some(e),
+                        error: Some(e.to_string()),
                         depth,
                     });
                 }
@@ -168,23 +168,4 @@ impl ReactionDispatcher {
     }
 }
 
-/// Resolve the target entity ID (same logic as sim, but standalone for the async path).
-fn resolve_target_id_async(
-    resolver: &TargetResolver,
-    source_entity_id: &str,
-    fields: &serde_json::Value,
-) -> Option<String> {
-    match resolver {
-        TargetResolver::Field { field } => fields
-            .get(field)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        TargetResolver::SameId => Some(source_entity_id.to_string()),
-        TargetResolver::Static { entity_id } => Some(entity_id.clone()),
-        TargetResolver::CreateIfMissing { id_field } => fields
-            .get(id_field)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| Some(format!("{source_entity_id}-derived"))),
-    }
-}
+// Target resolver logic consolidated in super::resolver::resolve_target_id.
