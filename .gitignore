@@ -61,3 +61,5 @@ scripts/generate-graph-json.js
 .code-review-pass
 .dst-review-pass
 .vercel
+.desloppify/
+scorecard.png
