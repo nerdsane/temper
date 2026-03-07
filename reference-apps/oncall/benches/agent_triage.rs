@@ -57,6 +57,7 @@ fn build_inmemory_state(name: &str) -> ServerState {
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
     let system = ActorSystem::new(name);
     ServerState::with_specs(system, csdl, CSDL_XML.to_string(), oncall_sources())
+        .expect("oncall specs should parse")
 }
 
 fn build_pg_state(rt: &tokio::runtime::Runtime, name: &str) -> Option<ServerState> {
@@ -76,13 +77,10 @@ fn build_pg_state(rt: &tokio::runtime::Runtime, name: &str) -> Option<ServerStat
     let store = PostgresEventStore::new(pool);
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
     let system = ActorSystem::new(name);
-    Some(ServerState::with_persistence(
-        system,
-        csdl,
-        CSDL_XML.to_string(),
-        oncall_sources(),
-        store,
-    ))
+    Some(
+        ServerState::with_persistence(system, csdl, CSDL_XML.to_string(), oncall_sources(), store)
+            .expect("oncall specs should parse"),
+    )
 }
 
 /// POST a bound action through the OData API and assert success.
