@@ -244,10 +244,12 @@ pub(crate) async fn handle_load_inline(
         })?;
     }
 
-    // Delegate to load-dir logic
+    // Delegate to load-dir logic with merge=true so agent-submitted specs
+    // are added to the existing tenant config instead of replacing it.
     let dir_request = LoadDirRequest {
         tenant,
         specs_dir: tmp_dir.to_string_lossy().to_string(),
+        merge: true,
     };
     handle_load_dir(State(state), Json(dir_request)).await
 }

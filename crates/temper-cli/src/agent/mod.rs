@@ -166,7 +166,9 @@ IOA Spec Format (TOML):
   when = [\"Done\"]
   assert = \"no_further_transitions\"
 
-CSDL Format (XML):
+CSDL Format (XML) — generate a NEW model.csdl.xml for YOUR entities only. \
+  Do NOT copy the existing system CSDL. The platform merges your CSDL with \
+  existing entity types automatically.
   <?xml version=\"1.0\" encoding=\"utf-8\"?>
   <edmx:Edmx Version=\"4.0\" xmlns:edmx=\"http://docs.oasis-open.org/odata/ns/edmx\">
     <edmx:DataServices>

@@ -202,6 +202,7 @@ pub(super) fn load_into_registry(
             &ioa_pairs,
             reactions,
             cross_invariants_toml.clone(),
+            false,
         )
         .with_context(|| format!("Failed to register tenant '{tenant}'"))?;
 

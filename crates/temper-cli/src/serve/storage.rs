@@ -243,6 +243,7 @@ pub(super) async fn load_registry_from_postgres(
                 &ioa_pairs,
                 Vec::new(),
                 cross_invariants_toml,
+                false,
             )
             .with_context(|| format!("Failed to restore tenant '{tenant}' into registry"))?;
         let tenant_id = TenantId::new(&tenant);
@@ -318,6 +319,7 @@ pub(super) async fn load_registry_from_turso(
                 &ioa_pairs,
                 Vec::new(),
                 cross_invariants_toml,
+                false,
             )
             .with_context(|| format!("Failed to restore tenant '{tenant}' into registry"))?;
         let tenant_id = TenantId::new(&tenant);
