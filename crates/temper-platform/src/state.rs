@@ -33,6 +33,7 @@ pub struct PlatformState {
     /// Broadcast sender for platform events (deploy, verify, evolution, etc.).
     pub broadcast_tx: broadcast::Sender<PlatformEvent>,
     /// Evolution record store.
+    #[allow(deprecated)] // ADR-0025 Phase 4
     pub record_store: RecordStore,
     /// Anthropic API key for Claude-powered evolution agents.
     pub api_key: Option<String>,
@@ -45,7 +46,7 @@ pub struct PlatformState {
 /// Default broadcast channel capacity.
 const BROADCAST_CAPACITY: usize = 256;
 
-// RecordStore retained during migration to IOA entities (ADR-0025)
+#[allow(deprecated)] // RecordStore retained during migration to IOA entities (ADR-0025)
 impl PlatformState {
     /// Create a new platform state with an empty registry.
     pub fn new(api_key: Option<String>) -> Self {
