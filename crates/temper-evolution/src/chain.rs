@@ -122,6 +122,7 @@ pub fn validate_chain(store: &RecordStore, leaf_id: &str) -> ChainValidation {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // Tests exercise RecordStore until ADR-0025 migration completes
 mod tests {
     use super::*;
 
