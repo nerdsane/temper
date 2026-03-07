@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn json_float_to_monty() {
-        assert_eq!(json_to_monty_object(&json!(3.14)), MontyObject::Float(3.14));
+        assert_eq!(json_to_monty_object(&json!(1.5)), MontyObject::Float(1.5));
     }
 
     #[test]

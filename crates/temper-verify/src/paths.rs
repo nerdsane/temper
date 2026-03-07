@@ -310,7 +310,6 @@ mod tests {
         let config = PathExtractionConfig {
             target_states: vec!["Delivered".to_string()],
             max_path_length: 2,
-            ..Default::default()
         };
         let result = extract_paths(&m, &config);
 

@@ -219,7 +219,7 @@ mod tests {
             &mut s,
             "Act",
         );
-        assert_eq!(s.booleans["done"], true);
+        assert!(s.booleans["done"]);
         apply_effects(
             &[ModelEffect::SetBool {
                 var: "done".into(),
@@ -228,7 +228,7 @@ mod tests {
             &mut s,
             "Act",
         );
-        assert_eq!(s.booleans["done"], false);
+        assert!(!s.booleans["done"]);
     }
 
     #[test]
