@@ -2,7 +2,7 @@
 //!
 //! Provides JSON/Monty conversion, helper utilities, HTTP dispatch for
 //! `temper.*` methods, and a generic sandbox runner. Used by both
-//! `temper-mcp` and `temper-agent-runtime`.
+//! `temper-mcp`.
 
 pub mod convert;
 pub mod dispatch;

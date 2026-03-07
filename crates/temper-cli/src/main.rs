@@ -3,7 +3,6 @@
 //! Provides commands for parsing specifications, generating code,
 //! running model checks, and managing Temper projects.
 
-mod agent;
 mod codegen;
 mod decide;
 mod init;
@@ -83,35 +82,6 @@ enum Commands {
         #[arg(long, default_value = "default")]
         tenant: String,
     },
-    /// Run an autonomous agent on Temper entities
-    Agent {
-        /// Port where Temper HTTP server is running
-        #[arg(short, long, default_value = "3000")]
-        port: u16,
-        /// Tenant name
-        #[arg(short, long, default_value = "default")]
-        tenant: String,
-        /// Agent goal (omit for interactive REPL)
-        #[arg(short, long)]
-        goal: Option<String>,
-        /// Agent role
-        #[arg(short, long, default_value = "developer")]
-        role: String,
-        /// LLM model to use
-        #[arg(short = 'm', long, default_value = "claude-sonnet-4-20250514")]
-        model: String,
-        /// Resume an existing agent by ID
-        #[arg(long)]
-        agent_id: Option<String>,
-        /// LLM provider (anthropic or openai-codex; auto-detected from model name if omitted)
-        #[arg(long)]
-        provider: Option<String>,
-    },
-    /// Authenticate with an LLM provider's subscription plan
-    Login {
-        /// Provider to log in to (currently: openai)
-        provider: String,
-    },
     /// Start the stdio MCP server for Code Mode
     Mcp {
         /// Port where Temper HTTP server is running (omit for self-contained mode)
@@ -168,27 +138,6 @@ async fn main() -> anyhow::Result<()> {
             }
             serve::run(port, apps, storage, storage_explicit, !no_observe).await?
         }
-        Commands::Agent {
-            port,
-            tenant,
-            goal,
-            role,
-            model,
-            agent_id,
-            provider,
-        } => {
-            agent::run(
-                port,
-                &tenant,
-                goal.as_deref(),
-                &role,
-                &model,
-                agent_id,
-                provider.as_deref(),
-            )
-            .await?
-        }
-        Commands::Login { provider } => agent::login::run(&provider).await?,
         Commands::Mcp {
             port,
             app,
@@ -361,114 +310,6 @@ mod tests {
                 ..
             } => {}
             _ => panic!("expected Serve command with default turso storage"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_agent_defaults() {
-        let cli = Cli::parse_from(["temper", "agent", "--goal", "List files"]);
-        match cli.command {
-            Commands::Agent {
-                port,
-                tenant,
-                goal,
-                role,
-                model,
-                agent_id,
-                provider,
-            } => {
-                assert_eq!(port, 3000);
-                assert_eq!(tenant, "default");
-                assert_eq!(goal, Some("List files".to_string()));
-                assert_eq!(role, "developer");
-                assert_eq!(model, "claude-sonnet-4-20250514");
-                assert_eq!(agent_id, None);
-                assert_eq!(provider, None);
-            }
-            _ => panic!("expected Agent command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_agent_interactive() {
-        let cli = Cli::parse_from(["temper", "agent"]);
-        match cli.command {
-            Commands::Agent { goal, .. } => {
-                assert_eq!(goal, None);
-            }
-            _ => panic!("expected Agent command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_agent_with_resume() {
-        let cli = Cli::parse_from([
-            "temper",
-            "agent",
-            "--goal",
-            "Build feature",
-            "--role",
-            "engineer",
-            "--model",
-            "claude-opus-4-20250514",
-            "--agent-id",
-            "abc-123",
-            "--port",
-            "8080",
-            "--tenant",
-            "my-app",
-        ]);
-        match cli.command {
-            Commands::Agent {
-                port,
-                tenant,
-                goal,
-                role,
-                model,
-                agent_id,
-                provider,
-            } => {
-                assert_eq!(port, 8080);
-                assert_eq!(tenant, "my-app");
-                assert_eq!(goal, Some("Build feature".to_string()));
-                assert_eq!(role, "engineer");
-                assert_eq!(model, "claude-opus-4-20250514");
-                assert_eq!(agent_id, Some("abc-123".to_string()));
-                assert_eq!(provider, None);
-            }
-            _ => panic!("expected Agent command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_agent_with_provider() {
-        let cli = Cli::parse_from([
-            "temper",
-            "agent",
-            "--goal",
-            "test",
-            "--provider",
-            "openai-codex",
-            "--model",
-            "gpt-5.1-codex",
-        ]);
-        match cli.command {
-            Commands::Agent {
-                provider, model, ..
-            } => {
-                assert_eq!(provider, Some("openai-codex".to_string()));
-                assert_eq!(model, "gpt-5.1-codex");
-            }
-            _ => panic!("expected Agent command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_login() {
-        let cli = Cli::parse_from(["temper", "login", "openai"]);
-        match cli.command {
-            Commands::Login { provider } => assert_eq!(provider, "openai"),
-            _ => panic!("expected Login command"),
         }
     }
 
