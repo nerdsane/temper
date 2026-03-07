@@ -1,7 +1,7 @@
 //! Generic Monty sandbox runner.
 //!
 //! Provides [`run_sandbox`] which eliminates the duplicated Monty `RunProgress`
-//! loop from both `temper-mcp` and `temper-agent-runtime`.
+//! loop from `temper-mcp`.
 
 use std::collections::BTreeMap;
 use std::future::Future;
