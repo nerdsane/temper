@@ -104,6 +104,34 @@ pub(super) async fn upsert_loaded_specs_to_postgres(
 // The CLI now calls restore_registry_from_postgres / restore_registry_from_turso
 // from the server crate, keeping storage-specific row translation out of the CLI.
 
+/// Upsert loaded specs to Turso (mirrors `upsert_loaded_specs_to_postgres`).
+pub(super) async fn upsert_loaded_specs_to_turso(
+    turso: &TursoEventStore,
+    tenant: &str,
+    loaded: &LoadedTenantSpecs,
+) -> Result<()> {
+    for (entity_type, ioa_source) in &loaded.ioa_sources {
+        turso
+            .upsert_spec(tenant, entity_type, ioa_source, &loaded.csdl_xml)
+            .await
+            .with_context(|| format!("Failed to persist spec {tenant}/{entity_type} in Turso"))?;
+    }
+    if let Some(source) = loaded.cross_invariants_toml.as_deref() {
+        turso
+            .upsert_tenant_constraints(tenant, source)
+            .await
+            .with_context(|| {
+                format!("Failed to persist tenant constraints for {tenant} in Turso")
+            })?;
+    } else {
+        turso
+            .delete_tenant_constraints(tenant)
+            .await
+            .with_context(|| format!("Failed to clear tenant constraints for {tenant} in Turso"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,32 +174,4 @@ mod tests {
     }
 
     // row_to_registry_status tests moved to temper_server::registry_bootstrap::tests
-}
-
-/// Upsert loaded specs to Turso (mirrors `upsert_loaded_specs_to_postgres`).
-pub(super) async fn upsert_loaded_specs_to_turso(
-    turso: &TursoEventStore,
-    tenant: &str,
-    loaded: &LoadedTenantSpecs,
-) -> Result<()> {
-    for (entity_type, ioa_source) in &loaded.ioa_sources {
-        turso
-            .upsert_spec(tenant, entity_type, ioa_source, &loaded.csdl_xml)
-            .await
-            .with_context(|| format!("Failed to persist spec {tenant}/{entity_type} in Turso"))?;
-    }
-    if let Some(source) = loaded.cross_invariants_toml.as_deref() {
-        turso
-            .upsert_tenant_constraints(tenant, source)
-            .await
-            .with_context(|| {
-                format!("Failed to persist tenant constraints for {tenant} in Turso")
-            })?;
-    } else {
-        turso
-            .delete_tenant_constraints(tenant)
-            .await
-            .with_context(|| format!("Failed to clear tenant constraints for {tenant} in Turso"))?;
-    }
-    Ok(())
 }
