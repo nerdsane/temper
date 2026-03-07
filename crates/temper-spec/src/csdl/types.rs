@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn annotation_value_variants() {
         let s = AnnotationValue::String("hello".into());
-        let f = AnnotationValue::Float(3.14);
+        let f = AnnotationValue::Float(2.72);
         let b = AnnotationValue::Bool(true);
         let i = AnnotationValue::Int(42);
         let c = AnnotationValue::Collection(vec!["a".into()]);
