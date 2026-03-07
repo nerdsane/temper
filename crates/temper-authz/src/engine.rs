@@ -214,7 +214,7 @@ impl AuthzEngine {
             Err(e) => {
                 return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
                     "policy lock poisoned: {e}"
-                )))
+                )));
             }
         };
         let response: CedarResponse =

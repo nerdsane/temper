@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use tracing::instrument;
 
-use crate::request_context::AgentContext;
 use crate::entity_actor::{EntityResponse, EntityState};
+use crate::request_context::AgentContext;
 use crate::secrets::template::resolve_secret_templates;
 use crate::state::pending_decisions::PendingDecision;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
@@ -137,13 +137,11 @@ impl crate::state::ServerState {
             agent_id: ctx.agent_ctx.agent_id.clone(),
             session_id: ctx.agent_ctx.session_id.clone(),
             integration_config: match self.secrets_vault.as_ref() {
-                Some(vault) => {
-                    resolve_secret_templates(
-                        &integration.config,
-                        vault,
-                        &ctx.entity_ref.tenant.to_string(),
-                    )
-                }
+                Some(vault) => resolve_secret_templates(
+                    &integration.config,
+                    vault,
+                    &ctx.entity_ref.tenant.to_string(),
+                ),
                 None => integration.config.clone(),
             },
         };
@@ -236,8 +234,7 @@ impl crate::state::ServerState {
         match self.wasm_engine.invoke(hash, &inv_ctx, host, limits).await {
             Ok(result) if result.success => {
                 if let Some(reason) = denial_tracker.take_denial() {
-                    let error_str =
-                        format!("authorization denied for http_call: {reason}");
+                    let error_str = format!("authorization denied for http_call: {reason}");
                     return self
                         .handle_wasm_failure(
                             ctx,

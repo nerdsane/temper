@@ -1,0 +1,363 @@
+{
+  "assessments": {
+    "authorization_consistency": 56.8,
+    "package_organization": 53.6,
+    "test_strategy": 55.0
+  },
+  "dimension_notes": {
+    "package_organization": {
+      "evidence": [
+        "`holistic_context.structure.directory_profiles` shows `crates/temper-server/src/` at 13 files and `crates/temper-server/src/observe/` at 10 files, with mixed routing, persistence adapter, invariant worker, and API concerns still split across top-level/root and feature folders.",
+        "`crates/temper-server/src/events.rs` and `crates/temper-server/src/observe/entities.rs` both implement SSE streaming from `state.event_tx` with overlapping stream/auth/filter responsibilities but live in different structural layers.",
+        "DST tests are grouped by filename prefix (`dst_*`) but remain flat in `crates/temper-server/tests/` (10 files total) rather than a dedicated test package boundary, despite shared fixture coupling via `mod common`."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": ""
+    },
+    "test_strategy": {
+      "evidence": [
+        "`crates/temper-server/src/events.rs` tests only JSON serialization (`entity_state_change_serializes`) and do not exercise `handle_events` auth gate, stream behavior, or lagged-message handling.",
+        "`crates/temper-server/src/observe/evolution/records_list.rs` has no local tests for query filtering, JSON merge behavior, malformed `r.data`, or response shape stability.",
+        "`crates/temper-cli/src/serve/storage.rs` has tests only for URL redaction; critical persistence paths (`connect_postgres_store`, `upsert_loaded_specs_to_postgres`, `upsert_loaded_specs_to_turso`) are untested.",
+        "`crates/temper-cli/src/init/mod.rs` test `test_init_creates_directory_structure` asserts Cargo name contains an absolute temp path, which couples the test to invocation details and misses Cargo package-name compatibility checks."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": ""
+    },
+    "authorization_consistency": {
+      "evidence": [
+        "`crates/temper-server/src/observe/agents.rs:88-92` and `:134-145` gate with `require_observe_auth` but forward user-supplied `params.tenant` directly to Turso queries without tenant scope derivation.",
+        "`crates/temper-server/src/observe/evolution/records_list.rs:26-31` and `:82-85` perform auth checks but query global evolution lists with no tenant filtering argument.",
+        "`crates/temper-server/src/events.rs:49-56` streams every broadcast event after auth check, while sibling stream handler `crates/temper-server/src/observe/entities.rs:187-201` applies `observe_tenant_scope` tenant filtering.",
+        "`crates/temper-server/tests/dst_multi_tenant.rs:3-6` asserts tenant isolation as a core runtime invariant, but observe/event read paths above do not consistently enforce tenant-scoped reads."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": ""
+    }
+  },
+  "findings": [
+    {
+      "dimension": "package_organization",
+      "identifier": "split_sse_boundary_between_root_and_observe",
+      "summary": "SSE event streaming is implemented in two packages with duplicated boundary logic.",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/entities.rs"
+      ],
+      "evidence": [
+        "`events.rs::handle_events` and `observe/entities.rs::handle_event_stream` both subscribe to `state.event_tx`, serialize the same change payloads, and emit `state_change` SSE events.",
+        "Both handlers enforce `read_events` auth but live in separate package layers (`src/` root vs `src/observe/`), causing feature logic to be split by route mount instead of ownership."
+      ],
+      "suggestion": "Staged reorg plan: 1) create `crates/temper-server/src/observe/events/stream.rs` with shared stream construction + filtering helpers, 2) move root `/tdata/$events` handler into a thin adapter module (for example `src/tdata/events.rs`) that calls the shared stream builder, 3) move observe stream handler to call the same shared builder with observe-specific filters, 4) update module wiring in `lib.rs`, `router.rs`, and `observe/mod.rs`, then run `cargo fmt && cargo check -p temper-server && cargo test -p temper-server dst_hotswap dst_lifecycle dst_multi_tenant`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "event_stream_boundary_blur"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "root_infrastructure_stragglers_in_server_src",
+      "summary": "Infrastructure/state internals remain as root-level stragglers instead of domain packages.",
+      "related_files": [
+        "crates/temper-server/src/event_store.rs",
+        "crates/temper-server/src/eventual_invariants.rs"
+      ],
+      "evidence": [
+        "`event_store.rs` is an adapter over persistence backends and is consumed by state/entity internals, but sits in `src/` alongside router-facing modules.",
+        "`eventual_invariants.rs` owns background convergence/state tracker logic and directly manipulates `ServerState` internals (`eventual_tracker`, `registry`, metrics), indicating state-domain ownership rather than root API ownership.",
+        "`holistic_context.structure` reports `crates/temper-server/src/` at 13 files (mixed concerns), signaling root flattening where these modules increase boundary ambiguity."
+      ],
+      "suggestion": "Staged reorg plan: 1) move `event_store.rs` to `crates/temper-server/src/state/persistence/event_store.rs`, 2) move `eventual_invariants.rs` to `crates/temper-server/src/state/invariants/eventual.rs`, 3) add/adjust `mod.rs` re-exports under `state/persistence` and `state/invariants`, 4) update imports in `state/mod.rs`, `entity_actor/*`, and test helpers to new paths, 5) keep temporary compatibility re-exports in `lib.rs` for one cycle, then remove, 6) validate with `cargo fmt && cargo check -p temper-server && cargo test -p temper-server`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "root_level_flattening"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "dst_suite_flattened_in_tests_root",
+      "summary": "DST integration tests are a coherent suite but are flattened in the generic tests root.",
+      "related_files": [
+        "crates/temper-server/tests/dst_hotswap.rs",
+        "crates/temper-server/tests/dst_lifecycle.rs",
+        "crates/temper-server/tests/dst_multi_tenant.rs"
+      ],
+      "evidence": [
+        "All three files import the same `mod common` fixtures and follow a single DST concern family (`dst_*`), but live at top-level beside unrelated integration suites.",
+        "`holistic_context.structure.directory_profiles` shows `crates/temper-server/tests/` has 10 files; DST concerns are not separated into a dedicated directory boundary."
+      ],
+      "suggestion": "Staged reorg plan: 1) create `crates/temper-server/tests/dst/`, 2) move `dst_hotswap.rs`, `dst_lifecycle.rs`, `dst_multi_tenant.rs` (and optionally `dst_persistence.rs`) into that folder, 3) move/adjust `common` as `tests/dst/common/mod.rs` and update `mod common;` paths, 4) run targeted validation `cargo test -p temper-server dst_`, then full `cargo test -p temper-server`.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "test_layout_flattening"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "observe_endpoints_missing_behavioral_tests",
+      "summary": "Observe endpoints lack behavioral tests for auth, error handling, and response-contract stability",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`handle_events` has runtime-critical logic (`require_observe_auth`, `BroadcastStream` filtering, SSE event formatting) but only serialization of `EntityStateChange` is tested.",
+        "`records_list.rs` has no tests despite non-trivial transformation logic that merges arbitrary JSON payload into top-level response fields.",
+        "README governance claims rely on auditable/observable behavior, but these handlers have no contract tests validating those guarantees."
+      ],
+      "suggestion": "Add integration tests under `crates/temper-server/tests/` that hit `/tdata/$events`, `/observe/evolution/records`, and `/observe/evolution/insights` with: unauthorized headers, valid headers, malformed row `data`, and lagged/empty stream scenarios; assert status codes and stable JSON/SSE schema.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "observe_contracts_not_tested_end_to_end"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "storage_write_paths_untested",
+      "summary": "Critical Postgres/Turso persistence paths are untested while only helper redaction is covered",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`storage.rs` tests cover only `redact_connection_url`; migration and upsert routines have no tests.",
+        "Failure-prone branches (`migrate`, SQL upsert conflict behavior, constraint delete path) are currently unchecked.",
+        "README positions persistence and governance as core runtime guarantees, but write-path parity and failure handling are not validated in this module."
+      ],
+      "suggestion": "Add backend-agnostic contract tests for `upsert_loaded_specs_to_postgres` and `upsert_loaded_specs_to_turso` using a shared fixture matrix (initial insert, conflict update, constraint upsert, constraint delete, error propagation) and run them in CI against both backends.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "critical_paths_have_unit_only_or_no_coverage"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "init_test_coupled_to_invalid_package_name",
+      "summary": "`temper init` test validates absolute-path package name, missing Cargo-compatibility contract checks",
+      "related_files": [
+        "crates/temper-cli/src/init/mod.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`run(name)` writes Cargo `name = \"{{name}}\"` directly from input.",
+        "`test_init_creates_directory_structure` calls `run` with an absolute temp path and asserts generated `Cargo.toml` contains that path.",
+        "This test encodes invocation-specific behavior instead of validating generated project compatibility (valid Cargo package name and expected namespace derivation semantics)."
+      ],
+      "suggestion": "Refactor tests to run inside a temp parent dir and call `run(\"my-app\")`; assert `Cargo.toml` package name and namespace are valid/expected, and add negative tests for invalid names (path separators, uppercase-only edge cases).",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "test_contracts_follow_implementation_shortcuts"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "server_root_flattening_mixes_api_concerns",
+      "summary": "temper-server root directory is overloaded with mixed concerns instead of boundary-aligned subpackages",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "Structure profile reports `crates/temper-server/src/` has 13 files with mixed concerns (`router`, `events`, `eventual_invariants`, `registry_bootstrap`, `response`, etc.), exceeding the flat-directory mixed-concern threshold.",
+        "`events.rs` is an HTTP observe endpoint but lives at server root, while other observe handlers are already nested under `observe/evolution`.",
+        "Current placement obscures ownership boundaries between general server wiring and observe API surface."
+      ],
+      "suggestion": "Staged reorg plan: 1) create `crates/temper-server/src/api/observe/` and move `events.rs` to `api/observe/events.rs`; 2) move/alias existing observe route modules into `api/observe/` while keeping transitional `pub mod` re-exports; 3) update imports in `router.rs` and sibling modules; 4) run `cargo check -p temper-server`, `cargo test -p temper-server`, and `rg \"crate::events|crate::observe\" crates/temper-server/src` to verify import cleanup.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "boundary_placement_drift_between_server_and_observe"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "cli_contains_persistence_domain_logic",
+      "summary": "CLI `serve/storage.rs` owns persistence upsert behavior that belongs to shared store/server boundaries",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/observe/evolution/insight_generator.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`serve/storage.rs` directly executes SQL for `specs` and `tenant_constraints` and drives migrations, while also constructing server event-store types.",
+        "Commented note shows partial extraction happened for registry restoration, but analogous upsert translation logic remains in CLI.",
+        "This couples command-layer packaging to persistence schema evolution and duplicates boundary responsibility expected in server/store crates."
+      ],
+      "suggestion": "Staged reorg plan: 1) introduce a shared persistence contract module in `crates/temper-server/src/persistence/specs_bootstrap.rs` (or `temper-store-*` traits) for `LoadedTenantSpecs` upserts; 2) move Postgres/Turso upsert implementations out of CLI into that module; 3) make CLI call the shared interface only; 4) update imports and remove direct SQL from CLI; 5) validate with `cargo check -p temper-cli -p temper-server`, `cargo test -p temper-cli -p temper-server`, and `rg \"upsert_loaded_specs_to_(postgres|turso)|tenant_constraints\" crates/temper-cli/src` to confirm boundary cleanup.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "boundary_placement_drift_between_server_and_observe"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "agent_audit_tenant_scope_bypass",
+      "summary": "Agent audit endpoints trust caller-provided tenant filters instead of enforced tenant scope",
+      "related_files": [
+        "crates/temper-server/src/observe/agents.rs",
+        "crates/temper-server/src/observe/entities.rs",
+        "crates/temper-server/tests/dst_multi_tenant.rs"
+      ],
+      "evidence": [
+        "`list_agents` and `get_agent_history` call `require_observe_auth` then pass `params.tenant.as_deref()` to Turso (`agents.rs:91-92`, `:142-143`) with no `observe_tenant_scope` or `extract_tenant` enforcement.",
+        "Sibling observe endpoints explicitly derive/enforce tenant scope (`entities.rs:28`, `:187-191`), so this is inconsistent within the same API surface.",
+        "Multi-tenant tests define isolation expectations (`dst_multi_tenant.rs:3-6`), making query-parameter-controlled tenant selection a risky trust boundary."
+      ],
+      "suggestion": "Derive tenant scope from auth context (same pattern as `observe_tenant_scope`) and intersect it with optional query filters. Reject mismatched tenant filters with `403`, and apply the enforced tenant to Turso queries in both agent handlers.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "observe_read_paths_missing_shared_tenant_scope_guard"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "evolution_records_not_tenant_scoped",
+      "summary": "Evolution listing endpoints expose unscoped record sets after coarse auth check",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-server/src/observe/entities.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`list_evolution_records` and `list_evolution_insights` authorize once (`records_list.rs:26`, `:82`) but call state list methods with no tenant input (`:28-31`, `:84-85`).",
+        "Comparable observe endpoints apply tenant filtering (`entities.rs:187-201`), showing missing consistency in sibling read paths.",
+        "README positions authorization/governed access as default-deny mediation (`README.md:35`, `:70`, `:130-132`), but these handlers do not enforce tenant-level data boundaries in code path."
+      ],
+      "suggestion": "Add tenant scope extraction for evolution reads and plumb tenant-filtered query methods through `ServerState` and backing stores. Keep global listing only behind an explicit admin-only permission distinct from normal `read_evolution`.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "observe_read_paths_missing_shared_tenant_scope_guard"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "legacy_events_stream_leaks_cross_tenant",
+      "summary": "`/tdata/$events` stream lacks tenant filtering unlike sibling event stream endpoint",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/entities.rs",
+        "crates/temper-server/tests/dst_multi_tenant.rs"
+      ],
+      "evidence": [
+        "`handle_events` subscribes and emits every `change` after `require_observe_auth` (`events.rs:49-56`) without tenant-scope checks.",
+        "`handle_event_stream` in observe applies tenant filter from auth scope (`entities.rs:187-201`) for the same event type.",
+        "Tenant isolation is treated as a core invariant in DST tests (`dst_multi_tenant.rs:3-6`), but this endpoint can still broadcast cross-tenant state transitions."
+      ],
+      "suggestion": "Apply `observe_tenant_scope` filtering to `handle_events` (same filtering logic as `handle_event_stream`) or deprecate `/tdata/$events` in favor of the scoped observe stream to avoid dual, inconsistent authorization behavior.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "observe_read_paths_missing_shared_tenant_scope_guard"
+    }
+  ],
+  "review_quality": {
+    "batch_count": 3,
+    "dimension_coverage": 0.444,
+    "evidence_density": 1.244,
+    "high_score_missing_issue_note": 0,
+    "finding_pressure": 26.704,
+    "dimensions_with_findings": 3
+  },
+  "review_scope": {
+    "reviewed_files_count": 14,
+    "successful_batch_count": 3,
+    "full_sweep_included": false,
+    "total_files": 323,
+    "imported_dimensions": [
+      "authorization_consistency",
+      "package_organization",
+      "test_strategy"
+    ]
+  },
+  "reviewed_files": [
+    "crates/temper-server/src/event_store.rs",
+    "crates/temper-server/src/events.rs",
+    "crates/temper-server/src/eventual_invariants.rs",
+    "crates/temper-server/src/observe/agents.rs",
+    "crates/temper-server/src/observe/entities.rs",
+    "crates/temper-server/src/observe/evolution.rs",
+    "crates/temper-server/tests/dst_hotswap.rs",
+    "crates/temper-server/tests/dst_lifecycle.rs",
+    "crates/temper-server/tests/dst_multi_tenant.rs",
+    "README.md",
+    "crates/temper-cli/src/init/mod.rs",
+    "crates/temper-cli/src/serve/storage.rs",
+    "crates/temper-server/src/observe/evolution/insight_generator.rs",
+    "crates/temper-server/src/observe/evolution/records_list.rs"
+  ],
+  "provenance": {
+    "kind": "blind_review_batch_import",
+    "blind": true,
+    "runner": "codex",
+    "run_stamp": "20260306_021522",
+    "created_at": "2026-03-06T02:17:27+00:00",
+    "batch_count": 3,
+    "batch_indexes": [
+      1,
+      2,
+      3
+    ],
+    "packet_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/review_packet_blind.json",
+    "packet_sha256": "afdfe9eb2e22049d7448d16353c68e6b3257a0ad1335c9d5ba0854f50ccef9d7"
+  },
+  "assessment_coverage": {
+    "scored_dimensions": [
+      "naming_quality",
+      "logic_clarity",
+      "type_safety",
+      "contract_coherence",
+      "error_consistency",
+      "abstraction_fitness",
+      "ai_generated_debt",
+      "high_level_elegance",
+      "mid_level_elegance",
+      "low_level_elegance",
+      "cross_module_architecture",
+      "initialization_coupling",
+      "convention_outlier",
+      "dependency_health",
+      "test_strategy",
+      "api_surface_coherence",
+      "authorization_consistency",
+      "incomplete_migration",
+      "package_organization",
+      "design_coherence"
+    ],
+    "selected_dimensions": [
+      "authorization_consistency",
+      "test_strategy",
+      "package_organization"
+    ],
+    "imported_dimensions": [
+      "authorization_consistency",
+      "package_organization",
+      "test_strategy"
+    ],
+    "missing_dimensions": [
+      "naming_quality",
+      "logic_clarity",
+      "type_safety",
+      "contract_coherence",
+      "error_consistency",
+      "abstraction_fitness",
+      "ai_generated_debt",
+      "high_level_elegance",
+      "mid_level_elegance",
+      "low_level_elegance",
+      "cross_module_architecture",
+      "initialization_coupling",
+      "convention_outlier",
+      "dependency_health",
+      "api_surface_coherence",
+      "incomplete_migration",
+      "design_coherence"
+    ]
+  }
+}

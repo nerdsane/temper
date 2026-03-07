@@ -11,8 +11,8 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::authz::{observe_tenant_scope, require_observe_auth};
-use crate::odata::extract_tenant;
 use crate::entity_actor::{EntityEvent, EntityMsg, EntityResponse};
+use crate::odata::extract_tenant;
 use crate::state::ServerState;
 
 use super::{EntityInstanceSummary, EventStreamParams};
@@ -54,7 +54,9 @@ pub(crate) async fn handle_list_entities(
     // Sort newest first (by last_updated descending, entities without timestamps go last)
     entities.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
     let total = entities.len();
-    Ok(Json(serde_json::json!({ "entities": entities, "total": total })))
+    Ok(Json(
+        serde_json::json!({ "entities": entities, "total": total }),
+    ))
 }
 
 /// GET /observe/entities/{entity_type}/{entity_id}/history -- entity event history.

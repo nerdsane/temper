@@ -1,0 +1,132 @@
+{
+  "batch": "Governance & Contracts",
+  "batch_index": 5,
+  "assessments": {
+    "cross_module_architecture": 74.0,
+    "test_strategy": 78.0,
+    "package_organization": 82.0
+  },
+  "dimension_notes": {
+    "cross_module_architecture": {
+      "evidence": [
+        "README.md states durable storage supports both Postgres and Turso/libSQL (README.md:41, README.md:105, README.md:216), but observe evolution handlers are hard-wired to `state.persistent_store()` (Turso) and return empty payloads when absent (crates/temper-server/src/observe/evolution/records_list.rs:23-27,72-80,88-90,123-127).",
+        "CLI storage bootstrap imports server-internal runtime boundary types (`temper_server::event_store::ServerEventStore`, `temper_server::registry::*`) from outside the server crate (crates/temper-cli/src/serve/storage.rs:9-12), coupling CLI startup code to server internals."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    },
+    "test_strategy": {
+      "evidence": [
+        "SSE endpoint tests only serialization of payload struct and do not exercise stream behavior, lag handling, or event JSON failure paths (crates/temper-server/src/events.rs:47-55,61-82).",
+        "Evolution records endpoints have no in-file tests and include backend-dependent fallback behavior (`empty` response on missing Turso) that is currently unverified (crates/temper-server/src/observe/evolution/records_list.rs:72-80,123-127).",
+        "`temper init` tests pass absolute filesystem path as project name and assert that path appears in generated Cargo package name (crates/temper-cli/src/init/mod.rs:149-177), which does not validate real `temper init <name>` contract from docs (crates/temper-cli/src/init/mod.rs:43)."
+      ],
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "package_organization": {
+      "evidence": [
+        "Holistic structure shows `crates/temper-server/src/` is a flat high-load directory with 22 production files, exceeding the '>10 mixed concerns' threshold and containing API routing, authz, webhook, SSE, insight generation, and registry responsibilities in one level.",
+        "`insight_generator.rs` is evolution-domain logic but sits at server root (crates/temper-server/src/insight_generator.rs:1-5), while evolution HTTP handlers are under `observe/evolution/` (crates/temper-server/src/observe/evolution/records_list.rs:17-19), indicating placement drift inside the same subsystem."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "medium"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "evolution_backend_contract_drift",
+      "summary": "Evolution read APIs violate documented multi-backend storage contract by serving Turso-only data.",
+      "related_files": [
+        "README.md",
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "Docs and feature matrix claim Postgres and Turso/libSQL support for durable state/evolution capabilities (README.md:41,105,216,219).",
+        "Postgres startup path explicitly migrates `evolution_records` (crates/temper-cli/src/serve/storage.rs:49-54), but observe endpoints read only via `state.persistent_store()` and return empty responses when unavailable (crates/temper-server/src/observe/evolution/records_list.rs:23-27,72-80,88-90,123-127)."
+      ],
+      "suggestion": "Introduce a backend-agnostic `EvolutionReadStore` interface at server state level and implement it for both Turso and Postgres; wire `list_evolution_records`/`list_evolution_insights` to the trait instead of `persistent_store()` only, and return explicit backend-unavailable errors instead of silent empty payloads.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "storage_contract_not_centralized"
+    },
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "cli_depends_on_server_internals",
+      "summary": "CLI storage bootstrap reaches into server internals, weakening crate boundary ownership.",
+      "related_files": [
+        "README.md",
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/events.rs"
+      ],
+      "evidence": [
+        "CLI storage module imports `temper_server::event_store::ServerEventStore` and registry internals directly (crates/temper-cli/src/serve/storage.rs:9-12).",
+        "Server crate is documented as HTTP/runtime surface (README.md:255), but CLI now orchestrates server-internal storage and verification state restoration, increasing blast radius for server internal changes."
+      ],
+      "suggestion": "Move shared storage/registry contracts into a dedicated crate (or `temper-server` public facade module) and consume only stable interfaces from CLI; keep server internal structs private and expose constructor helpers with semver-safe types.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "boundary_leakage_between_cli_and_server"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "governance_endpoint_quality_gaps",
+      "summary": "Governance-critical streaming and evolution read paths lack behavior-level tests.",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "SSE handler uses broadcast stream transform and silently drops lag/error cases, but tests only assert struct serialization (crates/temper-server/src/events.rs:47-55,61-82).",
+        "Evolution list endpoints implement fallback-to-empty behavior for missing/failed store access with no tests in file (crates/temper-server/src/observe/evolution/records_list.rs:66-80,117-127).",
+        "README advertises governance/audit guarantees and high test count (README.md:37,154,226), but these exact governance read/stream contracts are not directly covered here."
+      ],
+      "suggestion": "Add integration tests for `/tdata/$events` and `/observe/evolution/*` that assert tenant/event filtering behavior, lag handling, backend failure semantics, and fallback responses; run with `cargo test -p temper-server --test '*dst*'` plus targeted unit tests for handler output shaping.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "governance_paths_under_tested"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "evolution_logic_placement_drift",
+      "summary": "Evolution domain logic is split between root server module and observe/evolution package.",
+      "related_files": [
+        "crates/temper-server/src/insight_generator.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`insight_generator.rs` is explicitly evolution pipeline logic (crates/temper-server/src/insight_generator.rs:1-5) but is placed in `crates/temper-server/src/` root.",
+        "Evolution HTTP handlers are organized under `observe/evolution/` (crates/temper-server/src/observe/evolution/records_list.rs:17-19), creating split ownership for the same domain.",
+        "Holistic structure reports `crates/temper-server/src/` at 22 files with mixed concerns, exceeding a common >10 flat-directory cohesion threshold."
+      ],
+      "suggestion": "Staged reorg plan: 1) create `crates/temper-server/src/observe/evolution/insight_generator.rs` and move generator types/functions there, 2) update module exports in `observe/evolution/mod.rs` then replace `crate::insight_generator` imports with `crate::observe::evolution::insight_generator`, 3) move any shared evolution DTOs into `observe/evolution/types.rs` to prevent re-growth in root, 4) validate with `rg 'insight_generator' crates/temper-server/src`, `cargo fmt`, and `cargo test -p temper-server`.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "server_root_flattening"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Storage and evolution contracts are not centralized behind backend-agnostic interfaces.",
+      "Server root directory has accumulated mixed concerns, causing boundary and ownership drift.",
+      "Quality gates prioritize broad test count over explicit governance-path behavior contracts."
+    ],
+    "likely_symptoms": [
+      "evolution_backend_contract_drift",
+      "cli_depends_on_server_internals",
+      "evolution_logic_placement_drift"
+    ],
+    "possible_false_positives": []
+  }
+}

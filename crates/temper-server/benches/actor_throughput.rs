@@ -64,7 +64,8 @@ fn bench_actor(c: &mut Criterion) {
                     for i in 0..count {
                         let s = state.clone();
                         let eid = format!("o-{batch}-{i}");
-                        handles.push(tokio::spawn(async move { // determinism-ok: benchmark concurrency, not simulation
+                        handles.push(tokio::spawn(async move {
+                            // determinism-ok: benchmark concurrency, not simulation
                             s.dispatch_action(
                                 "Order",
                                 &eid,

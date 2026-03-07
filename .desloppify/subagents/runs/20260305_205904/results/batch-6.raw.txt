@@ -1,0 +1,106 @@
+{
+  "batch": "Design coherence — Mechanical Concern Signals",
+  "batch_index": 6,
+  "assessments": {
+    "design_coherence": 72.0
+  },
+  "dimension_notes": {
+    "design_coherence": {
+      "evidence": [
+        "Authorization gate flow is repeated per-handler in `crates/temper-server/src/observe/evolution/operations.rs` (`handle_sentinel_check`, `handle_unmet_intents`, `handle_feature_requests`, `handle_update_feature_request`) while `crates/temper-server/src/state/entity_ops.rs` already has two near-identical auth paths (`authorize` and `authorize_with_context`).",
+        "`crates/temper-platform/src/bootstrap.rs` duplicates the same parse -> cascade verify -> register -> mark verification-complete workflow in both `bootstrap_system_tenant` and `bootstrap_agent_specs`, including identical cascade tuning and status stamping logic.",
+        "`crates/temper-evolution/src/pg_store.rs` uses many type-specific thin wrappers (`insert_*`, `get_*`) around one generic JSON row mechanism, while `crates/temper-server/src/observe/evolution/operations.rs` independently rebuilds record-type/status strings and persistence paths.",
+        "A deterministic RNG implementation is duplicated with near-identical xorshift logic in both `crates/temper-runtime/src/scheduler/mod.rs` and `crates/temper-store-sim/src/lib.rs`."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "design_coherence",
+      "identifier": "duplicated_authz_gate_pipeline",
+      "summary": "Evolution endpoints duplicate authorization choreography instead of using one gate abstraction.",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/operations.rs",
+        "crates/temper-server/src/state/entity_ops.rs"
+      ],
+      "evidence": [
+        "Each evolution handler repeats principal-bypass + `authorize_with_context(...)` + forbidden-return logic with different action/resource strings.",
+        "`ServerState` simultaneously carries two almost-parallel auth entrypoints (`authorize` and `authorize_with_context`) with duplicated decision/telemetry flow."
+      ],
+      "suggestion": "Introduce a shared authorization helper for HTTP handlers (for example `require_capability(headers, action, resource)`), and collapse `authorize`/`authorize_with_context` to a single internal implementation so policy checks and telemetry are defined once.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_shared_workflow_abstractions"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "bootstrap_workflow_cloned",
+      "summary": "System and agent bootstrap functions clone the same multi-step lifecycle logic.",
+      "related_files": [
+        "crates/temper-platform/src/bootstrap.rs",
+        "crates/temper-verify/src/cascade.rs"
+      ],
+      "evidence": [
+        "`bootstrap_system_tenant` and `bootstrap_agent_specs` both perform parse loops, identical cascade configuration (`with_sim_seeds(3).with_prop_test_cases(50)`), tenant registration, and verification status stamping.",
+        "The two routines differ mainly in spec arrays and CSDL source, but maintain duplicated orchestration and failure policy (`panic!/assert!`)."
+      ],
+      "suggestion": "Extract one parameterized bootstrap pipeline (spec set, csdl, tenant target, log label, verification policy) and reuse it for both system and agent specs to keep verification behavior and registration semantics from drifting.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_shared_workflow_abstractions"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "evolution_persistence_split_brain",
+      "summary": "Evolution record typing and persistence mapping is split across layers with duplicated string conventions.",
+      "related_files": [
+        "crates/temper-evolution/src/pg_store.rs",
+        "crates/temper-server/src/observe/evolution/operations.rs"
+      ],
+      "evidence": [
+        "`PostgresRecordStore` exposes many typed wrapper methods over generic `(record_type,status,payload)` storage, but `operations.rs` separately constructs record-type/status strings (`\"Observation\"`, `format!(\"{:?}\", status)`) and writes through a different store path.",
+        "This duplicates domain mapping logic (enum <-> string) across server and store layers, increasing drift risk when record types/status values evolve."
+      ],
+      "suggestion": "Move record-type/status serialization and persistence orchestration behind one evolution persistence facade that accepts typed records; let HTTP handlers call typed operations only, and keep string mapping confined to the store boundary.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "stringly_typed_domain_mapping"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "duplicate_deterministic_rng",
+      "summary": "Deterministic RNG logic is duplicated in runtime scheduler and sim store.",
+      "related_files": [
+        "crates/temper-runtime/src/scheduler/mod.rs",
+        "crates/temper-store-sim/src/lib.rs"
+      ],
+      "evidence": [
+        "Both files define their own `DeterministicRng` with the same xorshift64 state/update behavior and similar probability helpers.",
+        "Simulation behavior now depends on keeping two independent implementations aligned."
+      ],
+      "suggestion": "Extract a shared deterministic RNG utility crate/module used by both scheduler and sim-store so seed semantics and probability behavior stay consistent.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "duplicate_simulation_primitives"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Cross-cutting workflows (auth gating, bootstrap verification, typed-record persistence) are implemented per-callsite rather than through shared orchestration primitives.",
+      "Simulation utilities are duplicated across crates instead of centralized."
+    ],
+    "likely_symptoms": [
+      "duplicated_authz_gate_pipeline",
+      "bootstrap_workflow_cloned",
+      "duplicate_deterministic_rng"
+    ],
+    "possible_false_positives": []
+  }
+}

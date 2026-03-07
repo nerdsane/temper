@@ -9,9 +9,9 @@ use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
-use crate::request_context::AgentContext;
 use crate::event_store::ServerEventStore;
 use crate::registry::SpecRegistry;
+use crate::request_context::AgentContext;
 
 const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
@@ -111,18 +111,14 @@ fn build_app_with_state(state: ServerState) -> Router {
 #[tokio::test]
 async fn test_list_specs_returns_registered_entities() {
     let app = build_test_app();
-    let response = app
-        .oneshot(system_get("/observe/specs"))
-        .await
-        .unwrap();
+    let response = app.oneshot(system_get("/observe/specs")).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .unwrap();
     let wrapper: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let specs: Vec<SpecSummary> =
-        serde_json::from_value(wrapper["specs"].clone()).unwrap();
+    let specs: Vec<SpecSummary> = serde_json::from_value(wrapper["specs"].clone()).unwrap();
     assert!(!specs.is_empty());
     assert_eq!(specs[0].entity_type, "Order");
     assert!(!specs[0].states.is_empty());
@@ -138,9 +134,7 @@ async fn test_list_specs_returns_registered_entities() {
 async fn test_get_spec_detail_found() {
     let app = build_test_app();
     let response = app
-        .oneshot(
-            system_get("/observe/specs/Order"),
-        )
+        .oneshot(system_get("/observe/specs/Order"))
         .await
         .unwrap();
 
@@ -158,9 +152,7 @@ async fn test_get_spec_detail_found() {
 async fn test_get_spec_detail_not_found() {
     let app = build_test_app();
     let response = app
-        .oneshot(
-            system_get("/observe/specs/NonExistent"),
-        )
+        .oneshot(system_get("/observe/specs/NonExistent"))
         .await
         .unwrap();
 
@@ -307,12 +299,7 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
 #[tokio::test]
 async fn test_list_entities_empty() {
     let app = build_test_app();
-    let response = app
-        .oneshot(
-            system_get("/observe/entities"),
-        )
-        .await
-        .unwrap();
+    let response = app.oneshot(system_get("/observe/entities")).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -361,9 +348,7 @@ async fn test_entity_history_returns_events() {
         .with_state(state);
 
     let response = app
-        .oneshot(
-            system_get("/observe/entities/Order/order-hist-1/history"),
-        )
+        .oneshot(system_get("/observe/entities/Order/order-hist-1/history"))
         .await
         .unwrap();
 
@@ -389,9 +374,7 @@ async fn test_entity_history_returns_events() {
 async fn test_entity_history_empty_for_unknown() {
     let app = build_test_app();
     let response = app
-        .oneshot(
-            system_get("/observe/entities/Order/nonexistent/history"),
-        )
+        .oneshot(system_get("/observe/entities/Order/nonexistent/history"))
         .await
         .unwrap();
 
@@ -567,9 +550,7 @@ async fn test_trajectories_records_success_and_failure() {
         .with_state(state);
 
     let response = app
-        .oneshot(
-            system_get("/observe/trajectories"),
-        )
+        .oneshot(system_get("/observe/trajectories"))
         .await
         .unwrap();
 
@@ -618,9 +599,7 @@ async fn test_trajectories_filters_by_entity_type() {
     // Filter for entity_type=Order should find our entry.
     let response = app
         .clone()
-        .oneshot(
-            system_get("/observe/trajectories?entity_type=Order"),
-        )
+        .oneshot(system_get("/observe/trajectories?entity_type=Order"))
         .await
         .unwrap();
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -631,9 +610,7 @@ async fn test_trajectories_filters_by_entity_type() {
 
     // Filter for non-existent entity_type should return 0.
     let response = app
-        .oneshot(
-            system_get("/observe/trajectories?entity_type=Nonexistent"),
-        )
+        .oneshot(system_get("/observe/trajectories?entity_type=Nonexistent"))
         .await
         .unwrap();
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -648,9 +625,7 @@ async fn test_trajectories_empty_when_no_actions() {
     let app = build_test_app();
 
     let response = app
-        .oneshot(
-            system_get("/observe/trajectories"),
-        )
+        .oneshot(system_get("/observe/trajectories"))
         .await
         .unwrap();
 
@@ -674,9 +649,7 @@ async fn test_sentinel_check_no_alerts_on_clean_state() {
     let app = build_test_app();
 
     let response = app
-        .oneshot(
-            system_post("/api/evolution/sentinel/check", ""),
-        )
+        .oneshot(system_post("/api/evolution/sentinel/check", ""))
         .await
         .unwrap();
 
@@ -726,9 +699,7 @@ async fn test_sentinel_check_detects_error_spike() {
         .with_state(state);
 
     let response = app
-        .oneshot(
-            system_post("/api/evolution/sentinel/check", ""),
-        )
+        .oneshot(system_post("/api/evolution/sentinel/check", ""))
         .await
         .unwrap();
 
@@ -754,9 +725,7 @@ async fn test_evolution_records_empty() {
     let app = build_test_app();
 
     let response = app
-        .oneshot(
-            system_get("/observe/evolution/records"),
-        )
+        .oneshot(system_get("/observe/evolution/records"))
         .await
         .unwrap();
 
@@ -795,17 +764,13 @@ async fn test_evolution_records_after_sentinel() {
     // Trigger sentinel first.
     let _ = app
         .clone()
-        .oneshot(
-            system_post("/api/evolution/sentinel/check", ""),
-        )
+        .oneshot(system_post("/api/evolution/sentinel/check", ""))
         .await
         .unwrap();
 
     // Now check evolution records.
     let response = app
-        .oneshot(
-            system_get("/observe/evolution/records"),
-        )
+        .oneshot(system_get("/observe/evolution/records"))
         .await
         .unwrap();
 
@@ -823,9 +788,7 @@ async fn test_evolution_get_record_not_found() {
     let app = build_app_with_state(state);
 
     let response = app
-        .oneshot(
-            system_get("/observe/evolution/records/O-2024-nonexistent"),
-        )
+        .oneshot(system_get("/observe/evolution/records/O-2024-nonexistent"))
         .await
         .unwrap();
 
@@ -1204,9 +1167,7 @@ async fn test_evolution_insights_empty() {
     let app = build_test_app();
 
     let response = app
-        .oneshot(
-            system_get("/observe/evolution/insights"),
-        )
+        .oneshot(system_get("/observe/evolution/insights"))
         .await
         .unwrap();
 

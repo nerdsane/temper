@@ -1,0 +1,93 @@
+{
+  "batch": "Architecture & Coupling",
+  "batch_index": 1,
+  "assessments": {
+    "cross_module_architecture": 74.0
+  },
+  "dimension_notes": {
+    "cross_module_architecture": {
+      "evidence": [
+        "Storage backend behavior is duplicated in parallel Postgres/Turso paths (`load_registry_from_postgres` vs `load_registry_from_turso`, `upsert_loaded_specs_to_postgres` vs `upsert_loaded_specs_to_turso`) in `crates/temper-cli/src/serve/storage.rs`.",
+        "HTTP handlers directly bind to concrete storage/event internals via `ServerState` (`state.persistent_store()` in `crates/temper-server/src/observe/evolution/records_list.rs`, `state.event_tx.subscribe()` in `crates/temper-server/src/events.rs`) instead of a stable service boundary.",
+        "Cross-module contracts are encoded as ad-hoc string literals across modules (`SubmitSpec`, error text matching, status literals, SSE event name), especially in `crates/temper-server/src/insight_generator.rs` and `crates/temper-server/src/observe/evolution/records_list.rs`."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "dual_backend_flow_duplication",
+      "summary": "Postgres and Turso integration paths are duplicated, creating backend drift risk across modules.",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "`load_registry_from_postgres` and `load_registry_from_turso` repeat the same tenant grouping, CSDL parse, registry registration, and status restoration flow (`storage.rs` lines ~212-369).",
+        "`upsert_loaded_specs_to_postgres` and `upsert_loaded_specs_to_turso` duplicate the same spec/constraint sync policy (`storage.rs` lines ~77-128 and ~472-499).",
+        "`records_list.rs` bypasses any shared backend-neutral read path and calls Turso-specific methods directly (`state.persistent_store().list_*`), reinforcing split backend behavior."
+      ],
+      "suggestion": "Introduce a backend-neutral persistence interface (e.g., `SpecPersistence`/`EvolutionReadStore`) and move shared restore/upsert orchestration into one implementation path; keep backend-specific code as thin adapters. Route `records_list` through that same interface instead of direct Turso calls.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "missing_backend_boundary"
+    },
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "string_protocol_boundary_drift",
+      "summary": "Cross-module behavior depends on magic strings rather than typed contracts.",
+      "related_files": [
+        "crates/temper-server/src/insight_generator.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-server/src/events.rs"
+      ],
+      "evidence": [
+        "`insight_generator.rs` derives behavior from literal action/error text (`SubmitSpec`, `EntitySetNotFound`, `Authorization denied`, `ActionNotFound`) instead of typed event/error categories.",
+        "`records_list.rs` accepts raw status/type strings in query params and composes JSON using string keys directly, with no shared enum/schema boundary.",
+        "`events.rs` emits a literal SSE event name (`\"state_change\"`) with no shared protocol constant across publishers/consumers."
+      ],
+      "suggestion": "Define shared protocol types/constants in a common domain module (action kinds, error categories, record status/type enums, SSE event names) and update handlers/generators to consume typed values instead of string matching.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "stringly_typed_integration_contracts"
+    },
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "server_state_as_hub_module",
+      "summary": "ServerState exposes low-level internals across modules, increasing coupling and blast radius.",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-server/src/state/dispatch_blocking.rs"
+      ],
+      "evidence": [
+        "`events.rs` accesses channel internals directly via `state.event_tx.subscribe()`.",
+        "`records_list.rs` accesses persistence internals via `state.persistent_store()` and performs response shaping in the handler layer.",
+        "`dispatch_blocking.rs` adds another `ServerState` method that forwards a wide request bag into internal dispatch, reinforcing `ServerState` as an orchestration hub rather than a narrow boundary."
+      ],
+      "suggestion": "Refactor `ServerState` consumers to depend on focused service interfaces (event feed, evolution read API, integration dispatch API). Keep `ServerState` as composition/wiring only, with handlers bound to trait-backed services.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "state_hub_coupling"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Missing backend-neutral service abstractions caused parallel Postgres/Turso logic and direct-store access from handlers.",
+      "Domain contracts are not centralized, so modules coordinate through string literals and implicit conventions.",
+      "`ServerState` has grown into a broad dependency hub that leaks internal mechanisms to endpoint modules."
+    ],
+    "likely_symptoms": [
+      "dual_backend_flow_duplication",
+      "string_protocol_boundary_drift",
+      "server_state_as_hub_module"
+    ],
+    "possible_false_positives": []
+  }
+}

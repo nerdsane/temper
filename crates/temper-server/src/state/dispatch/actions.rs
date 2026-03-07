@@ -1,13 +1,13 @@
 use tracing::instrument;
 
-use crate::request_context::AgentContext;
 use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
+use crate::request_context::AgentContext;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
-use super::{DispatchCommand, DispatchError, DispatchExtOptions};
 use super::effects::PostDispatchContext;
+use super::{DispatchCommand, DispatchError, DispatchExtOptions};
 
 impl crate::state::ServerState {
     /// Dispatch an action using the unified command object.
@@ -22,10 +22,7 @@ impl crate::state::ServerState {
         entity_id = cmd.entity_id,
         action_name = cmd.action,
     ))]
-    pub async fn dispatch(
-        &self,
-        cmd: DispatchCommand<'_>,
-    ) -> Result<EntityResponse, String> {
+    pub async fn dispatch(&self, cmd: DispatchCommand<'_>) -> Result<EntityResponse, String> {
         let response = self
             .dispatch_tenant_action_core(
                 cmd.tenant,

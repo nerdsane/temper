@@ -1,0 +1,138 @@
+{
+  "batch": "Design coherence — Mechanical Concern Signals",
+  "batch_index": 6,
+  "assessments": {
+    "design_coherence": 73.0
+  },
+  "dimension_notes": {
+    "design_coherence": {
+      "evidence": [
+        "`crates/temper-cli/src/serve/mod.rs:60` `run` combines storage bootstrapping, registry recovery, policy hydration, wasm recovery, tenant bootstraps, router/listener startup, UI process spawning, and verification scheduling in one entrypoint.",
+        "`crates/temper-server/src/odata/read.rs:281` `handle_odata_get_for_tenant` and `crates/temper-server/src/odata/write.rs:147`/`:291`/`:403`/`:494` each inline path parsing, entity-set/type resolution, existence checks, invariant checks, and response shaping instead of sharing workflow helpers.",
+        "`crates/temper-server/src/state/dispatch/wasm.rs:24` `dispatch_wasm_integrations_internal` handles integration lookup, authz setup, secret templating, invocation, telemetry, callback dispatch, and governance/pending-decision side effects; `record_wasm_authz_denial` (`:420`) adds additional persistence/entity-creation concerns.",
+        "`crates/temper-store-turso/src/store.rs` (1943 LOC) centralizes migrations plus unrelated CRUD/query responsibilities (specs, trajectories, feature requests, evolution records, design-time events, pending decisions, tenant policies, wasm modules/logs), making one module the default sink for new persistence concerns.",
+        "`crates/temper-server/src/api/decisions.rs:62` and `crates/temper-server/src/api/policies.rs:33` embed authorization, validation, policy compilation/reload, persistence, and audit/evolution side effects directly in handlers, producing duplicated orchestration patterns across APIs."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "design_coherence",
+      "identifier": "serve_run_orchestrator_blob",
+      "summary": "`temper serve` startup path mixes unrelated responsibilities in a single control flow, making changes high-risk.",
+      "related_files": [
+        "crates/temper-cli/src/serve/mod.rs",
+        "crates/temper-cli/src/serve/loader.rs",
+        "crates/temper-cli/src/serve/storage.rs"
+      ],
+      "evidence": [
+        "`crates/temper-cli/src/serve/mod.rs:60` `run` spans backend selection (`:73-127`), registry recovery/loading (`:129-151`), persisted policy/wasm hydration (`:241-286`), platform bootstrapping (`:301-310`), server startup (`:312-337`), and background job orchestration (`:329-333`).",
+        "`spawn_background_verification` in the same file (`:525+`) also mixes event emission, status persistence, registry mutation, CPU-bound verification execution, and console reporting in one function.",
+        "`loader.rs` and `storage.rs` already hold extractable concerns, but orchestration still inlines most cross-cutting startup logic."
+      ],
+      "suggestion": "Split startup into explicit phases (storage init, registry hydrate, policy/wasm recover, runtime bootstrap, process wiring) behind a `ServeBootstrapPlan`/`ServeRuntime` boundary; keep `run` as a short phase coordinator with typed phase outputs.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "orchestration_without_application_services"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "odata_workflow_duplication",
+      "summary": "OData read/write handlers repeatedly reimplement the same request workflow, increasing drift risk.",
+      "related_files": [
+        "crates/temper-server/src/odata/read.rs",
+        "crates/temper-server/src/odata/write.rs",
+        "crates/temper-server/src/odata/bindings.rs"
+      ],
+      "evidence": [
+        "Write handlers repeat parse/resolve/check scaffolding across methods: `handle_odata_post` (`write.rs:147`), `handle_odata_patch` (`:291`), `handle_odata_put` (`:403`), `handle_odata_delete` (`:494`).",
+        "Read handler branches in `handle_odata_get_for_tenant` (`read.rs:281+`) duplicate entity set resolution, missing-entity behavior, and response shaping for `Entity`, `NavigationProperty`, `NavigationEntity`, and `BoundFunction` paths.",
+        "Both modules duplicate `EntitySetNotFound`/`ResourceNotFound` shaping and entity existence/lookup checks with slight behavioral differences."
+      ],
+      "suggestion": "Introduce shared OData workflow primitives (e.g., `ResolvedEntityPath`, `load_entity_or_404`, `run_write_prechecks`, `odata_not_found`) and method-specific strategy functions so each endpoint branch focuses only on operation-specific behavior.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "endpoint_workflow_duplication"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "dispatch_api_transitional_layering",
+      "summary": "Dispatch API remains in a half-migrated state with overlapping entrypoints and split responsibility boundaries.",
+      "related_files": [
+        "crates/temper-server/src/state/dispatch/actions.rs",
+        "crates/temper-server/src/state/dispatch/mod.rs",
+        "crates/temper-server/src/state/dispatch/cross_entity.rs"
+      ],
+      "evidence": [
+        "`actions.rs` keeps `dispatch`, deprecated `dispatch_action`, `dispatch_tenant_action`, `dispatch_tenant_action_ext`, and `dispatch_tenant_action_core` simultaneously (`:25-153`), so intent is spread across wrapper and core layers.",
+        "`dispatch` itself performs extra reaction dispatch orchestration (`:41-63`) while core logic in `dispatch_tenant_action_core` handles actor execution and post-effects, making ownership non-obvious.",
+        "Cross-entity side effects in `cross_entity.rs:154+` still call wrapper APIs (`dispatch_tenant_action`) instead of a single canonical internal command surface."
+      ],
+      "suggestion": "Complete the migration to one public dispatch contract plus one internal primitive, move reaction/cross-entity choreography into dedicated effect pipeline steps, and remove legacy wrapper entrypoints after caller migration.",
+      "confidence": "medium",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "orchestration_without_application_services"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "wasm_dispatch_concern_overload",
+      "summary": "WASM dispatch pipeline conflates execution, policy enforcement, observability, and governance side effects in one path.",
+      "related_files": [
+        "crates/temper-server/src/state/dispatch/wasm.rs",
+        "crates/temper-server/src/state/dispatch/mod.rs",
+        "crates/temper-server/src/state/pending_decisions.rs"
+      ],
+      "evidence": [
+        "`dispatch_wasm_integrations_internal` (`wasm.rs:24+`) performs integration discovery, module lookup, authz wiring, secret resolution, engine invocation, failure branching, telemetry emission, and callback dispatch in one loop.",
+        "`handle_wasm_failure` (`:300+`) adds persistence and metrics concerns, while `record_wasm_authz_denial` (`:420+`) additionally pushes pending decisions, persists asynchronously, creates governance entities, and writes trajectory entries.",
+        "Top-level dispatch module (`dispatch/mod.rs`) exposes this as part of core dispatch behavior, further coupling entity-action flow with governance/audit mechanics."
+      ],
+      "suggestion": "Split into composable stages (`resolve_integration`, `invoke_module`, `classify_failure`, `emit_observability`, `emit_governance_effects`) with a typed outcome object; keep governance decision generation as a separate post-invocation handler.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "orchestration_without_application_services"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "api_policy_decision_flow_duplication",
+      "summary": "Decision and policy APIs duplicate multi-step authorization+policy-update orchestration instead of sharing a domain service.",
+      "related_files": [
+        "crates/temper-server/src/api/decisions.rs",
+        "crates/temper-server/src/api/policies.rs",
+        "crates/temper-server/src/authz_helpers.rs"
+      ],
+      "evidence": [
+        "`handle_approve_decision` (`decisions.rs:62+`) performs authz, decision retrieval/validation, policy text generation, engine reload, policy persistence, decision persistence, and evolution record write in one handler.",
+        "`handle_put_policies` (`policies.rs:33+`) and `handle_add_policy_rule` (`:135+`) repeat authz denial shaping, JSON validation, combined-policy recomputation, and `reload_policies` orchestration.",
+        "Both endpoints reconstruct combined policy text independently (`decisions.rs:131-156`, `policies.rs:95-107`, `:197-219`), creating repeated algorithm paths with different edge-case handling."
+      ],
+      "suggestion": "Extract a shared `PolicyMutationService` (authorize → prepare mutation → validate/reload → persist) used by decisions and policies handlers, and centralize denial response construction in one helper to enforce a single mutation workflow.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "endpoint_workflow_duplication"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Operational orchestration is concentrated in handlers/entrypoints rather than dedicated application services.",
+      "Incremental feature additions favored colocated changes in existing large modules, creating concern accretion.",
+      "Migration to newer abstractions (dispatch command model) is incomplete, leaving overlapping pathways."
+    ],
+    "likely_symptoms": [
+      "serve_run_orchestrator_blob",
+      "odata_workflow_duplication",
+      "dispatch_api_transitional_layering",
+      "wasm_dispatch_concern_overload",
+      "api_policy_decision_flow_duplication"
+    ],
+    "possible_false_positives": []
+  }
+}

@@ -227,10 +227,7 @@ fn record_type_from_id_prefix(id: &str) -> Option<RecordType> {
     }
 }
 
-async fn validate_chain(
-    state: &ServerState,
-    leaf_id: &str,
-) -> ChainValidationSummary {
+async fn validate_chain(state: &ServerState, leaf_id: &str) -> ChainValidationSummary {
     let mut errors = Vec::new();
     let mut chain_length = 0usize;
     let mut current_id = leaf_id.to_string();

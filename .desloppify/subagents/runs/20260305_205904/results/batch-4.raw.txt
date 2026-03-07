@@ -1,0 +1,104 @@
+{
+  "batch": "Package Organization",
+  "batch_index": 4,
+  "assessments": {
+    "package_organization": 78.0,
+    "high_level_elegance": 82.0
+  },
+  "dimension_notes": {
+    "package_organization": {
+      "evidence": [
+        "`crates/temper-server/src/lib.rs` keeps a broad flat root module list (authz, constraints, dispatch, odata, observe, reaction, registry, webhook, wasm, etc.), exceeding the batch heuristic of >10 mixed concerns in one directory boundary.",
+        "`crates/temper-server/src/dispatch.rs` is a compatibility facade for `odata` but also owns general request identity extraction (`AgentContext`, `extract_agent_context`) used by non-odata paths.",
+        "`crates/temper-server/src/observe/evolution.rs` is a facade over submodules, while sibling domains (`observe/agents.rs`, `observe/entities.rs`) remain monolithic flat files, indicating uneven package boundary strategy."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "high_level_elegance": {
+      "evidence": [
+        "`dispatch.rs` mixes migration shim behavior (re-exporting OData handlers from `crate::odata`) with long-term domain behavior (agent/session context extraction), so ownership of HTTP concerns is not crisp.",
+        "`authz_helpers.rs` depends on `dispatch::AgentContext`, tying authorization denial recording to a transport/dispatch module rather than a dedicated request-context boundary.",
+        "Observe endpoints show partial decomposition patterns (`observe/evolution.rs` is decomposed to submodules, while `agents.rs` and `entities.rs` still bundle endpoint contracts + query logic), reducing decomposition consistency at subsystem level."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "medium"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "package_organization",
+      "identifier": "temper_server_root_flattening",
+      "summary": "temper-server root keeps mixed concerns in a flat module layout",
+      "related_files": [
+        "crates/temper-server/src/lib.rs",
+        "crates/temper-server/src/constraint_engine.rs",
+        "crates/temper-server/src/dispatch.rs"
+      ],
+      "evidence": [
+        "`lib.rs` declares many root modules with different ownership domains instead of grouping by boundary.",
+        "`constraint_engine.rs` (cross-entity relation/invariant enforcement) lives at crate root though it is a policy/state subsystem concern.",
+        "`dispatch.rs` is currently both a compatibility surface and a place for reusable request context types."
+      ],
+      "suggestion": "Stage 1: create target folders `src/policy/` and `src/http/odata/`; move `constraint_engine.rs` to `src/policy/constraints.rs`, move legacy dispatch facade to `src/http/odata/compat_dispatch.rs`. Stage 2: create `src/http/request_context.rs` and move `AgentContext`/`extract_agent_context` there. Stage 3: update imports/module declarations (`lib.rs`, call sites) and keep temporary `pub use` shims for one release. Stage 4: validate with `cargo check -p temper-server` and `cargo test -p temper-server observe::`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "server_boundary_blur"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "observe_decomposition_inconsistency",
+      "summary": "observe package applies decomposition only to evolution, not peer domains",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution.rs",
+        "crates/temper-server/src/observe/agents.rs",
+        "crates/temper-server/src/observe/entities.rs"
+      ],
+      "evidence": [
+        "`observe/evolution.rs` is a pure facade that re-exports handlers from `observe/evolution/*` submodules.",
+        "`observe/agents.rs` and `observe/entities.rs` still combine endpoint handlers, DTOs, and storage/query orchestration in single files.",
+        "Directory strategy inside `observe` is therefore domain-inconsistent, making expected file placement non-obvious."
+      ],
+      "suggestion": "Stage 1: create `src/observe/agents/` and `src/observe/entities/` with `mod.rs` facades mirroring `evolution` style. Stage 2: move response DTOs to `types.rs` and handlers to `routes.rs` per domain. Stage 3: update router imports to module facades only. Stage 4: run `cargo check -p temper-server` and focused endpoint tests (`cargo test -p temper-server observe`).",
+      "confidence": "medium",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "server_boundary_blur"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "dispatch_module_ownership_mismatch",
+      "summary": "dispatch module has mixed long-term ownership (shim + shared request context)",
+      "related_files": [
+        "crates/temper-server/src/dispatch.rs",
+        "crates/temper-server/src/authz_helpers.rs",
+        "crates/temper-server/src/observe/entities.rs"
+      ],
+      "evidence": [
+        "`dispatch.rs` states it is a compatibility facade for OData handlers but also defines `AgentContext` and header parsing helpers.",
+        "`authz_helpers.rs` imports `dispatch::AgentContext` for denial recording, coupling authz workflows to a module whose stated role is compatibility.",
+        "`observe/entities.rs` imports tenant extraction from `dispatch`, extending this mixed-responsibility module as shared infrastructure."
+      ],
+      "suggestion": "Stage 1: introduce `src/http/context.rs` (or `src/request_context.rs`) as canonical home for tenant/agent/session extraction types. Stage 2: migrate `authz_helpers.rs` and observe/state callers to the new module. Stage 3: reduce `dispatch.rs` to temporary OData re-export shim only, then remove after import migration. Stage 4: validate with `cargo check -p temper-server` and router/integration tests (`cargo test -p temper-server router`).",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "server_boundary_blur"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Incremental migrations introduced facades without fully separating long-term ownership modules.",
+      "Root-level module growth in `temper-server` outpaced boundary-oriented foldering."
+    ],
+    "likely_symptoms": [
+      "temper_server_root_flattening",
+      "observe_decomposition_inconsistency",
+      "dispatch_module_ownership_mismatch"
+    ],
+    "possible_false_positives": []
+  }
+}

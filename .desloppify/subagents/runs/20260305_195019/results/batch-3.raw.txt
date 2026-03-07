@@ -1,0 +1,83 @@
+{
+  "batch": "AI Debt & Migrations",
+  "batch_index": 3,
+  "assessments": {
+    "incomplete_migration": 82.0,
+    "low_level_elegance": 86.0
+  },
+  "dimension_notes": {
+    "incomplete_migration": {
+      "evidence": [
+        "crates/temper-evolution/src/lib.rs:27 suppresses deprecation warnings with `#[allow(deprecated)]` on a public re-export (`pub use store::RecordStore;`), indicating active retention of a legacy API during migration.",
+        "The same crate root simultaneously re-exports newer record-chain APIs from `records`/`pg_store` alongside the deprecated surface, creating dual-path consumption risk."
+      ],
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "low_level_elegance": {
+      "evidence": [
+        "Several assigned modules are pass-through wrappers with only `pub mod`/`pub use` and no local behavior (`crates/temper-mcp/src/repl.rs`, `crates/temper-platform/src/deploy/mod.rs`, `crates/temper-jit/src/table/mod.rs`, `crates/temper-odata/src/query/mod.rs`, `crates/temper-platform/src/agent/mod.rs`).",
+        "This repeated micro-module pattern adds namespace hops and maintenance surface without encoding policy/translation, reducing internal directness."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "medium",
+      "issues_preventing_higher_score": "Excessive pass-through module layers and re-export-only files add indirection cost without clear local responsibility."
+    }
+  },
+  "findings": [
+    {
+      "dimension": "incomplete_migration",
+      "identifier": "deprecated-recordstore-reexport",
+      "summary": "Deprecated `RecordStore` API is still publicly exported with warnings silenced",
+      "related_files": [
+        "crates/temper-evolution/src/lib.rs",
+        "crates/temper-evolution/src/records.rs"
+      ],
+      "evidence": [
+        "crates/temper-evolution/src/lib.rs:27 applies `#[allow(deprecated)]` directly before `pub use store::RecordStore;`.",
+        "The crate root also exposes current record-model APIs (`records`, `pg_store`) in the same surface, so callers can continue selecting the legacy trait path instead of completing migration."
+      ],
+      "suggestion": "Remove the deprecated re-export from crate root (or gate it behind an explicit legacy feature), migrate internal/external callers to the current store interface, and replace blanket `allow(deprecated)` with targeted compile-time migration guidance.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "legacy_api_coexistence_without_sunset"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "pass_through_module_overfragmentation",
+      "summary": "Repeated re-export-only modules introduce micro-fragmentation with little local value",
+      "related_files": [
+        "crates/temper-mcp/src/repl.rs",
+        "crates/temper-platform/src/deploy/mod.rs",
+        "crates/temper-jit/src/table/mod.rs",
+        "crates/temper-odata/src/query/mod.rs",
+        "crates/temper-platform/src/agent/mod.rs"
+      ],
+      "evidence": [
+        "crates/temper-mcp/src/repl.rs contains only a crate-level comment plus `pub use temper_sandbox::repl::{ReplConfig, run_repl};`.",
+        "crates/temper-platform/src/deploy/mod.rs, crates/temper-jit/src/table/mod.rs, and crates/temper-odata/src/query/mod.rs primarily act as barrel modules with minimal local semantics."
+      ],
+      "suggestion": "Flatten or consolidate pass-through modules where no boundary policy is enforced, and keep wrapper modules only when they add explicit translation/stability guarantees documented at the API boundary.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "ceremonial_wrapper_layers"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Legacy compatibility is being preserved at crate boundaries without a hard sunset path.",
+      "Generated/ceremonial module scaffolding is favored over behavior-owning modules, increasing indirection."
+    ],
+    "likely_symptoms": [
+      "deprecated-recordstore-reexport",
+      "pass_through_module_overfragmentation"
+    ],
+    "possible_false_positives": [
+      "Some barrel modules may be intentional public API stabilization points if downstream consumers rely on these paths."
+    ]
+  }
+}

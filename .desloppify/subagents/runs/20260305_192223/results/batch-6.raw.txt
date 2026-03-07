@@ -1,0 +1,117 @@
+{
+  "batch": "Cross-cutting Sweep",
+  "batch_index": 6,
+  "assessments": {
+    "logic_clarity": 76.0,
+    "initialization_coupling": 78.0
+  },
+  "dimension_notes": {
+    "logic_clarity": {
+      "evidence": [
+        "History fallback path reads persistence IDs as `entity_type:entity_id` in `crates/temper-server/src/observe/entities.rs:101`, while actor persistence writes IDs as `tenant:entity_type:entity_id` in `crates/temper-server/src/entity_actor/actor.rs:105-107`.",
+        "Evolution persistence swallows JSON serialization failures with defaults (e.g. `unwrap_or_default`, `unwrap_or_else(|_| \"[]\")`) in `crates/temper-server/src/observe/evolution/operations.rs:63,89,116,223`, and listing endpoints silently skip malformed JSON merge in `crates/temper-server/src/observe/evolution/records_list.rs:40-47,98-105`."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "initialization_coupling": {
+      "evidence": [
+        "Tenant fallback behavior is inconsistent and startup-state dependent: API handlers force `\"default\"` (`crates/temper-server/src/api.rs:1070-1073,1130-1133,1195-1199`) while OData/observe fallback to first registered tenant then default (`crates/temper-server/src/odata/common.rs:23-36`).",
+        "Webhook secret/header interpolation is done once at load (`crates/temper-server/src/webhooks.rs:72-85,178-189`) and the dispatcher is built once during server startup (`crates/temper-cli/src/serve/mod.rs:194-218`), so runtime env changes or late secret injection are ignored; missing vars silently become empty strings."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "logic_clarity",
+      "identifier": "entity_history_tenant_key_mismatch",
+      "summary": "Entity history fallback queries wrong persistence key shape, risking cross-tenant misses/leakage",
+      "related_files": [
+        "crates/temper-server/src/observe/entities.rs",
+        "crates/temper-server/src/entity_actor/actor.rs",
+        "crates/temper-server/src/state/entity_ops.rs"
+      ],
+      "evidence": [
+        "`get_entity_history` uses tenant-scoped actor key (`{tenant}:{entity_type}:{entity_id}`) but event-store fallback reads `format!(\"{entity_type}:{entity_id}\")` (`observe/entities.rs:64,101-102`).",
+        "Entity persistence/replay consistently use tenant-prefixed IDs (`entity_actor/actor.rs:104-107`) and store-loading does the same (`state/entity_ops.rs:435-436`)."
+      ],
+      "suggestion": "Normalize persistence ID construction through a shared helper used by actor persistence, state hydration, and observe history endpoints; include tenant in fallback reads and add regression tests for same `entity_type/entity_id` across two tenants.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "tenant_identity_propagation"
+    },
+    {
+      "dimension": "logic_clarity",
+      "identifier": "evolution_json_error_swallowing",
+      "summary": "Evolution record serialization/parsing failures are silently converted into empty or partial data",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/operations.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "Persistence path replaces serialization errors with defaults (`unwrap_or_default` / `\"[]\"`) before writing records (`operations.rs:63,89,116,223`).",
+        "Read path only merges record `data` when JSON parse succeeds and otherwise returns base metadata without surfacing corruption (`records_list.rs:40-47,98-105`)."
+      ],
+      "suggestion": "Treat serialization/deserialization failure as explicit error paths: return/store a failure status with diagnostics instead of default JSON, and include a parse_error field in list responses when stored data is invalid.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "silent_data_degradation"
+    },
+    {
+      "dimension": "initialization_coupling",
+      "identifier": "tenant_fallback_policy_drift",
+      "summary": "Tenant resolution differs by endpoint, coupling behavior to bootstrap state and route choice",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/odata/common.rs",
+        "crates/temper-server/src/observe/evolution/trajectories.rs"
+      ],
+      "evidence": [
+        "API endpoints default missing tenant header to literal `\"default\"` (`api.rs:1070-1073,1130-1133,1195-1199`; trajectories endpoint also defaults body tenant to `\"default\"` at `observe/evolution/trajectories.rs:96-99`).",
+        "OData helper falls back to first registered tenant in registry, then `TenantId::default()` (`odata/common.rs:23-36`), which can diverge from API behavior when startup tenant set/order changes."
+      ],
+      "suggestion": "Define one tenant resolution policy (header required, or deterministic configured default) in a single helper and reuse it across API/OData/observe handlers; add startup validation to ensure configured default tenant exists.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "tenant_identity_propagation"
+    },
+    {
+      "dimension": "initialization_coupling",
+      "identifier": "webhook_secret_resolution_fixed_at_boot",
+      "summary": "Webhook auth headers are bound to environment at startup and silently blank on missing vars",
+      "related_files": [
+        "crates/temper-server/src/webhooks.rs",
+        "crates/temper-cli/src/serve/mod.rs"
+      ],
+      "evidence": [
+        "Webhook config expansion resolves `${ENV_VAR}` once in `from_toml` and substitutes unknown variables with empty string (`webhooks.rs:72-85,176-189`).",
+        "Dispatcher is created once during `temper serve` startup and reused (`serve/mod.rs:194-218`), so secret availability/rotation after bootstrap is not reflected."
+      ],
+      "suggestion": "Fail fast on unresolved required env placeholders and support explicit reload/re-resolution of webhook configs (or resolve per dispatch with cached TTL) to remove startup-order dependence for secrets.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "startup_bound_configuration"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Tenant identity handling is duplicated across layers instead of centralized, producing drift in key construction and defaulting rules.",
+      "Error handling favors fallback defaults over explicit failure signaling in persistence/observation paths.",
+      "Configuration resolution is performed at bootstrap with limited validation, creating runtime dependence on initialization timing."
+    ],
+    "likely_symptoms": [
+      "entity_history_tenant_key_mismatch",
+      "tenant_fallback_policy_drift",
+      "webhook_secret_resolution_fixed_at_boot"
+    ],
+    "possible_false_positives": []
+  }
+}

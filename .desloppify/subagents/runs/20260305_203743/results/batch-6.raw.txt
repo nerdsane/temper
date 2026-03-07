@@ -1,0 +1,132 @@
+{
+  "batch": "Design coherence — Mechanical Concern Signals",
+  "batch_index": 6,
+  "assessments": {
+    "design_coherence": 78.0
+  },
+  "dimension_notes": {
+    "design_coherence": {
+      "evidence": [
+        "`crates/temper-runtime/src/scheduler/sim_actor_system.rs:229-289` (`step`) and `:362-448` (`run_random`) duplicate the same transition bookkeeping, invariant checks, and integration-callback scheduling with two separate control flows.",
+        "`crates/temper-runtime/src/scheduler/mod.rs:47-88` and `crates/temper-store-sim/src/lib.rs:66-99` both define near-identical `DeterministicRng` xorshift implementations with subtly different probability guards, indicating copy-based reuse instead of one deterministic core.",
+        "`crates/temper-platform/src/bootstrap.rs:72-133` and `:142-200` repeat the same parse→verify→register→mark-verified pipeline for system and agent specs, with only constants and tenant inputs changing.",
+        "`crates/temper-server/src/state/entity_ops.rs:205-243` and `:253-290` replicate authz conversion/telemetry/decision formatting logic in two sibling methods.",
+        "`crates/temper-server/src/registry.rs:296-445` combines cross-invariant parsing, entity-set mapping, hot-reload mutation, first-registration creation, webhook index rebuild, and verification reset in a single branch-heavy method."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "design_coherence",
+      "identifier": "sim_actor_transition_path_duplication",
+      "summary": "SimActorSystem keeps two independent transition-processing paths that must stay behaviorally identical.",
+      "related_files": [
+        "crates/temper-runtime/src/scheduler/sim_actor_system.rs",
+        "crates/temper-runtime/src/scheduler/mod.rs"
+      ],
+      "evidence": [
+        "`step` handles status snapshotting, action counting, transition recording, invariant checks, and integration callback scheduling at `sim_actor_system.rs:240-278`.",
+        "`run_random` re-implements the same sequence for delivered messages at `sim_actor_system.rs:401-433`, with separate failure paths and side-effect ordering.",
+        "Both flows rely on shared scheduler/fault semantics from `scheduler/mod.rs`, but correctness now depends on manually maintaining duplicated logic."
+      ],
+      "suggestion": "Extract a single internal `process_transition(actor_id, action, payload, tick_source)` routine used by both scripted and random modes, so invariant checks, counters, and callback scheduling cannot drift.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "simulation_flow_duplication"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "deterministic_rng_split_brain",
+      "summary": "Deterministic RNG logic is duplicated across crates with diverging edge-case behavior.",
+      "related_files": [
+        "crates/temper-runtime/src/scheduler/mod.rs",
+        "crates/temper-store-sim/src/lib.rs"
+      ],
+      "evidence": [
+        "Both files define a local `DeterministicRng` with the same xorshift implementation (`scheduler/mod.rs:47-88`, `store-sim/lib.rs:66-99`).",
+        "`chance` behavior differs: scheduler uses threshold compare directly (`mod.rs:79-82`), while store-sim short-circuits for `<=0.0` and `>=1.0` (`lib.rs:89-97`).",
+        "This creates two randomness contracts for the same deterministic-testing domain, increasing risk of inconsistent fault-injection expectations."
+      ],
+      "suggestion": "Move RNG into one shared deterministic utility (likely `temper-runtime`) and have both scheduler and sim store consume the same implementation and probability contract.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "simulation_flow_duplication"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "bootstrap_pipeline_copied",
+      "summary": "Bootstrap logic is copy-pasted for system and agent specs instead of being parameterized.",
+      "related_files": [
+        "crates/temper-platform/src/bootstrap.rs",
+        "crates/temper-server/src/registry.rs"
+      ],
+      "evidence": [
+        "`bootstrap_system_tenant` and `bootstrap_agent_specs` each perform the same four stages: parse all specs, run per-spec cascade, parse CSDL, register and write `VerificationStatus::Completed` (`bootstrap.rs:72-133`, `:142-200`).",
+        "Both functions manually build the same `EntityVerificationResult` shape and per-entity registry update loop (`bootstrap.rs:110-126`, `:176-192`).",
+        "This duplicates policy for how verified bootstrap entities are represented in registry state, making it easy for one bootstrap path to diverge from the other."
+      ],
+      "suggestion": "Introduce a generic `bootstrap_spec_bundle(state, tenant_id, csdl_xml, specs)` helper returning structured outcomes; keep only bundle constants and tenant selection in the public wrappers.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "bootstrap_duplication"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "entity_ops_authz_branch_duplication",
+      "summary": "ServerState has two authorization entrypoints with duplicated decision and telemetry choreography.",
+      "related_files": [
+        "crates/temper-server/src/state/entity_ops.rs",
+        "crates/temper-authz/src/engine.rs"
+      ],
+      "evidence": [
+        "`authorize` and `authorize_with_context` duplicate conversion from `BTreeMap` to `HashMap`, call `authorize_or_bypass`, build wide-event telemetry, and map `AuthzDecision` to `Result<(), String>` (`entity_ops.rs:205-243` and `:253-290`).",
+        "The only material difference is how `SecurityContext` is obtained (`from_headers` vs prebuilt), but both methods inline the same post-decision handling.",
+        "Because `AuthzEngine` already encapsulates decision logic (`engine.rs:217-229`), this extra duplicated wrapper policy is a maintenance hotspot."
+      ],
+      "suggestion": "Consolidate shared logic into a single private `authorize_internal(&SecurityContext, ...)` and keep the public methods as thin context adapters.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "authz_wrapper_duplication"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "registry_registration_god_function",
+      "summary": "Tenant registration function mixes too many responsibilities and duplicates entity-build logic across branches.",
+      "related_files": [
+        "crates/temper-server/src/registry.rs",
+        "crates/temper-platform/src/bootstrap.rs"
+      ],
+      "evidence": [
+        "`try_register_tenant_with_reactions_and_constraints` performs parsing, graph compilation, entity-set indexing, hot-reload updates, first-time insertion, route rebuilding, and verification resets in one method (`registry.rs:296-445`).",
+        "The hot-reload and first-registration branches both repeat IOA parse + table build + integrations extraction (`registry.rs:344-377` and `:400-418`).",
+        "Bootstrap callers rely on this broad method as a central write path (`bootstrap.rs:102-108`, `:173-175`), increasing blast radius for any registration change."
+      ],
+      "suggestion": "Split registration into composable phases (`parse_inputs`, `build_entity_specs`, `apply_to_existing`, `create_new_tenant`, `refresh_indexes`) and share one entity-spec builder between branches.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "registry_lifecycle_overload"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Copy-extend development style is repeated in runtime/simulation/bootstrap paths instead of extracting shared lifecycle primitives.",
+      "Boundary helpers are missing where context-adaptation and side-effect choreography repeat (authz wrappers, transition bookkeeping)."
+    ],
+    "likely_symptoms": [
+      "sim_actor_transition_path_duplication",
+      "bootstrap_pipeline_copied",
+      "entity_ops_authz_branch_duplication"
+    ],
+    "possible_false_positives": [
+      "Some duplication in actor vs DST tests may be intentional coverage layering, but core runtime/bootstrap duplication appears structural rather than test-only."
+    ]
+  }
+}

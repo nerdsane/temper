@@ -1,0 +1,158 @@
+{
+  "batch": "Cross-cutting Sweep",
+  "batch_index": 7,
+  "assessments": {
+    "authorization_consistency": 67.0,
+    "error_consistency": 72.0,
+    "api_surface_coherence": 70.0
+  },
+  "dimension_notes": {
+    "authorization_consistency": {
+      "evidence": [
+        "SecurityContext is built directly from caller-controlled X-Temper-* headers, including principal kind (`crates/temper-authz/src/context.rs`:49-71), and comments explicitly note token validation is not implemented yet.",
+        "Evolution endpoints are inconsistent: `handle_update_feature_request` performs Cedar checks (`crates/temper-server/src/observe/evolution/operations.rs`:315-325) while sibling read/trigger endpoints (`handle_sentinel_check`, `handle_unmet_intents`, `handle_feature_requests`) have no auth gate (`crates/temper-server/src/observe/evolution/operations.rs`:168-301).",
+        "Tenant selection falls back silently when headers are missing (`crates/temper-server/src/odata/common.rs`:13-37), while entity history fallback ignores tenant by using `entity_type:entity_id` (`crates/temper-server/src/observe/entities.rs`:61,101-103), creating inconsistent tenant boundary behavior."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    },
+    "error_consistency": {
+      "evidence": [
+        "Multiple observe handlers log backend failures then return 200 with empty payloads, masking operational failures: agents (`crates/temper-server/src/observe/agents.rs`:109-119,165-176), evolution records/insights (`crates/temper-server/src/observe/evolution/records_list.rs`:66-80,117-127), feature requests (`crates/temper-server/src/observe/evolution/operations.rs`:293-300).",
+        "Within the same module, persistence failures are handled differently: `persist_alerts` returns 500 immediately (`crates/temper-server/src/observe/evolution/operations.rs`:77-79) while `persist_insights` only logs and continues (`crates/temper-server/src/observe/evolution/operations.rs`:129-131).",
+        "Core dispatch/state APIs still propagate plain `String` errors (`crates/temper-server/src/state/dispatch/actions.rs`:22,47,72,178; `crates/temper-server/src/state/entity_ops.rs`:211,253,297,309), while other crates expose structured error enums (`crates/temper-authz/src/error.rs`, `crates/temper-observe/src/error.rs`, `crates/temper-mcp/src/error.rs`)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "api_surface_coherence": {
+      "evidence": [
+        "Observe/evolution handlers expose mixed return contracts for sibling routes: `Json<_>` (`handle_unmet_intents`, `handle_feature_requests`), `Result<Json<_>, StatusCode>` (`handle_sentinel_check`), and `Result<Json<_>, (StatusCode, String)>` (`handle_update_feature_request`) in `crates/temper-server/src/observe/evolution/operations.rs`:168-363.",
+        "Observe read APIs differ in failure signaling for similar data-fetch behavior: some return `Result<..., StatusCode>` (`crates/temper-server/src/observe/specs.rs`:71-120), others always return `Json` and silently degrade to empty results (`crates/temper-server/src/observe/agents.rs`:81-177; `crates/temper-server/src/observe/evolution/records_list.rs`:19-128).",
+        "Tenant and identity inputs are not uniform across surface area: tenant can be implicit fallback (`crates/temper-server/src/odata/common.rs`:13-37), while agent identity may come from either `x-agent-id` or `x-temper-principal-id` (`crates/temper-server/src/dispatch.rs`:35-49), leading to inconsistent caller contract expectations."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "header_principal_spoofing_surface",
+      "summary": "Authorization identity is derived from unverified client headers, allowing caller-selected principal kind/ID at policy boundaries.",
+      "related_files": [
+        "crates/temper-authz/src/context.rs",
+        "crates/temper-server/src/authz_helpers.rs",
+        "crates/temper-server/src/observe/evolution/operations.rs"
+      ],
+      "evidence": [
+        "`SecurityContext::from_headers` directly maps `x-temper-principal-id` and `x-temper-principal-kind` into the principal (`crates/temper-authz/src/context.rs`:51-71).",
+        "Auth helper forwards extracted headers without trust verification (`crates/temper-server/src/authz_helpers.rs`:17-40).",
+        "Authorization decisions and admin bypasses in evolution update are keyed off that context (`crates/temper-server/src/observe/evolution/operations.rs`:315-325)."
+      ],
+      "suggestion": "Introduce a single authenticated identity middleware that validates signed tokens/session and constructs `SecurityContext` from trusted claims only; reject or ignore caller-provided principal-kind headers unless explicitly allowed in a development mode.",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "trust_boundary_not_centralized"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "observe_auth_gate_drift",
+      "summary": "Sibling observe/evolution endpoints apply Cedar checks inconsistently, leaving sensitive reads/triggers unauthenticated while patch is gated.",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/operations.rs",
+        "crates/temper-server/src/observe/evolution.rs",
+        "crates/temper-server/src/observe/agents.rs"
+      ],
+      "evidence": [
+        "`handle_update_feature_request` performs authz (`crates/temper-server/src/observe/evolution/operations.rs`:315-325), but `handle_sentinel_check`, `handle_unmet_intents`, and `handle_feature_requests` have no equivalent check (`crates/temper-server/src/observe/evolution/operations.rs`:168-301).",
+        "Module export/reuse exposes these operations together as one API surface (`crates/temper-server/src/observe/evolution.rs`:8-14).",
+        "Agent audit endpoints (`list_agents`, `get_agent_history`) also expose tenant/agent activity without auth gating (`crates/temper-server/src/observe/agents.rs`:81-177)."
+      ],
+      "suggestion": "Apply a uniform authorization policy per observe route class (read telemetry, trigger jobs, mutate state) via shared guard helpers or router-level middleware, and require explicit allow-listing for intentionally public endpoints.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "trust_boundary_not_centralized"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "tenant_scope_fallback_mismatch",
+      "summary": "Tenant scoping is inconsistently applied: tenant is extracted but not used in history-store fallback path, enabling implicit default-tenant reads.",
+      "related_files": [
+        "crates/temper-server/src/odata/common.rs",
+        "crates/temper-server/src/observe/entities.rs",
+        "crates/temper-store-postgres/src/store.rs"
+      ],
+      "evidence": [
+        "Tenant extraction silently falls back when header is missing (`crates/temper-server/src/odata/common.rs`:13-37).",
+        "`get_entity_history` computes tenant-aware actor key, but store fallback uses `format!(\"{entity_type}:{entity_id}\")` and drops tenant (`crates/temper-server/src/observe/entities.rs`:61-65,101-103).",
+        "Store read path parses `persistence_id` into tenant/entity components and queries by tenant (`crates/temper-store-postgres/src/store.rs`:125-137), so missing tenant in caller ID changes scope semantics."
+      ],
+      "suggestion": "Make tenant mandatory for persisted history lookups (`tenant:entity_type:entity_id`), and return explicit 400/401 when tenant context is absent instead of fallbacking to implicit/default tenant selection.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "tenant_boundary_implicitness"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "silent_empty_on_backend_failure",
+      "summary": "Observe endpoints convert backend errors into successful empty responses, hiding outages and corrupting client semantics.",
+      "related_files": [
+        "crates/temper-server/src/observe/agents.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-server/src/observe/evolution/operations.rs"
+      ],
+      "evidence": [
+        "On Turso query errors, handlers log warnings and return empty success payloads in agents endpoints (`crates/temper-server/src/observe/agents.rs`:109-119,165-176).",
+        "Same pattern in evolution records/insights list endpoints (`crates/temper-server/src/observe/evolution/records_list.rs`:66-80,117-127).",
+        "Feature request listing also degrades to `{ feature_requests: [], total: 0 }` on query failure (`crates/temper-server/src/observe/evolution/operations.rs`:293-300)."
+      ],
+      "suggestion": "Return explicit typed failures (e.g., 503 for unavailable backend, 500 for query failures) and reserve empty arrays for true zero-result queries; keep logs but stop collapsing operational errors into success responses.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "error_contract_not_standardized"
+    },
+    {
+      "dimension": "api_surface_coherence",
+      "identifier": "mixed_observe_response_contracts",
+      "summary": "Closely related observe endpoints expose incompatible response/error shapes, forcing route-specific client error handling.",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/operations.rs",
+        "crates/temper-server/src/observe/specs.rs",
+        "crates/temper-server/src/observe/agents.rs"
+      ],
+      "evidence": [
+        "Evolution operations mix `Json<_>`, `Result<Json<_>, StatusCode>`, and `Result<Json<_>, (StatusCode, String)>` in the same module (`crates/temper-server/src/observe/evolution/operations.rs`:168-363).",
+        "Specs endpoint uses status-code errors (`crates/temper-server/src/observe/specs.rs`:71-120), while agents endpoints never surface status errors and always return `Json` (`crates/temper-server/src/observe/agents.rs`:81-177).",
+        "This creates divergent wire contracts for conceptually similar read/report endpoints under `/observe`."
+      ],
+      "suggestion": "Define one observe API error envelope and one handler contract pattern (e.g., `Result<Json<T>, ApiError>`), then migrate all observe modules to it so status codes and payload schemas are predictable.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "error_contract_not_standardized"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Trust boundary is fragmented across handlers instead of centralized at ingress.",
+      "Tenant identity remains partially implicit for backward compatibility, creating scope ambiguity.",
+      "Observe API lacks a shared error/response contract, so handlers evolved divergent semantics."
+    ],
+    "likely_symptoms": [
+      "observe_auth_gate_drift",
+      "silent_empty_on_backend_failure",
+      "mixed_observe_response_contracts"
+    ],
+    "possible_false_positives": [
+      "If deployment architecture guarantees authenticated reverse-proxy identity injection and strips user-supplied X-Temper headers, `header_principal_spoofing_surface` impact would be reduced but still under-specified in code-level contracts."
+    ]
+  }
+}

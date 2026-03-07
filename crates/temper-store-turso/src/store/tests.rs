@@ -1,6 +1,8 @@
 //! Integration tests for the Turso event store.
 
-use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope, PersistenceError};
+use temper_runtime::persistence::{
+    EventMetadata, EventStore, PersistenceEnvelope, PersistenceError,
+};
 
 use super::TursoEventStore;
 

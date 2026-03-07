@@ -2,9 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::request_context::AgentContext;
-use crate::entity_actor::EntityState;
 use crate::authz::wasm_gate::PermissiveWasmAuthzGate;
+use crate::entity_actor::EntityState;
+use crate::request_context::AgentContext;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{WasmAuthzContext, WasmAuthzDecision, WasmAuthzGate};
 
@@ -207,7 +207,8 @@ impl crate::state::ServerState {
         let entity_state = _entity_state.clone();
         let agent_ctx = agent_ctx.clone();
         let action_params = action_params.clone();
-        tokio::spawn(async move { // determinism-ok: async integration side-effects run outside simulation core
+        tokio::spawn(async move {
+            // determinism-ok: async integration side-effects run outside simulation core
             let req = WasmDispatchRequest {
                 tenant: &tenant,
                 entity_type: &entity_type,
@@ -219,10 +220,7 @@ impl crate::state::ServerState {
                 action_params: &action_params,
                 mode: WasmDispatchMode::Background,
             };
-            if let Err(e) = state
-                .dispatch_wasm_integrations_internal(&req)
-                .await
-            {
+            if let Err(e) = state.dispatch_wasm_integrations_internal(&req).await {
                 tracing::error!(error = %e, "background WASM integration dispatch failed");
             }
         });

@@ -1,0 +1,93 @@
+{
+  "batch": "Abstractions & Dependencies",
+  "batch_index": 2,
+  "assessments": {
+    "dependency_health": 76.0
+  },
+  "dimension_notes": {
+    "dependency_health": {
+      "evidence": [
+        "`temper-platform` imports `temper_server::registry` types directly in bootstrap (`crates/temper-platform/src/bootstrap.rs:9`), and multiple platform/reference tests import `temper_server::entity_actor::sim_handler::EntityActorHandler` directly (`crates/temper-platform/tests/system_entity_dst.rs:19`, `reference-apps/ecommerce/tests/ecommerce_dst.rs:16`, `reference-apps/oncall/tests/oncall_dst.rs:16`).",
+        "IOA AST-to-runtime translation logic is duplicated across crates: guard/effect mapping in JIT (`crates/temper-jit/src/table/builder.rs:47-145`), separate guard/effect/assert mapping in verify (`crates/temper-verify/src/model/builder.rs:130-183`, `:218-226`), and assert-op mapping again in server sim handler (`crates/temper-server/src/entity_actor/sim_handler.rs:99-118`).",
+        "CLI serve path is a high-fan-in dependency hub, importing platform router/state plus server internals plus concrete stores (`crates/temper-cli/src/serve/mod.rs:24-35`) while `temper-cli` depends on both `temper-platform` and `temper-server` (`crates/temper-cli/Cargo.toml:17-18`)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "dependency_health",
+      "identifier": "server_internal_test_api_leak",
+      "summary": "Cross-crate tests depend on server internals, creating brittle dependency edges.",
+      "related_files": [
+        "crates/temper-platform/tests/system_entity_dst.rs",
+        "reference-apps/ecommerce/tests/ecommerce_dst.rs",
+        "reference-apps/oncall/tests/oncall_dst.rs",
+        "crates/temper-server/src/entity_actor/sim_handler.rs"
+      ],
+      "evidence": [
+        "Platform and reference tests import `temper_server::entity_actor::sim_handler::EntityActorHandler` (`system_entity_dst.rs:19`, `ecommerce_dst.rs:16`, `oncall_dst.rs:16`).",
+        "`EntityActorHandler` lives under server internals (`crates/temper-server/src/entity_actor/sim_handler.rs`), so test suites in other crates are coupled to non-stable module layout and implementation details."
+      ],
+      "suggestion": "Extract a stable simulation-test API (e.g., `temper-sim` or a public `temper_server::sim` facade) and migrate external tests to that API; keep `entity_actor::sim_handler` internal.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_stable_boundary_for_simulation_dependencies"
+    },
+    {
+      "dimension": "dependency_health",
+      "identifier": "duplicated_ioa_projection_layers",
+      "summary": "IOA translation logic is duplicated across runtime, verify, and server layers.",
+      "related_files": [
+        "crates/temper-jit/src/table/builder.rs",
+        "crates/temper-verify/src/model/builder.rs",
+        "crates/temper-server/src/entity_actor/sim_handler.rs"
+      ],
+      "evidence": [
+        "JIT builder re-maps `automaton::Guard`/`automaton::Effect` variants (`table/builder.rs:47-145`).",
+        "Verify builder independently re-maps the same automaton guards/effects and assert parsing (`model/builder.rs:130-183`, `:218-226`).",
+        "Server simulation handler adds another assert enum mapping (`sim_handler.rs:99-118`)."
+      ],
+      "suggestion": "Introduce a shared projection module/crate for IOA semantic lowering (guards/effects/asserts) with target-specific adapters; make JIT/verify/server consume that shared layer to avoid drift and synchronized edits.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "missing_stable_boundary_for_simulation_dependencies"
+    },
+    {
+      "dimension": "dependency_health",
+      "identifier": "cli_serve_dependency_hub",
+      "summary": "`temper serve` orchestrator in CLI directly binds to many concrete subsystems.",
+      "related_files": [
+        "crates/temper-cli/src/serve/mod.rs",
+        "crates/temper-cli/Cargo.toml",
+        "crates/temper-platform/src/bootstrap.rs",
+        "crates/temper-server/src/registry.rs"
+      ],
+      "evidence": [
+        "`serve/mod.rs` imports platform router/state, server registry/state/webhooks, evolution/observe stores, and Redis/Turso backends directly (`serve/mod.rs:21-35`).",
+        "`temper-cli` depends simultaneously on `temper-platform` and `temper-server` (`Cargo.toml:17-18`), making CLI a compile/link hotspot with broad transitive churn for serve-path changes."
+      ],
+      "suggestion": "Move serve orchestration and backend wiring behind a single platform-facing entry API (e.g., `temper_platform::serve::run`) so CLI becomes a thin adapter and no longer directly couples to server/store internals.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_stable_boundary_for_simulation_dependencies"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "No dedicated stable boundary crate/facade for simulation and IOA semantic projection.",
+      "Executable layer (`temper-cli`) is owning composition details that belong to a platform boundary."
+    ],
+    "likely_symptoms": [
+      "server_internal_test_api_leak",
+      "duplicated_ioa_projection_layers",
+      "cli_serve_dependency_hub"
+    ],
+    "possible_false_positives": []
+  }
+}

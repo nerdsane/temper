@@ -304,9 +304,9 @@ impl PostgresRecordStore {
         record_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<Vec<GenericEvolutionRow>, PgRecordStoreError> {
-        let rows: Vec<EvolutionRow> = match (record_type, status) {
-            (Some(rt), Some(st)) => {
-                sqlx::query_as(
+        let rows: Vec<EvolutionRow> =
+            match (record_type, status) {
+                (Some(rt), Some(st)) => sqlx::query_as(
                     "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
                      FROM evolution_records WHERE record_type = $1 AND status = $2 \
                      ORDER BY timestamp DESC",
@@ -314,35 +314,28 @@ impl PostgresRecordStore {
                 .bind(rt)
                 .bind(st)
                 .fetch_all(&self.pool)
-                .await?
-            }
-            (Some(rt), None) => {
-                sqlx::query_as(
+                .await?,
+                (Some(rt), None) => sqlx::query_as(
                     "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
                      FROM evolution_records WHERE record_type = $1 ORDER BY timestamp DESC",
                 )
                 .bind(rt)
                 .fetch_all(&self.pool)
-                .await?
-            }
-            (None, Some(st)) => {
-                sqlx::query_as(
+                .await?,
+                (None, Some(st)) => sqlx::query_as(
                     "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
                      FROM evolution_records WHERE status = $1 ORDER BY timestamp DESC",
                 )
                 .bind(st)
                 .fetch_all(&self.pool)
-                .await?
-            }
-            (None, None) => {
-                sqlx::query_as(
+                .await?,
+                (None, None) => sqlx::query_as(
                     "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
                      FROM evolution_records ORDER BY timestamp DESC",
                 )
                 .fetch_all(&self.pool)
-                .await?
-            }
-        };
+                .await?,
+            };
 
         Ok(rows.into_iter().map(GenericEvolutionRow::from).collect())
     }

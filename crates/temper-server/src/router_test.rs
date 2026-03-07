@@ -543,15 +543,9 @@ async fn collect_sse_frames_until(
 
     let mut stream = body.into_data_stream();
     let mut collected = String::new();
-    let deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            stream.next(),
-        )
-        .await
-        {
+        match tokio::time::timeout(std::time::Duration::from_millis(500), stream.next()).await {
             Ok(Some(Ok(bytes))) => {
                 collected.push_str(&String::from_utf8_lossy(&bytes));
                 if predicate(&collected) {
@@ -606,8 +600,7 @@ async fn test_sse_events_endpoint_delivers_state_changes() {
 
     // Read SSE frames until we see the event (stream never closes on its own).
     let collected =
-        collect_sse_frames_until(response.into_body(), |s| s.contains("o-sse-1"), 3000)
-            .await;
+        collect_sse_frames_until(response.into_body(), |s| s.contains("o-sse-1"), 3000).await;
     assert!(
         collected.contains("o-sse-1"),
         "SSE body should contain the entity_id. Got: {collected}"
@@ -662,12 +655,8 @@ async fn test_sse_events_lagged_receiver_continues() {
     });
 
     // Read frames — the stream should recover and deliver the fresh event.
-    let collected = collect_sse_frames_until(
-        response.into_body(),
-        |s| s.contains("after-flood"),
-        3000,
-    )
-    .await;
+    let collected =
+        collect_sse_frames_until(response.into_body(), |s| s.contains("after-flood"), 3000).await;
     assert!(
         collected.contains("after-flood"),
         "SSE should recover after lag. Got: {collected}"

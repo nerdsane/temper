@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use temper_spec::automaton::{
-    Automaton, ParsedAssert, ResolvedEffect, ResolvedGuard, parse_assert_expr,
-    parse_bool_initial, parse_counter_initial_usize, parse_list_initial, translate_actions,
+    Automaton, ParsedAssert, ResolvedEffect, ResolvedGuard, parse_assert_expr, parse_bool_initial,
+    parse_counter_initial_usize, parse_list_initial, translate_actions,
 };
 
 use super::types::{

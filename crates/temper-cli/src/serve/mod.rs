@@ -25,9 +25,7 @@ use temper_platform::optimization::run_optimization_cycle;
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
-use temper_server::registry::{
-    EntityLevelSummary, EntityVerificationResult, VerificationStatus,
-};
+use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_server::state::DesignTimeEvent;
 use temper_verify::cascade::VerificationCascade;
 

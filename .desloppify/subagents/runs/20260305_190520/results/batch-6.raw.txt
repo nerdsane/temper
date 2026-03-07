@@ -1,0 +1,271 @@
+{
+  "batch": "Cross-cutting Sweep",
+  "batch_index": 6,
+  "assessments": {
+    "naming_quality": 88.0,
+    "logic_clarity": 87.0,
+    "type_safety": 84.0,
+    "contract_coherence": 76.0,
+    "error_consistency": 78.0,
+    "initialization_coupling": 91.0,
+    "convention_outlier": 83.0,
+    "authorization_consistency": 70.0,
+    "design_coherence": 82.0
+  },
+  "dimension_notes": {
+    "naming_quality": {
+      "evidence": [
+        "`AuthzEngine::permissive()` creates an empty policy set that denies by default, but its name implies allow-all behavior (`crates/temper-authz/src/engine.rs:56`, tests at `crates/temper-authz/src/engine.rs:302-303`).",
+        "The same misleading semantic appears next to a real allow-all implementation (`PermissiveWasmAuthzGate`) in `crates/temper-server/src/wasm_authz_gate.rs:104-121`, increasing reader confusion."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": "Misleading security-critical naming (`permissive`) contradicts runtime behavior and adjacent naming in WASM authz."
+    },
+    "logic_clarity": {
+      "evidence": [
+        "Multiple handlers log query failures and then return successful empty payloads, making control flow obscure for clients (e.g. `crates/temper-server/src/api.rs:604-609`, `954-959`; `crates/temper-server/src/observe/agents.rs:110-115`, `166-171`).",
+        "This pattern hides whether a response is genuinely empty or backend-unavailable, reducing operational clarity."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": "Failure and empty-data flows are intentionally merged in several endpoints, obscuring true execution outcomes."
+    },
+    "type_safety": {
+      "evidence": [
+        "API query/body fields that are bounded enums are typed as free-form strings and validated manually (`scope: String` in `crates/temper-server/src/api.rs:627`, matched at `644`; `record_type/status: Option<String>` in `crates/temper-server/src/observe/evolution/records_list.rs:12-14`; `disposition` string normalization in `crates/temper-server/src/observe/evolution/operations.rs:313`).",
+        "This repeats stringly-typed protocol parsing instead of leveraging typed deserialization."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "contract_coherence": {
+      "evidence": [
+        "`SecurityContext::from_headers` defaults missing/unknown principal kind to `System` (`crates/temper-authz/src/context.rs:53`), while `authorize_or_bypass` unconditionally allows `System` (`crates/temper-authz/src/engine.rs:225-226`).",
+        "Server authorization paths call this bypass-enabled flow (`crates/temper-server/src/state/entity_ops.rs:267`), so missing identity headers can violate expected auth contract."
+      ],
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    },
+    "error_consistency": {
+      "evidence": [
+        "Read APIs treat backend query failures as `200 OK` with empty collections (`crates/temper-server/src/api.rs:604-609`, `954-959`; `crates/temper-server/src/observe/evolution/records_list.rs:67-72`; `crates/temper-server/src/observe/agents.rs:110-115`).",
+        "Write/authorize paths in the same modules return explicit non-2xx on failures (e.g. `crates/temper-server/src/api.rs:349-358`, `410-417`, `522-527`)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "initialization_coupling": {
+      "evidence": [
+        "Most environment and config reads occur inside runtime setup/handlers, not at module import time (`crates/temper-cli/src/serve/mod.rs:71-119`, `343-346`; `crates/temper-server/src/webhooks.rs:70-87`, `188`).",
+        "Embedded specs via `include_str!` are compile-time constants in bootstrap/test contexts (`crates/temper-platform/src/bootstrap.rs:20-55`) and do not introduce runtime boot-order side effects."
+      ],
+      "impact_scope": "local",
+      "fix_scope": "single_edit",
+      "confidence": "medium",
+      "issues_preventing_higher_score": "Some startup paths still bind behavior to ambient env values (e.g., webhook header expansion) without explicit config provenance."
+    },
+    "convention_outlier": {
+      "evidence": [
+        "Header conventions drift across modules: `extract_temper_headers` accepts any `x-temper-*` keys (`crates/temper-server/src/authz_helpers.rs:16-26`) while `SecurityContext::from_headers` only interprets specific keys (`crates/temper-authz/src/context.rs:60-85`).",
+        "Tests in authz helpers validate `x-temper-principal` (`crates/temper-server/src/authz_helpers.rs:155-173`), but authz context parsing expects `x-temper-principal-id` (`crates/temper-authz/src/context.rs:62`)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "authorization_consistency": {
+      "evidence": [
+        "Several sensitive tenant/cross-tenant endpoints are routed without explicit authorization checks (secrets and decision listing/streams in `crates/temper-server/src/api.rs:68-101`, handlers at `163`, `253`, `290`, `561`, `886`, `915`, `975`, `1001`).",
+        "Other sibling policy/decision mutation endpoints enforce Cedar checks and denial recording (`crates/temper-server/src/api.rs:341-358`, `443-460`, `640-641`, `815-816`).",
+        "Missing or malformed identity headers can become `System` and bypass all checks (`crates/temper-authz/src/context.rs:53`; `crates/temper-authz/src/engine.rs:225-226`; invoked from `crates/temper-server/src/state/entity_ops.rs:267`)."
+      ],
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    },
+    "design_coherence": {
+      "evidence": [
+        "Authorization logic is duplicated per-handler instead of centralized middleware/policy guard, producing drift between guarded and unguarded sibling routes (`crates/temper-server/src/api.rs:341-358`, `443-460`, `640-641`, `815-816` vs unguarded handlers at `163`, `290`, `561`, `915`).",
+        "Shared helper exists (`crates/temper-server/src/authz_helpers.rs`) but is not applied consistently to route protection decisions."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "default_system_principal_bypass",
+      "summary": "Missing identity headers default to System principal and bypass Cedar checks",
+      "related_files": [
+        "crates/temper-authz/src/context.rs",
+        "crates/temper-authz/src/engine.rs",
+        "crates/temper-server/src/state/entity_ops.rs"
+      ],
+      "evidence": [
+        "`SecurityContext::from_headers` initializes `kind` as `PrincipalKind::System` (`context.rs:53`).",
+        "`AuthzEngine::authorize_or_bypass` allows all `System` principals (`engine.rs:225-226`).",
+        "Server authorization paths use `authorize_or_bypass` (`entity_ops.rs:267`), so absent/invalid headers can become allow-all."
+      ],
+      "suggestion": "Change default principal kind for missing/unknown headers to a non-bypass identity (e.g., `Anonymous`/`Customer`/`Agent` with deny-by-default), and reserve `System` only for explicitly trusted internal construction paths (e.g., `SecurityContext::system()`).",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "ad_hoc_auth_boundary"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "unguarded_sensitive_routes",
+      "summary": "Sensitive API routes lack Cedar authorization while sibling routes enforce it",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/authz_helpers.rs"
+      ],
+      "evidence": [
+        "Secrets and decision read/stream handlers are routed and implemented without auth checks (`api.rs` routes `68-101`; handlers `163`, `253`, `290`, `561`, `886`, `915`, `975`, `1001`).",
+        "Policy mutation and decision mutation paths do enforce authorization and denial auditing (`api.rs:341-358`, `443-460`, `640-641`, `815-816`)."
+      ],
+      "suggestion": "Apply a uniform auth guard/middleware for all management and decision routes, with explicit allowlist for intentionally public endpoints; use one reusable helper to avoid per-handler divergence.",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "ad_hoc_auth_boundary"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "query_failures_masked_as_empty_success",
+      "summary": "Backend query failures are returned as empty 200 responses",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/observe/agents.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "Decision list endpoints log query errors but return empty success payloads (`api.rs:604-609`, `954-959`).",
+        "Observe agents/evolution endpoints follow the same pattern (`observe/agents.rs:110-115`, `166-171`; `records_list.rs:67-72`, `118-123`)."
+      ],
+      "suggestion": "Return explicit backend-failure status (`503`/`500`) with error bodies for query failures, and keep `200 + empty` only for true empty datasets; centralize this mapping in a shared helper.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "error_masking_fallback"
+    },
+    {
+      "dimension": "type_safety",
+      "identifier": "stringly_typed_protocol_fields",
+      "summary": "Enum-like request/query fields are modeled as free-form strings",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-server/src/observe/evolution/operations.rs"
+      ],
+      "evidence": [
+        "`ApproveBody.scope` is `String` and manually matched (`api.rs:627`, `644-652`).",
+        "Evolution record filters are `Option<String>` for bounded domains (`records_list.rs:12-14`).",
+        "Feature request disposition is normalized with manual lowercase matching (`operations.rs:313-319`)."
+      ],
+      "suggestion": "Replace string fields with serde-deserializable enums (`#[serde(rename_all = \"snake_case\")]` / aliases where needed) so invalid values fail at parse boundaries consistently.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "stringly_api_contracts"
+    },
+    {
+      "dimension": "convention_outlier",
+      "identifier": "header_key_convention_drift",
+      "summary": "Header naming conventions drift between extraction and authz parsing",
+      "related_files": [
+        "crates/temper-server/src/authz_helpers.rs",
+        "crates/temper-authz/src/context.rs",
+        "crates/temper-server/src/dispatch.rs"
+      ],
+      "evidence": [
+        "`extract_temper_headers` forwards any `x-temper-*` key (`authz_helpers.rs:16-26`), but `SecurityContext::from_headers` recognizes only specific names (`context.rs:60-85`).",
+        "Helper tests validate `x-temper-principal` (`authz_helpers.rs:155-173`), while parsing logic requires `x-temper-principal-id` (`context.rs:62`).",
+        "Dispatch context also accepts different identity headers (`x-agent-id` and fallback `x-temper-principal-id`) (`dispatch.rs:34-54`)."
+      ],
+      "suggestion": "Define a single header schema (constants + parser) and enforce it in helpers/tests; reject or explicitly map legacy aliases instead of silently ignoring mismatched keys.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "ad_hoc_auth_boundary"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "route_auth_pattern_not_centralized",
+      "summary": "Authorization policy is duplicated at handler level, causing drift",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/authz_helpers.rs",
+        "crates/temper-server/src/observe/entities.rs"
+      ],
+      "evidence": [
+        "Some API handlers inline auth checks and denial handling (`api.rs:341-358`, `443-460`, `640-641`, `815-816`) while sibling handlers skip checks entirely (`api.rs:163`, `290`, `561`, `915`; observe handlers in `observe/entities.rs`).",
+        "A shared helper exists but is used only for parts of the surface (`authz_helpers.rs`), indicating missing structural abstraction for route-level authorization."
+      ],
+      "suggestion": "Introduce route-level authorization middleware/guard builders that declare required action/resource once per route group; keep denial recording in one shared path.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "ad_hoc_auth_boundary"
+    },
+    {
+      "dimension": "naming_quality",
+      "identifier": "misleading_permissive_engine_name",
+      "summary": "`permissive` name contradicts deny-by-default behavior",
+      "related_files": [
+        "crates/temper-authz/src/engine.rs",
+        "crates/temper-server/src/wasm_authz_gate.rs"
+      ],
+      "evidence": [
+        "`AuthzEngine::permissive()` creates `PolicySet::new()` (`engine.rs:56-60`), and tests confirm this denies by default (`engine.rs:302-310`).",
+        "In WASM authz, `PermissiveWasmAuthzGate` is true allow-all (`wasm_authz_gate.rs:104-121`), making the `permissive` engine name semantically inverted."
+      ],
+      "suggestion": "Rename `AuthzEngine::permissive` to an accurate term like `empty_policy_set`/`default_deny`, and update call sites/tests to remove security-behavior ambiguity.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "stringly_api_contracts"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "auth_contract_allows_implicit_privilege",
+      "summary": "Security context contract grants privileged semantics on missing headers",
+      "related_files": [
+        "crates/temper-authz/src/context.rs",
+        "crates/temper-authz/src/engine.rs",
+        "crates/temper-server/src/api.rs"
+      ],
+      "evidence": [
+        "Context construction from headers treats unknown principal kind as `System` (`context.rs:64-68`).",
+        "Auth engine defines `System` as unconditional bypass (`engine.rs:212-226`).",
+        "API handlers commonly build context directly from request headers (`api.rs:341`, `443`, `1053`) without mandatory identity presence checks."
+      ],
+      "suggestion": "Make header-derived contexts unprivileged by default and require explicit trusted construction for system-level contexts; enforce presence/validation of principal headers at API boundary.",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "ad_hoc_auth_boundary"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Authorization is enforced via per-handler conventions instead of a single mandatory boundary.",
+      "Protocol and header contracts are stringly-typed and duplicated across modules, allowing drift.",
+      "Read-path resilience currently favors silent fallback over explicit error signaling."
+    ],
+    "likely_symptoms": [
+      "unguarded_sensitive_routes",
+      "header_key_convention_drift",
+      "query_failures_masked_as_empty_success"
+    ],
+    "possible_false_positives": []
+  }
+}

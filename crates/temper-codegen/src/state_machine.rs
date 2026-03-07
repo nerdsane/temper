@@ -125,7 +125,11 @@ mod tests {
     fn test_sm() -> StateMachine {
         StateMachine {
             module_name: "OrderSpec".to_string(),
-            states: vec!["Draft".to_string(), "Submitted".to_string(), "Done".to_string()],
+            states: vec![
+                "Draft".to_string(),
+                "Submitted".to_string(),
+                "Done".to_string(),
+            ],
             transitions: vec![
                 Transition {
                     name: "Submit".to_string(),

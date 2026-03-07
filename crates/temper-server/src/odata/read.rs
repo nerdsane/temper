@@ -334,9 +334,7 @@ pub(super) async fn handle_odata_get_for_tenant(
         ODataPath::NavigationProperty {
             ref parent,
             ref property,
-        } => {
-            handle_navigation_property(&state, &tenant, parent, property, &query_options).await
-        }
+        } => handle_navigation_property(&state, &tenant, parent, property, &query_options).await,
 
         ODataPath::NavigationEntity {
             ref parent,
@@ -459,14 +457,7 @@ async fn handle_entity(
                 Some(format!("{set_name}('{key_str}')")),
             );
 
-            enrich_entity_response(
-                &mut body,
-                &entity_type,
-                set_name,
-                &key_str,
-                state,
-                tenant,
-            );
+            enrich_entity_response(&mut body, &entity_type, set_name, &key_str, state, tenant);
 
             if let Some(ref expand_items) = query_options.expand {
                 expand_entity(&mut body, expand_items, &entity_type, state, tenant).await;
@@ -575,9 +566,7 @@ async fn handle_navigation_property(
         return odata_error(
             StatusCode::NOT_FOUND,
             "NavigationPropertyNotFound",
-            &format!(
-                "Navigation property '{property}' not found on entity type '{parent_type}'"
-            ),
+            &format!("Navigation property '{property}' not found on entity type '{parent_type}'"),
         )
         .into_response();
     };
@@ -636,9 +625,7 @@ async fn handle_navigation_entity(
     let target_type = {
         let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
         let tc = registry.get_tenant(tenant);
-        tc.and_then(|tc| {
-            crate::query_eval::find_nav_target(&tc.csdl, &parent_type, property)
-        })
+        tc.and_then(|tc| crate::query_eval::find_nav_target(&tc.csdl, &parent_type, property))
     };
 
     let Some(target_type) = target_type else {

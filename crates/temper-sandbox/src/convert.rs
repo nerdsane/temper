@@ -112,7 +112,10 @@ mod tests {
     #[test]
     fn json_bool_to_monty() {
         assert_eq!(json_to_monty_object(&json!(true)), MontyObject::Bool(true));
-        assert_eq!(json_to_monty_object(&json!(false)), MontyObject::Bool(false));
+        assert_eq!(
+            json_to_monty_object(&json!(false)),
+            MontyObject::Bool(false)
+        );
     }
 
     #[test]

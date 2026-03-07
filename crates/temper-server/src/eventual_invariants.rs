@@ -135,7 +135,8 @@ pub fn spawn_eventual_recheck(
     state: crate::state::ServerState,
     interval: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(// determinism-ok: background convergence task
+    tokio::spawn(
+        // determinism-ok: background convergence task
         async move {
             let mut ticker = tokio::time::interval(interval); // determinism-ok: convergence polling
             loop {
@@ -172,15 +173,16 @@ pub fn spawn_eventual_recheck(
                             "eventual_converged",
                         );
                         // Observability: emit WideEvent for invariant convergence
-                        let wide = wide_event::from_invariant_check(wide_event::InvariantCheckInput {
-                            invariant_name: &inv.name,
-                            entity_type: &inv.entity_type,
-                            entity_id: &inv.entity_id,
-                            tenant: &inv.tenant,
-                            check_count: inv.check_count as u32,
-                            outcome: "converged",
-                            duration_ns: 0,
-                        });
+                        let wide =
+                            wide_event::from_invariant_check(wide_event::InvariantCheckInput {
+                                invariant_name: &inv.name,
+                                entity_type: &inv.entity_type,
+                                entity_id: &inv.entity_id,
+                                tenant: &inv.tenant,
+                                check_count: inv.check_count as u32,
+                                outcome: "converged",
+                                duration_ns: 0,
+                            });
                         wide_event::emit_span(&wide);
                         wide_event::emit_metrics(&wide);
                         tracing::info!(

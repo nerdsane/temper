@@ -1,0 +1,93 @@
+{
+  "batch": "AI Debt & Migrations",
+  "batch_index": 3,
+  "assessments": {
+    "low_level_elegance": 82.0
+  },
+  "dimension_notes": {
+    "low_level_elegance": {
+      "evidence": [
+        "`crates/temper-evolution/src/lib.rs` keeps a `legacy` shim with `#[allow(deprecated)] pub use crate::store::RecordStore;`, but the shim itself is not marked deprecated, so old usage remains silent and open-ended.",
+        "Multiple assigned modules are pass-through veneers with no local behavior (`crates/temper-mcp/src/repl.rs`, `crates/temper-platform/src/agent/mod.rs`, `crates/temper-platform/src/deploy/mod.rs`, `crates/temper-odata/src/query/mod.rs`), adding indirection without local policy.",
+        "Error surfaces across assigned crates still rely heavily on string payloads (`AuthzError::* (String)`, `McpError::* (String)`), which encourages ad-hoc message parsing and weakens precise handling at call sites."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "legacy_shim_not_self_deprecated",
+      "summary": "Compatibility shim keeps deprecated API path alive without compiler pressure to migrate.",
+      "related_files": [
+        "crates/temper-evolution/src/lib.rs",
+        "crates/temper-evolution/src/records.rs"
+      ],
+      "evidence": [
+        "`crates/temper-evolution/src/lib.rs` defines `pub mod legacy` and suppresses deprecation warnings via `#[allow(deprecated)]` while re-exporting `RecordStore`.",
+        "The module docs say these APIs are deprecated and will be removed, but there is no `#[deprecated(...)]` attribute on the shim entrypoint itself.",
+        "`crates/temper-evolution/src/records.rs` models migration planning (`ImplementationPlan.migration_required`) while the API surface still silently accepts legacy usage."
+      ],
+      "suggestion": "Mark the legacy module/re-export with `#[deprecated(note = ...)]`, remove `#[allow(deprecated)]` at the public boundary, and gate legacy exports behind an explicit compatibility feature with a sunset target.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "unbounded_migration_compatibility"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "pass_through_module_indirection",
+      "summary": "Several modules are pure re-export/pass-through layers that add navigation and maintenance overhead.",
+      "related_files": [
+        "crates/temper-mcp/src/repl.rs",
+        "crates/temper-platform/src/agent/mod.rs",
+        "crates/temper-platform/src/deploy/mod.rs",
+        "crates/temper-odata/src/query/mod.rs"
+      ],
+      "evidence": [
+        "`crates/temper-mcp/src/repl.rs` only re-exports `ReplConfig` and `run_repl` from `temper_sandbox::repl`.",
+        "`crates/temper-platform/src/agent/mod.rs` and `crates/temper-platform/src/deploy/mod.rs` are mostly façade re-exports without local behavior/policy.",
+        "`crates/temper-odata/src/query/mod.rs` is also a pure barrel for `filter` and `types` exports."
+      ],
+      "suggestion": "Collapse purely pass-through modules where possible, or keep them only when they enforce clear local policy/versioning boundaries; otherwise export directly from owning modules to reduce indirection depth.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "ai_generated_barrel_patterns"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "stringly_typed_error_payloads",
+      "summary": "Error enums rely on broad `String` payloads, reducing precision and encouraging formatting-as-contract patterns.",
+      "related_files": [
+        "crates/temper-authz/src/error.rs",
+        "crates/temper-mcp/src/error.rs",
+        "crates/temper-observe/src/error.rs"
+      ],
+      "evidence": [
+        "`AuthzError` variants (`Denied`, `PolicyParse`, `InvalidPrincipal`, `InvalidResource`, `Engine`) all carry plain `String`.",
+        "`McpError` variants are predominantly `String`-backed, even across distinct transport/protocol/runtime categories.",
+        "`ObserveError` mixes one typed source (`SerializationError(#[from] serde_json::Error)`) with multiple free-form string variants, indicating inconsistent granularity."
+      ],
+      "suggestion": "Introduce typed payload structs or source-error wrappers per category (e.g., dedicated parse/resource/principal error types), keep human formatting at display boundaries, and standardize conversion helpers across crates.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "stringly_error_modeling"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Migration compatibility paths are retained as open-ended shims instead of explicitly staged deprecations.",
+      "AI-style barrel/pass-through module generation increased indirection without adding behavior.",
+      "Error modeling favored quick string wrapping over typed domain errors."
+    ],
+    "likely_symptoms": [
+      "pass_through_module_indirection",
+      "stringly_typed_error_payloads"
+    ],
+    "possible_false_positives": []
+  }
+}

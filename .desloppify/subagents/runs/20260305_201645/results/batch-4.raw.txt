@@ -1,0 +1,95 @@
+{
+  "batch": "Cross-cutting Sweep",
+  "batch_index": 4,
+  "assessments": {
+    "authorization_consistency": 62.0
+  },
+  "dimension_notes": {
+    "authorization_consistency": {
+      "evidence": [
+        "Implicit principal defaults to `System` in `SecurityContext::from_headers` when identity headers are absent (`crates/temper-authz/src/context.rs:51-54`), and `authorize_or_bypass` unconditionally allows `System` (`crates/temper-authz/src/engine.rs:212-227`).",
+        "Endpoints in `crates/temper-server/src/observe/evolution/operations.rs` that mutate state (`handle_sentinel_check`, `handle_feature_requests`) perform writes/dispatches without any Cedar check (`:167-185`, `:221-269`).",
+        "Tenant resolution falls back to first registered tenant or default when `x-tenant-id` is missing (`crates/temper-server/src/odata/common.rs:13-37`), while read endpoints enumerate across all tenants (`crates/temper-server/src/observe/specs.rs:20-66`).",
+        "Cross-tenant record/insight listing endpoints (`crates/temper-server/src/observe/evolution/records_list.rs:17-128`) expose data without tenant/principal scoping, while a sibling endpoint in the same module family applies Cedar checks (`crates/temper-server/src/observe/evolution/operations.rs:303-327`)."
+      ],
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "implicit_system_bypass_from_missing_identity",
+      "summary": "Missing identity headers default to `System`, turning auth checks into allow-by-default",
+      "related_files": [
+        "crates/temper-authz/src/context.rs",
+        "crates/temper-authz/src/engine.rs",
+        "crates/temper-server/src/observe/evolution/operations.rs"
+      ],
+      "evidence": [
+        "`SecurityContext::from_headers` initializes `kind` as `PrincipalKind::System` (`context.rs:53`) when no `x-temper-principal-kind` header exists.",
+        "`AuthzEngine::authorize_or_bypass` returns `Allow` for any `System` principal (`engine.rs:225-227`).",
+        "`handle_update_feature_request` builds context from headers and relies on Cedar authorization (`operations.rs:315-323`), so missing headers still pass via System bypass."
+      ],
+      "suggestion": "Change default request principal to a non-bypass identity (for example `Anonymous`/`Agent`), reserve `System` only for explicitly internal call paths, and require explicit trusted marker for any bypass path. Then update endpoint auth helpers to reject missing/invalid principal headers for external routes.",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "implicit_system_trust"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "mutating_evolution_endpoints_missing_cedar_gate",
+      "summary": "State-mutating evolution handlers run without authorization checks",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/operations.rs",
+        "crates/temper-server/src/state/entity_ops.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`handle_sentinel_check` triggers alert/insight persistence and entity creation via `persist_alerts`/`persist_insights` with no principal/auth check (`operations.rs:167-185`).",
+        "`handle_feature_requests` (GET) upserts feature requests and dispatches `CreateFeatureRequest` actions (`operations.rs:221-269`) without Cedar authorization.",
+        "Documentation claims every state-changing action is authorized (`README.md:25`, `README.md:35`, `README.md:70`), but these mutating handlers bypass that model."
+      ],
+      "suggestion": "Apply a shared authorization middleware/policy gate for all mutation-capable handlers (including GET handlers with side effects), and split read endpoints from write/refresh behavior so non-mutating reads cannot perform writes implicitly.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "inconsistent_route_auth_contract"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "tenant_inference_without_caller_proof",
+      "summary": "Tenant is inferred from server state when header is missing, enabling cross-tenant drift",
+      "related_files": [
+        "crates/temper-server/src/odata/common.rs",
+        "crates/temper-server/src/observe/specs.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "`extract_tenant` silently falls back to first registered tenant, then default tenant (`odata/common.rs:23-37`) instead of rejecting missing tenant identity.",
+        "`list_specs` iterates all tenants and returns full per-tenant spec metadata (`observe/specs.rs:25-66`).",
+        "`list_evolution_records` and `list_evolution_insights` return global Turso rows without tenant filter (`records_list.rs:24-64`, `:89-115`)."
+      ],
+      "suggestion": "Require explicit tenant binding for external requests (header/token claim) and reject absent tenant context; for intentionally cross-tenant endpoints, enforce explicit privileged permission and audit marker rather than implicit fallback behavior.",
+      "confidence": "medium",
+      "impact_scope": "codebase",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "implicit_system_trust"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Trusted-system semantics are overloaded onto default request parsing rather than explicit internal-only call paths.",
+      "Authorization is implemented per-handler with no mandatory route-level policy contract, so sibling endpoints diverge.",
+      "Tenant identity is treated as optional transport metadata instead of a required authorization input."
+    ],
+    "likely_symptoms": [
+      "implicit_system_bypass_from_missing_identity",
+      "mutating_evolution_endpoints_missing_cedar_gate",
+      "tenant_inference_without_caller_proof"
+    ],
+    "possible_false_positives": []
+  }
+}

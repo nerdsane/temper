@@ -1,0 +1,14 @@
+{
+  "session": {
+    "id": "ext_20260306_022448_a13c10f0",
+    "token": "6aa8b862977f7f199d13419df8b2f904"
+  },
+  "assessments": {
+    "authorization_consistency": 0,
+    "test_strategy": 0,
+    "package_organization": 0,
+    "design_coherence": 0,
+    "api_surface_coherence": 0
+  },
+  "findings": []
+}

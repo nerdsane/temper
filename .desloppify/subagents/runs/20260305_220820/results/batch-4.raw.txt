@@ -1,0 +1,86 @@
+{
+  "batch": "Package Organization",
+  "batch_index": 4,
+  "assessments": {
+    "package_organization": 76.0,
+    "high_level_elegance": 79.0
+  },
+  "dimension_notes": {
+    "package_organization": {
+      "evidence": [
+        "`holistic_context.structure.directory_profiles[\"crates/temper-server/src/\"]` reports 22 files in one flat root folder, mixing routing (`router.rs`), auth helpers (`authz_helpers.rs`), constraints (`constraint_engine.rs`), dispatch facade (`dispatch.rs`), and other domains.",
+        "`crates/temper-server/src/dispatch.rs` is a compatibility facade that re-exports both OData handlers and request-context types, which blurs placement/ownership boundaries.",
+        "`crates/temper-server/src/observe/entities.rs` imports tenant extraction through `crate::dispatch::extract_tenant`, tying observe package placement to an OData-oriented facade instead of a direct request-context boundary."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "high_level_elegance": {
+      "evidence": [
+        "Root-level modules have unclear ownership seams: `authz_helpers.rs` is shared by API/OData/observe paths, while `constraint_engine.rs` is effectively an OData write-time policy module but sits at crate root.",
+        "`dispatch.rs` keeps backward-compatible exports from multiple domains (`crate::odata::*` and `crate::request_context::*`), so architectural ownership is historical rather than capability-aligned."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "package_organization",
+      "identifier": "dispatch_facade_boundary_blur",
+      "summary": "Top-level `dispatch.rs` acts as a cross-domain shim, obscuring package boundaries.",
+      "related_files": [
+        "crates/temper-server/src/dispatch.rs",
+        "crates/temper-server/src/observe/entities.rs",
+        "crates/temper-server/src/router.rs",
+        "crates/temper-server/src/lib.rs"
+      ],
+      "evidence": [
+        "`dispatch.rs` re-exports OData handlers plus `AgentContext`/`extract_agent_context` from `request_context`, mixing two ownership domains in one facade.",
+        "`observe/entities.rs` depends on `crate::dispatch::extract_tenant`, so observe routing depends on an OData compatibility module instead of a direct request-context module.",
+        "Server root directory has 22 files with mixed concerns, indicating flattening debt around boundary files."
+      ],
+      "suggestion": "Staged reorg plan: 1) Create target folders/modules `crates/temper-server/src/odata/dispatch.rs` (OData handlers only) and keep tenant/agent extraction in `crates/temper-server/src/request_context.rs`. 2) Move imports in order: `router.rs` and OData call sites to `crate::odata::dispatch::*`, then observe/API call sites to `crate::request_context::*`. 3) Keep `dispatch.rs` as temporary deprecated shim for one release, then remove it and update `lib.rs` exports. Import-update/validation commands: `rg -n \"crate::dispatch::\" crates/temper-server/src`, `cargo check -p temper-server --features observe`, `cargo test -p temper-server --features observe`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "legacy_compat_shims"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "root_level_service_modules_without_domain_homes",
+      "summary": "Authz and constraint modules are placed as root helpers instead of domain-owned packages.",
+      "related_files": [
+        "crates/temper-server/src/authz_helpers.rs",
+        "crates/temper-server/src/constraint_engine.rs",
+        "crates/temper-server/src/odata/write.rs",
+        "crates/temper-server/src/observe/agents.rs"
+      ],
+      "evidence": [
+        "`constraint_engine.rs` is consumed primarily by OData boundary code (`odata/write.rs`, `odata/bindings.rs`, `odata/common.rs`), but its placement suggests generic server-wide ownership.",
+        "`authz_helpers.rs` centralizes observe/API denial handling and header-derived context, but remains a generic root helper rather than an explicit authz module boundary.",
+        "This organization makes top-level ownership hard to explain quickly: policy enforcement, request parsing, and routing seams are spread as peer root files."
+      ],
+      "suggestion": "Staged reorg plan: 1) Create target modules `crates/temper-server/src/authz/mod.rs` (move `security_context_from_headers`, `require_observe_auth`, `record_authz_denial`) and `crates/temper-server/src/odata/constraints.rs` (move `ConstraintViolation*` and relation/invariant check functions). 2) Move call sites in order: OData files first (`odata/common.rs`, `odata/bindings.rs`, `odata/write.rs`), then observe/API auth imports. 3) Keep temporary `pub use` compatibility shims in old files, then remove after import convergence and update `lib.rs`. Import-update/validation commands: `rg -n \"crate::(authz_helpers|constraint_engine)::\" crates/temper-server/src`, `cargo check -p temper-server --features observe`, `cargo test -p temper-server --features observe`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "legacy_compat_shims"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Compatibility-first shims became long-lived architectural surfaces.",
+      "Root-level flattening in `crates/temper-server/src/` weakened domain-based file placement."
+    ],
+    "likely_symptoms": [
+      "dispatch_facade_boundary_blur",
+      "root_level_service_modules_without_domain_homes"
+    ],
+    "possible_false_positives": [
+      "Prior 'orphaned' flags for these files appear stale; current code shows active imports/usages across server modules."
+    ]
+  }
+}

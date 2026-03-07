@@ -146,7 +146,10 @@ mod tests {
     fn empty_actions_and_functions() {
         let result = generate_message_enum("Order", &[], &[], "Ns");
 
-        assert!(result.contains("pub enum OrderMsg {"), "expected enum declaration");
+        assert!(
+            result.contains("pub enum OrderMsg {"),
+            "expected enum declaration"
+        );
         assert!(result.contains("GetState"), "expected GetState variant");
         assert!(
             result.contains("impl temper_runtime::actor::Message for OrderMsg"),
@@ -160,8 +163,14 @@ mod tests {
         let result = generate_message_enum("Order", &[&action], &[], "Ns");
 
         // Should generate a unit variant (no braces around fields)
-        assert!(result.contains("/// Action: Submit"), "expected action doc comment");
-        assert!(result.contains("    Submit,"), "expected unit variant Submit");
+        assert!(
+            result.contains("/// Action: Submit"),
+            "expected action doc comment"
+        );
+        assert!(
+            result.contains("    Submit,"),
+            "expected unit variant Submit"
+        );
         assert!(result.contains("GetState"), "expected GetState variant");
     }
 
@@ -178,9 +187,18 @@ mod tests {
         let result = generate_message_enum("Order", &[&action], &[], "Ns");
 
         // Should generate a struct variant
-        assert!(result.contains("/// Action: AssignTo"), "expected action doc comment");
-        assert!(result.contains("AssignTo {"), "expected struct variant opening");
-        assert!(result.contains("user_id: Uuid"), "expected snake_case Uuid field");
+        assert!(
+            result.contains("/// Action: AssignTo"),
+            "expected action doc comment"
+        );
+        assert!(
+            result.contains("AssignTo {"),
+            "expected struct variant opening"
+        );
+        assert!(
+            result.contains("user_id: Uuid"),
+            "expected snake_case Uuid field"
+        );
         assert!(
             result.contains("notes: Option<String>"),
             "expected nullable string as Option<String>"
@@ -203,7 +221,10 @@ mod tests {
             result.contains("/// Function: GetSummary (read-only)"),
             "expected function doc comment with read-only marker"
         );
-        assert!(result.contains("GetSummary {"), "expected struct variant opening");
+        assert!(
+            result.contains("GetSummary {"),
+            "expected struct variant opening"
+        );
         assert!(
             result.contains("include_details: bool"),
             "expected snake_case bool field"
@@ -229,29 +250,39 @@ mod tests {
         );
         let func2 = make_function("GetHistory", vec![binding_param("Ns.Order")]);
 
-        let result = generate_message_enum(
-            "Order",
-            &[&action1, &action2],
-            &[&func1, &func2],
-            "Ns",
-        );
+        let result = generate_message_enum("Order", &[&action1, &action2], &[&func1, &func2], "Ns");
 
         // Action variants
-        assert!(result.contains("    Activate,"), "expected unit variant Activate");
-        assert!(result.contains("SetPriority {"), "expected struct variant SetPriority");
-        assert!(result.contains("level: i32"), "expected i32 field for Level");
+        assert!(
+            result.contains("    Activate,"),
+            "expected unit variant Activate"
+        );
+        assert!(
+            result.contains("SetPriority {"),
+            "expected struct variant SetPriority"
+        );
+        assert!(
+            result.contains("level: i32"),
+            "expected i32 field for Level"
+        );
 
         // Function variants
         assert!(
             result.contains("/// Function: ComputeTotal (read-only)"),
             "expected ComputeTotal doc comment"
         );
-        assert!(result.contains("ComputeTotal {"), "expected struct variant ComputeTotal");
+        assert!(
+            result.contains("ComputeTotal {"),
+            "expected struct variant ComputeTotal"
+        );
         assert!(
             result.contains("/// Function: GetHistory (read-only)"),
             "expected GetHistory doc comment"
         );
-        assert!(result.contains("    GetHistory,"), "expected unit variant GetHistory");
+        assert!(
+            result.contains("    GetHistory,"),
+            "expected unit variant GetHistory"
+        );
 
         // Always present
         assert!(result.contains("GetState"), "expected GetState variant");

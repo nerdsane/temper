@@ -139,8 +139,14 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/specs", get(specs::handle_list_specs))
         .route("/specs/{entity}", get(specs::handle_get_spec_detail))
         .route("/entities", get(entities::handle_list_entities))
-        .route("/verify/{entity}", post(verification::handle_run_verification))
-        .route("/simulation/{entity}", get(verification::handle_run_simulation))
+        .route(
+            "/verify/{entity}",
+            post(verification::handle_run_verification),
+        )
+        .route(
+            "/simulation/{entity}",
+            get(verification::handle_run_simulation),
+        )
         .route("/paths/{entity}", get(verification::handle_get_paths))
         .route(
             "/entities/{entity_type}/{entity_id}/history",
@@ -159,7 +165,10 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/health", get(metrics::handle_health))
         .route("/metrics", get(metrics::handle_metrics))
         .route("/trajectories", get(evolution::handle_trajectories))
-        .route("/evolution/records", get(evolution::handle_list_evolution_records))
+        .route(
+            "/evolution/records",
+            get(evolution::handle_list_evolution_records),
+        )
         .route(
             "/evolution/records/{id}",
             get(evolution::handle_get_evolution_record),
@@ -169,7 +178,10 @@ pub fn build_observe_router() -> Router<ServerState> {
             get(evolution::handle_list_evolution_insights),
         )
         .route("/agents", get(agents::handle_list_agents))
-        .route("/agents/{agent_id}/history", get(agents::handle_get_agent_history))
+        .route(
+            "/agents/{agent_id}/history",
+            get(agents::handle_get_agent_history),
+        )
         .route("/wasm/modules", get(wasm::handle_list_wasm_modules))
         .route("/wasm/invocations", get(wasm::handle_list_wasm_invocations))
         .route(

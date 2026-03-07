@@ -128,14 +128,8 @@ mod tests {
             classify_decision_status("approved"),
             DecisionOutcome::Approved
         );
-        assert_eq!(
-            classify_decision_status("Denied"),
-            DecisionOutcome::Denied
-        );
-        assert_eq!(
-            classify_decision_status("denied"),
-            DecisionOutcome::Denied
-        );
+        assert_eq!(classify_decision_status("Denied"), DecisionOutcome::Denied);
+        assert_eq!(classify_decision_status("denied"), DecisionOutcome::Denied);
         assert_eq!(
             classify_decision_status("Rejected"),
             DecisionOutcome::Denied

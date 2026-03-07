@@ -331,8 +331,7 @@ async fn dispatch_governance(
             if let Some(decisions) = result.get("decisions").and_then(Value::as_array) {
                 for d in decisions {
                     if d.get("id").and_then(Value::as_str) == Some(&decision_id) {
-                        let status =
-                            d.get("status").and_then(Value::as_str).unwrap_or("unknown");
+                        let status = d.get("status").and_then(Value::as_str).unwrap_or("unknown");
                         return Ok(serde_json::json!({
                             "decision_id": decision_id,
                             "status": status,
@@ -354,10 +353,8 @@ async fn dispatch_governance(
             let tenant_str = ctx.tenant.to_string();
             let pid = ctx.principal_id.map(|s| s.to_string());
             let api_key = ctx.api_key.map(|s| s.to_string());
-            let (decision, _outcome) = crate::governance::poll_decision(
-                &decision_id,
-                &config,
-                || {
+            let (decision, _outcome) =
+                crate::governance::poll_decision(&decision_id, &config, || {
                     let http = http.clone();
                     let base_url = base_url.clone();
                     let tenant_str = tenant_str.clone();
@@ -376,9 +373,8 @@ async fn dispatch_governance(
                         )
                         .await
                     }
-                },
-            )
-            .await?;
+                })
+                .await?;
             Ok(decision)
         }
         _ => unreachable!("dispatch_governance called with non-governance method"),

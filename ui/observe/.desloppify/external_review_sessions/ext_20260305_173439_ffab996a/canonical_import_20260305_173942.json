@@ -1,0 +1,363 @@
+{
+  "assessments": {
+    "cross_module_architecture": 82,
+    "convention_outlier": 78,
+    "error_consistency": 72,
+    "abstraction_fitness": 88,
+    "api_surface_coherence": 75,
+    "authorization_consistency": 85,
+    "ai_generated_debt": 86,
+    "incomplete_migration": 90,
+    "package_organization": 85,
+    "high_level_elegance": 80,
+    "mid_level_elegance": 74,
+    "low_level_elegance": 72,
+    "design_coherence": 68
+  },
+  "findings": [
+    {
+      "dimension": "error_consistency",
+      "identifier": "swallowed_errors_no_user_feedback",
+      "summary": "Catch blocks silently swallow errors in mutation handlers, leaving users with no feedback on failure",
+      "related_files": [
+        "app/decisions/page.tsx",
+        "app/feature-requests/page.tsx"
+      ],
+      "evidence": [
+        "decisions/page.tsx lines 352-357: handleApprove catches errors with only console.error \u2014 no error state is set, so the UI gives no failure signal to the user after a failed approve action",
+        "decisions/page.tsx lines 363-373: handleDeny has the same pattern \u2014 error is logged but the acting state resets to false and the user sees nothing",
+        "feature-requests/page.tsx lines 202-204: handleUpdate catch block has comment 'Silently handled by polling' but polling does not surface the error either \u2014 the user's disposition change is simply dropped"
+      ],
+      "suggestion": "Add an error state (e.g. `const [actionError, setActionError] = useState<string|null>(null)`) in each page and set it in the catch block. Render it as an inline error banner near the action buttons so the user knows the operation failed and can retry.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "mixed_initial_load_strategies",
+      "summary": "Pages use two different patterns for initial data loading \u2014 dedicated loadInitial+useEffect vs. direct usePolling \u2014 with no consistent rationale",
+      "related_files": [
+        "app/activity/page.tsx",
+        "app/decisions/page.tsx",
+        "app/evolution/page.tsx",
+        "app/feature-requests/page.tsx",
+        "app/agents/[id]/page.tsx"
+      ],
+      "evidence": [
+        "app/activity/page.tsx lines 36-50: loadInitial calls fetchTrajectories() just to trigger an initial load and catch errors, then usePolling sets up its own independent fetcher for the same endpoint \u2014 two parallel fetches happen at startup",
+        "app/evolution/page.tsx lines 196-210: same pattern \u2014 loadInitial calls fetchEvolutionRecords() solely to handle the error path, while recordsPoll starts its own timer independently",
+        "app/agents/[id]/page.tsx lines 17-25: AgentDetailPage skips loadInitial entirely and relies on usePolling error state (historyPoll.error) \u2014 a different model than all other pages",
+        "app/feature-requests/page.tsx lines 181-184: FeatureRequestsPage also skips loadInitial and uses featuresPoll.error directly \u2014 consistent with agents page but inconsistent with activity/decisions/evolution"
+      ],
+      "suggestion": "Pick one strategy codebase-wide. The cleanest is the agents/feature-requests pattern: rely on usePolling's own loading/error states and eliminate the redundant loadInitial+useEffect. This removes duplicate fetches on startup, eliminates the separate initialLoading/initialError state variables, and makes all pages consistent. Update activity, decisions, and evolution pages to match.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "sse_parse_error_context_lost",
+      "summary": "All SSE event handlers swallow JSON parse errors silently, losing context about which event type failed and why",
+      "related_files": [
+        "lib/api.ts"
+      ],
+      "evidence": [
+        "lib/api.ts lines 137-143: subscribeDesignTimeEvents catch block is empty \u2014 parse errors are invisible",
+        "lib/api.ts lines 151-159: subscribeEntityEvents same pattern",
+        "lib/api.ts lines 285-290: subscribePendingDecisions and subscribeAllPendingDecisions (lines 308-316) and subscribeEvolutionEvents (lines 373-381) all use identical empty catch blocks",
+        "A malformed event from the server will silently fail with no indication of which stream, which event type, or what the raw payload was"
+      ],
+      "suggestion": "At minimum log the raw event data on parse failure so the issue is diagnosable: `catch (e) { console.warn('[SSE parse error]', eventType, e, (ev as MessageEvent).data?.slice(0, 200)); }`. The 200-char slice avoids dumping large payloads while giving enough context to diagnose the problem.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "monolithic_page_components",
+      "summary": "Six page-level components exceed 200 LOC with 8-12 useState hooks each, mixing data-fetching, filtering, animation, and rendering in a single function body",
+      "related_files": [
+        "app/decisions/page.tsx",
+        "app/activity/page.tsx",
+        "app/evolution/page.tsx",
+        "app/page.tsx",
+        "app/integrations/page.tsx",
+        "app/feature-requests/page.tsx"
+      ],
+      "evidence": [
+        "app/decisions/page.tsx is 620 LOC with 10 useState calls, 2 SSE subscriptions, polling setup, approval/denial handlers, CSV export logic, date-grouped history rendering, and pending-decisions card rendering all in one component",
+        "app/activity/page.tsx is 559 LOC with 12 useState calls covering: loading, error, live events, filter state, pagination, animation keys, entity selection, search query, and entity filters",
+        "app/evolution/page.tsx is 536 LOC mixing SSE subscription, three independent polling loops, sentinel check mutation, tab filtering, and five different subsection renderers inline",
+        "The SSE subscription in evolution/page.tsx (lines 213-222) references recordsPoll/insightsPoll/unmetPoll before they are declared (lines 224-239) \u2014 a temporal coupling defect that works only because of JavaScript hoisting of const declarations within the function scope but is fragile to reordering"
+      ],
+      "suggestion": "Extract each logical section into its own component file. For decisions: DecisionsHeader, PendingDecisionsList, DecisionHistoryTable. For activity: ActivityHeader, LiveEventFeed, ActionBreakdownTable, EntityTable, FailedIntentsPanel. The page component should only compose these and wire shared state (polling results, filters). This is not about line count \u2014 it is about having one coherent responsibility per function.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "inline_iife_rendering_pattern",
+      "summary": "Multiple pages use IIFE (() => { ... })() inside JSX to handle conditional logic that should be extracted into components or computed variables",
+      "related_files": [
+        "app/page.tsx",
+        "app/activity/page.tsx"
+      ],
+      "evidence": [
+        "app/page.tsx lines 311-337: the Spec cards section uses an IIFE to group specs by tenant and render grouped entries \u2014 this is imperative logic in the middle of JSX that obscures the render tree",
+        "app/activity/page.tsx lines 448-523: the Failed Intents section uses an IIFE spanning 75 lines that computes pagination state and renders \u2014 variables totalFailed, totalPages, reversed, and paginatedIntents are computed mid-render"
+      ],
+      "suggestion": "Move the spec-grouping logic in page.tsx to a useMemo (e.g. `const groupedSpecs = useMemo(...)`) and create a `<SpecGroup tenant={} specs={} />` component. Move the failed intents pagination variables to useMemo/useState at the top of the component and extract a `<FailedIntentsList intents={} />` component. IIFEs in JSX are a signal that extraction is overdue.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "decisions_page_wide_acting_flag",
+      "summary": "The decisions page uses a single `acting` boolean to disable ALL decision cards during any single approve/deny operation, blocking unrelated decisions",
+      "related_files": [
+        "app/decisions/page.tsx"
+      ],
+      "evidence": [
+        "app/decisions/page.tsx line 287: `const [acting, setActing] = useState(false)`",
+        "Lines 346-358 and 361-374: handleApprove and handleDeny both set acting=true globally before their await, then acting=false in finally",
+        "Lines 516-520: all DecisionCard instances receive the same acting prop \u2014 approving decision A disables decision B's buttons even though they are independent operations"
+      ],
+      "suggestion": "Replace the global acting flag with per-decision acting state: `const [actingIds, setActingIds] = useState<Set<string>>(new Set())`. In handleApprove/handleDeny, add/remove the specific decision id. Pass `acting={actingIds.has(decision.id)}` to each DecisionCard. This allows concurrent independent decisions.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "mid_level_elegance",
+      "identifier": "sidebar_polling_duplicates_decision_notifier",
+      "summary": "Sidebar independently polls fetchUnmetIntents on a 15-second interval while DecisionNotifierProvider already polls fetchAllDecisions every 5 seconds \u2014 uncoordinated polling from separate components watching overlapping concerns",
+      "related_files": [
+        "components/Sidebar.tsx",
+        "lib/decision-notifier.tsx"
+      ],
+      "evidence": [
+        "Sidebar.tsx lines 90-101: creates its own setInterval polling fetchUnmetIntents every 15 seconds, managing its own mounted flag and cleanup \u2014 this is ad-hoc polling that duplicates the usePolling pattern used everywhere else",
+        "lib/decision-notifier.tsx lines 168-178: DecisionNotifierProvider has its own polling loop for fetchAllDecisions every 5 seconds",
+        "Both are mounted globally via app/layout.tsx. The sidebar's approach is a one-off pattern: it does not use usePolling, does not expose error state, and uses a `mounted` ref guard that the rest of the codebase does not use"
+      ],
+      "suggestion": "Move unmet intent count to a shared context (or reuse the pattern from DecisionNotifierProvider). Create an UnmetIntentsProvider that exposes `openCount` via context, and have the Sidebar read it via `useContext`. Alternatively, lift the unmetCount polling into the existing DecisionNotifierProvider (since both are global concerns) and expose it from the same context. This eliminates the ad-hoc interval pattern in the Sidebar.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "mid_level_elegance",
+      "identifier": "sse_cleanup_ref_pattern_in_verify_page",
+      "summary": "VerificationPage manages SSE cleanup through a mutable ref rather than useEffect cleanup, creating a fragile lifecycle pattern not used anywhere else in the codebase",
+      "related_files": [
+        "app/verify/[entity]/page.tsx"
+      ],
+      "evidence": [
+        "app/verify/[entity]/page.tsx lines 35-65: cleanupRef holds the SSE unsubscribe function. A dedicated useEffect (lines 61-65) only handles component unmount cleanup",
+        "The subscription is created inside handleRunVerification (line 112) \u2014 a user event handler \u2014 and manually cleaned up in the finally block (lines 133-137)",
+        "This means the SSE connection lifetime is managed imperatively across two scopes (event handler + useEffect) instead of being tied to React's lifecycle via a single useEffect with a dependency on the running state",
+        "All other SSE subscriptions in the codebase (activity/page.tsx, decisions/page.tsx, evolution/page.tsx) use a single useEffect that opens and closes the connection declaratively"
+      ],
+      "suggestion": "Replace the ref-based approach with a state-driven useEffect: `useEffect(() => { if (!running) return; const cleanup = subscribeDesignTimeEvents(handleDesignTimeEvent); return cleanup; }, [running, handleDesignTimeEvent])`. This aligns with how all other pages manage SSE and removes the imperative ref/cleanup split.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "convention_outlier",
+      "identifier": "naming_inconsistency_camel_vs_components_dir",
+      "summary": "components/ directory contains two camelCase-named files amid 25 PascalCase files",
+      "related_files": [
+        "components/"
+      ],
+      "evidence": [
+        "The blind packet convention analysis shows components/ has 25 PascalCase names and 2 camelCase names",
+        "All React component files in the directory follow PascalCase (CascadeResults.tsx, ErrorDisplay.tsx, Sidebar.tsx, etc.) \u2014 two files deviate from this established convention",
+        "In TypeScript/React, PascalCase filenames for component files is the universal standard and matches the exported component names"
+      ],
+      "suggestion": "Identify the two camelCase files in components/ and rename them to PascalCase. Ensure import paths in all consumers are updated.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "convention_outlier",
+      "identifier": "outlier_pages_skip_initial_load_guard",
+      "summary": "The majority of app pages guard polling with `enabled: !initialLoading && !initialError` but agents/[id]/page.tsx and feature-requests/page.tsx skip the guard entirely",
+      "related_files": [
+        "app/agents/[id]/page.tsx",
+        "app/feature-requests/page.tsx",
+        "app/decisions/page.tsx",
+        "app/activity/page.tsx"
+      ],
+      "evidence": [
+        "app/agents/[id]/page.tsx line 23: `enabled: true` \u2014 polling starts immediately without any initial load guard",
+        "app/feature-requests/page.tsx lines 181-184: usePolling called with no enabled parameter (defaults to true) \u2014 polling starts unconditionally",
+        "By contrast, app/decisions/page.tsx line 324 uses `enabled: !initialLoading && !initialError`, and app/activity/page.tsx line 54 does the same",
+        "The behavioral difference is meaningful: agents and feature-requests fire their first poll immediately without waiting for any prerequisite, while decisions and activity pages coordinate startup through an initial fetch sequence"
+      ],
+      "suggestion": "Decide which pattern is correct and apply it uniformly. If the pre-check is genuinely unnecessary for agents and feature-requests (they have no prerequisite data), document why with a comment. If the asymmetry is accidental, standardize: either all pages use a loadInitial guard or none do.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "convention_outlier",
+      "identifier": "stat_cards_inconsistent_implementation",
+      "summary": "The dashboard and feature-requests page duplicate StatCard markup inline despite StatCard being a shared component",
+      "related_files": [
+        "app/page.tsx",
+        "app/feature-requests/page.tsx",
+        "components/StatCard.tsx"
+      ],
+      "evidence": [
+        "app/page.tsx lines 285-305: renders three stat cards using raw div markup (`bg-[#111115] rounded-lg p-5`) rather than the StatCard component \u2014 the layout, font, and color classes are hand-rolled",
+        "app/feature-requests/page.tsx lines 287-310: same pattern \u2014 four hand-rolled stat cards with `bg-[#111115] rounded-lg p-3.5` instead of StatCard",
+        "components/StatCard.tsx uses `glass rounded p-3.5` as its container \u2014 a different CSS class than the dashboard's `bg-[#111115] rounded-lg p-5`, creating visual inconsistency",
+        "The blind packet also flags 'StatCard has 2 different signatures across 5 files' \u2014 confirming the component is not used uniformly"
+      ],
+      "suggestion": "Either (a) extend StatCard to accept a `variant` prop (e.g. `glass` vs `solid`) so all pages can use the same component, or (b) accept that the dashboard's stat cards have a deliberately different treatment and document it with a comment. The current situation silently diverges across pages.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "api_surface_coherence",
+      "identifier": "fetch_feature_requests_inconsistent_error_contract",
+      "summary": "fetchFeatureRequests returns an empty array on non-OK HTTP responses instead of throwing, unlike every other fetch function in lib/api.ts",
+      "related_files": [
+        "lib/api.ts"
+      ],
+      "evidence": [
+        "lib/api.ts line 388: `if (!res.ok) return [];` \u2014 silently returns an empty array on any HTTP error",
+        "Every other async fetch function in the same file throws ApiError on non-OK responses (e.g. fetchSpecs line 68, fetchDecisions line 260, fetchAgents line 326)",
+        "The caller in app/feature-requests/page.tsx cannot distinguish 'server returned 500' from 'there are genuinely no feature requests' \u2014 both produce an empty list with no error display"
+      ],
+      "suggestion": "Change fetchFeatureRequests to throw ApiError on non-OK responses, matching the rest of the module: `if (!res.ok) throw new ApiError('Failed to fetch feature requests: ' + res.status, res.status);`. The feature-requests page already has error handling via featuresPoll.error \u2014 it just never fires.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "api_surface_coherence",
+      "identifier": "mixed_sync_async_in_api_module",
+      "summary": "lib/api.ts exports both async fetch functions and sync SSE subscription functions under a single module boundary with no naming signal to distinguish them",
+      "related_files": [
+        "lib/api.ts"
+      ],
+      "evidence": [
+        "lib/api.ts exports: fetchSpecs (async), subscribeDesignTimeEvents (sync, returns cleanup), fetchEntities (async), subscribeEntityEvents (sync, returns cleanup), ... \u2014 35 functions with two fundamentally different interaction models mixed together",
+        "The blind packet confirms `api_surface.sync_async_mix: ['lib/api.ts']`",
+        "Callers must know which category each export belongs to; there is no naming protocol (e.g. `subscribe*` vs `fetch*`) applied consistently \u2014 e.g. `checkConnection` and `triggerSentinelCheck` are async but do not start with `fetch`"
+      ],
+      "suggestion": "The subscribe*/fetch* split is actually mostly in place \u2014 reinforce it by renaming outliers: `checkConnection` -> `fetchConnectionStatus`, `runVerification` -> `postVerification` or `triggerVerification`, `triggerSentinelCheck` -> `postSentinelCheck`. This makes the sync/async split discoverable by name without splitting the module.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "lib_decision_notifier_imports_lib_api",
+      "summary": "lib/decision-notifier.tsx imports directly from lib/api.ts and lib/types.ts, creating a peer-to-peer dependency within the lib/ layer rather than a clean unidirectional layering",
+      "related_files": [
+        "lib/decision-notifier.tsx",
+        "lib/api.ts",
+        "lib/types.ts"
+      ],
+      "evidence": [
+        "lib/decision-notifier.tsx lines 12-13: `import { fetchAllDecisions, subscribeAllPendingDecisions } from './api'` and `import type { PendingDecision } from './types'`",
+        "lib/connection.tsx also imports from lib/api.ts (line 4)",
+        "Both connection.tsx and decision-notifier.tsx are React context providers that belong to the UI layer (they render JSX and use React hooks) but live in lib/ alongside pure data-fetching and utility modules",
+        "The result is that lib/ contains both pure utilities (api.ts, types.ts, utils.ts, hooks.ts) and React UI context providers (connection.tsx, decision-notifier.tsx) with no boundary distinction"
+      ],
+      "suggestion": "Move connection.tsx and decision-notifier.tsx to a `providers/` directory (or `contexts/`) to signal that they are React context providers, not utility library code. lib/ should contain only framework-agnostic code (api, types, hooks, utils). This makes the dependency direction explicit: app/ and components/ import from providers/ and lib/; providers/ imports from lib/ only.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "lib_types_monolith",
+      "summary": "lib/types.ts is a 469-line monolith containing unrelated domain type groups that have no coupling to each other",
+      "related_files": [
+        "lib/types.ts"
+      ],
+      "evidence": [
+        "lib/types.ts contains at minimum 8 independent domain groups: Spec types (lines 1-40), Entity types (42-47), Verification types (49-135), Entity history types (137-171), Workflow types (193-215), Trajectory types (217-241), Evolution types (243-289), Sentinel types (291-304), WASM types (306-339), Decision types (341-369), Agent types (371-407), UnmetIntent types (409-426), FeatureRequest types (428-441)",
+        "The blind packet confirms lib/types.ts has 25 importers and a complexity score of 54, flagged for 'needs decomposition'",
+        "All 25 importing modules import from this single file regardless of which domain they operate in \u2014 a change to WasmModule has the same file as a change to SpecSummary"
+      ],
+      "suggestion": "Split into domain-scoped type modules: `lib/types/spec.ts`, `lib/types/verification.ts`, `lib/types/evolution.ts`, `lib/types/decisions.ts`, `lib/types/agents.ts`, `lib/types/wasm.ts`, `lib/types/workflow.ts`. Maintain a `lib/types/index.ts` barrel that re-exports everything for backward compatibility. Each consumer can then import only what it needs, and changes are scoped to their domain file.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "lib_api_mixed_responsibilities",
+      "summary": "lib/api.ts spans 8 disconnected function clusters serving different domain areas with no cohesion signal between them",
+      "related_files": [
+        "lib/api.ts"
+      ],
+      "evidence": [
+        "lib/api.ts contains: spec functions (fetchSpecs, fetchSpecDetail), entity functions (fetchEntities, fetchEntityHistory), verification functions (runVerification, fetchVerificationStatus), SSE subscriptions (subscribeDesignTimeEvents, subscribeEntityEvents), trajectory functions (fetchTrajectories), evolution functions (fetchEvolutionRecords, fetchEvolutionInsights, fetchUnmetIntents, fetchRecordDetail, subscribeEvolutionEvents), sentinel functions (triggerSentinelCheck, triggerExtendedSentinelCheck), WASM functions (fetchWasmModules, fetchWasmInvocations), decisions functions (fetchDecisions, approveDecision, denyDecision, subscribePendingDecisions, fetchAllDecisions, subscribeAllPendingDecisions), agent functions (fetchAgents, fetchAgentHistory), feature-request functions (fetchFeatureRequests, updateFeatureRequest), and shared utilities (checkConnection, fetchMetricsText)",
+        "The blind packet confirms '8 disconnected function clusters (35 functions)' as a responsibility_cohesion flag",
+        "An evolution page and a decisions page both import from the same file, meaning a refactor of evolution API shapes can affect the decisions import graph"
+      ],
+      "suggestion": "Split lib/api.ts by domain: `lib/api/specs.ts`, `lib/api/decisions.ts`, `lib/api/evolution.ts`, `lib/api/agents.ts`, `lib/api/wasm.ts`. Keep shared infrastructure (ApiError class, fetchWithRetry, ADMIN_HEADERS) in `lib/api/client.ts`. Maintain `lib/api.ts` as a barrel re-export during the transition. This is a large change \u2014 do it incrementally by extracting one domain cluster per PR.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "eslint_suppress_exhaustive_deps_pattern",
+      "summary": "Three useEffect hooks suppress the react-hooks/exhaustive-deps rule to avoid adding poll objects to dependencies, creating stale-closure risk",
+      "related_files": [
+        "app/activity/page.tsx",
+        "app/decisions/page.tsx",
+        "app/page.tsx"
+      ],
+      "evidence": [
+        "app/activity/page.tsx line 69: `// eslint-disable-line react-hooks/exhaustive-deps` \u2014 the SSE useEffect uses trajectoryPoll.refresh() but omits trajectoryPoll from the deps array",
+        "app/decisions/page.tsx line 344: same suppression \u2014 the SSE useEffect calls decisionsPoll.refresh() without listing decisionsPoll as a dependency",
+        "app/page.tsx line 191: same pattern \u2014 SSE useEffect calls specPoll.refresh(), verifyPoll.refresh(), entityPoll.refresh() without listing the poll objects",
+        "Each case is intentionally excluding the polling hook result objects (which change identity on every render) to prevent infinite re-subscription loops. This is a design tension: the pollers need to be stable across renders for the pattern to work safely"
+      ],
+      "suggestion": "Extract the refresh callbacks from the poll objects into stable useCallback refs before the SSE useEffect: `const refreshTrajectory = useCallback(() => trajectoryPoll.refresh(), []);` with the ref-refresh pattern (updating the ref on each render but keeping the callback identity stable). Alternatively, expose a stable `refreshRef` from usePolling itself. This eliminates the eslint suppression while keeping the behavior correct.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "activity_page_iife_pagination",
+      "summary": "app/activity/page.tsx computes pagination inside a 75-line IIFE inside JSX, making the render tree opaque and preventing unit testing of the pagination logic",
+      "related_files": [
+        "app/activity/page.tsx"
+      ],
+      "evidence": [
+        "app/activity/page.tsx lines 448-523: `{(() => { const totalFailed = ...; const totalPages = ...; const reversed = [...data.failed_intents].reverse(); const paginatedIntents = reversed.slice(...); return (<> ... </>); })()}` \u2014 75 lines of imperative logic embedded in JSX",
+        "The reversed array and pagination slice happen on every render within the IIFE, making performance characteristics invisible",
+        "The pagination state variable `failedPage` and constant `FAILED_PER_PAGE` (defined at line 20 as a const inside the component, not at module scope) are used inside the IIFE \u2014 mixing state reads, computations, and rendering"
+      ],
+      "suggestion": "Lift the pagination computation to useMemo at the component level: `const paginatedFailedIntents = useMemo(() => { const reversed = [...(data?.failed_intents ?? [])].reverse(); return { items: reversed.slice(...), totalPages: ... }; }, [data?.failed_intents, failedPage])`. Extract a `<FailedIntentsList items={} page={} totalPages={} onPageChange={} />` component. Move FAILED_PER_PAGE to module scope as a constant.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "sort_without_stable_comparator",
+      "summary": "Multiple pages call .sort() on UI data without a comparator, producing locale-dependent and potentially unstable sort order",
+      "related_files": [
+        "app/activity/page.tsx",
+        "app/integrations/page.tsx",
+        "app/agents/[id]/page.tsx",
+        "app/page.tsx"
+      ],
+      "evidence": [
+        "app/activity/page.tsx line 81: `Object.keys(data.by_action).sort()` \u2014 no comparator. Object.keys order is not guaranteed to be stable across engines",
+        "app/activity/page.tsx multiple useMemo blocks extract sets and call .sort() without comparators",
+        "app/agents/[id]/page.tsx (entityTypes useMemo): `Array.from(set).sort()` \u2014 no locale-aware comparator",
+        "The blind packet flags '4x .sort() without comparator function' in activity/page.tsx and '1x .sort() without comparator function' in integrations/page.tsx and agents/page.tsx"
+      ],
+      "suggestion": "Use explicit locale-aware comparators for user-visible sorts: `.sort((a, b) => a.localeCompare(b))`. For numeric sorts use explicit `(a, b) => a - b`. This is especially important for entity type names and action names which are user-visible strings.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "admin_headers_missing_from_feature_requests",
+      "summary": "updateFeatureRequest sends a PATCH request without ADMIN_HEADERS, while all other mutating decision endpoints require them",
+      "related_files": [
+        "lib/api.ts"
+      ],
+      "evidence": [
+        "lib/api.ts lines 394-403: `fetchWithRetry(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(update) })` \u2014 no ADMIN_HEADERS included",
+        "lib/api.ts lines 267-272: approveDecision includes `...ADMIN_HEADERS` in its headers",
+        "lib/api.ts lines 277-279: denyDecision includes `headers: ADMIN_HEADERS`",
+        "lib/api.ts lines 259-261: fetchDecisions includes `headers: ADMIN_HEADERS`",
+        "ADMIN_HEADERS sets `X-Temper-Principal-Kind: admin` \u2014 its omission from updateFeatureRequest means the server may apply different authorization logic, or the call may fail in the same way SSE calls fail without admin headers (as commented at lib/api.ts line 167)"
+      ],
+      "suggestion": "Add ADMIN_HEADERS to the updateFeatureRequest call: `headers: { 'Content-Type': 'application/json', ...ADMIN_HEADERS }`. Review fetchFeatureRequests (line 387) as well \u2014 if feature request reads also require admin privileges, add ADMIN_HEADERS there too.",
+      "confidence": "medium"
+    }
+  ],
+  "provenance": {
+    "kind": "blind_review_batch_import",
+    "blind": true,
+    "runner": "claude",
+    "run_stamp": "ext_20260305_173439_ffab996a",
+    "created_at": "2026-03-05T17:39:42+00:00",
+    "packet_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/ui/observe/.desloppify/review_packet_blind.json",
+    "packet_sha256": "c58c07ede2899eee15bf517209fc0a33936931061c342f44476edcb24bf65408",
+    "external_session_id": "ext_20260305_173439_ffab996a"
+  }
+}

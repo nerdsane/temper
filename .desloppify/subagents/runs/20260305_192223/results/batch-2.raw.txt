@@ -1,0 +1,166 @@
+{
+  "batch": "Abstractions & Dependencies",
+  "batch_index": 2,
+  "assessments": {
+    "abstraction_fitness": 74.0,
+    "mid_level_elegance": 76.0,
+    "low_level_elegance": 79.0
+  },
+  "dimension_notes": {
+    "abstraction_fitness": {
+      "evidence": [
+        "IOA guard/effect translation is implemented twice with parallel logic in `crates/temper-jit/src/table/builder.rs` (guard/effect mapping and name-based fallback at lines 45-175) and `crates/temper-verify/src/model/builder.rs` (parallel mapping and fallback at lines 89-185).",
+        "Server OData helpers repeatedly bridge two storage abstractions (registry-first + legacy fallback) in `crates/temper-server/src/odata/common.rs` (`resolve_entity_type`, `tenant_csdl_xml`, `tenant_entity_sets` at lines 62-98), while other spec readers like `crates/temper-server/src/observe/specs.rs` use registry-only paths."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "sub_axes": {
+        "abstraction_leverage": 71.0,
+        "indirection_cost": 73.0,
+        "interface_honesty": 78.0
+      }
+    },
+    "mid_level_elegance": {
+      "evidence": [
+        "Authz boundary requires repeated map-shape translation from deterministic `BTreeMap` to `HashMap` in `crates/temper-server/src/state/entity_ops.rs` (`authorize` and `authorize_with_context`, lines 205-243 and 253-290) because `crates/temper-authz/src/engine.rs` only accepts `HashMap` inputs (lines 90-96, 223-224).",
+        "`crates/temper-cli/src/serve/mod.rs::run` (lines 60-260) orchestrates backend selection, recovery, tenant loading, webhook loading, event-store wiring, hydration, and policy reload in one flow, with boundary logic repeated for Postgres/Turso branches and minimal seam isolation."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "low_level_elegance": {
+      "evidence": [
+        "Dispatch call path adds a four-step wrapper chain in `crates/temper-server/src/state/dispatch/actions.rs` (`dispatch_action` -> `dispatch_tenant_action` -> `dispatch_tenant_action_ext` -> `dispatch_tenant_action_core`, lines 16-178) with behavior split across wrappers and an options bag carrying only two toggles.",
+        "Evolution persistence/create loops are copy-structured with divergent error semantics in `crates/temper-server/src/observe/evolution/operations.rs` (`persist_alerts` lines 57-107 returns 500 on persist error, `persist_insights` lines 109-158 logs and continues, feature-request upsert/entity creation in lines 219-260 logs and continues), making local behavior harder to reason about."
+      ],
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "abstraction_fitness",
+      "identifier": "duplicated_ioa_translation_layers",
+      "summary": "Runtime and verifier duplicate IOA guard/effect translation logic",
+      "related_files": [
+        "crates/temper-jit/src/table/builder.rs",
+        "crates/temper-verify/src/model/builder.rs"
+      ],
+      "evidence": [
+        "`TransitionTable::from_automaton` maps IOA guards/effects and applies name-based fallback heuristics (`additem`/`removeitem`) in `crates/temper-jit/src/table/builder.rs` lines 45-175.",
+        "`resolve_transitions` + `translate_guards` + `translate_effects` repeat equivalent translation decisions and the same name-based fallback in `crates/temper-verify/src/model/builder.rs` lines 89-185."
+      ],
+      "suggestion": "Extract a shared IOA-to-execution translation layer (or a shared normalized IR) consumed by both JIT table builder and verify model builder, with explicit feature flags for runtime-only effects.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "parallel_semantics_pipelines"
+    },
+    {
+      "dimension": "abstraction_fitness",
+      "identifier": "dual_registry_legacy_read_path",
+      "summary": "OData helpers leak two parallel metadata sources behind helper APIs",
+      "related_files": [
+        "crates/temper-server/src/odata/common.rs",
+        "crates/temper-server/src/observe/specs.rs"
+      ],
+      "evidence": [
+        "`resolve_entity_type`, `tenant_csdl_xml`, and `tenant_entity_sets` in `crates/temper-server/src/odata/common.rs` lines 62-98 each do registry-first then legacy fallback to `state.entity_set_map`/`state.csdl_xml`.",
+        "`crates/temper-server/src/observe/specs.rs` reads directly from `state.registry` only (lines 21-65, 75-119), so sibling read paths are not aligned on one abstraction boundary."
+      ],
+      "suggestion": "Introduce a single server metadata accessor (tenant-scoped) and migrate callers to it; keep legacy fallback in one compatibility adapter instead of per-helper branching.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "legacy_transition_surface"
+    },
+    {
+      "dimension": "mid_level_elegance",
+      "identifier": "authz_boundary_type_churn",
+      "summary": "Authz seam forces repetitive BTreeMap-to-HashMap translation",
+      "related_files": [
+        "crates/temper-server/src/state/entity_ops.rs",
+        "crates/temper-authz/src/engine.rs"
+      ],
+      "evidence": [
+        "`authorize` and `authorize_with_context` in `crates/temper-server/src/state/entity_ops.rs` lines 205-243 and 253-290 both clone `BTreeMap` attrs into `HashMap` before calling authz.",
+        "`AuthzEngine::authorize` and `authorize_or_bypass` in `crates/temper-authz/src/engine.rs` lines 90-96 and 218-224 require `HashMap`, making each caller bridge collection types."
+      ],
+      "suggestion": "Define a single `ResourceAttrs` boundary type (or accept `impl IntoIterator<Item=(String, Value)>`) in authz engine so conversion happens once at the seam, not in each call path.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "boundary_type_mismatch"
+    },
+    {
+      "dimension": "mid_level_elegance",
+      "identifier": "serve_run_orchestration_blob",
+      "summary": "CLI serve startup packs many boundary responsibilities into one function",
+      "related_files": [
+        "crates/temper-cli/src/serve/mod.rs",
+        "crates/temper-platform/src/bootstrap.rs"
+      ],
+      "evidence": [
+        "`crates/temper-cli/src/serve/mod.rs::run` (lines 60-260) handles storage backend creation, registry restoration, app loading, webhook aggregation, persistence wiring, hydration, and policy reload in one procedure.",
+        "Bootstrapping logic is separately encoded in `crates/temper-platform/src/bootstrap.rs` (`bootstrap_system_tenant`/`bootstrap_agent_specs`, lines 72-200), but serve startup still performs adjacent orchestration itself instead of composing clearer startup phases."
+      ],
+      "suggestion": "Split `run` into explicit startup phases (storage init, registry load, tenant bootstrap, integration wiring) and move each phase behind small typed components with clear input/output contracts.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "orchestration_without_phase_boundaries"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "dispatch_wrapper_stack",
+      "summary": "Dispatch path has layered wrappers with low behavioral leverage",
+      "related_files": [
+        "crates/temper-server/src/state/dispatch/actions.rs",
+        "crates/temper-server/src/observe/evolution/operations.rs"
+      ],
+      "evidence": [
+        "`crates/temper-server/src/state/dispatch/actions.rs` chains `dispatch_action` -> `dispatch_tenant_action` -> `dispatch_tenant_action_ext` -> `dispatch_tenant_action_core` (lines 16-178), with wrappers mainly forwarding arguments/defaults.",
+        "Callers like `create_system_entity` in `crates/temper-server/src/observe/evolution/operations.rs` lines 47-53 consume only the high-level entrypoint, while integration toggles are threaded through intermediate wrappers and options, increasing local call-path complexity."
+      ],
+      "suggestion": "Collapse wrapper levels into one public API plus one internal core, and encode optional behavior with explicit strategy methods instead of forwarding through multiple thin layers.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "thin_wrapper_accumulation"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "evolution_persist_flow_divergence",
+      "summary": "Similar evolution persistence loops diverge in error behavior",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/operations.rs",
+        "crates/temper-platform/src/evolution/feedback.rs"
+      ],
+      "evidence": [
+        "`persist_alerts` in `crates/temper-server/src/observe/evolution/operations.rs` lines 64-77 aborts with HTTP 500 on persistence failure, while `persist_insights` lines 117-129 only logs and continues; feature-request upserts (lines 231-244) also log-and-continue.",
+        "`crates/temper-platform/src/evolution/feedback.rs` uses yet another persistence style (`persist_evolution_record_to_pg`, lines 25-40, spawn-and-warn callsites at lines 106-112 and 143-149), creating inconsistent local failure semantics for the same domain concern."
+      ],
+      "suggestion": "Introduce one evolution persistence policy function that encodes severity (fail-fast vs best-effort) per record type, and route all server/platform evolution writes through it.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "inconsistent_failure_policy"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Parallel implementations of the same domain translation logic across runtime and verification paths",
+      "Legacy-to-new migration kept as distributed fallback checks instead of being isolated behind one compatibility seam",
+      "Incremental feature growth added wrapper/orchestration layers without periodic flattening"
+    ],
+    "likely_symptoms": [
+      "dispatch_wrapper_stack",
+      "dual_registry_legacy_read_path",
+      "evolution_persist_flow_divergence"
+    ],
+    "possible_false_positives": []
+  }
+}

@@ -12,9 +12,9 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::instrument;
 
+use super::insight_generator;
 use crate::authz::require_observe_auth;
 use crate::request_context::AgentContext;
-use super::insight_generator;
 use crate::sentinel;
 use crate::state::ServerState;
 
@@ -32,7 +32,14 @@ async fn persist_evolution_record(
         return Ok(());
     };
     turso
-        .insert_evolution_record(record_id, record_type, status, created_by, derived_from, data_json)
+        .insert_evolution_record(
+            record_id,
+            record_type,
+            status,
+            created_by,
+            derived_from,
+            data_json,
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -47,7 +54,14 @@ async fn create_system_entity(
 ) {
     let system_tenant = TenantId::new("temper-system");
     if let Err(e) = state
-        .dispatch_tenant_action(&system_tenant, entity_type, entity_id, action, params, &AgentContext::system())
+        .dispatch_tenant_action(
+            &system_tenant,
+            entity_type,
+            entity_id,
+            action,
+            params,
+            &AgentContext::system(),
+        )
         .await
     {
         tracing::warn!(error = %e, entity_type, entity_id, "failed to create system entity");
@@ -293,7 +307,9 @@ pub(crate) async fn handle_feature_requests(
                     })
                     .collect();
                 let total = items.len();
-                return Ok(Json(serde_json::json!({ "feature_requests": items, "total": total })));
+                return Ok(Json(
+                    serde_json::json!({ "feature_requests": items, "total": total }),
+                ));
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to query feature requests from Turso");
@@ -303,7 +319,9 @@ pub(crate) async fn handle_feature_requests(
     }
 
     // No persistent store configured — return empty.
-    Ok(Json(serde_json::json!({ "feature_requests": [], "total": 0 })))
+    Ok(Json(
+        serde_json::json!({ "feature_requests": [], "total": 0 }),
+    ))
 }
 
 /// PATCH /observe/evolution/feature-requests/:id -- update disposition + notes in Turso.
@@ -318,7 +336,12 @@ pub(crate) async fn handle_update_feature_request(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     // Cedar authorization: admin/system bypass, others need manage_feature_requests.
-    require_observe_auth(&state, &headers, "manage_feature_requests", "FeatureRequest")?;
+    require_observe_auth(
+        &state,
+        &headers,
+        "manage_feature_requests",
+        "FeatureRequest",
+    )?;
 
     let disposition = body.get("disposition").and_then(|v| v.as_str());
     let notes = body.get("developer_notes").and_then(|v| v.as_str());

@@ -1,0 +1,115 @@
+{
+  "batch": "Cross-cutting Sweep",
+  "batch_index": 4,
+  "assessments": {
+    "authorization_consistency": 61.0
+  },
+  "dimension_notes": {
+    "authorization_consistency": {
+      "evidence": [
+        "`SecurityContext::from_headers` accepts caller-supplied `x-temper-principal-kind=system`, and `AuthzEngine::authorize_or_bypass` grants unconditional allow for `System` principals.",
+        "`handle_evolution_stream` exposes evolution/pending decision event data without any auth check, while sibling evolution endpoints in the same module call `require_observe_auth`.",
+        "Tenant resolution is inconsistent: OData falls back to first/default tenant when `X-Tenant-Id` is absent, while multiple server paths still dispatch/read using `TenantId::default()` legacy wrappers."
+      ],
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "header_spoofed_system_bypass",
+      "summary": "Authorization can be bypassed by spoofing `x-temper-principal-kind: system` in request headers.",
+      "related_files": [
+        "crates/temper-authz/src/context.rs",
+        "crates/temper-authz/src/engine.rs",
+        "crates/temper-server/src/state/entity_ops.rs"
+      ],
+      "evidence": [
+        "`SecurityContext::from_headers` maps `x-temper-principal-kind` directly to `PrincipalKind`, including `System`, with no token verification.",
+        "`AuthzEngine::authorize_or_bypass` returns `Allow` for any `System` principal before Cedar policy evaluation.",
+        "`ServerState::authorize` builds context from raw headers (`SecurityContext::from_headers(headers)`), so user-controlled headers can reach bypass logic."
+      ],
+      "suggestion": "Remove `System` selection from externally sourced headers. Derive system principals only from trusted server-internal call paths (e.g., signed service identity or explicit internal constructor), and reject/ignore `x-temper-principal-kind=system` at HTTP boundaries.",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "untrusted_identity_headers"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "evolution_stream_missing_auth_gate",
+      "summary": "The evolution SSE stream endpoint skips authorization unlike sibling evolution endpoints.",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/operations.rs",
+        "crates/temper-server/src/observe/specs.rs"
+      ],
+      "evidence": [
+        "`handle_sentinel_check`, `handle_unmet_intents`, and `handle_feature_requests` all call `require_observe_auth`.",
+        "`handle_evolution_stream` takes only `State` and subscribes directly to `pending_decision_tx` without headers/auth checks.",
+        "The stream payload includes decision metadata (`decision_id`, `action`, `resource_type`) that should remain behind observe permissions."
+      ],
+      "suggestion": "Require headers and enforce `require_observe_auth` (or equivalent) in `handle_evolution_stream`, using the same permission model as other `/observe/evolution/*` handlers.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "inconsistent_endpoint_guards"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "implicit_default_tenant_authority",
+      "summary": "Multiple code paths silently assume a default tenant, weakening tenant-bound authorization boundaries.",
+      "related_files": [
+        "crates/temper-server/src/odata/common.rs",
+        "crates/temper-server/src/state/dispatch/actions.rs",
+        "crates/temper-server/src/state/entity_ops.rs",
+        "crates/temper-server/src/entity_actor/actor.rs"
+      ],
+      "evidence": [
+        "`extract_tenant` falls back to first registered tenant or `TenantId::default()` when header is missing.",
+        "Legacy dispatch/read helpers (`dispatch_action`, `get_or_spawn_actor`, `get_entity_state`) route through `TenantId::default()`.",
+        "`EntityActor::new`/`with_persistence` initialize tenant as `\"default\"`, relying on later mutation to enforce tenant isolation."
+      ],
+      "suggestion": "Make tenant explicit at request boundaries (reject missing tenant for tenant-scoped APIs), deprecate default-tenant wrappers in server state APIs, and enforce constructor-level tenant binding for entity actors.",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "implicit_tenant_defaults"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "mixed_bypass_semantics_across_surfaces",
+      "summary": "Bypass behavior is implemented inconsistently across endpoints and execution surfaces.",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/operations.rs",
+        "crates/temper-authz/src/engine.rs",
+        "crates/temper-server/src/wasm_authz_gate.rs"
+      ],
+      "evidence": [
+        "`AuthzEngine` defines centralized bypass only for `System` principals.",
+        "`handle_update_feature_request` adds a separate manual `Admin` bypass instead of using the same helper path as sibling observe endpoints.",
+        "`PermissiveWasmAuthzGate` unconditionally allows host function access, introducing a third bypass mode outside Cedar policies."
+      ],
+      "suggestion": "Consolidate bypass policy into one authorization abstraction with explicit policy flags and audit hooks; remove ad-hoc per-handler bypass branches and make permissive WASM mode opt-in behind strict environment gating plus startup warnings.",
+      "confidence": "medium",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "fragmented_bypass_policy"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Identity trust is derived from unverified transport headers rather than trusted authentication artifacts.",
+      "Authorization enforcement is not consistently centralized, so endpoint-level guard drift occurs.",
+      "Legacy single-tenant compatibility paths remain active alongside multi-tenant logic."
+    ],
+    "likely_symptoms": [
+      "header_spoofed_system_bypass",
+      "evolution_stream_missing_auth_gate",
+      "implicit_default_tenant_authority",
+      "mixed_bypass_semantics_across_surfaces"
+    ],
+    "possible_false_positives": []
+  }
+}

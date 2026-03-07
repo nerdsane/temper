@@ -1,0 +1,108 @@
+{
+  "batch": "Governance & Contracts",
+  "batch_index": 2,
+  "assessments": {
+    "test_strategy": 72.0
+  },
+  "dimension_notes": {
+    "test_strategy": {
+      "evidence": [
+        "README.md asserts hard governance guarantees like \"Every spec passes four levels before reaching production. No exceptions.\" (README.md:111), but assigned runtime boundary modules have limited contract-level tests.",
+        "crates/temper-server/src/events.rs implements `/tdata/$events` stream behavior (events.rs:42-58), while its test coverage only checks struct serialization (events.rs:61-82).",
+        "crates/temper-server/src/observe/evolution/records_list.rs has filtering and response-shaping logic (records_list.rs:19-128), but observe tests only cover empty/basic scenarios (observe/mod_test.rs:745-817,1201-1222) and not query-filter or payload-shape edge cases.",
+        "crates/temper-cli/src/serve/storage.rs contains startup persistence/recovery paths (storage.rs:39-369,472-499) that are invoked by serve startup (serve/mod.rs:78,132,137,147,149), but local tests only exercise URL redaction and a status helper (storage.rs:371-470)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "test_strategy",
+      "identifier": "governance_contract_tests_missing",
+      "summary": "Documented governance guarantees are not backed by executable contract tests in this batch.",
+      "related_files": [
+        "README.md",
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-cli/src/serve/storage.rs"
+      ],
+      "evidence": [
+        "README states absolute guarantees (e.g., \"No exceptions\" for verification cascade at README.md:111), while tested coverage in assigned files is mostly unit-level/helper-level.",
+        "Critical runtime boundary functions in events/records_list/storage lack end-to-end assertions that would fail on contract regressions."
+      ],
+      "suggestion": "Add a governance contract test suite that maps README-level guarantees to executable checks across storage recovery, event streaming, and evolution API behavior; enforce it in CI as a quality gate.",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "missing_contract_level_integration_tests"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "sse_events_endpoint_untested",
+      "summary": "The `/tdata/$events` SSE handler lacks route-level tests for stream semantics.",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/mod_test.rs"
+      ],
+      "evidence": [
+        "`handle_events` performs runtime stream mapping and drops lagged broadcast errors (events.rs:43-55), but tests in this module only verify JSON serialization of `EntityStateChange` (events.rs:61-82).",
+        "Existing SSE test coverage in observe tests targets a different endpoint (`/api/tenants/default/decisions/stream`) rather than `/tdata/$events` (observe/mod_test.rs:162-184)."
+      ],
+      "suggestion": "Add async integration tests that mount the router with `/tdata/$events`, publish broadcast messages, and assert `text/event-stream`, event name `state_change`, payload content, and lagged-receiver behavior.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_contract_level_integration_tests"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "evolution_records_query_contract_gap",
+      "summary": "Evolution list endpoints are not tested for filter and payload-shaping contracts.",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-server/src/observe/mod_test.rs"
+      ],
+      "evidence": [
+        "`list_evolution_records` accepts `record_type`/`status` query filters and merges `r.data` fields into top-level response objects (records_list.rs:10-64), but tests only cover empty/basic totals (observe/mod_test.rs:745-817).",
+        "`list_evolution_insights` merges JSON data into each insight item (records_list.rs:85-115), while only empty response behavior is tested (observe/mod_test.rs:1201-1222)."
+      ],
+      "suggestion": "Add table-driven endpoint tests that seed Turso rows and assert query filtering, stable response keys, and deterministic behavior when `data` includes conflicting keys or malformed JSON.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_contract_level_integration_tests"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "storage_recovery_paths_not_integration_tested",
+      "summary": "Startup persistence and registry-restore paths are effectively unvalidated by integration tests.",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-cli/src/serve/mod.rs"
+      ],
+      "evidence": [
+        "Storage module includes connection/migration/upsert/load flows for Postgres and Turso (storage.rs:39-59,77-127,212-369,472-499), but tests in that file only cover URL redaction and `row_to_registry_status` helper logic (storage.rs:371-470).",
+        "These storage functions are on the `serve::run` startup path that controls persisted-spec recovery and loading (serve/mod.rs:78,132,137,147,149)."
+      ],
+      "suggestion": "Add backend integration tests (Postgres test DB + Turso file DB) that run upsert/load round-trips, validate restored verification states and tenant constraints, and assert startup behavior under malformed or missing persisted records.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_contract_level_integration_tests"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Test portfolio is skewed toward unit helpers and happy/empty endpoint cases rather than contract-level integration at governance boundaries.",
+      "Cross-file policy guarantees are documented, but there is no explicit traceability from guarantee to executable test."
+    ],
+    "likely_symptoms": [
+      "sse_events_endpoint_untested",
+      "evolution_records_query_contract_gap",
+      "storage_recovery_paths_not_integration_tested"
+    ],
+    "possible_false_positives": []
+  }
+}

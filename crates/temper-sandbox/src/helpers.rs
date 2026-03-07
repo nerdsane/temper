@@ -269,7 +269,8 @@ mod tests {
 
     #[test]
     fn format_authz_denied_valid() {
-        let body = r#"{"error":{"code":"AuthorizationDenied","message":"Cedar denied (PD-abc123)"}}"#;
+        let body =
+            r#"{"error":{"code":"AuthorizationDenied","message":"Cedar denied (PD-abc123)"}}"#;
         let result = format_authz_denied(body);
         assert!(result.is_some());
         let val = result.unwrap();

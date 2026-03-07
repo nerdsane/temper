@@ -21,10 +21,7 @@ pub enum Principal<'a> {
 ///
 /// Handles success (including empty bodies), authz denials (403 with
 /// structured body), and generic HTTP errors.
-async fn process_response(
-    response: reqwest::Response,
-    url: &str,
-) -> Result<Value, String> {
+async fn process_response(response: reqwest::Response, url: &str) -> Result<Value, String> {
     let status = response.status();
     let text = response
         .text()
@@ -58,7 +55,17 @@ pub async fn temper_request(
     path: &str,
     body: Option<&Value>,
 ) -> Result<Value, String> {
-    send_json(http, base_url, tenant, Principal::Agent(principal_id), api_key, method, path, body).await
+    send_json(
+        http,
+        base_url,
+        tenant,
+        Principal::Agent(principal_id),
+        api_key,
+        method,
+        path,
+        body,
+    )
+    .await
 }
 
 /// Send a governance request (admin principal) to the Temper server.
@@ -72,7 +79,17 @@ pub async fn temper_governance_request(
     path: &str,
     body: Option<&Value>,
 ) -> Result<Value, String> {
-    send_json(http, base_url, tenant, Principal::Admin(principal_id), api_key, method, path, body).await
+    send_json(
+        http,
+        base_url,
+        tenant,
+        Principal::Admin(principal_id),
+        api_key,
+        method,
+        path,
+        body,
+    )
+    .await
 }
 
 /// Core JSON request sender shared by `temper_request` and `temper_governance_request`.

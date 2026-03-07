@@ -377,7 +377,9 @@ effect = [{ type = "increment", var = "count" }, { type = "set_bool", var = "don
         let effects = &actions[0].effects;
         assert_eq!(effects.len(), 3);
         assert!(matches!(&effects[0], ResolvedEffect::IncrementCounter(v) if v == "count"));
-        assert!(matches!(&effects[1], ResolvedEffect::SetBool { var, value: true } if var == "done"));
+        assert!(
+            matches!(&effects[1], ResolvedEffect::SetBool { var, value: true } if var == "done")
+        );
         assert!(matches!(&effects[2], ResolvedEffect::Emit(e) if e == "thing_done"));
     }
 
@@ -408,12 +410,16 @@ from = ["Draft"]
         let effects = &actions[0].effects;
         // Should have items increment + quantity increment
         assert!(effects.len() >= 2);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, ResolvedEffect::IncrementCounter(v) if v == "items")));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, ResolvedEffect::IncrementCounter(v) if v == "quantity")));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, ResolvedEffect::IncrementCounter(v) if v == "items"))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, ResolvedEffect::IncrementCounter(v) if v == "quantity"))
+        );
     }
 
     #[test]
@@ -493,26 +499,32 @@ from = ["Draft"]
     fn is_verifiable_classification() {
         assert!(ResolvedEffect::IncrementCounter("x".into()).is_verifiable());
         assert!(ResolvedEffect::DecrementCounter("x".into()).is_verifiable());
-        assert!(ResolvedEffect::SetBool {
-            var: "x".into(),
-            value: true
-        }
-        .is_verifiable());
+        assert!(
+            ResolvedEffect::SetBool {
+                var: "x".into(),
+                value: true
+            }
+            .is_verifiable()
+        );
         assert!(ResolvedEffect::ListAppend("x".into()).is_verifiable());
         assert!(ResolvedEffect::ListRemoveAt("x".into()).is_verifiable());
         assert!(!ResolvedEffect::Emit("e".into()).is_verifiable());
         assert!(!ResolvedEffect::Trigger("t".into()).is_verifiable());
-        assert!(!ResolvedEffect::Schedule {
-            action: "a".into(),
-            delay_seconds: 1
-        }
-        .is_verifiable());
-        assert!(!ResolvedEffect::Spawn {
-            entity_type: "T".into(),
-            entity_id_source: "s".into(),
-            initial_action: None,
-            store_id_in: None,
-        }
-        .is_verifiable());
+        assert!(
+            !ResolvedEffect::Schedule {
+                action: "a".into(),
+                delay_seconds: 1
+            }
+            .is_verifiable()
+        );
+        assert!(
+            !ResolvedEffect::Spawn {
+                entity_type: "T".into(),
+                entity_id_source: "s".into(),
+                initial_action: None,
+                store_id_in: None,
+            }
+            .is_verifiable()
+        );
     }
 }

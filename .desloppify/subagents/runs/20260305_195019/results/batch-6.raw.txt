@@ -1,0 +1,137 @@
+{
+  "batch": "Cross-cutting Sweep",
+  "batch_index": 6,
+  "assessments": {
+    "authorization_consistency": 57.0
+  },
+  "dimension_notes": {
+    "authorization_consistency": {
+      "evidence": [
+        "Authorization checks use `security_context_from_headers`, but `SecurityContext::from_headers` defaults missing/unknown principals to `PrincipalKind::System` (`crates/temper-authz/src/context.rs:53-69`), and `authorize_or_bypass` auto-allows system principals (`crates/temper-authz/src/engine.rs:217-227`), creating a header-omission bypass for gated endpoints that call `authorize_with_context` (`crates/temper-server/src/state/entity_ops.rs:253-268`).",
+        "Sensitive `/api` routes are inconsistent: policy writes are Cedar-gated (`crates/temper-server/src/api.rs:333-374`, `435-476`), but sibling reads/listeners are ungated (`handle_get_policies` at `315-328`, decision listing/streams at `606-626`, `889-916`, `918-955`, plus secrets CRUD/list at `161-309`).",
+        "`/api/specs/load-inline` explicitly performs Cedar authorization (`crates/temper-server/src/observe/specs/load_inline.rs:20-58`), while sibling `/api/specs/load-dir` has no header/auth check despite being mounted in management router (`crates/temper-server/src/api.rs:42-48`, `crates/temper-server/src/observe/specs/load_dir.rs:25-29`).",
+        "Tenant scoping is inconsistently inferred: OData helper silently falls back to first/default tenant when header missing (`crates/temper-server/src/odata/common.rs:13-37`), and `/api/authorize`, `/api/audit`, `/api/repl` also default tenant to `default` (`crates/temper-server/src/api.rs:1033-1037`, `1088-1092`, `1153-1157`).",
+        "Observe surface mixes read/write and tenant isolation inconsistently: router claims read-only except verify (`crates/temper-server/src/observe/mod.rs:135-137`) but exposes PATCH mutation (`188-190`) backed by DB update (`crates/temper-server/src/observe/evolution/operations.rs:301-337`); entity listing/history also exposes cross-tenant data paths (`crates/temper-server/src/observe/entities.rs:22-49`, `99-103`) while actor/event keys are tenant-qualified elsewhere (`crates/temper-server/src/state/entity_ops.rs:435-436`)."
+      ],
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "system_default_principal_bypass",
+      "summary": "Missing principal headers become `System`, bypassing Cedar checks on gated routes.",
+      "related_files": [
+        "crates/temper-authz/src/context.rs",
+        "crates/temper-authz/src/engine.rs",
+        "crates/temper-server/src/state/entity_ops.rs",
+        "crates/temper-server/src/authz_helpers.rs"
+      ],
+      "evidence": [
+        "`SecurityContext::from_headers` initializes `kind` as `PrincipalKind::System` and maps unknown kind values to `System` (`context.rs:53-69`).",
+        "`AuthzEngine::authorize_or_bypass` returns `Allow` whenever principal is `System` (`engine.rs:217-227`).",
+        "Server auth gate paths call `authorize_with_context`, which delegates to `authorize_or_bypass` (`entity_ops.rs:253-268`); many handlers build context from headers only (`authz_helpers.rs:33-39`)."
+      ],
+      "suggestion": "Change header-derived default principal to a non-bypass identity (for example `Anonymous`/`Agent` with deny-by-default), reserve `System` to explicit internal call sites (`SecurityContext::system()` only), and require trusted internal marker before allowing any bypass path.",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "implicit_trust_defaults"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "sensitive_api_siblings_missing_gate",
+      "summary": "Sensitive `/api` sibling endpoints mix gated and ungated access patterns.",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/authz_helpers.rs"
+      ],
+      "evidence": [
+        "Policy mutation routes perform Cedar checks (`api.rs:333-374`, `435-476`) while policy read route `handle_get_policies` has no auth check (`315-328`).",
+        "Decision approve/deny calls shared authorization (`645-647`, `820-822`), but decision list/stream endpoints accept `_headers` and do no gate (`606-626`, `889-916`, `918-955`).",
+        "Tenant secret put/delete/list handlers contain no `authorize_with_context` checks despite direct data-plane access (`161-309`)."
+      ],
+      "suggestion": "Introduce a single `authorize_api_route` guard helper and apply it uniformly to all policy/decision/secret endpoints with explicit action/resource mapping; keep exceptions only if explicitly declared as public with in-code annotation and docs.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_route_level_policy_contract"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "spec_submission_authz_split_brain",
+      "summary": "`load-inline` is Cedar-gated but sibling `load-dir` path is not.",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/observe/specs/load_inline.rs",
+        "crates/temper-server/src/observe/specs/load_dir.rs"
+      ],
+      "evidence": [
+        "`/api/specs/load-inline` runs `authorize_with_context(..., \"submit_specs\", \"SpecRegistry\", ...)` (`load_inline.rs:20-58`).",
+        "`/api/specs/load-dir` handler signature has no headers/context and performs no Cedar check (`load_dir.rs:25-29`).",
+        "Both endpoints are mounted as peer management routes (`api.rs:42-48`)."
+      ],
+      "suggestion": "Make both spec ingestion paths pass through the same authz gate (ideally shared pre-handler middleware/helper), or funnel `load-dir` through `load-inline` authorization logic before any registry/persistence mutation.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_route_level_policy_contract"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "implicit_tenant_fallbacks_weaken_isolation",
+      "summary": "Multiple endpoints silently choose fallback tenants when tenant identity is absent.",
+      "related_files": [
+        "crates/temper-server/src/odata/common.rs",
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/observe/entities.rs"
+      ],
+      "evidence": [
+        "`extract_tenant` falls back to first registered tenant, then `TenantId::default()` when header is missing (`odata/common.rs:13-37`).",
+        "`/api/authorize`, `/api/audit`, and `/api/repl` use `x-tenant-id` with `unwrap_or(\"default\")` (`api.rs:1033-1037`, `1088-1092`, `1153-1157`).",
+        "History endpoint depends on extracted tenant for actor path (`observe/entities.rs:61-65`), so fallback behavior directly affects which tenant data is accessed."
+      ],
+      "suggestion": "Require explicit tenant identity for tenant-scoped endpoints (reject missing header/path with 400/401), and keep fallback only for clearly documented single-tenant dev mode behind an explicit feature/env gate.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "implicit_trust_defaults"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "observe_surface_breaks_readonly_and_tenant_boundaries",
+      "summary": "`/observe` includes unauthenticated mutations and cross-tenant data exposure patterns.",
+      "related_files": [
+        "crates/temper-server/src/observe/mod.rs",
+        "crates/temper-server/src/observe/evolution/operations.rs",
+        "crates/temper-server/src/observe/entities.rs",
+        "crates/temper-server/src/state/entity_ops.rs"
+      ],
+      "evidence": [
+        "Observe router docs claim read-only except verify (`observe/mod.rs:135-137`) but route table exposes PATCH `/evolution/feature-requests/{id}` (`188-190`).",
+        "Patch handler directly updates Turso without authz gate (`operations.rs:301-337`).",
+        "`list_entities` enumerates all actor keys without tenant filter (`entities.rs:22-49`), and history fallback reads by non-tenant persistence key (`entities.rs:101-103`) despite tenant-qualified persistence IDs elsewhere (`state/entity_ops.rs:435-436`)."
+      ],
+      "suggestion": "Move mutating observe endpoints under authenticated `/api` (or add explicit authz in observe), add tenant filter enforcement for entity listing/history, and normalize persistence key handling to tenant-qualified IDs in all read paths.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "missing_route_level_policy_contract"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Implicit trust defaults (system principal and tenant fallback) are used as convenience paths in request-boundary code.",
+      "No centralized authorization contract at router level leads to per-handler drift in sibling endpoints.",
+      "Observe/API boundary intent is not enforced structurally, allowing write paths and broad visibility to leak into observation surface."
+    ],
+    "likely_symptoms": [
+      "sensitive_api_siblings_missing_gate",
+      "spec_submission_authz_split_brain",
+      "observe_surface_breaks_readonly_and_tenant_boundaries"
+    ],
+    "possible_false_positives": []
+  }
+}

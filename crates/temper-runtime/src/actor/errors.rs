@@ -51,7 +51,10 @@ mod tests {
     fn error_display_messages() {
         assert_eq!(ActorError::Stopped.to_string(), "actor stopped");
         assert_eq!(ActorError::MailboxFull.to_string(), "mailbox full");
-        assert_eq!(ActorError::SendFailed.to_string(), "send failed: actor not running");
+        assert_eq!(
+            ActorError::SendFailed.to_string(),
+            "send failed: actor not running"
+        );
         assert_eq!(
             ActorError::AskTimeout(Duration::from_secs(5)).to_string(),
             "ask timeout after 5s"

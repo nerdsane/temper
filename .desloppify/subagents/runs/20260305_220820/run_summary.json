@@ -1,0 +1,117 @@
+{
+  "created_at": "2026-03-05T22:08:22+00:00",
+  "run_stamp": "20260305_220820",
+  "runner": "codex",
+  "parallel": true,
+  "selected_batches": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "successful_batches": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "failed_batches": [],
+  "allow_partial": false,
+  "max_parallel_batches": 3,
+  "batch_timeout_seconds": 1200,
+  "batch_max_retries": 1,
+  "batch_retry_backoff_seconds": 2.0,
+  "batch_heartbeat_seconds": 15.0,
+  "batch_stall_warning_seconds": 0,
+  "batch_stall_kill_seconds": 120,
+  "immutable_packet": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/review_packets/holistic_packet_20260305_220820.json",
+  "blind_packet": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/review_packet_blind.json",
+  "run_dir": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820",
+  "logs_dir": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/logs",
+  "run_log": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/run.log",
+  "batches": {
+    "1": {
+      "position": 1,
+      "status": "succeeded",
+      "prompt_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/prompts/batch-1.md",
+      "result_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/results/batch-1.raw.txt",
+      "log_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/logs/batch-1.log",
+      "started_at": "2026-03-05T22:08:22+00:00",
+      "elapsed_seconds": 95,
+      "exit_code": 0,
+      "completed_at": "2026-03-05T22:09:57+00:00"
+    },
+    "2": {
+      "position": 2,
+      "status": "succeeded",
+      "prompt_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/prompts/batch-2.md",
+      "result_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/results/batch-2.raw.txt",
+      "log_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/logs/batch-2.log",
+      "started_at": "2026-03-05T22:08:22+00:00",
+      "elapsed_seconds": 197,
+      "exit_code": 0,
+      "completed_at": "2026-03-05T22:11:39+00:00"
+    },
+    "3": {
+      "position": 3,
+      "status": "succeeded",
+      "prompt_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/prompts/batch-3.md",
+      "result_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/results/batch-3.raw.txt",
+      "log_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/logs/batch-3.log",
+      "started_at": "2026-03-05T22:08:22+00:00",
+      "elapsed_seconds": 82,
+      "exit_code": 0,
+      "completed_at": "2026-03-05T22:09:44+00:00"
+    },
+    "4": {
+      "position": 4,
+      "status": "succeeded",
+      "prompt_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/prompts/batch-4.md",
+      "result_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/results/batch-4.raw.txt",
+      "log_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/logs/batch-4.log",
+      "started_at": "2026-03-05T22:09:44+00:00",
+      "elapsed_seconds": 123,
+      "exit_code": 0,
+      "completed_at": "2026-03-05T22:11:48+00:00"
+    },
+    "5": {
+      "position": 5,
+      "status": "succeeded",
+      "prompt_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/prompts/batch-5.md",
+      "result_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/results/batch-5.raw.txt",
+      "log_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/logs/batch-5.log",
+      "started_at": "2026-03-05T22:09:57+00:00",
+      "elapsed_seconds": 127,
+      "exit_code": 0,
+      "completed_at": "2026-03-05T22:12:05+00:00"
+    },
+    "6": {
+      "position": 6,
+      "status": "succeeded",
+      "prompt_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/prompts/batch-6.md",
+      "result_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/results/batch-6.raw.txt",
+      "log_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/logs/batch-6.log",
+      "started_at": "2026-03-05T22:11:39+00:00",
+      "elapsed_seconds": 164,
+      "exit_code": 0,
+      "completed_at": "2026-03-05T22:14:24+00:00"
+    },
+    "7": {
+      "position": 7,
+      "status": "succeeded",
+      "prompt_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/prompts/batch-7.md",
+      "result_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/results/batch-7.raw.txt",
+      "log_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/subagents/runs/20260305_220820/logs/batch-7.log",
+      "started_at": "2026-03-05T22:11:48+00:00",
+      "elapsed_seconds": 154,
+      "exit_code": 0,
+      "completed_at": "2026-03-05T22:14:22+00:00"
+    }
+  }
+}

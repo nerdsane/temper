@@ -1,0 +1,119 @@
+{
+  "batch": "Architecture & Coupling",
+  "batch_index": 1,
+  "assessments": {
+    "cross_module_architecture": 72.0,
+    "high_level_elegance": 74.0
+  },
+  "dimension_notes": {
+    "cross_module_architecture": {
+      "evidence": [
+        "`crates/temper-cli/src/serve/storage.rs:7-15` imports server-level domain types (`ServerEventStore`, `SpecRegistry`, verification result/status) plus backend adapters (`temper_store_postgres`, `temper_store_turso`), making CLI startup code a cross-layer dependency hub.",
+        "`crates/temper-cli/src/serve/storage.rs:212-369` duplicates almost identical registry restoration workflows for Postgres and Turso, so boundary behavior is copy-maintained rather than owned behind one backend-neutral seam.",
+        "`crates/temper-server/src/events.rs:46-51`, `crates/temper-server/src/observe/evolution/records_list.rs:22-30`, and `crates/temper-server/src/state/dispatch_blocking.rs:24-49` all reach into broad `ServerState` capabilities from unrelated concerns, reinforcing service-locator coupling across modules."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    },
+    "high_level_elegance": {
+      "evidence": [
+        "`crates/temper-cli/src/init/mod.rs:56-64` scaffolds local `evolution/{observations,problems,analyses,decisions,insights}` directories as a first-class project structure.",
+        "`crates/temper-server/src/observe/evolution/records_list.rs:27-33` and `:95-98` declare Turso/persistent store as the runtime source for evolution lists/insights, and `:77-85`/`:131-135` return empty payloads when no persistent store exists, with no file-based fallback.",
+        "The project shape advertised by `temper init` and the runtime ownership of evolution data diverge, so top-level ownership is split between scaffolded filesystem concepts and DB-governed behavior."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "cli_storage_cross_layer_hub",
+      "summary": "CLI storage module couples orchestration, backend IO, and server registry internals in one seam.",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "`crates/temper-cli/src/serve/storage.rs:7-15` mixes imports from server domain types and concrete storage adapters, then performs connection/migration/upsert/restore in the same module (`:39-127`, `:212-369`, `:472-499`).",
+        "`crates/temper-server/src/observe/evolution/records_list.rs:28-31` depends on runtime persistent-store behavior that this CLI module effectively shapes at startup, creating a wide blast radius for persistence changes."
+      ],
+      "suggestion": "Introduce a persistence bootstrap boundary (e.g., `SpecPersistenceBootstrap`) owned by the server/persistence layer; move registry restoration and backend-specific translation out of CLI, leaving CLI to call a narrow boot API.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "missing_bootstrap_boundary"
+    },
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "duplicated_backend_restore_pipeline",
+      "summary": "Postgres and Turso registry restore flows are duplicated, causing architecture drift risk.",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/state/dispatch_blocking.rs"
+      ],
+      "evidence": [
+        "`load_registry_from_postgres` and `load_registry_from_turso` duplicate grouping, CSDL parsing, tenant registration, and verification-status restoration logic almost line-for-line (`storage.rs:212-294` vs `296-369`).",
+        "This duplication sits on critical startup state used by downstream runtime paths (including blocking dispatch over `ServerState` in `dispatch_blocking.rs:24-49`), so divergence in one restore path can silently alter runtime behavior per backend."
+      ],
+      "suggestion": "Extract a backend-agnostic restore pipeline that accepts a normalized row/constraint iterator and shared mapping callbacks; keep backend code limited to data fetch and row adaptation.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_bootstrap_boundary"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "scaffold_runtime_evolution_model_split",
+      "summary": "Scaffolded filesystem evolution model conflicts with DB-owned runtime evolution endpoints.",
+      "related_files": [
+        "crates/temper-cli/src/init/mod.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "`init::run` always creates `evolution/*` directories (`init/mod.rs:59-63`) and tests lock this shape in (`:158-162`).",
+        "`list_evolution_records` and `list_evolution_insights` only read through `state.persistent_store()` (`records_list.rs:28-31`, `:96-98`) and otherwise return empty lists (`:77-85`, `:131-135`) without consuming scaffolded folders."
+      ],
+      "suggestion": "Choose one canonical ownership model for evolution records: either remove the scaffolded `evolution/*` directories from `temper init` or add a first-class file-backed evolution store path that these handlers can query.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "domain_contract_drift"
+    },
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "serverstate_service_locator_spread",
+      "summary": "Broad `ServerState` access pattern creates implicit cross-module dependencies.",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-server/src/state/dispatch_blocking.rs"
+      ],
+      "evidence": [
+        "SSE handler directly consumes auth + event bus from full state (`events.rs:49-51`), evolution handlers consume auth + persistence from full state (`records_list.rs:26-30`, `:94-97`), and dispatch blocking consumes internal dispatch engine via full state impl (`dispatch_blocking.rs:24-49`).",
+        "These modules depend on a single broad state carrier instead of narrow capability interfaces, so internal state changes can ripple across unrelated endpoints and dispatch paths."
+      ],
+      "suggestion": "Slice `ServerState` into capability traits/typed subcontexts (e.g., `EventStreamContext`, `EvolutionStoreContext`, `WasmDispatchContext`) and inject only required capabilities into each module.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "missing_bootstrap_boundary"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Infrastructure ownership is split between CLI boot code and server runtime modules without a single persistence boundary.",
+      "A broad shared state object (`ServerState`) is used as the default integration mechanism instead of explicit capability seams.",
+      "Project-scaffold contracts and runtime data-ownership contracts evolved independently."
+    ],
+    "likely_symptoms": [
+      "cli_storage_cross_layer_hub",
+      "duplicated_backend_restore_pipeline",
+      "scaffold_runtime_evolution_model_split",
+      "serverstate_service_locator_spread"
+    ],
+    "possible_false_positives": []
+  }
+}

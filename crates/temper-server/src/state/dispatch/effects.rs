@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use tracing::Instrument;
 
-use crate::request_context::AgentContext;
 use crate::entity_actor::{EntityResponse, effects::ScheduledAction};
 use crate::events::EntityStateChange;
+use crate::request_context::AgentContext;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
@@ -108,7 +108,8 @@ impl crate::state::ServerState {
                 source: Some(TrajectorySource::Entity),
                 spec_governed: None,
             };
-            tokio::spawn(async move { // determinism-ok: external side-effect, no simulation-visible state
+            tokio::spawn(async move {
+                // determinism-ok: external side-effect, no simulation-visible state
                 dispatcher.dispatch(&entry);
             });
         }
@@ -134,7 +135,8 @@ impl crate::state::ServerState {
             let action = sched.action.clone();
             let ctx = agent_ctx.clone();
             let delay = std::time::Duration::from_secs(sched.delay_seconds);
-            tokio::spawn( // determinism-ok: timer delivery is a background side-effect
+            tokio::spawn(
+                // determinism-ok: timer delivery is a background side-effect
                 async move {
                     tokio::time::sleep(delay).await; // determinism-ok: scheduled delay
                     let _ = state
@@ -194,10 +196,8 @@ impl crate::state::ServerState {
                     action_params: ctx.action_params,
                     mode: super::WasmDispatchMode::Inline,
                 };
-                if let Ok(Some(final_response)) = Box::pin(
-                    self.dispatch_wasm_integrations_internal(&req),
-                )
-                .await
+                if let Ok(Some(final_response)) =
+                    Box::pin(self.dispatch_wasm_integrations_internal(&req)).await
                 {
                     return final_response;
                 }

@@ -1,0 +1,92 @@
+{
+  "batch": "Package Organization",
+  "batch_index": 1,
+  "assessments": {
+    "package_organization": 77.0
+  },
+  "dimension_notes": {
+    "package_organization": {
+      "evidence": [
+        "`holistic_context.structure.directory_profiles` shows `crates/temper-server/src/` at 13 files and `crates/temper-server/src/observe/` at 10 files, with mixed routing, persistence adapter, invariant worker, and API concerns still split across top-level/root and feature folders.",
+        "`crates/temper-server/src/events.rs` and `crates/temper-server/src/observe/entities.rs` both implement SSE streaming from `state.event_tx` with overlapping stream/auth/filter responsibilities but live in different structural layers.",
+        "DST tests are grouped by filename prefix (`dst_*`) but remain flat in `crates/temper-server/tests/` (10 files total) rather than a dedicated test package boundary, despite shared fixture coupling via `mod common`."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "package_organization",
+      "identifier": "split_sse_boundary_between_root_and_observe",
+      "summary": "SSE event streaming is implemented in two packages with duplicated boundary logic.",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/entities.rs"
+      ],
+      "evidence": [
+        "`events.rs::handle_events` and `observe/entities.rs::handle_event_stream` both subscribe to `state.event_tx`, serialize the same change payloads, and emit `state_change` SSE events.",
+        "Both handlers enforce `read_events` auth but live in separate package layers (`src/` root vs `src/observe/`), causing feature logic to be split by route mount instead of ownership."
+      ],
+      "suggestion": "Staged reorg plan: 1) create `crates/temper-server/src/observe/events/stream.rs` with shared stream construction + filtering helpers, 2) move root `/tdata/$events` handler into a thin adapter module (for example `src/tdata/events.rs`) that calls the shared stream builder, 3) move observe stream handler to call the same shared builder with observe-specific filters, 4) update module wiring in `lib.rs`, `router.rs`, and `observe/mod.rs`, then run `cargo fmt && cargo check -p temper-server && cargo test -p temper-server dst_hotswap dst_lifecycle dst_multi_tenant`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "event_stream_boundary_blur"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "root_infrastructure_stragglers_in_server_src",
+      "summary": "Infrastructure/state internals remain as root-level stragglers instead of domain packages.",
+      "related_files": [
+        "crates/temper-server/src/event_store.rs",
+        "crates/temper-server/src/eventual_invariants.rs"
+      ],
+      "evidence": [
+        "`event_store.rs` is an adapter over persistence backends and is consumed by state/entity internals, but sits in `src/` alongside router-facing modules.",
+        "`eventual_invariants.rs` owns background convergence/state tracker logic and directly manipulates `ServerState` internals (`eventual_tracker`, `registry`, metrics), indicating state-domain ownership rather than root API ownership.",
+        "`holistic_context.structure` reports `crates/temper-server/src/` at 13 files (mixed concerns), signaling root flattening where these modules increase boundary ambiguity."
+      ],
+      "suggestion": "Staged reorg plan: 1) move `event_store.rs` to `crates/temper-server/src/state/persistence/event_store.rs`, 2) move `eventual_invariants.rs` to `crates/temper-server/src/state/invariants/eventual.rs`, 3) add/adjust `mod.rs` re-exports under `state/persistence` and `state/invariants`, 4) update imports in `state/mod.rs`, `entity_actor/*`, and test helpers to new paths, 5) keep temporary compatibility re-exports in `lib.rs` for one cycle, then remove, 6) validate with `cargo fmt && cargo check -p temper-server && cargo test -p temper-server`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "root_level_flattening"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "dst_suite_flattened_in_tests_root",
+      "summary": "DST integration tests are a coherent suite but are flattened in the generic tests root.",
+      "related_files": [
+        "crates/temper-server/tests/dst_hotswap.rs",
+        "crates/temper-server/tests/dst_lifecycle.rs",
+        "crates/temper-server/tests/dst_multi_tenant.rs"
+      ],
+      "evidence": [
+        "All three files import the same `mod common` fixtures and follow a single DST concern family (`dst_*`), but live at top-level beside unrelated integration suites.",
+        "`holistic_context.structure.directory_profiles` shows `crates/temper-server/tests/` has 10 files; DST concerns are not separated into a dedicated directory boundary."
+      ],
+      "suggestion": "Staged reorg plan: 1) create `crates/temper-server/tests/dst/`, 2) move `dst_hotswap.rs`, `dst_lifecycle.rs`, `dst_multi_tenant.rs` (and optionally `dst_persistence.rs`) into that folder, 3) move/adjust `common` as `tests/dst/common/mod.rs` and update `mod common;` paths, 4) run targeted validation `cargo test -p temper-server dst_`, then full `cargo test -p temper-server`.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "test_layout_flattening"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Route-surface packaging (where endpoint is mounted) is driving file placement more than ownership of shared stream logic.",
+      "Root `src/` has accumulated both public API modules and internal infrastructure/state mechanics, weakening directory boundary semantics.",
+      "Integration tests are organized by filename convention rather than folder ownership, reducing discoverability as suites grow."
+    ],
+    "likely_symptoms": [
+      "split_sse_boundary_between_root_and_observe",
+      "root_infrastructure_stragglers_in_server_src",
+      "dst_suite_flattened_in_tests_root"
+    ],
+    "possible_false_positives": [
+      "Legacy 'orphaned file' claims in packet context appear stale for this batch and were not re-reported."
+    ]
+  }
+}

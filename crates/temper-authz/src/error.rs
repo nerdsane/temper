@@ -98,7 +98,10 @@ mod tests {
     #[test]
     fn authz_error_display_engine() {
         let err = AuthzError::Engine("internal failure".into());
-        assert_eq!(err.to_string(), "authorization engine error: internal failure");
+        assert_eq!(
+            err.to_string(),
+            "authorization engine error: internal failure"
+        );
     }
 
     #[test]
@@ -111,15 +114,16 @@ mod tests {
 
     #[test]
     fn denial_display_policy_denied_empty_ids() {
-        let d = AuthzDenial::PolicyDenied {
-            policy_ids: vec![],
-        };
+        let d = AuthzDenial::PolicyDenied { policy_ids: vec![] };
         assert_eq!(d.to_string(), "denied by policy");
     }
 
     #[test]
     fn denial_display_no_matching_permit() {
-        assert_eq!(AuthzDenial::NoMatchingPermit.to_string(), "no matching permit policy");
+        assert_eq!(
+            AuthzDenial::NoMatchingPermit.to_string(),
+            "no matching permit policy"
+        );
     }
 
     #[test]

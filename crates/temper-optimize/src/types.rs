@@ -120,7 +120,10 @@ mod tests {
         let json = serde_json::to_string(&action).unwrap();
         let back: OptAction = serde_json::from_str(&json).unwrap();
         match back {
-            OptAction::UpdateQueryPlan { entity_set, new_plan } => {
+            OptAction::UpdateQueryPlan {
+                entity_set,
+                new_plan,
+            } => {
                 assert_eq!(entity_set, "Orders");
                 assert_eq!(new_plan, "idx_scan");
             }

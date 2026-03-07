@@ -14,8 +14,8 @@ use super::common::{
     constraint_violation_response, extract_key, extract_tenant, load_entity_or_404,
     resolve_entity_type, run_write_prechecks, verification_gate_response,
 };
-use super::response::annotate_entity;
 use super::constraints::pre_delete_relation_checks;
+use super::response::annotate_entity;
 use crate::request_context::{AgentContext, extract_agent_context};
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
@@ -192,9 +192,16 @@ pub async fn handle_odata_post(
 
             let initial_fields = body_json.clone();
             if let Err(resp) = run_write_prechecks(
-                &state, &tenant, &entity_type, &entity_id,
-                "Create", "create", &initial_fields,
-            ).await {
+                &state,
+                &tenant,
+                &entity_type,
+                &entity_id,
+                "Create",
+                "create",
+                &initial_fields,
+            )
+            .await
+            {
                 return resp;
             }
 
@@ -307,8 +314,14 @@ pub async fn handle_odata_patch(
                 Err(resp) => return *resp,
             };
             let current_state = match load_entity_or_404(
-                &state, &tenant, &entity_type, &set_name, &key_str,
-            ).await {
+                &state,
+                &tenant,
+                &entity_type,
+                &set_name,
+                &key_str,
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
@@ -325,9 +338,16 @@ pub async fn handle_odata_patch(
             }
 
             if let Err(resp) = run_write_prechecks(
-                &state, &tenant, &entity_type, &key_str,
-                "Patch", "patch", &prospective_fields,
-            ).await {
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                "Patch",
+                "patch",
+                &prospective_fields,
+            )
+            .await
+            {
                 return resp;
             }
 
@@ -400,9 +420,16 @@ pub async fn handle_odata_put(
             };
 
             if let Err(resp) = run_write_prechecks(
-                &state, &tenant, &entity_type, &key_str,
-                "Put", "put", &body_json,
-            ).await {
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                "Put",
+                "put",
+                &body_json,
+            )
+            .await
+            {
                 return resp;
             }
 
@@ -473,15 +500,28 @@ pub async fn handle_odata_delete(
                 return constraint_violation_response(v);
             }
             let current_state = match load_entity_or_404(
-                &state, &tenant, &entity_type, &set_name, &key_str,
-            ).await {
+                &state,
+                &tenant,
+                &entity_type,
+                &set_name,
+                &key_str,
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
             if let Err(resp) = run_write_prechecks(
-                &state, &tenant, &entity_type, &key_str,
-                "Delete", "delete", &current_state.state.fields,
-            ).await {
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                "Delete",
+                "delete",
+                &current_state.state.fields,
+            )
+            .await
+            {
                 return resp;
             }
 

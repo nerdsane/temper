@@ -107,7 +107,11 @@ mod tests {
 
     #[test]
     fn delete_policy_serde_roundtrip() {
-        for policy in [DeletePolicy::Restrict, DeletePolicy::Cascade, DeletePolicy::SetNull] {
+        for policy in [
+            DeletePolicy::Restrict,
+            DeletePolicy::Cascade,
+            DeletePolicy::SetNull,
+        ] {
             let json = serde_json::to_string(&policy).unwrap();
             let back: DeletePolicy = serde_json::from_str(&json).unwrap();
             assert_eq!(back, policy);
@@ -116,15 +120,30 @@ mod tests {
 
     #[test]
     fn delete_policy_serde_rename() {
-        assert_eq!(serde_json::to_string(&DeletePolicy::Restrict).unwrap(), "\"restrict\"");
-        assert_eq!(serde_json::to_string(&DeletePolicy::Cascade).unwrap(), "\"cascade\"");
-        assert_eq!(serde_json::to_string(&DeletePolicy::SetNull).unwrap(), "\"setnull\"");
+        assert_eq!(
+            serde_json::to_string(&DeletePolicy::Restrict).unwrap(),
+            "\"restrict\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DeletePolicy::Cascade).unwrap(),
+            "\"cascade\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DeletePolicy::SetNull).unwrap(),
+            "\"setnull\""
+        );
     }
 
     #[test]
     fn invariant_kind_serde_rename() {
-        assert_eq!(serde_json::to_string(&InvariantKind::Hard).unwrap(), "\"hard\"");
-        assert_eq!(serde_json::to_string(&InvariantKind::Eventual).unwrap(), "\"eventual\"");
+        assert_eq!(
+            serde_json::to_string(&InvariantKind::Hard).unwrap(),
+            "\"hard\""
+        );
+        assert_eq!(
+            serde_json::to_string(&InvariantKind::Eventual).unwrap(),
+            "\"eventual\""
+        );
     }
 
     #[test]
@@ -152,7 +171,10 @@ delete_policy = "cascade"
         assert_eq!(spec.invariants[0].kind, InvariantKind::Hard);
         assert_eq!(spec.invariants[0].on, "Order.*");
         assert_eq!(spec.relation_overrides.len(), 1);
-        assert_eq!(spec.relation_overrides[0].delete_policy, DeletePolicy::Cascade);
+        assert_eq!(
+            spec.relation_overrides[0].delete_policy,
+            DeletePolicy::Cascade
+        );
     }
 
     #[test]

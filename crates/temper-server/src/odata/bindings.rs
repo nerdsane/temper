@@ -129,8 +129,13 @@ pub(super) async fn dispatch_bound_action(
     };
     resource_attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
 
-    let authz_result =
-        state.authorize_with_context(&security_ctx, action, entity_type, &resource_attrs, tenant.as_str());
+    let authz_result = state.authorize_with_context(
+        &security_ctx,
+        action,
+        entity_type,
+        &resource_attrs,
+        tenant.as_str(),
+    );
     if let Err(denial) = authz_result {
         let reason = denial.to_string();
         let pd = record_authz_denial(

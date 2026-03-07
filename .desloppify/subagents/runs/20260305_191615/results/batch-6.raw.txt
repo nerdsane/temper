@@ -1,0 +1,224 @@
+{
+  "batch": "Cross-cutting Sweep",
+  "batch_index": 6,
+  "assessments": {
+    "api_surface_coherence": 88.0,
+    "authorization_consistency": 72.0,
+    "contract_coherence": 80.0,
+    "convention_outlier": 90.0,
+    "design_coherence": 83.0,
+    "error_consistency": 78.0,
+    "naming_quality": 86.0,
+    "type_safety": 91.0
+  },
+  "dimension_notes": {
+    "api_surface_coherence": {
+      "evidence": [
+        "`crates/temper-server/src/api.rs` mixes strongly-gated mutations (`handle_put_policies`, `handle_add_policy_rule`) with sibling handlers that return open reads/streams (`handle_list_decisions`, `handle_all_decisions_stream`) in the same API surface.",
+        "`crates/temper-server/src/observe/evolution/operations.rs` and `crates/temper-server/src/api.rs` expose similar JSON APIs but with differing return contracts (`Json<_>`, `Result<Json<_>, StatusCode>`, `impl IntoResponse`)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": "Endpoint families with similar semantics still expose inconsistent handler contracts and gating expectations."
+    },
+    "authorization_consistency": {
+      "evidence": [
+        "`crates/temper-server/src/api.rs` has no auth check in `handle_put_secret`, `handle_delete_secret`, `handle_list_secrets`, `handle_list_decisions`, `handle_decision_stream`, `handle_list_all_decisions`, and `handle_all_decisions_stream`, while sibling policy mutation handlers explicitly call `authorize_with_context`.",
+        "`crates/temper-server/src/odata/common.rs` falls back to first registered tenant when `x-tenant-id` is missing, and `crates/temper-server/src/observe/specs.rs` resolves spec detail by scanning all tenants and returning first match."
+      ],
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    },
+    "contract_coherence": {
+      "evidence": [
+        "`crates/temper-server/src/observe/specs.rs` documents `get_spec_detail` as searching all tenants and returning first match, which makes returned entity identity depend on registry ordering rather than explicit tenant contract.",
+        "`crates/temper-server/src/odata/common.rs` silently defaults tenant selection (`first registered` / `TenantId::default`) when tenant header is absent, changing request meaning without caller intent."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "convention_outlier": {
+      "evidence": [
+        "Naming and module organization are mostly consistent snake_case across assigned files.",
+        "Small convention drift remains around mixed header namespaces (`x-agent-id` vs `x-temper-principal-id`) in `crates/temper-server/src/dispatch.rs` and auth helpers."
+      ],
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "confidence": "medium",
+      "issues_preventing_higher_score": "Header vocabulary is not fully normalized across adjacent auth/context entry points."
+    },
+    "design_coherence": {
+      "evidence": [
+        "`crates/temper-server/src/api.rs` centralizes many unrelated concerns (secrets, policy CRUD, decisions, authorize/audit, REPL) and repeatedly inlines authorization-denial plumbing.",
+        "Cross-cutting authz-denial behavior is partly extracted (`crates/temper-server/src/authz_helpers.rs`) but still duplicated at call sites, creating drift-prone boundary logic."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "error_consistency": {
+      "evidence": [
+        "Several handlers log backend query errors and still return `200` with empty payloads (`crates/temper-server/src/api.rs` decisions handlers; `crates/temper-server/src/observe/agents.rs`; `crates/temper-server/src/observe/evolution/records_list.rs`).",
+        "This differs from other endpoints in the same modules that return explicit non-2xx errors for invalid input or backend unavailability."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "naming_quality": {
+      "evidence": [
+        "`crates/temper-authz/src/engine.rs` defines `AuthzEngine::permissive()` while its own doc says it loads no policies and therefore denies by default.",
+        "`crates/temper-server/src/wasm_authz_gate.rs` contains `PermissiveWasmAuthzGate` that truly allows all, increasing ambiguity with `AuthzEngine::permissive`."
+      ],
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "confidence": "high",
+      "issues_preventing_higher_score": "A key security-related constructor name currently communicates the opposite runtime behavior."
+    },
+    "type_safety": {
+      "evidence": [
+        "Typed structs and enums are broadly used at boundaries (`SecurityContext`, `AgentSummary`, `AuthorizeRequest`, `DecisionStatus`) and unsafe usage is confined to WASM FFI glue.",
+        "Remaining risk is semantic typing rather than compile-time typing (tenant defaults and first-match tenant resolution represented as valid values)."
+      ],
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "confidence": "medium",
+      "issues_preventing_higher_score": "Some semantically ambiguous fallback states are type-valid, so incorrect tenant selection is not prevented by the type system."
+    }
+  },
+  "findings": [
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "unguarded_sensitive_api_routes",
+      "summary": "Multiple sensitive API routes skip Cedar checks while sibling routes enforce them",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`handle_put_secret`, `handle_delete_secret`, `handle_list_secrets`, `handle_list_decisions`, and decision stream handlers in `api.rs` do not call `authorize_with_context`.",
+        "Sibling handlers `handle_put_policies` and `handle_add_policy_rule` explicitly perform Cedar checks and denial recording.",
+        "`README.md` states governed access and authorization for actions, but these endpoints currently permit unauthenticated access paths."
+      ],
+      "suggestion": "Add a shared auth middleware/helper for all `/api/tenants/*` and `/api/decisions*` routes, then explicitly opt out only for intentionally public endpoints.",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "authz_boundary_drift"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "implicit_tenant_resolution",
+      "summary": "Missing tenant header silently resolves to arbitrary/default tenant context",
+      "related_files": [
+        "crates/temper-server/src/odata/common.rs",
+        "crates/temper-server/src/observe/specs.rs",
+        "crates/temper-server/src/observe/entities.rs"
+      ],
+      "evidence": [
+        "`extract_tenant` in `odata/common.rs` falls back to first registered tenant, then `TenantId::default()` when header is absent.",
+        "`observe/entities.rs` uses this extracted tenant to build actor keys and fetch history.",
+        "`observe/specs.rs` returns first tenant match for entity detail instead of requiring tenant identity."
+      ],
+      "suggestion": "Require explicit tenant identity for tenant-scoped reads/writes (or authenticated principal-to-tenant mapping), and return 400/403 on missing tenant instead of implicit fallback.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "authz_boundary_drift"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "store_failures_masked_as_empty_success",
+      "summary": "Backend query failures degrade to 200 + empty payload, hiding operational errors",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/observe/agents.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "Decision list handlers in `api.rs` log Turso errors and return `200` with empty collections.",
+        "`observe/agents.rs` and `observe/evolution/records_list.rs` follow the same pattern: warn log on query failure, then empty success response.",
+        "Other handlers in these modules return explicit non-2xx for validation/backend-not-configured failures, so callers cannot reliably distinguish empty data from failed data source."
+      ],
+      "suggestion": "Return explicit 5xx/503 error envelopes for query failures (with optional partial-data mode behind a flag), and reserve empty 200 responses for true zero-result states only.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "error_contract_drift"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "cross_tenant_first_match_contract",
+      "summary": "Spec detail API contract depends on registry iteration order across tenants",
+      "related_files": [
+        "crates/temper-server/src/observe/specs.rs",
+        "crates/temper-server/src/odata/common.rs"
+      ],
+      "evidence": [
+        "`get_spec_detail` in `observe/specs.rs` scans `tenant_ids()` and returns the first matching entity type.",
+        "Tenant fallback behavior in `odata/common.rs` further normalizes implicit tenant selection when caller does not specify tenant."
+      ],
+      "suggestion": "Make tenant explicit in spec-detail route (`/observe/specs/{tenant}/{entity}` or query param), and reject ambiguous multi-tenant matches.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "tenant_identity_ambiguity"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "cross_cutting_authz_logic_scattered",
+      "summary": "Authorization/denial workflow is partially abstracted but still duplicated across handlers",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/authz_helpers.rs",
+        "crates/temper-server/src/observe/evolution/operations.rs"
+      ],
+      "evidence": [
+        "`api.rs` repeats per-handler boilerplate for building security context, checking authorization, and shaping denial payloads.",
+        "`authz_helpers.rs` extracts only parts of this path (`security_context_from_headers`, `record_authz_denial`), leaving route-specific drift and omissions.",
+        "Some mutation/read handlers in adjacent modules still omit checks entirely, showing boundary policy encoded at call-site level."
+      ],
+      "suggestion": "Introduce a uniform authorization guard layer (middleware or route-wrapper) that enforces action/resource mapping and denial response generation centrally.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "authz_boundary_drift"
+    },
+    {
+      "dimension": "naming_quality",
+      "identifier": "misleading_permissive_constructor_name",
+      "summary": "`AuthzEngine::permissive` name contradicts deny-by-default runtime behavior",
+      "related_files": [
+        "crates/temper-authz/src/engine.rs",
+        "crates/temper-server/src/wasm_authz_gate.rs"
+      ],
+      "evidence": [
+        "`engine.rs` documents `permissive()` as creating engine with no policies that denies by default.",
+        "`wasm_authz_gate.rs` has `PermissiveWasmAuthzGate` that truly allows everything, making `permissive` overloaded with opposite meanings in auth code."
+      ],
+      "suggestion": "Rename `AuthzEngine::permissive` to `empty_policy_set`/`deny_all_default` (with deprecation shim if needed) to align naming with behavior.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Authorization is enforced as handler-local choreography rather than a uniform boundary policy.",
+      "Tenant identity is treated as optional transport metadata instead of a required security boundary.",
+      "Read-path error handling prioritizes availability-style empty responses over explicit data-source failure semantics."
+    ],
+    "likely_symptoms": [
+      "unguarded_sensitive_api_routes",
+      "implicit_tenant_resolution",
+      "store_failures_masked_as_empty_success",
+      "cross_tenant_first_match_contract"
+    ],
+    "possible_false_positives": [
+      "Some unauthenticated read endpoints may be intentionally public in local/dev deployments, but no explicit scope guard is encoded in reviewed files."
+    ]
+  }
+}

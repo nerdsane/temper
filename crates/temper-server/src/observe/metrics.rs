@@ -1,8 +1,8 @@
 //! Health and metrics endpoints.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::Ordering;
 use std::sync::RwLock;
+use std::sync::atomic::Ordering;
 
 use axum::extract::State;
 use axum::http::StatusCode;

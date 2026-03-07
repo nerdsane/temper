@@ -1,0 +1,20 @@
+{
+  "session_id": "ext_20260305_173439_ffab996a",
+  "status": "submitted",
+  "runner": "claude",
+  "created_at": "2026-03-05T17:34:39+00:00",
+  "expires_at": "2026-03-06T17:34:39+00:00",
+  "ttl_hours": 24,
+  "token": "b54ac2b807876d8f0cc120860a2d5cda",
+  "attest": "I validated this review was completed without awareness of overall score and is unbiased.",
+  "packet_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/ui/observe/.desloppify/review_packets/holistic_packet_20260305_173439.json",
+  "blind_packet_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/ui/observe/.desloppify/review_packet_blind.json",
+  "packet_sha256": "c58c07ede2899eee15bf517209fc0a33936931061c342f44476edcb24bf65408",
+  "template_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/ui/observe/.desloppify/external_review_sessions/ext_20260305_173439_ffab996a/review_result.template.json",
+  "launch_prompt_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/ui/observe/.desloppify/external_review_sessions/ext_20260305_173439_ffab996a/claude_launch_prompt.md",
+  "instructions_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/ui/observe/.desloppify/external_review_sessions/ext_20260305_173439_ffab996a/reviewer_instructions.md",
+  "expected_output_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/ui/observe/.desloppify/external_review_sessions/ext_20260305_173439_ffab996a/review_result.json",
+  "submitted_at": "2026-03-05T17:40:25+00:00",
+  "submitted_input_file": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/ui/observe/.desloppify/external_review_sessions/ext_20260305_173439_ffab996a/review_result.json",
+  "submitted_canonical_file": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/ui/observe/.desloppify/external_review_sessions/ext_20260305_173439_ffab996a/canonical_import_20260305_174025.json"
+}

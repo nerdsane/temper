@@ -308,8 +308,14 @@ mod tests {
             enum_types: vec![EnumType {
                 name: "Status".into(),
                 members: vec![
-                    EnumMember { name: "Active".into(), value: Some(0) },
-                    EnumMember { name: "Inactive".into(), value: Some(1) },
+                    EnumMember {
+                        name: "Active".into(),
+                        value: Some(0),
+                    },
+                    EnumMember {
+                        name: "Inactive".into(),
+                        value: Some(1),
+                    },
                 ],
             }],
             actions: vec![Action {

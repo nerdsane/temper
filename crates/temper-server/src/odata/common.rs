@@ -119,9 +119,7 @@ pub(super) fn verification_gate_response(err: VerificationGateError) -> axum::re
 
 pub(super) fn constraint_violation_response(err: ConstraintViolation) -> axum::response::Response {
     let violation_type = match err.violation_type {
-        super::constraints::ConstraintViolationType::RelationIntegrity => {
-            "relation_integrity"
-        }
+        super::constraints::ConstraintViolationType::RelationIntegrity => "relation_integrity",
         super::constraints::ConstraintViolationType::CrossInvariant => "cross_invariant",
     };
     let body = serde_json::json!({
@@ -154,15 +152,8 @@ pub(super) async fn run_write_prechecks(
     operation: &str,
     fields: &serde_json::Value,
 ) -> Result<(), axum::response::Response> {
-    if let Err(v) = pre_upsert_relation_checks(
-        state,
-        tenant,
-        entity_type,
-        entity_id,
-        operation,
-        fields,
-    )
-    .await
+    if let Err(v) =
+        pre_upsert_relation_checks(state, tenant, entity_type, entity_id, operation, fields).await
     {
         return Err(constraint_violation_response(v));
     }

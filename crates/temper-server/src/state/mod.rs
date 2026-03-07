@@ -21,7 +21,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use temper_authz::AuthzEngine;
 use temper_evolution::PostgresRecordStore;
-#[allow(deprecated)] // ADR-0025 Phase 4: remove after sentinel/insight dispatch migrated to IOA entities
+#[allow(deprecated)]
+// ADR-0025 Phase 4: remove after sentinel/insight dispatch migrated to IOA entities
 use temper_evolution::store::RecordStore;
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
@@ -91,7 +92,8 @@ pub struct DesignTimeEvent {
 }
 
 fn env_bool(name: &str, default: bool) -> bool {
-    match std::env::var(name) { // determinism-ok: read once at startup
+    match std::env::var(name) {
+        // determinism-ok: read once at startup
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "0" | "false" | "off" | "no" => false,
             "1" | "true" | "on" | "yes" => true,

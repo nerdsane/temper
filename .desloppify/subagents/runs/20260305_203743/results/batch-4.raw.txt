@@ -1,0 +1,120 @@
+{
+  "batch": "Package Organization",
+  "batch_index": 4,
+  "assessments": {
+    "package_organization": 74.0
+  },
+  "dimension_notes": {
+    "package_organization": {
+      "evidence": [
+        "holistic_context.structure only exposes directory_profiles in this packet (no root_files/coupling_matrix), but it still shows a flat overload at crates/temper-server/src/ with file_count=21 and mixed concerns (routing, authz, constraint checks, observability, webhooks, wasm).",
+        "Import-affinity mismatch: crates/temper-server/src/dispatch.rs is documented as an OData compatibility facade, yet it also owns AgentContext/extract_agent_context used broadly outside OData (state/dispatch/*.rs, reaction/dispatcher.rs, authz_helpers.rs, webhook_receiver.rs, tests).",
+        "Root straggler: crates/temper-server/src/constraint_engine.rs is referenced from OData paths (odata/bindings.rs, odata/write.rs, odata/common.rs), but remains at crate root rather than within odata/ boundary.",
+        "Duplicate boundary pattern: crates/temper-server/src/observe/evolution.rs acts as a re-export shim over crates/temper-server/src/observe/evolution/*, creating a second entrypoint layer for the same concern.",
+        "Route modules under crates/temper-server/src/observe/ (agents.rs, entities.rs) embed backend query orchestration directly against ServerState stores, while storage abstractions live in crates/temper-observe, indicating blurred package layering."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "package_organization",
+      "identifier": "dispatch_mixed_ownership_facade",
+      "summary": "dispatch.rs combines legacy OData facade duties with cross-cutting agent identity context, creating a misleading module boundary.",
+      "related_files": [
+        "crates/temper-server/src/dispatch.rs",
+        "crates/temper-server/src/reaction/dispatcher.rs",
+        "crates/temper-server/src/state/dispatch/mod.rs",
+        "crates/temper-server/src/authz_helpers.rs"
+      ],
+      "evidence": [
+        "crates/temper-server/src/dispatch.rs declares itself a compatibility facade for OData handlers, but also defines AgentContext and extract_agent_context.",
+        "Non-OData modules import AgentContext from dispatch (reaction/dispatcher.rs, state/dispatch/mod.rs, authz_helpers.rs, webhook_receiver.rs), so the file is no longer OData-scoped in practice.",
+        "This creates an import-affinity mismatch: identity/context ownership is spread under a module named and documented for OData dispatch."
+      ],
+      "suggestion": "Staged reorg plan: 1) Create `crates/temper-server/src/request_context/agent.rs` (or `http_context/agent.rs`) and move `AgentContext` + `extract_agent_context` there. 2) Update imports with `rg -l \"crate::dispatch::AgentContext|crate::dispatch::extract_agent_context\" crates/temper-server/src crates/temper-server/tests | xargs sed`-style targeted edits, keeping `dispatch.rs` OData-only. 3) Keep temporary re-exports in `dispatch.rs` for one release if needed, then remove. 4) Validate with `cargo check -p temper-server` and `cargo test -p temper-server`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "legacy_facade_boundary_blur"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "constraint_engine_root_straggler",
+      "summary": "constraint_engine.rs sits in the crowded crate root even though its usage is OData-write specific.",
+      "related_files": [
+        "crates/temper-server/src/constraint_engine.rs",
+        "crates/temper-server/src/odata/bindings.rs",
+        "crates/temper-server/src/odata/write.rs",
+        "crates/temper-server/src/odata/common.rs"
+      ],
+      "evidence": [
+        "directory_profiles reports `crates/temper-server/src/` file_count=21, indicating a broad flat root.",
+        "Constraint engine APIs are imported by OData modules (bindings.rs, write.rs, common.rs) rather than widely across unrelated server domains.",
+        "Keeping this policy/checking unit at root obscures that it is part of OData write-path enforcement."
+      ],
+      "suggestion": "Staged reorg plan: 1) Move `constraint_engine.rs` to `crates/temper-server/src/odata/constraints.rs`. 2) Wire through `crates/temper-server/src/odata/mod.rs` (`pub(crate) mod constraints;` and selective re-exports if external callsites remain). 3) Update imports via `rg -l \"constraint_engine::\" crates/temper-server/src | xargs` replacements to `odata::constraints::`. 4) Validate with `cargo check -p temper-server` and focused tests `cargo test -p temper-server odata`.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "root_level_concern_flattening"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "observe_evolution_double_entrypoint",
+      "summary": "observe/evolution.rs is a shim over observe/evolution/*, adding an avoidable extra package layer for the same domain.",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution.rs",
+        "crates/temper-server/src/observe/mod.rs",
+        "crates/temper-server/src/observe/evolution/operations.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "crates/temper-server/src/observe/evolution.rs only declares submodules and re-exports handlers from `observe/evolution/*`.",
+        "Router wiring in observe/mod.rs calls through this shim, so navigation requires understanding both a facade file and the real implementation directory.",
+        "This repeats the same compatibility-layer pattern seen in dispatch.rs and contributes to boundary ambiguity."
+      ],
+      "suggestion": "Staged reorg plan: 1) Replace `crates/temper-server/src/observe/evolution.rs` with `crates/temper-server/src/observe/evolution/mod.rs` and keep handlers directly declared there. 2) Update `observe/mod.rs` references if needed to avoid extra re-export hops. 3) Remove obsolete file-level facade docs/comments to reduce ambiguity. 4) Validate with `cargo check -p temper-server` and `cargo test -p temper-server observe`.",
+      "confidence": "medium",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "legacy_facade_boundary_blur"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "observe_routes_embed_storage_orchestration",
+      "summary": "observe route modules mix HTTP concerns with storage-query orchestration, weakening directory boundaries between transport and data access.",
+      "related_files": [
+        "crates/temper-server/src/observe/agents.rs",
+        "crates/temper-server/src/observe/entities.rs",
+        "crates/temper-observe/src/lib.rs",
+        "crates/temper-observe/src/clickhouse.rs"
+      ],
+      "evidence": [
+        "agents.rs directly drives persistent-store queries (`query_agent_summaries`, `query_trajectories_by_agent`) and response shaping in the same handler module.",
+        "entities.rs performs actor-registry reads, event store fallback logic, and SSE emission in one route file.",
+        "At the same time, `temper-observe` already hosts observability storage abstractions/adapters, so server `observe/` currently carries mixed transport + backend orchestration responsibilities."
+      ],
+      "suggestion": "Staged reorg plan: 1) Introduce `crates/temper-server/src/observe/service/` (e.g., `agent_audit.rs`, `entity_history.rs`) and move Turso/event-store orchestration there. 2) Keep `observe/agents.rs` and `observe/entities.rs` as thin axum adapters calling service functions. 3) Move shared observability DTOs that are transport-agnostic into `temper-observe` only where cross-crate reuse is proven, then update imports. 4) Validate with `cargo check -p temper-server -p temper-observe` and `cargo test -p temper-server`.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "root_level_concern_flattening"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Compatibility facades were retained while also accumulating new ownership, producing misleading module boundaries.",
+      "Flat root-level placement in temper-server encourages concern drift instead of domain-scoped folders."
+    ],
+    "likely_symptoms": [
+      "dispatch_mixed_ownership_facade",
+      "observe_evolution_double_entrypoint"
+    ],
+    "possible_false_positives": [
+      "constraint_engine_root_straggler may be intentionally root-scoped if team treats constraints as cross-cutting beyond OData; current callsites still indicate OData affinity."
+    ]
+  }
+}

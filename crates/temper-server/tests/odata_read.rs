@@ -18,10 +18,7 @@ async fn get_json(
     path: &str,
 ) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let req = Request::builder()
-        .uri(path)
-        .body(Body::empty())
-        .unwrap();
+    let req = Request::builder().uri(path).body(Body::empty()).unwrap();
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
@@ -36,12 +33,26 @@ async fn entity_set_returns_created_entities() {
     let (state, _sim) = build_default_state(42, "odata-read-set");
     let tenant = TenantId::default();
 
-    dispatch(&state, &tenant, "Order", "ord-1", "Create", serde_json::json!({}))
-        .await
-        .expect("create ord-1");
-    dispatch(&state, &tenant, "Order", "ord-2", "Create", serde_json::json!({}))
-        .await
-        .expect("create ord-2");
+    dispatch(
+        &state,
+        &tenant,
+        "Order",
+        "ord-1",
+        "Create",
+        serde_json::json!({}),
+    )
+    .await
+    .expect("create ord-1");
+    dispatch(
+        &state,
+        &tenant,
+        "Order",
+        "ord-2",
+        "Create",
+        serde_json::json!({}),
+    )
+    .await
+    .expect("create ord-2");
 
     let (status, body) = get_json(&state, "/tdata/Orders").await;
     assert_eq!(status, StatusCode::OK);
@@ -55,9 +66,16 @@ async fn entity_get_returns_single_entity_with_actions() {
     let (state, _sim) = build_default_state(43, "odata-read-entity");
     let tenant = TenantId::default();
 
-    dispatch(&state, &tenant, "Order", "ord-1", "Create", serde_json::json!({}))
-        .await
-        .expect("create");
+    dispatch(
+        &state,
+        &tenant,
+        "Order",
+        "ord-1",
+        "Create",
+        serde_json::json!({}),
+    )
+    .await
+    .expect("create");
 
     let (status, body) = get_json(&state, "/tdata/Orders('ord-1')").await;
     assert_eq!(status, StatusCode::OK);
@@ -93,7 +111,10 @@ async fn service_document_lists_entity_sets() {
     let (status, body) = get_json(&state, "/tdata").await;
     assert_eq!(status, StatusCode::OK);
     let values = body["value"].as_array().expect("value array");
-    assert!(!values.is_empty(), "service document should list entity sets");
+    assert!(
+        !values.is_empty(),
+        "service document should list entity sets"
+    );
 }
 
 #[tokio::test]

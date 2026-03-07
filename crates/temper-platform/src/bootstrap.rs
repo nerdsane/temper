@@ -111,7 +111,8 @@ fn bootstrap_tenant_specs(
     }
 
     // Parse CSDL schema.
-    let csdl = parse_csdl(csdl_source).unwrap_or_else(|e| panic!("{label} CSDL failed to parse: {e}"));
+    let csdl =
+        parse_csdl(csdl_source).unwrap_or_else(|e| panic!("{label} CSDL failed to parse: {e}"));
 
     // Register tenant and mark specs as pre-verified.
     let tenant_id = TenantId::new(tenant);

@@ -6,7 +6,8 @@
 //! Reviewed, etc. This module is retained for backward compatibility.
 
 use crate::records::*;
-#[allow(deprecated)] // ADR-0025 Phase 4: remove after chain validation replaced by cross-entity guards
+#[allow(deprecated)]
+// ADR-0025 Phase 4: remove after chain validation replaced by cross-entity guards
 use crate::store::RecordStore;
 
 /// Validation result for a record chain.

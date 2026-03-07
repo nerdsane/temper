@@ -65,7 +65,11 @@ mod tests {
 
     #[test]
     fn odata_error_format() {
-        let resp = odata_error(StatusCode::NOT_FOUND, "EntityNotFound", "Order 123 not found");
+        let resp = odata_error(
+            StatusCode::NOT_FOUND,
+            "EntityNotFound",
+            "Order 123 not found",
+        );
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
         assert_eq!(resp.body["error"]["code"], "EntityNotFound");
         assert_eq!(resp.body["error"]["message"], "Order 123 not found");
@@ -79,17 +83,16 @@ mod tests {
         };
         let response = resp.into_response();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get("OData-Version").unwrap(),
-            "4.0"
+        assert_eq!(response.headers().get("OData-Version").unwrap(), "4.0");
+        assert!(
+            response
+                .headers()
+                .get("Content-Type")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("application/json")
         );
-        assert!(response
-            .headers()
-            .get("Content-Type")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .contains("application/json"));
     }
 
     #[test]
@@ -102,10 +105,7 @@ mod tests {
             response.headers().get("Content-Type").unwrap(),
             "application/xml"
         );
-        assert_eq!(
-            response.headers().get("OData-Version").unwrap(),
-            "4.0"
-        );
+        assert_eq!(response.headers().get("OData-Version").unwrap(), "4.0");
     }
 
     #[test]

@@ -1,0 +1,140 @@
+{
+  "batch": "Cross-cutting Sweep",
+  "batch_index": 7,
+  "assessments": {
+    "authorization_consistency": 68.0,
+    "error_consistency": 74.0,
+    "api_surface_coherence": 76.0
+  },
+  "dimension_notes": {
+    "authorization_consistency": {
+      "evidence": [
+        "Observe endpoints in `crates/temper-server/src/observe/specs.rs` (`list_specs`, `get_spec_detail`) do not accept headers or run `authorize_with_context`, while sibling observe handlers in `crates/temper-server/src/observe/agents.rs` and `crates/temper-server/src/observe/evolution/operations.rs` enforce Cedar checks.",
+        "`crates/temper-server/src/observe/entities.rs` exposes `/observe/entities`, `/observe/entities/{...}/history`, and `/observe/events/stream` without auth checks, including tenant/entity timeline data and SSE streams.",
+        "`crates/temper-server/src/observe/evolution/records_list.rs` and `crates/temper-server/src/observe/evolution/trajectories.rs` expose record/trajectory reads without auth, while `handle_sentinel_check`, `handle_unmet_intents`, and `handle_feature_requests` in `operations.rs` require `read_evolution` or `run_sentinel`."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "error_consistency": {
+      "evidence": [
+        "For Turso read failures, `list_evolution_records`/`list_evolution_insights` in `records_list.rs` return `SERVICE_UNAVAILABLE`, but `handle_trajectories` in `trajectories.rs` logs and returns a successful empty payload.",
+        "`get_entity_history` in `observe/entities.rs` suppresses backend errors (`if let Ok(...)`) and returns `200` with empty events, unlike other observe handlers that return explicit HTTP error codes.",
+        "`events.rs` serializes SSE payloads via `serde_json::to_string(...).unwrap_or_default()`, silently converting serialization failures into empty event bodies."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "api_surface_coherence": {
+      "evidence": [
+        "Authz API layers use incompatible contracts: `AuthzError` exists (`crates/temper-authz/src/error.rs`), but runtime authorization in `engine.rs` returns `AuthzDecision::Deny(String)` and callers in `state/entity_ops.rs` further collapse to `Result<(), String>`.",
+        "Endpoint failure contracts vary for similar observe reads: some return `Result<..., StatusCode>` (`records_list.rs`), others always return `Json` with fallback empties (`entities.rs`, `trajectories.rs`), making client behavior hard to predict.",
+        "Response/body shape inconsistency across related evolution endpoints (`records_list.rs`, `records_detail.rs`, `trajectories.rs`) mixes status-only, structured JSON, and implicit-success-empty patterns for failure conditions."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "observe_read_endpoints_missing_authz",
+      "summary": "Multiple observe read endpoints bypass Cedar checks while siblings enforce them",
+      "related_files": [
+        "crates/temper-server/src/observe/specs.rs",
+        "crates/temper-server/src/observe/entities.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-server/src/observe/evolution/trajectories.rs",
+        "crates/temper-server/src/observe/agents.rs",
+        "crates/temper-server/src/observe/evolution/operations.rs"
+      ],
+      "evidence": [
+        "`list_specs`/`get_spec_detail` and entity/history/SSE handlers do not accept `HeaderMap` and never call `security_context_from_headers` or `authorize_with_context`.",
+        "In the same observe subsystem, `list_agents`, `get_agent_history`, `handle_sentinel_check`, and `handle_unmet_intents` explicitly enforce authorization for non-admin/system principals.",
+        "This creates route-level authorization drift for endpoints exposing sensitive runtime and historical data."
+      ],
+      "suggestion": "Introduce a shared observe-auth guard and apply it consistently across all `/observe/*` read handlers (specs, entities, trajectories, evolution records, SSE streams), with explicit policy actions per route (for example `read_specs`, `read_entities`, `read_evolution`).",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "observe_authz_drift"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "sse_streams_expose_cross_tenant_activity_without_gate",
+      "summary": "Unauthenticated SSE streams leak actor activity metadata",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/entities.rs",
+        "crates/temper-server/src/observe/mod.rs"
+      ],
+      "evidence": [
+        "`/tdata/$events` (`events.rs`) streams `EntityStateChange` including `tenant`, `agent_id`, and `session_id` without any auth check.",
+        "`/observe/events/stream` (`entities.rs`) similarly streams state changes with optional filters but no authorization.",
+        "Router wiring in `observe/mod.rs` mounts these routes directly, while other observe routes enforce Cedar policy."
+      ],
+      "suggestion": "Require authz for SSE subscriptions and scope streams by authorized tenant/principal; at minimum gate these routes with a dedicated `read_events` policy and redact agent/session identifiers when caller lacks elevated permissions.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "observe_authz_drift"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "observe_storage_failures_are_handled_inconsistently",
+      "summary": "Observe handlers mix explicit errors with silent empty-success fallbacks",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-server/src/observe/evolution/trajectories.rs",
+        "crates/temper-server/src/observe/entities.rs"
+      ],
+      "evidence": [
+        "`records_list.rs` returns `SERVICE_UNAVAILABLE` when Turso queries fail.",
+        "`trajectories.rs` logs Turso query failure and returns `200` with zeroed stats, indistinguishable from real empty data.",
+        "`entities.rs` suppresses event-store read errors and returns successful empty history payloads."
+      ],
+      "suggestion": "Standardize observe read error policy: return explicit HTTP errors for backend failures (or a uniform degraded-mode envelope with `degraded=true`), and avoid converting storage errors into normal empty responses.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "observe_error_contract_drift"
+    },
+    {
+      "dimension": "api_surface_coherence",
+      "identifier": "authz_runtime_contract_collapses_to_untyped_strings",
+      "summary": "Authz APIs expose typed errors and string denials simultaneously",
+      "related_files": [
+        "crates/temper-authz/src/error.rs",
+        "crates/temper-authz/src/engine.rs",
+        "crates/temper-server/src/state/entity_ops.rs"
+      ],
+      "evidence": [
+        "`AuthzError` defines structured variants, but `authorize` returns `AuthzDecision::Deny(String)` for parse/request/context failures.",
+        "`ServerState::authorize` and `authorize_with_context` convert authz outcomes to `Result<(), String>`, losing denial/error taxonomy.",
+        "Callers therefore cannot reliably distinguish policy denial vs engine/input failures, forcing brittle string matching/log-only handling."
+      ],
+      "suggestion": "Unify runtime authz contract around a typed denial/error model (for example `Result<AuthzPermit, AuthzFailure>` with explicit `PolicyDenied` vs `EngineError` kinds) and propagate that type through `entity_ops` and HTTP adapters.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "authz_contract_fragmentation"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Observe endpoints were added incrementally with no enforced shared auth middleware, creating route-by-route policy drift.",
+      "No common response/error envelope for observe read APIs, so handlers independently chose fallback vs explicit error behavior.",
+      "Authorization core and server boundary evolved with parallel contracts (typed setup errors, string runtime denials) without converging on one public failure model."
+    ],
+    "likely_symptoms": [
+      "observe_read_endpoints_missing_authz",
+      "sse_streams_expose_cross_tenant_activity_without_gate",
+      "observe_storage_failures_are_handled_inconsistently",
+      "authz_runtime_contract_collapses_to_untyped_strings"
+    ],
+    "possible_false_positives": []
+  }
+}

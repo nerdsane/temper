@@ -86,29 +86,44 @@ impl RecordStore {
     }
 
     record_accessors!(
-        observations, ObservationRecord,
-        insert_observation, "Insert an observation record into the store.",
-        get_observation, "Retrieve an observation record by ID."
+        observations,
+        ObservationRecord,
+        insert_observation,
+        "Insert an observation record into the store.",
+        get_observation,
+        "Retrieve an observation record by ID."
     );
     record_accessors!(
-        problems, ProblemRecord,
-        insert_problem, "Insert a problem record into the store.",
-        get_problem, "Retrieve a problem record by ID."
+        problems,
+        ProblemRecord,
+        insert_problem,
+        "Insert a problem record into the store.",
+        get_problem,
+        "Retrieve a problem record by ID."
     );
     record_accessors!(
-        analyses, AnalysisRecord,
-        insert_analysis, "Insert an analysis record into the store.",
-        get_analysis, "Retrieve an analysis record by ID."
+        analyses,
+        AnalysisRecord,
+        insert_analysis,
+        "Insert an analysis record into the store.",
+        get_analysis,
+        "Retrieve an analysis record by ID."
     );
     record_accessors!(
-        decisions, DecisionRecord,
-        insert_decision, "Insert a decision record into the store.",
-        get_decision, "Retrieve a decision record by ID."
+        decisions,
+        DecisionRecord,
+        insert_decision,
+        "Insert a decision record into the store.",
+        get_decision,
+        "Retrieve a decision record by ID."
     );
     record_accessors!(
-        insights, InsightRecord,
-        insert_insight, "Insert an insight record into the store.",
-        get_insight, "Retrieve an insight record by ID."
+        insights,
+        InsightRecord,
+        insert_insight,
+        "Insert an insight record into the store.",
+        get_insight,
+        "Retrieve an insight record by ID."
     );
 
     /// Get all open observations (not yet resolved).

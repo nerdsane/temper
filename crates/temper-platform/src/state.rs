@@ -8,7 +8,8 @@ use std::sync::{Arc, RwLock};
 
 use tokio::sync::broadcast;
 
-#[allow(deprecated)] // ADR-0025 Phase 4: remove after feedback.rs migrated to IOA entity dispatch
+#[allow(deprecated)]
+// ADR-0025 Phase 4: remove after feedback.rs migrated to IOA entity dispatch
 use temper_evolution::store::RecordStore;
 use temper_runtime::ActorSystem;
 use temper_server::ServerState;

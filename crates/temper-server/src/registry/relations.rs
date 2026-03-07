@@ -159,7 +159,10 @@ mod tests {
 
     #[test]
     fn nav_target_collection_type() {
-        assert_eq!(nav_target_entity("Collection(MyNamespace.OrderItem)"), "OrderItem");
+        assert_eq!(
+            nav_target_entity("Collection(MyNamespace.OrderItem)"),
+            "OrderItem"
+        );
     }
 
     #[test]

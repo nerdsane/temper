@@ -709,7 +709,11 @@ mod tests {
             Some("MarkSent")
         );
         assert!(responses.get_callback("Order", "send_trigger").is_none());
-        assert!(responses.get_callback("Unknown", "payment_trigger").is_none());
+        assert!(
+            responses
+                .get_callback("Unknown", "payment_trigger")
+                .is_none()
+        );
     }
 
     #[test]
@@ -733,7 +737,13 @@ mod tests {
     fn run_record_equality() {
         let r1 = RunRecord {
             seed: 42,
-            transitions: vec![(1, "a".into(), "Submit".into(), "Draft".into(), "Submitted".into())],
+            transitions: vec![(
+                1,
+                "a".into(),
+                "Submit".into(),
+                "Draft".into(),
+                "Submitted".into(),
+            )],
             events: BTreeMap::new(),
             final_states: vec![],
             invariant_results: vec![],

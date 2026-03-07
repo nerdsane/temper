@@ -1,0 +1,466 @@
+{
+  "session": {
+    "id": "ext_20260306_004031_0de464b9",
+    "token": "b8e8e5539b2fb33e7a1d17a9e9819152"
+  },
+  "assessments": {
+    "naming_quality": 88.5,
+    "logic_clarity": 82.0,
+    "type_safety": 90.2,
+    "contract_coherence": 85.3,
+    "error_consistency": 83.7,
+    "abstraction_fitness": 79.4,
+    "ai_generated_debt": 76.8,
+    "high_level_elegance": 82.5,
+    "mid_level_elegance": 80.3,
+    "low_level_elegance": 77.5,
+    "cross_module_architecture": 78.6,
+    "initialization_coupling": 88.0,
+    "convention_outlier": 87.3,
+    "dependency_health": 85.0,
+    "test_strategy": 72.5,
+    "api_surface_coherence": 79.8,
+    "authorization_consistency": 68.5,
+    "incomplete_migration": 80.2,
+    "package_organization": 74.8,
+    "design_coherence": 75.3
+  },
+  "findings": [
+    {
+      "dimension": "package_organization",
+      "identifier": "temper_server_src_flat_overload",
+      "summary": "temper-server/src/ has 20 root-level files mixing unrelated concerns (authz, webhooks, OData, secrets, events)",
+      "related_files": [
+        "crates/temper-server/src/authz.rs",
+        "crates/temper-server/src/webhooks.rs",
+        "crates/temper-server/src/secrets_vault.rs",
+        "crates/temper-server/src/sentinel.rs",
+        "crates/temper-server/src/wasm_authz_gate.rs",
+        "crates/temper-server/src/wasm_registry.rs",
+        "crates/temper-server/src/webhook_receiver.rs",
+        "crates/temper-server/src/idempotency.rs",
+        "crates/temper-server/src/query_eval.rs"
+      ],
+      "evidence": [
+        "20 files at crates/temper-server/src/ root with mixed domains: authz, secrets, webhooks, wasm, events, query_eval, sentinel, idempotency",
+        "existing_findings flags 'Flat directory: 20 files -- consider grouping by domain'",
+        "Related modules (authz.rs, wasm_authz_gate.rs) sit as siblings rather than inside a security/ or authz/ directory",
+        "webhook_receiver.rs and webhooks.rs are siblings with no shared directory"
+      ],
+      "suggestion": "Group related root files into purpose-driven subdirectories: move authz.rs + wasm_authz_gate.rs into authz/, webhook_receiver.rs + webhooks.rs into webhooks/, secrets_vault.rs + secret_template.rs into secrets/. This reduces the root file count and aligns file placement with ownership boundaries.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "critical_modules_untested",
+      "summary": "Many high-complexity production files (500-1200 LOC) have zero direct test coverage or importers",
+      "related_files": [
+        "crates/temper-server/src/entity_actor/actor.rs",
+        "crates/temper-server/src/odata/read.rs",
+        "crates/temper-server/src/registry.rs",
+        "crates/temper-verify/src/smt.rs",
+        "crates/temper-server/src/query_eval.rs",
+        "crates/temper-spec/src/automaton/toml_parser.rs",
+        "crates/temper-server/src/observe/verification.rs",
+        "crates/temper-wasm/src/engine.rs"
+      ],
+      "evidence": [
+        "entity_actor/actor.rs: 839 LOC, complexity 528, zero importers, flagged 'high blast radius'",
+        "odata/read.rs: 802 LOC, complexity 1245, zero importers, flagged 'high blast radius'",
+        "smt.rs: 869 LOC, zero importers, flagged 'high blast radius'",
+        "toml_parser.rs: 936 LOC, complexity 976, zero importers, flagged 'high blast radius'",
+        "query_eval.rs: 746 LOC, complexity 341, zero importers, flagged 'high blast radius'",
+        "Over 40 production files are flagged as 'Untested critical module' with 'high blast radius'"
+      ],
+      "suggestion": "Prioritize test coverage for the highest complexity/LOC critical files. Start with entity_actor/actor.rs, odata/read.rs, toml_parser.rs, and query_eval.rs which have both high complexity scores and high LOC. Add at minimum unit tests for public API surface and integration tests for key state transition paths.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "no_rls_on_any_table",
+      "summary": "Zero database tables have RLS enabled; all 16 tables (events, specs, secrets, etc.) lack row-level security",
+      "related_files": [
+        "crates/temper-store-postgres/src/schema.rs",
+        "crates/temper-store-postgres/src/store.rs",
+        "crates/temper-cli/src/serve/storage.rs"
+      ],
+      "evidence": [
+        "rls_coverage shows with_rls=[] and without_rls lists 16 tables: events, specs, tenant_secrets, wasm_modules, evolution_records, etc.",
+        "Multi-tenant system where TenantId scopes data, but no database-level tenant isolation",
+        "All tenant filtering is purely at application level which creates risk of cross-tenant data access on bugs"
+      ],
+      "suggestion": "Enable Postgres RLS on all tenant-scoped tables (events, specs, tenant_secrets, tenant_policies, wasm_modules, evolution_records, trajectories, pending_decisions). Create a tenant isolation policy on each table using SET LOCAL to scope queries. This provides defense-in-depth for the multi-tenant architecture.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "large_files_need_decomposition",
+      "summary": "30+ production files exceed 500 LOC, many with high cyclomatic complexity and mixed responsibilities",
+      "related_files": [
+        "crates/temper-server/src/observe/mod_test.rs",
+        "crates/temper-spec/src/automaton/toml_parser.rs",
+        "crates/temper-server/src/entity_actor/actor.rs",
+        "crates/temper-server/src/odata/read.rs",
+        "crates/temper-server/src/registry.rs",
+        "crates/temper-verify/src/smt.rs",
+        "crates/temper-runtime/src/scheduler/sim_actor_system.rs"
+      ],
+      "evidence": [
+        "mod_test.rs: 1221 LOC, 6 disconnected function clusters (37 functions)",
+        "toml_parser.rs: 936 LOC, complexity 976",
+        "actor.rs: 839 LOC, complexity 528, 7 disconnected function clusters",
+        "read.rs: 802 LOC, complexity 1245",
+        "registry.rs: 804 LOC, 6 disconnected clusters (35 functions)",
+        "sim_actor_system.rs: 760 LOC, 7 disconnected function clusters (26 functions)",
+        "CLAUDE.md states: 'Files > 500 lines must be split into directory modules'"
+      ],
+      "suggestion": "The codebase's own convention (>500 LOC triggers split) is violated in 30+ files. Prioritize splitting the highest-complexity files: toml_parser.rs into validation/parsing/transform submodules, actor.rs into lifecycle/message-handling/state-management, registry.rs into registration/lookup/bootstrap. Use the disconnected function cluster counts as guides for natural split boundaries.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "ai_generated_debt",
+      "identifier": "elevated_comment_ratios_in_lib_files",
+      "summary": "Multiple lib.rs and mod.rs files have comment ratios 2-3x the codebase average, suggesting restating/docstring bloat",
+      "related_files": [
+        "crates/temper-agent-runtime/src/lib.rs",
+        "crates/temper-mcp/src/repl.rs",
+        "crates/temper-jit/src/lib.rs",
+        "crates/temper-observe/src/lib.rs",
+        "crates/temper-codegen/src/lib.rs",
+        "crates/temper-odata/src/lib.rs"
+      ],
+      "evidence": [
+        "Codebase average comment ratio: 0.18",
+        "temper-agent-runtime/src/lib.rs: 0.62 (3.4x average) on 37 LOC",
+        "temper-mcp/src/repl.rs: 0.64 (3.6x average) on 11 LOC",
+        "temper-jit/src/lib.rs: 0.60 (3.3x average) on 20 LOC",
+        "temper-observe/src/lib.rs: 0.54 (3.0x average) on 37 LOC",
+        "temper-codegen/src/lib.rs: 0.50 (2.8x average) on 14 LOC",
+        "These are thin re-export modules where over half the lines are comments/docs on trivial re-exports"
+      ],
+      "suggestion": "Reduce comment overhead on thin re-export lib.rs files. A one-line module doc ('//! Re-exports for temper-agent-runtime.') suffices for a module that only contains pub use statements. Remove per-item doc comments on re-exports where the target already has documentation. This also applies to repl.rs (11 LOC, 0.64 ratio).",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "server_state_god_object",
+      "summary": "ServerState is accessed broadly across modules (odata, observe, dispatch, entity_actor, api) creating implicit coupling",
+      "related_files": [
+        "crates/temper-server/src/state/mod.rs",
+        "crates/temper-server/src/state/dispatch_blocking.rs",
+        "crates/temper-server/src/state/entity_ops.rs",
+        "crates/temper-server/src/odata/common.rs",
+        "crates/temper-server/src/observe/specs.rs",
+        "crates/temper-server/src/entity_actor/actor.rs"
+      ],
+      "evidence": [
+        "existing_findings notes: 'Broad ServerState access pattern creates implicit cross-module dependencies'",
+        "state/mod.rs: 498 LOC with imports spanning dispatch, pending_decisions, trajectory, wasm_invocation_log, persistence",
+        "dispatch_blocking.rs shows impl ServerState with methods that delegate to self.dispatch_wasm_integrations_internal with 9 parameters",
+        "Multiple modules (odata/common.rs, observe/specs.rs, entity_actor/actor.rs) all take &ServerState and reach deep into its internals"
+      ],
+      "suggestion": "Refactor ServerState to expose focused capability traits (e.g., DispatchCapability, RegistryAccess, EventStoreAccess) rather than passing the full god object. Modules like odata/ should depend on a narrow trait, not the full ServerState. This reduces the blast radius of changes to unrelated state fields.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "abstraction_fitness",
+      "identifier": "wide_param_dispatch_internal",
+      "summary": "dispatch_wasm_integrations_internal takes 9 positional parameters; BlockingWasmDispatch struct exists but is only used at one layer",
+      "related_files": [
+        "crates/temper-server/src/state/dispatch/wasm.rs",
+        "crates/temper-server/src/state/dispatch_blocking.rs"
+      ],
+      "evidence": [
+        "#[allow(clippy::too_many_arguments)] suppresses the lint on dispatch_wasm_integrations_internal with 9 params",
+        "BlockingWasmDispatch struct bundles the same fields but is destructured back into 9 positional args when calling the internal method",
+        "The request struct pattern is used at the blocking layer but not propagated to the core dispatch, creating an abstraction that does not reduce complexity"
+      ],
+      "suggestion": "Propagate the BlockingWasmDispatch struct (or a shared WasmDispatchRequest) all the way down to dispatch_wasm_integrations_internal, removing the 9-parameter signature. This eliminates the clippy suppression and makes the request contract explicit at all layers.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "incomplete_migration",
+      "identifier": "deprecated_record_store_still_used",
+      "summary": "Deprecated RecordStore is still actively used in PlatformState despite being marked deprecated",
+      "related_files": [
+        "crates/temper-platform/src/state.rs",
+        "crates/temper-evolution/src/store.rs"
+      ],
+      "evidence": [
+        "PlatformState field 'record_store: RecordStore' with #[allow(deprecated)] annotation",
+        "Comment: 'RecordStore retained during migration to IOA entities (ADR-0025)'",
+        "Clippy warnings: 'use of deprecated struct temper_evolution::store::RecordStore: Use IOA' appears 3 times in state.rs",
+        "state/mod.rs also has 3 deprecated RecordStore clippy warnings",
+        "The deprecation message says 'Use IOA' but the IOA replacement is not yet wired in"
+      ],
+      "suggestion": "Complete the migration referenced in ADR-0025: replace RecordStore with the IOA-based alternative in PlatformState and ServerState. If the migration is blocked, add a tracking issue and timeline comment. The #[allow(deprecated)] annotations should have expiration notes.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "string_error_in_dispatch",
+      "summary": "Dispatch methods return Result<_, String> while the rest of the codebase uses typed error enums or anyhow::Error",
+      "related_files": [
+        "crates/temper-server/src/state/dispatch/wasm.rs",
+        "crates/temper-server/src/state/dispatch_blocking.rs",
+        "crates/temper-server/src/state/dispatch/actions.rs"
+      ],
+      "evidence": [
+        "dispatch_wasm_integrations_internal returns Result<Option<EntityResponse>, String>",
+        "dispatch_wasm_integrations_blocking returns Result<Option<EntityResponse>, String>",
+        "existing_findings: 'Error enums rely on broad String payloads, reducing precision and encouraging lossy error chains'",
+        "The codebase predominantly uses result_type (typed Result) with 183 files using this pattern, but dispatch layer uses bare String",
+        "Only 14 files use returns_null, showing the codebase is otherwise consistent with Result types"
+      ],
+      "suggestion": "Replace String error types in the dispatch module with a DispatchError enum (or integrate with an existing server error type). Include variants for WasmInvocationFailed, RegistryLookupFailed, AuthzDenied, etc. This preserves error context and enables structured error handling at the HTTP boundary.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "logic_clarity",
+      "identifier": "identical_if_blocks_wasm_dispatch",
+      "summary": "Clippy detected identical if blocks in state/dispatch/wasm.rs indicating dead or duplicated control flow",
+      "related_files": [
+        "crates/temper-server/src/state/dispatch/wasm.rs"
+      ],
+      "evidence": [
+        "clippy_warning: 'warning: this if has identical blocks' in dispatch/wasm.rs",
+        "Additional collapsible if warnings in observe/verification.rs, observe/entities.rs, observe/specs.rs, observe/wasm.rs, observe/evolution/records_detail.rs"
+      ],
+      "suggestion": "Fix the identical-block if statement in dispatch/wasm.rs by either merging the conditions with || or removing the redundant branch. Also address the 6+ collapsible if statements across observe/ modules -- these can be collapsed into single if-let chains.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "systemic_high_complexity_scores",
+      "summary": "Multiple files have complexity scores >500, indicating deeply nested or highly branching control flow",
+      "related_files": [
+        "crates/temper-server/src/odata/read.rs",
+        "crates/temper-server/src/observe/specs/verification_stream.rs",
+        "crates/temper-spec/src/automaton/toml_parser.rs",
+        "crates/temper-sandbox/src/dispatch.rs",
+        "crates/temper-cli/src/serve/mod.rs",
+        "crates/temper-server/src/entity_actor/actor.rs"
+      ],
+      "evidence": [
+        "odata/read.rs: complexity 1245 -- highest in the codebase",
+        "verification_stream.rs: complexity 1150",
+        "toml_parser.rs: complexity 976",
+        "dispatch.rs (sandbox): complexity 953",
+        "serve/mod.rs: complexity 613",
+        "actor.rs: complexity 528",
+        "interactive_demo.rs: complexity 776",
+        "High complexity correlates with the files also flagged for needing decomposition"
+      ],
+      "suggestion": "Extract the deeply nested control flow in the top-complexity files. For odata/read.rs (1245), split OData read handling by path pattern (entity set, entity key, navigation, function). For verification_stream.rs (1150), extract verification step handling into separate functions. For toml_parser.rs (976), extract section parsers (transitions, invariants, metadata) into dedicated submodules.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "api_surface_coherence",
+      "identifier": "inconsistent_signature_shapes",
+      "summary": "Multiple function names have divergent signatures across implementations, breaking API predictability",
+      "related_files": [
+        "crates/temper-runtime/src/scheduler/mod.rs",
+        "crates/temper-authz/src/engine.rs",
+        "crates/temper-server/src/event_store.rs",
+        "crates/temper-platform/src/integration/webhook.rs",
+        "crates/temper-server/src/state/dispatch/mod.rs"
+      ],
+      "evidence": [
+        "'register_actor' has 3 different signatures across 3 files",
+        "'authorize' has 3 different signatures across 3 files",
+        "'list_entity_ids' has 2 different signatures across 6 files",
+        "'dispatch' has 4 different signatures across 4 files",
+        "'authorize_http_call' has 2 different signatures across 3 files",
+        "'authorize_secret_access' has 2 different signatures across 3 files",
+        "'get_evolution_record' has 2 different signatures across 3 files"
+      ],
+      "suggestion": "Audit each divergent signature set. For trait implementations (authorize, list_entity_ids), unify the trait definition so all implementors match. For standalone functions (register_actor, dispatch), determine if they serve genuinely different purposes (rename) or should be unified (align signatures). Start with 'authorize' and 'dispatch' which have the most variants.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "responsibility_cohesion_mixed_clusters",
+      "summary": "Several core modules have 6-23 disconnected function clusters, indicating mixed responsibilities in single files",
+      "related_files": [
+        "crates/temper-platform/src/bootstrap.rs",
+        "crates/temper-runtime/src/scheduler/mod.rs",
+        "crates/temper-server/src/registry.rs",
+        "crates/temper-runtime/src/scheduler/sim_actor_system.rs",
+        "crates/temper-cli/src/main.rs"
+      ],
+      "evidence": [
+        "bootstrap.rs: 20 disconnected function clusters (25 functions) -- highest cluster count",
+        "scheduler/mod.rs: 6 clusters (41 functions)",
+        "registry.rs: 6 clusters (35 functions)",
+        "sim_actor_system.rs: 7 clusters (26 functions)",
+        "main.rs: 20 disconnected clusters (20 functions) -- each CLI command handler is isolated",
+        "system_entity_dst.rs: 23 clusters (40 functions) -- highest cluster count overall"
+      ],
+      "suggestion": "Split bootstrap.rs into focused modules by lifecycle phase (registry_init, spec_loading, system_entity_setup, tenant_bootstrap). Split scheduler/mod.rs into scheduler_core and scenario_runner. For main.rs, extract command handlers into per-command modules under commands/.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "mid_level_elegance",
+      "identifier": "blocking_dispatch_unwraps_and_re_bundles",
+      "summary": "BlockingWasmDispatch bundles 8 fields into a struct only to destructure them back into positional args at the next layer",
+      "related_files": [
+        "crates/temper-server/src/state/dispatch_blocking.rs",
+        "crates/temper-server/src/state/dispatch/wasm.rs"
+      ],
+      "evidence": [
+        "BlockingWasmDispatch struct has 8 fields: tenant, entity_type, entity_id, action, custom_effects, entity_state, agent_ctx, action_params",
+        "dispatch_wasm_integrations_blocking immediately destructures into request.tenant, request.entity_type, etc. and passes as 9 positional args to dispatch_wasm_integrations_internal",
+        "The struct adds a boundary translation step that provides no type narrowing or policy enforcement"
+      ],
+      "suggestion": "Either propagate the struct type all the way to the internal dispatch (eliminating the 9-arg signature), or remove the struct and have callers pass arguments directly. The current approach adds a translation layer without reducing complexity at either boundary.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "naming_quality",
+      "identifier": "observe_module_overloaded_name",
+      "summary": "Both temper-observe crate and temper-server/src/observe/ directory exist with overlapping domain names but different purposes",
+      "related_files": [
+        "crates/temper-observe/src/lib.rs",
+        "crates/temper-server/src/observe/mod.rs"
+      ],
+      "evidence": [
+        "temper-observe crate: telemetry infrastructure (WideEvent, OTEL, ClickHouse, trajectory)",
+        "temper-server/src/observe/: HTTP handlers for observability endpoints (specs, evolution, metrics, entities, wasm, agents, verification)",
+        "A developer searching for 'observe' logic must disambiguate between the observability infrastructure crate and the server's HTTP handler directory"
+      ],
+      "suggestion": "Rename the server's observe/ directory to observe_api/ or endpoints/observe/ to distinguish HTTP handler code from the infrastructure crate. Alternatively, rename to dashboard/ or admin/ to reflect that these are administrative observation endpoints rather than the core observability machinery.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "indirection_hotspot_operations",
+      "summary": "observe/evolution/operations.rs has max chain depth 4 with 29 chains plus 5 disconnected clusters, indicating over-layered design",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/operations.rs"
+      ],
+      "evidence": [
+        "Max chain depth: 4 (highest in codebase)",
+        "Chain count: 29",
+        "5 disconnected function clusters (9 functions)",
+        "390 LOC with complexity score 48",
+        "Flagged as 'Untested critical module with high blast radius'"
+      ],
+      "suggestion": "Flatten the call chain depth in operations.rs. When chain depth reaches 4, intermediate layers likely add no value. Identify which layers exist for handler routing vs actual business logic and inline the pass-through layers. The 5 disconnected clusters suggest this file should be split by operation type (create, read, stream, etc.).",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "unused_import_systemic",
+      "summary": "Systemic unused imports across 100+ files indicate API surface drift from declared contracts",
+      "related_files": [
+        "crates/temper-server/src/entity_actor/actor.rs",
+        "crates/temper-server/src/registry.rs",
+        "crates/temper-verify/src/cascade.rs",
+        "crates/temper-runtime/src/scheduler/mod.rs"
+      ],
+      "evidence": [
+        "actor.rs: 6 unused import groups",
+        "registry.rs: 6 unused import groups",
+        "cascade.rs: 7 unused import groups",
+        "scheduler/mod.rs: 8 unused import groups",
+        "The pattern appears across nearly every file in existing_findings",
+        "This likely reflects modules re-exporting broadly while consumers use narrower subsets, or API evolution leaving stale imports"
+      ],
+      "suggestion": "Run 'cargo fix --edition' or configure a CI step to fail on unused imports. The volume suggests these accumulated over time without enforcement. A single sweep with 'cargo fix' would resolve most of them. Consider adding '#![warn(unused_imports)]' at the crate level for ongoing enforcement.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "dependency_health",
+      "identifier": "duplicate_near_functions",
+      "summary": "Near-duplicate functions detected across files, indicating missing shared abstractions",
+      "related_files": [
+        "crates/temper-runtime/src/scheduler/mod.rs",
+        "reference-apps/ecommerce/benches/agent_checkout.rs"
+      ],
+      "evidence": [
+        "Near dupe: run_scenario in scheduler/mod.rs has a near-duplicate in another location",
+        "Near dupe: build_pg_state in ecommerce bench has a near-duplicate",
+        "The scheduler's run_scenario duplication suggests test/production helper extraction is incomplete"
+      ],
+      "suggestion": "Extract run_scenario into a shared test utility crate or module that both the scheduler and test files can import. For build_pg_state, create a shared test fixture builder in a common test helpers module that both reference-apps can use.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "collapsible_auth_checks",
+      "summary": "Multiple observe/ handlers have collapsible if statements around auth/tenant scoping, indicating inconsistent guard patterns",
+      "related_files": [
+        "crates/temper-server/src/observe/specs.rs",
+        "crates/temper-server/src/observe/entities.rs",
+        "crates/temper-server/src/observe/wasm.rs",
+        "crates/temper-server/src/observe/verification.rs"
+      ],
+      "evidence": [
+        "observe/specs.rs: 2 collapsible if clippy warnings",
+        "observe/wasm.rs: 2 collapsible if + 1 map_or warnings",
+        "observe/entities.rs: 1 collapsible if warning",
+        "observe/verification.rs: 1 collapsible if warning",
+        "These handlers all import observe_tenant_scope and require_observe_auth but apply them in structurally different patterns"
+      ],
+      "suggestion": "Standardize the auth/tenant-scoping pattern across observe/ handlers into a shared middleware extractor (e.g., ObserveAuth that combines require_observe_auth + observe_tenant_scope). This eliminates the inconsistent if-chain patterns and ensures uniform auth enforcement. Fix the collapsible if statements as part of this refactor.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "initialization_coupling",
+      "identifier": "storage_pg_connect_at_serve_time",
+      "summary": "Database connection established at serve-time with println! diagnostics rather than structured logging",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs"
+      ],
+      "evidence": [
+        "connect_postgres_store uses println!('Connecting to Postgres...') and println!('Postgres connected, migrations applied.') instead of tracing::info!",
+        "This is a startup-time I/O operation that runs migrations inline",
+        "The rest of the codebase uses tracing for structured logging"
+      ],
+      "suggestion": "Replace println! calls in connect_postgres_store with tracing::info! for consistency with the rest of the codebase. Startup diagnostics should be captured in the same structured logging pipeline as runtime events.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "convention_outlier",
+      "identifier": "eprintln_vs_tracing_inconsistency",
+      "summary": "Critical persistence error paths use eprintln! while the rest of the codebase (156+ instances) uses structured tracing macros",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/authz_helpers.rs",
+        "crates/temper-mcp/src/runtime.rs",
+        "crates/temper-cli/src/serve/storage.rs"
+      ],
+      "evidence": [
+        "authz_helpers.rs line 87: eprintln!('Warning: failed to persist pending decision') in persistence error path",
+        "api.rs lines 739, 754: eprintln! for warning messages in critical paths",
+        "temper-mcp/src/runtime.rs lines 384, 414: eprintln! for server output",
+        "storage.rs: println!('Connecting to Postgres...') and println!('Postgres connected, migrations applied.') instead of tracing::info!",
+        "156+ files use tracing::warn!, tracing::error!, tracing::info! consistently -- these outliers break the pattern"
+      ],
+      "suggestion": "Replace all eprintln! and println! calls in persistence/server paths with tracing::warn! or tracing::info!. CLI user-facing output is acceptable as println!, but server-side error paths should use structured tracing for consistency and observability.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "type_safety",
+      "identifier": "bare_string_domain_types",
+      "summary": "Entity types, action names, and status values are passed as bare String/&str throughout the codebase, losing compile-time domain safety",
+      "related_files": [
+        "crates/temper-server/src/reaction/types.rs",
+        "crates/temper-server/src/entity_actor/types.rs",
+        "crates/temper-jit/src/table/types.rs",
+        "crates/temper-server/src/reaction/registry.rs",
+        "crates/temper-server/src/eventual_invariants.rs"
+      ],
+      "evidence": [
+        "ReactionTrigger.entity_type: String and ReactionTarget.entity_type: String -- no newtype protection",
+        "TransitionTable.entity_name: String -- core domain type as bare string",
+        "EntityState.entity_type: String, status: String, action: String -- all bare strings",
+        "TenantId is a well-designed newtype but entity_type and action are bare String everywhere",
+        "reaction/registry.rs uses format!('{}:{}', entity_type, action) for key construction -- string concatenation for compound keys is error-prone",
+        "eventual_invariants.rs stores tenant as String instead of TenantId, bypassing TenantId validation"
+      ],
+      "suggestion": "Introduce newtypes for EntityType and ActionName similar to the existing TenantId pattern. This provides compile-time protection against mixing entity types with action names or status values. Start with the most used types (EntityType, ActionName) and gradually adopt across the codebase.",
+      "confidence": "high"
+    }
+  ]
+}

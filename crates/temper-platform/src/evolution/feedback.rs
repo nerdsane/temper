@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use temper_evolution::InsightCategory;
 use temper_evolution::{
-    Decision, DecisionRecord, InsightRecord, InsightSignal, ObservationClass, ObservationRecord, Trend,
-    RecordHeader, RecordType, classify_insight, compute_priority_score,
+    Decision, DecisionRecord, InsightRecord, InsightSignal, ObservationClass, ObservationRecord,
+    RecordHeader, RecordType, Trend, classify_insight, compute_priority_score,
 };
 
 use crate::protocol::PlatformEvent;

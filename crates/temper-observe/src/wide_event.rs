@@ -249,7 +249,10 @@ pub fn from_authz_decision(input: AuthzDecisionInput<'_>) -> WideEvent {
     tags.insert("decision".into(), input.decision.into());
 
     let mut attributes = BTreeMap::new();
-    attributes.insert("principal_kind".into(), serde_json::json!(input.principal_kind));
+    attributes.insert(
+        "principal_kind".into(),
+        serde_json::json!(input.principal_kind),
+    );
     attributes.insert("tenant".into(), serde_json::json!(input.tenant));
 
     let mut measurements = BTreeMap::new();

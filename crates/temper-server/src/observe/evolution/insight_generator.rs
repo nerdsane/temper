@@ -15,7 +15,11 @@ use temper_evolution::records::{
 use crate::state::trajectory::TrajectorySource;
 
 /// Build an `InsightRecord` from a signal, recommendation, and optional priority override.
-fn build_insight(signal: InsightSignal, recommendation: String, priority_override: Option<f64>) -> InsightRecord {
+fn build_insight(
+    signal: InsightSignal,
+    recommendation: String,
+    priority_override: Option<f64>,
+) -> InsightRecord {
     let priority = priority_override.unwrap_or_else(|| compute_priority_score(&signal));
     let category = classify_insight(&signal);
     InsightRecord {
@@ -146,7 +150,11 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
             } else {
                 compute_priority_score(&insight_signal).max(0.5)
             };
-            insights.push(build_insight(insight_signal, recommendation, Some(priority)));
+            insights.push(build_insight(
+                insight_signal,
+                recommendation,
+                Some(priority),
+            ));
             continue;
         }
 
@@ -222,7 +230,11 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
             }
         };
 
-        insights.push(build_insight(insight_signal, recommendation, Some(priority)));
+        insights.push(build_insight(
+            insight_signal,
+            recommendation,
+            Some(priority),
+        ));
     }
 
     // Sort by priority (highest first).
@@ -513,7 +525,10 @@ mod tests {
         // Single entry (total < 2) should produce no insights.
         let entries = vec![entry("Ticket", "Create", true)];
         let insights = generate_insights(&entries);
-        assert!(insights.is_empty(), "signals with total < 2 should be skipped");
+        assert!(
+            insights.is_empty(),
+            "signals with total < 2 should be skipped"
+        );
     }
 
     #[test]
@@ -537,7 +552,10 @@ mod tests {
         ];
         let insights = generate_insights(&entries);
         assert!(!insights.is_empty());
-        let resolved = insights.iter().find(|i| i.signal.intent.contains("Invoice")).unwrap();
+        let resolved = insights
+            .iter()
+            .find(|i| i.signal.intent.contains("Invoice"))
+            .unwrap();
         assert!(resolved.signal.intent.contains("resolved"));
         assert!(resolved.recommendation.contains("submitted"));
     }
@@ -554,8 +572,16 @@ mod tests {
 
         let insights = generate_insights(&entries);
         let denial_insight = insights.iter().find(|i| i.signal.intent.contains("denied"));
-        assert!(denial_insight.is_some(), "should generate authz denial insight");
-        assert!(denial_insight.unwrap().recommendation.contains("Cedar permit"));
+        assert!(
+            denial_insight.is_some(),
+            "should generate authz denial insight"
+        );
+        assert!(
+            denial_insight
+                .unwrap()
+                .recommendation
+                .contains("Cedar permit")
+        );
     }
 
     #[test]
@@ -569,7 +595,10 @@ mod tests {
 
         let insights = generate_insights(&entries);
         let denial_insight = insights.iter().find(|i| i.signal.intent.contains("denied"));
-        assert!(denial_insight.is_none(), "should not generate authz denial insight below threshold");
+        assert!(
+            denial_insight.is_none(),
+            "should not generate authz denial insight below threshold"
+        );
     }
 
     #[test]
@@ -600,7 +629,10 @@ mod tests {
             failed_entry("Ticket", "Create", "EntitySetNotFound"),
             failed_entry("Ticket", "Create", "EntitySetNotFound"),
         ];
-        assert!(generate_feature_requests(&entries).is_empty(), "non-platform source should not generate FRs");
+        assert!(
+            generate_feature_requests(&entries).is_empty(),
+            "non-platform source should not generate FRs"
+        );
     }
 
     #[test]
@@ -641,9 +673,18 @@ mod tests {
 
     #[test]
     fn categorize_error_patterns() {
-        assert_eq!(categorize_error(Some("EntitySetNotFound: X")), "EntitySetNotFound");
-        assert_eq!(categorize_error(Some("Authorization denied")), "AuthzDenied");
-        assert_eq!(categorize_error(Some("ActionNotFound: Y")), "ActionNotFound");
+        assert_eq!(
+            categorize_error(Some("EntitySetNotFound: X")),
+            "EntitySetNotFound"
+        );
+        assert_eq!(
+            categorize_error(Some("Authorization denied")),
+            "AuthzDenied"
+        );
+        assert_eq!(
+            categorize_error(Some("ActionNotFound: Y")),
+            "ActionNotFound"
+        );
         assert_eq!(categorize_error(Some("guard rejected")), "GuardRejected");
         assert_eq!(categorize_error(Some("something else")), "Other");
         assert_eq!(categorize_error(None), "Unknown");

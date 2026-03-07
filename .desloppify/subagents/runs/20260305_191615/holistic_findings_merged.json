@@ -1,0 +1,759 @@
+{
+  "assessments": {
+    "ai_generated_debt": 77.4,
+    "api_surface_coherence": 88.0,
+    "authorization_consistency": 55.0,
+    "contract_coherence": 74.5,
+    "convention_outlier": 90.0,
+    "cross_module_architecture": 50.0,
+    "dependency_health": 57.2,
+    "design_coherence": 77.5,
+    "error_consistency": 72.5,
+    "incomplete_migration": 71.5,
+    "naming_quality": 82.6,
+    "package_organization": 51.0,
+    "test_strategy": 73.5,
+    "type_safety": 91.0
+  },
+  "dimension_notes": {
+    "cross_module_architecture": {
+      "evidence": [
+        "Backend restore/write flows are duplicated in parallel implementations (`load_registry_from_postgres` vs `load_registry_from_turso`, and `upsert_loaded_specs_to_postgres` vs `upsert_loaded_specs_to_turso`) in `crates/temper-cli/src/serve/storage.rs` lines 77-127, 212-369, 472-499.",
+        "Server observe handlers are tightly bound to Turso-specific persistence APIs and row shapes (`state.persistent_store()`, `turso.list_evolution_records`, `turso.list_ranked_insights`, and `r.data` JSON merge) in `crates/temper-server/src/observe/evolution/records_list.rs` lines 23-27, 44-49, 89-104.",
+        "Cross-module contracts rely on ad-hoc string parsing/literals for shared semantics (`verification_status` string mapping in `storage.rs` lines 166-170, error substring taxonomy in `insight_generator.rs` lines 414-428, and free-form query params in `records_list.rs` lines 10-14)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": ""
+    },
+    "dependency_health": {
+      "evidence": [
+        "`temper-platform` imports `temper_server::registry` types directly in bootstrap (`crates/temper-platform/src/bootstrap.rs:9`), and multiple platform/reference tests import `temper_server::entity_actor::sim_handler::EntityActorHandler` directly (`crates/temper-platform/tests/system_entity_dst.rs:19`, `reference-apps/ecommerce/tests/ecommerce_dst.rs:16`, `reference-apps/oncall/tests/oncall_dst.rs:16`).",
+        "IOA AST-to-runtime translation logic is duplicated across crates: guard/effect mapping in JIT (`crates/temper-jit/src/table/builder.rs:47-145`), separate guard/effect/assert mapping in verify (`crates/temper-verify/src/model/builder.rs:130-183`, `:218-226`), and assert-op mapping again in server sim handler (`crates/temper-server/src/entity_actor/sim_handler.rs:99-118`).",
+        "CLI serve path is a high-fan-in dependency hub, importing platform router/state plus server internals plus concrete stores (`crates/temper-cli/src/serve/mod.rs:24-35`) while `temper-cli` depends on both `temper-platform` and `temper-server` (`crates/temper-cli/Cargo.toml:17-18`)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": ""
+    },
+    "ai_generated_debt": {
+      "evidence": [
+        "crates/temper-cli/src/util.rs is a single-line pass-through re-export (`pub(crate) use temper_spec::naming::{...}`) with no local behavior.",
+        "crates/temper-mcp/src/repl.rs is a pure pass-through module (`pub use temper_sandbox::repl::{ReplConfig, run_repl}`) that adds another indirection layer without policy, validation, or adaptation.",
+        "Multiple crate roots/modules in this batch contain long narrative comments while exposing mostly re-export surfaces, indicating ceremony-heavy structure relative to implementation density (e.g., crates/temper-agent-runtime/src/lib.rs, crates/temper-jit/src/lib.rs, crates/temper-odata/src/lib.rs)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "medium",
+      "issues_preventing_higher_score": ""
+    },
+    "incomplete_migration": {
+      "evidence": [
+        "crates/temper-evolution/src/lib.rs explicitly re-exports a deprecated API via `#[allow(deprecated)] pub use store::RecordStore;`, keeping old and new paths alive simultaneously.",
+        "The same file also re-exports the newer Postgres-oriented surface (`pub use pg_store::{PgRecordStoreError, PostgresRecordStore};`), confirming parallel legacy/new API exposure in the crate root.",
+        "No in-code migration boundary markers (removal milestone, compatibility window, or targeted deprecation message) are present alongside the deprecated re-export."
+      ],
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": ""
+    },
+    "package_organization": {
+      "evidence": [
+        "holistic_context.structure.directory_profiles shows `crates/temper-server/src/` has 22 files (>10 threshold) while mixing unrelated concerns (API mutation routing, authz helper logic, constraint engine, secrets/webhooks/wasm) in one flat root.",
+        "`crates/temper-server/src/api.rs` is 1281 LOC and wires routes across multiple domains; in `build_api_router` it mounts handlers from `crate::observe::specs`, `crate::observe::wasm`, and `crate::observe::evolution`, so management API placement depends on another feature package\u2019s internals.",
+        "`crates/temper-server/src/observe/evolution.rs` is only a re-export hub while the root `api.rs` directly references observe handlers, indicating boundary ownership is split between `src/` and `src/observe/`.",
+        "`crates/temper-observe/src/lib.rs` exports backend-specific `clickhouse` alongside core contracts (`store`, `schema`, `error`) at the same layer, and `clickhouse.rs` lives as a top-level peer module instead of a provider-scoped folder."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high",
+      "issues_preventing_higher_score": ""
+    },
+    "test_strategy": {
+      "evidence": [
+        "SSE endpoint tests only serialization of payload struct and do not exercise stream behavior, lag handling, or event JSON failure paths (crates/temper-server/src/events.rs:47-55,61-82).",
+        "Evolution records endpoints have no in-file tests and include backend-dependent fallback behavior (`empty` response on missing Turso) that is currently unverified (crates/temper-server/src/observe/evolution/records_list.rs:72-80,123-127).",
+        "`temper init` tests pass absolute filesystem path as project name and assert that path appears in generated Cargo package name (crates/temper-cli/src/init/mod.rs:149-177), which does not validate real `temper init <name>` contract from docs (crates/temper-cli/src/init/mod.rs:43)."
+      ],
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": ""
+    },
+    "api_surface_coherence": {
+      "evidence": [
+        "`crates/temper-server/src/api.rs` mixes strongly-gated mutations (`handle_put_policies`, `handle_add_policy_rule`) with sibling handlers that return open reads/streams (`handle_list_decisions`, `handle_all_decisions_stream`) in the same API surface.",
+        "`crates/temper-server/src/observe/evolution/operations.rs` and `crates/temper-server/src/api.rs` expose similar JSON APIs but with differing return contracts (`Json<_>`, `Result<Json<_>, StatusCode>`, `impl IntoResponse`)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": "Endpoint families with similar semantics still expose inconsistent handler contracts and gating expectations."
+    },
+    "authorization_consistency": {
+      "evidence": [
+        "`crates/temper-server/src/api.rs` has no auth check in `handle_put_secret`, `handle_delete_secret`, `handle_list_secrets`, `handle_list_decisions`, `handle_decision_stream`, `handle_list_all_decisions`, and `handle_all_decisions_stream`, while sibling policy mutation handlers explicitly call `authorize_with_context`.",
+        "`crates/temper-server/src/odata/common.rs` falls back to first registered tenant when `x-tenant-id` is missing, and `crates/temper-server/src/observe/specs.rs` resolves spec detail by scanning all tenants and returning first match."
+      ],
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "confidence": "high",
+      "issues_preventing_higher_score": ""
+    },
+    "contract_coherence": {
+      "evidence": [
+        "`crates/temper-server/src/observe/specs.rs` documents `get_spec_detail` as searching all tenants and returning first match, which makes returned entity identity depend on registry ordering rather than explicit tenant contract.",
+        "`crates/temper-server/src/odata/common.rs` silently defaults tenant selection (`first registered` / `TenantId::default`) when tenant header is absent, changing request meaning without caller intent."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": ""
+    },
+    "convention_outlier": {
+      "evidence": [
+        "Naming and module organization are mostly consistent snake_case across assigned files.",
+        "Small convention drift remains around mixed header namespaces (`x-agent-id` vs `x-temper-principal-id`) in `crates/temper-server/src/dispatch.rs` and auth helpers."
+      ],
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "confidence": "medium",
+      "issues_preventing_higher_score": "Header vocabulary is not fully normalized across adjacent auth/context entry points."
+    },
+    "design_coherence": {
+      "evidence": [
+        "`crates/temper-server/src/api.rs` centralizes many unrelated concerns (secrets, policy CRUD, decisions, authorize/audit, REPL) and repeatedly inlines authorization-denial plumbing.",
+        "Cross-cutting authz-denial behavior is partly extracted (`crates/temper-server/src/authz_helpers.rs`) but still duplicated at call sites, creating drift-prone boundary logic."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": ""
+    },
+    "error_consistency": {
+      "evidence": [
+        "Several handlers log backend query errors and still return `200` with empty payloads (`crates/temper-server/src/api.rs` decisions handlers; `crates/temper-server/src/observe/agents.rs`; `crates/temper-server/src/observe/evolution/records_list.rs`).",
+        "This differs from other endpoints in the same modules that return explicit non-2xx errors for invalid input or backend unavailability."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": ""
+    },
+    "naming_quality": {
+      "evidence": [
+        "`crates/temper-authz/src/engine.rs` defines `AuthzEngine::permissive()` while its own doc says it loads no policies and therefore denies by default.",
+        "`crates/temper-server/src/wasm_authz_gate.rs` contains `PermissiveWasmAuthzGate` that truly allows all, increasing ambiguity with `AuthzEngine::permissive`."
+      ],
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "confidence": "high",
+      "issues_preventing_higher_score": "A key security-related constructor name currently communicates the opposite runtime behavior."
+    },
+    "type_safety": {
+      "evidence": [
+        "Typed structs and enums are broadly used at boundaries (`SecurityContext`, `AgentSummary`, `AuthorizeRequest`, `DecisionStatus`) and unsafe usage is confined to WASM FFI glue.",
+        "Remaining risk is semantic typing rather than compile-time typing (tenant defaults and first-match tenant resolution represented as valid values)."
+      ],
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "confidence": "medium",
+      "issues_preventing_higher_score": "Some semantically ambiguous fallback states are type-valid, so incorrect tenant selection is not prevented by the type system."
+    }
+  },
+  "findings": [
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "duplicated_backend_restore_pipeline",
+      "summary": "Postgres and Turso spec restore/upsert pipelines are duplicated instead of sharing a storage-boundary abstraction.",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "`load_registry_from_postgres` and `load_registry_from_turso` repeat the same grouping, CSDL parse, tenant registration, and verification-status restoration flow (`storage.rs` lines 212-293 vs 296-369).",
+        "`upsert_loaded_specs_to_postgres` and `upsert_loaded_specs_to_turso` perform equivalent write semantics with separate codepaths (`storage.rs` lines 77-127 vs 472-499).",
+        "The server side already has endpoint logic directly bound to one backend (`records_list.rs` lines 23-27, 89-90), increasing risk that backend behavior drifts across modules."
+      ],
+      "suggestion": "Introduce a storage-port trait (e.g., `SpecPersistence`) that exposes normalized read/write operations and tenant-constraint access; implement Postgres/Turso adapters behind it, then keep one shared restore/upsert orchestration path.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_storage_boundary_abstraction"
+    },
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "observe_layer_persistence_leak",
+      "summary": "HTTP observe handlers depend directly on persistence-row shape and backend availability, leaking storage concerns into API boundary code.",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-cli/src/serve/storage.rs"
+      ],
+      "evidence": [
+        "`list_evolution_records` and `list_evolution_insights` call Turso methods directly and manually decode/merge `r.data` JSON fields (`records_list.rs` lines 24-27, 44-49, 90-104).",
+        "If Turso is absent or query fails, handlers emit empty success payloads (`records_list.rs` lines 72-80, 123-127), coupling API semantics to backend configuration state.",
+        "A separate module already centralizes backend duality for related spec persistence (`storage.rs` lines 39-58, 296-369), but observe endpoints bypass such indirection."
+      ],
+      "suggestion": "Move record retrieval and response-shaping into a domain service/repository that returns typed DTOs independent of Turso row internals; make handlers consume that service and surface explicit availability/errors instead of silent empty fallbacks.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_storage_boundary_abstraction"
+    },
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "stringly_typed_cross_module_contracts",
+      "summary": "Shared semantics across persistence, analytics, and API modules are encoded as free-form strings rather than shared typed contracts.",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/insight_generator.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "Verification restoration relies on status string normalization/matching (`pending`, `running`, `passed`) in `storage.rs` lines 166-177.",
+        "Insight generation classifies failure causes via substring checks on error text (`EntitySetNotFound`, `Authorization denied`, `unknown action`) in `insight_generator.rs` lines 414-428.",
+        "Observe query filters and counters depend on raw string values (`record_type`, `status`, and hardcoded type labels) in `records_list.rs` lines 10-14 and 56-63."
+      ],
+      "suggestion": "Define shared enums/value objects for verification status, evolution record type/status, and trajectory failure categories in a common contract crate; convert at boundaries once, then propagate typed values internally.",
+      "confidence": "medium",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "stringly_typed_contracts"
+    },
+    {
+      "dimension": "dependency_health",
+      "identifier": "server_internal_test_api_leak",
+      "summary": "Cross-crate tests depend on server internals, creating brittle dependency edges.",
+      "related_files": [
+        "crates/temper-platform/tests/system_entity_dst.rs",
+        "reference-apps/ecommerce/tests/ecommerce_dst.rs",
+        "reference-apps/oncall/tests/oncall_dst.rs",
+        "crates/temper-server/src/entity_actor/sim_handler.rs"
+      ],
+      "evidence": [
+        "Platform and reference tests import `temper_server::entity_actor::sim_handler::EntityActorHandler` (`system_entity_dst.rs:19`, `ecommerce_dst.rs:16`, `oncall_dst.rs:16`).",
+        "`EntityActorHandler` lives under server internals (`crates/temper-server/src/entity_actor/sim_handler.rs`), so test suites in other crates are coupled to non-stable module layout and implementation details."
+      ],
+      "suggestion": "Extract a stable simulation-test API (e.g., `temper-sim` or a public `temper_server::sim` facade) and migrate external tests to that API; keep `entity_actor::sim_handler` internal.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_stable_boundary_for_simulation_dependencies"
+    },
+    {
+      "dimension": "dependency_health",
+      "identifier": "duplicated_ioa_projection_layers",
+      "summary": "IOA translation logic is duplicated across runtime, verify, and server layers.",
+      "related_files": [
+        "crates/temper-jit/src/table/builder.rs",
+        "crates/temper-verify/src/model/builder.rs",
+        "crates/temper-server/src/entity_actor/sim_handler.rs"
+      ],
+      "evidence": [
+        "JIT builder re-maps `automaton::Guard`/`automaton::Effect` variants (`table/builder.rs:47-145`).",
+        "Verify builder independently re-maps the same automaton guards/effects and assert parsing (`model/builder.rs:130-183`, `:218-226`).",
+        "Server simulation handler adds another assert enum mapping (`sim_handler.rs:99-118`)."
+      ],
+      "suggestion": "Introduce a shared projection module/crate for IOA semantic lowering (guards/effects/asserts) with target-specific adapters; make JIT/verify/server consume that shared layer to avoid drift and synchronized edits.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "missing_stable_boundary_for_simulation_dependencies"
+    },
+    {
+      "dimension": "dependency_health",
+      "identifier": "cli_serve_dependency_hub",
+      "summary": "`temper serve` orchestrator in CLI directly binds to many concrete subsystems.",
+      "related_files": [
+        "crates/temper-cli/src/serve/mod.rs",
+        "crates/temper-cli/Cargo.toml",
+        "crates/temper-platform/src/bootstrap.rs",
+        "crates/temper-server/src/registry.rs"
+      ],
+      "evidence": [
+        "`serve/mod.rs` imports platform router/state, server registry/state/webhooks, evolution/observe stores, and Redis/Turso backends directly (`serve/mod.rs:21-35`).",
+        "`temper-cli` depends simultaneously on `temper-platform` and `temper-server` (`Cargo.toml:17-18`), making CLI a compile/link hotspot with broad transitive churn for serve-path changes."
+      ],
+      "suggestion": "Move serve orchestration and backend wiring behind a single platform-facing entry API (e.g., `temper_platform::serve::run`) so CLI becomes a thin adapter and no longer directly couples to server/store internals.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "missing_stable_boundary_for_simulation_dependencies"
+    },
+    {
+      "dimension": "incomplete_migration",
+      "identifier": "deprecated_recordstore_still_exported",
+      "summary": "Deprecated `RecordStore` remains publicly exported with suppression, extending dual-path migration debt",
+      "related_files": [
+        "crates/temper-evolution/src/lib.rs",
+        "crates/temper-evolution/src/records.rs"
+      ],
+      "evidence": [
+        "crates/temper-evolution/src/lib.rs uses `#[allow(deprecated)] pub use store::RecordStore;` which suppresses migration pressure instead of enforcing callers to move.",
+        "The same module re-exports `PostgresRecordStore` as the newer path, so consumers can continue using either path indefinitely.",
+        "records.rs includes migration-oriented domain fields (`ImplementationPlan::migration_required`) but the public API surface does not enforce or stage removal of legacy store usage."
+      ],
+      "suggestion": "Introduce an explicit migration boundary: remove the crate-root `RecordStore` re-export (or gate it behind a legacy feature), add a deprecation message with removal version/date, and migrate internal/public call sites to `PostgresRecordStore`/new store APIs in one tracked refactor.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "legacy_surface_kept_open"
+    },
+    {
+      "dimension": "ai_generated_debt",
+      "identifier": "thin_facade_module_sprawl",
+      "summary": "Several modules are pure pass-through facades with high ceremony and low leverage",
+      "related_files": [
+        "crates/temper-cli/src/util.rs",
+        "crates/temper-mcp/src/repl.rs",
+        "crates/temper-platform/src/agent/mod.rs"
+      ],
+      "evidence": [
+        "`crates/temper-cli/src/util.rs` only re-exports naming helpers from another crate and adds no normalization or domain-specific behavior.",
+        "`crates/temper-mcp/src/repl.rs` only re-exports `ReplConfig` and `run_repl` from `temper_sandbox` without protocol adaptation.",
+        "`crates/temper-platform/src/agent/mod.rs` acts mainly as a shallow re-export boundary (`pub mod claude; pub use claude::{...};`), similar to other thin facades in this batch."
+      ],
+      "suggestion": "Collapse non-value-adding pass-through modules by importing from source modules directly, or make each facade earn its existence by adding stable API shaping (versioning, validation, telemetry, or migration guards).",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "ceremonial_facade_pattern"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "server_api_root_overloaded",
+      "summary": "Root `api.rs` is a cross-domain sink and obscures ownership boundaries.",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/observe/evolution.rs"
+      ],
+      "evidence": [
+        "`crates/temper-server/src/api.rs` is 1281 LOC and contains secrets, policy decisions, audit, authorize, REPL, and SSE handlers in one file.",
+        "In `build_api_router`, routes under `/api` directly call `crate::observe::specs::*`, `crate::observe::wasm::*`, and `crate::observe::evolution::*`, so route ownership is split across root and observe modules."
+      ],
+      "suggestion": "Staged reorg plan: (1) Create `crates/temper-server/src/api/` with domain files (`secrets.rs`, `policies.rs`, `decisions.rs`, `authz.rs`, `repl.rs`) and keep `api/mod.rs` as router composition only. (2) Move observe-owned mutation handlers to `crates/temper-server/src/observe/management/` and expose a narrow routing API from observe, then have `api/mod.rs` call that API instead of direct function paths. (3) Update imports via `rg -n \"crate::observe::|handle_\" crates/temper-server/src/api* crates/temper-server/src/observe` and apply `cargo fmt`. (4) Validate with `cargo check -p temper-server` and `cargo test -p temper-server`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "server_root_flattening"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "server_root_mixed_engine_helpers",
+      "summary": "Top-level server root keeps feature engines/helpers that should live in feature folders.",
+      "related_files": [
+        "crates/temper-server/src/constraint_engine.rs",
+        "crates/temper-server/src/authz_helpers.rs",
+        "crates/temper-server/src/api.rs"
+      ],
+      "evidence": [
+        "`crates/temper-server/src/constraint_engine.rs` (457 LOC) and `crates/temper-server/src/authz_helpers.rs` (194 LOC) are feature-specific coordination modules but are placed in the flat root `src/`.",
+        "The same root already hosts broad API composition (`api.rs`), increasing cross-file navigation cost and making feature boundaries (authz, constraints, management API) implicit rather than directory-scoped."
+      ],
+      "suggestion": "Staged reorg plan: (1) Create `crates/temper-server/src/authz/helpers.rs` and `crates/temper-server/src/odata/constraints/engine.rs` (or `src/constraints/engine.rs` if shared). (2) Move files with `git mv` in this order: `authz_helpers.rs` first, then `constraint_engine.rs`, then adjust `api`/odata references. (3) Update module declarations in `lib.rs` and call sites using `rg -n \"crate::authz_helpers|crate::constraint_engine\" crates/temper-server/src`. (4) Validate with `cargo check -p temper-server` and targeted tests (`cargo test -p temper-server odata`).",
+      "confidence": "medium",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "server_root_flattening"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "observe_crate_provider_layer_flattened",
+      "summary": "temper-observe mixes provider adapters and core contracts at one module level.",
+      "related_files": [
+        "crates/temper-observe/src/lib.rs",
+        "crates/temper-observe/src/clickhouse.rs",
+        "crates/temper-observe/src/error.rs"
+      ],
+      "evidence": [
+        "`crates/temper-observe/src/lib.rs` exports `clickhouse`, `memory`, `otel`, `schema`, `store`, and `error` all from the crate root.",
+        "`crates/temper-observe/src/clickhouse.rs` is backend-specific implementation but is a top-level sibling of core error/trait modules, flattening provider-vs-core boundaries."
+      ],
+      "suggestion": "Staged reorg plan: (1) Introduce `crates/temper-observe/src/providers/{clickhouse.rs,memory.rs,otel.rs}` and `crates/temper-observe/src/core/{store.rs,schema.rs,error.rs}` with `mod.rs` files. (2) Move backend modules first, then core modules, and keep temporary re-exports in `lib.rs` for compatibility. (3) Update imports with `rg -n \"crate::(clickhouse|memory|otel|store|schema|error)|temper_observe::\" crates/temper-observe crates/temper-server`. (4) Validate with `cargo check -p temper-observe -p temper-server` and `cargo test -p temper-observe`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "provider_core_boundary_blur"
+    },
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "evolution_backend_contract_drift",
+      "summary": "Evolution read APIs violate documented multi-backend storage contract by serving Turso-only data.",
+      "related_files": [
+        "README.md",
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "Docs and feature matrix claim Postgres and Turso/libSQL support for durable state/evolution capabilities (README.md:41,105,216,219).",
+        "Postgres startup path explicitly migrates `evolution_records` (crates/temper-cli/src/serve/storage.rs:49-54), but observe endpoints read only via `state.persistent_store()` and return empty responses when unavailable (crates/temper-server/src/observe/evolution/records_list.rs:23-27,72-80,88-90,123-127)."
+      ],
+      "suggestion": "Introduce a backend-agnostic `EvolutionReadStore` interface at server state level and implement it for both Turso and Postgres; wire `list_evolution_records`/`list_evolution_insights` to the trait instead of `persistent_store()` only, and return explicit backend-unavailable errors instead of silent empty payloads.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "storage_contract_not_centralized"
+    },
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "cli_depends_on_server_internals",
+      "summary": "CLI storage bootstrap reaches into server internals, weakening crate boundary ownership.",
+      "related_files": [
+        "README.md",
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/events.rs"
+      ],
+      "evidence": [
+        "CLI storage module imports `temper_server::event_store::ServerEventStore` and registry internals directly (crates/temper-cli/src/serve/storage.rs:9-12).",
+        "Server crate is documented as HTTP/runtime surface (README.md:255), but CLI now orchestrates server-internal storage and verification state restoration, increasing blast radius for server internal changes."
+      ],
+      "suggestion": "Move shared storage/registry contracts into a dedicated crate (or `temper-server` public facade module) and consume only stable interfaces from CLI; keep server internal structs private and expose constructor helpers with semver-safe types.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "boundary_leakage_between_cli_and_server"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "governance_endpoint_quality_gaps",
+      "summary": "Governance-critical streaming and evolution read paths lack behavior-level tests.",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "SSE handler uses broadcast stream transform and silently drops lag/error cases, but tests only assert struct serialization (crates/temper-server/src/events.rs:47-55,61-82).",
+        "Evolution list endpoints implement fallback-to-empty behavior for missing/failed store access with no tests in file (crates/temper-server/src/observe/evolution/records_list.rs:66-80,117-127).",
+        "README advertises governance/audit guarantees and high test count (README.md:37,154,226), but these exact governance read/stream contracts are not directly covered here."
+      ],
+      "suggestion": "Add integration tests for `/tdata/$events` and `/observe/evolution/*` that assert tenant/event filtering behavior, lag handling, backend failure semantics, and fallback responses; run with `cargo test -p temper-server --test '*dst*'` plus targeted unit tests for handler output shaping.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "governance_paths_under_tested"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "evolution_logic_placement_drift",
+      "summary": "Evolution domain logic is split between root server module and observe/evolution package.",
+      "related_files": [
+        "crates/temper-server/src/insight_generator.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`insight_generator.rs` is explicitly evolution pipeline logic (crates/temper-server/src/insight_generator.rs:1-5) but is placed in `crates/temper-server/src/` root.",
+        "Evolution HTTP handlers are organized under `observe/evolution/` (crates/temper-server/src/observe/evolution/records_list.rs:17-19), creating split ownership for the same domain.",
+        "Holistic structure reports `crates/temper-server/src/` at 22 files with mixed concerns, exceeding a common >10 flat-directory cohesion threshold."
+      ],
+      "suggestion": "Staged reorg plan: 1) create `crates/temper-server/src/observe/evolution/insight_generator.rs` and move generator types/functions there, 2) update module exports in `observe/evolution/mod.rs` then replace `crate::insight_generator` imports with `crate::observe::evolution::insight_generator`, 3) move any shared evolution DTOs into `observe/evolution/types.rs` to prevent re-growth in root, 4) validate with `rg 'insight_generator' crates/temper-server/src`, `cargo fmt`, and `cargo test -p temper-server`.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "server_root_flattening"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "unguarded_sensitive_api_routes",
+      "summary": "Multiple sensitive API routes skip Cedar checks while sibling routes enforce them",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`handle_put_secret`, `handle_delete_secret`, `handle_list_secrets`, `handle_list_decisions`, and decision stream handlers in `api.rs` do not call `authorize_with_context`.",
+        "Sibling handlers `handle_put_policies` and `handle_add_policy_rule` explicitly perform Cedar checks and denial recording.",
+        "`README.md` states governed access and authorization for actions, but these endpoints currently permit unauthenticated access paths."
+      ],
+      "suggestion": "Add a shared auth middleware/helper for all `/api/tenants/*` and `/api/decisions*` routes, then explicitly opt out only for intentionally public endpoints.",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "authz_boundary_drift"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "implicit_tenant_resolution",
+      "summary": "Missing tenant header silently resolves to arbitrary/default tenant context",
+      "related_files": [
+        "crates/temper-server/src/odata/common.rs",
+        "crates/temper-server/src/observe/specs.rs",
+        "crates/temper-server/src/observe/entities.rs"
+      ],
+      "evidence": [
+        "`extract_tenant` in `odata/common.rs` falls back to first registered tenant, then `TenantId::default()` when header is absent.",
+        "`observe/entities.rs` uses this extracted tenant to build actor keys and fetch history.",
+        "`observe/specs.rs` returns first tenant match for entity detail instead of requiring tenant identity."
+      ],
+      "suggestion": "Require explicit tenant identity for tenant-scoped reads/writes (or authenticated principal-to-tenant mapping), and return 400/403 on missing tenant instead of implicit fallback.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "authz_boundary_drift"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "store_failures_masked_as_empty_success",
+      "summary": "Backend query failures degrade to 200 + empty payload, hiding operational errors",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/observe/agents.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "Decision list handlers in `api.rs` log Turso errors and return `200` with empty collections.",
+        "`observe/agents.rs` and `observe/evolution/records_list.rs` follow the same pattern: warn log on query failure, then empty success response.",
+        "Other handlers in these modules return explicit non-2xx for validation/backend-not-configured failures, so callers cannot reliably distinguish empty data from failed data source."
+      ],
+      "suggestion": "Return explicit 5xx/503 error envelopes for query failures (with optional partial-data mode behind a flag), and reserve empty 200 responses for true zero-result states only.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "error_contract_drift"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "cross_tenant_first_match_contract",
+      "summary": "Spec detail API contract depends on registry iteration order across tenants",
+      "related_files": [
+        "crates/temper-server/src/observe/specs.rs",
+        "crates/temper-server/src/odata/common.rs"
+      ],
+      "evidence": [
+        "`get_spec_detail` in `observe/specs.rs` scans `tenant_ids()` and returns the first matching entity type.",
+        "Tenant fallback behavior in `odata/common.rs` further normalizes implicit tenant selection when caller does not specify tenant."
+      ],
+      "suggestion": "Make tenant explicit in spec-detail route (`/observe/specs/{tenant}/{entity}` or query param), and reject ambiguous multi-tenant matches.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "tenant_identity_ambiguity"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "cross_cutting_authz_logic_scattered",
+      "summary": "Authorization/denial workflow is partially abstracted but still duplicated across handlers",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/authz_helpers.rs",
+        "crates/temper-server/src/observe/evolution/operations.rs"
+      ],
+      "evidence": [
+        "`api.rs` repeats per-handler boilerplate for building security context, checking authorization, and shaping denial payloads.",
+        "`authz_helpers.rs` extracts only parts of this path (`security_context_from_headers`, `record_authz_denial`), leaving route-specific drift and omissions.",
+        "Some mutation/read handlers in adjacent modules still omit checks entirely, showing boundary policy encoded at call-site level."
+      ],
+      "suggestion": "Introduce a uniform authorization guard layer (middleware or route-wrapper) that enforces action/resource mapping and denial response generation centrally.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "authz_boundary_drift"
+    },
+    {
+      "dimension": "naming_quality",
+      "identifier": "misleading_permissive_constructor_name",
+      "summary": "`AuthzEngine::permissive` name contradicts deny-by-default runtime behavior",
+      "related_files": [
+        "crates/temper-authz/src/engine.rs",
+        "crates/temper-server/src/wasm_authz_gate.rs"
+      ],
+      "evidence": [
+        "`engine.rs` documents `permissive()` as creating engine with no policies that denies by default.",
+        "`wasm_authz_gate.rs` has `PermissiveWasmAuthzGate` that truly allows everything, making `permissive` overloaded with opposite meanings in auth code."
+      ],
+      "suggestion": "Rename `AuthzEngine::permissive` to `empty_policy_set`/`deny_all_default` (with deprecation shim if needed) to align naming with behavior.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit"
+    }
+  ],
+  "review_quality": {
+    "batch_count": 6,
+    "dimension_coverage": 0.19,
+    "evidence_density": 1.792,
+    "high_score_missing_issue_note": 0,
+    "finding_pressure": 54.274,
+    "dimensions_with_findings": 11
+  },
+  "review_scope": {
+    "reviewed_files_count": 71,
+    "successful_batch_count": 6,
+    "full_sweep_included": false,
+    "total_files": 297,
+    "imported_dimensions": [
+      "ai_generated_debt",
+      "api_surface_coherence",
+      "authorization_consistency",
+      "contract_coherence",
+      "convention_outlier",
+      "cross_module_architecture",
+      "dependency_health",
+      "design_coherence",
+      "error_consistency",
+      "incomplete_migration",
+      "naming_quality",
+      "package_organization",
+      "test_strategy",
+      "type_safety"
+    ]
+  },
+  "reviewed_files": [
+    "crates/temper-cli/src/init/mod.rs",
+    "crates/temper-cli/src/serve/storage.rs",
+    "crates/temper-server/src/events.rs",
+    "crates/temper-server/src/insight_generator.rs",
+    "crates/temper-server/src/observe/evolution/records_list.rs",
+    "crates/temper-server/src/state/dispatch_blocking.rs",
+    "crates/temper-sandbox/src/helpers.rs",
+    "crates/temper-server/src/odata/common.rs",
+    "crates/temper-cli/src/util.rs",
+    "crates/temper-server/src/observe/evolution/operations.rs",
+    "crates/temper-spec/src/automaton/parser.rs",
+    "crates/temper-server/src/entity_actor/actor.rs",
+    "crates/temper-platform/src/bootstrap.rs",
+    "crates/temper-server/src/registry.rs",
+    "crates/temper-platform/tests/system_entity_actors.rs",
+    "crates/temper-verify/src/model/builder.rs",
+    "crates/temper-server/src/entity_actor/sim_handler.rs",
+    "crates/temper-authz/src/context.rs",
+    "crates/temper-platform/tests/platform_e2e_dst.rs",
+    "crates/temper-server/src/api.rs",
+    "crates/temper-cli/src/serve/mod.rs",
+    "crates/temper-platform/src/evolution/feedback.rs",
+    "crates/temper-server/src/reaction/sim_dispatcher.rs",
+    "crates/temper-server/src/state/entity_ops.rs",
+    "crates/temper-server/src/observe/specs.rs",
+    "crates/temper-cli/src/verify/mod.rs",
+    "crates/temper-server/src/state/dispatch/actions.rs",
+    "crates/temper-jit/src/table/builder.rs",
+    "crates/temper-mcp/src/lib_tests.rs",
+    "crates/temper-odata/src/query/types.rs",
+    "crates/temper-jit/src/table/types.rs",
+    "crates/temper-authz/src/engine.rs",
+    "crates/temper-store-turso/src/store.rs",
+    "reference-apps/ecommerce/tests/ecommerce_dst.rs",
+    "reference-apps/oncall/tests/oncall_dst.rs",
+    "crates/temper-server/src/webhooks.rs",
+    "crates/temper-verify/src/simulation.rs",
+    "crates/temper-server/src/wasm_authz_gate.rs",
+    "crates/temper-wasm-sdk/src/lib.rs",
+    "crates/temper-server/src/entity_actor/effects.rs",
+    "crates/temper-server/src/secret_template.rs",
+    "crates/temper-platform/tests/system_entity_dst.rs",
+    "crates/temper-server/tests/gmail_oauth_dst.rs",
+    "crates/temper-verify/src/paths.rs",
+    "crates/temper-runtime/src/scheduler/context.rs",
+    "crates/temper-agent-runtime/src/lib.rs",
+    "crates/temper-agent-runtime/src/tools/mod.rs",
+    "crates/temper-authz/src/error.rs",
+    "crates/temper-authz/src/lib.rs",
+    "crates/temper-codegen/src/lib.rs",
+    "crates/temper-evolution/src/lib.rs",
+    "crates/temper-evolution/src/records.rs",
+    "crates/temper-jit/src/lib.rs",
+    "crates/temper-jit/src/table/mod.rs",
+    "crates/temper-mcp/src/error.rs",
+    "crates/temper-mcp/src/repl.rs",
+    "crates/temper-observe/src/error.rs",
+    "crates/temper-observe/src/lib.rs",
+    "crates/temper-observe/src/schema.rs",
+    "crates/temper-observe/src/store.rs",
+    "crates/temper-odata/src/lib.rs",
+    "crates/temper-odata/src/query/mod.rs",
+    "crates/temper-optimize/src/types.rs",
+    "crates/temper-platform/src/agent/mod.rs",
+    "crates/temper-server/src/authz_helpers.rs",
+    "crates/temper-server/src/constraint_engine.rs",
+    "crates/temper-server/src/observe/agents.rs",
+    "crates/temper-server/src/observe/entities.rs",
+    "crates/temper-server/src/observe/evolution.rs",
+    "crates/temper-observe/src/clickhouse.rs",
+    "README.md"
+  ],
+  "provenance": {
+    "kind": "blind_review_batch_import",
+    "blind": true,
+    "runner": "codex",
+    "run_stamp": "20260305_191615",
+    "created_at": "2026-03-05T19:22:12+00:00",
+    "batch_count": 6,
+    "batch_indexes": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "packet_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/review_packet_blind.json",
+    "packet_sha256": "9306b4f4afcc75e7fb0ac168e94e0c46e4f63f7053c47231da9ee2820b3c2871"
+  },
+  "assessment_coverage": {
+    "scored_dimensions": [
+      "naming_quality",
+      "logic_clarity",
+      "type_safety",
+      "contract_coherence",
+      "error_consistency",
+      "abstraction_fitness",
+      "ai_generated_debt",
+      "high_level_elegance",
+      "mid_level_elegance",
+      "low_level_elegance",
+      "cross_module_architecture",
+      "initialization_coupling",
+      "convention_outlier",
+      "dependency_health",
+      "test_strategy",
+      "api_surface_coherence",
+      "authorization_consistency",
+      "incomplete_migration",
+      "package_organization",
+      "design_coherence"
+    ],
+    "selected_dimensions": [
+      "ai_generated_debt",
+      "api_surface_coherence",
+      "authorization_consistency",
+      "contract_coherence",
+      "convention_outlier",
+      "cross_module_architecture",
+      "dependency_health",
+      "design_coherence",
+      "error_consistency",
+      "naming_quality",
+      "incomplete_migration",
+      "package_organization",
+      "test_strategy",
+      "type_safety"
+    ],
+    "imported_dimensions": [
+      "ai_generated_debt",
+      "api_surface_coherence",
+      "authorization_consistency",
+      "contract_coherence",
+      "convention_outlier",
+      "cross_module_architecture",
+      "dependency_health",
+      "design_coherence",
+      "error_consistency",
+      "incomplete_migration",
+      "naming_quality",
+      "package_organization",
+      "test_strategy",
+      "type_safety"
+    ],
+    "missing_dimensions": [
+      "logic_clarity",
+      "abstraction_fitness",
+      "high_level_elegance",
+      "mid_level_elegance",
+      "low_level_elegance",
+      "initialization_coupling"
+    ]
+  }
+}

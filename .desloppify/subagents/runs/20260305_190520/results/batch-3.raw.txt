@@ -1,0 +1,90 @@
+{
+  "batch": "AI Debt & Migrations",
+  "batch_index": 3,
+  "assessments": {
+    "low_level_elegance": 82.0
+  },
+  "dimension_notes": {
+    "low_level_elegance": {
+      "evidence": [
+        "`crates/temper-evolution/src/lib.rs` uses `#[allow(deprecated)]` on a root re-export (`pub use store::RecordStore;`), preserving an old API path without a bounded migration mechanism.",
+        "Several assigned files are pass-through shims with little/no local behavior (e.g., `crates/temper-mcp/src/repl.rs`, `crates/temper-cli/src/util.rs`, `crates/temper-odata/src/query/mod.rs`), increasing indirection without added semantics.",
+        "`crates/temper-observe/src/schema.rs` duplicates near-identical column-membership helpers and corresponding tests for each table, indicating repetitive hand-maintained logic."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "deprecated_root_reexport_extends_migration",
+      "summary": "Deprecated `RecordStore` is still exported from crate root behind `#[allow(deprecated)]`, extending dual-path API debt.",
+      "related_files": [
+        "crates/temper-evolution/src/lib.rs",
+        "crates/temper-evolution/src/records.rs"
+      ],
+      "evidence": [
+        "`crates/temper-evolution/src/lib.rs:27-28` suppresses deprecation and re-exports `store::RecordStore`.",
+        "The same root also exports the newer record-centric surface (`records::*` at `crates/temper-evolution/src/lib.rs:22-26`), so callers can continue using legacy and new APIs concurrently."
+      ],
+      "suggestion": "Replace blanket suppression with a bounded migration path: either remove root export and force `store::RecordStore` explicit imports, or gate a compatibility re-export behind a feature flag plus removal milestone.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "migration_shim_retention"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "passthrough_modules_add_indirection",
+      "summary": "Multiple modules exist only as re-export shims, adding namespace hops without behavior.",
+      "related_files": [
+        "crates/temper-mcp/src/repl.rs",
+        "crates/temper-cli/src/util.rs",
+        "crates/temper-odata/src/query/mod.rs"
+      ],
+      "evidence": [
+        "`crates/temper-mcp/src/repl.rs:3` is only `pub use temper_sandbox::repl::{ReplConfig, run_repl};`.",
+        "`crates/temper-cli/src/util.rs:3` is only a naming-function re-export.",
+        "`crates/temper-odata/src/query/mod.rs:9-13` is primarily pass-through re-export wiring to `filter`/`types`."
+      ],
+      "suggestion": "Either collapse these shims by importing from canonical modules directly, or annotate them as temporary compatibility facades with deprecation attributes and a planned removal version.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "migration_shim_retention"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "schema_helper_duplication",
+      "summary": "Schema column validation uses repeated table-specific helper/test blocks instead of a shared pattern.",
+      "related_files": [
+        "crates/temper-observe/src/schema.rs",
+        "crates/temper-observe/src/lib.rs"
+      ],
+      "evidence": [
+        "`crates/temper-observe/src/schema.rs:65-77` defines three near-identical `is_*_column` functions that differ only by backing slice.",
+        "Tests at `crates/temper-observe/src/schema.rs:84-122` repeat the same assertion pattern for each table.",
+        "These constants/helpers are part of the public crate surface via `crates/temper-observe/src/lib.rs:34`."
+      ],
+      "suggestion": "Introduce a shared helper (e.g., table enum + generic membership check) and table-driven tests to reduce repetitive maintenance and prevent drift when schemas evolve.",
+      "confidence": "medium",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "boilerplate_pattern_duplication"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Compatibility shims and legacy exports are retained without explicit migration end-state.",
+      "Generated-style repetitive patterns were accepted without consolidating low-level helper structure."
+    ],
+    "likely_symptoms": [
+      "deprecated_root_reexport_extends_migration",
+      "passthrough_modules_add_indirection",
+      "schema_helper_duplication"
+    ],
+    "possible_false_positives": []
+  }
+}

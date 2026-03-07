@@ -47,10 +47,7 @@ impl ServerState {
         }
 
         if let Some(pg) = &self.pg_record_store {
-            let row = pg
-                .get_record_generic(id)
-                .await
-                .map_err(|e| e.to_string())?;
+            let row = pg.get_record_generic(id).await.map_err(|e| e.to_string())?;
             return Ok(row.map(pg_row_to_turso));
         }
 
@@ -89,7 +86,14 @@ impl ServerState {
     ) -> Result<(), String> {
         if let Some(turso) = self.persistent_store() {
             return turso
-                .insert_evolution_record(id, record_type, status, created_by, derived_from, data_json)
+                .insert_evolution_record(
+                    id,
+                    record_type,
+                    status,
+                    created_by,
+                    derived_from,
+                    data_json,
+                )
                 .await
                 .map_err(|e| e.to_string());
         }

@@ -1,0 +1,112 @@
+{
+  "batch": "Cross-cutting Sweep",
+  "batch_index": 2,
+  "assessments": {
+    "api_surface_coherence": 79.6
+  },
+  "dimension_notes": {
+    "api_surface_coherence": {
+      "evidence": [
+        "`ToolRegistry::execute` returns `Result<ToolResult>` while `ToolResult` itself has `Error(String)`, creating two overlapping failure channels (`crates/temper-agent-runtime/src/tools/mod.rs:27`, `crates/temper-agent-runtime/src/tools/mod.rs:55`).",
+        "`ToolRegistry::to_cedar` takes untyped `serde_json::Value` input but is infallible (`-> CedarMapping`), unlike adjacent APIs that surface typed errors (`crates/temper-agent-runtime/src/tools/mod.rs:58`, `crates/temper-mcp/src/error.rs:16`).",
+        "Public OData parsing API is duplicated at two import depths (`temper_odata::parse_filter` and `temper_odata::query::parse_filter`), encouraging inconsistent call sites (`crates/temper-odata/src/lib.rs:19`, `crates/temper-odata/src/query/mod.rs:9`).",
+        "Crate-level error contracts are inconsistent and mostly stringly-typed across sibling APIs (`AuthzError`, `ObserveError`, `McpError`), reducing predictable cross-crate handling (`crates/temper-authz/src/error.rs:5`, `crates/temper-observe/src/error.rs:7`, `crates/temper-mcp/src/error.rs:16`).",
+        "Deprecated API is still re-exported at crate root (`pub use store::RecordStore`), so consumers see both modern and legacy store surfaces (`crates/temper-evolution/src/lib.rs:21`, `crates/temper-evolution/src/lib.rs:28`)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "api_surface_coherence",
+      "identifier": "dual_failure_channel_tool_result",
+      "summary": "Tool execution API exposes two competing error channels",
+      "related_files": [
+        "crates/temper-agent-runtime/src/tools/mod.rs",
+        "crates/temper-mcp/src/error.rs"
+      ],
+      "evidence": [
+        "`ToolRegistry::execute` returns `anyhow::Result<ToolResult>` (`tools/mod.rs:55`).",
+        "`ToolResult` includes `Error(String)` (`tools/mod.rs:27-32`), so failures may be represented as either `Err(_)` or `Ok(ToolResult::Error(_))`.",
+        "By contrast, MCP consolidates error propagation on `Result<T, McpError>` (`mcp/error.rs:61-63`), showing a clearer single-channel contract."
+      ],
+      "suggestion": "Collapse to one failure channel: either return `Result<String, ToolError>` (preferred) or return only `ToolResult` and remove outer `Result`. Introduce a typed `ToolError` enum and map it explicitly at protocol boundaries.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "inconsistent_error_contracts"
+    },
+    {
+      "dimension": "api_surface_coherence",
+      "identifier": "infallible_cedar_mapping_contract",
+      "summary": "Authorization mapping API is infallible despite parsing dynamic input",
+      "related_files": [
+        "crates/temper-agent-runtime/src/tools/mod.rs",
+        "crates/temper-authz/src/error.rs"
+      ],
+      "evidence": [
+        "`to_cedar(&self, name: &str, input: &Value) -> CedarMapping` is infallible (`tools/mod.rs:58`).",
+        "The function consumes untyped JSON and tool name strings, which can be malformed/unknown but has no error path.",
+        "Authz layer already defines validation-style failures (`InvalidPrincipal`, `InvalidResource`) (`authz/error.rs:14-24`), implying mapping/validation failures are first-class in this subsystem."
+      ],
+      "suggestion": "Change `to_cedar` to return `Result<CedarMapping, ToolAuthzMapError>` (or `AuthzError`) and enforce explicit handling for malformed tool payloads and unknown actions before policy evaluation.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "inconsistent_error_contracts"
+    },
+    {
+      "dimension": "api_surface_coherence",
+      "identifier": "duplicated_odata_parse_entrypoints",
+      "summary": "OData parser functions are exported at multiple API depths",
+      "related_files": [
+        "crates/temper-odata/src/lib.rs",
+        "crates/temper-odata/src/query/mod.rs"
+      ],
+      "evidence": [
+        "Crate root exports `parse_filter` and `parse_query_options` (`odata/lib.rs:19-22`).",
+        "The query module also exports the same functions (`odata/query/mod.rs:9-13`).",
+        "This creates two canonical import paths for the same operation and leads to inconsistent usage style across consumers."
+      ],
+      "suggestion": "Pick one canonical surface (either only crate-root convenience exports or only module-scoped exports) and deprecate the duplicate path with a documented migration window.",
+      "confidence": "medium",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "barrel_export_policy_drift"
+    },
+    {
+      "dimension": "api_surface_coherence",
+      "identifier": "legacy_and_current_store_api_coexist",
+      "summary": "Evolution crate root exposes both current and deprecated store contracts",
+      "related_files": [
+        "crates/temper-evolution/src/lib.rs",
+        "crates/temper-observe/src/lib.rs"
+      ],
+      "evidence": [
+        "`temper-evolution` root exports `PostgresRecordStore` and also re-exports deprecated `RecordStore` with `#[allow(deprecated)]` (`evolution/lib.rs:21`, `evolution/lib.rs:27-28`).",
+        "Sibling crates like `temper-observe` expose a single current store interface (`ObservabilityStore`) at root (`observe/lib.rs:30-31`), highlighting API-shape drift.",
+        "Keeping both old and new store contracts in the primary surface makes the canonical integration path ambiguous for new consumers."
+      ],
+      "suggestion": "Move deprecated `RecordStore` behind a `legacy` module or feature flag, keep one root-level canonical store API, and publish a removal timeline in crate docs/changelog.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "barrel_export_policy_drift"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Error-handling contracts are not standardized across crate boundaries (single-channel vs dual-channel vs infallible APIs).",
+      "Crate-root export strategy lacks a strict policy, so duplicate and legacy entry points remain publicly visible."
+    ],
+    "likely_symptoms": [
+      "dual_failure_channel_tool_result",
+      "infallible_cedar_mapping_contract",
+      "duplicated_odata_parse_entrypoints",
+      "legacy_and_current_store_api_coexist"
+    ],
+    "possible_false_positives": []
+  }
+}

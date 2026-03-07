@@ -1,0 +1,143 @@
+{
+  "batch": "Governance & Contracts",
+  "batch_index": 2,
+  "assessments": {
+    "test_strategy": 71.0,
+    "package_organization": 79.0
+  },
+  "dimension_notes": {
+    "test_strategy": {
+      "evidence": [
+        "`crates/temper-server/src/events.rs` tests only JSON serialization (`entity_state_change_serializes`) and do not exercise `handle_events` auth gate, stream behavior, or lagged-message handling.",
+        "`crates/temper-server/src/observe/evolution/records_list.rs` has no local tests for query filtering, JSON merge behavior, malformed `r.data`, or response shape stability.",
+        "`crates/temper-cli/src/serve/storage.rs` has tests only for URL redaction; critical persistence paths (`connect_postgres_store`, `upsert_loaded_specs_to_postgres`, `upsert_loaded_specs_to_turso`) are untested.",
+        "`crates/temper-cli/src/init/mod.rs` test `test_init_creates_directory_structure` asserts Cargo name contains an absolute temp path, which couples the test to invocation details and misses Cargo package-name compatibility checks."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "package_organization": {
+      "evidence": [
+        "Holistic structure data shows `crates/temper-server/src/` has 13 files (flat root with mixed responsibilities: routing, events, invariants, bootstrap, response), crossing the >10-files mixed-concern threshold.",
+        "`crates/temper-cli/src/serve/storage.rs` contains direct spec/constraint SQL upsert and migration orchestration while importing server/store crates (`temper_server::event_store`, `temper_store_postgres`, `temper_store_turso`), indicating persistence/domain logic living in CLI command packaging.",
+        "`README.md` describes clear crate ownership boundaries (`temper-server` HTTP/routing; `temper-store-*` persistence), but `temper-cli` `serve/storage.rs` currently hosts part of persistence write behavior, creating docs-vs-runtime boundary drift."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "test_strategy",
+      "identifier": "observe_endpoints_missing_behavioral_tests",
+      "summary": "Observe endpoints lack behavioral tests for auth, error handling, and response-contract stability",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`handle_events` has runtime-critical logic (`require_observe_auth`, `BroadcastStream` filtering, SSE event formatting) but only serialization of `EntityStateChange` is tested.",
+        "`records_list.rs` has no tests despite non-trivial transformation logic that merges arbitrary JSON payload into top-level response fields.",
+        "README governance claims rely on auditable/observable behavior, but these handlers have no contract tests validating those guarantees."
+      ],
+      "suggestion": "Add integration tests under `crates/temper-server/tests/` that hit `/tdata/$events`, `/observe/evolution/records`, and `/observe/evolution/insights` with: unauthorized headers, valid headers, malformed row `data`, and lagged/empty stream scenarios; assert status codes and stable JSON/SSE schema.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "observe_contracts_not_tested_end_to_end"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "storage_write_paths_untested",
+      "summary": "Critical Postgres/Turso persistence paths are untested while only helper redaction is covered",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`storage.rs` tests cover only `redact_connection_url`; migration and upsert routines have no tests.",
+        "Failure-prone branches (`migrate`, SQL upsert conflict behavior, constraint delete path) are currently unchecked.",
+        "README positions persistence and governance as core runtime guarantees, but write-path parity and failure handling are not validated in this module."
+      ],
+      "suggestion": "Add backend-agnostic contract tests for `upsert_loaded_specs_to_postgres` and `upsert_loaded_specs_to_turso` using a shared fixture matrix (initial insert, conflict update, constraint upsert, constraint delete, error propagation) and run them in CI against both backends.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "critical_paths_have_unit_only_or_no_coverage"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "init_test_coupled_to_invalid_package_name",
+      "summary": "`temper init` test validates absolute-path package name, missing Cargo-compatibility contract checks",
+      "related_files": [
+        "crates/temper-cli/src/init/mod.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`run(name)` writes Cargo `name = \"{{name}}\"` directly from input.",
+        "`test_init_creates_directory_structure` calls `run` with an absolute temp path and asserts generated `Cargo.toml` contains that path.",
+        "This test encodes invocation-specific behavior instead of validating generated project compatibility (valid Cargo package name and expected namespace derivation semantics)."
+      ],
+      "suggestion": "Refactor tests to run inside a temp parent dir and call `run(\"my-app\")`; assert `Cargo.toml` package name and namespace are valid/expected, and add negative tests for invalid names (path separators, uppercase-only edge cases).",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "test_contracts_follow_implementation_shortcuts"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "server_root_flattening_mixes_api_concerns",
+      "summary": "temper-server root directory is overloaded with mixed concerns instead of boundary-aligned subpackages",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "Structure profile reports `crates/temper-server/src/` has 13 files with mixed concerns (`router`, `events`, `eventual_invariants`, `registry_bootstrap`, `response`, etc.), exceeding the flat-directory mixed-concern threshold.",
+        "`events.rs` is an HTTP observe endpoint but lives at server root, while other observe handlers are already nested under `observe/evolution`.",
+        "Current placement obscures ownership boundaries between general server wiring and observe API surface."
+      ],
+      "suggestion": "Staged reorg plan: 1) create `crates/temper-server/src/api/observe/` and move `events.rs` to `api/observe/events.rs`; 2) move/alias existing observe route modules into `api/observe/` while keeping transitional `pub mod` re-exports; 3) update imports in `router.rs` and sibling modules; 4) run `cargo check -p temper-server`, `cargo test -p temper-server`, and `rg \"crate::events|crate::observe\" crates/temper-server/src` to verify import cleanup.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "boundary_placement_drift_between_server_and_observe"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "cli_contains_persistence_domain_logic",
+      "summary": "CLI `serve/storage.rs` owns persistence upsert behavior that belongs to shared store/server boundaries",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/observe/evolution/insight_generator.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`serve/storage.rs` directly executes SQL for `specs` and `tenant_constraints` and drives migrations, while also constructing server event-store types.",
+        "Commented note shows partial extraction happened for registry restoration, but analogous upsert translation logic remains in CLI.",
+        "This couples command-layer packaging to persistence schema evolution and duplicates boundary responsibility expected in server/store crates."
+      ],
+      "suggestion": "Staged reorg plan: 1) introduce a shared persistence contract module in `crates/temper-server/src/persistence/specs_bootstrap.rs` (or `temper-store-*` traits) for `LoadedTenantSpecs` upserts; 2) move Postgres/Turso upsert implementations out of CLI into that module; 3) make CLI call the shared interface only; 4) update imports and remove direct SQL from CLI; 5) validate with `cargo check -p temper-cli -p temper-server`, `cargo test -p temper-cli -p temper-server`, and `rg \"upsert_loaded_specs_to_(postgres|turso)|tenant_constraints\" crates/temper-cli/src` to confirm boundary cleanup.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "boundary_placement_drift_between_server_and_observe"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Critical governance paths are validated mostly at helper/unit level, with weak end-to-end contract coverage for HTTP observe and persistence mutation paths.",
+      "Module placement has drifted over time: partial extractions happened, but ownership boundaries are still split between CLI command code and server/store layers."
+    ],
+    "likely_symptoms": [
+      "observe_endpoints_missing_behavioral_tests",
+      "storage_write_paths_untested",
+      "cli_contains_persistence_domain_logic"
+    ],
+    "possible_false_positives": []
+  }
+}

@@ -264,7 +264,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get(0,"service"), Some(&json!("api")));
+        assert_eq!(result.get(0, "service"), Some(&json!("api")));
     }
 
     #[tokio::test]
@@ -289,7 +289,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get(0,"message"), Some(&json!("login failed")));
+        assert_eq!(result.get(0, "message"), Some(&json!("login failed")));
     }
 
     #[tokio::test]
@@ -321,7 +321,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get(0,"value"), Some(&json!(42.5)));
+        assert_eq!(result.get(0, "value"), Some(&json!(42.5)));
     }
 
     #[tokio::test]

@@ -1,0 +1,93 @@
+{
+  "batch": "Governance & Contracts",
+  "batch_index": 5,
+  "assessments": {
+    "high_level_elegance": 74.0
+  },
+  "dimension_notes": {
+    "high_level_elegance": {
+      "evidence": [
+        "README.md states storage and persistence as \"Postgres or Turso/libSQL\" and marks Evolution Engine done (README.md:41, README.md:166, README.md:216, README.md:219), but evolution read APIs are Turso-only with empty fallback (crates/temper-server/src/observe/evolution/records_list.rs:17-24, :72-80, :83-90, :123-127).",
+        "CLI bootstrap explicitly provisions Postgres evolution records migration (crates/temper-cli/src/serve/storage.rs:49-54), which makes the Turso-only observe surface an ownership/contract split instead of a clear backend-agnostic subsystem.",
+        "README claims verification-gated change flow with no exceptions (README.md:111, README.md:154), while insight resolution logic marks intents resolved from any successful SubmitSpec signal without verification/approval status checks (crates/temper-server/src/insight_generator.rs:112-125, :250-252).",
+        "Project initialization path creates generic Rust app scaffolding and no governance-runtime entrypoint/spec submission flow despite README positioning Temper as an agent-governed operating layer (README.md:74-102 vs crates/temper-cli/src/init/mod.rs:90-105)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "docs_runtime_storage_contract_drift",
+      "summary": "Evolution API contract says multi-backend, runtime exposes Turso-only reads with silent empty fallback",
+      "related_files": [
+        "README.md",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-cli/src/serve/storage.rs"
+      ],
+      "evidence": [
+        "README advertises persistence as \"Postgres or Turso/libSQL\" and marks Evolution Engine as done (README.md:41, README.md:166, README.md:216, README.md:219).",
+        "Observe handlers hardcode Turso semantics (\"single source of truth\") and return HTTP 200 empty payload when backend is absent/fails (crates/temper-server/src/observe/evolution/records_list.rs:23-24, :67-80, :88-89, :118-127).",
+        "CLI storage bootstrap still creates/migrates Postgres evolution records store (crates/temper-cli/src/serve/storage.rs:49-54), showing backend capability exists but is not reflected in observe contracts."
+      ],
+      "suggestion": "Define one canonical evolution-read contract at the server boundary (trait/service) that supports both Postgres and Turso, and make observe handlers depend on it; if a backend is intentionally unsupported, explicitly document and return a typed error instead of empty success.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "contract_drift_between_docs_and_runtime"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "verification_gate_semantics_not_preserved_in_insights",
+      "summary": "Insight pipeline treats SubmitSpec success as resolution, bypassing stated verification/approval governance contract",
+      "related_files": [
+        "README.md",
+        "crates/temper-server/src/insight_generator.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "README states every change is gated by verification cascade and presents OPADI chain integrity as core governance behavior (README.md:111, README.md:154, README.md:219).",
+        "Unmet-intent resolution is inferred from any successful SubmitSpec event by entity_type, with no check for verification outcome, decision status, or deployment success (crates/temper-server/src/insight_generator.rs:112-125, :250-252).",
+        "Records API exposes status fields as governance truth to consumers (crates/temper-server/src/observe/evolution/records_list.rs:35-38), so premature 'resolved' inference creates top-level contract dishonesty."
+      ],
+      "suggestion": "Resolve unmet intents from verified governance artifacts (e.g., decision approved + verification passed + spec active) rather than SubmitSpec success heuristics, and centralize this lifecycle mapping in one domain component used by both insight generation and observe views.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "contract_drift_between_docs_and_runtime"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "init_experience_misaligned_with_product_contract",
+      "summary": "CLI init scaffolds a generic Rust app, not the governance/spec-first workflow described as primary product contract",
+      "related_files": [
+        "README.md",
+        "crates/temper-cli/src/init/mod.rs"
+      ],
+      "evidence": [
+        "README positions the primary usage model as agent-driven spec submission via Temper APIs and verification cascade (README.md:74-102, README.md:111-119).",
+        "Init command creates a hello-world `main.rs`, a placeholder Cargo manifest, and generic next steps (`temper codegen`) instead of a runnable spec-first governance flow (crates/temper-cli/src/init/mod.rs:90-105).",
+        "Scaffolded structure can lead users toward historical Rust-app ownership instead of the documented domain ownership boundary (Temper-mediated operations)."
+      ],
+      "suggestion": "Rework `temper init` into a contract-aligned bootstrap: generate minimal IOA + CSDL + policy stubs, include a submit/verify/apply command path, and remove or de-emphasize generic Rust-app scaffolding unless explicitly requested via a separate template mode.",
+      "confidence": "medium",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "onboarding_contract_misalignment"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Documentation and runtime behavior are evolving independently without a single source of truth for governance contracts.",
+      "Evolution-domain lifecycle semantics are encoded as local heuristics rather than shared contract-level state transitions."
+    ],
+    "likely_symptoms": [
+      "docs_runtime_storage_contract_drift",
+      "verification_gate_semantics_not_preserved_in_insights",
+      "init_experience_misaligned_with_product_contract"
+    ],
+    "possible_false_positives": []
+  }
+}

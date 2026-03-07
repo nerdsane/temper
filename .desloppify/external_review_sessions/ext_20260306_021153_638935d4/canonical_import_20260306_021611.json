@@ -1,0 +1,330 @@
+{
+  "assessments": {
+    "naming_quality": 89.2,
+    "logic_clarity": 90.5,
+    "type_safety": 92.3,
+    "contract_coherence": 87.4,
+    "error_consistency": 91.8,
+    "abstraction_fitness": 84.6,
+    "ai_generated_debt": 82.1,
+    "high_level_elegance": 88.3,
+    "mid_level_elegance": 86.7,
+    "low_level_elegance": 83.5,
+    "cross_module_architecture": 87.9,
+    "initialization_coupling": 91.4,
+    "convention_outlier": 88.6,
+    "dependency_health": 90.1,
+    "test_strategy": 80.3,
+    "api_surface_coherence": 84.2,
+    "authorization_consistency": 82.7,
+    "incomplete_migration": 83.4,
+    "package_organization": 85.1,
+    "design_coherence": 81.8
+  },
+  "findings": [
+    {
+      "dimension": "design_coherence",
+      "identifier": "dispatch_temper_method_god_function",
+      "summary": "dispatch_temper_method is a 543-LOC match arm routing function with 9 parameters",
+      "related_files": [
+        "crates/temper-sandbox/src/dispatch.rs"
+      ],
+      "evidence": [
+        "Function has #[allow(clippy::too_many_arguments)] with 9 parameters including http client, base_url, tenant, principal_id, method name, args, kwargs, entity_set_resolver closure, and binary_path",
+        "543 LOC single function body dispatching all temper.* SDK methods via string matching"
+      ],
+      "suggestion": "Extract a DispatchContext struct to hold the first 4-5 common parameters (http, base_url, tenant, principal_id, entity_set_resolver). Split the match arms into per-domain helper functions (entity_dispatch, wasm_dispatch, evolution_dispatch) that take DispatchContext + method-specific args.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "large_files_exceeding_500_loc_threshold",
+      "summary": "30+ production files exceed the project's own 500-LOC split threshold",
+      "related_files": [
+        "crates/temper-spec/src/automaton/toml_parser.rs",
+        "crates/temper-server/src/entity_actor/actor.rs",
+        "crates/temper-server/src/odata/read.rs",
+        "crates/temper-verify/src/smt.rs",
+        "crates/temper-server/src/query_eval.rs",
+        "crates/temper-server/src/observe/verification.rs",
+        "crates/temper-runtime/src/scheduler/sim_actor_system.rs"
+      ],
+      "evidence": [
+        "CLAUDE.md states 'Files > 500 lines must be split into directory modules'",
+        "toml_parser.rs: 936 LOC, actor.rs: 839 LOC, odata/read.rs: 852 LOC, smt.rs: 869 LOC, query_eval.rs: 746 LOC, verification.rs: 776 LOC, sim_actor_system.rs: 760 LOC"
+      ],
+      "suggestion": "Prioritize splitting the highest-LOC files into directory modules. For example, toml_parser.rs could split parsing, section handling, and multiline processing. actor.rs could split message handling from state management. odata/read.rs could split collection reads from single-entity reads.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "authorization_consistency",
+      "identifier": "rls_gap_on_tenant_scoped_tables",
+      "summary": "6 tenant-scoped tables lack Row Level Security while 9 sibling tables have it",
+      "related_files": [
+        "crates/temper-store-postgres/src/schema.rs",
+        "crates/temper-store-turso/src/store/evolution.rs"
+      ],
+      "evidence": [
+        "Tables WITH RLS: design_time_events, events, snapshots, specs, tenant_constraints, tenant_secrets, trajectories, wasm_invocation_logs, wasm_modules",
+        "Tables WITHOUT RLS: evolution_records, feature_requests, pending_decisions, tenant_policies, statement, IF",
+        "evolution_records and feature_requests are tenant-scoped data that should have RLS to prevent cross-tenant data leakage"
+      ],
+      "suggestion": "Add RLS policies to evolution_records, feature_requests, pending_decisions, and tenant_policies tables. The 'IF' and 'statement' entries may be schema artifacts (investigate whether they are real tables). At minimum, ensure all tables holding tenant-scoped data consistently apply RLS.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "critical_modules_with_zero_test_importers",
+      "summary": "Several high-complexity production modules have zero test coverage indicators",
+      "related_files": [
+        "crates/temper-spec/src/automaton/parser.rs",
+        "crates/temper-verify/src/cascade.rs",
+        "crates/temper-server/src/state/entity_ops.rs",
+        "crates/temper-odata/src/query/types.rs",
+        "crates/temper-evolution/src/records.rs",
+        "crates/temper-platform/src/bootstrap.rs"
+      ],
+      "evidence": [
+        "parser.rs (731 LOC, 0 importers): core spec parsing logic with no direct test coverage",
+        "cascade.rs (630 LOC, 0 importers): the 5-level verification cascade has no direct unit tests",
+        "entity_ops.rs (579 LOC, 0 importers): entity state management untested directly",
+        "query/types.rs (599 LOC, 0 importers): OData query type definitions untested",
+        "records.rs (655 LOC, 0 importers): evolution record types untested",
+        "bootstrap.rs (380 LOC, 0 importers): platform bootstrap untested"
+      ],
+      "suggestion": "These files may be tested transitively through integration tests, but the zero-importer signal suggests they could benefit from focused unit tests. Priority: parser.rs and cascade.rs are core to spec verification and should have direct test modules.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "ai_generated_debt",
+      "identifier": "high_comment_ratio_lib_files",
+      "summary": "Several lib.rs files have comment ratios 3-4x the codebase average, suggesting over-documented re-export modules",
+      "related_files": [
+        "crates/temper-agent-runtime/src/lib.rs",
+        "crates/temper-observe/src/lib.rs",
+        "crates/temper-codegen/src/lib.rs",
+        "crates/temper-jit/src/table/mod.rs"
+      ],
+      "evidence": [
+        "Codebase average comment ratio: 0.171",
+        "temper-agent-runtime/src/lib.rs: 0.62 comment ratio (3.6x average)",
+        "temper-observe/src/lib.rs: 0.54 comment ratio (3.2x average)",
+        "temper-codegen/src/lib.rs: 0.50 comment ratio (2.9x average)",
+        "temper-jit/src/table/mod.rs: 0.45 comment ratio (2.6x average)"
+      ],
+      "suggestion": "Review these files for restating comments that echo use/pub statements. Crate-level lib.rs doc comments explaining architecture are valuable, but per-re-export line comments add noise. Consolidate into a single crate-level //! doc comment block.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "api_surface_coherence",
+      "identifier": "authorize_signature_divergence",
+      "summary": "The 'authorize' function has 3 different signatures across 3 files, creating API inconsistency",
+      "related_files": [
+        "crates/temper-authz/src/engine.rs",
+        "crates/temper-server/src/authz/wasm_gate.rs",
+        "crates/temper-server/src/authz/helpers.rs"
+      ],
+      "evidence": [
+        "signature: 'authorize' has 3 different signatures across 3 files",
+        "authorize_http_call has 2 different signatures across 3 files",
+        "authorize_secret_access has 2 different signatures across 3 files",
+        "These are related authorization functions that should follow a consistent parameter pattern"
+      ],
+      "suggestion": "Standardize the authorization function signatures. Consider a shared AuthzRequest struct that all authorize variants accept, or ensure the parameter ordering and types are consistent across the authorization surface.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "api_surface_coherence",
+      "identifier": "too_many_arguments_pattern_wide_event",
+      "summary": "wide_event.rs has 4 separate #[allow(clippy::too_many_arguments)] suppressions indicating API design debt",
+      "related_files": [
+        "crates/temper-observe/src/wide_event.rs"
+      ],
+      "evidence": [
+        "4 instances of #[allow(clippy::too_many_arguments)] at lines 107, 158, 206, 248",
+        "This file is 525 LOC with multiple functions taking too many positional parameters"
+      ],
+      "suggestion": "Introduce builder or context structs for wide event construction. A WideEventBuilder or WideEventContext struct would group the common parameters (tenant, entity_type, entity_id, action, etc.) and reduce the parameter count of each emit function.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "incomplete_migration",
+      "identifier": "tlaplus_legacy_coexistence",
+      "summary": "TLA+ parser coexists with IOA TOML parser; TLA+ is documented as legacy but code persists",
+      "related_files": [
+        "crates/temper-spec/src/tlaplus/extractor.rs",
+        "crates/temper-spec/src/tlaplus/mod.rs",
+        "crates/temper-spec/src/tlaplus/types.rs",
+        "crates/temper-cli/src/util.rs"
+      ],
+      "evidence": [
+        "CLAUDE.md states: 'TLA+ is legacy -- from_tla_source() is #[cfg(test)] only'",
+        "tlaplus/extractor.rs is 664 LOC of production code (not cfg(test))",
+        "util.rs contains read_tla_sources() which reads .tla files from a specs directory",
+        "The tlaplus module has 793 total LOC across 3 files"
+      ],
+      "suggestion": "If TLA+ is truly legacy and only for tests, gate the entire tlaplus module with #[cfg(test)] or move it to a test-support crate. The current state has ~800 LOC of production-compiled legacy code that the project docs say should be test-only.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "incomplete_migration",
+      "identifier": "deprecated_record_store_still_in_use",
+      "summary": "RecordStore import is marked #[allow(deprecated)] with ADR phase note but still actively used",
+      "related_files": [
+        "crates/temper-server/src/state/mod.rs"
+      ],
+      "evidence": [
+        "#[allow(deprecated)] // ADR-0025 Phase 4: remove after sentinel/insight dispatch migrated to IOA entities",
+        "use temper_evolution::store::RecordStore;"
+      ],
+      "suggestion": "Track ADR-0025 Phase 4 completion. The deprecated import should either be migrated to the IOA entity approach or the deprecation timeline should be documented in a tracking issue.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "abstraction_fitness",
+      "identifier": "wide_param_bag_hotspots",
+      "summary": "52 files flagged for config_bag pattern mentions, indicating potential parameter object opportunities",
+      "related_files": [
+        "crates/temper-mcp/src/lib_tests.rs",
+        "crates/temper-odata/src/query/types.rs",
+        "crates/temper-server/src/state/dispatch/effects.rs",
+        "crates/temper-jit/src/table/types.rs",
+        "crates/temper-authz/src/engine.rs"
+      ],
+      "evidence": [
+        "lib_tests.rs: 65 config_bag_mentions, query/types.rs: 63, dispatch/effects.rs: 55, table/types.rs: 48, engine.rs: 43",
+        "The top 5 files average 54.8 config_bag_mentions each",
+        "Combined with the too_many_arguments lint suppressions, this suggests a systemic pattern of passing many related parameters individually"
+      ],
+      "suggestion": "For the highest-hit files, identify parameter clusters that travel together and extract them into named structs. For example, (tenant, entity_type, entity_id) appears as a cluster across many call sites and could be the existing QualifiedEntityId.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "toml_parser_hand_rolled_complexity",
+      "summary": "toml_parser.rs is a 936-LOC hand-rolled TOML parser with complexity score 976",
+      "related_files": [
+        "crates/temper-spec/src/automaton/toml_parser.rs"
+      ],
+      "evidence": [
+        "936 LOC with complexity score 976 (highest in the codebase)",
+        "Uses manual line-by-line parsing with section tracking state variables",
+        "Module docstring says 'hand-rolled parser rather than the full toml crate for the core parsing'",
+        "Multiple flush_all() calls to manage accumulated state, 6 Option<T> tracking variables for current section items"
+      ],
+      "suggestion": "Consider whether the toml crate (already a dependency per 'delegated to toml::from_str in a second pass') could handle the full parse. If the hand-rolled parser must stay, split it into section-specific submodules and extract the flush/accumulate pattern into a typed state machine.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "server_src_root_file_sprawl",
+      "summary": "temper-server/src/ root has 13 files (3244 LOC) mixing concerns: event sourcing, idempotency, query eval, registry bootstrap, sentinels",
+      "related_files": [
+        "crates/temper-server/src/event_store.rs",
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/eventual_invariants.rs",
+        "crates/temper-server/src/idempotency.rs",
+        "crates/temper-server/src/query_eval.rs",
+        "crates/temper-server/src/registry_bootstrap.rs",
+        "crates/temper-server/src/sentinel.rs",
+        "crates/temper-server/src/wasm_registry.rs"
+      ],
+      "evidence": [
+        "13 files at root level totaling 3244 LOC",
+        "event_store.rs (171 LOC), events.rs (86 LOC), eventual_invariants.rs (347 LOC), idempotency.rs (172 LOC), query_eval.rs (746 LOC), registry_bootstrap.rs (313 LOC), sentinel.rs (276 LOC), wasm_registry.rs (139 LOC)",
+        "These files have low cohesion with each other -- event_store and events could be in an events/ subdirectory, query_eval could be in odata/, sentinel could be in observe/"
+      ],
+      "suggestion": "Group related root files into subdirectories: move event_store.rs and events.rs into an events/ module, move query_eval.rs into odata/ where it logically belongs, move sentinel.rs into observe/ where the evolution engine lives.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "observe_evolution_operations_deep_chain",
+      "summary": "observe/evolution/operations.rs has max chain depth 4 with 29 chains, highest indirection in the codebase",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/operations.rs"
+      ],
+      "evidence": [
+        "max_chain_depth: 4, chain_count: 29 -- the highest max_chain_depth in the codebase",
+        "This file is 390 LOC with 5 disconnected function clusters (9 functions)",
+        "The deep call chains suggest orchestration logic that could benefit from flattening"
+      ],
+      "suggestion": "Review the 4-deep call chains to determine if intermediate layers add value. Consider flattening chains where inner functions are only called from one place, or restructuring as a pipeline/composition pattern instead of nested delegation.",
+      "confidence": "low"
+    },
+    {
+      "dimension": "convention_outlier",
+      "identifier": "mixed_error_strategy_cross_invariant",
+      "summary": "cross_invariant/parser.rs uses mixed error strategy while all sibling modules use result_type consistently",
+      "related_files": [
+        "crates/temper-spec/src/cross_invariant/parser.rs"
+      ],
+      "evidence": [
+        "Error strategy map shows cross_invariant/parser.rs as 'mixed' while every other parser (automaton/parser.rs, csdl/parser.rs, tlaplus/extractor.rs) uses 'result_type'",
+        "The rest of temper-spec uses result_type consistently: 34 result_type in automaton/, 90 in csdl/, 8 in tlaplus/"
+      ],
+      "suggestion": "Standardize cross_invariant/parser.rs to use Result types consistently, matching the convention used by all sibling parser modules in temper-spec.",
+      "confidence": "high"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "signature_divergence_across_trait_impls",
+      "summary": "Multiple functions have divergent signatures across implementation files, risking contract confusion",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/records_detail.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-server/src/event_store.rs",
+        "crates/temper-server/src/authz/wasm_gate.rs"
+      ],
+      "evidence": [
+        "get_evolution_record: 2 different signatures across 3 files",
+        "list_evolution_records: 2 different signatures across 3 files",
+        "list_entity_ids: 2 different signatures across 6 files",
+        "authorize_http_call: 2 different signatures across 3 files",
+        "authorize_secret_access: 2 different signatures across 3 files",
+        "dispatch: 4 different signatures across 4 files"
+      ],
+      "suggestion": "For each case, determine which signature is the 'canonical' one and align the others. Where the divergence is due to trait implementations vs free functions, consider whether the free function should delegate to the trait method rather than having its own independent signature.",
+      "confidence": "medium"
+    },
+    {
+      "dimension": "naming_quality",
+      "identifier": "duplicate_function_names_across_crates",
+      "summary": "'new' has 42 different signatures across 66 files -- while expected for constructors, some may mask intent",
+      "related_files": [
+        "crates/temper-agent-runtime/src/providers/anthropic.rs"
+      ],
+      "evidence": [
+        "signature: 'new' has 42 different signatures across 66 files",
+        "While ::new() is idiomatic Rust, the high variance (42 unique signatures) suggests some constructors may benefit from named constructors that convey what is being configured"
+      ],
+      "suggestion": "Review constructors with many parameters (>4) and consider named constructor alternatives like ::with_config(), ::from_credentials(), or builder patterns for complex initialization.",
+      "confidence": "low"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "near_duplicate_test_helpers",
+      "summary": "Near-duplicate functions detected across test files, indicating missing shared test infrastructure",
+      "related_files": [
+        "reference-apps/ecommerce/benches/agent_checkout.rs",
+        "crates/temper-runtime/src/scheduler/core.rs"
+      ],
+      "evidence": [
+        "dupes: Near dupe: build_pg_state in reference-apps/ecommerce/benches/agent_checkout.rs",
+        "dupes: Near dupe: run_scenario in crates/temper-runtime/src/scheduler/core.rs"
+      ],
+      "suggestion": "Extract duplicated test helper functions into shared test utility modules (e.g., tests/common/ directories or a temper-test-support crate) to reduce maintenance burden and ensure test infrastructure evolves consistently.",
+      "confidence": "medium"
+    }
+  ],
+  "provenance": {
+    "kind": "blind_review_batch_import",
+    "blind": true,
+    "runner": "claude",
+    "run_stamp": "ext_20260306_021153_638935d4",
+    "created_at": "2026-03-06T02:16:11+00:00",
+    "packet_path": "/Users/seshendranalla/Development/temper/.claude/worktrees/zany-snuggling-deer/.desloppify/review_packet_blind.json",
+    "packet_sha256": "7123863e09c7337bf3db9963a90c63c07db928aab987053e02875cc11f377cbd",
+    "external_session_id": "ext_20260306_021153_638935d4"
+  }
+}

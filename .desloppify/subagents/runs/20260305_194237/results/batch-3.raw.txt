@@ -1,0 +1,226 @@
+{
+  "batch": "Cross-cutting Sweep",
+  "batch_index": 3,
+  "assessments": {
+    "naming_quality": 91.0,
+    "logic_clarity": 78.0,
+    "type_safety": 88.0,
+    "contract_coherence": 81.0,
+    "error_consistency": 76.0,
+    "initialization_coupling": 93.0,
+    "convention_outlier": 89.0,
+    "api_surface_coherence": 82.0,
+    "design_coherence": 83.0
+  },
+  "dimension_notes": {
+    "naming_quality": {
+      "evidence": [
+        "Optimization API uses abbreviated type names (`OptCategory`, `OptAction`) while most other crates use fully spelled domain nouns (`RecordType`, `ObserveError`, `AuthzError`).",
+        "Public evolution/observe/server APIs are generally explicit, but abbreviation islands increase vocabulary switching cost."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "medium",
+      "issues_preventing_higher_score": "Abbreviated public type names in `temper-optimize` diverge from the more explicit naming style used across sibling crates."
+    },
+    "logic_clarity": {
+      "evidence": [
+        "`generate_insights` marks unmet intent as resolved if any `SubmitSpec` exists for an entity type, without checking event ordering (`crates/temper-server/src/insight_generator.rs:112-119`).",
+        "`generate_unmet_intents` uses the same entity-level presence check (`submitted_specs.contains_key`) and can mark failures as resolved even when failures occur after submit (`crates/temper-server/src/insight_generator.rs:307-309`)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "type_safety": {
+      "evidence": [
+        "Evolution filtering takes free-form `Option<String>` for `record_type`/`status` and forwards them directly (`crates/temper-server/src/observe/evolution/records_list.rs:12-27`) instead of using `RecordType`/`RecordStatus` enums from `temper-evolution`.",
+        "Several response payloads are built as untyped `serde_json::Value` maps, reducing compile-time guarantees on API field stability."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "medium",
+      "issues_preventing_higher_score": "Stringly-typed request filters and untyped response assembly leave API-level typing weaker than the internal enum model."
+    },
+    "contract_coherence": {
+      "evidence": [
+        "`run(name)` is documented as `temper init <name>`, but writes the raw input into package `name` (`crates/temper-cli/src/init/mod.rs:43-86`), so path-like input can generate invalid Cargo package names.",
+        "Tests encode this behavior by asserting `Cargo.toml` contains the full path string (`crates/temper-cli/src/init/mod.rs:174-177`), which conflicts with Cargo package naming constraints."
+      ],
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "confidence": "high"
+    },
+    "error_consistency": {
+      "evidence": [
+        "SSE event serialization failure is silently converted to empty payload via `unwrap_or_default()` (`crates/temper-server/src/events.rs:50`).",
+        "`/observe/evolution` handlers log Turso errors and return successful empty responses instead of surfacing transport/query failures (`crates/temper-server/src/observe/evolution/records_list.rs:67-80`, `117-127`)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "initialization_coupling": {
+      "evidence": [
+        "No import-time network or DB side effects were found in the reviewed files; Postgres/Turso connections are established in explicit async functions (`crates/temper-cli/src/serve/storage.rs:39-59`).",
+        "Module roots are mostly re-export-only and avoid startup-order-sensitive globals (`crates/temper-agent-runtime/src/lib.rs`, `crates/temper-observe/src/lib.rs`, `crates/temper-odata/src/lib.rs`)."
+      ],
+      "impact_scope": "local",
+      "fix_scope": "single_edit",
+      "confidence": "high",
+      "issues_preventing_higher_score": "Bootstrap still couples runtime restoration and DB migration into single connect paths, which can complicate isolated startup testing."
+    },
+    "convention_outlier": {
+      "evidence": [
+        "Error enums are mostly crate-specific and coherent, but naming convention drifts exist (`ProviderError`/`ConnectionError` vs short `Tool`/`Runtime` variants across crates).",
+        "Public APIs mix strongly typed domain enums in core crates with ad-hoc string status fields in server DTOs."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "medium",
+      "issues_preventing_higher_score": "Conventions are mostly consistent, but server-facing DTO conventions drift toward stringly contracts compared with enum-heavy core crates."
+    },
+    "api_surface_coherence": {
+      "evidence": [
+        "Evolution API accepts unconstrained string filters while canonical enums already exist (`crates/temper-server/src/observe/evolution/records_list.rs:12-27`, `crates/temper-evolution/src/records.rs:16-29`, `64-73`).",
+        "Handler responses merge arbitrary JSON `data` fields into top-level objects (`records_list.rs:43-49`, `100-107`), making field shape collision-prone and less predictable."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "design_coherence": {
+      "evidence": [
+        "`load_registry_from_postgres` and `load_registry_from_turso` duplicate near-identical grouping/restore logic with only storage access differences (`crates/temper-cli/src/serve/storage.rs:212-294` vs `296-369`).",
+        "Evolution list/insight handlers duplicate JSON merge and fallback behavior patterns (`crates/temper-server/src/observe/evolution/records_list.rs:29-80` and `92-127`)."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "logic_clarity",
+      "identifier": "insight_resolution_ignores_temporal_order",
+      "summary": "Unmet-intent resolution logic ignores timestamp ordering and can mark active failures as resolved",
+      "related_files": [
+        "crates/temper-server/src/insight_generator.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "`generate_insights` sets `resolved` based on entity presence in `submitted_types`, not whether submit happened after failures (`insight_generator.rs:112-119`).",
+        "`generate_unmet_intents` uses `submitted_specs.contains_key` similarly (`insight_generator.rs:307-309`), so later failures can still be labeled resolved in records served by evolution endpoints."
+      ],
+      "suggestion": "Track submit timestamps per entity and resolve only when `submit_timestamp >= last_failure_timestamp` for each grouped signal/intent; keep groups open when failures continue after submit.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "temporal_state_modeling_gap"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "sse_serialization_error_suppressed",
+      "summary": "SSE stream silently emits empty data when event serialization fails",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-mcp/src/error.rs"
+      ],
+      "evidence": [
+        "`serde_json::to_string(&change).unwrap_or_default()` replaces serialization failure with empty string (`events.rs:50`).",
+        "Elsewhere (e.g., MCP) serialization issues are typed and surfaced (`McpError::Serialization`, `crates/temper-mcp/src/error.rs:52-55`), creating inconsistent failure behavior."
+      ],
+      "suggestion": "Replace `unwrap_or_default` with explicit error handling: log the serialization error with entity context and either skip the event or emit a structured error event, but never substitute silent empty payloads.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "error_swallowing_to_keep_endpoint_green"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "observe_endpoints_mask_store_failures",
+      "summary": "Evolution endpoints return 200+empty payload when Turso query fails",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-cli/src/serve/storage.rs"
+      ],
+      "evidence": [
+        "On Turso query errors, handlers only `warn!` and then return empty arrays (`records_list.rs:67-80`, `117-127`).",
+        "Storage layer otherwise treats DB failures as hard errors (`anyhow` propagation in `storage.rs:216-233`, `301-308`), so API behavior diverges from backend error contract."
+      ],
+      "suggestion": "Return explicit error responses (e.g., 503/500 with stable error envelope) when persistent-store queries fail; keep empty payload fallback only for the explicit \"store not configured\" branch.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "error_swallowing_to_keep_endpoint_green"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "init_uses_raw_input_as_cargo_package_name",
+      "summary": "`temper init` treats path-like input as Cargo package name, violating Cargo naming contract",
+      "related_files": [
+        "crates/temper-cli/src/init/mod.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "`run(name)` writes `name` directly into `Cargo.toml` package name template (`init/mod.rs:34-37`, `84-86`) without sanitization.",
+        "Test passes absolute path as input and asserts that path appears in package name (`init/mod.rs:148-150`, `174-177`), locking in invalid-manifest behavior for non-simple names."
+      ],
+      "suggestion": "Derive package name from `Path::file_name()` and normalize to Cargo-valid `[a-zA-Z0-9_-]` format, while still using full path for destination directory.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "input_identity_vs_artifact_identity_mismatch"
+    },
+    {
+      "dimension": "api_surface_coherence",
+      "identifier": "stringly_typed_evolution_filters",
+      "summary": "Evolution API filters are free-form strings despite canonical enum types",
+      "related_files": [
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-evolution/src/records.rs"
+      ],
+      "evidence": [
+        "`EvolutionRecordParams` uses `Option<String>` for `record_type` and `status` (`records_list.rs:10-15`) and forwards directly to storage (`:26-27`).",
+        "Canonical enums already define valid values (`RecordType`, `RecordStatus` in `records.rs:16-29`, `64-73`), but endpoint contract does not enforce them."
+      ],
+      "suggestion": "Use typed query DTOs backed by enum deserialization (`serde(rename_all = \"lowercase\")`) and return 400 for invalid values; keep storage signatures aligned to typed enums.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "stringly_typed_evolution_api"
+    },
+    {
+      "dimension": "design_coherence",
+      "identifier": "backend_restore_logic_duplicated",
+      "summary": "Postgres and Turso registry restore flows duplicate large orchestration blocks",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "`load_registry_from_postgres` and `load_registry_from_turso` repeat the same grouping/parsing/registration/status-restore logic with backend-specific row types (`storage.rs:212-294` and `296-369`).",
+        "The same file already introduced `SpecRowLike` abstraction (`storage.rs:130-164`) but orchestration remains duplicated, indicating partial abstraction.",
+        "Records handlers also duplicate JSON assembly/fallback blocks (`records_list.rs:29-80` and `92-127`), showing repeated endpoint orchestration patterns."
+      ],
+      "suggestion": "Extract backend-agnostic restore pipeline into shared helper(s) operating over a row trait plus backend loader closures; similarly extract shared evolution response assembly utilities.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "partial_abstraction_leaving_duplicate_orchestration"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Stringly typed API boundaries around evolution data despite strong internal enums",
+      "Operational preference for soft-fail empty responses leading to hidden runtime failures",
+      "Partial abstraction adoption where low-level traits exist but orchestration is still copy-pasted"
+    ],
+    "likely_symptoms": [
+      "stringly_typed_evolution_filters",
+      "observe_endpoints_mask_store_failures",
+      "backend_restore_logic_duplicated"
+    ],
+    "possible_false_positives": []
+  }
+}

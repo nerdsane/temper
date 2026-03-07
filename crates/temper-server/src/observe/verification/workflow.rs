@@ -161,7 +161,12 @@ fn step_from_event(
     let event = events.iter().find(|e| e.kind == kind);
     WorkflowStep {
         step: step_name.to_string(),
-        status: if event.is_some() { "completed" } else { "pending" }.to_string(),
+        status: if event.is_some() {
+            "completed"
+        } else {
+            "pending"
+        }
+        .to_string(),
         passed: None,
         timestamp: event.map(|e| e.timestamp.clone()),
         summary: event.map(|e| e.summary.clone()),
@@ -181,7 +186,11 @@ fn build_entity_workflow(
     // Steps 1-2: loaded and verify_started
     let started_event = entity_events.iter().find(|e| e.kind == "verify_started");
     steps.push(step_from_event("loaded", entity_events, "spec_loaded"));
-    steps.push(step_from_event("verify_started", entity_events, "verify_started"));
+    steps.push(step_from_event(
+        "verify_started",
+        entity_events,
+        "verify_started",
+    ));
 
     // Steps 3-6: L0-L3 from verify_level events
     let level_events: Vec<_> = entity_events

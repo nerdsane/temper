@@ -1,0 +1,103 @@
+{
+  "batch": "Package Organization",
+  "batch_index": 4,
+  "assessments": {
+    "package_organization": 74.0,
+    "high_level_elegance": 76.0
+  },
+  "dimension_notes": {
+    "package_organization": {
+      "evidence": [
+        "holistic_context.structure.directory_profiles reports `crates/temper-server/src/observe/` at 10 files and 3390 LOC, indicating a dense boundary where navigation depends heavily on naming discipline.",
+        "`crates/temper-server/src/api.rs` routes multiple `/api` mutation endpoints to `crate::observe::*` handlers (`/specs/load-dir`, `/specs/load-inline`, `/wasm/modules/*`, `/evolution/*`), while the file header says observe should remain read-only.",
+        "`crates/temper-observe/src/lib.rs` documents a provider-agnostic `ObservabilityStore` architecture but directly exposes `clickhouse` as a first-class root module and re-export, mixing adapter placement into the core package surface."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "high_level_elegance": {
+      "evidence": [
+        "`crates/temper-server/src/api.rs` combines unrelated domains (spec loading, WASM lifecycle, secrets, policy CRUD, decision workflow, REPL, authorize/audit, SSE streams) in one top-level module, obscuring ownership boundaries.",
+        "`crates/temper-server/src/authz_helpers.rs` is named as helper code but performs governance writes (`dispatch_tenant_action` for `GovernanceDecision`) and trajectory persistence, so the module role is broader than its package placement suggests.",
+        "`crates/temper-observe/src/lib.rs` exposes both query abstractions and concrete/write-side concerns from one crate root, weakening clear top-level decomposition."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "package_organization",
+      "identifier": "observe_namespace_contains_management_mutations",
+      "summary": "Management mutations are implemented under `observe` namespace, breaking directory boundary intent.",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/observe/evolution.rs",
+        "crates/temper-server/src/observe/entities.rs"
+      ],
+      "evidence": [
+        "`api.rs` documents `/api` as management mutations separated from read-only observe routes, but wires `/api/specs/*`, `/api/wasm/modules/*`, and `/api/evolution/*` to `crate::observe::*` handlers.",
+        "`observe/evolution.rs` exports `handle_decide` and other mutation-oriented handlers, while sibling `observe/entities.rs` is read/query focused, creating mixed concerns inside one directory."
+      ],
+      "suggestion": "Staged reorg plan: 1) create `crates/temper-server/src/manage/` with `specs.rs`, `wasm.rs`, `evolution.rs`; 2) move mutation handlers (`handle_load_*`, `upload/delete_wasm_module`, `handle_decide`, `handle_unmet_intent`, `handle_sentinel_check`) from `observe/*` into `manage/*`; 3) keep `observe/*` only for GET/query/SSE read models; 4) update route imports in `api.rs` to `crate::manage::*`; 5) run `rg \"crate::observe::(specs|wasm|evolution)::handle_\" crates/temper-server/src -n` to verify no mutation handlers remain under observe, then run `cargo check -p temper-server` and `cargo test -p temper-server`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "boundary_blur_between_read_and_manage"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "api_module_is_multi_domain_hub",
+      "summary": "`api.rs` acts as a broad hub for many domains, reducing ownership clarity.",
+      "related_files": [
+        "crates/temper-server/src/api.rs",
+        "crates/temper-server/src/authz_helpers.rs",
+        "crates/temper-server/src/constraint_engine.rs"
+      ],
+      "evidence": [
+        "`api.rs` route table includes secrets, policy CRUD, decision workflow, REPL, authz/audit, and agent stream endpoints in one module.",
+        "`authz_helpers.rs` performs non-helper side effects (pending-decision persistence, governance entity creation, trajectory recording), increasing hidden coupling between transport handlers and governance workflows."
+      ],
+      "suggestion": "Staged reorg plan: 1) split `api.rs` into domain routers (`api/secrets.rs`, `api/policies.rs`, `api/decisions.rs`, `api/repl.rs`, `api/authz.rs`) and compose in a thin `api/mod.rs`; 2) move `record_authz_denial` into a dedicated service module (`governance/denials.rs`) and keep header parsing helpers separate; 3) keep HTTP translation in `api/*` and domain effects in service modules; 4) update imports with `rg \"record_authz_denial|security_context_from_headers\" crates/temper-server/src -n`; 5) validate with `cargo check -p temper-server` and endpoint smoke tests for `/api/tenants/*` and `/api/decisions*`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "boundary_blur_between_read_and_manage"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "temper_observe_root_mixes_core_and_adapter_roles",
+      "summary": "The `temper-observe` root surface mixes core abstractions with concrete adapter placement.",
+      "related_files": [
+        "crates/temper-observe/src/lib.rs",
+        "crates/temper-observe/src/clickhouse.rs",
+        "crates/temper-observe/src/error.rs"
+      ],
+      "evidence": [
+        "`lib.rs` describes a provider-agnostic trait-centered architecture but directly exposes `pub mod clickhouse` and re-exports `ClickHouseStore` from crate root.",
+        "This places provider-specific implementation alongside canonical schema/store contracts, reducing package-role separation."
+      ],
+      "suggestion": "Staged reorg plan: 1) introduce `crates/temper-observe/src/adapters/` and move `clickhouse.rs` to `adapters/clickhouse.rs`; 2) keep `lib.rs` root exports focused on core contracts (`store`, `schema`, `error`, trajectory types); 3) re-export adapter types behind an explicit namespace (`pub mod adapters`) to preserve compatibility; 4) update call sites using `rg \"ClickHouseStore|temper_observe::clickhouse\" -n`; 5) validate with `cargo check -p temper-observe -p temper-server` and existing observe integration tests.",
+      "confidence": "medium",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "core_vs_adapter_separation"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Read/observe and manage/mutation concerns were organized by implementation convenience instead of boundary contracts.",
+      "Helper-style naming masks service-level side effects, encouraging hub modules.",
+      "Core-vs-adapter separation is incomplete in observability package exports."
+    ],
+    "likely_symptoms": [
+      "observe_namespace_contains_management_mutations",
+      "api_module_is_multi_domain_hub"
+    ],
+    "possible_false_positives": [
+      "If the team intentionally defines `observe` as a broader governance/operations namespace, finding severity for namespace mismatch may be lower."
+    ]
+  }
+}

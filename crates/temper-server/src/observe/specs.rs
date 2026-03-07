@@ -44,7 +44,10 @@ pub(crate) async fn handle_list_specs(
                 {
                     Some(VerificationStatus::Pending) | None => ("pending".to_string(), None, None),
                     Some(VerificationStatus::Running) => ("running".to_string(), None, None),
-                    Some(VerificationStatus::Completed(result) | VerificationStatus::Restored(result)) => {
+                    Some(
+                        VerificationStatus::Completed(result)
+                        | VerificationStatus::Restored(result),
+                    ) => {
                         let passed = result.levels.iter().filter(|l| l.passed).count();
                         let total = result.levels.len();
                         let status = if result.all_passed {

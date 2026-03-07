@@ -7,8 +7,8 @@ use axum::routing::get;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::odata;
 use crate::events;
+use crate::odata;
 use crate::state::ServerState;
 use crate::webhooks::receiver as webhook_receiver;
 

@@ -1,0 +1,144 @@
+{
+  "batch": "Governance & Contracts",
+  "batch_index": 5,
+  "assessments": {
+    "cross_module_architecture": 76.0,
+    "high_level_elegance": 74.0,
+    "test_strategy": 79.0,
+    "package_organization": 78.0
+  },
+  "dimension_notes": {
+    "cross_module_architecture": {
+      "evidence": [
+        "`crates/temper-cli/src/serve/storage.rs` implements parallel Postgres and Turso flows (`connect_postgres_store`, `load_registry_from_postgres`, `load_registry_from_turso`, dual upsert paths), but `crates/temper-server/src/observe/evolution/records_list.rs` hard-codes Turso-oriented behavior (`Query Turso directly (single source of truth)`) for evolution reads.",
+        "README states backend parity (`Storage: Postgres or Turso/libSQL`) while evolution-list handlers are coupled to one backend contract and return empty fallback on absence/error instead of using a backend-neutral query seam."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    },
+    "high_level_elegance": {
+      "evidence": [
+        "README presents absolute platform contracts (for example verification cascade language 'No exceptions' and broad 'Done' claims), but runtime composition is conditional via feature flags (`crates/temper-server/src/lib.rs` gates `observe` and `insight_generator` behind `feature = \"observe\"`).",
+        "`crates/temper-server/src/observe/evolution/records_list.rs` silently degrades to empty payloads on storage errors/no store, which weakens contract honesty against README's strong governance/audit guarantees."
+      ],
+      "impact_scope": "codebase",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "medium"
+    },
+    "test_strategy": {
+      "evidence": [
+        "`crates/temper-server/src/events.rs` tests only struct serialization; no tests exercise SSE stream behavior (lag handling, event payload generation, keep-alive behavior).",
+        "`crates/temper-server/src/observe/evolution/records_list.rs` has no tests for query-param filtering, JSON merge logic, or error/no-store fallbacks.",
+        "`crates/temper-cli/src/serve/storage.rs` has unit tests for URL redaction/status mapping but no integration test validating Postgres/Turso parity for persisted spec restoration."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    },
+    "package_organization": {
+      "evidence": [
+        "`holistic_context.structure.directory_profiles` shows `crates/temper-server/src/` has 22 production files (flat overload threshold exceeded) with mixed concerns (routing, authz, evolution insight generation, secrets, dispatch).",
+        "`crates/temper-server/src/insight_generator.rs` (evolution-domain logic) lives at server root while related handlers are under `crates/temper-server/src/observe/evolution/`, indicating placement drift from domain boundaries."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "cross_module_architecture",
+      "identifier": "backend_contract_drift_evolution_reads",
+      "summary": "Evolution read path is Turso-coupled while broader storage contract advertises backend neutrality.",
+      "related_files": [
+        "README.md",
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "`storage.rs` maintains dual backend logic for Postgres and Turso (connect/load/upsert mirrors).",
+        "`records_list.rs` explicitly queries Turso-oriented store methods and falls back to empty data when unavailable.",
+        "README advertises storage backend choice (`Postgres or Turso/libSQL`), but this endpoint contract is not backend-agnostic."
+      ],
+      "suggestion": "Define a backend-neutral evolution-read trait in server state (for records and ranked insights), implement adapters for Postgres and Turso, and route `records_list` through that trait. Keep Turso-specific SQL in adapter modules only. Add parity tests that run the same handler assertions against both adapters.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "storage_backend_contract_drift"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "docs_runtime_contract_mismatch",
+      "summary": "Top-level governance claims are stronger than runtime-scoped behavior and fallback semantics.",
+      "related_files": [
+        "README.md",
+        "crates/temper-server/src/lib.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "README uses unconditional contract language around verification/governance and implemented feature status.",
+        "`lib.rs` conditionally compiles observe/evolution pieces behind `feature = \"observe\"`.",
+        "`records_list.rs` returns empty success-shaped responses on storage error/no store, which can hide governance telemetry gaps."
+      ],
+      "suggestion": "Split README claims into explicit contract tiers: core guarantees vs optional features (`observe`, backend-specific capabilities). Document degradation semantics (empty fallback vs error) and align runtime to surface explicit capability status in responses.",
+      "confidence": "medium",
+      "impact_scope": "codebase",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "contract_honesty_gap"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "missing_endpoint_contract_tests",
+      "summary": "Critical governance endpoints lack behavior-level tests for failure and fallback paths.",
+      "related_files": [
+        "crates/temper-server/src/events.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "crates/temper-cli/src/serve/storage.rs"
+      ],
+      "evidence": [
+        "`events.rs` contains only serialization unit coverage; no stream contract test for dropped/lagged broadcast events.",
+        "`records_list.rs` has no tests for filtering, JSON data merge, or store-error behavior despite direct user-facing contract shape.",
+        "`storage.rs` tests helpers but not cross-backend restore/upsert behavior that these endpoints depend on."
+      ],
+      "suggestion": "Add staged tests: (1) unit tests for `records_list` JSON shaping/filtering and error/no-store behavior; (2) async handler tests for SSE stream event framing and lag handling; (3) backend-parity integration tests for evolution data availability after Postgres vs Turso restore/upsert.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "governance_quality_gate_gap"
+    },
+    {
+      "dimension": "package_organization",
+      "identifier": "server_root_concern_overload",
+      "summary": "Server root is overloaded and evolution logic is split across root and observe subtrees.",
+      "related_files": [
+        "crates/temper-server/src/insight_generator.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "Objective structure signal: `crates/temper-server/src/` has 22 production files in one flat directory profile.",
+        "`insight_generator.rs` is evolution-domain logic at root while evolution endpoints are under `observe/evolution`, creating navigational and ownership ambiguity.",
+        "README presents evolution as a coherent subsystem, but placement currently fragments that boundary."
+      ],
+      "suggestion": "Staged reorg plan: Stage 1 move `insight_generator.rs` to `crates/temper-server/src/observe/evolution/insight_generator.rs`; Stage 2 update `observe/evolution.rs` exports and imports to use local module path; Stage 3 narrow `crates/temper-server/src/lib.rs` exposure to module-level `observe` API only. Validation/import-update commands: `rg -n \"insight_generator\" crates/temper-server/src`, `cargo check -p temper-server`, `cargo test -p temper-server observe::`.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "server_module_boundary_blur"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Backend neutrality is declared at product-doc level but not enforced by a shared evolution-read interface.",
+      "Contract documentation and runtime capability scoping (feature flags/degraded modes) are maintained separately and drift.",
+      "Server package boundaries evolved organically, leaving evolution-domain code split across root and nested modules."
+    ],
+    "likely_symptoms": [
+      "backend_contract_drift_evolution_reads",
+      "docs_runtime_contract_mismatch",
+      "server_root_concern_overload"
+    ],
+    "possible_false_positives": []
+  }
+}

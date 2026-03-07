@@ -164,7 +164,6 @@ pub(crate) async fn require_policy_auth(
     None
 }
 
-
 /// Validate and reload combined Cedar policies for a tenant mutation.
 ///
 /// Builds a combined policy text from all tenants, substituting `new_tenant_text`

@@ -146,20 +146,20 @@ impl SimReactionSystem {
             .collect();
 
         for rule in rules {
-            let target_entity_id = match super::resolver::resolve_target_id(&rule.resolve_target, entity_id, fields)
-            {
-                Some(id) => id,
-                None => {
-                    self.last_results.push(ReactionResult {
-                        rule_name: rule.name.clone(),
-                        success: false,
-                        target_status: None,
-                        error: Some("Could not resolve target entity ID".to_string()),
-                        depth,
-                    });
-                    continue;
-                }
-            };
+            let target_entity_id =
+                match super::resolver::resolve_target_id(&rule.resolve_target, entity_id, fields) {
+                    Some(id) => id,
+                    None => {
+                        self.last_results.push(ReactionResult {
+                            rule_name: rule.name.clone(),
+                            success: false,
+                            target_status: None,
+                            error: Some("Could not resolve target entity ID".to_string()),
+                            depth,
+                        });
+                        continue;
+                    }
+                };
 
             // Find the actor for the target entity
             let target_key = format!("{}:{}", rule.then.entity_type, target_entity_id);

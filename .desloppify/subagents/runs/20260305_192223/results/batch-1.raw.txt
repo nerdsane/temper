@@ -1,0 +1,90 @@
+{
+  "batch": "Architecture & Coupling",
+  "batch_index": 1,
+  "assessments": {
+    "high_level_elegance": 74.0
+  },
+  "dimension_notes": {
+    "high_level_elegance": {
+      "evidence": [
+        "`crates/temper-server/src/insight_generator.rs` co-locates three distinct pipelines (`generate_insights`, `generate_unmet_intents`, `generate_feature_requests`) plus shared classification/dedup heuristics in one module (lines 48, 241, 336, 414), blurring bounded ownership.",
+        "`crates/temper-cli/src/serve/storage.rs` contains near-mirror backend paths for both Postgres and Turso for registry restoration and spec upsert (`load_registry_from_postgres` vs `load_registry_from_turso`, lines 212-294 vs 297-369; `upsert_loaded_specs_to_postgres` vs `upsert_loaded_specs_to_turso`, lines 77-128 vs 473-499), indicating storage capability decomposition is backend-first rather than domain-first.",
+        "`crates/temper-server/src/observe/evolution/records_list.rs` handlers directly perform persistence calls and JSON shape construction/merging (lines 24-64, 89-115), making HTTP route modules own data-access and response composition simultaneously."
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high"
+    }
+  },
+  "findings": [
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "evolution_pipeline_god_module",
+      "summary": "One module owns multiple evolution domains and policy heuristics.",
+      "related_files": [
+        "crates/temper-server/src/insight_generator.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "`insight_generator.rs` implements insight ranking, unmet-intent lifecycle inference, feature-request generation, dedup-key parsing, and error taxonomy in one file (lines 48-235, 241-311, 336-402, 318-329, 414-429).",
+        "The API layer in `records_list.rs` separately re-shapes persisted evolution records/insights (lines 30-52, 92-109), so evolution behavior is split between generation policy and response-shaping policy without a clear service boundary."
+      ],
+      "suggestion": "Split evolution into dedicated modules/services (for example `insights`, `unmet_intents`, `feature_requests`) behind a small `EvolutionQueryService`/`EvolutionAnalysisService` interface used by observe handlers; keep classification/error taxonomy in shared typed policy modules to avoid policy scattering.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "root_cause_cluster": "missing_evolution_domain_boundary"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "backend_mirror_logic_in_cli_storage",
+      "summary": "Backend-specific mirror flows duplicate the same domain restore/upsert workflow.",
+      "related_files": [
+        "crates/temper-cli/src/serve/storage.rs",
+        "crates/temper-server/src/observe/evolution/records_list.rs"
+      ],
+      "evidence": [
+        "`load_registry_from_postgres` and `load_registry_from_turso` repeat the same grouping, CSDL parse, tenant registration, and status restoration algorithm with backend-specific row retrieval (storage.rs lines 212-294 and 297-369).",
+        "`upsert_loaded_specs_to_postgres` and `upsert_loaded_specs_to_turso` duplicate tenant/spec upsert semantics in two codepaths (lines 77-128 and 473-499), increasing drift risk whenever persistence rules change.",
+        "`records_list.rs` reaches directly into Turso from handler methods (lines 24-27, 89-90), reinforcing backend-specific coupling at call sites instead of through a unified domain repository."
+      ],
+      "suggestion": "Introduce a backend-agnostic repository trait (or adapter layer) for spec restore/upsert/evolution queries and centralize the domain algorithm once; backend adapters should only implement row fetch/store primitives.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "storage_boundary_leakage"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "state_dispatch_api_is_parameter_aggregate",
+      "summary": "Dispatch ownership is obscured by passing a wide cross-domain request bag.",
+      "related_files": [
+        "crates/temper-server/src/state/dispatch_blocking.rs",
+        "crates/temper-server/src/insight_generator.rs"
+      ],
+      "evidence": [
+        "`BlockingWasmDispatch` aggregates tenant identity, entity identity, action, effects, state snapshot, agent context, and action params in one struct (dispatch_blocking.rs lines 13-22), then just forwards all fields to internal dispatch (lines 38-47).",
+        "The method returns a boxed future from an `impl ServerState` extension (lines 31-36), making the state root object a broad orchestration surface rather than exposing narrower collaborators for integration dispatch."
+      ],
+      "suggestion": "Extract a dedicated integration-dispatch service with a typed command object organized by cohesive sub-objects (identity, invocation, context); keep `ServerState` as composition root and delegate via a stable trait boundary.",
+      "confidence": "medium",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "service_boundary_erosion"
+    }
+  ],
+  "retrospective": {
+    "root_causes": [
+      "Domain workflows are organized around immediate call-site convenience (handler or backend) rather than stable service/repository boundaries.",
+      "Cross-cutting policy logic (error categorization, recommendation text, record shaping) lacks a single ownership layer, causing duplicated and drifting behavior."
+    ],
+    "likely_symptoms": [
+      "backend_mirror_logic_in_cli_storage",
+      "evolution_pipeline_god_module",
+      "state_dispatch_api_is_parameter_aggregate"
+    ],
+    "possible_false_positives": [
+      "Packet-level orphaned/unused-import flags appear to be broad static artifacts; findings here were limited to directly evidenced structural coupling in current file contents."
+    ]
+  }
+}

@@ -191,8 +191,8 @@ pub fn check_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request_context::AgentContext;
     use crate::registry::SpecRegistry;
+    use crate::request_context::AgentContext;
     use crate::state::ServerState;
     use temper_runtime::ActorSystem;
     use temper_runtime::tenant::TenantId;

@@ -392,7 +392,9 @@ guard = [
         assert!(matches!(&guards[0], Guard::MinCount { var, min: 1 } if var == "items"));
         assert!(matches!(&guards[1], Guard::MaxCount { var, max: 10 } if var == "items"));
         assert!(matches!(&guards[2], Guard::IsTrue { var } if var == "ready"));
-        assert!(matches!(&guards[3], Guard::ListContains { var, value } if var == "tags" && value == "vip"));
+        assert!(
+            matches!(&guards[3], Guard::ListContains { var, value } if var == "tags" && value == "vip")
+        );
         assert!(matches!(&guards[4], Guard::ListLengthMin { var, min: 2 } if var == "tags"));
     }
 
@@ -428,7 +430,9 @@ effect = [
         assert!(matches!(&effects[4], Effect::ListAppend { var } if var == "log"));
         assert!(matches!(&effects[5], Effect::ListRemoveAt { var } if var == "log"));
         assert!(matches!(&effects[6], Effect::Trigger { name } if name == "run_wasm"));
-        assert!(matches!(&effects[7], Effect::Schedule { action, delay_seconds: 30 } if action == "Retry"));
+        assert!(
+            matches!(&effects[7], Effect::Schedule { action, delay_seconds: 30 } if action == "Retry")
+        );
     }
 
     #[test]
@@ -448,7 +452,12 @@ effect = [
 "#;
         let a: Automaton = toml::from_str(toml_src).unwrap();
         match &a.actions[0].effect[0] {
-            Effect::Spawn { entity_type, entity_id_source, initial_action, store_id_in } => {
+            Effect::Spawn {
+                entity_type,
+                entity_id_source,
+                initial_action,
+                store_id_in,
+            } => {
                 assert_eq!(entity_type, "Child");
                 assert_eq!(entity_id_source, "{uuid}");
                 assert_eq!(initial_action.as_deref(), Some("Init"));
@@ -508,8 +517,14 @@ on_failure = "PaymentFailed"
         assert_eq!(a.integrations.len(), 1);
         assert_eq!(a.integrations[0].name, "payment");
         assert_eq!(a.integrations[0].integration_type, "wasm");
-        assert_eq!(a.integrations[0].module.as_deref(), Some("payment_processor"));
-        assert_eq!(a.integrations[0].on_success.as_deref(), Some("PaymentConfirmed"));
+        assert_eq!(
+            a.integrations[0].module.as_deref(),
+            Some("payment_processor")
+        );
+        assert_eq!(
+            a.integrations[0].on_success.as_deref(),
+            Some("PaymentConfirmed")
+        );
     }
 
     #[test]
@@ -549,10 +564,17 @@ guard = [{ type = "cross_entity_state", entity_type = "Parent", entity_id_source
 "#;
         let a: Automaton = toml::from_str(toml_src).unwrap();
         match &a.actions[0].guard[0] {
-            Guard::CrossEntityState { entity_type, entity_id_source, required_status } => {
+            Guard::CrossEntityState {
+                entity_type,
+                entity_id_source,
+                required_status,
+            } => {
                 assert_eq!(entity_type, "Parent");
                 assert_eq!(entity_id_source, "parent_id");
-                assert_eq!(required_status, &vec!["Done".to_string(), "Approved".to_string()]);
+                assert_eq!(
+                    required_status,
+                    &vec!["Done".to_string(), "Approved".to_string()]
+                );
             }
             other => panic!("expected CrossEntityState, got {other:?}"),
         }

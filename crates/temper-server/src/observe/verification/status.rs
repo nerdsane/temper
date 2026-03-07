@@ -66,7 +66,8 @@ pub(crate) async fn handle_verification_status(
                         running += 1;
                         ("running".to_string(), None, None)
                     }
-                    VerificationStatus::Completed(result) | VerificationStatus::Restored(result) => {
+                    VerificationStatus::Completed(result)
+                    | VerificationStatus::Restored(result) => {
                         let passed_count = result.levels.iter().filter(|l| l.passed).count();
                         let s = if result.all_passed {
                             passed += 1;

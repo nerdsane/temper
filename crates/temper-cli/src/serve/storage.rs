@@ -134,10 +134,7 @@ mod tests {
 
     #[test]
     fn redact_no_scheme() {
-        assert_eq!(
-            redact_connection_url("no-scheme-here"),
-            "no-scheme-here"
-        );
+        assert_eq!(redact_connection_url("no-scheme-here"), "no-scheme-here");
     }
 
     #[test]
@@ -174,9 +171,7 @@ pub(super) async fn upsert_loaded_specs_to_turso(
         turso
             .delete_tenant_constraints(tenant)
             .await
-            .with_context(|| {
-                format!("Failed to clear tenant constraints for {tenant} in Turso")
-            })?;
+            .with_context(|| format!("Failed to clear tenant constraints for {tenant} in Turso"))?;
     }
     Ok(())
 }
