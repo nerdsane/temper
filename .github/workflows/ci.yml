@@ -119,7 +119,7 @@ jobs:
         run: |
           # Strip #[cfg(test)] blocks and proc macro crates before scanning
           FOUND=false
-          for f in $(find crates -name '*.rs' -not -path '*/tests/*' -not -name '*_test.rs' -not -path '*/temper-macros/*'); do
+          for f in $(find crates -name '*.rs' -not -path '*/tests/*' -not -name '*_test.rs' -not -name '*_tests.rs' -not -name 'tests.rs' -not -path '*/temper-macros/*'); do
             # Extract only production code (stop at #[cfg(test)])
             PROD_CODE="$(awk '/^#\[cfg\(test\)\]/{exit} {print}' "$f")"
             if echo "$PROD_CODE" | grep -E '(TODO|FIXME|XXX|HACK)\b' | grep -v '// ci-ok' | grep -qv '^[[:space:]]*//' 2>/dev/null; then
@@ -139,7 +139,7 @@ jobs:
           #     (poisoned lock = prior panic, TigerStyle fail-fast is correct)
           #   - .with_ymd_and_hms(...).unwrap() — chrono infallible for valid dates
           FOUND=false
-          for f in $(find crates -name '*.rs' -not -path '*/tests/*' -not -name '*_test.rs' -not -path '*/temper-macros/*' -not -path '*/benches/*'); do
+          for f in $(find crates -name '*.rs' -not -path '*/tests/*' -not -name '*_test.rs' -not -name '*_tests.rs' -not -name 'tests.rs' -not -path '*/temper-macros/*' -not -path '*/benches/*'); do
             PROD_CODE="$(awk '/^#\[cfg\(test\)\]/{exit} {print}' "$f")"
             FILTERED="$(echo "$PROD_CODE" | grep '\.unwrap()' | grep -v '// ci-ok' | grep -v '^[[:space:]]*//' | grep -v '\.read()\.unwrap()' | grep -v '\.write()\.unwrap()' | grep -v '\.lock()\.unwrap()' | grep -v 'with_ymd_and_hms.*\.unwrap()' || true)"
             if [ -n "$FILTERED" ]; then
