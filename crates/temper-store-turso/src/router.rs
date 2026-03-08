@@ -285,7 +285,10 @@ impl TenantStoreRouter {
         )
         .await
         .map_err(storage_error)?;
-        self.tenants.write().await.insert(tenant_id.to_string(), store.clone());
+        self.tenants
+            .write()
+            .await
+            .insert(tenant_id.to_string(), store.clone());
 
         info!(tenant_id, "Registered and connected new tenant");
         Ok(store)
@@ -396,15 +399,10 @@ impl TenantStoreRouter {
         }
 
         // Local mode: create a file-based database.
-        let base_dir = self
-            .local_base_dir
-            .as_deref()
-            .unwrap_or(".temper/tenants");
+        let base_dir = self.local_base_dir.as_deref().unwrap_or(".temper/tenants");
 
         std::fs::create_dir_all(base_dir).map_err(|e| {
-            PersistenceError::Storage(format!(
-                "failed to create tenant directory {base_dir}: {e}"
-            ))
+            PersistenceError::Storage(format!("failed to create tenant directory {base_dir}: {e}"))
         })?;
 
         let db_url = format!("file:{base_dir}/{tenant_id}.db");
@@ -508,10 +506,7 @@ impl TenantStoreRouter {
                 ))
             })?;
 
-        info!(
-            tenant_id,
-            db_url, "Provisioned Turso Cloud tenant database"
-        );
+        info!(tenant_id, db_url, "Provisioned Turso Cloud tenant database");
         Ok((db_url, Some(auth_token)))
     }
 
@@ -635,10 +630,7 @@ mod tests {
             .expect("append");
         assert_eq!(seq, 1);
 
-        let read_back = router
-            .read_events(persistence_id, 0)
-            .await
-            .expect("read");
+        let read_back = router.read_events(persistence_id, 0).await.expect("read");
         assert_eq!(read_back.len(), 1);
         assert_eq!(read_back[0].event_type, "OrderCreated");
 
@@ -686,10 +678,7 @@ mod tests {
             .expect("query");
         assert_eq!(alice_tenants.len(), 2);
 
-        let bob_tenants = router
-            .tenants_for_user("github:bob")
-            .await
-            .expect("query");
+        let bob_tenants = router.tenants_for_user("github:bob").await.expect("query");
         assert_eq!(bob_tenants.len(), 1);
         assert_eq!(bob_tenants[0].tenant_id, "alpha");
 
@@ -698,10 +687,7 @@ mod tests {
             .remove_tenant_user("alpha", "github:bob")
             .await
             .expect("remove");
-        let bob_tenants = router
-            .tenants_for_user("github:bob")
-            .await
-            .expect("query");
+        let bob_tenants = router.tenants_for_user("github:bob").await.expect("query");
         assert!(bob_tenants.is_empty());
     }
 }

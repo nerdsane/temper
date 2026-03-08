@@ -25,10 +25,7 @@ pub fn build_platform_router(state: PlatformState) -> Router {
 
     temper_server::build_router(state.server.clone())
         .nest("/api", tenant_api.with_state(state.clone()))
-        .layer(middleware::from_fn_with_state(
-            state,
-            tenant_access_check,
-        ))
+        .layer(middleware::from_fn_with_state(state, tenant_access_check))
 }
 
 #[cfg(test)]

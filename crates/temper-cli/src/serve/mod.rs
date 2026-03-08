@@ -117,8 +117,7 @@ pub async fn run(
                 let turso_url = match std::env::var("TURSO_URL") {
                     Ok(url) => url,
                     Err(_) => {
-                        let home =
-                            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
                         let db_path = Path::new(&home).join(".local/share/temper/agents.db");
                         let parent_dir = db_path.parent().context(
                             "Failed to determine parent directory for default Turso DB path",

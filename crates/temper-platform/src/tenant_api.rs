@@ -66,7 +66,10 @@ pub struct UserInfo {
 pub fn tenant_api_router() -> Router<PlatformState> {
     Router::new()
         .route("/tenants", routing::post(create_tenant).get(list_tenants))
-        .route("/tenants/{id}/users", routing::post(add_user).get(list_users))
+        .route(
+            "/tenants/{id}/users",
+            routing::post(add_user).get(list_users),
+        )
         .route(
             "/tenants/{id}/users/{user_id}",
             routing::delete(remove_user),

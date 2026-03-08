@@ -254,7 +254,11 @@ impl ServerState {
         // Turso tenant-routed path: load from each connected tenant + platform.
         if let Some(router) = store.tenant_router() {
             // Load from platform store (system modules).
-            if let Ok(rows) = router.platform_store().load_wasm_modules_all_tenants().await {
+            if let Ok(rows) = router
+                .platform_store()
+                .load_wasm_modules_all_tenants()
+                .await
+            {
                 for row in rows {
                     if let Ok(hash) = self.wasm_engine.compile_and_cache(&row.wasm_bytes) {
                         let tenant_id = temper_runtime::tenant::TenantId::new(&row.tenant);
