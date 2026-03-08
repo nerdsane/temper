@@ -3916,6 +3916,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "project-management"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "temper-jit",
+ "temper-runtime",
+ "temper-server",
+ "temper-spec",
+ "temper-store-postgres",
+ "temper-verify",
+ "tokio",
+]
+
+[[package]]
 name = "proptest"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -27,6 +27,7 @@ members = [
     "crates/temper-sandbox",
     "reference-apps/ecommerce",
     "reference-apps/oncall",
+    "os-apps/project-management",
 ]
 
 [workspace.package]
