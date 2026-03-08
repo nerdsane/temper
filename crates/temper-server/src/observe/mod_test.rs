@@ -78,6 +78,7 @@ fn system_post(uri: &str, body: &str) -> Request<Body> {
 }
 
 /// Build a POST request with admin auth headers.
+#[allow(dead_code)]
 fn admin_post(uri: &str, body: &str) -> Request<Body> {
     Request::post(uri)
         .header("Content-Type", "application/json")
