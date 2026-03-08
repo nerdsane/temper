@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::secrets_vault::SecretsVault;
+use super::vault::SecretsVault;
 
 /// Resolve `{secret:KEY}` patterns in integration config values.
 ///
@@ -27,23 +27,27 @@ pub fn resolve_secret_templates(
         .collect()
 }
 
+/// Template prefix for secret references.
+const SECRET_PREFIX: &str = "{secret:";
+
 /// Resolve all `{secret:...}` patterns within a single string value.
 fn resolve_value(value: &str, vault: &SecretsVault, tenant: &str) -> String {
     let mut result = String::with_capacity(value.len());
     let mut remaining = value;
 
-    while let Some(start) = remaining.find("{secret:") {
+    while let Some(start) = remaining.find(SECRET_PREFIX) {
         // Push everything before the pattern.
         result.push_str(&remaining[..start]);
 
-        let after_prefix = &remaining[start + 8..]; // skip "{secret:"
+        let after_prefix = &remaining[start + SECRET_PREFIX.len()..];
         if let Some(end) = after_prefix.find('}') {
             let key = &after_prefix[..end];
             if let Some(secret) = vault.get_secret(tenant, key) {
                 result.push_str(&secret);
             } else {
                 // Missing secret — leave the pattern as-is.
-                result.push_str(&remaining[start..start + 8 + end + 1]);
+                let pattern_end = start + SECRET_PREFIX.len() + end + 1;
+                result.push_str(&remaining[start..pattern_end]);
             }
             remaining = &after_prefix[end + 1..];
         } else {

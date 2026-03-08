@@ -1,185 +1,61 @@
 //! TransitionTable constructors.
 //!
-//! Builds transition tables from I/O Automaton specifications. The IOA format
-//! has explicit `from`, `to`, `guard` fields — no inference needed.
+//! Builds transition tables from I/O Automaton specifications using the shared
+//! translation layer in `temper-spec`. The shared layer eliminates duplicated
+//! guard/effect translation logic between JIT and verification paths.
 
-use temper_spec::automaton::{self, Automaton};
+use temper_spec::automaton::{self, Automaton, ResolvedEffect, ResolvedGuard, translate_actions};
 
 use super::types::{Effect, Guard, TransitionRule, TransitionTable};
 
 impl TransitionTable {
     /// Build a TransitionTable from I/O Automaton TOML source.
     ///
-    /// This is the primary constructor for production use. The IOA format
-    /// has explicit guards and effects — no `CanXxx` predicate inference.
+    /// Returns an error if the TOML fails to parse. Prefer this over
+    /// [`from_ioa_source`](Self::from_ioa_source) in production code
+    /// where parse errors should be propagated.
+    pub fn try_from_ioa_source(ioa_toml: &str) -> Result<Self, String> {
+        let automaton = automaton::parse_automaton(ioa_toml)
+            .map_err(|e| format!("failed to parse I/O Automaton TOML: {e}"))?;
+        Ok(Self::from_automaton(&automaton))
+    }
+
+    /// Build a TransitionTable from I/O Automaton TOML source.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the TOML fails to parse. Use [`try_from_ioa_source`](Self::try_from_ioa_source)
+    /// for fallible construction.
     pub fn from_ioa_source(ioa_toml: &str) -> Self {
-        let automaton =
-            automaton::parse_automaton(ioa_toml).expect("failed to parse I/O Automaton TOML");
-        Self::from_automaton(&automaton)
+        Self::try_from_ioa_source(ioa_toml).expect("failed to parse I/O Automaton TOML")
     }
 
     /// Build a TransitionTable directly from a parsed [`Automaton`].
     ///
     /// Each action becomes a [`TransitionRule`] with guards and effects
-    /// derived from the IOA specification. Output actions are skipped
-    /// (they don't transition state).
+    /// derived from the IOA specification via the shared translation layer.
+    /// Output actions are skipped (they don't transition state).
     pub fn from_automaton(automaton: &Automaton) -> Self {
-        // Collect counter variable names from the spec's [[state]] declarations.
-        let counter_vars: Vec<String> = automaton
-            .state
-            .iter()
-            .filter(|s| s.var_type == "counter")
-            .map(|s| s.name.clone())
-            .collect();
+        let resolved_actions = translate_actions(automaton);
 
-        let rules: Vec<TransitionRule> = automaton
-            .actions
-            .iter()
-            .filter(|a| a.kind != "output")
+        let rules: Vec<TransitionRule> = resolved_actions
+            .into_iter()
             .map(|a| {
-                // Build guards from IOA action fields
-                let mut guards = vec![];
-                if !a.from.is_empty() {
-                    guards.push(Guard::StateIn(a.from.clone()));
-                }
-                for g in &a.guard {
-                    match g {
-                        automaton::Guard::StateIn { values } => {
-                            guards.push(Guard::StateIn(values.clone()));
-                        }
-                        automaton::Guard::MinCount { var, min } => {
-                            guards.push(Guard::CounterMin {
-                                var: var.clone(),
-                                min: *min,
-                            });
-                        }
-                        automaton::Guard::MaxCount { var, max } => {
-                            guards.push(Guard::CounterMax {
-                                var: var.clone(),
-                                max: *max,
-                            });
-                        }
-                        automaton::Guard::IsTrue { var } => {
-                            guards.push(Guard::BoolTrue(var.clone()));
-                        }
-                        automaton::Guard::ListContains { var, value } => {
-                            guards.push(Guard::ListContains {
-                                var: var.clone(),
-                                value: value.clone(),
-                            });
-                        }
-                        automaton::Guard::ListLengthMin { var, min } => {
-                            guards.push(Guard::ListLengthMin {
-                                var: var.clone(),
-                                min: *min,
-                            });
-                        }
-                        automaton::Guard::CrossEntityState {
-                            entity_type,
-                            entity_id_source,
-                            required_status,
-                        } => {
-                            guards.push(Guard::CrossEntityStateIn {
-                                entity_type: entity_type.clone(),
-                                entity_id_source: entity_id_source.clone(),
-                                required_status: required_status.clone(),
-                            });
-                        }
-                    }
-                }
+                let guard = convert_guard(a.guard);
 
-                let guard = match guards.len() {
-                    0 => Guard::Always,
-                    1 => guards.into_iter().next().unwrap(), // ci-ok: len() == 1
-                    _ => Guard::And(guards),
-                };
-
-                // Build effects from IOA action fields
-                let mut effects = vec![];
-                if let Some(ref to) = a.to {
+                let mut effects = Vec::new();
+                if let Some(ref to) = a.to_state {
                     effects.push(Effect::SetState(to.clone()));
                 }
-
-                // Prefer IOA effect declarations when present.
-                if !a.effect.is_empty() {
-                    for e in &a.effect {
-                        match e {
-                            automaton::Effect::Increment { var } => {
-                                effects.push(Effect::IncrementCounter(var.clone()));
-                            }
-                            automaton::Effect::Decrement { var } => {
-                                effects.push(Effect::DecrementCounter(var.clone()));
-                            }
-                            automaton::Effect::SetBool { var, value } => {
-                                effects.push(Effect::SetBool {
-                                    var: var.clone(),
-                                    value: *value,
-                                });
-                            }
-                            automaton::Effect::Emit { event } => {
-                                effects.push(Effect::EmitEvent(event.clone()));
-                            }
-                            automaton::Effect::ListAppend { var } => {
-                                effects.push(Effect::ListAppend(var.clone()));
-                            }
-                            automaton::Effect::ListRemoveAt { var } => {
-                                effects.push(Effect::ListRemoveAt(var.clone()));
-                            }
-                            automaton::Effect::Trigger { name } => {
-                                effects.push(Effect::Custom(name.clone()));
-                            }
-                            automaton::Effect::Schedule {
-                                action,
-                                delay_seconds,
-                            } => {
-                                effects.push(Effect::ScheduleAction {
-                                    action: action.clone(),
-                                    delay_seconds: *delay_seconds,
-                                });
-                            }
-                            automaton::Effect::Spawn {
-                                entity_type,
-                                entity_id_source,
-                                initial_action,
-                                store_id_in,
-                            } => {
-                                effects.push(Effect::SpawnEntity {
-                                    entity_type: entity_type.clone(),
-                                    entity_id_source: entity_id_source.clone(),
-                                    initial_action: initial_action.clone(),
-                                    store_id_in: store_id_in.clone(),
-                                });
-                            }
-                        }
-                    }
-                } else {
-                    // Fallback: infer item effects from action name convention.
-                    let name_lower = a.name.to_lowercase();
-                    if name_lower.contains("additem") || name_lower.contains("add_item") {
-                        effects.push(Effect::IncrementItems);
-                        for var in &counter_vars {
-                            if var != "items" {
-                                effects.push(Effect::IncrementCounter(var.clone()));
-                            }
-                        }
-                    } else if name_lower.contains("removeitem")
-                        || name_lower.contains("remove_item")
-                    {
-                        effects.push(Effect::DecrementItems);
-                        for var in &counter_vars {
-                            if var != "items" {
-                                effects.push(Effect::DecrementCounter(var.clone()));
-                            }
-                        }
-                    }
+                for e in a.effects {
+                    effects.push(convert_effect(e));
                 }
-
                 effects.push(Effect::EmitEvent(a.name.clone()));
 
                 TransitionRule {
-                    name: a.name.clone(),
-                    from_states: a.from.clone(),
-                    to_state: a.to.clone(),
+                    name: a.name,
+                    from_states: a.from_states,
+                    to_state: a.to_state,
                     guard,
                     effects,
                 }
@@ -202,6 +78,62 @@ impl TransitionTable {
             rules,
             rule_index,
         }
+    }
+}
+
+/// Convert a shared [`ResolvedGuard`] to the JIT [`Guard`] type.
+fn convert_guard(guard: ResolvedGuard) -> Guard {
+    match guard {
+        ResolvedGuard::Always => Guard::Always,
+        ResolvedGuard::StateIn(values) => Guard::StateIn(values),
+        ResolvedGuard::CounterMin { var, min } => Guard::CounterMin { var, min },
+        ResolvedGuard::CounterMax { var, max } => Guard::CounterMax { var, max },
+        ResolvedGuard::BoolTrue(var) => Guard::BoolTrue(var),
+        ResolvedGuard::ListContains { var, value } => Guard::ListContains { var, value },
+        ResolvedGuard::ListLengthMin { var, min } => Guard::ListLengthMin { var, min },
+        ResolvedGuard::CrossEntityState {
+            entity_type,
+            entity_id_source,
+            required_status,
+        } => Guard::CrossEntityStateIn {
+            entity_type,
+            entity_id_source,
+            required_status,
+        },
+        ResolvedGuard::And(guards) => Guard::And(guards.into_iter().map(convert_guard).collect()),
+    }
+}
+
+/// Convert a shared [`ResolvedEffect`] to the JIT [`Effect`] type.
+fn convert_effect(effect: ResolvedEffect) -> Effect {
+    match effect {
+        ResolvedEffect::IncrementCounter(ref var) if var == "items" => Effect::IncrementItems,
+        ResolvedEffect::DecrementCounter(ref var) if var == "items" => Effect::DecrementItems,
+        ResolvedEffect::IncrementCounter(var) => Effect::IncrementCounter(var),
+        ResolvedEffect::DecrementCounter(var) => Effect::DecrementCounter(var),
+        ResolvedEffect::SetBool { var, value } => Effect::SetBool { var, value },
+        ResolvedEffect::ListAppend(var) => Effect::ListAppend(var),
+        ResolvedEffect::ListRemoveAt(var) => Effect::ListRemoveAt(var),
+        ResolvedEffect::Emit(event) => Effect::EmitEvent(event),
+        ResolvedEffect::Trigger(name) => Effect::Custom(name),
+        ResolvedEffect::Schedule {
+            action,
+            delay_seconds,
+        } => Effect::ScheduleAction {
+            action,
+            delay_seconds,
+        },
+        ResolvedEffect::Spawn {
+            entity_type,
+            entity_id_source,
+            initial_action,
+            store_id_in,
+        } => Effect::SpawnEntity {
+            entity_type,
+            entity_id_source,
+            initial_action,
+            store_id_in,
+        },
     }
 }
 

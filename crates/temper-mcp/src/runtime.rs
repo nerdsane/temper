@@ -331,17 +331,20 @@ impl RuntimeContext {
                         entity_or_set.to_string()
                     };
 
+                    let ctx = temper_sandbox::dispatch::DispatchContext {
+                        http: &http,
+                        base_url: &base_url,
+                        tenant: &tenant,
+                        principal_id: principal_id.as_deref(),
+                        entity_set_resolver: Some(&resolver),
+                        binary_path: binary_path.as_deref(),
+                        api_key: api_key.as_deref(),
+                    };
                     temper_sandbox::dispatch::dispatch_temper_method(
-                        &http,
-                        &base_url,
-                        &tenant,
-                        principal_id.as_deref(),
-                        api_key.as_deref(),
+                        &ctx,
                         &function_name,
                         remaining,
                         &kwargs,
-                        Some(&resolver),
-                        binary_path.as_deref(),
                     )
                     .await
                 }

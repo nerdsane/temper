@@ -103,50 +103,62 @@ pub enum FieldClass {
     Measurement,
 }
 
+/// Input for building a transition wide event.
+pub struct TransitionInput<'a> {
+    /// Entity type (e.g., "Order").
+    pub entity_type: &'a str,
+    /// Entity ID.
+    pub entity_id: &'a str,
+    /// Operation name (e.g., "SubmitOrder").
+    pub operation: &'a str,
+    /// Status before the transition.
+    pub from_status: &'a str,
+    /// Status after the transition.
+    pub to_status: &'a str,
+    /// Whether the transition succeeded.
+    pub success: bool,
+    /// Duration in nanoseconds.
+    pub duration_ns: u64,
+    /// Action parameters.
+    pub params: &'a serde_json::Value,
+    /// Number of items affected.
+    pub item_count: usize,
+    /// Trace ID for correlation.
+    pub trace_id: &'a str,
+}
+
 /// Build a WideEvent from an entity actor transition.
-#[allow(clippy::too_many_arguments)]
-pub fn from_transition(
-    entity_type: &str,
-    entity_id: &str,
-    operation: &str,
-    from_status: &str,
-    to_status: &str,
-    success: bool,
-    duration_ns: u64,
-    params: &serde_json::Value,
-    item_count: usize,
-    trace_id: &str,
-) -> WideEvent {
+pub fn from_transition(input: TransitionInput<'_>) -> WideEvent {
     let span_id = sim_uuid().to_string();
 
     let mut tags = BTreeMap::new();
-    tags.insert("entity_type".into(), entity_type.into());
-    tags.insert("operation".into(), operation.into());
-    tags.insert("status".into(), to_status.into());
-    tags.insert("success".into(), success.to_string());
+    tags.insert("entity_type".into(), input.entity_type.into());
+    tags.insert("operation".into(), input.operation.into());
+    tags.insert("status".into(), input.to_status.into());
+    tags.insert("success".into(), input.success.to_string());
 
     let mut attributes = BTreeMap::new();
-    attributes.insert("entity_id".into(), serde_json::json!(entity_id));
-    attributes.insert("from_status".into(), serde_json::json!(from_status));
-    attributes.insert("params".into(), params.clone());
-    attributes.insert("item_count".into(), serde_json::json!(item_count));
+    attributes.insert("entity_id".into(), serde_json::json!(input.entity_id));
+    attributes.insert("from_status".into(), serde_json::json!(input.from_status));
+    attributes.insert("params".into(), input.params.clone());
+    attributes.insert("item_count".into(), serde_json::json!(input.item_count));
 
     let mut measurements = BTreeMap::new();
     measurements.insert("transition_count".into(), 1.0);
-    measurements.insert("duration_ms".into(), duration_ns as f64 / 1_000_000.0);
-    measurements.insert("item_count".into(), item_count as f64);
+    measurements.insert("duration_ms".into(), input.duration_ns as f64 / 1_000_000.0);
+    measurements.insert("item_count".into(), input.item_count as f64);
 
     WideEvent {
         event_kind: EventKind::Transition,
-        entity_type: entity_type.into(),
-        entity_id: entity_id.into(),
-        operation: operation.into(),
-        from_status: from_status.into(),
-        to_status: to_status.into(),
-        success,
-        duration_ns,
+        entity_type: input.entity_type.into(),
+        entity_id: input.entity_id.into(),
+        operation: input.operation.into(),
+        from_status: input.from_status.into(),
+        to_status: input.to_status.into(),
+        success: input.success,
+        duration_ns: input.duration_ns,
         timestamp: sim_now(),
-        trace_id: trace_id.into(),
+        trace_id: input.trace_id.into(),
         span_id,
         tags,
         attributes,
@@ -154,45 +166,55 @@ pub fn from_transition(
     }
 }
 
+/// Input for building a WASM invocation wide event.
+pub struct WasmInvocationInput<'a> {
+    /// WASM module name.
+    pub module_name: &'a str,
+    /// Action that triggered the invocation.
+    pub trigger_action: &'a str,
+    /// Entity type.
+    pub entity_type: &'a str,
+    /// Entity ID.
+    pub entity_id: &'a str,
+    /// Tenant identifier.
+    pub tenant: &'a str,
+    /// Whether the invocation succeeded.
+    pub success: bool,
+    /// Duration in nanoseconds.
+    pub duration_ns: u64,
+    /// Error message, if any.
+    pub error: Option<&'a str>,
+}
+
 /// Build a WideEvent from a WASM integration module invocation.
-#[allow(clippy::too_many_arguments)]
-pub fn from_wasm_invocation(
-    module_name: &str,
-    trigger_action: &str,
-    entity_type: &str,
-    entity_id: &str,
-    tenant: &str,
-    success: bool,
-    duration_ns: u64,
-    error: Option<&str>,
-) -> WideEvent {
+pub fn from_wasm_invocation(input: WasmInvocationInput<'_>) -> WideEvent {
     let span_id = sim_uuid().to_string();
     let mut tags = BTreeMap::new();
-    tags.insert("module_name".into(), module_name.into());
-    tags.insert("trigger_action".into(), trigger_action.into());
-    tags.insert("success".into(), success.to_string());
-    tags.insert("entity_type".into(), entity_type.into());
+    tags.insert("module_name".into(), input.module_name.into());
+    tags.insert("trigger_action".into(), input.trigger_action.into());
+    tags.insert("success".into(), input.success.to_string());
+    tags.insert("entity_type".into(), input.entity_type.into());
 
     let mut attributes = BTreeMap::new();
-    attributes.insert("entity_id".into(), serde_json::json!(entity_id));
-    attributes.insert("tenant".into(), serde_json::json!(tenant));
-    if let Some(err) = error {
+    attributes.insert("entity_id".into(), serde_json::json!(input.entity_id));
+    attributes.insert("tenant".into(), serde_json::json!(input.tenant));
+    if let Some(err) = input.error {
         attributes.insert("error".into(), serde_json::json!(err));
     }
 
     let mut measurements = BTreeMap::new();
     measurements.insert("invocation_count".into(), 1.0);
-    measurements.insert("duration_ms".into(), duration_ns as f64 / 1_000_000.0);
+    measurements.insert("duration_ms".into(), input.duration_ns as f64 / 1_000_000.0);
 
     WideEvent {
         event_kind: EventKind::WasmInvocation,
-        entity_type: entity_type.into(),
-        entity_id: entity_id.into(),
-        operation: trigger_action.into(),
+        entity_type: input.entity_type.into(),
+        entity_id: input.entity_id.into(),
+        operation: input.trigger_action.into(),
         from_status: String::new(),
         to_status: String::new(),
-        success,
-        duration_ns,
+        success: input.success,
+        duration_ns: input.duration_ns,
         timestamp: sim_now(),
         trace_id: String::new(),
         span_id,
@@ -200,41 +222,52 @@ pub fn from_wasm_invocation(
         attributes,
         measurements,
     }
+}
+
+/// Input for building an authorization decision wide event.
+pub struct AuthzDecisionInput<'a> {
+    /// Authorization action.
+    pub action: &'a str,
+    /// Resource type being authorized.
+    pub resource_type: &'a str,
+    /// Kind of principal (user, admin, system).
+    pub principal_kind: &'a str,
+    /// Decision outcome ("Allow" or "Deny").
+    pub decision: &'a str,
+    /// Duration in nanoseconds.
+    pub duration_ns: u64,
+    /// Tenant identifier.
+    pub tenant: &'a str,
 }
 
 /// Build a WideEvent from a Cedar authorization decision.
-#[allow(clippy::too_many_arguments)]
-pub fn from_authz_decision(
-    action: &str,
-    resource_type: &str,
-    principal_kind: &str,
-    decision: &str,
-    duration_ns: u64,
-    tenant: &str,
-) -> WideEvent {
+pub fn from_authz_decision(input: AuthzDecisionInput<'_>) -> WideEvent {
     let span_id = sim_uuid().to_string();
     let mut tags = BTreeMap::new();
-    tags.insert("action".into(), action.into());
-    tags.insert("resource_type".into(), resource_type.into());
-    tags.insert("decision".into(), decision.into());
+    tags.insert("action".into(), input.action.into());
+    tags.insert("resource_type".into(), input.resource_type.into());
+    tags.insert("decision".into(), input.decision.into());
 
     let mut attributes = BTreeMap::new();
-    attributes.insert("principal_kind".into(), serde_json::json!(principal_kind));
-    attributes.insert("tenant".into(), serde_json::json!(tenant));
+    attributes.insert(
+        "principal_kind".into(),
+        serde_json::json!(input.principal_kind),
+    );
+    attributes.insert("tenant".into(), serde_json::json!(input.tenant));
 
     let mut measurements = BTreeMap::new();
     measurements.insert("decision_count".into(), 1.0);
-    measurements.insert("duration_ns".into(), duration_ns as f64);
+    measurements.insert("duration_ns".into(), input.duration_ns as f64);
 
     WideEvent {
         event_kind: EventKind::AuthzDecision,
-        entity_type: resource_type.into(),
+        entity_type: input.resource_type.into(),
         entity_id: String::new(),
-        operation: action.into(),
+        operation: input.action.into(),
         from_status: String::new(),
         to_status: String::new(),
-        success: decision == "Allow",
-        duration_ns,
+        success: input.decision == "Allow",
+        duration_ns: input.duration_ns,
         timestamp: sim_now(),
         trace_id: String::new(),
         span_id,
@@ -244,41 +277,50 @@ pub fn from_authz_decision(
     }
 }
 
+/// Input for building an invariant check wide event.
+pub struct InvariantCheckInput<'a> {
+    /// Invariant name.
+    pub invariant_name: &'a str,
+    /// Entity type.
+    pub entity_type: &'a str,
+    /// Entity ID.
+    pub entity_id: &'a str,
+    /// Tenant identifier.
+    pub tenant: &'a str,
+    /// Number of checks performed.
+    pub check_count: u32,
+    /// Outcome ("converged" or "failed").
+    pub outcome: &'a str,
+    /// Duration in nanoseconds.
+    pub duration_ns: u64,
+}
+
 /// Build a WideEvent from an eventual invariant convergence check.
-#[allow(clippy::too_many_arguments)]
-pub fn from_invariant_check(
-    invariant_name: &str,
-    entity_type: &str,
-    entity_id: &str,
-    tenant: &str,
-    check_count: u32,
-    outcome: &str,
-    duration_ns: u64,
-) -> WideEvent {
+pub fn from_invariant_check(input: InvariantCheckInput<'_>) -> WideEvent {
     let span_id = sim_uuid().to_string();
     let mut tags = BTreeMap::new();
-    tags.insert("invariant_name".into(), invariant_name.into());
-    tags.insert("entity_type".into(), entity_type.into());
-    tags.insert("outcome".into(), outcome.into());
+    tags.insert("invariant_name".into(), input.invariant_name.into());
+    tags.insert("entity_type".into(), input.entity_type.into());
+    tags.insert("outcome".into(), input.outcome.into());
 
     let mut attributes = BTreeMap::new();
-    attributes.insert("entity_id".into(), serde_json::json!(entity_id));
-    attributes.insert("tenant".into(), serde_json::json!(tenant));
-    attributes.insert("check_count".into(), serde_json::json!(check_count));
+    attributes.insert("entity_id".into(), serde_json::json!(input.entity_id));
+    attributes.insert("tenant".into(), serde_json::json!(input.tenant));
+    attributes.insert("check_count".into(), serde_json::json!(input.check_count));
 
     let mut measurements = BTreeMap::new();
-    measurements.insert("duration_ms".into(), duration_ns as f64 / 1_000_000.0);
-    measurements.insert("check_count".into(), check_count as f64);
+    measurements.insert("duration_ms".into(), input.duration_ns as f64 / 1_000_000.0);
+    measurements.insert("check_count".into(), input.check_count as f64);
 
     WideEvent {
         event_kind: EventKind::InvariantCheck,
-        entity_type: entity_type.into(),
-        entity_id: entity_id.into(),
-        operation: invariant_name.into(),
+        entity_type: input.entity_type.into(),
+        entity_id: input.entity_id.into(),
+        operation: input.invariant_name.into(),
         from_status: String::new(),
         to_status: String::new(),
-        success: outcome == "converged",
-        duration_ns,
+        success: input.outcome == "converged",
+        duration_ns: input.duration_ns,
         timestamp: sim_now(),
         trace_id: String::new(),
         span_id,
@@ -360,18 +402,18 @@ mod tests {
     use super::*;
 
     fn sample_event() -> WideEvent {
-        from_transition(
-            "Order",
-            "order-123",
-            "SubmitOrder",
-            "Draft",
-            "Submitted",
-            true,
-            5_000_000,
-            &serde_json::json!({"ShippingAddressId": "addr-1"}),
-            2,
-            "trace-abc",
-        )
+        from_transition(TransitionInput {
+            entity_type: "Order",
+            entity_id: "order-123",
+            operation: "SubmitOrder",
+            from_status: "Draft",
+            to_status: "Submitted",
+            success: true,
+            duration_ns: 5_000_000,
+            params: &serde_json::json!({"ShippingAddressId": "addr-1"}),
+            item_count: 2,
+            trace_id: "trace-abc",
+        })
     }
 
     #[test]
@@ -407,34 +449,34 @@ mod tests {
 
     #[test]
     fn test_failed_transition_marks_error() {
-        let event = from_transition(
-            "Order",
-            "order-456",
-            "SubmitOrder",
-            "Draft",
-            "Draft",
-            false,
-            1_000_000,
-            &serde_json::json!({}),
-            0,
-            "trace-def",
-        );
+        let event = from_transition(TransitionInput {
+            entity_type: "Order",
+            entity_id: "order-456",
+            operation: "SubmitOrder",
+            from_status: "Draft",
+            to_status: "Draft",
+            success: false,
+            duration_ns: 1_000_000,
+            params: &serde_json::json!({}),
+            item_count: 0,
+            trace_id: "trace-def",
+        });
         assert!(!event.success);
         assert_eq!(event.tags["success"], "false");
     }
 
     #[test]
     fn test_wasm_invocation_event() {
-        let event = from_wasm_invocation(
-            "weather_module",
-            "CheckWeather",
-            "Task",
-            "task-1",
-            "tenant-a",
-            true,
-            2_000_000,
-            None,
-        );
+        let event = from_wasm_invocation(WasmInvocationInput {
+            module_name: "weather_module",
+            trigger_action: "CheckWeather",
+            entity_type: "Task",
+            entity_id: "task-1",
+            tenant: "tenant-a",
+            success: true,
+            duration_ns: 2_000_000,
+            error: None,
+        });
         assert_eq!(event.event_kind, EventKind::WasmInvocation);
         assert_eq!(event.tags["module_name"], "weather_module");
         assert_eq!(event.tags["success"], "true");
@@ -445,24 +487,30 @@ mod tests {
 
     #[test]
     fn test_wasm_invocation_with_error() {
-        let event = from_wasm_invocation(
-            "weather_module",
-            "CheckWeather",
-            "Task",
-            "task-1",
-            "tenant-a",
-            false,
-            3_000_000,
-            Some("module panicked"),
-        );
+        let event = from_wasm_invocation(WasmInvocationInput {
+            module_name: "weather_module",
+            trigger_action: "CheckWeather",
+            entity_type: "Task",
+            entity_id: "task-1",
+            tenant: "tenant-a",
+            success: false,
+            duration_ns: 3_000_000,
+            error: Some("module panicked"),
+        });
         assert!(!event.success);
         assert_eq!(event.attributes["error"], "module panicked");
     }
 
     #[test]
     fn test_authz_decision_event() {
-        let event =
-            from_authz_decision("SubmitOrder", "Order", "user", "Allow", 500_000, "tenant-b");
+        let event = from_authz_decision(AuthzDecisionInput {
+            action: "SubmitOrder",
+            resource_type: "Order",
+            principal_kind: "user",
+            decision: "Allow",
+            duration_ns: 500_000,
+            tenant: "tenant-b",
+        });
         assert_eq!(event.event_kind, EventKind::AuthzDecision);
         assert_eq!(event.tags["decision"], "Allow");
         assert!(event.success);
@@ -472,22 +520,28 @@ mod tests {
 
     #[test]
     fn test_authz_deny_decision() {
-        let event =
-            from_authz_decision("DeleteOrder", "Order", "user", "Deny", 800_000, "tenant-b");
+        let event = from_authz_decision(AuthzDecisionInput {
+            action: "DeleteOrder",
+            resource_type: "Order",
+            principal_kind: "user",
+            decision: "Deny",
+            duration_ns: 800_000,
+            tenant: "tenant-b",
+        });
         assert!(!event.success);
     }
 
     #[test]
     fn test_invariant_check_event() {
-        let event = from_invariant_check(
-            "order_total_positive",
-            "Order",
-            "order-99",
-            "tenant-c",
-            3,
-            "converged",
-            1_500_000,
-        );
+        let event = from_invariant_check(InvariantCheckInput {
+            invariant_name: "order_total_positive",
+            entity_type: "Order",
+            entity_id: "order-99",
+            tenant: "tenant-c",
+            check_count: 3,
+            outcome: "converged",
+            duration_ns: 1_500_000,
+        });
         assert_eq!(event.event_kind, EventKind::InvariantCheck);
         assert_eq!(event.tags["outcome"], "converged");
         assert!(event.success);
@@ -497,15 +551,15 @@ mod tests {
 
     #[test]
     fn test_invariant_check_failed() {
-        let event = from_invariant_check(
-            "stock_non_negative",
-            "Inventory",
-            "inv-5",
-            "tenant-c",
-            10,
-            "failed",
-            5_000_000,
-        );
+        let event = from_invariant_check(InvariantCheckInput {
+            invariant_name: "stock_non_negative",
+            entity_type: "Inventory",
+            entity_id: "inv-5",
+            tenant: "tenant-c",
+            check_count: 10,
+            outcome: "failed",
+            duration_ns: 5_000_000,
+        });
         assert!(!event.success);
     }
 
@@ -513,9 +567,33 @@ mod tests {
     fn test_emit_span_all_event_kinds() {
         let events = vec![
             sample_event(),
-            from_wasm_invocation("m", "a", "T", "id", "t", true, 0, None),
-            from_authz_decision("a", "T", "user", "Allow", 0, "t"),
-            from_invariant_check("inv", "T", "id", "t", 1, "converged", 0),
+            from_wasm_invocation(WasmInvocationInput {
+                module_name: "m",
+                trigger_action: "a",
+                entity_type: "T",
+                entity_id: "id",
+                tenant: "t",
+                success: true,
+                duration_ns: 0,
+                error: None,
+            }),
+            from_authz_decision(AuthzDecisionInput {
+                action: "a",
+                resource_type: "T",
+                principal_kind: "user",
+                decision: "Allow",
+                duration_ns: 0,
+                tenant: "t",
+            }),
+            from_invariant_check(InvariantCheckInput {
+                invariant_name: "inv",
+                entity_type: "T",
+                entity_id: "id",
+                tenant: "t",
+                check_count: 1,
+                outcome: "converged",
+                duration_ns: 0,
+            }),
         ];
         for e in &events {
             emit_span(e);

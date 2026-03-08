@@ -135,15 +135,98 @@ pub struct ProblemRecord {
     pub impact: ImpactAssessment,
 }
 
+/// Severity level for an impact assessment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    /// Low severity — cosmetic or minor usability issue.
+    Low,
+    /// Medium severity — degraded functionality for some users.
+    Medium,
+    /// High severity — major functionality loss.
+    High,
+    /// Critical severity — system outage or data integrity risk.
+    Critical,
+}
+
+/// Trend direction for an observation or metric.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Trend {
+    /// Getting worse over time.
+    Growing,
+    /// Holding steady.
+    Stable,
+    /// Improving over time.
+    Declining,
+}
+
+/// Complexity estimate for a solution option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Complexity {
+    /// Trivial change (minutes).
+    Trivial,
+    /// Low complexity (hours).
+    Low,
+    /// Medium complexity (days).
+    Medium,
+    /// High complexity (weeks).
+    High,
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Severity::Low => write!(f, "low"),
+            Severity::Medium => write!(f, "medium"),
+            Severity::High => write!(f, "high"),
+            Severity::Critical => write!(f, "critical"),
+        }
+    }
+}
+
+impl std::fmt::Display for Trend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Trend::Growing => write!(f, "growing"),
+            Trend::Stable => write!(f, "stable"),
+            Trend::Declining => write!(f, "declining"),
+        }
+    }
+}
+
+impl std::fmt::Display for Complexity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Complexity::Trivial => write!(f, "trivial"),
+            Complexity::Low => write!(f, "low"),
+            Complexity::Medium => write!(f, "medium"),
+            Complexity::High => write!(f, "high"),
+        }
+    }
+}
+
+impl std::fmt::Display for SolutionRisk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SolutionRisk::None => write!(f, "none"),
+            SolutionRisk::Low => write!(f, "low"),
+            SolutionRisk::Medium => write!(f, "medium"),
+            SolutionRisk::High => write!(f, "high"),
+        }
+    }
+}
+
 /// Impact assessment for a problem.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImpactAssessment {
     /// Estimated number of affected users per time period.
     pub affected_users: Option<u64>,
-    /// Severity: low, medium, high, critical.
-    pub severity: String,
-    /// Trend: growing, stable, declining.
-    pub trend: String,
+    /// Severity level.
+    pub severity: Severity,
+    /// Trend direction.
+    pub trend: Trend,
 }
 
 // ============================================================
@@ -162,6 +245,20 @@ pub struct AnalysisRecord {
     pub recommendation: Option<usize>,
 }
 
+/// Risk level for a solution option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SolutionRisk {
+    /// No risk — purely additive, cannot affect correctness.
+    None,
+    /// Low risk — minor behavioural change, easily reversible.
+    Low,
+    /// Medium risk — requires shadow testing.
+    Medium,
+    /// High risk — significant correctness or availability implications.
+    High,
+}
+
 /// A proposed solution option.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolutionOption {
@@ -171,10 +268,10 @@ pub struct SolutionOption {
     pub spec_diff: String,
     /// Impact on TLA+ invariants ("NONE" if no invariant changes).
     pub tla_impact: String,
-    /// Risk level: low, medium, high.
-    pub risk: String,
+    /// Risk level.
+    pub risk: SolutionRisk,
     /// Estimated complexity.
-    pub complexity: String,
+    pub complexity: Complexity,
 }
 
 // ============================================================
@@ -276,7 +373,7 @@ pub struct InsightSignal {
     /// Success/failure rate for this intent.
     pub success_rate: f64,
     /// Trend direction.
-    pub trend: String,
+    pub trend: Trend,
     /// Growth rate (week-over-week).
     pub growth_rate: Option<f64>,
 }
@@ -341,11 +438,17 @@ pub struct FeatureRequestRecord {
 
 impl RecordHeader {
     /// Create a new record header with auto-generated ID.
+    ///
+    /// Uses 12 hex characters from a UUID v7 suffix (~48 bits of entropy)
+    /// to avoid collisions in high-throughput workloads.
     pub fn new(record_type: RecordType, created_by: impl Into<String>) -> Self {
         let now = Utc::now();
         let year = now.format("%Y");
-        let seq = &uuid::Uuid::now_v7().to_string()[..4];
-        let id = format!("{}-{}-{}", record_type.prefix(), year, seq);
+        let full_uuid = uuid::Uuid::now_v7().to_string();
+        // Take the last 12 hex chars (skipping hyphens) for ~48 bits of entropy.
+        let hex_chars: String = full_uuid.chars().filter(|c| *c != '-').collect();
+        let suffix = &hex_chars[hex_chars.len() - 12..];
+        let id = format!("{}-{}-{}", record_type.prefix(), year, suffix);
 
         Self {
             id,
@@ -420,7 +523,7 @@ mod tests {
                 intent: "split order into multiple shipments".to_string(),
                 volume: 234,
                 success_rate: 0.18,
-                trend: "growing".to_string(),
+                trend: Trend::Growing,
                 growth_rate: Some(0.12),
             },
             recommendation: "Add SplitOrder action to Order entity".to_string(),
@@ -545,7 +648,7 @@ mod tests {
                 intent: "unknown method 'send_email'".to_string(),
                 volume: 47,
                 success_rate: 0.0,
-                trend: "growing".to_string(),
+                trend: Trend::Growing,
                 growth_rate: Some(0.25),
             },
             recommendation: "Consider adding email integration capability".to_string(),

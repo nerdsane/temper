@@ -1,4 +1,4 @@
-use crate::dispatch::AgentContext;
+use crate::request_context::AgentContext;
 use temper_runtime::tenant::TenantId;
 
 impl crate::state::ServerState {

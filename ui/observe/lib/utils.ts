@@ -39,11 +39,18 @@ export function redactSensitiveFields(obj: unknown): unknown {
   return result;
 }
 
-/** Stringify and truncate JSON to maxLen characters. */
-export function truncateJson(value: unknown, maxLen = 2000): string {
-  const str = JSON.stringify(value, null, 2);
-  if (str.length <= maxLen) return str;
-  return str.slice(0, maxLen) + "\n... [truncated]";
+/** Map a success rate (0–100) to a text color class. */
+export function rateColor(rate: number): string {
+  if (rate >= 80) return "text-teal-400";
+  if (rate >= 50) return "text-amber-400";
+  return "text-pink-400";
+}
+
+/** Map a success rate (0–100) to a background color class. */
+export function rateBgColor(rate: number): string {
+  if (rate >= 80) return "bg-teal-400";
+  if (rate >= 50) return "bg-amber-400";
+  return "bg-pink-400";
 }
 
 /** Generate a Cedar policy preview matching the Rust generate_policy() logic. */

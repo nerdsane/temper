@@ -67,7 +67,8 @@ async function fetchWithRetry(input: string, init?: RequestInit): Promise<Respon
 export async function fetchSpecs(): Promise<SpecSummary[]> {
   const res = await fetchWithRetry(`${API_BASE}/observe/specs`, { cache: "no-store" });
   if (!res.ok) throw new ApiError(`Failed to fetch specs: ${res.status}`, res.status);
-  return res.json();
+  const data = await res.json();
+  return data.specs;
 }
 
 export async function fetchSpecDetail(entity: string): Promise<SpecDetail> {
@@ -81,7 +82,8 @@ export async function fetchSpecDetail(entity: string): Promise<SpecDetail> {
 export async function fetchEntities(): Promise<EntitySummary[]> {
   const res = await fetchWithRetry(`${API_BASE}/observe/entities`, { cache: "no-store" });
   if (!res.ok) throw new ApiError(`Failed to fetch entities: ${res.status}`, res.status);
-  return res.json();
+  const data = await res.json();
+  return data.entities;
 }
 
 export async function runVerification(entity: string): Promise<VerificationResult> {
@@ -368,14 +370,6 @@ export async function fetchAgentHistory(agentId: string, params?: {
   return res.json();
 }
 
-/** Fetch Cedar policies for a tenant */
-export async function fetchPolicies(tenant: string): Promise<{ policy_text: string; policy_count: number }> {
-  const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/policies`;
-  const res = await fetchWithRetry(url, { cache: "no-store" });
-  if (!res.ok) throw new ApiError(`Failed to fetch policies: ${res.status}`, res.status);
-  return res.json();
-}
-
 /** Fetch unmet intents from trajectory analysis */
 export async function fetchUnmetIntents(): Promise<UnmetIntentsResponse> {
   const res = await fetchWithRetry(`${API_BASE}/observe/evolution/unmet-intents`, { cache: "no-store" });
@@ -416,8 +410,9 @@ export function subscribeEvolutionEvents(onEvent: (event: Record<string, unknown
 export async function fetchFeatureRequests(disposition?: FeatureRequestDisposition): Promise<FeatureRequest[]> {
   const params = disposition ? `?disposition=${disposition}` : "";
   const res = await fetchWithRetry(`${API_BASE}/observe/evolution/feature-requests${params}`, { cache: "no-store" });
-  if (!res.ok) return [];
-  return res.json();
+  if (!res.ok) throw new ApiError(`Failed to fetch feature requests: ${res.status}`, res.status);
+  const data = await res.json();
+  return data.feature_requests;
 }
 
 /** Update a feature request's disposition and/or developer notes */

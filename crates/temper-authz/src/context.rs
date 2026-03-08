@@ -50,7 +50,9 @@ impl SecurityContext {
     /// For now, extracts from X-Temper-* headers.
     pub fn from_headers(headers: &[(String, String)]) -> Self {
         let mut principal_id = "anonymous".to_string();
-        let mut kind = PrincipalKind::System;
+        // Default to Customer (most restrictive). System bypass is only via
+        // SecurityContext::system() or explicit "system" header value.
+        let mut kind = PrincipalKind::Customer;
         let mut role = None;
         let mut acting_for = None;
         let mut attributes = HashMap::new();
@@ -65,7 +67,10 @@ impl SecurityContext {
                         "customer" => PrincipalKind::Customer,
                         "agent" => PrincipalKind::Agent,
                         "admin" => PrincipalKind::Admin,
-                        _ => PrincipalKind::System,
+                        // "system" is NOT accepted from headers to prevent
+                        // privilege escalation via header spoofing.  Use
+                        // SecurityContext::system() for trusted internal paths.
+                        _ => PrincipalKind::Customer,
                     };
                 }
                 "x-temper-agent-role" => role = Some(value.clone()),
@@ -250,6 +255,18 @@ mod tests {
             ctx.context_attrs.get("agentId"),
             Some(&serde_json::Value::String("agent-1".to_string()))
         );
+    }
+
+    #[test]
+    fn system_principal_cannot_be_spoofed_via_headers() {
+        let headers = vec![
+            ("X-Temper-Principal-Id".to_string(), "attacker".to_string()),
+            ("X-Temper-Principal-Kind".to_string(), "system".to_string()),
+        ];
+        let ctx = SecurityContext::from_headers(&headers);
+        // Must NOT be System — falls back to Customer.
+        assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
+        assert_eq!(ctx.principal.id, "attacker");
     }
 
     #[test]

@@ -223,3 +223,152 @@ impl Guard {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn guard_always_passes() {
+        let guard = Guard::Always;
+        let ctx = EvalContext::default();
+        assert!(guard.check("Draft", &ctx));
+    }
+
+    #[test]
+    fn guard_state_in_matches() {
+        let guard = Guard::StateIn(vec!["Draft".to_string(), "Active".to_string()]);
+        let ctx = EvalContext::default();
+        assert!(guard.check("Draft", &ctx));
+    }
+
+    #[test]
+    fn guard_state_in_no_match() {
+        let guard = Guard::StateIn(vec!["Draft".to_string()]);
+        let ctx = EvalContext::default();
+        assert!(!guard.check("Active", &ctx));
+    }
+
+    #[test]
+    fn guard_item_count_min_passes() {
+        let guard = Guard::ItemCountMin(2);
+        let mut ctx = EvalContext::default();
+        ctx.counters.insert("items".to_string(), 3);
+        assert!(guard.check("Draft", &ctx));
+    }
+
+    #[test]
+    fn guard_item_count_min_fails() {
+        let guard = Guard::ItemCountMin(2);
+        let mut ctx = EvalContext::default();
+        ctx.counters.insert("items".to_string(), 1);
+        assert!(!guard.check("Draft", &ctx));
+    }
+
+    #[test]
+    fn guard_counter_min_passes() {
+        let guard = Guard::CounterMin {
+            var: "cycles".to_string(),
+            min: 2,
+        };
+        let mut ctx = EvalContext::default();
+        ctx.counters.insert("cycles".to_string(), 3);
+        assert!(guard.check("Draft", &ctx));
+    }
+
+    #[test]
+    fn guard_counter_max_passes() {
+        let guard = Guard::CounterMax {
+            var: "retries".to_string(),
+            max: 3,
+        };
+        let mut ctx = EvalContext::default();
+        ctx.counters.insert("retries".to_string(), 2);
+        assert!(guard.check("Draft", &ctx));
+    }
+
+    #[test]
+    fn guard_counter_max_fails() {
+        let guard = Guard::CounterMax {
+            var: "retries".to_string(),
+            max: 3,
+        };
+        let mut ctx = EvalContext::default();
+        ctx.counters.insert("retries".to_string(), 3);
+        assert!(!guard.check("Draft", &ctx));
+    }
+
+    #[test]
+    fn guard_bool_true_passes() {
+        let guard = Guard::BoolTrue("assigned".to_string());
+        let mut ctx = EvalContext::default();
+        ctx.booleans.insert("assigned".to_string(), true);
+        assert!(guard.check("Draft", &ctx));
+    }
+
+    #[test]
+    fn guard_bool_true_fails_missing() {
+        let guard = Guard::BoolTrue("assigned".to_string());
+        let ctx = EvalContext::default();
+        assert!(!guard.check("Draft", &ctx));
+    }
+
+    #[test]
+    fn guard_and_all_pass() {
+        let guard = Guard::And(vec![
+            Guard::Always,
+            Guard::StateIn(vec!["Draft".to_string()]),
+        ]);
+        let ctx = EvalContext::default();
+        assert!(guard.check("Draft", &ctx));
+    }
+
+    #[test]
+    fn guard_and_one_fails() {
+        let guard = Guard::And(vec![
+            Guard::Always,
+            Guard::StateIn(vec!["Active".to_string()]),
+        ]);
+        let ctx = EvalContext::default();
+        assert!(!guard.check("Draft", &ctx));
+    }
+
+    #[test]
+    fn rebuild_index_groups_by_name() {
+        let mut table = TransitionTable {
+            entity_name: "TestEntity".to_string(),
+            states: vec!["Draft".to_string(), "Active".to_string()],
+            initial_state: "Draft".to_string(),
+            rules: vec![
+                TransitionRule {
+                    name: "Submit".to_string(),
+                    from_states: vec!["Draft".to_string()],
+                    to_state: Some("Active".to_string()),
+                    guard: Guard::Always,
+                    effects: vec![],
+                },
+                TransitionRule {
+                    name: "Submit".to_string(),
+                    from_states: vec!["Active".to_string()],
+                    to_state: Some("Draft".to_string()),
+                    guard: Guard::Always,
+                    effects: vec![],
+                },
+                TransitionRule {
+                    name: "Cancel".to_string(),
+                    from_states: vec!["Draft".to_string()],
+                    to_state: Some("Draft".to_string()),
+                    guard: Guard::Always,
+                    effects: vec![],
+                },
+            ],
+            rule_index: BTreeMap::new(),
+        };
+        table.rebuild_index();
+
+        assert_eq!(table.rule_index.len(), 2);
+        assert_eq!(table.rule_index["Submit"], vec![0, 1]);
+        assert_eq!(table.rule_index["Cancel"], vec![2]);
+    }
+}

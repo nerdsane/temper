@@ -11,8 +11,8 @@ use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::ServerEventStore;
 use temper_server::ServerState;
-use temper_server::dispatch::AgentContext;
 use temper_server::registry::SpecRegistry;
+use temper_server::request_context::AgentContext;
 use temper_server::state::{DispatchExtOptions, PendingDecision};
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
@@ -160,7 +160,7 @@ fn install_non_wasm_policy(state: &ServerState) {
 /// 3. A WASM invocation entry recording the failed invocation
 async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str) {
     let turso = state
-        .turso_opt()
+        .persistent_store()
         .expect("Turso backend required for authz denial artifact verification");
 
     // 1. Verify PendingDecision was persisted.

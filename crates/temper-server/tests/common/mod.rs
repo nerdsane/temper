@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
-use temper_server::dispatch::AgentContext;
 use temper_server::registry::SpecRegistry;
+use temper_server::request_context::AgentContext;
 use temper_server::{ServerEventStore, ServerState};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;

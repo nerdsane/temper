@@ -12,6 +12,8 @@ use temper_codegen::generate_entity_module;
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::{SpecSource, build_spec_model_mixed};
 
+use crate::util::{to_pascal_case, to_snake_case};
+
 /// Run the `temper codegen` command.
 ///
 /// Reads specs from `specs_dir`, generates Rust code, and writes to `output_dir`.
@@ -193,97 +195,12 @@ fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
     Ok(sources)
 }
 
-/// Read all `.tla` files from the specs directory and return a map of
-/// entity name (derived from file stem, PascalCase) to TLA+ source text.
-fn read_tla_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
-    let mut sources = HashMap::new();
-
-    if !specs_dir.is_dir() {
-        return Ok(sources);
-    }
-
-    for entry in fs::read_dir(specs_dir)
-        .with_context(|| format!("Failed to read specs directory: {}", specs_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().and_then(|e| e.to_str()) == Some("tla") {
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default();
-
-            // Convert file stem to PascalCase entity name
-            let entity_name = to_pascal_case(stem);
-            let source = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read TLA+ file: {}", path.display()))?;
-
-            println!(
-                "  Read TLA+ spec: {} -> entity '{}'",
-                path.display(),
-                entity_name
-            );
-            sources.insert(entity_name, source);
-        }
-    }
-
-    Ok(sources)
-}
-
-/// Convert a string to PascalCase.
-///
-/// "order" -> "Order", "order_item" -> "OrderItem"
-fn to_pascal_case(s: &str) -> String {
-    s.split(['_', '-'])
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => {
-                    let upper: String = first.to_uppercase().collect();
-                    format!("{}{}", upper, chars.collect::<String>())
-                }
-                None => String::new(),
-            }
-        })
-        .collect()
-}
-
-/// Convert a PascalCase or camelCase string to snake_case.
-///
-/// "Order" -> "order", "OrderItem" -> "order_item"
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.extend(c.to_lowercase());
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
+// read_tla_sources is shared via crate::util::read_tla_sources
+use crate::util::read_tla_sources;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_to_pascal_case() {
-        assert_eq!(to_pascal_case("order"), "Order");
-        assert_eq!(to_pascal_case("order_item"), "OrderItem");
-        assert_eq!(to_pascal_case("my-entity"), "MyEntity");
-    }
-
-    #[test]
-    fn test_to_snake_case() {
-        assert_eq!(to_snake_case("Order"), "order");
-        assert_eq!(to_snake_case("OrderItem"), "order_item");
-        assert_eq!(to_snake_case("Customer"), "customer");
-    }
 
     #[test]
     fn test_codegen_from_reference_specs() {

@@ -10,4 +10,4 @@ mod error;
 
 pub use context::{Principal, PrincipalKind, SecurityContext};
 pub use engine::{AuthzDecision, AuthzEngine};
-pub use error::AuthzError;
+pub use error::{AuthzDenial, AuthzError};

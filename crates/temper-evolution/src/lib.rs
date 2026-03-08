@@ -18,10 +18,10 @@ pub mod store;
 // Re-export primary types at crate root.
 pub use chain::{ChainValidation, validate_chain};
 pub use insight::{classify_insight, compute_priority_score, generate_digest};
-pub use pg_store::{PgRecordStoreError, PostgresRecordStore};
+pub use pg_store::{GenericEvolutionRow, PgRecordStoreError, PostgresRecordStore};
 pub use records::{
-    AnalysisRecord, Decision, DecisionRecord, FeatureRequestDisposition, FeatureRequestRecord,
-    InsightCategory, InsightRecord, InsightSignal, ObservationClass, ObservationRecord,
-    PlatformGapCategory, ProblemRecord, RecordHeader, RecordId, RecordStatus, RecordType,
+    AnalysisRecord, Complexity, Decision, DecisionRecord, FeatureRequestDisposition,
+    FeatureRequestRecord, InsightCategory, InsightRecord, InsightSignal, ObservationClass,
+    ObservationRecord, PlatformGapCategory, ProblemRecord, RecordHeader, RecordId, RecordStatus,
+    RecordType, Severity, SolutionRisk, Trend,
 };
-pub use store::RecordStore;

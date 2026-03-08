@@ -8,7 +8,7 @@ use temper_evolution::records::{
 use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
-use crate::authz_helpers::{record_authz_denial, security_context_from_headers};
+use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
 use super::load_dir::handle_load_dir;
@@ -54,23 +54,27 @@ pub(crate) async fn handle_load_inline(
         "submit_specs",
         "SpecRegistry",
         &spec_resource_attrs,
+        &tenant,
     );
-    if let Err(reason) = authz_result {
+    if let Err(denial) = authz_result {
+        let reason = denial.to_string();
         // Record denials and use the first decision ID as the primary chain anchor.
         // Record a single denial per authz check. The resource_id must match
         // what Cedar evaluated: SpecRegistry::"<tenant>".
         let pd = record_authz_denial(
             &state,
-            &tenant,
-            &security_ctx,
-            None,
-            "submit_specs",
-            "SpecRegistry",
-            &tenant,
-            serde_json::json!({"entity_types": entity_names}),
-            &reason,
-            None,
-            None,
+            DenialInput {
+                tenant: &tenant,
+                security_ctx: &security_ctx,
+                agent_id_override: None,
+                action: "submit_specs",
+                resource_type: "SpecRegistry",
+                resource_id: &tenant,
+                resource_attrs: serde_json::json!({"entity_types": entity_names}),
+                reason: &reason,
+                module_name: None,
+                from_status: None,
+            },
         )
         .await;
         let primary_decision_id = pd.id.clone();
@@ -98,7 +102,7 @@ pub(crate) async fn handle_load_inline(
         };
         let o_id = o_record.header.id.clone();
         // Persist observation to Turso.
-        if let Some(turso) = state.turso_opt() {
+        if let Some(turso) = state.persistent_store() {
             let data_json = serde_json::to_string(&o_record).unwrap_or_default();
             let _ = turso
                 .insert_evolution_record(
@@ -130,14 +134,14 @@ pub(crate) async fn handle_load_inline(
                 description: "Approve spec submission via Observe UI".to_string(),
                 spec_diff: serde_json::to_string_pretty(&body.specs).unwrap_or_default(),
                 tla_impact: "NEW".to_string(),
-                risk: "low".to_string(),
-                complexity: "low".to_string(),
+                risk: temper_evolution::SolutionRisk::Low,
+                complexity: temper_evolution::Complexity::Low,
             }],
             recommendation: Some(0),
         };
         let a_record_id = a_record.header.id.clone();
         // Persist analysis to Turso.
-        if let Some(turso) = state.turso_opt() {
+        if let Some(turso) = state.persistent_store() {
             let data_json = serde_json::to_string(&a_record).unwrap_or_default();
             let _ = turso
                 .insert_evolution_record(
@@ -154,7 +158,7 @@ pub(crate) async fn handle_load_inline(
         // Link the PendingDecision to the A-Record for O-A-D chain tracing.
         // Decisions are persisted to Turso; the evolution_record_id link will be
         // available when the decision is read back from Turso.
-        if let Some(turso) = state.turso_opt() {
+        if let Some(turso) = state.persistent_store() {
             for decision_id in &decision_ids {
                 if let Ok(Some(data_str)) = turso.get_pending_decision(decision_id).await
                     && let Ok(mut pd) =
@@ -216,7 +220,7 @@ pub(crate) async fn handle_load_inline(
     let tmp_dir = std::env::temp_dir().join(format!("temper-inline-{}", tenant)); // determinism-ok: HTTP handler writes user specs to temp dir for loading
     let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans previous temp dir
     std::fs::create_dir_all(&tmp_dir).map_err(|e| {
-        // determinism-ok: HTTP handler creates temp dir for inline specs
+        // determinism-ok: HTTP handler creates temp dir
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to create temp dir: {e}"),
@@ -226,7 +230,7 @@ pub(crate) async fn handle_load_inline(
     for (filename, content) in &body.specs {
         let path = tmp_dir.join(filename);
         std::fs::write(&path, content).map_err(|e| {
-            // determinism-ok: HTTP handler writes user specs to temp dir
+            // determinism-ok: HTTP handler writes specs
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to write {filename}: {e}"),

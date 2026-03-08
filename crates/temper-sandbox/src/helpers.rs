@@ -176,3 +176,112 @@ pub fn format_authz_denied(body: &str) -> Option<Value> {
 
     Some(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use monty::MontyObject;
+    use reqwest::StatusCode;
+    use serde_json::json;
+
+    #[test]
+    fn wrap_user_code_basic() {
+        let result = wrap_user_code("x = 1");
+        assert!(result.contains("async def __temper_user():"));
+        assert!(result.contains("    x = 1"));
+    }
+
+    #[test]
+    fn wrap_user_code_empty() {
+        let result = wrap_user_code("");
+        assert!(result.contains("return None"));
+    }
+
+    #[test]
+    fn wrap_user_code_multiline() {
+        let result = wrap_user_code("a = 1\nb = 2");
+        assert!(result.contains("    a = 1\n    b = 2"));
+    }
+
+    #[test]
+    fn escape_odata_key_no_quotes() {
+        assert_eq!(escape_odata_key("hello"), "hello");
+    }
+
+    #[test]
+    fn escape_odata_key_with_quotes() {
+        assert_eq!(escape_odata_key("it's"), "it''s");
+    }
+
+    #[test]
+    fn optional_string_arg_present() {
+        let args = vec![MontyObject::String("val".to_string())];
+        assert_eq!(optional_string_arg(&args, 0), Some("val".to_string()));
+    }
+
+    #[test]
+    fn optional_string_arg_absent() {
+        let args: Vec<MontyObject> = vec![];
+        assert_eq!(optional_string_arg(&args, 0), None);
+    }
+
+    #[test]
+    fn expect_string_arg_success() {
+        let args = vec![MontyObject::String("val".to_string())];
+        let result = expect_string_arg(&args, 0, "name", "test_method");
+        assert_eq!(result.unwrap(), "val");
+    }
+
+    #[test]
+    fn expect_string_arg_missing() {
+        let args: Vec<MontyObject> = vec![];
+        let result = expect_string_arg(&args, 0, "name", "test_method");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing required argument"));
+    }
+
+    #[test]
+    fn expect_string_arg_wrong_type() {
+        let args = vec![MontyObject::Int(42)];
+        let result = expect_string_arg(&args, 0, "name", "test_method");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("expected"));
+    }
+
+    #[test]
+    fn format_http_error_with_json_body() {
+        let body = r#"{"error":{"message":"Not found"}}"#;
+        let result = format_http_error(StatusCode::NOT_FOUND, body);
+        assert!(result.contains("Not found"));
+    }
+
+    #[test]
+    fn format_http_error_empty_body() {
+        let result = format_http_error(StatusCode::INTERNAL_SERVER_ERROR, "");
+        assert!(result.contains("<empty body>"));
+    }
+
+    #[test]
+    fn format_http_error_plain_text() {
+        let result = format_http_error(StatusCode::BAD_REQUEST, "bad request");
+        assert!(result.contains("bad request"));
+    }
+
+    #[test]
+    fn format_authz_denied_valid() {
+        let body =
+            r#"{"error":{"code":"AuthorizationDenied","message":"Cedar denied (PD-abc123)"}}"#;
+        let result = format_authz_denied(body);
+        assert!(result.is_some());
+        let val = result.unwrap();
+        assert_eq!(val["denied"], json!(true));
+        assert_eq!(val["decision_id"], json!("PD-abc123"));
+    }
+
+    #[test]
+    fn format_authz_denied_not_authz() {
+        let body = r#"{"error":{"code":"Other"}}"#;
+        let result = format_authz_denied(body);
+        assert!(result.is_none());
+    }
+}

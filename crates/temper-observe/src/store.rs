@@ -7,20 +7,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ObserveError;
 
-/// A row in a query result set.
+/// A row in a query result set. Values are aligned with `ResultSet::columns`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultRow {
-    /// Column name-value pairs for this row.
-    pub columns: Vec<(String, serde_json::Value)>,
+    /// Values aligned positionally with `ResultSet::columns`.
+    pub values: Vec<serde_json::Value>,
 }
 
 impl ResultRow {
-    /// Look up a value by column name.
-    pub fn get(&self, column: &str) -> Option<&serde_json::Value> {
-        self.columns
-            .iter()
-            .find(|(name, _)| name == column)
-            .map(|(_, value)| value)
+    /// Look up a value by column name, given the ordered column list from the parent `ResultSet`.
+    pub fn get_in(&self, columns: &[String], name: &str) -> Option<&serde_json::Value> {
+        let idx = columns.iter().position(|c| c == name)?;
+        self.values.get(idx)
     }
 }
 
@@ -29,7 +27,7 @@ impl ResultRow {
 pub struct ResultSet {
     /// Ordered column names.
     pub columns: Vec<String>,
-    /// Result rows.
+    /// Result rows. Each row's values are aligned with `columns`.
     pub rows: Vec<ResultRow>,
 }
 
@@ -50,6 +48,15 @@ impl ResultSet {
     /// Return whether the result set is empty.
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
+    }
+
+    /// Look up a value by row index and column name.
+    ///
+    /// Uses the shared column index for O(n) column lookup once per call,
+    /// avoiding per-row string storage.
+    pub fn get(&self, row_idx: usize, column: &str) -> Option<&serde_json::Value> {
+        let col_idx = self.columns.iter().position(|c| c == column)?;
+        self.rows.get(row_idx)?.values.get(col_idx)
     }
 }
 

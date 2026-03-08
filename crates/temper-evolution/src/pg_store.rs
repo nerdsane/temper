@@ -33,6 +33,42 @@ struct EvolutionRow {
     payload: serde_json::Value,
 }
 
+/// Backend-neutral evolution record row for cross-backend consumption.
+///
+/// Matches the same shape as `temper_store_turso::EvolutionRecordRow`,
+/// enabling the server layer to abstract over both Postgres and Turso.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GenericEvolutionRow {
+    /// Record ID.
+    pub id: String,
+    /// Record type: Observation, Problem, Analysis, Decision, Insight.
+    pub record_type: String,
+    /// Status: Open, Resolved, Superseded, Rejected.
+    pub status: String,
+    /// Creator identity.
+    pub created_by: String,
+    /// ID of the parent record this was derived from.
+    pub derived_from: Option<String>,
+    /// Full record data as JSON string.
+    pub data: String,
+    /// ISO-8601 timestamp string.
+    pub timestamp: String,
+}
+
+impl From<EvolutionRow> for GenericEvolutionRow {
+    fn from(row: EvolutionRow) -> Self {
+        Self {
+            id: row.id,
+            record_type: row.record_type,
+            status: row.status,
+            created_by: row.created_by,
+            derived_from: row.derived_from,
+            data: row.payload.to_string(),
+            timestamp: row.timestamp.to_rfc3339(),
+        }
+    }
+}
+
 /// Postgres-backed evolution record store.
 ///
 /// All five record types are stored in a single `evolution_records` table.
@@ -257,6 +293,115 @@ impl PostgresRecordStore {
             .collect()
     }
 
+    // -- Generic row access (backend-neutral interface) --
+
+    /// List evolution records with optional type/status filters.
+    ///
+    /// Returns generic `(id, record_type, status, created_by, derived_from,
+    /// data_json, timestamp_rfc3339)` tuples for backend-neutral consumption.
+    pub async fn list_records_generic(
+        &self,
+        record_type: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<Vec<GenericEvolutionRow>, PgRecordStoreError> {
+        let rows: Vec<EvolutionRow> =
+            match (record_type, status) {
+                (Some(rt), Some(st)) => sqlx::query_as(
+                    "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
+                     FROM evolution_records WHERE record_type = $1 AND status = $2 \
+                     ORDER BY timestamp DESC",
+                )
+                .bind(rt)
+                .bind(st)
+                .fetch_all(&self.pool)
+                .await?,
+                (Some(rt), None) => sqlx::query_as(
+                    "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
+                     FROM evolution_records WHERE record_type = $1 ORDER BY timestamp DESC",
+                )
+                .bind(rt)
+                .fetch_all(&self.pool)
+                .await?,
+                (None, Some(st)) => sqlx::query_as(
+                    "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
+                     FROM evolution_records WHERE status = $1 ORDER BY timestamp DESC",
+                )
+                .bind(st)
+                .fetch_all(&self.pool)
+                .await?,
+                (None, None) => sqlx::query_as(
+                    "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
+                     FROM evolution_records ORDER BY timestamp DESC",
+                )
+                .fetch_all(&self.pool)
+                .await?,
+            };
+
+        Ok(rows.into_iter().map(GenericEvolutionRow::from).collect())
+    }
+
+    /// Get a single evolution record by ID.
+    pub async fn get_record_generic(
+        &self,
+        id: &str,
+    ) -> Result<Option<GenericEvolutionRow>, PgRecordStoreError> {
+        let row: Option<EvolutionRow> = sqlx::query_as(
+            "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
+             FROM evolution_records WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(GenericEvolutionRow::from))
+    }
+
+    /// List ranked insights as generic rows, sorted by priority_score descending.
+    pub async fn list_ranked_insights_generic(
+        &self,
+    ) -> Result<Vec<GenericEvolutionRow>, PgRecordStoreError> {
+        let rows: Vec<EvolutionRow> = sqlx::query_as(
+            "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
+             FROM evolution_records WHERE record_type = 'Insight' AND status = 'Open' \
+             ORDER BY (payload->>'priority_score')::float8 DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(GenericEvolutionRow::from).collect())
+    }
+
+    /// Insert a generic evolution record (for backend-neutral writes).
+    pub async fn insert_record_generic(
+        &self,
+        id: &str,
+        record_type: &str,
+        status: &str,
+        created_by: &str,
+        derived_from: Option<&str>,
+        data_json: &str,
+    ) -> Result<(), PgRecordStoreError> {
+        let payload: serde_json::Value = serde_json::from_str(data_json)
+            .map_err(|e| PgRecordStoreError::Serialization(e.to_string()))?;
+        let now = chrono::Utc::now(); // determinism-ok: pg_store is I/O-bound, not sim-visible
+        sqlx::query(
+            "INSERT INTO evolution_records \
+             (id, record_type, status, created_by, derived_from, timestamp, payload) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(record_type)
+        .bind(status)
+        .bind(created_by)
+        .bind(derived_from)
+        .bind(now)
+        .bind(payload)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     // -- Internal helpers --
 
     async fn insert_row(
@@ -421,7 +566,7 @@ mod tests {
                 intent: "test".to_string(),
                 volume: 100,
                 success_rate: 0.5,
-                trend: "stable".to_string(),
+                trend: Trend::Stable,
                 growth_rate: None,
             },
             recommendation: "build it".to_string(),

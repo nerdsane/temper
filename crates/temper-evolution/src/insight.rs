@@ -13,10 +13,10 @@ use crate::records::*;
 pub fn compute_priority_score(signal: &InsightSignal) -> f64 {
     let volume_factor = (signal.volume as f64).log10().max(0.0) / 4.0; // normalize: 10000 -> 1.0
     let impact_factor = 1.0 - signal.success_rate;
-    let trend_multiplier = match signal.trend.as_str() {
-        "growing" => 1.2,
-        "declining" => 0.8,
-        _ => 1.0,
+    let trend_multiplier = match signal.trend {
+        Trend::Growing => 1.2,
+        Trend::Declining => 0.8,
+        Trend::Stable => 1.0,
     };
 
     let raw_score = volume_factor * impact_factor * trend_multiplier;
@@ -112,7 +112,7 @@ mod tests {
             intent: "split order".into(),
             volume: 234,
             success_rate: 0.18,
-            trend: "growing".into(),
+            trend: Trend::Growing,
             growth_rate: Some(0.12),
         };
 
@@ -129,7 +129,7 @@ mod tests {
             intent: "rare thing".into(),
             volume: 5,
             success_rate: 0.1,
-            trend: "stable".into(),
+            trend: Trend::Stable,
             growth_rate: None,
         };
 
@@ -143,7 +143,7 @@ mod tests {
             intent: "split order".into(),
             volume: 234,
             success_rate: 0.18,
-            trend: "growing".into(),
+            trend: Trend::Growing,
             growth_rate: None,
         };
         assert_eq!(classify_insight(&signal), InsightCategory::UnmetIntent);
@@ -155,7 +155,7 @@ mod tests {
             intent: "order history".into(),
             volume: 2341,
             success_rate: 0.85,
-            trend: "stable".into(),
+            trend: Trend::Stable,
             growth_rate: None,
         };
         assert_eq!(classify_insight(&signal), InsightCategory::Friction);
@@ -167,7 +167,7 @@ mod tests {
             intent: "bulk update".into(),
             volume: 847,
             success_rate: 0.6,
-            trend: "stable".into(),
+            trend: Trend::Stable,
             growth_rate: None,
         };
         assert_eq!(classify_insight(&signal), InsightCategory::Workaround);
@@ -183,7 +183,7 @@ mod tests {
                     intent: "split order".into(),
                     volume: 234,
                     success_rate: 0.18,
-                    trend: "growing".into(),
+                    trend: Trend::Growing,
                     growth_rate: None,
                 },
                 recommendation: "Add SplitOrder action".into(),
@@ -196,7 +196,7 @@ mod tests {
                     intent: "order history".into(),
                     volume: 2341,
                     success_rate: 0.85,
-                    trend: "stable".into(),
+                    trend: Trend::Stable,
                     growth_rate: None,
                 },
                 recommendation: "Add Customer→Orders NavigationProperty".into(),

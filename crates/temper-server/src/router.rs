@@ -7,10 +7,10 @@ use axum::routing::get;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::dispatch;
 use crate::events;
+use crate::odata;
 use crate::state::ServerState;
-use crate::webhook_receiver;
+use crate::webhooks::receiver as webhook_receiver;
 
 const TEMPER_CLIENT_JS: &str = include_str!("../static/temper-client.js");
 
@@ -44,17 +44,17 @@ async fn serve_temper_client() -> (
 /// first registered tenant in the SpecRegistry.
 pub fn build_router(state: ServerState) -> Router {
     let tdata = Router::new()
-        .route("/", get(dispatch::handle_service_document))
-        .route("/$metadata", get(dispatch::handle_metadata))
-        .route("/$hints", get(dispatch::handle_hints))
+        .route("/", get(odata::handle_service_document))
+        .route("/$metadata", get(odata::handle_metadata))
+        .route("/$hints", get(odata::handle_hints))
         .route("/$events", get(events::handle_events))
         .route(
             "/{*path}",
-            get(dispatch::handle_odata_get)
-                .post(dispatch::handle_odata_post)
-                .patch(dispatch::handle_odata_patch)
-                .put(dispatch::handle_odata_put)
-                .delete(dispatch::handle_odata_delete),
+            get(odata::handle_odata_get)
+                .post(odata::handle_odata_post)
+                .patch(odata::handle_odata_patch)
+                .put(odata::handle_odata_put)
+                .delete(odata::handle_odata_delete),
         );
 
     let router = Router::new()

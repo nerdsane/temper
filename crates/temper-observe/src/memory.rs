@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 
 use crate::error::ObserveError;
 use crate::schema::{LOG_COLUMNS, METRIC_COLUMNS, SPAN_COLUMNS};
-use crate::store::{ObservabilityStore, ResultRow, ResultSet, SqlParam};
+use crate::store::{ObservabilityStore, ResultSet, SqlParam};
 
 /// An in-memory row is a map from column name to JSON value.
 type Row = Vec<(String, JsonValue)>;
@@ -149,7 +149,7 @@ fn apply_filter(
 ) -> Result<ResultSet, ObserveError> {
     let columns: Vec<String> = schema_columns.iter().map(|s| (*s).to_string()).collect();
 
-    let filtered: Vec<ResultRow> = rows
+    let filtered_rows: Vec<Vec<serde_json::Value>> = rows
         .iter()
         .filter(|row| match filter {
             Filter::All => true,
@@ -159,14 +159,26 @@ fn apply_filter(
                 .map(|(_, v)| json_value_matches(v, value))
                 .unwrap_or(false),
         })
-        .map(|row| ResultRow {
-            columns: row.clone(),
+        .map(|row| {
+            // Align values to the schema column order, filling missing with Null.
+            columns
+                .iter()
+                .map(|col| {
+                    row.iter()
+                        .find(|(name, _)| name == col)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(serde_json::Value::Null)
+                })
+                .collect()
         })
         .collect();
 
     Ok(ResultSet {
         columns,
-        rows: filtered,
+        rows: filtered_rows
+            .into_iter()
+            .map(|values| crate::store::ResultRow { values })
+            .collect(),
     })
 }
 
@@ -252,7 +264,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result.rows[0].get("service"), Some(&json!("api")));
+        assert_eq!(result.get(0, "service"), Some(&json!("api")));
     }
 
     #[tokio::test]
@@ -277,7 +289,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result.rows[0].get("message"), Some(&json!("login failed")));
+        assert_eq!(result.get(0, "message"), Some(&json!("login failed")));
     }
 
     #[tokio::test]
@@ -309,7 +321,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result.rows[0].get("value"), Some(&json!(42.5)));
+        assert_eq!(result.get(0, "value"), Some(&json!(42.5)));
     }
 
     #[tokio::test]
@@ -320,12 +332,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_result_row_get_missing_column() {
-        let row = ResultRow {
-            columns: vec![("a".into(), json!(1))],
+    async fn test_result_set_column_lookup() {
+        let rs = ResultSet {
+            columns: vec!["a".into(), "b".into()],
+            rows: vec![crate::store::ResultRow {
+                values: vec![json!(1), json!(2)],
+            }],
         };
-        assert!(row.get("b").is_none());
-        assert_eq!(row.get("a"), Some(&json!(1)));
+        assert_eq!(rs.get(0, "a"), Some(&json!(1)));
+        assert_eq!(rs.get(0, "b"), Some(&json!(2)));
+        assert!(rs.get(0, "c").is_none());
+        assert!(rs.get(1, "a").is_none());
     }
 
     #[tokio::test]

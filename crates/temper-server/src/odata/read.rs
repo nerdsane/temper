@@ -324,51 +324,262 @@ pub(super) async fn handle_odata_get_for_tenant(
         }
 
         ODataPath::EntitySet(name) => {
-            let entity_type = match resolve_entity_type(&state, &tenant, &name) {
-                Some(t) => t,
-                None => {
-                    record_entity_set_not_found(&state, tenant.as_str(), &name).await;
-                    return odata_error(
-                        StatusCode::NOT_FOUND,
-                        "EntitySetNotFound",
-                        &format!("Entity set '{name}' not found"),
-                    )
-                    .into_response();
-                }
-            };
+            handle_entity_set(&state, &tenant, &name, &query_options).await
+        }
 
-            let entity_ids = state.list_entity_ids(&tenant, &entity_type);
-            let mut entities = Vec::new();
-            for id in &entity_ids {
-                if let Ok(response) = state
-                    .get_tenant_entity_state(&tenant, &entity_type, id)
-                    .await
-                {
-                    let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
-                    if let Some(obj) = entity.as_object_mut() {
-                        obj.insert(
-                            "@odata.id".into(),
-                            serde_json::json!(format!("{name}('{id}')")),
-                        );
-                    }
-                    entities.push(entity);
-                }
+        ODataPath::Entity(set_name, key) => {
+            handle_entity(&state, &tenant, &set_name, &key, &query_options).await
+        }
+
+        ODataPath::NavigationProperty {
+            ref parent,
+            ref property,
+        } => handle_navigation_property(&state, &tenant, parent, property, &query_options).await,
+
+        ODataPath::NavigationEntity {
+            ref parent,
+            ref property,
+            ref key,
+        } => handle_navigation_entity(&state, &tenant, parent, property, key, &query_options).await,
+
+        ODataPath::BoundFunction { parent, function } => {
+            handle_bound_function(&state, &tenant, &parent, &function, &query_options).await
+        }
+
+        _ => odata_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "NotImplemented",
+            "This path pattern is not yet supported",
+        )
+        .into_response(),
+    }
+}
+
+/// Handle `EntitySet` path: list all entities in a set with query options.
+async fn handle_entity_set(
+    state: &ServerState,
+    tenant: &TenantId,
+    name: &str,
+    query_options: &temper_odata::query::types::QueryOptions,
+) -> axum::response::Response {
+    let entity_type = match resolve_entity_type(state, tenant, name) {
+        Some(t) => t,
+        None => {
+            record_entity_set_not_found(state, tenant.as_str(), name).await;
+            return odata_error(
+                StatusCode::NOT_FOUND,
+                "EntitySetNotFound",
+                &format!("Entity set '{name}' not found"),
+            )
+            .into_response();
+        }
+    };
+
+    let entity_ids = state.list_entity_ids(tenant, &entity_type);
+    let mut entities = Vec::new();
+    for id in &entity_ids {
+        if let Ok(response) = state
+            .get_tenant_entity_state(tenant, &entity_type, id)
+            .await
+        {
+            let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
+            if let Some(obj) = entity.as_object_mut() {
+                obj.insert(
+                    "@odata.id".into(),
+                    serde_json::json!(format!("{name}('{id}')")),
+                );
             }
+            entities.push(entity);
+        }
+    }
 
-            let (mut result, count) = apply_query_options(entities, &query_options);
+    let (mut result, count) = apply_query_options(entities, query_options);
+
+    if let Some(ref expand_items) = query_options.expand {
+        for entity in &mut result {
+            expand_entity(entity, expand_items, &entity_type, state, tenant).await;
+        }
+    }
+
+    let mut body = serde_json::json!({
+        "@odata.context": format!("$metadata#{name}"),
+        "value": result,
+    });
+    if let Some(c) = count {
+        body["@odata.count"] = serde_json::json!(c);
+    }
+    ODataResponse {
+        status: StatusCode::OK,
+        body,
+    }
+    .into_response()
+}
+
+/// Handle `Entity` path: fetch a single entity by key.
+async fn handle_entity(
+    state: &ServerState,
+    tenant: &TenantId,
+    set_name: &str,
+    key: &temper_odata::path::KeyValue,
+    query_options: &temper_odata::query::types::QueryOptions,
+) -> axum::response::Response {
+    let entity_type = match resolve_entity_type(state, tenant, set_name) {
+        Some(t) => t,
+        None => {
+            record_entity_set_not_found(state, tenant.as_str(), set_name).await;
+            return odata_error(
+                StatusCode::NOT_FOUND,
+                "EntitySetNotFound",
+                &format!("Entity set '{set_name}' not found"),
+            )
+            .into_response();
+        }
+    };
+    let key_str = extract_key(key);
+
+    if !state.entity_exists(tenant, &entity_type, &key_str) {
+        return odata_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFound",
+            &format!("Entity '{set_name}' with key '{key_str}' not found"),
+        )
+        .into_response();
+    }
+
+    match state
+        .get_tenant_entity_state(tenant, &entity_type, &key_str)
+        .await
+    {
+        Ok(response) => {
+            let mut body = annotate_entity(
+                serde_json::to_value(&response.state).unwrap_or_default(),
+                format!("$metadata#{set_name}/$entity"),
+                Some(format!("{set_name}('{key_str}')")),
+            );
+
+            enrich_entity_response(&mut body, &entity_type, set_name, &key_str, state, tenant);
 
             if let Some(ref expand_items) = query_options.expand {
-                for entity in &mut result {
-                    expand_entity(entity, expand_items, &entity_type, &state, &tenant).await;
-                }
+                expand_entity(&mut body, expand_items, &entity_type, state, tenant).await;
             }
 
+            if let Some(ref select) = query_options.select {
+                body = select_fields(vec![body], select).pop().unwrap_or_default();
+            }
+
+            ODataResponse {
+                status: StatusCode::OK,
+                body,
+            }
+            .into_response()
+        }
+        Err(_) => odata_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFound",
+            &format!("Entity '{set_name}' with key '{key_str}' not found"),
+        )
+        .into_response(),
+    }
+}
+
+/// Handle `NavigationProperty` path: resolve parent and expand nav property.
+async fn handle_navigation_property(
+    state: &ServerState,
+    tenant: &TenantId,
+    parent: &ODataPath,
+    property: &str,
+    query_options: &temper_odata::query::types::QueryOptions,
+) -> axum::response::Response {
+    let (parent_type, parent_key, parent_set) =
+        match resolve_parent_entity(parent, state, tenant).await {
+            Ok(r) => r,
+            Err((status, msg)) => {
+                return odata_error(status, "InvalidPath", &msg).into_response();
+            }
+        };
+
+    let parent_entity_type = match resolve_entity_type(state, tenant, &parent_set) {
+        Some(t) => t,
+        None => {
+            record_entity_set_not_found(state, tenant.as_str(), &parent_set).await;
+            return odata_error(
+                StatusCode::NOT_FOUND,
+                "EntitySetNotFound",
+                &format!("Entity set '{parent_set}' not found"),
+            )
+            .into_response();
+        }
+    };
+
+    if !state.entity_exists(tenant, &parent_entity_type, &parent_key) {
+        return odata_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFound",
+            &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
+        )
+        .into_response();
+    }
+
+    let response = match state
+        .get_tenant_entity_state(tenant, &parent_type, &parent_key)
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => {
+            return odata_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
+            )
+            .into_response();
+        }
+    };
+
+    let mut parent_body = serde_json::to_value(&response.state).unwrap_or_default();
+    let nav_opts = temper_odata::query::types::ExpandOptions {
+        select: query_options.select.clone(),
+        filter: query_options.filter.clone(),
+        orderby: query_options.orderby.clone(),
+        top: query_options.top,
+        skip: query_options.skip,
+        expand: query_options.expand.clone(),
+    };
+    let expand_item = temper_odata::query::types::ExpandItem {
+        property: property.to_string(),
+        options: if has_expand_options(&nav_opts) {
+            Some(nav_opts)
+        } else {
+            None
+        },
+    };
+
+    expand_entity(
+        &mut parent_body,
+        &[expand_item],
+        &parent_type,
+        state,
+        tenant,
+    )
+    .await;
+
+    let Some(nav_value) = parent_body.get(property).cloned() else {
+        return odata_error(
+            StatusCode::NOT_FOUND,
+            "NavigationPropertyNotFound",
+            &format!("Navigation property '{property}' not found on entity type '{parent_type}'"),
+        )
+        .into_response();
+    };
+
+    match nav_value {
+        serde_json::Value::Array(values) => {
+            let count = values.len();
             let mut body = serde_json::json!({
-                "@odata.context": format!("$metadata#{name}"),
-                "value": result,
+                "@odata.context": format!("$metadata#{parent_set}('{parent_key}')/{property}"),
+                "value": values,
             });
-            if let Some(c) = count {
-                body["@odata.count"] = serde_json::json!(c);
+            if query_options.count == Some(true) {
+                body["@odata.count"] = serde_json::json!(count);
             }
             ODataResponse {
                 status: StatusCode::OK,
@@ -376,367 +587,193 @@ pub(super) async fn handle_odata_get_for_tenant(
             }
             .into_response()
         }
-
-        ODataPath::Entity(set_name, key) => {
-            let entity_type = match resolve_entity_type(&state, &tenant, &set_name) {
-                Some(t) => t,
-                None => {
-                    record_entity_set_not_found(&state, tenant.as_str(), &set_name).await;
-                    return odata_error(
-                        StatusCode::NOT_FOUND,
-                        "EntitySetNotFound",
-                        &format!("Entity set '{set_name}' not found"),
-                    )
-                    .into_response();
-                }
-            };
-            let key_str = extract_key(&key);
-
-            if !state.entity_exists(&tenant, &entity_type, &key_str) {
-                return odata_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFound",
-                    &format!("Entity '{set_name}' with key '{key_str}' not found"),
-                )
-                .into_response();
+        mut other => {
+            if let Some(obj) = other.as_object_mut() {
+                obj.insert(
+                    "@odata.context".into(),
+                    serde_json::json!(format!(
+                        "$metadata#{parent_set}('{parent_key}')/{property}/$entity"
+                    )),
+                );
             }
-
-            match state
-                .get_tenant_entity_state(&tenant, &entity_type, &key_str)
-                .await
-            {
-                Ok(response) => {
-                    let mut body = annotate_entity(
-                        serde_json::to_value(&response.state).unwrap_or_default(),
-                        format!("$metadata#{set_name}/$entity"),
-                        Some(format!("{set_name}('{key_str}')")),
-                    );
-
-                    // Enrich with available actions and child nav properties
-                    enrich_entity_response(
-                        &mut body,
-                        &entity_type,
-                        &set_name,
-                        &key_str,
-                        &state,
-                        &tenant,
-                    );
-
-                    if let Some(ref expand_items) = query_options.expand {
-                        expand_entity(&mut body, expand_items, &entity_type, &state, &tenant).await;
-                    }
-
-                    if let Some(ref select) = query_options.select {
-                        body = select_fields(vec![body], select).pop().unwrap_or_default();
-                    }
-
-                    ODataResponse {
-                        status: StatusCode::OK,
-                        body,
-                    }
-                    .into_response()
-                }
-                Err(_) => odata_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFound",
-                    &format!("Entity '{set_name}' with key '{key_str}' not found"),
-                )
-                .into_response(),
+            ODataResponse {
+                status: StatusCode::OK,
+                body: other,
             }
+            .into_response()
         }
+    }
+}
 
-        ODataPath::NavigationProperty {
-            ref parent,
-            ref property,
-        } => {
-            // Recursively resolve the parent entity
-            let (parent_type, parent_key, parent_set) =
-                match resolve_parent_entity(parent, &state, &tenant).await {
-                    Ok(r) => r,
-                    Err((status, msg)) => {
-                        return odata_error(status, "InvalidPath", &msg).into_response();
-                    }
-                };
+/// Handle `NavigationEntity` path: resolve parent, then fetch keyed child.
+async fn handle_navigation_entity(
+    state: &ServerState,
+    tenant: &TenantId,
+    parent: &ODataPath,
+    property: &str,
+    key: &temper_odata::path::KeyValue,
+    query_options: &temper_odata::query::types::QueryOptions,
+) -> axum::response::Response {
+    let (parent_type, _parent_key, _parent_set) =
+        match resolve_parent_entity(parent, state, tenant).await {
+            Ok(r) => r,
+            Err((status, msg)) => {
+                return odata_error(status, "InvalidPath", &msg).into_response();
+            }
+        };
 
-            let parent_entity_type = match resolve_entity_type(&state, &tenant, &parent_set) {
-                Some(t) => t,
-                None => {
-                    record_entity_set_not_found(&state, tenant.as_str(), &parent_set).await;
-                    return odata_error(
-                        StatusCode::NOT_FOUND,
-                        "EntitySetNotFound",
-                        &format!("Entity set '{parent_set}' not found"),
-                    )
-                    .into_response();
-                }
-            };
+    let target_type = {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        let tc = registry.get_tenant(tenant);
+        tc.and_then(|tc| crate::query_eval::find_nav_target(&tc.csdl, &parent_type, property))
+    };
 
-            if !state.entity_exists(&tenant, &parent_entity_type, &parent_key) {
-                return odata_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFound",
-                    &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
-                )
-                .into_response();
+    let Some(target_type) = target_type else {
+        return odata_error(
+            StatusCode::NOT_FOUND,
+            "NavigationPropertyNotFound",
+            &format!("Navigation property '{property}' not found on '{parent_type}'"),
+        )
+        .into_response();
+    };
+
+    let key_str = extract_key(key);
+    let target_set = resolve_entity_set_name(state, tenant, &target_type);
+
+    if !state.entity_exists(tenant, &target_type, &key_str) {
+        return odata_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFound",
+            &format!("Entity '{target_set}' with key '{key_str}' not found"),
+        )
+        .into_response();
+    }
+
+    match state
+        .get_tenant_entity_state(tenant, &target_type, &key_str)
+        .await
+    {
+        Ok(response) => {
+            let mut body = annotate_entity(
+                serde_json::to_value(&response.state).unwrap_or_default(),
+                format!("$metadata#{target_set}/$entity"),
+                Some(format!("{target_set}('{key_str}')")),
+            );
+
+            enrich_entity_response(
+                &mut body,
+                &target_type,
+                &target_set,
+                &key_str,
+                state,
+                tenant,
+            );
+
+            if let Some(ref expand_items) = query_options.expand {
+                expand_entity(&mut body, expand_items, &target_type, state, tenant).await;
             }
 
-            let response = match state
-                .get_tenant_entity_state(&tenant, &parent_type, &parent_key)
-                .await
-            {
-                Ok(r) => r,
-                Err(_) => {
-                    return odata_error(
-                        StatusCode::NOT_FOUND,
-                        "ResourceNotFound",
-                        &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
-                    )
-                    .into_response();
-                }
-            };
+            if let Some(ref select) = query_options.select {
+                body = select_fields(vec![body], select).pop().unwrap_or_default();
+            }
 
-            let mut parent_body = serde_json::to_value(&response.state).unwrap_or_default();
-            let nav_opts = temper_odata::query::types::ExpandOptions {
-                select: query_options.select.clone(),
-                filter: query_options.filter.clone(),
-                orderby: query_options.orderby.clone(),
-                top: query_options.top,
-                skip: query_options.skip,
-                expand: query_options.expand.clone(),
-            };
-            let expand_item = temper_odata::query::types::ExpandItem {
-                property: property.clone(),
-                options: if has_expand_options(&nav_opts) {
-                    Some(nav_opts)
-                } else {
-                    None
-                },
-            };
+            ODataResponse {
+                status: StatusCode::OK,
+                body,
+            }
+            .into_response()
+        }
+        Err(_) => odata_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFound",
+            &format!("Entity '{target_set}' with key '{key_str}' not found"),
+        )
+        .into_response(),
+    }
+}
 
-            expand_entity(
-                &mut parent_body,
-                &[expand_item],
-                &parent_type,
-                &state,
-                &tenant,
+/// Handle `BoundFunction` path: fetch entity and annotate with function info.
+async fn handle_bound_function(
+    state: &ServerState,
+    tenant: &TenantId,
+    parent: &ODataPath,
+    function: &str,
+    query_options: &temper_odata::query::types::QueryOptions,
+) -> axum::response::Response {
+    let (parent_set, parent_key) = match parent {
+        ODataPath::Entity(set_name, key) => (set_name.clone(), extract_key(key)),
+        _ => {
+            return odata_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidPath",
+                "Bound function requires an entity key parent path",
             )
-            .await;
-
-            let Some(nav_value) = parent_body.get(property).cloned() else {
-                return odata_error(
-                    StatusCode::NOT_FOUND,
-                    "NavigationPropertyNotFound",
-                    &format!(
-                        "Navigation property '{property}' not found on entity type '{parent_type}'"
-                    ),
-                )
-                .into_response();
-            };
-
-            match nav_value {
-                serde_json::Value::Array(values) => {
-                    let count = values.len();
-                    let mut body = serde_json::json!({
-                        "@odata.context": format!("$metadata#{parent_set}('{parent_key}')/{property}"),
-                        "value": values,
-                    });
-                    if query_options.count == Some(true) {
-                        body["@odata.count"] = serde_json::json!(count);
-                    }
-                    ODataResponse {
-                        status: StatusCode::OK,
-                        body,
-                    }
-                    .into_response()
-                }
-                mut other => {
-                    if let Some(obj) = other.as_object_mut() {
-                        obj.insert(
-                            "@odata.context".into(),
-                            serde_json::json!(format!(
-                                "$metadata#{parent_set}('{parent_key}')/{property}/$entity"
-                            )),
-                        );
-                    }
-                    ODataResponse {
-                        status: StatusCode::OK,
-                        body: other,
-                    }
-                    .into_response()
-                }
-            }
+            .into_response();
         }
+    };
 
-        ODataPath::NavigationEntity {
-            ref parent,
-            ref property,
-            ref key,
-        } => {
-            // Resolve the parent entity, then fetch the keyed child
-            let (parent_type, _parent_key, _parent_set) =
-                match resolve_parent_entity(parent, &state, &tenant).await {
-                    Ok(r) => r,
-                    Err((status, msg)) => {
-                        return odata_error(status, "InvalidPath", &msg).into_response();
-                    }
-                };
-
-            let target_type = {
-                let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
-                let tc = registry.get_tenant(&tenant);
-                tc.and_then(|tc| {
-                    crate::query_eval::find_nav_target(&tc.csdl, &parent_type, property)
-                })
-            };
-
-            let Some(target_type) = target_type else {
-                return odata_error(
-                    StatusCode::NOT_FOUND,
-                    "NavigationPropertyNotFound",
-                    &format!("Navigation property '{property}' not found on '{parent_type}'"),
-                )
-                .into_response();
-            };
-
-            let key_str = extract_key(key);
-            let target_set = resolve_entity_set_name(&state, &tenant, &target_type);
-
-            if !state.entity_exists(&tenant, &target_type, &key_str) {
-                return odata_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFound",
-                    &format!("Entity '{target_set}' with key '{key_str}' not found"),
-                )
-                .into_response();
-            }
-
-            match state
-                .get_tenant_entity_state(&tenant, &target_type, &key_str)
-                .await
-            {
-                Ok(response) => {
-                    let mut body = annotate_entity(
-                        serde_json::to_value(&response.state).unwrap_or_default(),
-                        format!("$metadata#{target_set}/$entity"),
-                        Some(format!("{target_set}('{key_str}')")),
-                    );
-
-                    enrich_entity_response(
-                        &mut body,
-                        &target_type,
-                        &target_set,
-                        &key_str,
-                        &state,
-                        &tenant,
-                    );
-
-                    if let Some(ref expand_items) = query_options.expand {
-                        expand_entity(&mut body, expand_items, &target_type, &state, &tenant).await;
-                    }
-
-                    if let Some(ref select) = query_options.select {
-                        body = select_fields(vec![body], select).pop().unwrap_or_default();
-                    }
-
-                    ODataResponse {
-                        status: StatusCode::OK,
-                        body,
-                    }
-                    .into_response()
-                }
-                Err(_) => odata_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFound",
-                    &format!("Entity '{target_set}' with key '{key_str}' not found"),
-                )
-                .into_response(),
-            }
+    let entity_type = match resolve_entity_type(state, tenant, &parent_set) {
+        Some(et) => et,
+        None => {
+            return odata_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                &format!("Entity set '{}' not found", parent_set),
+            )
+            .into_response();
         }
+    };
 
-        ODataPath::BoundFunction { parent, function } => {
-            let (parent_set, parent_key) = match *parent {
-                ODataPath::Entity(ref set_name, ref key) => (set_name.clone(), extract_key(key)),
-                _ => {
-                    return odata_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidPath",
-                        "Bound function requires an entity key parent path",
-                    )
-                    .into_response();
-                }
-            };
+    if !state.entity_exists(tenant, &entity_type, &parent_key) {
+        return odata_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFound",
+            &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
+        )
+        .into_response();
+    }
 
-            let entity_type = match resolve_entity_type(&state, &tenant, &parent_set) {
-                Some(et) => et,
-                None => {
-                    return odata_error(
-                        StatusCode::NOT_FOUND,
-                        "ResourceNotFound",
-                        &format!("Entity set '{}' not found", parent_set),
-                    )
-                    .into_response();
-                }
-            };
-
-            if !state.entity_exists(&tenant, &entity_type, &parent_key) {
-                return odata_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFound",
-                    &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
-                )
-                .into_response();
+    match state
+        .get_tenant_entity_state(tenant, &entity_type, &parent_key)
+        .await
+    {
+        Ok(response) => {
+            let mut body = annotate_entity(
+                serde_json::to_value(&response.state).unwrap_or_default(),
+                format!("$metadata#{entity_type}"),
+                None,
+            );
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("@odata.function".to_string(), serde_json::json!(function));
             }
 
-            match state
-                .get_tenant_entity_state(&tenant, &entity_type, &parent_key)
-                .await
-            {
-                Ok(response) => {
-                    let mut body = annotate_entity(
-                        serde_json::to_value(&response.state).unwrap_or_default(),
-                        format!("$metadata#{entity_type}"),
-                        None,
-                    );
-                    if let Some(obj) = body.as_object_mut() {
-                        obj.insert("@odata.function".to_string(), serde_json::json!(function));
-                    }
-
-                    if let Some(ref select) = query_options.select {
-                        let selected = crate::query_eval::select_fields(vec![body.clone()], select);
-                        if let Some(first) = selected.into_iter().next() {
-                            body = first;
-                        }
-                    }
-                    if let Some(ref expand_items) = query_options.expand {
-                        crate::query_eval::expand_entity(
-                            &mut body,
-                            expand_items,
-                            &entity_type,
-                            &state,
-                            &tenant,
-                        )
-                        .await;
-                    }
-
-                    ODataResponse {
-                        status: StatusCode::OK,
-                        body,
-                    }
-                    .into_response()
+            if let Some(ref select) = query_options.select {
+                let selected = crate::query_eval::select_fields(vec![body.clone()], select);
+                if let Some(first) = selected.into_iter().next() {
+                    body = first;
                 }
-                Err(_) => odata_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFound",
-                    &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
-                )
-                .into_response(),
             }
+            if let Some(ref expand_items) = query_options.expand {
+                crate::query_eval::expand_entity(
+                    &mut body,
+                    expand_items,
+                    &entity_type,
+                    state,
+                    tenant,
+                )
+                .await;
+            }
+
+            ODataResponse {
+                status: StatusCode::OK,
+                body,
+            }
+            .into_response()
         }
-
-        _ => odata_error(
-            StatusCode::NOT_IMPLEMENTED,
-            "NotImplemented",
-            "This path pattern is not yet supported",
+        Err(_) => odata_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFound",
+            &format!("Entity '{parent_set}' with key '{parent_key}' not found"),
         )
         .into_response(),
     }
@@ -750,7 +787,10 @@ pub async fn handle_odata_get(
     axum::extract::Path(path): axum::extract::Path<String>,
     Query(query_params): Query<std::collections::BTreeMap<String, String>>,
 ) -> impl IntoResponse {
-    let tenant = extract_tenant(&headers, &state);
+    let tenant = match extract_tenant(&headers, &state) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
     handle_odata_get_for_tenant(state, tenant, path, query_params).await
 }
 
@@ -759,7 +799,10 @@ pub async fn handle_service_document(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let tenant = extract_tenant(&headers, &state);
+    let tenant = match extract_tenant(&headers, &state) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
     let entity_sets: Vec<serde_json::Value> = tenant_entity_sets(&state, &tenant)
         .iter()
         .map(|name| serde_json::json!({"name": name, "kind": "EntitySet", "url": name}))
@@ -768,6 +811,7 @@ pub async fn handle_service_document(
         status: StatusCode::OK,
         body: serde_json::json!({"@odata.context": "$metadata", "value": entity_sets}),
     }
+    .into_response()
 }
 
 #[instrument(skip_all, fields(otel.name = "GET /odata/$metadata"))]
@@ -775,10 +819,14 @@ pub async fn handle_metadata(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let tenant = extract_tenant(&headers, &state);
+    let tenant = match extract_tenant(&headers, &state) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
     ODataXmlResponse {
         body: tenant_csdl_xml(&state, &tenant),
     }
+    .into_response()
 }
 
 #[instrument(skip_all, fields(otel.name = "GET /odata/hints"))]

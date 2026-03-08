@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use temper_evolution::FeatureRequestDisposition;
@@ -12,76 +12,101 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::instrument;
 
-use crate::dispatch::AgentContext;
-use crate::insight_generator;
+use super::insight_generator;
+use crate::authz::require_observe_auth;
+use crate::request_context::AgentContext;
 use crate::sentinel;
 use crate::state::ServerState;
 
-/// POST /api/evolution/sentinel/check -- trigger sentinel rule evaluation.
-///
-/// Evaluates all default sentinel rules against current server state.
-/// Any triggered rules generate O-Records and store them in the RecordStore.
-/// Returns a list of alerts (may be empty if all is healthy).
-#[instrument(skip_all, fields(otel.name = "POST /api/evolution/sentinel/check"))]
-pub(crate) async fn handle_sentinel_check(
-    State(state): State<ServerState>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Load trajectory entries from Turso for sentinel and insight generation.
-    let trajectory_entries = state.load_trajectory_entries(10_000).await;
+/// Persist an evolution record to Turso and return whether persistence succeeded.
+async fn persist_evolution_record(
+    state: &ServerState,
+    record_id: &str,
+    record_type: &str,
+    status: &str,
+    created_by: &str,
+    derived_from: Option<&str>,
+    data_json: &str,
+) -> Result<(), String> {
+    let Some(turso) = state.persistent_store() else {
+        return Ok(());
+    };
+    turso
+        .insert_evolution_record(
+            record_id,
+            record_type,
+            status,
+            created_by,
+            derived_from,
+            data_json,
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
 
-    let rules = sentinel::default_rules();
-    let alerts = sentinel::check_rules(&rules, &state, &trajectory_entries);
-
-    // Store generated O-Records and create Observation entities.
+/// Create an entity in the temper-system tenant, logging a warning on failure.
+async fn create_system_entity(
+    state: &ServerState,
+    entity_type: &str,
+    entity_id: &str,
+    action: &str,
+    params: serde_json::Value,
+) {
     let system_tenant = TenantId::new("temper-system");
+    if let Err(e) = state
+        .dispatch_tenant_action(
+            &system_tenant,
+            entity_type,
+            entity_id,
+            action,
+            params,
+            &AgentContext::system(),
+        )
+        .await
+    {
+        tracing::warn!(error = %e, entity_type, entity_id, "failed to create system entity");
+    }
+}
+
+/// Persist sentinel alerts to Turso and create Observation entities.
+async fn persist_alerts(
+    state: &ServerState,
+    alerts: &[sentinel::SentinelAlert],
+) -> Result<Vec<serde_json::Value>, StatusCode> {
     let mut results = Vec::new();
-    for alert in &alerts {
-        // Persist observation to Turso.
-        if let Some(turso) = state.turso_opt() {
-            let data_json = serde_json::to_string(&alert.record).unwrap_or_default();
-            if let Err(e) = turso
-                .insert_evolution_record(
-                    &alert.record.header.id,
-                    "Observation",
-                    &format!("{:?}", alert.record.header.status),
-                    &alert.record.header.created_by,
-                    alert.record.header.derived_from.as_deref(),
-                    &data_json,
-                )
-                .await
-            {
-                tracing::error!(
-                    record_id = %alert.record.header.id,
-                    error = %e,
-                    "failed to persist sentinel observation to Turso"
-                );
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
-            }
+    for alert in alerts {
+        let data_json = serde_json::to_string(&alert.record).unwrap_or_default();
+        if let Err(e) = persist_evolution_record(
+            state,
+            &alert.record.header.id,
+            "Observation",
+            &format!("{:?}", alert.record.header.status),
+            &alert.record.header.created_by,
+            alert.record.header.derived_from.as_deref(),
+            &data_json,
+        )
+        .await
+        {
+            tracing::error!(record_id = %alert.record.header.id, error = %e, "failed to persist sentinel observation");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
 
-        // Create Observation entity in temper-system tenant.
         let obs_id = format!("OBS-{}", sim_uuid());
-        let obs_params = serde_json::json!({
-            "source": alert.record.source,
-            "classification": format!("{:?}", alert.record.classification),
-            "evidence_query": alert.record.evidence_query,
-            "context": serde_json::to_string(&alert.record.context).unwrap_or_default(),
-            "tenant": "temper-system",
-            "legacy_record_id": alert.record.header.id,
-        });
-        if let Err(e) = state
-            .dispatch_tenant_action(
-                &system_tenant,
-                "Observation",
-                &obs_id,
-                "CreateObservation",
-                obs_params,
-                &AgentContext::default(),
-            )
-            .await
-        {
-            tracing::warn!(error = %e, "failed to create Observation entity for sentinel alert");
-        }
+        create_system_entity(
+            state,
+            "Observation",
+            &obs_id,
+            "CreateObservation",
+            serde_json::json!({
+                "source": alert.record.source,
+                "classification": format!("{:?}", alert.record.classification),
+                "evidence_query": alert.record.evidence_query,
+                "context": serde_json::to_string(&alert.record.context).unwrap_or_default(),
+                "tenant": "temper-system",
+                "legacy_record_id": alert.record.header.id,
+            }),
+        )
+        .await;
 
         results.push(serde_json::json!({
             "rule": alert.rule_name,
@@ -93,58 +118,49 @@ pub(crate) async fn handle_sentinel_check(
             "observed": alert.record.observed_value,
         }));
     }
+    Ok(results)
+}
 
-    // Also generate insights from trajectory data.
-    let insights = insight_generator::generate_insights(&trajectory_entries);
-    let mut insight_results = Vec::new();
-    for insight in &insights {
-        // Persist insight to Turso.
-        if let Some(turso) = state.turso_opt() {
-            let data_json = serde_json::to_string(insight).unwrap_or_default();
-            if let Err(e) = turso
-                .insert_evolution_record(
-                    &insight.header.id,
-                    "Insight",
-                    &format!("{:?}", insight.header.status),
-                    &insight.header.created_by,
-                    insight.header.derived_from.as_deref(),
-                    &data_json,
-                )
-                .await
-            {
-                tracing::error!(
-                    record_id = %insight.header.id,
-                    error = %e,
-                    "failed to persist insight to Turso"
-                );
-            }
-        }
-
-        // Create Insight entity in temper-system tenant.
-        let insight_id = format!("INS-{}", sim_uuid());
-        let insight_params = serde_json::json!({
-            "observation_id": "",
-            "category": format!("{:?}", insight.category),
-            "signal": insight.signal.intent,
-            "recommendation": insight.recommendation,
-            "priority_score": format!("{:.4}", insight.priority_score),
-            "legacy_record_id": insight.header.id,
-        });
-        if let Err(e) = state
-            .dispatch_tenant_action(
-                &system_tenant,
-                "Insight",
-                &insight_id,
-                "CreateInsight",
-                insight_params,
-                &AgentContext::default(),
-            )
-            .await
+/// Persist generated insights to Turso and create Insight entities.
+async fn persist_insights(
+    state: &ServerState,
+    insights: &[temper_evolution::InsightRecord],
+) -> Vec<serde_json::Value> {
+    let mut results = Vec::new();
+    for insight in insights {
+        let data_json = serde_json::to_string(insight).unwrap_or_default();
+        if let Err(e) = persist_evolution_record(
+            state,
+            &insight.header.id,
+            "Insight",
+            &format!("{:?}", insight.header.status),
+            &insight.header.created_by,
+            insight.header.derived_from.as_deref(),
+            &data_json,
+        )
+        .await
         {
-            tracing::warn!(error = %e, "failed to create Insight entity");
+            tracing::error!(record_id = %insight.header.id, error = %e, "failed to persist insight");
         }
 
-        insight_results.push(serde_json::json!({
+        let insight_id = format!("INS-{}", sim_uuid());
+        create_system_entity(
+            state,
+            "Insight",
+            &insight_id,
+            "CreateInsight",
+            serde_json::json!({
+                "observation_id": "",
+                "category": format!("{:?}", insight.category),
+                "signal": insight.signal.intent,
+                "recommendation": insight.recommendation,
+                "priority_score": format!("{:.4}", insight.priority_score),
+                "legacy_record_id": insight.header.id,
+            }),
+        )
+        .await;
+
+        results.push(serde_json::json!({
             "record_id": insight.header.id,
             "entity_id": insight_id,
             "category": format!("{:?}", insight.category),
@@ -153,6 +169,28 @@ pub(crate) async fn handle_sentinel_check(
             "recommendation": insight.recommendation,
         }));
     }
+    results
+}
+
+/// POST /api/evolution/sentinel/check -- trigger sentinel rule evaluation.
+///
+/// Evaluates all default sentinel rules against current server state.
+/// Any triggered rules generate O-Records and store them in the RecordStore.
+/// Returns a list of alerts (may be empty if all is healthy).
+#[instrument(skip_all, fields(otel.name = "POST /api/evolution/sentinel/check"))]
+pub(crate) async fn handle_sentinel_check(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_observe_auth(&state, &headers, "run_sentinel", "Evolution")?;
+    let trajectory_entries = state.load_trajectory_entries(10_000).await;
+
+    let rules = sentinel::default_rules();
+    let alerts = sentinel::check_rules(&rules, &state, &trajectory_entries);
+    let results = persist_alerts(&state, &alerts).await?;
+
+    let insights = insight_generator::generate_insights(&trajectory_entries);
+    let insight_results = persist_insights(&state, &insights).await;
 
     Ok(Json(serde_json::json!({
         "alerts_count": alerts.len(),
@@ -166,17 +204,19 @@ pub(crate) async fn handle_sentinel_check(
 #[instrument(skip_all, fields(otel.name = "GET /observe/evolution/unmet-intents"))]
 pub(crate) async fn handle_unmet_intents(
     State(state): State<ServerState>,
-) -> Json<serde_json::Value> {
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
     let trajectory_entries = state.load_trajectory_entries(10_000).await;
     let intents = insight_generator::generate_unmet_intents(&trajectory_entries);
     let open_count = intents.iter().filter(|i| i.status == "open").count();
     let resolved_count = intents.iter().filter(|i| i.status == "resolved").count();
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "intents": intents,
         "open_count": open_count,
         "resolved_count": resolved_count,
-    }))
+    })))
 }
 
 /// GET /observe/evolution/feature-requests -- list feature request records from Turso.
@@ -185,8 +225,10 @@ pub(crate) async fn handle_unmet_intents(
 #[instrument(skip_all, fields(otel.name = "GET /observe/evolution/feature-requests"))]
 pub(crate) async fn handle_feature_requests(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Query(params): Query<BTreeMap<String, String>>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
     let disposition_filter = params.get("disposition").map(|d| d.as_str());
 
     // Load trajectory entries for feature request generation.
@@ -194,7 +236,7 @@ pub(crate) async fn handle_feature_requests(
 
     // Query Turso directly (single source of truth).
     let system_tenant = TenantId::new("temper-system");
-    if let Some(turso) = state.turso_opt() {
+    if let Some(turso) = state.persistent_store() {
         // First, generate and upsert fresh feature requests from trajectory data.
         let generated = insight_generator::generate_feature_requests(&trajectory_entries);
         for fr in &generated {
@@ -238,7 +280,7 @@ pub(crate) async fn handle_feature_requests(
                     &fr_id,
                     "CreateFeatureRequest",
                     fr_params,
-                    &AgentContext::default(),
+                    &AgentContext::system(),
                 )
                 .await
             {
@@ -264,25 +306,43 @@ pub(crate) async fn handle_feature_requests(
                         })
                     })
                     .collect();
-                return Json(serde_json::json!(items));
+                let total = items.len();
+                return Ok(Json(
+                    serde_json::json!({ "feature_requests": items, "total": total }),
+                ));
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to query feature requests from Turso");
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
         }
     }
 
-    // Fallback: empty response when no Turso configured.
-    Json(serde_json::json!([]))
+    // No persistent store configured — return empty.
+    Ok(Json(
+        serde_json::json!({ "feature_requests": [], "total": 0 }),
+    ))
 }
 
 /// PATCH /observe/evolution/feature-requests/:id -- update disposition + notes in Turso.
+///
+/// Admin principals bypass Cedar; other principals require "manage_feature_requests"
+/// on "FeatureRequest".
 #[instrument(skip_all, fields(otel.name = "PATCH /observe/evolution/feature-requests/{id}"))]
 pub(crate) async fn handle_update_feature_request(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Cedar authorization: admin/system bypass, others need manage_feature_requests.
+    require_observe_auth(
+        &state,
+        &headers,
+        "manage_feature_requests",
+        "FeatureRequest",
+    )?;
+
     let disposition = body.get("disposition").and_then(|v| v.as_str());
     let notes = body.get("developer_notes").and_then(|v| v.as_str());
 
@@ -292,26 +352,21 @@ pub(crate) async fn handle_update_feature_request(
             "open" | "acknowledged" | "planned" | "wontfix" | "wont_fix" | "resolved" => {}
             _ => {
                 tracing::warn!(disposition = %d, "invalid disposition value");
-                return Err((StatusCode::BAD_REQUEST, format!("Invalid disposition: {d}")));
+                return Err(StatusCode::BAD_REQUEST);
             }
         }
     }
 
-    let Some(turso) = state.turso_opt() else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Turso backend not configured".to_string(),
-        ));
+    let Some(turso) = state.persistent_store() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
     turso
         .update_feature_request(&id, disposition.unwrap_or(""), notes)
         .await
         .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to update feature request: {e}"),
-            )
+            tracing::error!(error = %e, "failed to update feature request");
+            StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
     Ok(Json(serde_json::json!({
@@ -327,7 +382,9 @@ pub(crate) async fn handle_update_feature_request(
 #[instrument(skip_all, fields(otel.name = "GET /observe/evolution/stream"))]
 pub(crate) async fn handle_evolution_stream(
     State(state): State<ServerState>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    headers: HeaderMap,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_evolution", "EvolutionStream")?;
     // Subscribe to pending decision broadcasts (which include authz denials
     // that create evolution records). A dedicated evolution broadcast channel
     // could be added later for O/P/A/D/I records specifically.
@@ -346,5 +403,5 @@ pub(crate) async fn handle_evolution_stream(
         Err(_) => None,
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }

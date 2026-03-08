@@ -12,6 +12,8 @@ use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton}
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::build_spec_model;
 
+use crate::util::to_pascal_case;
+
 /// Run the `temper verify` command.
 ///
 /// Loads specs from the given directory, builds the spec model, and reports
@@ -216,52 +218,8 @@ fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
     Ok(sources)
 }
 
-/// Read all `.tla` files from the specs directory.
-fn read_tla_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
-    let mut sources = HashMap::new();
-
-    if !specs_dir.is_dir() {
-        return Ok(sources);
-    }
-
-    for entry in fs::read_dir(specs_dir)
-        .with_context(|| format!("Failed to read specs directory: {}", specs_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().and_then(|e| e.to_str()) == Some("tla") {
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default();
-
-            let entity_name = to_pascal_case(stem);
-            let source = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read TLA+ file: {}", path.display()))?;
-
-            sources.insert(entity_name, source);
-        }
-    }
-
-    Ok(sources)
-}
-
-/// Convert a string to PascalCase.
-fn to_pascal_case(s: &str) -> String {
-    s.split(['_', '-'])
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => {
-                    let upper: String = first.to_uppercase().collect();
-                    format!("{}{}", upper, chars.collect::<String>())
-                }
-                None => String::new(),
-            }
-        })
-        .collect()
-}
+// read_tla_sources is shared via crate::util::read_tla_sources
+use crate::util::read_tla_sources;
 
 #[cfg(test)]
 mod tests {

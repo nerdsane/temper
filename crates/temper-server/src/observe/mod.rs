@@ -136,15 +136,21 @@ pub struct EventStreamParams {
 /// Exception: POST /observe/verify/{entity} triggers computation but does not mutate state.
 pub fn build_observe_router() -> Router<ServerState> {
     Router::new()
-        .route("/specs", get(specs::list_specs))
-        .route("/specs/{entity}", get(specs::get_spec_detail))
-        .route("/entities", get(entities::list_entities))
-        .route("/verify/{entity}", post(verification::run_verification))
-        .route("/simulation/{entity}", get(verification::run_simulation))
-        .route("/paths/{entity}", get(verification::get_paths))
+        .route("/specs", get(specs::handle_list_specs))
+        .route("/specs/{entity}", get(specs::handle_get_spec_detail))
+        .route("/entities", get(entities::handle_list_entities))
+        .route(
+            "/verify/{entity}",
+            post(verification::handle_run_verification),
+        )
+        .route(
+            "/simulation/{entity}",
+            get(verification::handle_run_simulation),
+        )
+        .route("/paths/{entity}", get(verification::handle_get_paths))
         .route(
             "/entities/{entity_type}/{entity_id}/history",
-            get(entities::get_entity_history),
+            get(entities::handle_get_entity_history),
         )
         .route("/events/stream", get(entities::handle_event_stream))
         .route(
@@ -159,22 +165,28 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/health", get(metrics::handle_health))
         .route("/metrics", get(metrics::handle_metrics))
         .route("/trajectories", get(evolution::handle_trajectories))
-        .route("/evolution/records", get(evolution::list_evolution_records))
+        .route(
+            "/evolution/records",
+            get(evolution::handle_list_evolution_records),
+        )
         .route(
             "/evolution/records/{id}",
-            get(evolution::get_evolution_record),
+            get(evolution::handle_get_evolution_record),
         )
         .route(
             "/evolution/insights",
-            get(evolution::list_evolution_insights),
+            get(evolution::handle_list_evolution_insights),
         )
-        .route("/agents", get(agents::list_agents))
-        .route("/agents/{agent_id}/history", get(agents::get_agent_history))
-        .route("/wasm/modules", get(wasm::list_wasm_modules))
-        .route("/wasm/invocations", get(wasm::list_wasm_invocations))
+        .route("/agents", get(agents::handle_list_agents))
+        .route(
+            "/agents/{agent_id}/history",
+            get(agents::handle_get_agent_history),
+        )
+        .route("/wasm/modules", get(wasm::handle_list_wasm_modules))
+        .route("/wasm/invocations", get(wasm::handle_list_wasm_invocations))
         .route(
             "/wasm/modules/{module_name}",
-            get(wasm::get_wasm_module_info),
+            get(wasm::handle_get_wasm_module_info),
         )
         .route(
             "/evolution/unmet-intents",

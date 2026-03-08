@@ -129,3 +129,46 @@ impl<M: Message> fmt::Debug for ActorRef<M> {
         write!(f, "ActorRef({})", self.id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actor_id_new_sets_name_and_path() {
+        let id = ActorId::new("order-actor", "system/orders/order-1");
+        assert_eq!(id.name, "order-actor");
+        assert_eq!(id.path, "system/orders/order-1");
+    }
+
+    #[test]
+    fn actor_id_display_format() {
+        let id = ActorId::new("test", "system/test");
+        let display = format!("{}", id);
+        assert!(display.starts_with("system/test@"));
+        assert!(display.contains('@'));
+    }
+
+    #[test]
+    fn actor_id_equality() {
+        let id1 = ActorId {
+            name: "a".to_string(),
+            path: "p".to_string(),
+            uid: uuid::Uuid::nil(),
+        };
+        let id2 = ActorId {
+            name: "a".to_string(),
+            path: "p".to_string(),
+            uid: uuid::Uuid::nil(),
+        };
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn actor_id_inequality_on_uid() {
+        let id1 = ActorId::new("a", "p");
+        let id2 = ActorId::new("a", "p");
+        // Different sim_uuid() calls produce different UUIDs
+        assert_ne!(id1, id2);
+    }
+}

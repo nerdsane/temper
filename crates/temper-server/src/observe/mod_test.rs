@@ -9,9 +9,9 @@ use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
-use crate::dispatch::AgentContext;
 use crate::event_store::ServerEventStore;
 use crate::registry::SpecRegistry;
+use crate::request_context::AgentContext;
 
 const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
@@ -57,6 +57,36 @@ fn build_test_app() -> Router {
         .with_state(state)
 }
 
+/// Build a GET request with admin auth headers for observe endpoints.
+///
+/// Uses "admin" principal kind — "system" is no longer accepted from headers
+/// (only via `SecurityContext::system()` on internal paths).
+fn system_get(uri: &str) -> Request<Body> {
+    Request::get(uri)
+        .header("X-Temper-Principal-Kind", "admin")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Build a POST request with admin auth headers for observe endpoints.
+fn system_post(uri: &str, body: &str) -> Request<Body> {
+    Request::post(uri)
+        .header("Content-Type", "application/json")
+        .header("X-Temper-Principal-Kind", "admin")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// Build a POST request with admin auth headers.
+#[allow(dead_code)]
+fn admin_post(uri: &str, body: &str) -> Request<Body> {
+    Request::post(uri)
+        .header("Content-Type", "application/json")
+        .header("X-Temper-Principal-Kind", "admin")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 const ADMIN_MANAGE_POLICIES_POLICY: &str = r#"
 permit(
   principal is Admin,
@@ -82,16 +112,14 @@ fn build_app_with_state(state: ServerState) -> Router {
 #[tokio::test]
 async fn test_list_specs_returns_registered_entities() {
     let app = build_test_app();
-    let response = app
-        .oneshot(Request::get("/observe/specs").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let response = app.oneshot(system_get("/observe/specs")).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .unwrap();
-    let specs: Vec<SpecSummary> = serde_json::from_slice(&body).unwrap();
+    let wrapper: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let specs: Vec<SpecSummary> = serde_json::from_value(wrapper["specs"].clone()).unwrap();
     assert!(!specs.is_empty());
     assert_eq!(specs[0].entity_type, "Order");
     assert!(!specs[0].states.is_empty());
@@ -100,17 +128,14 @@ async fn test_list_specs_returns_registered_entities() {
     assert_eq!(specs[0].verification_status, "pending");
     assert!(specs[0].levels_passed.is_none());
     assert!(specs[0].levels_total.is_none());
+    assert_eq!(wrapper["total"], specs.len());
 }
 
 #[tokio::test]
 async fn test_get_spec_detail_found() {
     let app = build_test_app();
     let response = app
-        .oneshot(
-            Request::get("/observe/specs/Order")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_get("/observe/specs/Order"))
         .await
         .unwrap();
 
@@ -128,11 +153,7 @@ async fn test_get_spec_detail_found() {
 async fn test_get_spec_detail_not_found() {
     let app = build_test_app();
     let response = app
-        .oneshot(
-            Request::get("/observe/specs/NonExistent")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_get("/observe/specs/NonExistent"))
         .await
         .unwrap();
 
@@ -258,10 +279,10 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     // Verify decision status unchanged in Turso.
-    let turso = state.turso_opt().expect("turso configured");
+    let turso = state.persistent_store().expect("turso configured");
     let data_str = turso
         .get_pending_decision(&decision_id)
         .await
@@ -279,22 +300,18 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
 #[tokio::test]
 async fn test_list_entities_empty() {
     let app = build_test_app();
-    let response = app
-        .oneshot(
-            Request::get("/observe/entities")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = app.oneshot(system_get("/observe/entities")).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .unwrap();
-    let entities: Vec<EntityInstanceSummary> = serde_json::from_slice(&body).unwrap();
+    let wrapper: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entities: Vec<EntityInstanceSummary> =
+        serde_json::from_value(wrapper["entities"].clone()).unwrap();
     // No actors spawned yet, so should be empty
     assert!(entities.is_empty());
+    assert_eq!(wrapper["total"], 0);
 }
 
 #[tokio::test]
@@ -332,11 +349,7 @@ async fn test_entity_history_returns_events() {
         .with_state(state);
 
     let response = app
-        .oneshot(
-            Request::get("/observe/entities/Order/order-hist-1/history")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_get("/observe/entities/Order/order-hist-1/history"))
         .await
         .unwrap();
 
@@ -362,11 +375,7 @@ async fn test_entity_history_returns_events() {
 async fn test_entity_history_empty_for_unknown() {
     let app = build_test_app();
     let response = app
-        .oneshot(
-            Request::get("/observe/entities/Order/nonexistent/history")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_get("/observe/entities/Order/nonexistent/history"))
         .await
         .unwrap();
 
@@ -542,11 +551,7 @@ async fn test_trajectories_records_success_and_failure() {
         .with_state(state);
 
     let response = app
-        .oneshot(
-            Request::get("/observe/trajectories")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_get("/observe/trajectories"))
         .await
         .unwrap();
 
@@ -595,11 +600,7 @@ async fn test_trajectories_filters_by_entity_type() {
     // Filter for entity_type=Order should find our entry.
     let response = app
         .clone()
-        .oneshot(
-            Request::get("/observe/trajectories?entity_type=Order")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_get("/observe/trajectories?entity_type=Order"))
         .await
         .unwrap();
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -610,11 +611,7 @@ async fn test_trajectories_filters_by_entity_type() {
 
     // Filter for non-existent entity_type should return 0.
     let response = app
-        .oneshot(
-            Request::get("/observe/trajectories?entity_type=Nonexistent")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_get("/observe/trajectories?entity_type=Nonexistent"))
         .await
         .unwrap();
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -629,11 +626,7 @@ async fn test_trajectories_empty_when_no_actions() {
     let app = build_test_app();
 
     let response = app
-        .oneshot(
-            Request::get("/observe/trajectories")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_get("/observe/trajectories"))
         .await
         .unwrap();
 
@@ -657,11 +650,7 @@ async fn test_sentinel_check_no_alerts_on_clean_state() {
     let app = build_test_app();
 
     let response = app
-        .oneshot(
-            Request::post("/api/evolution/sentinel/check")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_post("/api/evolution/sentinel/check", ""))
         .await
         .unwrap();
 
@@ -711,11 +700,7 @@ async fn test_sentinel_check_detects_error_spike() {
         .with_state(state);
 
     let response = app
-        .oneshot(
-            Request::post("/api/evolution/sentinel/check")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_post("/api/evolution/sentinel/check", ""))
         .await
         .unwrap();
 
@@ -741,11 +726,7 @@ async fn test_evolution_records_empty() {
     let app = build_test_app();
 
     let response = app
-        .oneshot(
-            Request::get("/observe/evolution/records")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_get("/observe/evolution/records"))
         .await
         .unwrap();
 
@@ -784,21 +765,13 @@ async fn test_evolution_records_after_sentinel() {
     // Trigger sentinel first.
     let _ = app
         .clone()
-        .oneshot(
-            Request::post("/api/evolution/sentinel/check")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_post("/api/evolution/sentinel/check", ""))
         .await
         .unwrap();
 
     // Now check evolution records.
     let response = app
-        .oneshot(
-            Request::get("/observe/evolution/records")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_get("/observe/evolution/records"))
         .await
         .unwrap();
 
@@ -816,11 +789,7 @@ async fn test_evolution_get_record_not_found() {
     let app = build_app_with_state(state);
 
     let response = app
-        .oneshot(
-            Request::get("/observe/evolution/records/O-2024-nonexistent")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_get("/observe/evolution/records/O-2024-nonexistent"))
         .await
         .unwrap();
 
@@ -851,7 +820,7 @@ async fn test_evolution_decide_creates_d_record() {
     };
     let data_json = serde_json::to_string(&obs).unwrap();
     state
-        .turso_opt()
+        .persistent_store()
         .expect("turso configured")
         .insert_evolution_record(
             &obs.header.id,
@@ -874,6 +843,7 @@ async fn test_evolution_decide_creates_d_record() {
             .oneshot(
                 Request::post("/api/evolution/records/O-test-decide/decide")
                     .header("Content-Type", "application/json")
+                    .header("X-Temper-Principal-Kind", "admin")
                     .body(Body::from(r#"{"decision":"approved","decided_by":"alice@example.com","rationale":"Looks good"}"#))
                     .unwrap(),
             )
@@ -899,6 +869,7 @@ async fn test_evolution_decide_not_found() {
         .oneshot(
             Request::post("/api/evolution/records/O-nonexistent/decide")
                 .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
                 .body(Body::from(
                     r#"{"decision":"rejected","decided_by":"bob","rationale":"nope"}"#,
                 ))
@@ -1168,7 +1139,7 @@ async fn test_load_dir_emits_design_time_events() {
         .unwrap();
 
     // Check that design-time events were persisted to Turso.
-    let turso = state.turso_opt().expect("turso configured");
+    let turso = state.persistent_store().expect("turso configured");
     let events = turso
         .list_design_time_events(None, 1000)
         .await
@@ -1197,11 +1168,7 @@ async fn test_evolution_insights_empty() {
     let app = build_test_app();
 
     let response = app
-        .oneshot(
-            Request::get("/observe/evolution/insights")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(system_get("/observe/evolution/insights"))
         .await
         .unwrap();
 

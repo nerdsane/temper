@@ -20,9 +20,10 @@ fn build_state(name: &str) -> ServerState {
     let mut ioa_sources = BTreeMap::new();
     ioa_sources.insert("Order".to_string(), ORDER_IOA.to_string());
     let system = ActorSystem::new(name);
-    ServerState::with_specs(system, csdl, CSDL_XML.to_string(), ioa_sources)
+    ServerState::with_specs(system, csdl, CSDL_XML.to_string(), ioa_sources).unwrap()
 }
 
+#[allow(deprecated)] // Legacy dispatch_action used intentionally in benchmarks
 fn bench_actor(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("actor");

@@ -1,57 +1,30 @@
 //! Storage backend connection and persistence functions (Postgres, Turso).
 
-use std::collections::BTreeMap;
-
 use anyhow::{Context, Result};
 
 use temper_evolution::PostgresRecordStore;
-use temper_runtime::tenant::TenantId;
 use temper_server::event_store::ServerEventStore;
-use temper_server::registry::{
-    EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
-};
-use temper_spec::csdl::parse_csdl;
 use temper_store_postgres::PostgresEventStore;
 use temper_store_turso::TursoEventStore;
 
 use super::LoadedTenantSpecs;
 
-#[derive(sqlx::FromRow)]
-pub(super) struct PersistedSpecRow {
-    pub tenant: String,
-    pub entity_type: String,
-    pub ioa_source: String,
-    pub csdl_xml: Option<String>,
-    pub verification_status: String,
-    pub verified: bool,
-    pub levels_passed: Option<i32>,
-    pub levels_total: Option<i32>,
-    pub verification_result: Option<serde_json::Value>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(sqlx::FromRow)]
-struct PersistedTenantConstraintRow {
-    tenant: String,
-    cross_invariants_toml: String,
-}
-
 pub(super) async fn connect_postgres_store(
     database_url: &str,
 ) -> Result<(ServerEventStore, sqlx::PgPool)> {
-    println!("  Connecting to Postgres...");
+    eprintln!("  Connecting to Postgres...");
     let pool = sqlx::PgPool::connect(database_url)
         .await
         .context("Failed to connect to Postgres")?;
     temper_store_postgres::migration::run_migrations(&pool)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run migrations: {e}"))?;
+        .context("Failed to run migrations")?;
     let pg_record_store: PostgresRecordStore = PostgresRecordStore::new(pool.clone());
     pg_record_store
         .migrate()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to migrate evolution_records: {e}"))?;
-    println!("  Postgres connected, migrations applied.");
+        .context("Failed to migrate evolution_records")?;
+    eprintln!("  Postgres connected, migrations applied.");
     Ok((
         ServerEventStore::Postgres(PostgresEventStore::new(pool.clone())),
         pool,
@@ -127,263 +100,9 @@ pub(super) async fn upsert_loaded_specs_to_postgres(
     Ok(())
 }
 
-fn persisted_status_to_registry_status(row: &PersistedSpecRow) -> VerificationStatus {
-    let status = row.verification_status.to_lowercase();
-    match status.as_str() {
-        "pending" => VerificationStatus::Pending,
-        "running" => VerificationStatus::Running,
-        _ => {
-            if let Some(value) = row.verification_result.clone()
-                && let Ok(result) = serde_json::from_value::<EntityVerificationResult>(value)
-            {
-                return VerificationStatus::Completed(result);
-            }
-
-            let all_passed = status == "passed" || row.verified;
-            let levels_passed = row
-                .levels_passed
-                .unwrap_or(if all_passed { 1 } else { 0 })
-                .max(0) as usize;
-            let levels_total = row.levels_total.unwrap_or(levels_passed as i32).max(0) as usize;
-            let levels = if levels_total > 0 {
-                (0..levels_total)
-                    .map(|idx| EntityLevelSummary {
-                        level: format!("L{idx}"),
-                        passed: idx < levels_passed,
-                        summary: if idx < levels_passed {
-                            "Restored from persisted verification summary".to_string()
-                        } else {
-                            "Restored failed verification level".to_string()
-                        },
-                        details: None,
-                    })
-                    .collect()
-            } else {
-                vec![EntityLevelSummary {
-                    level: "Persisted".to_string(),
-                    passed: all_passed,
-                    summary: format!("Restored status '{}'", row.verification_status),
-                    details: None,
-                }]
-            };
-            VerificationStatus::Completed(EntityVerificationResult {
-                all_passed,
-                levels,
-                verified_at: row.updated_at.to_rfc3339(),
-            })
-        }
-    }
-}
-
-pub(super) async fn load_registry_from_postgres(
-    registry: &mut SpecRegistry,
-    pool: &sqlx::PgPool,
-) -> Result<usize> {
-    let rows: Vec<PersistedSpecRow> = sqlx::query_as(
-        "SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
-                levels_passed, levels_total, verification_result, updated_at \
-         FROM specs \
-         ORDER BY tenant, entity_type",
-    )
-    .fetch_all(pool)
-    .await
-    .context("Failed to read specs from Postgres")?;
-
-    let constraints_rows: Vec<PersistedTenantConstraintRow> = sqlx::query_as(
-        "SELECT tenant, cross_invariants_toml \
-         FROM tenant_constraints \
-         ORDER BY tenant",
-    )
-    .fetch_all(pool)
-    .await
-    .context("Failed to read tenant constraints from Postgres")?;
-
-    let mut constraints_by_tenant: BTreeMap<String, String> = constraints_rows
-        .into_iter()
-        .map(|row| (row.tenant, row.cross_invariants_toml))
-        .collect();
-
-    if rows.is_empty() {
-        return Ok(0);
-    }
-
-    let mut grouped: BTreeMap<String, Vec<PersistedSpecRow>> = BTreeMap::new();
-    for row in rows {
-        grouped.entry(row.tenant.clone()).or_default().push(row);
-    }
-
-    let mut restored_specs = 0usize;
-    for (tenant, tenant_rows) in grouped {
-        let csdl_xml = tenant_rows
-            .iter()
-            .find_map(|row| row.csdl_xml.clone())
-            .unwrap_or_default();
-        if csdl_xml.trim().is_empty() {
-            eprintln!("Warning: skipping restored tenant '{tenant}' due to missing CSDL");
-            continue;
-        }
-        let csdl = parse_csdl(&csdl_xml)
-            .with_context(|| format!("Failed to parse restored CSDL for tenant '{tenant}'"))?;
-
-        let ioa_owned: Vec<(String, String)> = tenant_rows
-            .iter()
-            .map(|row| (row.entity_type.clone(), row.ioa_source.clone()))
-            .collect();
-        let ioa_pairs: Vec<(&str, &str)> = ioa_owned
-            .iter()
-            .map(|(entity_type, ioa)| (entity_type.as_str(), ioa.as_str()))
-            .collect();
-
-        let cross_invariants_toml = constraints_by_tenant.remove(&tenant);
-        registry
-            .try_register_tenant_with_reactions_and_constraints(
-                tenant.as_str(),
-                csdl,
-                csdl_xml,
-                &ioa_pairs,
-                Vec::new(),
-                cross_invariants_toml,
-                false,
-            )
-            .with_context(|| format!("Failed to restore tenant '{tenant}' into registry"))?;
-        let tenant_id = TenantId::new(&tenant);
-        for row in &tenant_rows {
-            registry.set_verification_status(
-                &tenant_id,
-                &row.entity_type,
-                persisted_status_to_registry_status(row),
-            );
-            restored_specs += 1;
-        }
-    }
-
-    Ok(restored_specs)
-}
-
-/// Load specs from Turso into a registry (mirrors `load_registry_from_postgres`).
-pub(super) async fn load_registry_from_turso(
-    registry: &mut SpecRegistry,
-    turso: &TursoEventStore,
-) -> Result<usize> {
-    let rows = turso
-        .load_specs()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to read specs from Turso: {e}"))?;
-    let constraints_rows = turso
-        .load_tenant_constraints()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to read tenant constraints from Turso: {e}"))?;
-
-    let mut constraints_by_tenant: BTreeMap<String, String> = constraints_rows
-        .into_iter()
-        .map(|row| (row.tenant, row.cross_invariants_toml))
-        .collect();
-
-    if rows.is_empty() {
-        return Ok(0);
-    }
-
-    let mut grouped: BTreeMap<String, Vec<temper_store_turso::TursoSpecRow>> = BTreeMap::new();
-    for row in rows {
-        grouped.entry(row.tenant.clone()).or_default().push(row);
-    }
-
-    let mut restored_specs = 0usize;
-    for (tenant, tenant_rows) in grouped {
-        let csdl_xml = tenant_rows
-            .iter()
-            .find_map(|row| row.csdl_xml.clone())
-            .unwrap_or_default();
-        if csdl_xml.trim().is_empty() {
-            eprintln!("Warning: skipping restored tenant '{tenant}' due to missing CSDL");
-            continue;
-        }
-        let csdl = parse_csdl(&csdl_xml)
-            .with_context(|| format!("Failed to parse restored CSDL for tenant '{tenant}'"))?;
-
-        let ioa_owned: Vec<(String, String)> = tenant_rows
-            .iter()
-            .map(|row| (row.entity_type.clone(), row.ioa_source.clone()))
-            .collect();
-        let ioa_pairs: Vec<(&str, &str)> = ioa_owned
-            .iter()
-            .map(|(entity_type, ioa)| (entity_type.as_str(), ioa.as_str()))
-            .collect();
-
-        let cross_invariants_toml = constraints_by_tenant.remove(&tenant);
-        registry
-            .try_register_tenant_with_reactions_and_constraints(
-                tenant.as_str(),
-                csdl,
-                csdl_xml,
-                &ioa_pairs,
-                Vec::new(),
-                cross_invariants_toml,
-                false,
-            )
-            .with_context(|| format!("Failed to restore tenant '{tenant}' into registry"))?;
-        let tenant_id = TenantId::new(&tenant);
-        for row in &tenant_rows {
-            registry.set_verification_status(
-                &tenant_id,
-                &row.entity_type,
-                turso_status_to_registry_status(row),
-            );
-            restored_specs += 1;
-        }
-    }
-
-    Ok(restored_specs)
-}
-
-/// Convert a Turso spec row's verification status to a registry VerificationStatus.
-fn turso_status_to_registry_status(row: &temper_store_turso::TursoSpecRow) -> VerificationStatus {
-    let status = row.verification_status.to_lowercase();
-    match status.as_str() {
-        "pending" => VerificationStatus::Pending,
-        "running" => VerificationStatus::Running,
-        _ => {
-            if let Some(ref json_str) = row.verification_result
-                && let Ok(result) = serde_json::from_str::<EntityVerificationResult>(json_str)
-            {
-                return VerificationStatus::Completed(result);
-            }
-
-            let all_passed = status == "passed" || row.verified;
-            let levels_passed = row
-                .levels_passed
-                .unwrap_or(if all_passed { 1 } else { 0 })
-                .max(0) as usize;
-            let levels_total = row.levels_total.unwrap_or(levels_passed as i32).max(0) as usize;
-            let levels = if levels_total > 0 {
-                (0..levels_total)
-                    .map(|idx| EntityLevelSummary {
-                        level: format!("L{idx}"),
-                        passed: idx < levels_passed,
-                        summary: if idx < levels_passed {
-                            "Restored from Turso verification summary".to_string()
-                        } else {
-                            "Restored failed verification level".to_string()
-                        },
-                        details: None,
-                    })
-                    .collect()
-            } else {
-                vec![EntityLevelSummary {
-                    level: "Persisted".to_string(),
-                    passed: all_passed,
-                    summary: format!("Restored status '{}'", row.verification_status),
-                    details: None,
-                }]
-            };
-            VerificationStatus::Completed(EntityVerificationResult {
-                all_passed,
-                levels,
-                verified_at: row.updated_at.clone(),
-            })
-        }
-    }
-}
+// Registry restoration logic has been moved to temper_server::registry_bootstrap.
+// The CLI now calls restore_registry_from_postgres / restore_registry_from_turso
+// from the server crate, keeping storage-specific row translation out of the CLI.
 
 /// Upsert loaded specs to Turso (mirrors `upsert_loaded_specs_to_postgres`).
 pub(super) async fn upsert_loaded_specs_to_turso(
@@ -395,21 +114,64 @@ pub(super) async fn upsert_loaded_specs_to_turso(
         turso
             .upsert_spec(tenant, entity_type, ioa_source, &loaded.csdl_xml)
             .await
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to persist spec {tenant}/{entity_type} in Turso: {e}")
-            })?;
+            .with_context(|| format!("Failed to persist spec {tenant}/{entity_type} in Turso"))?;
     }
     if let Some(source) = loaded.cross_invariants_toml.as_deref() {
         turso
             .upsert_tenant_constraints(tenant, source)
             .await
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to persist tenant constraints for {tenant} in Turso: {e}")
+            .with_context(|| {
+                format!("Failed to persist tenant constraints for {tenant} in Turso")
             })?;
     } else {
-        turso.delete_tenant_constraints(tenant).await.map_err(|e| {
-            anyhow::anyhow!("Failed to clear tenant constraints for {tenant} in Turso: {e}")
-        })?;
+        turso
+            .delete_tenant_constraints(tenant)
+            .await
+            .with_context(|| format!("Failed to clear tenant constraints for {tenant} in Turso"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_with_user_and_password() {
+        assert_eq!(
+            redact_connection_url("postgres://admin:secret@db.example.com:5432/mydb"),
+            "postgres://admin:***@db.example.com:5432/mydb"
+        );
+    }
+
+    #[test]
+    fn redact_user_only_no_password() {
+        assert_eq!(
+            redact_connection_url("postgres://admin@db.example.com:5432/mydb"),
+            "postgres://***@db.example.com:5432/mydb"
+        );
+    }
+
+    #[test]
+    fn redact_no_credentials() {
+        assert_eq!(
+            redact_connection_url("postgres://db.example.com:5432/mydb"),
+            "postgres://db.example.com:5432/mydb"
+        );
+    }
+
+    #[test]
+    fn redact_no_scheme() {
+        assert_eq!(redact_connection_url("no-scheme-here"), "no-scheme-here");
+    }
+
+    #[test]
+    fn redact_libsql_scheme() {
+        assert_eq!(
+            redact_connection_url("libsql://user:token@turso.example.com"),
+            "libsql://user:***@turso.example.com"
+        );
+    }
+
+    // row_to_registry_status tests moved to temper_server::registry_bootstrap::tests
 }

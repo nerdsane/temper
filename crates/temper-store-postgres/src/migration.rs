@@ -123,6 +123,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), PersistenceError> {
             ))
         })?;
 
+    // Enable row-level security on all tenant-scoped tables.
+    for stmt in schema::ENABLE_TENANT_RLS {
+        sqlx::query(stmt)
+            .execute(pool)
+            .await
+            .map_err(|e| PersistenceError::Storage(format!("failed to enable tenant RLS: {e}")))?;
+    }
+
     Ok(())
 }
 

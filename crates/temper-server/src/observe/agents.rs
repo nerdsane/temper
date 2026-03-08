@@ -4,9 +4,11 @@
 //! from Turso (single source of truth).
 
 use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::authz::{observe_tenant_scope, require_observe_auth};
 use crate::state::ServerState;
 
 /// Summary of a single agent's activity.
@@ -78,13 +80,20 @@ pub struct AgentHistoryParams {
 }
 
 /// GET /observe/agents -- list agents with action/denial counts.
-pub(crate) async fn list_agents(
+pub(crate) async fn handle_list_agents(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Query(params): Query<ListAgentsParams>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_agents", "AgentAudit")?;
+    let tenant_scope = observe_tenant_scope(&state, &headers)?;
+    let tenant_filter = tenant_scope
+        .as_ref()
+        .map(|t| t.as_str().to_string())
+        .or(params.tenant);
     // Query Turso directly (single source of truth).
-    if let Some(turso) = state.turso_opt() {
-        match turso.query_agent_summaries(params.tenant.as_deref()).await {
+    if let Some(turso) = state.persistent_store() {
+        match turso.query_agent_summaries(tenant_filter.as_deref()).await {
             Ok(summaries) => {
                 let agents: Vec<AgentSummary> = summaries
                     .into_iter()
@@ -101,38 +110,46 @@ pub(crate) async fn list_agents(
                     })
                     .collect();
                 let total = agents.len();
-                return Json(serde_json::json!({
+                return Ok(Json(serde_json::json!({
                     "agents": agents,
                     "total": total,
-                }));
+                })));
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to query agent summaries from Turso");
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
         }
     }
 
-    // Fallback: empty response when no Turso configured.
-    Json(serde_json::json!({
+    // No persistent store configured — return empty.
+    Ok(Json(serde_json::json!({
         "agents": [],
         "total": 0,
-    }))
+    })))
 }
 
 /// GET /observe/agents/{agent_id}/history -- full action timeline for one agent.
-pub(crate) async fn get_agent_history(
+pub(crate) async fn handle_get_agent_history(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Path(agent_id): Path<String>,
     Query(params): Query<AgentHistoryParams>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_agents", "AgentAudit")?;
+    let tenant_scope = observe_tenant_scope(&state, &headers)?;
+    let tenant_filter = tenant_scope
+        .as_ref()
+        .map(|t| t.as_str().to_string())
+        .or(params.tenant);
     let limit = params.limit.unwrap_or(100).min(500);
 
     // Query Turso directly (single source of truth).
-    if let Some(turso) = state.turso_opt() {
+    if let Some(turso) = state.persistent_store() {
         match turso
             .query_trajectories_by_agent(
                 &agent_id,
-                params.tenant.as_deref(),
+                tenant_filter.as_deref(),
                 params.entity_type.as_deref(),
                 limit as i64,
             )
@@ -156,22 +173,23 @@ pub(crate) async fn get_agent_history(
                     })
                     .collect();
                 let total = history.len();
-                return Json(serde_json::json!({
+                return Ok(Json(serde_json::json!({
                     "agent_id": agent_id,
                     "history": history,
                     "total": total,
-                }));
+                })));
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to query agent history from Turso");
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
         }
     }
 
-    // Fallback: empty response when no Turso configured.
-    Json(serde_json::json!({
+    // No persistent store configured — return empty.
+    Ok(Json(serde_json::json!({
         "agent_id": agent_id,
         "history": [],
         "total": 0,
-    }))
+    })))
 }

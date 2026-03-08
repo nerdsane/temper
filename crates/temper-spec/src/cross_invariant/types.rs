@@ -81,3 +81,129 @@ impl Default for CrossInvariantSpec {
 fn default_version() -> u32 {
     1
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_policy_default_is_restrict() {
+        assert_eq!(DeletePolicy::default(), DeletePolicy::Restrict);
+    }
+
+    #[test]
+    fn invariant_kind_default_is_hard() {
+        assert_eq!(InvariantKind::default(), InvariantKind::Hard);
+    }
+
+    #[test]
+    fn cross_invariant_spec_default() {
+        let spec = CrossInvariantSpec::default();
+        assert_eq!(spec.version, 1);
+        assert_eq!(spec.default_delete_policy, DeletePolicy::Restrict);
+        assert!(spec.invariants.is_empty());
+        assert!(spec.relation_overrides.is_empty());
+    }
+
+    #[test]
+    fn delete_policy_serde_roundtrip() {
+        for policy in [
+            DeletePolicy::Restrict,
+            DeletePolicy::Cascade,
+            DeletePolicy::SetNull,
+        ] {
+            let json = serde_json::to_string(&policy).unwrap();
+            let back: DeletePolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, policy);
+        }
+    }
+
+    #[test]
+    fn delete_policy_serde_rename() {
+        assert_eq!(
+            serde_json::to_string(&DeletePolicy::Restrict).unwrap(),
+            "\"restrict\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DeletePolicy::Cascade).unwrap(),
+            "\"cascade\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DeletePolicy::SetNull).unwrap(),
+            "\"setnull\""
+        );
+    }
+
+    #[test]
+    fn invariant_kind_serde_rename() {
+        assert_eq!(
+            serde_json::to_string(&InvariantKind::Hard).unwrap(),
+            "\"hard\""
+        );
+        assert_eq!(
+            serde_json::to_string(&InvariantKind::Eventual).unwrap(),
+            "\"eventual\""
+        );
+    }
+
+    #[test]
+    fn cross_invariant_toml_roundtrip() {
+        let toml_src = r#"
+version = 1
+default_delete_policy = "cascade"
+
+[[invariant]]
+name = "OrderRequiresCustomer"
+kind = "hard"
+on = "Order.*"
+assert = "Customer.status in [Active]"
+
+[[relation_override]]
+from_entity = "Order"
+navigation_property = "Items"
+delete_policy = "cascade"
+"#;
+        let spec: CrossInvariantSpec = toml::from_str(toml_src).unwrap();
+        assert_eq!(spec.version, 1);
+        assert_eq!(spec.default_delete_policy, DeletePolicy::Cascade);
+        assert_eq!(spec.invariants.len(), 1);
+        assert_eq!(spec.invariants[0].name, "OrderRequiresCustomer");
+        assert_eq!(spec.invariants[0].kind, InvariantKind::Hard);
+        assert_eq!(spec.invariants[0].on, "Order.*");
+        assert_eq!(spec.relation_overrides.len(), 1);
+        assert_eq!(
+            spec.relation_overrides[0].delete_policy,
+            DeletePolicy::Cascade
+        );
+    }
+
+    #[test]
+    fn eventual_invariant_with_window() {
+        let toml_src = r#"
+[[invariant]]
+name = "EventualSync"
+kind = "eventual"
+on = "Entity.Action"
+assert = "synced == true"
+window_ms = 5000
+"#;
+        let spec: CrossInvariantSpec = toml::from_str(toml_src).unwrap();
+        assert_eq!(spec.invariants[0].kind, InvariantKind::Eventual);
+        assert_eq!(spec.invariants[0].window_ms, Some(5000));
+    }
+
+    #[test]
+    fn minimal_spec_defaults() {
+        let toml_src = r#"
+[[invariant]]
+name = "Min"
+on = "E.*"
+assert = "x > 0"
+"#;
+        let spec: CrossInvariantSpec = toml::from_str(toml_src).unwrap();
+        assert_eq!(spec.version, 1);
+        assert_eq!(spec.default_delete_policy, DeletePolicy::Restrict);
+        assert_eq!(spec.invariants[0].kind, InvariantKind::Hard);
+        assert_eq!(spec.invariants[0].window_ms, None);
+    }
+}

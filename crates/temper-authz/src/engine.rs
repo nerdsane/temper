@@ -14,21 +14,29 @@ use cedar_policy::{
 };
 
 use crate::context::{PrincipalKind, SecurityContext};
-use crate::error::AuthzError;
+use crate::error::{AuthzDenial, AuthzError};
 
 /// The result of an authorization check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthzDecision {
     /// The request is allowed.
     Allow,
-    /// The request is denied with a reason.
-    Deny(String),
+    /// The request is denied with typed denial details.
+    Deny(AuthzDenial),
 }
 
 impl AuthzDecision {
     /// Returns `true` if the authorization decision is `Allow`.
     pub fn is_allowed(&self) -> bool {
         matches!(self, AuthzDecision::Allow)
+    }
+
+    /// Returns the denial details if the decision is `Deny`.
+    pub fn denial(&self) -> Option<&AuthzDenial> {
+        match self {
+            AuthzDecision::Allow => None,
+            AuthzDecision::Deny(d) => Some(d),
+        }
     }
 }
 
@@ -52,10 +60,26 @@ impl AuthzEngine {
         })
     }
 
-    /// Create an AuthzEngine with no policies (denies by default per Cedar semantics).
-    pub fn permissive() -> Self {
+    /// Create an AuthzEngine with no policies (Cedar default-deny semantics).
+    ///
+    /// Use this to test deny behavior. For test setups that need all requests
+    /// to be allowed, use [`permissive`](Self::permissive) instead.
+    pub fn empty() -> Self {
         Self {
             policy_set: RwLock::new(PolicySet::new()),
+            authorizer: Authorizer::new(),
+        }
+    }
+
+    /// Create an AuthzEngine that permits all requests.
+    ///
+    /// Loads a single catch-all `permit(principal, action, resource);` policy
+    /// so that Cedar evaluates to Allow even for non-System principals.
+    pub fn permissive() -> Self {
+        let policy_set =
+            PolicySet::from_str("permit(principal, action, resource);").unwrap_or_default();
+        Self {
+            policy_set: RwLock::new(policy_set),
             authorizer: Authorizer::new(),
         }
     }
@@ -108,7 +132,7 @@ impl AuthzEngine {
         )) {
             Ok(uid) => uid,
             Err(e) => {
-                return AuthzDecision::Deny(format!("invalid principal: {e}"));
+                return AuthzDecision::Deny(AuthzDenial::InvalidPrincipal(e.to_string()));
             }
         };
 
@@ -116,7 +140,7 @@ impl AuthzEngine {
         let action_uid = match EntityUid::from_str(&format!("Action::\"{}\"", action)) {
             Ok(uid) => uid,
             Err(e) => {
-                return AuthzDecision::Deny(format!("invalid action: {e}"));
+                return AuthzDecision::Deny(AuthzDenial::InvalidAction(e.to_string()));
             }
         };
 
@@ -128,7 +152,7 @@ impl AuthzEngine {
         )) {
             Ok(uid) => uid,
             Err(e) => {
-                return AuthzDecision::Deny(format!("invalid resource: {e}"));
+                return AuthzDecision::Deny(AuthzDenial::InvalidResource(e.to_string()));
             }
         };
 
@@ -164,7 +188,7 @@ impl AuthzEngine {
         let context = match Context::from_pairs(ctx_map) {
             Ok(c) => c,
             Err(e) => {
-                return AuthzDecision::Deny(format!("invalid context: {e}"));
+                return AuthzDecision::Deny(AuthzDenial::InvalidContext(e.to_string()));
             }
         };
 
@@ -177,7 +201,9 @@ impl AuthzEngine {
         ) {
             Ok(r) => r,
             Err(e) => {
-                return AuthzDecision::Deny(format!("invalid request: {e}"));
+                return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
+                    "invalid request: {e}"
+                )));
             }
         };
 
@@ -185,7 +211,11 @@ impl AuthzEngine {
 
         let policy_set = match self.policy_set.read() {
             Ok(ps) => ps,
-            Err(e) => return AuthzDecision::Deny(format!("policy lock poisoned: {e}")),
+            Err(e) => {
+                return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
+                    "policy lock poisoned: {e}"
+                )));
+            }
         };
         let response: CedarResponse =
             self.authorizer
@@ -194,17 +224,16 @@ impl AuthzEngine {
         match response.decision() {
             Decision::Allow => AuthzDecision::Allow,
             Decision::Deny => {
-                let reasons: Vec<String> = response
+                let policy_ids: Vec<String> = response
                     .diagnostics()
                     .reason()
                     .map(|id| id.to_string())
                     .collect();
-                let msg = if reasons.is_empty() {
-                    "no matching permit policy".to_string()
+                if policy_ids.is_empty() {
+                    AuthzDecision::Deny(AuthzDenial::NoMatchingPermit)
                 } else {
-                    reasons.join(", ")
-                };
-                AuthzDecision::Deny(msg)
+                    AuthzDecision::Deny(AuthzDenial::PolicyDenied { policy_ids })
+                }
             }
         }
     }
@@ -279,6 +308,7 @@ fn resource_id_from_attrs(attrs: &HashMap<String, serde_json::Value>) -> String 
 mod tests {
     use super::*;
     use crate::context::SecurityContext;
+    use crate::error::AuthzDenial;
 
     fn admin_context() -> SecurityContext {
         SecurityContext::from_headers(&[
@@ -298,17 +328,14 @@ mod tests {
     }
 
     #[test]
-    fn test_permissive_engine_denies_by_default() {
-        // No policies = no permits = deny
+    fn test_permissive_engine_allows_all() {
+        // Permissive engine has a catch-all permit policy.
         let engine = AuthzEngine::permissive();
         let ctx = customer_context("cust-1");
         let attrs = HashMap::new();
 
         let decision = engine.authorize(&ctx, "read", "Order", &attrs);
-        assert_eq!(
-            decision,
-            AuthzDecision::Deny("no matching permit policy".to_string())
-        );
+        assert_eq!(decision, AuthzDecision::Allow);
     }
 
     #[test]
@@ -369,7 +396,7 @@ mod tests {
     #[test]
     fn test_decision_is_allowed() {
         assert!(AuthzDecision::Allow.is_allowed());
-        assert!(!AuthzDecision::Deny("reason".into()).is_allowed());
+        assert!(!AuthzDecision::Deny(AuthzDenial::NoMatchingPermit).is_allowed());
     }
 
     #[test]

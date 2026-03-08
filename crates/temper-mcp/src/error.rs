@@ -51,7 +51,7 @@ pub enum McpError {
 
     /// JSON serialization/deserialization failure.
     #[error("serialization error: {0}")]
-    Serialization(String),
+    Serialization(#[from] serde_json::Error),
 
     /// Spec loading or configuration error.
     #[error("{0}")]
@@ -92,12 +92,6 @@ impl McpError {
                 "message": message,
             },
         })
-    }
-}
-
-impl From<serde_json::Error> for McpError {
-    fn from(err: serde_json::Error) -> Self {
-        Self::Serialization(err.to_string())
     }
 }
 

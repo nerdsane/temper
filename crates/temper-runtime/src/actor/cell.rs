@@ -75,7 +75,7 @@ impl<A: Actor> ActorCell<A> {
                         restart_count += 1;
                         warn!(actor = %id, restart = restart_count, "restarting after init failure");
                         let backoff = strategy.backoff_duration(restart_count);
-                        tokio::time::sleep(backoff).await;
+                        tokio::time::sleep(backoff).await; // determinism-ok: production actor cell, backoff between restarts
                         continue;
                     } else {
                         error!(actor = %id, "actor permanently failed during init");
@@ -140,7 +140,7 @@ impl<A: Actor> ActorCell<A> {
                 restart_count += 1;
                 warn!(actor = %id, restart = restart_count, "restarting");
                 let backoff = strategy.backoff_duration(restart_count);
-                tokio::time::sleep(backoff).await;
+                tokio::time::sleep(backoff).await; // determinism-ok: production actor cell, backoff between restarts
             } else {
                 info!(actor = %id, "actor stopped");
                 return;
@@ -153,5 +153,41 @@ fn should_restart(strategy: &SupervisionStrategy, current_restarts: u32) -> bool
     match strategy {
         SupervisionStrategy::Stop => false,
         SupervisionStrategy::Restart { max_retries, .. } => current_restarts < *max_retries,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn stop_strategy_never_restarts() {
+        let strategy = SupervisionStrategy::Stop;
+        assert!(!should_restart(&strategy, 0));
+        assert!(!should_restart(&strategy, 1));
+        assert!(!should_restart(&strategy, 100));
+    }
+
+    #[test]
+    fn restart_strategy_respects_max_retries() {
+        let strategy = SupervisionStrategy::Restart {
+            max_retries: 3,
+            backoff_base: Duration::from_millis(100),
+        };
+        assert!(should_restart(&strategy, 0));
+        assert!(should_restart(&strategy, 1));
+        assert!(should_restart(&strategy, 2));
+        assert!(!should_restart(&strategy, 3));
+        assert!(!should_restart(&strategy, 4));
+    }
+
+    #[test]
+    fn restart_strategy_zero_retries_never_restarts() {
+        let strategy = SupervisionStrategy::Restart {
+            max_retries: 0,
+            backoff_base: Duration::from_millis(100),
+        };
+        assert!(!should_restart(&strategy, 0));
     }
 }

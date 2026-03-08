@@ -43,33 +43,39 @@ impl PlacementOptimizer {
         let query = "SELECT service, COUNT(*) as op_count, AVG(duration_ns) as avg_duration FROM spans GROUP BY service";
         let result = store.query_spans(query, &[]).await;
 
-        let rows = match result {
-            Ok(rs) => rs.rows,
+        let rs = match result {
+            Ok(rs) => rs,
             Err(_) => return recommendations,
         };
 
-        if rows.is_empty() {
+        if rs.is_empty() {
             return recommendations;
         }
 
+        let cols = &rs.columns;
+
         // Calculate average operation count across all services
-        let total_ops: u64 = rows
+        let total_ops: u64 = rs
+            .rows
             .iter()
-            .filter_map(|row| row.get("op_count").and_then(|v| v.as_u64()))
+            .filter_map(|row| row.get_in(cols, "op_count").and_then(|v| v.as_u64()))
             .sum();
-        let service_count = rows.len() as u64;
+        let service_count = rs.rows.len() as u64;
         if service_count == 0 || total_ops == 0 {
             return recommendations;
         }
         let avg_ops = total_ops / service_count;
 
         // Detect hot shards (services with > HOTSPOT_MULTIPLIER * average ops)
-        for (idx, row) in rows.iter().enumerate() {
+        for (idx, row) in rs.rows.iter().enumerate() {
             let service = row
-                .get("service")
+                .get_in(cols, "service")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let op_count = row.get("op_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let op_count = row
+                .get_in(cols, "op_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
 
             if op_count < MIN_OPS_THRESHOLD {
                 continue;
@@ -79,11 +85,12 @@ impl PlacementOptimizer {
                 let improvement = 1.0 - (avg_ops as f64 / op_count as f64);
 
                 // Find the least-loaded service as rebalance target
-                let target = rows
+                let target = rs
+                    .rows
                     .iter()
                     .filter_map(|r| {
-                        let s = r.get("service")?.as_str()?;
-                        let c = r.get("op_count")?.as_u64()?;
+                        let s = r.get_in(cols, "service")?.as_str()?;
+                        let c = r.get_in(cols, "op_count")?.as_u64()?;
                         Some((s, c))
                     })
                     .min_by_key(|(_, c)| *c)

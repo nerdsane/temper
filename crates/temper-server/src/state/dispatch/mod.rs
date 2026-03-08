@@ -2,14 +2,15 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::dispatch::AgentContext;
+use crate::authz::wasm_gate::PermissiveWasmAuthzGate;
 use crate::entity_actor::EntityState;
-use crate::wasm_authz_gate::PermissiveWasmAuthzGate;
+use crate::request_context::AgentContext;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{WasmAuthzContext, WasmAuthzDecision, WasmAuthzGate};
 
 mod actions;
 mod cross_entity;
+mod effects;
 mod wasm;
 mod wasm_secrets;
 
@@ -26,8 +27,82 @@ struct WasmEntityRef<'a> {
     entity_id: &'a str,
 }
 
+/// Unified request for WASM integration dispatch.
+///
+/// Used by both the background (fire-and-forget) and blocking (inline-await)
+/// dispatch paths, replacing the previous 9-parameter positional signature.
+pub(crate) struct WasmDispatchRequest<'a> {
+    pub tenant: &'a TenantId,
+    pub entity_type: &'a str,
+    pub entity_id: &'a str,
+    pub action: &'a str,
+    pub custom_effects: &'a [String],
+    pub entity_state: &'a EntityState,
+    pub agent_ctx: &'a AgentContext,
+    pub action_params: &'a serde_json::Value,
+    pub mode: WasmDispatchMode,
+}
+
+/// Typed error enum for action dispatch failures.
+///
+/// Replaces bare `String` errors in the dispatch chain with structured
+/// variants that preserve error context and enable pattern matching at
+/// the HTTP boundary.
+#[derive(Debug, thiserror::Error)]
+pub enum DispatchError {
+    /// The actor mailbox ask failed (timeout, mailbox full, actor stopped).
+    #[error("actor dispatch failed: {0}")]
+    ActorFailed(String),
+
+    /// A WASM integration invocation or callback failed.
+    #[error("wasm integration failed: {0}")]
+    #[allow(dead_code)] // Reserved for structured error handling migration
+    WasmFailed(String),
+
+    /// An authorization check denied the action.
+    #[error("authorization denied: {0}")]
+    #[allow(dead_code)] // Reserved for structured error handling migration
+    AuthzDenied(String),
+
+    /// An internal error (serialization, persistence, unexpected state).
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl From<String> for DispatchError {
+    fn from(s: String) -> Self {
+        Self::Internal(s)
+    }
+}
+
+/// Options for the extended dispatch entry point.
+///
+/// Deprecated: prefer [`DispatchCommand`] which unifies all dispatch parameters.
 pub struct DispatchExtOptions<'a> {
     pub agent_ctx: &'a AgentContext,
+    pub await_integration: bool,
+}
+
+/// Unified command object for entity action dispatch.
+///
+/// Collapses the previous three-layer dispatch API (`dispatch_action` →
+/// `dispatch_tenant_action` → `dispatch_tenant_action_ext`) into a single
+/// explicit parameter struct. All callers should migrate to
+/// [`ServerState::dispatch`].
+pub struct DispatchCommand<'a> {
+    /// Target tenant (required — no implicit defaults).
+    pub tenant: &'a TenantId,
+    /// Entity type name.
+    pub entity_type: &'a str,
+    /// Entity instance ID.
+    pub entity_id: &'a str,
+    /// Action to dispatch.
+    pub action: &'a str,
+    /// Action parameters.
+    pub params: serde_json::Value,
+    /// Agent identity context.
+    pub agent_ctx: &'a AgentContext,
+    /// Whether to await WASM integration callbacks before returning.
     pub await_integration: bool,
 }
 
@@ -96,7 +171,7 @@ impl crate::state::ServerState {
     pub(crate) fn wasm_authz_gate(&self) -> Arc<dyn WasmAuthzGate> {
         // If the authz engine has policies loaded, use Cedar gate.
         if self.authz.policy_count() > 0 {
-            Arc::new(crate::wasm_authz_gate::CedarWasmAuthzGate::new(
+            Arc::new(crate::authz::wasm_gate::CedarWasmAuthzGate::new(
                 self.authz.clone(),
             ))
         } else {
@@ -134,20 +209,18 @@ impl crate::state::ServerState {
         let action_params = action_params.clone();
         tokio::spawn(async move {
             // determinism-ok: async integration side-effects run outside simulation core
-            if let Err(e) = state
-                .dispatch_wasm_integrations_internal(
-                    &tenant,
-                    &entity_type,
-                    &entity_id,
-                    &action,
-                    &custom_effects,
-                    &entity_state,
-                    &agent_ctx,
-                    &action_params,
-                    WasmDispatchMode::Background,
-                )
-                .await
-            {
+            let req = WasmDispatchRequest {
+                tenant: &tenant,
+                entity_type: &entity_type,
+                entity_id: &entity_id,
+                action: &action,
+                custom_effects: &custom_effects,
+                entity_state: &entity_state,
+                agent_ctx: &agent_ctx,
+                action_params: &action_params,
+                mode: WasmDispatchMode::Background,
+            };
+            if let Err(e) = state.dispatch_wasm_integrations_internal(&req).await {
                 tracing::error!(error = %e, "background WASM integration dispatch failed");
             }
         });

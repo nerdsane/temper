@@ -6,6 +6,7 @@
 
 pub mod convert;
 pub mod dispatch;
+pub mod governance;
 pub mod helpers;
 pub mod http;
 pub mod repl;

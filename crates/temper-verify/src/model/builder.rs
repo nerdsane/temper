@@ -1,13 +1,14 @@
 //! Model builder: constructs a `TemperModel` directly from I/O Automaton specifications.
 //!
-//! Translates `Automaton` (parsed IOA TOML) into pre-computed structures for
-//! efficient Stateright model checking. No TLA+ or StateMachine IR involved.
+//! Uses the shared translation layer in `temper-spec` for guard/effect translation,
+//! then converts to verification-specific types. Runtime-only effects (Emit, Trigger,
+//! Schedule, Spawn) are filtered out; CrossEntityState guards become Always (permissive).
 
 use std::collections::BTreeMap;
 
 use temper_spec::automaton::{
-    self, Automaton, ParsedAssert, parse_assert_expr, parse_bool_initial,
-    parse_counter_initial_usize, parse_list_initial,
+    Automaton, ParsedAssert, ResolvedEffect, ResolvedGuard, parse_assert_expr, parse_bool_initial,
+    parse_counter_initial_usize, parse_list_initial, translate_actions,
 };
 
 use super::types::{
@@ -19,10 +20,12 @@ use super::types::{
 ///
 /// This is the sole entry point. The IOA format has explicit guards and effects,
 /// so the `Automaton` is translated directly — no intermediate representation.
-pub fn build_model_from_ioa(ioa_toml: &str, max_counter: usize) -> TemperModel {
+///
+/// Returns an error if the IOA TOML fails to parse.
+pub fn build_model_from_ioa(ioa_toml: &str, max_counter: usize) -> Result<TemperModel, String> {
     let automaton = temper_spec::automaton::parse_automaton(ioa_toml)
-        .expect("failed to parse I/O Automaton TOML");
-    build_model_from_automaton(&automaton, max_counter)
+        .map_err(|e| format!("failed to parse I/O Automaton TOML: {e}"))?;
+    Ok(build_model_from_automaton(&automaton, max_counter))
 }
 
 /// Build a `TemperModel` directly from a parsed [`Automaton`].
@@ -57,7 +60,7 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
         }
     }
 
-    let transitions = resolve_transitions(automaton, &initial_counters);
+    let transitions = resolve_transitions(automaton);
     let invariants = resolve_invariants(automaton);
     let liveness = resolve_liveness(automaton);
 
@@ -75,114 +78,68 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
     }
 }
 
-/// Translate IOA actions into resolved transitions with model guards and effects.
-fn resolve_transitions(
-    automaton: &Automaton,
-    counter_vars: &BTreeMap<String, usize>,
-) -> Vec<ResolvedTransition> {
-    automaton
-        .actions
-        .iter()
-        .filter(|a| a.kind != "output") // Output actions don't transition state
-        .map(|a| {
-            // Build guard from IOA guard clauses
-            let guard = translate_guards(&a.guard);
-
-            // Build effects from IOA effect clauses
-            let mut effects = translate_effects(&a.effect);
-
-            // Name-heuristic fallback: only when no explicit effects
-            if a.effect.is_empty() {
-                let name_lower = a.name.to_lowercase();
-                if name_lower.contains("additem") || name_lower.contains("add_item") {
-                    effects.push(ModelEffect::IncrementCounter("items".to_string()));
-                    for var in counter_vars.keys() {
-                        if var != "items" {
-                            effects.push(ModelEffect::IncrementCounter(var.clone()));
-                        }
-                    }
-                } else if name_lower.contains("removeitem") || name_lower.contains("remove_item") {
-                    effects.push(ModelEffect::DecrementCounter("items".to_string()));
-                    for var in counter_vars.keys() {
-                        if var != "items" {
-                            effects.push(ModelEffect::DecrementCounter(var.clone()));
-                        }
-                    }
-                }
-            }
-
-            ResolvedTransition {
-                name: a.name.clone(),
-                from_states: a.from.clone(),
-                to_state: a.to.clone(),
-                guard,
-                effects,
-            }
+/// Translate IOA actions into resolved transitions using the shared translation layer.
+fn resolve_transitions(automaton: &Automaton) -> Vec<ResolvedTransition> {
+    translate_actions(automaton)
+        .into_iter()
+        .map(|a| ResolvedTransition {
+            name: a.name,
+            from_states: a.from_states,
+            to_state: a.to_state,
+            guard: convert_guard(a.guard),
+            effects: a
+                .effects
+                .into_iter()
+                .filter(|e| e.is_verifiable())
+                .map(convert_effect)
+                .collect(),
         })
         .collect()
 }
 
-/// Translate IOA guard clauses to a ModelGuard.
-fn translate_guards(guards: &[automaton::Guard]) -> ModelGuard {
-    let model_guards: Vec<ModelGuard> = guards
-        .iter()
-        .map(|g| match g {
-            automaton::Guard::StateIn { values } => ModelGuard::StateIn(values.clone()),
-            automaton::Guard::MinCount { var, min } => ModelGuard::CounterMin {
-                var: var.clone(),
-                min: *min,
-            },
-            automaton::Guard::MaxCount { var, max } => ModelGuard::CounterMax {
-                var: var.clone(),
-                max: *max,
-            },
-            automaton::Guard::IsTrue { var } => ModelGuard::BoolTrue(var.clone()),
-            automaton::Guard::ListContains { var, value } => ModelGuard::ListContains {
-                var: var.clone(),
-                value: value.clone(),
-            },
-            automaton::Guard::ListLengthMin { var, min } => ModelGuard::ListLengthMin {
-                var: var.clone(),
-                min: *min,
-            },
-            automaton::Guard::CrossEntityState { .. } => {
-                // Cross-entity guards are runtime-only (pre-resolved at dispatch).
-                // For model checking, treat as always-true (permissive).
-                ModelGuard::Always
-            }
-        })
-        .collect();
-
-    match model_guards.len() {
-        0 => ModelGuard::Always,
-        1 => model_guards.into_iter().next().unwrap(), // ci-ok: len() == 1
-        _ => ModelGuard::And(model_guards),
+/// Convert a shared [`ResolvedGuard`] to the verification [`ModelGuard`].
+///
+/// `CrossEntityState` guards become `Always` (permissive) because cross-entity
+/// state is a runtime concern pre-resolved at dispatch time.
+fn convert_guard(guard: ResolvedGuard) -> ModelGuard {
+    match guard {
+        ResolvedGuard::Always => ModelGuard::Always,
+        ResolvedGuard::StateIn(values) => ModelGuard::StateIn(values),
+        ResolvedGuard::CounterMin { var, min } => ModelGuard::CounterMin { var, min },
+        ResolvedGuard::CounterMax { var, max } => ModelGuard::CounterMax { var, max },
+        ResolvedGuard::BoolTrue(var) => ModelGuard::BoolTrue(var),
+        ResolvedGuard::ListContains { var, value } => ModelGuard::ListContains { var, value },
+        ResolvedGuard::ListLengthMin { var, min } => ModelGuard::ListLengthMin { var, min },
+        ResolvedGuard::CrossEntityState { .. } => {
+            // Cross-entity guards are runtime-only (pre-resolved at dispatch).
+            // For model checking, treat as always-true (permissive).
+            ModelGuard::Always
+        }
+        ResolvedGuard::And(guards) => {
+            ModelGuard::And(guards.into_iter().map(convert_guard).collect())
+        }
     }
 }
 
-/// Translate IOA effect clauses to ModelEffects.
-fn translate_effects(effects: &[automaton::Effect]) -> Vec<ModelEffect> {
-    effects
-        .iter()
-        .filter_map(|e| match e {
-            automaton::Effect::Increment { var } => {
-                Some(ModelEffect::IncrementCounter(var.clone()))
-            }
-            automaton::Effect::Decrement { var } => {
-                Some(ModelEffect::DecrementCounter(var.clone()))
-            }
-            automaton::Effect::SetBool { var, value } => Some(ModelEffect::SetBool {
-                var: var.clone(),
-                value: *value,
-            }),
-            automaton::Effect::ListAppend { var } => Some(ModelEffect::ListAppend(var.clone())),
-            automaton::Effect::ListRemoveAt { var } => Some(ModelEffect::ListRemoveAt(var.clone())),
-            automaton::Effect::Emit { .. } => None, // Emit is runtime-only
-            automaton::Effect::Trigger { .. } => None, // Trigger is runtime-only (WASM dispatch)\
-            automaton::Effect::Schedule { .. } => None, // Schedule is runtime-only (timer dispatch)
-            automaton::Effect::Spawn { .. } => None, // Spawn is runtime-only (dispatch pipeline)
-        })
-        .collect()
+/// Convert a verifiable [`ResolvedEffect`] to the verification [`ModelEffect`].
+///
+/// Only called for effects where `is_verifiable()` is true. Runtime-only
+/// effects are filtered before reaching this function.
+fn convert_effect(effect: ResolvedEffect) -> ModelEffect {
+    match effect {
+        ResolvedEffect::IncrementCounter(var) => ModelEffect::IncrementCounter(var),
+        ResolvedEffect::DecrementCounter(var) => ModelEffect::DecrementCounter(var),
+        ResolvedEffect::SetBool { var, value } => ModelEffect::SetBool { var, value },
+        ResolvedEffect::ListAppend(var) => ModelEffect::ListAppend(var),
+        ResolvedEffect::ListRemoveAt(var) => ModelEffect::ListRemoveAt(var),
+        // Runtime-only effects should have been filtered by is_verifiable()
+        ResolvedEffect::Emit(_)
+        | ResolvedEffect::Trigger(_)
+        | ResolvedEffect::Schedule { .. }
+        | ResolvedEffect::Spawn { .. } => {
+            unreachable!("runtime-only effect should have been filtered")
+        }
+    }
 }
 
 /// Translate IOA invariants into resolved invariants.
@@ -305,7 +262,7 @@ mod tests {
     const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 
     fn build_order_model() -> TemperModel {
-        build_model_from_ioa(ORDER_IOA, 2)
+        build_model_from_ioa(ORDER_IOA, 2).unwrap()
     }
 
     #[test]
@@ -455,7 +412,7 @@ mod tests {
 
     #[test]
     fn debug_resolved_transitions() {
-        let model = build_model_from_ioa(ORDER_IOA, 2);
+        let model = build_model_from_ioa(ORDER_IOA, 2).unwrap();
         for t in &model.transitions {
             eprintln!(
                 "{}: from={:?} to={:?} guard={:?} effects={:?}",

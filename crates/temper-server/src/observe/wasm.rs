@@ -7,10 +7,12 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
+use temper_authz::PrincipalKind;
 
 use tracing::instrument;
 
-use crate::dispatch::extract_tenant;
+use crate::authz::{observe_tenant_scope, require_observe_auth, security_context_from_headers};
+use crate::odata::extract_tenant;
 use crate::state::ServerState;
 
 /// Response for WASM module upload.
@@ -77,14 +79,31 @@ pub struct WasmInvocationResponse {
 }
 
 /// POST /api/wasm/modules/{module_name} — upload a WASM binary.
+///
+/// Admin principals bypass Cedar; other principals require "manage_wasm" on "WasmModule".
 #[instrument(skip_all, fields(module_name, otel.name = "POST /api/wasm/modules/{module_name}"))]
-pub async fn upload_wasm_module(
+pub async fn handle_upload_wasm_module(
     State(state): State<ServerState>,
     headers: HeaderMap,
     Path(module_name): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Json<WasmModuleUploadResponse>, (StatusCode, String)> {
-    let tenant = extract_tenant(&headers, &state);
+    let tenant = extract_tenant(&headers, &state)?;
+    // Cedar authorization: admin bypass, others need manage_wasm.
+    let security_ctx = security_context_from_headers(&headers, None, None);
+    if !matches!(security_ctx.principal.kind, PrincipalKind::Admin)
+        && let Err(denial) = state.authorize_with_context(
+            &security_ctx,
+            "manage_wasm",
+            "WasmModule",
+            &std::collections::BTreeMap::new(),
+            tenant.as_str(),
+        )
+    {
+        let reason = denial.to_string();
+        tracing::warn!(reason = %reason, "unauthorized WASM upload attempt");
+        return Err((StatusCode::FORBIDDEN, reason));
+    }
 
     // TigerStyle: pre-assertion on module size (10 MB budget)
     if body.len() > temper_wasm::types::MAX_MODULE_SIZE {
@@ -140,12 +159,12 @@ pub async fn upload_wasm_module(
 
 /// GET /observe/wasm/modules/{module_name} — module info.
 #[instrument(skip_all, fields(module_name, otel.name = "GET /observe/wasm/modules/{module_name}"))]
-pub async fn get_wasm_module_info(
+pub async fn handle_get_wasm_module_info(
     State(state): State<ServerState>,
     headers: HeaderMap,
     Path(module_name): Path<String>,
-) -> Result<Json<WasmModuleInfoResponse>, (StatusCode, String)> {
-    let tenant = extract_tenant(&headers, &state);
+) -> Result<Json<WasmModuleInfoResponse>, StatusCode> {
+    let tenant = extract_tenant(&headers, &state).map_err(|(s, _)| s)?;
 
     let hash = {
         let wasm_reg = state.wasm_module_registry.read().unwrap();
@@ -156,10 +175,7 @@ pub async fn get_wasm_module_info(
 
     let Some(hash) = hash else {
         tracing::warn!("WASM module not found");
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("WASM module '{module_name}' not found for tenant '{tenant}'"),
-        ));
+        return Err(StatusCode::NOT_FOUND);
     };
 
     let cached = state.wasm_engine.is_cached(&hash);
@@ -172,13 +188,30 @@ pub async fn get_wasm_module_info(
 }
 
 /// DELETE /api/wasm/modules/{module_name} — remove a module.
+///
+/// Admin principals bypass Cedar; other principals require "manage_wasm" on "WasmModule".
 #[instrument(skip_all, fields(module_name, otel.name = "DELETE /api/wasm/modules/{module_name}"))]
-pub async fn delete_wasm_module(
+pub async fn handle_delete_wasm_module(
     State(state): State<ServerState>,
     headers: HeaderMap,
     Path(module_name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let tenant = extract_tenant(&headers, &state);
+    let tenant = extract_tenant(&headers, &state)?;
+    // Cedar authorization: admin bypass, others need manage_wasm.
+    let security_ctx = security_context_from_headers(&headers, None, None);
+    if !matches!(security_ctx.principal.kind, PrincipalKind::Admin)
+        && let Err(denial) = state.authorize_with_context(
+            &security_ctx,
+            "manage_wasm",
+            "WasmModule",
+            &std::collections::BTreeMap::new(),
+            tenant.as_str(),
+        )
+    {
+        let reason = denial.to_string();
+        tracing::warn!(reason = %reason, "unauthorized WASM delete attempt");
+        return Err((StatusCode::FORBIDDEN, reason));
+    }
 
     // Get hash before removing from registry (for cache eviction)
     let hash = {
@@ -227,13 +260,16 @@ pub async fn delete_wasm_module(
     })))
 }
 
-/// GET /observe/wasm/modules — list all modules for tenant (with stats).
+/// GET /observe/wasm/modules — list all modules (with stats).
+///
+/// Admin/System principals see all tenants; others are scoped to `X-Tenant-Id`.
 #[instrument(skip_all, fields(otel.name = "GET /observe/wasm/modules"))]
-pub async fn list_wasm_modules(
+pub async fn handle_list_wasm_modules(
     State(state): State<ServerState>,
-    _headers: HeaderMap,
-) -> Json<serde_json::Value> {
-    // Observe endpoints are cross-tenant — return all modules across all tenants.
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_wasm", "WasmModule")?;
+    let tenant_scope = observe_tenant_scope(&state, &headers)?;
 
     // Collect invocation stats — Turso is single source of truth but we
     // aggregate from load_recent_wasm_invocations; for module list we
@@ -241,7 +277,7 @@ pub async fn list_wasm_modules(
     let invocation_stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> = {
         let mut stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> =
             std::collections::BTreeMap::new();
-        if let Some(turso) = state.turso_opt()
+        if let Some(turso) = state.persistent_store()
             && let Ok(rows) = turso.load_recent_wasm_invocations(10_000).await
         {
             for row in rows {
@@ -266,6 +302,11 @@ pub async fn list_wasm_modules(
         wasm_reg
             .all_modules()
             .into_iter()
+            .filter(|(tenant, _, _)| {
+                tenant_scope
+                    .as_ref()
+                    .is_none_or(|scope| scope.as_str() == *tenant)
+            })
             .map(|(tenant, name, hash)| {
                 let cached = state.wasm_engine.is_cached(hash);
                 let (total_invocations, success_count, last_invoked_at) =
@@ -290,22 +331,24 @@ pub async fn list_wasm_modules(
     };
 
     let total = modules.len();
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "modules": modules,
         "total": total,
-    }))
+    })))
 }
 
 /// GET /observe/wasm/invocations — query WASM invocation history from Turso.
 #[instrument(skip_all, fields(otel.name = "GET /observe/wasm/invocations"))]
-pub async fn list_wasm_invocations(
+pub async fn handle_list_wasm_invocations(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Query(params): Query<InvocationQueryParams>,
-) -> Json<WasmInvocationResponse> {
+) -> Result<Json<WasmInvocationResponse>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_wasm", "WasmModule")?;
     let limit = params.limit.unwrap_or(100).min(10_000);
 
     // Query Turso directly (single source of truth).
-    if let Some(turso) = state.turso_opt() {
+    if let Some(turso) = state.persistent_store() {
         match turso.load_recent_wasm_invocations(limit as i64).await {
             Ok(rows) => {
                 let filtered: Vec<serde_json::Value> = rows
@@ -326,10 +369,10 @@ pub async fn list_wasm_invocations(
                     .map(|e| serde_json::to_value(&e).unwrap_or_default())
                     .collect();
                 let total = filtered.len();
-                return Json(WasmInvocationResponse {
+                return Ok(Json(WasmInvocationResponse {
                     invocations: filtered,
                     total,
-                });
+                }));
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to query WASM invocations from Turso");
@@ -338,8 +381,8 @@ pub async fn list_wasm_invocations(
     }
 
     // Fallback: empty response when no Turso configured.
-    Json(WasmInvocationResponse {
+    Ok(Json(WasmInvocationResponse {
         invocations: Vec::new(),
         total: 0,
-    })
+    }))
 }

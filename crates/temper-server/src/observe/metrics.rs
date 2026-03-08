@@ -1,5 +1,7 @@
 //! Health and metrics endpoints.
 
+use std::collections::BTreeMap;
+use std::sync::RwLock;
 use std::sync::atomic::Ordering;
 
 use axum::extract::State;
@@ -8,6 +10,34 @@ use axum::response::Json;
 use temper_runtime::scheduler::sim_now;
 
 use crate::state::ServerState;
+
+/// Format a colon-delimited key map into Prometheus exposition lines.
+///
+/// Each key is split into exactly 3 parts by `:`. Keys with fewer parts are
+/// skipped. The three parts are assigned to `labels[0..3]` respectively.
+fn format_keyed_metric(
+    lines: &mut Vec<String>,
+    map: &RwLock<BTreeMap<String, u64>>,
+    metric_name: &str,
+    labels: [&str; 3],
+) {
+    if let Ok(m) = map.read() {
+        for (key, count) in m.iter() {
+            let parts: Vec<&str> = key.splitn(3, ':').collect();
+            if parts.len() == 3 {
+                lines.push(format!(
+                    "{metric_name}{{{l0}=\"{v0}\",{l1}=\"{v1}\",{l2}=\"{v2}\"}} {count}",
+                    l0 = labels[0],
+                    v0 = parts[0],
+                    l1 = labels[1],
+                    v1 = parts[1],
+                    l2 = labels[2],
+                    v2 = parts[2],
+                ));
+            }
+        }
+    }
+}
 
 /// GET /observe/health -- server health summary.
 pub(crate) async fn handle_health(State(state): State<ServerState>) -> Json<serde_json::Value> {
@@ -62,18 +92,12 @@ pub(crate) async fn handle_metrics(
     // -- temper_transitions_total --
     lines.push("# HELP temper_transitions_total Total entity state transitions.".to_string());
     lines.push("# TYPE temper_transitions_total counter".to_string());
-    if let Ok(map) = state.metrics.transitions.read() {
-        for (key, count) in map.iter() {
-            // key format: "entity_type:action:true|false"
-            let parts: Vec<&str> = key.splitn(3, ':').collect();
-            if parts.len() == 3 {
-                lines.push(format!(
-                    "temper_transitions_total{{entity_type=\"{}\",action=\"{}\",success=\"{}\"}} {}",
-                    parts[0], parts[1], parts[2], count
-                ));
-            }
-        }
-    }
+    format_keyed_metric(
+        &mut lines,
+        &state.metrics.transitions,
+        "temper_transitions_total",
+        ["entity_type", "action", "success"],
+    );
 
     // -- temper_guard_rejections_total (subset: success=false) --
     lines.push("# HELP temper_guard_rejections_total Total failed transitions (guard not met or unknown action).".to_string());
@@ -117,17 +141,12 @@ pub(crate) async fn handle_metrics(
         "# HELP temper_cross_invariant_checks_total Total cross-invariant checks.".to_string(),
     );
     lines.push("# TYPE temper_cross_invariant_checks_total counter".to_string());
-    if let Ok(map) = state.metrics.cross_invariant_checks.read() {
-        for (key, count) in map.iter() {
-            let parts: Vec<&str> = key.splitn(3, ':').collect();
-            if parts.len() == 3 {
-                lines.push(format!(
-                    "temper_cross_invariant_checks_total{{tenant=\"{}\",entity_type=\"{}\",result=\"{}\"}} {}",
-                    parts[0], parts[1], parts[2], count
-                ));
-            }
-        }
-    }
+    format_keyed_metric(
+        &mut lines,
+        &state.metrics.cross_invariant_checks,
+        "temper_cross_invariant_checks_total",
+        ["tenant", "entity_type", "result"],
+    );
 
     // -- temper_cross_invariant_violations_total --
     lines.push(
@@ -135,17 +154,12 @@ pub(crate) async fn handle_metrics(
             .to_string(),
     );
     lines.push("# TYPE temper_cross_invariant_violations_total counter".to_string());
-    if let Ok(map) = state.metrics.cross_invariant_violations.read() {
-        for (key, count) in map.iter() {
-            let parts: Vec<&str> = key.splitn(3, ':').collect();
-            if parts.len() == 3 {
-                lines.push(format!(
-                    "temper_cross_invariant_violations_total{{tenant=\"{}\",invariant=\"{}\",kind=\"{}\"}} {}",
-                    parts[0], parts[1], parts[2], count
-                ));
-            }
-        }
-    }
+    format_keyed_metric(
+        &mut lines,
+        &state.metrics.cross_invariant_violations,
+        "temper_cross_invariant_violations_total",
+        ["tenant", "invariant", "kind"],
+    );
 
     // -- temper_relation_integrity_violations_total --
     lines.push(
@@ -153,17 +167,12 @@ pub(crate) async fn handle_metrics(
             .to_string(),
     );
     lines.push("# TYPE temper_relation_integrity_violations_total counter".to_string());
-    if let Ok(map) = state.metrics.relation_integrity_violations.read() {
-        for (key, count) in map.iter() {
-            let parts: Vec<&str> = key.splitn(3, ':').collect();
-            if parts.len() == 3 {
-                lines.push(format!(
-                    "temper_relation_integrity_violations_total{{tenant=\"{}\",entity_type=\"{}\",operation=\"{}\"}} {}",
-                    parts[0], parts[1], parts[2], count
-                ));
-            }
-        }
-    }
+    format_keyed_metric(
+        &mut lines,
+        &state.metrics.relation_integrity_violations,
+        "temper_relation_integrity_violations_total",
+        ["tenant", "entity_type", "operation"],
+    );
 
     // -- temper_cross_invariant_eval_duration_ms_bucket --
     lines.push("# HELP temper_cross_invariant_eval_duration_ms_bucket Cross-invariant evaluation latency histogram buckets.".to_string());

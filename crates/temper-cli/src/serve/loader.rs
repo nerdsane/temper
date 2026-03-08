@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::util::to_pascal_case;
 use temper_runtime::tenant::TenantId;
 use temper_server::reaction::registry::parse_reactions;
 use temper_server::registry::SpecRegistry;
@@ -269,22 +270,6 @@ pub(super) fn read_cross_invariants_toml(specs_dir: &Path) -> Result<Option<Stri
     let source =
         fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
     Ok(Some(source))
-}
-
-/// Convert a string to PascalCase.
-pub(super) fn to_pascal_case(s: &str) -> String {
-    s.split(['_', '-'])
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => {
-                    let upper: String = first.to_uppercase().collect();
-                    format!("{}{}", upper, chars.collect::<String>())
-                }
-                None => String::new(),
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

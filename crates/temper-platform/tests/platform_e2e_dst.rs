@@ -19,7 +19,7 @@ mod common;
 use common::http::{body_json, body_string};
 use common::platform::{bootstrapped_router, bootstrapped_state};
 use temper_platform::bootstrap::SYSTEM_TENANT;
-use temper_server::dispatch::AgentContext;
+use temper_server::request_context::AgentContext;
 
 // =========================================================================
 // Dispatch-level tests — prove shared registry
@@ -363,6 +363,8 @@ async fn e2e_http_project_lifecycle() {
         .oneshot(
             Request::post("/tdata/Projects")
                 .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("X-Tenant-Id", SYSTEM_TENANT)
                 .body(Body::from(r#"{"name": "test-project"}"#))
                 .unwrap(),
         )
@@ -389,6 +391,8 @@ async fn e2e_http_project_lifecycle() {
                 "/tdata/Projects('{entity_id}')/Temper.System.UpdateSpecs"
             ))
             .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
+            .header("X-Tenant-Id", SYSTEM_TENANT)
             .body(Body::from("{}"))
             .unwrap(),
         )
@@ -406,6 +410,8 @@ async fn e2e_http_project_lifecycle() {
                 "/tdata/Projects('{entity_id}')/Temper.System.Verify"
             ))
             .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
+            .header("X-Tenant-Id", SYSTEM_TENANT)
             .body(Body::from("{}"))
             .unwrap(),
         )
@@ -420,6 +426,7 @@ async fn e2e_http_project_lifecycle() {
         .clone()
         .oneshot(
             Request::get("/tdata/$metadata")
+                .header("X-Tenant-Id", SYSTEM_TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -437,6 +444,7 @@ async fn e2e_http_project_lifecycle() {
         .clone()
         .oneshot(
             Request::get(format!("/tdata/Projects('{entity_id}')"))
+                .header("X-Tenant-Id", SYSTEM_TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -457,6 +465,7 @@ async fn e2e_http_metadata_shows_system_entities() {
         .clone()
         .oneshot(
             Request::get("/tdata/$metadata")
+                .header("X-Tenant-Id", SYSTEM_TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -480,7 +489,12 @@ async fn e2e_http_metadata_shows_system_entities() {
     // GET /tdata → service document lists all 5 entity sets
     let response = app
         .clone()
-        .oneshot(Request::get("/tdata").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/tdata")
+                .header("X-Tenant-Id", SYSTEM_TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);

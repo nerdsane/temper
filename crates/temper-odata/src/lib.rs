@@ -1,13 +1,4 @@
-//! temper-odata: OData v4 protocol implementation for Temper.
-//!
-//! Provides OData-compliant query parsing, response formatting,
-//! and entity routing for Temper entity services.
-//!
-//! # Key modules
-//!
-//! - [`error`] — OData error types
-//! - [`path`] — URL path parser
-//! - [`query`] — Query options parser (`$filter`, `$select`, `$expand`, etc.)
+//! OData v4 protocol implementation: path parsing, query options, and error types.
 
 pub mod error;
 pub mod path;

@@ -6,32 +6,27 @@
 
 #[cfg(feature = "observe")]
 mod api;
-pub(crate) mod authz_helpers;
-mod constraint_engine;
-pub mod dispatch;
+pub mod authz;
 pub mod entity_actor;
 pub mod event_store;
 pub mod events;
 pub mod eventual_invariants;
 pub mod idempotency;
 #[cfg(feature = "observe")]
-pub(crate) mod insight_generator;
-#[cfg(feature = "observe")]
 pub mod observe;
-mod odata;
+pub mod odata;
 mod query_eval;
 pub mod reaction;
 pub mod registry;
+pub mod registry_bootstrap;
+pub mod request_context;
 mod response;
 mod router;
-pub mod secret_template;
-pub mod secrets_vault;
+pub mod secrets;
 #[cfg(feature = "observe")]
 pub mod sentinel;
 pub mod state;
-pub mod wasm_authz_gate;
 pub mod wasm_registry;
-pub mod webhook_receiver;
 pub mod webhooks;
 
 pub use entity_actor::{EntityActor, EntityActorHandler, EntityMsg, EntityResponse, EntityState};

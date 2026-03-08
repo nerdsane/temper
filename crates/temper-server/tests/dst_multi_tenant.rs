@@ -9,7 +9,7 @@ mod common;
 
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_runtime::tenant::TenantId;
-use temper_server::dispatch::AgentContext;
+use temper_server::request_context::AgentContext;
 use temper_spec::csdl::parse_csdl;
 
 const TASK_IOA: &str = r#"

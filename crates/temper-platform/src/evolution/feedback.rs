@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use temper_evolution::InsightCategory;
 use temper_evolution::{
     Decision, DecisionRecord, InsightRecord, InsightSignal, ObservationClass, ObservationRecord,
-    RecordHeader, RecordType, classify_insight, compute_priority_score,
+    RecordHeader, RecordType, Trend, classify_insight, compute_priority_score,
 };
 
 use crate::protocol::PlatformEvent;
@@ -116,7 +116,7 @@ impl UnmetIntentCollector {
             intent: unmet.user_intent.clone(),
             volume: 1, // Single occurrence; aggregation happens in ranked_insights()
             success_rate: 0.0,
-            trend: "growing".into(),
+            trend: Trend::Growing,
             growth_rate: None,
         };
 

@@ -5,35 +5,39 @@ use axum::response::IntoResponse;
 use temper_odata::path::KeyValue;
 use temper_runtime::tenant::TenantId;
 
-use crate::constraint_engine::ConstraintViolation;
+use super::constraints::{
+    ConstraintViolation, post_write_invariant_checks, pre_upsert_relation_checks,
+};
 use crate::state::{ServerState, VerificationGateError};
 
 /// Extract the tenant ID from request headers.
 ///
-/// Checks `X-Tenant-Id` header first. Falls back to the first registered
-/// tenant in the SpecRegistry, or `TenantId::default()` if empty.
-pub(crate) fn extract_tenant(headers: &HeaderMap, state: &ServerState) -> TenantId {
+/// Checks `X-Tenant-Id` header first.  In single-tenant compatibility mode
+/// (the legacy default), falls back to `TenantId::default()` ("default").
+/// In multi-tenant mode, rejects the request with 400 when the header is
+/// missing.
+pub(crate) fn extract_tenant(
+    headers: &HeaderMap,
+    state: &ServerState,
+) -> Result<TenantId, (StatusCode, String)> {
     if let Some(val) = headers.get("x-tenant-id")
         && let Ok(s) = val.to_str()
         && !s.is_empty()
     {
-        return TenantId::new(s);
+        return Ok(TenantId::new(s));
     }
 
-    // Fall back to the first registered tenant.
-    let tenant_ids = state
-        .registry
-        .read()
-        .unwrap() // ci-ok: infallible lock
-        .tenant_ids()
-        .into_iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    if let Some(first) = tenant_ids.first() {
-        return first.clone();
+    // Multi-tenant mode: require explicit tenant header.
+    if !state.single_tenant_mode {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Missing required X-Tenant-Id header".to_string(),
+        ));
     }
 
-    TenantId::default()
+    // Single-tenant compatibility: deterministic fallback to the well-known
+    // default tenant rather than relying on registry registration order.
+    Ok(TenantId::default())
 }
 
 pub(super) fn extract_key(key: &KeyValue) -> String {
@@ -115,10 +119,8 @@ pub(super) fn verification_gate_response(err: VerificationGateError) -> axum::re
 
 pub(super) fn constraint_violation_response(err: ConstraintViolation) -> axum::response::Response {
     let violation_type = match err.violation_type {
-        crate::constraint_engine::ConstraintViolationType::RelationIntegrity => {
-            "relation_integrity"
-        }
-        crate::constraint_engine::ConstraintViolationType::CrossInvariant => "cross_invariant",
+        super::constraints::ConstraintViolationType::RelationIntegrity => "relation_integrity",
+        super::constraints::ConstraintViolationType::CrossInvariant => "cross_invariant",
     };
     let body = serde_json::json!({
         "error": {
@@ -134,4 +136,63 @@ pub(super) fn constraint_violation_response(err: ConstraintViolation) -> axum::r
         }
     });
     (StatusCode::CONFLICT, axum::Json(body)).into_response()
+}
+
+/// Run pre-upsert relation checks and post-write invariant checks.
+///
+/// Consolidates the duplicated two-step constraint check pattern used by
+/// create, patch, put, delete, and bound action handlers. The `action` label
+/// is used for the post-write check (e.g. "Create", "Patch", "Put", "Delete").
+pub(super) async fn run_write_prechecks(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    action: &str,
+    operation: &str,
+    fields: &serde_json::Value,
+) -> Result<(), axum::response::Response> {
+    if let Err(v) =
+        pre_upsert_relation_checks(state, tenant, entity_type, entity_id, operation, fields).await
+    {
+        return Err(constraint_violation_response(v));
+    }
+    if let Err(v) = post_write_invariant_checks(
+        state,
+        tenant,
+        entity_type,
+        entity_id,
+        action,
+        fields,
+        operation,
+    )
+    .await
+    {
+        return Err(constraint_violation_response(v));
+    }
+    Ok(())
+}
+
+/// Load an entity's current state or return a 404 response.
+///
+/// Consolidates the repeated pattern of calling `get_tenant_entity_state`
+/// and mapping errors to OData error responses.
+pub(super) async fn load_entity_or_404(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    set_name: &str,
+    key: &str,
+) -> Result<crate::EntityResponse, axum::response::Response> {
+    state
+        .get_tenant_entity_state(tenant, entity_type, key)
+        .await
+        .map_err(|e| {
+            crate::response::odata_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                &format!("Entity '{set_name}' with key '{key}' not found: {e}"),
+            )
+            .into_response()
+        })
 }

@@ -6,6 +6,8 @@
 //! Reviewed, etc. This module is retained for backward compatibility.
 
 use crate::records::*;
+#[allow(deprecated)]
+// ADR-0025 Phase 4: remove after chain validation replaced by cross-entity guards
 use crate::store::RecordStore;
 
 /// Validation result for a record chain.
@@ -21,6 +23,7 @@ pub struct ChainValidation {
 
 /// Validate that a record chain is well-formed.
 /// A valid chain follows: O → P → A → D (each derived_from its predecessor).
+#[allow(deprecated)]
 pub fn validate_chain(store: &RecordStore, leaf_id: &str) -> ChainValidation {
     let mut errors = Vec::new();
     let mut chain_length = 0;
@@ -119,6 +122,7 @@ pub fn validate_chain(store: &RecordStore, leaf_id: &str) -> ChainValidation {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // Tests exercise RecordStore until ADR-0025 migration completes
 mod tests {
     use super::*;
 
@@ -159,8 +163,8 @@ mod tests {
             constraints: vec!["Cannot change the Order state machine".into()],
             impact: ImpactAssessment {
                 affected_users: Some(189),
-                severity: "high".into(),
-                trend: "growing".into(),
+                severity: Severity::High,
+                trend: Trend::Growing,
             },
         };
         store.insert_problem(prob);
@@ -179,8 +183,8 @@ mod tests {
                 description: "Compound shard key".into(),
                 spec_diff: "+ShardKey: entity_id,region".into(),
                 tla_impact: "NONE".into(),
-                risk: "low".into(),
-                complexity: "medium".into(),
+                risk: SolutionRisk::Low,
+                complexity: Complexity::Medium,
             }],
             recommendation: Some(0),
         };
@@ -227,8 +231,8 @@ mod tests {
             constraints: vec![],
             impact: ImpactAssessment {
                 affected_users: None,
-                severity: "low".into(),
-                trend: "stable".into(),
+                severity: Severity::Low,
+                trend: Trend::Stable,
             },
         };
         store.insert_problem(prob);

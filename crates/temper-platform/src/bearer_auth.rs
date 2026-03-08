@@ -66,11 +66,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use axum::middleware;
     use axum::routing::get;
-    use axum::Router;
     use tower::ServiceExt;
 
     async fn ok_handler() -> &'static str {
@@ -84,7 +84,10 @@ mod tests {
             .route("/tdata", get(ok_handler))
             .route("/tdata/Orders", get(ok_handler))
             .route("/api/specs", get(ok_handler))
-            .layer(middleware::from_fn_with_state(state.clone(), bearer_auth_check))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                bearer_auth_check,
+            ))
             .with_state(state)
     }
 

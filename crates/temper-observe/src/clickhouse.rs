@@ -120,19 +120,12 @@ fn parse_json_each_row(body: &str) -> Result<ResultSet, ObserveError> {
             columns.sort();
         }
 
-        let row_columns: Vec<(String, serde_json::Value)> = columns
+        let values: Vec<serde_json::Value> = columns
             .iter()
-            .map(|col| {
-                (
-                    col.clone(),
-                    obj.get(col).cloned().unwrap_or(serde_json::Value::Null),
-                )
-            })
+            .map(|col| obj.get(col).cloned().unwrap_or(serde_json::Value::Null))
             .collect();
 
-        rows.push(ResultRow {
-            columns: row_columns,
-        });
+        rows.push(ResultRow { values });
     }
 
     Ok(ResultSet { columns, rows })
@@ -170,7 +163,7 @@ mod tests {
         let body = r#"{"service":"api","status":"ok"}"#;
         let rs = parse_json_each_row(body).unwrap();
         assert_eq!(rs.len(), 1);
-        assert_eq!(rs.rows[0].get("service"), Some(&serde_json::json!("api")));
+        assert_eq!(rs.get(0, "service"), Some(&serde_json::json!("api")));
     }
 
     #[test]
