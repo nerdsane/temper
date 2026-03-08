@@ -30,6 +30,9 @@ pub(crate) struct RuntimeContext {
     /// Port of the Temper HTTP server. Set at construction when an explicit
     /// port is provided, or later by `start_server` in self-contained mode.
     pub(crate) server_port: Arc<std::sync::OnceLock<u16>>,
+    /// Full URL of a remote Temper server (e.g. `https://temper.railway.app`).
+    /// When set, takes precedence over `server_port` for base URL resolution.
+    pub(crate) server_url: Option<String>,
     /// App configurations (used to build `--app` args when spawning server).
     pub(crate) apps: Vec<crate::AppConfig>,
     /// Path to the temper binary (for spawning `temper serve`).
@@ -45,10 +48,16 @@ impl RuntimeContext {
         if let Some(p) = config.temper_port {
             let _ = server_port.set(p);
         }
+        // Strip trailing slash from URL if present.
+        let server_url = config
+            .temper_url
+            .as_ref()
+            .map(|u| u.trim_end_matches('/').to_string());
         Ok(Self {
             spec,
             app_metadata,
             server_port,
+            server_url,
             apps: config.apps.clone(),
             binary_path: std::env::current_exe().ok(),
             http: reqwest::Client::new(),
@@ -238,6 +247,7 @@ impl RuntimeContext {
     pub(crate) async fn run_execute(&self, code: &str) -> Result<String> {
         let http = self.http.clone();
         let server_port = self.server_port.clone();
+        let server_url = self.server_url.clone();
         let app_metadata = self.app_metadata.clone();
         let principal_id = self.principal_id.clone();
         let binary_path = self.binary_path.clone();
@@ -251,6 +261,7 @@ impl RuntimeContext {
             |function_name: String, args: Vec<MontyObject>, kwargs: Vec<(MontyObject, MontyObject)>| {
                 let http = http.clone();
                 let server_port = server_port.clone();
+                let server_url = server_url.clone();
                 let app_metadata = app_metadata.clone();
                 let principal_id = principal_id.clone();
                 let binary_path = binary_path.clone();
@@ -268,7 +279,7 @@ impl RuntimeContext {
 
                     // Handle MCP-only methods before tenant extraction
                     if function_name == "start_server" {
-                        return handle_start_server(&server_port, &binary_path, &apps).await;
+                        return handle_start_server(&server_port, &server_url, &binary_path, &apps).await;
                     }
                     if function_name == "show_spec" {
                         let tenant = temper_sandbox::helpers::expect_string_arg(args, 0, "tenant", &function_name)?;
@@ -285,12 +296,16 @@ impl RuntimeContext {
                     let tenant = temper_sandbox::helpers::expect_string_arg(args, 0, "tenant", &function_name)?;
                     let remaining = if args.len() > 1 { &args[1..] } else { &[] };
 
-                    let port = server_port.get().ok_or_else(|| {
-                        "Server not running. Call `await temper.start_server()` first, \
-                         or restart MCP with --port to connect to an existing server."
-                            .to_string()
-                    })?;
-                    let base_url = format!("http://127.0.0.1:{port}");
+                    let base_url = if let Some(url) = &server_url {
+                        url.clone()
+                    } else {
+                        let port = server_port.get().ok_or_else(|| {
+                            "Server not running. Call `await temper.start_server()` first, \
+                             or restart MCP with --port/--url to connect to an existing server."
+                                .to_string()
+                        })?;
+                        format!("http://127.0.0.1:{port}")
+                    };
 
                     let metadata = app_metadata.get(&tenant);
                     let resolver = |entity_or_set: &str| -> String {
@@ -331,11 +346,21 @@ impl RuntimeContext {
 /// Handle the `start_server` MCP-only method (spawns `temper serve`).
 async fn handle_start_server(
     server_port: &Arc<std::sync::OnceLock<u16>>,
+    server_url: &Option<String>,
     binary_path: &Option<std::path::PathBuf>,
     apps: &[crate::AppConfig],
 ) -> std::result::Result<Value, String> {
     use std::process::Stdio;
     use tokio::io::AsyncBufReadExt as _;
+
+    // When connected to a remote server via --url, spawning a local server
+    // is not supported — the remote server is already running.
+    if let Some(url) = server_url {
+        return Err(format!(
+            "Cannot start server — already connected to remote server at {url}. \
+             The remote server is managed externally."
+        ));
+    }
 
     if let Some(&port) = server_port.get() {
         let app_names: Vec<String> = apps.iter().map(|a| a.name.clone()).collect();

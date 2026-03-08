@@ -124,6 +124,7 @@ async fn start_test_temper_server() -> (u16, oneshot::Sender<()>) {
 async fn mcp_initialize_handshake() {
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(3001),
+        temper_url: None,
         apps: vec![],
         principal_id: None,
     })
@@ -152,6 +153,7 @@ async fn search_returns_filtered_spec_data() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(3001),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -180,6 +182,7 @@ async fn execute_creates_entity_and_reads_it_back() {
     let (port, shutdown) = start_test_temper_server().await;
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(port),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -213,6 +216,7 @@ async fn execute_invalid_action_returns_409_cleanly() {
     let (port, shutdown) = start_test_temper_server().await;
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(port),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -247,6 +251,7 @@ async fn sandbox_blocks_filesystem_access() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(3001),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -275,6 +280,7 @@ async fn execute_supports_compound_operation() {
     let (port, shutdown) = start_test_temper_server().await;
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(port),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -308,6 +314,7 @@ async fn search_spec_tenants() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(3001),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -330,6 +337,7 @@ async fn search_spec_entities() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(3001),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -356,6 +364,7 @@ async fn search_spec_describe() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(3001),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -385,6 +394,7 @@ async fn search_spec_actions_from() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(3001),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -419,6 +429,7 @@ async fn tool_list_includes_loaded_summary() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(3001),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -457,6 +468,7 @@ async fn execute_show_spec_returns_spec_data() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(3001),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -490,6 +502,7 @@ async fn e2e_agent_denial_human_approve_retry() {
     // Use agent identity so Cedar authorization applies (default-deny for agents).
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(port),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: Some("checkout-bot".to_string()),
     })
@@ -623,6 +636,7 @@ async fn e2e_search_chained_discovery() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(3001),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -669,6 +683,7 @@ async fn e2e_show_spec_matches_search_describe() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(3001),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -710,6 +725,7 @@ async fn execute_without_server_returns_helpful_error() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: None,
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -738,6 +754,7 @@ async fn search_works_without_server() {
     let tmp = write_temp_specs();
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: None,
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
     })
@@ -862,6 +879,7 @@ async fn get_decision_status_returns_decision() {
     // Use agent identity so Cedar authorization applies (default-deny for agents).
     let ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(port),
+        temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: Some("status-bot".to_string()),
     })

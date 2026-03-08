@@ -1,0 +1,129 @@
+# Project Entity — I/O Automaton Specification
+#
+# Groups issues into a logical project with lifecycle tracking.
+
+[automaton]
+name = "Project"
+states = ["Planning", "Active", "Paused", "Completed", "Archived"]
+initial = "Planning"
+
+# --- State Variables ---
+
+[[state]]
+name = "issue_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "has_description"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "cycle_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "member_count"
+type = "counter"
+initial = "0"
+
+# --- Actions ---
+
+[[action]]
+name = "SetDescription"
+kind = "input"
+from = ["Planning", "Active", "Paused"]
+effect = "set has_description true"
+params = ["description"]
+hint = "Set or update the project description and goal."
+
+[[action]]
+name = "Activate"
+kind = "internal"
+from = ["Planning"]
+to = "Active"
+guard = "is_true has_description"
+hint = "Activate the project for work. Requires a description."
+
+[[action]]
+name = "AddIssue"
+kind = "input"
+from = ["Active"]
+effect = "increment issue_count"
+params = ["IssueId"]
+hint = "Associate an issue with this project."
+
+[[action]]
+name = "AddCycle"
+kind = "input"
+from = ["Active"]
+effect = "increment cycle_count"
+params = ["CycleId"]
+hint = "Create a new cycle (sprint) within this project."
+
+[[action]]
+name = "AddMember"
+kind = "input"
+from = ["Active", "Planning"]
+effect = "increment member_count"
+params = ["AgentId"]
+hint = "Add a team member to the project."
+
+[[action]]
+name = "Pause"
+kind = "input"
+from = ["Active"]
+to = "Paused"
+hint = "Pause the project."
+
+[[action]]
+name = "Resume"
+kind = "input"
+from = ["Paused"]
+to = "Active"
+hint = "Resume a paused project."
+
+[[action]]
+name = "Complete"
+kind = "internal"
+from = ["Active"]
+to = "Completed"
+guard = "issue_count > 0"
+hint = "Mark the project as completed. Requires at least one issue."
+
+[[action]]
+name = "Archive"
+kind = "internal"
+from = ["Completed"]
+to = "Archived"
+hint = "Archive a completed project. Terminal state."
+
+# --- Output Actions ---
+
+[[action]]
+name = "ProjectCompletedEvent"
+kind = "output"
+hint = "Emitted when project transitions to Completed."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "CompletedRequiresIssues"
+when = ["Completed", "Archived"]
+assert = "issue_count > 0"
+
+[[invariant]]
+name = "ActiveRequiresDescription"
+when = ["Active", "Paused", "Completed", "Archived"]
+assert = "has_description"
+
+# --- Liveness ---
+# No liveness property — projects can validly stay in Planning or Active
+# indefinitely. Completion is goal-driven, not guaranteed.

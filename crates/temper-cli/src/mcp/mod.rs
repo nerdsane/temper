@@ -2,6 +2,7 @@ use anyhow::Result;
 
 pub async fn run(
     port: Option<u16>,
+    url: Option<String>,
     apps: Vec<(String, String)>,
     agent_id: Option<String>,
 ) -> Result<()> {
@@ -15,6 +16,7 @@ pub async fn run(
 
     temper_mcp::run_stdio_server(temper_mcp::McpConfig {
         temper_port: port,
+        temper_url: url,
         apps,
         principal_id: agent_id.or_else(|| Some("mcp-agent".to_string())),
     })

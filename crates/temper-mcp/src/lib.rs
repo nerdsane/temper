@@ -28,6 +28,9 @@ pub struct AppConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpConfig {
     pub temper_port: Option<u16>,
+    /// Full URL of a remote Temper server (e.g. `https://temper.railway.app`).
+    /// Mutually exclusive with `temper_port`.
+    pub temper_url: Option<String>,
     pub apps: Vec<AppConfig>,
     /// Agent principal ID for `X-Temper-Principal-Id` header. When set, all
     /// requests include agent identity headers for Cedar authorization.

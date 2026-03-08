@@ -84,9 +84,14 @@ enum Commands {
     },
     /// Start the stdio MCP server for Code Mode
     Mcp {
-        /// Port where Temper HTTP server is running (omit for self-contained mode)
-        #[arg(short, long)]
+        /// Port where Temper HTTP server is running (omit for self-contained mode).
+        /// Mutually exclusive with --url.
+        #[arg(short, long, conflicts_with = "url")]
         port: Option<u16>,
+        /// Full URL of a remote Temper server (e.g. https://temper.railway.app).
+        /// Mutually exclusive with --port.
+        #[arg(long, conflicts_with = "port")]
+        url: Option<String>,
         /// Load an app: --app name=specs-dir (repeatable)
         #[arg(long)]
         app: Vec<String>,
@@ -140,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Mcp {
             port,
+            url,
             app,
             agent_id,
         } => {
@@ -151,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
                     anyhow::bail!("Invalid --app format: '{entry}'. Expected name=specs-dir");
                 }
             }
-            mcp::run(port, apps, agent_id).await?
+            mcp::run(port, url, apps, agent_id).await?
         }
     }
 
@@ -317,8 +323,14 @@ mod tests {
     fn test_cli_parse_mcp_no_port() {
         let cli = Cli::parse_from(["temper", "mcp"]);
         match cli.command {
-            Commands::Mcp { port, agent_id, .. } => {
+            Commands::Mcp {
+                port,
+                url,
+                agent_id,
+                ..
+            } => {
                 assert_eq!(port, None);
+                assert_eq!(url, None);
                 assert_eq!(agent_id, None);
             }
             _ => panic!("expected Mcp command"),
@@ -338,10 +350,12 @@ mod tests {
         match cli.command {
             Commands::Mcp {
                 port,
+                url,
                 app,
                 agent_id,
             } => {
                 assert_eq!(port, Some(3001));
+                assert_eq!(url, None);
                 assert_eq!(app, vec!["haku-ops=apps/haku-ops/specs"]);
                 assert_eq!(agent_id, None);
             }
@@ -364,14 +378,58 @@ mod tests {
         match cli.command {
             Commands::Mcp {
                 port,
+                url,
                 app,
                 agent_id,
             } => {
                 assert_eq!(port, Some(3001));
+                assert_eq!(url, None);
                 assert_eq!(app, vec!["haku-ops=apps/haku-ops/specs"]);
                 assert_eq!(agent_id, Some("haku".to_string()));
             }
             _ => panic!("expected Mcp command"),
         }
+    }
+
+    #[test]
+    fn test_cli_parse_mcp_with_url() {
+        let cli = Cli::parse_from([
+            "temper",
+            "mcp",
+            "--url",
+            "https://temper.railway.app",
+            "--app",
+            "demo=specs/demo",
+        ]);
+        match cli.command {
+            Commands::Mcp {
+                port,
+                url,
+                app,
+                agent_id,
+            } => {
+                assert_eq!(port, None);
+                assert_eq!(url, Some("https://temper.railway.app".to_string()));
+                assert_eq!(app, vec!["demo=specs/demo"]);
+                assert_eq!(agent_id, None);
+            }
+            _ => panic!("expected Mcp command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_mcp_url_and_port_conflict() {
+        let result = Cli::try_parse_from([
+            "temper",
+            "mcp",
+            "--port",
+            "3001",
+            "--url",
+            "https://temper.railway.app",
+        ]);
+        assert!(
+            result.is_err(),
+            "--port and --url should be mutually exclusive"
+        );
     }
 }

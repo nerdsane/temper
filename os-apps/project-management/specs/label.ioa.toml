@@ -1,0 +1,45 @@
+# Label Entity — I/O Automaton Specification
+#
+# Categorization tag for issues.
+
+[automaton]
+name = "Label"
+states = ["Active", "Archived"]
+initial = "Active"
+
+# --- State Variables ---
+
+[[state]]
+name = "usage_count"
+type = "counter"
+initial = "0"
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+params = ["name", "color", "description"]
+hint = "Initialize label with name, color, and optional description."
+
+[[action]]
+name = "IncrementUsage"
+kind = "input"
+from = ["Active"]
+effect = "increment usage_count"
+hint = "Increment usage count when label is attached to an issue."
+
+[[action]]
+name = "Archive"
+kind = "input"
+from = ["Active"]
+to = "Archived"
+hint = "Archive the label. Terminal state."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
