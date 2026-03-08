@@ -186,10 +186,10 @@ pub async fn run(
             upsert_loaded_specs_to_postgres(pool, tenant, &loaded).await?;
         } else if let Some(ServerEventStore::Turso(ref turso)) = event_store {
             upsert_loaded_specs_to_turso(turso, tenant, &loaded).await?;
-        } else if let Some(ServerEventStore::TenantRouted(ref router)) = event_store {
-            if let Ok(store) = router.store_for_tenant(tenant).await {
-                upsert_loaded_specs_to_turso(&store, tenant, &loaded).await?;
-            }
+        } else if let Some(ServerEventStore::TenantRouted(ref router)) = event_store
+            && let Ok(store) = router.store_for_tenant(tenant).await
+        {
+            upsert_loaded_specs_to_turso(&store, tenant, &loaded).await?;
         }
     }
 
