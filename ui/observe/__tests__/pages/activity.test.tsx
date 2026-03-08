@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import ActivityPage from "@/app/activity/page";
+import ActivityPage from "@/app/(observe)/activity/page";
 
 vi.mock("@/lib/api", () => ({
   fetchTrajectories: vi.fn(),

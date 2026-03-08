@@ -1,11 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import EvolutionPage from "@/app/evolution/page";
+import EvolutionPage from "@/app/(observe)/evolution/page";
 
 vi.mock("@/lib/api", () => ({
   fetchEvolutionRecords: vi.fn(),
   fetchEvolutionInsights: vi.fn(),
   triggerSentinelCheck: vi.fn(),
+  fetchUnmetIntents: vi.fn().mockResolvedValue({ open_count: 0, intents: [] }),
+  subscribeEvolutionEvents: vi.fn().mockReturnValue(() => {}),
 }));
 
 vi.mock("@/lib/hooks", () => ({

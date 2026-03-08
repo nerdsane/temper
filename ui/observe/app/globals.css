@@ -13,7 +13,7 @@
   --color-text-secondary: #a1a1aa;
   --color-text-muted: #52525b;
   --font-mono: var(--font-geist-mono), ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
-  --font-display: var(--font-space-grotesk), system-ui, sans-serif;
+  --font-display: var(--font-geist-sans), system-ui, sans-serif;
 }
 
 body {
@@ -116,6 +116,49 @@ code, .font-mono {
   font-family: var(--font-display), system-ui, sans-serif;
 }
 
+/* ── Landing page animations ── */
+@keyframes orb-drift-1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(40px, 30px) scale(1.1); }
+}
+@keyframes orb-drift-2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-30px, -40px) scale(1.08); }
+}
+@keyframes glow-pulse {
+  0%, 100% { transform: translateX(-50%) scale(1); opacity: 1; }
+  50% { transform: translateX(-50%) scale(1.15); opacity: 0.8; }
+}
+@keyframes hero-fade-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes hero-mascot-reveal {
+  from { opacity: 0; transform: scale(0.9); filter: blur(4px); }
+  to { opacity: 1; transform: scale(1); filter: blur(0); }
+}
+@keyframes filter-progress {
+  0% { width: 0; }
+  100% { width: 100%; }
+}
+@keyframes dash-loop {
+  0% { stroke-dashoffset: 600; }
+  100% { stroke-dashoffset: 0; }
+}
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.animate-orb-drift-1 { animation: orb-drift-1 25s ease-in-out infinite; }
+.animate-orb-drift-2 { animation: orb-drift-2 30s ease-in-out infinite; }
+.animate-glow-pulse { animation: glow-pulse 8s ease-in-out infinite; }
+.animate-hero-fade-up { animation: hero-fade-up 0.5s ease-out both; }
+.animate-hero-mascot { animation: hero-mascot-reveal 0.6s ease-out both; animation-delay: 0.1s; }
+.animate-filter-progress { animation: filter-progress 2s linear infinite; }
+.animate-dash-loop { animation: dash-loop 4s linear infinite; }
+.animate-dot-pulse { animation: dot-pulse 2s ease-in-out infinite; }
+
 /* Reduced motion: disable all custom animations for users who prefer it */
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-in,
@@ -125,7 +168,15 @@ code, .font-mono {
   .animate-flash-pink,
   .animate-slide-in-right,
   .animate-item-slide-in,
-  .animate-slide-in-up {
+  .animate-slide-in-up,
+  .animate-orb-drift-1,
+  .animate-orb-drift-2,
+  .animate-glow-pulse,
+  .animate-hero-fade-up,
+  .animate-hero-mascot,
+  .animate-filter-progress,
+  .animate-dash-loop,
+  .animate-dot-pulse {
     animation: none !important;
   }
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import Dashboard from "@/app/page";
+import Dashboard from "@/app/(observe)/dashboard/page";
 
 vi.mock("@/lib/api", () => ({
   fetchSpecs: vi.fn(),

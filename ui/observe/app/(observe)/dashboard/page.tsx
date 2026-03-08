@@ -58,8 +58,6 @@ function DesignTimeProgress({ verificationStatus }: { verificationStatus: AllVer
   const total = verificationStatus.pending + verificationStatus.running +
     verificationStatus.passed + verificationStatus.failed + verificationStatus.partial;
 
-  if (total === 0) return null;
-
   const done = verificationStatus.passed + verificationStatus.failed + verificationStatus.partial;
   const allDone = verificationStatus.pending === 0 && verificationStatus.running === 0;
 
@@ -82,6 +80,8 @@ function DesignTimeProgress({ verificationStatus }: { verificationStatus: AllVer
     }
     return () => { if (allDoneTimerRef.current) clearTimeout(allDoneTimerRef.current); };
   }, [allDone, total]);
+
+  if (total === 0) return null;
 
   // Hide after the 3s "all done" display
   if (allDone && !showComplete) return null;
@@ -175,12 +175,6 @@ export default function Dashboard() {
     enabled: !initialLoading && !initialError,
   });
   const verificationStatus = verifyPoll.data;
-
-  // Check if any entity is still pending/running (to show progress panel)
-  const buildInProgress = useMemo(() => {
-    if (!verificationStatus) return false;
-    return verificationStatus.pending > 0 || verificationStatus.running > 0;
-  }, [verificationStatus]);
 
   // SSE subscriptions for real-time reactivity
   useEffect(() => {

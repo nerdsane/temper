@@ -72,7 +72,7 @@ function NavIcon({ icon }: { icon: string }) {
 }
 
 const navItems = [
-  { href: "/", label: "Dashboard", icon: "grid" },
+  { href: "/dashboard", label: "Dashboard", icon: "grid" },
   { href: "/workflows", label: "Workflows", icon: "workflow" },
   { href: "/activity", label: "Activity", icon: "activity" },
   { href: "/decisions", label: "Decisions", icon: "shield" },
@@ -102,7 +102,7 @@ export default function Sidebar() {
   }, []);
 
   const isActive = (href: string) => {
-    if (href === "/") return pathname === "/";
+    if (href === "/dashboard") return pathname === "/dashboard";
     return pathname.startsWith(href);
   };
 
@@ -110,7 +110,7 @@ export default function Sidebar() {
     <aside className="w-52 bg-[#0a0a0c]/80 backdrop-blur-xl border-r border-white/[0.06] flex flex-col h-screen">
       {/* Logo / Title */}
       <div className="px-4 py-3.5">
-        <Link href="/" className="flex items-center gap-2.5">
+        <Link href="/dashboard" className="flex items-center gap-2.5">
           <div>
             <div className="text-[15px] font-bold text-zinc-100 tracking-tight font-display">Temper</div>
             <div className="text-[10px] text-zinc-600 tracking-wide uppercase">Observe</div>
