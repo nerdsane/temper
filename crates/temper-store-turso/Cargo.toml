@@ -12,8 +12,15 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 libsql = "0.9.26"
 tracing = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true, optional = true }
+
+[features]
+default = []
+cloud = ["reqwest"]
 
 [dev-dependencies]
 tokio = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+tempfile = "3"

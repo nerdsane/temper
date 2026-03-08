@@ -1181,7 +1181,11 @@ impl TursoEventStore {
     ///   HTTP/gRPC connection pool managed by the `libsql` crate.
     ///
     /// It is safe (and cheap) to call this at the start of every method.
-    fn connection(&self) -> Result<libsql::Connection, PersistenceError> {
+    /// Get a low-level connection handle.
+    ///
+    /// Public for use by [`TenantStoreRouter`](crate::router::TenantStoreRouter)
+    /// to run platform-specific queries.
+    pub fn connection(&self) -> Result<libsql::Connection, PersistenceError> {
         self.db.connect().map_err(storage_error)
     }
 

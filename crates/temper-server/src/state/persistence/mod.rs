@@ -223,7 +223,7 @@ impl ServerState {
             return Ok(recovered);
         }
 
-        // Turso path.
+        // Turso path (single-DB).
         if let Some(turso) = store.turso_store() {
             let rows = turso
                 .load_wasm_modules_all_tenants()
@@ -245,6 +245,49 @@ impl ServerState {
                             error = %e,
                             "failed to compile recovered WASM module, skipping"
                         );
+                    }
+                }
+            }
+            return Ok(recovered);
+        }
+
+        // Turso tenant-routed path: load from each connected tenant + platform.
+        if let Some(router) = store.tenant_router() {
+            // Load from platform store (system modules).
+            if let Ok(rows) = router.platform_store().load_wasm_modules_all_tenants().await {
+                for row in rows {
+                    if let Ok(hash) = self.wasm_engine.compile_and_cache(&row.wasm_bytes) {
+                        let tenant_id = temper_runtime::tenant::TenantId::new(&row.tenant);
+                        let mut wasm_reg = self.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
+                        wasm_reg.register(&tenant_id, &row.module_name, &hash);
+                        recovered += 1;
+                    }
+                }
+            }
+            // Load from each tenant store.
+            for tid in router.connected_tenants().await {
+                let Ok(turso) = router.store_for_tenant(&tid).await else {
+                    continue;
+                };
+                let Ok(rows) = turso.load_wasm_modules_all_tenants().await else {
+                    continue;
+                };
+                for row in rows {
+                    match self.wasm_engine.compile_and_cache(&row.wasm_bytes) {
+                        Ok(hash) => {
+                            let tenant_id = temper_runtime::tenant::TenantId::new(&row.tenant);
+                            let mut wasm_reg = self.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
+                            wasm_reg.register(&tenant_id, &row.module_name, &hash);
+                            recovered += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                tenant = %row.tenant,
+                                module = %row.module_name,
+                                error = %e,
+                                "failed to compile recovered WASM module, skipping"
+                            );
+                        }
                     }
                 }
             }

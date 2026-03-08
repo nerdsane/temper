@@ -21,6 +21,8 @@ pub mod protocol;
 pub mod router;
 pub mod spec_store;
 pub mod state;
+pub mod tenant_access;
+pub mod tenant_api;
 
 // Re-export primary types at crate root.
 pub use bootstrap::{bootstrap_agent_specs, bootstrap_system_tenant};

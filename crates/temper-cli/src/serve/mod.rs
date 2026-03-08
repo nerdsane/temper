@@ -32,7 +32,7 @@ use temper_server::registry::{
 use temper_server::state::DesignTimeEvent;
 use temper_server::webhooks::WebhookDispatcher;
 use temper_store_redis::RedisEventStore;
-use temper_store_turso::TursoEventStore;
+use temper_store_turso::{TenantStoreRouter, TursoEventStore};
 use temper_verify::cascade::VerificationCascade;
 
 use crate::StorageBackend;
@@ -91,29 +91,54 @@ pub async fn run(
             }
         }
         StorageBackend::Turso => {
-            let turso_url = match std::env::var("TURSO_URL") {
-                Ok(url) => url,
-                Err(_) => {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                    let db_path = Path::new(&home).join(".local/share/temper/agents.db");
-                    let parent_dir = db_path.parent().context(
-                        "Failed to determine parent directory for default Turso DB path",
-                    )?;
-                    fs::create_dir_all(parent_dir).with_context(|| {
-                        format!(
-                            "Failed to create default Turso DB directory: {}",
-                            parent_dir.display()
-                        )
-                    })?;
-                    format!("file:{}", db_path.display())
-                }
-            };
-            let turso_token = std::env::var("TURSO_AUTH_TOKEN").ok();
-            let store = TursoEventStore::new(&turso_url, turso_token.as_deref())
+            // Multi-tenant cloud mode: TURSO_PLATFORM_URL points at the shared platform DB.
+            if let Ok(platform_url) = std::env::var("TURSO_PLATFORM_URL") {
+                let platform_token = std::env::var("TURSO_PLATFORM_AUTH_TOKEN").ok();
+                let local_base_dir = std::env::var("TURSO_LOCAL_BASE_DIR").ok().or_else(|| {
+                    let home = std::env::var("HOME").ok()?;
+                    Some(format!("{home}/.local/share/temper/tenants"))
+                });
+
+                let router = TenantStoreRouter::new(
+                    &platform_url,
+                    platform_token.as_deref(),
+                    local_base_dir,
+                )
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to connect to Turso/libSQL: {e}"))?;
-            println!("  Storage: turso ({})", turso_url);
-            Some(ServerEventStore::Turso(store))
+                .map_err(|e| anyhow::anyhow!("Failed to create tenant store router: {e}"))?;
+
+                let tenant_count = router.connected_tenants().await.len();
+                println!(
+                    "  Storage: turso-routed ({platform_url}, {tenant_count} tenants connected)"
+                );
+                Some(ServerEventStore::TenantRouted(router))
+            } else {
+                // Single-DB mode (local dev).
+                let turso_url = match std::env::var("TURSO_URL") {
+                    Ok(url) => url,
+                    Err(_) => {
+                        let home =
+                            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                        let db_path = Path::new(&home).join(".local/share/temper/agents.db");
+                        let parent_dir = db_path.parent().context(
+                            "Failed to determine parent directory for default Turso DB path",
+                        )?;
+                        fs::create_dir_all(parent_dir).with_context(|| {
+                            format!(
+                                "Failed to create default Turso DB directory: {}",
+                                parent_dir.display()
+                            )
+                        })?;
+                        format!("file:{}", db_path.display())
+                    }
+                };
+                let turso_token = std::env::var("TURSO_AUTH_TOKEN").ok();
+                let store = TursoEventStore::new(&turso_url, turso_token.as_deref())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to Turso/libSQL: {e}"))?;
+                println!("  Storage: turso ({})", turso_url);
+                Some(ServerEventStore::Turso(store))
+            }
         }
         StorageBackend::Redis => {
             let redis_url = std::env::var("REDIS_URL")
@@ -138,6 +163,21 @@ pub async fn run(
         if restored > 0 {
             println!("  Restored {restored} specs from Turso.");
         }
+    } else if let Some(ServerEventStore::TenantRouted(ref router)) = event_store {
+        let mut total_restored = 0usize;
+        // Restore from platform store (system specs).
+        let restored = load_registry_from_turso(&mut registry, router.platform_store()).await?;
+        total_restored += restored;
+        // Restore from each connected tenant store.
+        for tenant_id in router.connected_tenants().await {
+            if let Ok(store) = router.store_for_tenant(&tenant_id).await {
+                let restored = load_registry_from_turso(&mut registry, &store).await?;
+                total_restored += restored;
+            }
+        }
+        if total_restored > 0 {
+            println!("  Restored {total_restored} specs from Turso (routed).");
+        }
     }
 
     for (tenant, specs_dir) in &apps {
@@ -147,6 +187,10 @@ pub async fn run(
             upsert_loaded_specs_to_postgres(pool, tenant, &loaded).await?;
         } else if let Some(ServerEventStore::Turso(ref turso)) = event_store {
             upsert_loaded_specs_to_turso(turso, tenant, &loaded).await?;
+        } else if let Some(ServerEventStore::TenantRouted(ref router)) = event_store {
+            if let Ok(store) = router.store_for_tenant(tenant).await {
+                upsert_loaded_specs_to_turso(&store, tenant, &loaded).await?;
+            }
         }
     }
 
@@ -232,40 +276,72 @@ pub async fn run(
             let tenant_id = temper_runtime::tenant::TenantId::new(tenant.as_str());
             state.server.hydrate_from_store(&tenant_id).await;
         }
+        // In TenantRouted mode, also hydrate all registered tenants.
+        if let Some(ref store) = state.server.event_store
+            && let Some(router) = store.tenant_router()
+        {
+            for tenant in router.connected_tenants().await {
+                let tenant_id = TenantId::new(&tenant);
+                state.server.hydrate_from_store(&tenant_id).await;
+            }
+        }
     }
 
     // Trajectory data is now read directly from Turso (single source of truth).
 
     // Pending decisions are now read directly from Turso (single source of truth).
 
-    // Hydrate Cedar policies from Turso.
-    if let Some(ref store) = state.server.event_store
-        && let Some(turso) = store.turso_store()
-    {
-        match turso.load_tenant_policies().await {
-            Ok(rows) if !rows.is_empty() => {
-                let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-                for (tenant, policy_text) in &rows {
-                    policies.insert(tenant.clone(), policy_text.clone());
-                }
-                // Reload all policies into Cedar engine.
-                let mut combined = String::new();
-                for text in policies.values() {
-                    combined.push_str(text);
-                    combined.push('\n');
-                }
-                if let Err(e) = state.server.authz.reload_policies(&combined) {
-                    eprintln!("  Warning: failed to reload Cedar policies from Turso: {e}");
-                } else {
-                    println!(
-                        "  Restored Cedar policies for {} tenants from Turso.",
-                        rows.len()
-                    );
+    // Hydrate Cedar policies from Turso (single-DB or routed).
+    if let Some(ref store) = state.server.event_store {
+        let mut all_policy_rows: Vec<(String, String)> = Vec::new();
+
+        if let Some(turso) = store.turso_store() {
+            // Single-DB mode.
+            match turso.load_tenant_policies().await {
+                Ok(rows) => all_policy_rows.extend(rows),
+                Err(e) => {
+                    eprintln!("  Warning: failed to load Cedar policies from Turso: {e}");
                 }
             }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("  Warning: failed to load Cedar policies from Turso: {e}");
+        } else if let Some(router) = store.tenant_router() {
+            // Routed mode: load from platform store + each tenant store.
+            match router.platform_store().load_tenant_policies().await {
+                Ok(rows) => all_policy_rows.extend(rows),
+                Err(e) => {
+                    eprintln!("  Warning: failed to load Cedar policies from platform store: {e}");
+                }
+            }
+            for tenant_id in router.connected_tenants().await {
+                if let Ok(turso) = router.store_for_tenant(&tenant_id).await {
+                    match turso.load_tenant_policies().await {
+                        Ok(rows) => all_policy_rows.extend(rows),
+                        Err(e) => {
+                            eprintln!(
+                                "  Warning: failed to load Cedar policies for tenant {tenant_id}: {e}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if !all_policy_rows.is_empty() {
+            let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+            for (tenant, policy_text) in &all_policy_rows {
+                policies.insert(tenant.clone(), policy_text.clone());
+            }
+            let mut combined = String::new();
+            for text in policies.values() {
+                combined.push_str(text);
+                combined.push('\n');
+            }
+            if let Err(e) = state.server.authz.reload_policies(&combined) {
+                eprintln!("  Warning: failed to reload Cedar policies: {e}");
+            } else {
+                println!(
+                    "  Restored Cedar policies for {} tenants.",
+                    all_policy_rows.len()
+                );
             }
         }
     }
@@ -307,6 +383,15 @@ pub async fn run(
     // Also bootstrap agent specs for each --app tenant so agents work within user apps.
     for (tenant, _dir) in &apps {
         temper_platform::bootstrap_agent_specs(&state, tenant);
+    }
+
+    // In TenantRouted mode, bootstrap agent specs for all registered tenants.
+    if let Some(ref store) = state.server.event_store
+        && let Some(tenant_router) = store.tenant_router()
+    {
+        for tenant in tenant_router.connected_tenants().await {
+            temper_platform::bootstrap_agent_specs(&state, &tenant);
+        }
     }
 
     let router = build_platform_router(state.clone());

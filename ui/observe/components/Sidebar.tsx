@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { useConnection } from "@/lib/connection";
 import { useDecisionNotifier } from "@/lib/decision-notifier";
 import { fetchUnmetIntents } from "@/lib/api";
+import UserMenu from "@/components/UserMenu";
 
 function NavIcon({ icon }: { icon: string }) {
   switch (icon) {
@@ -147,21 +148,20 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      {/* Connection Status + Footer */}
-      <div className="px-4 py-3 mt-auto space-y-1.5">
-        {!checking && (
-          <div className="flex items-center gap-2">
-            <div
-              className={`w-1.5 h-1.5 rounded-full ${
-                connected ? "bg-teal-400" : "bg-pink-400"
-              }`}
-            />
-            <span className={`text-[11px] ${connected ? "text-zinc-600" : "text-pink-400"}`}>
-              {connected ? "Connected" : "Disconnected"}
-            </span>
-          </div>
-        )}
-        <div className="text-[10px] text-zinc-700">v0.1.0</div>
+      {/* User */}
+      <div className="border-t border-white/[0.06]">
+        <UserMenu />
+      </div>
+
+      {/* Footer */}
+      <div className="px-4 py-3 border-t border-white/[0.06] flex items-center justify-between">
+        <div className="text-[10px] text-zinc-700 font-mono">TEMPER v0.1.0</div>
+        <div className="flex items-center gap-1.5" aria-label={checking ? "Checking connection" : connected ? "Connected" : "Disconnected"}>
+          <div className={`w-1.5 h-1.5 rounded-full ${checking ? "bg-zinc-600" : connected ? "bg-teal-400" : "bg-pink-400"}`} />
+          <span className={`text-[10px] font-mono ${checking ? "text-zinc-600" : connected ? "text-zinc-600" : "text-pink-400"}`}>
+            {checking ? "..." : connected ? "" : "offline"}
+          </span>
+        </div>
       </div>
     </aside>
   );

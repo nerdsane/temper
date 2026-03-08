@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use temper_runtime::persistence::{EventStore, PersistenceEnvelope, PersistenceError};
 use temper_store_postgres::PostgresEventStore;
 use temper_store_redis::RedisEventStore;
-use temper_store_turso::TursoEventStore;
+use temper_store_turso::{TenantStoreRouter, TursoEventStore};
 
 #[cfg(feature = "sim")]
 use temper_store_sim::SimEventStore;
@@ -18,6 +18,8 @@ pub enum ServerEventStore {
     Postgres(PostgresEventStore),
     Turso(TursoEventStore),
     Redis(RedisEventStore),
+    /// Database-per-tenant routing via [`TenantStoreRouter`].
+    TenantRouted(TenantStoreRouter),
     /// In-memory deterministic event store for simulation testing.
     #[cfg(feature = "sim")]
     Sim(SimEventStore),
@@ -30,6 +32,7 @@ impl ServerEventStore {
             Self::Postgres(_) => "postgres",
             Self::Turso(_) => "turso",
             Self::Redis(_) => "redis",
+            Self::TenantRouted(_) => "turso-routed",
             #[cfg(feature = "sim")]
             Self::Sim(_) => "sim",
         }
@@ -39,19 +42,37 @@ impl ServerEventStore {
     pub fn postgres_pool(&self) -> Option<&PgPool> {
         match self {
             Self::Postgres(store) => Some(store.pool()),
-            Self::Turso(_) | Self::Redis(_) => None,
-            #[cfg(feature = "sim")]
-            Self::Sim(_) => None,
+            _ => None,
         }
     }
 
-    /// Return the Turso store when using the Turso backend.
+    /// Return the Turso store when using the single-DB Turso backend.
+    ///
+    /// Returns `None` in tenant-routed mode — use [`turso_for_tenant`] instead.
     pub fn turso_store(&self) -> Option<&TursoEventStore> {
         match self {
             Self::Turso(store) => Some(store),
-            Self::Postgres(_) | Self::Redis(_) => None,
-            #[cfg(feature = "sim")]
-            Self::Sim(_) => None,
+            _ => None,
+        }
+    }
+
+    /// Return the tenant store router when using database-per-tenant mode.
+    pub fn tenant_router(&self) -> Option<&TenantStoreRouter> {
+        match self {
+            Self::TenantRouted(router) => Some(router),
+            _ => None,
+        }
+    }
+
+    /// Return a Turso store for a specific tenant.
+    ///
+    /// Works in both single-DB mode (returns the shared store) and
+    /// tenant-routed mode (returns the per-tenant store).
+    pub async fn turso_for_tenant(&self, tenant: &str) -> Option<TursoEventStore> {
+        match self {
+            Self::Turso(store) => Some(store.clone()),
+            Self::TenantRouted(router) => router.store_for_tenant(tenant).await.ok(),
+            _ => None,
         }
     }
 
@@ -59,9 +80,7 @@ impl ServerEventStore {
     pub fn redis_store(&self) -> Option<&RedisEventStore> {
         match self {
             Self::Redis(store) => Some(store),
-            Self::Postgres(_) | Self::Turso(_) => None,
-            #[cfg(feature = "sim")]
-            Self::Sim(_) => None,
+            _ => None,
         }
     }
 }
@@ -89,6 +108,11 @@ impl EventStore for ServerEventStore {
                     .append(persistence_id, expected_sequence, events)
                     .await
             }
+            Self::TenantRouted(router) => {
+                router
+                    .append(persistence_id, expected_sequence, events)
+                    .await
+            }
             #[cfg(feature = "sim")]
             Self::Sim(store) => {
                 store
@@ -107,6 +131,7 @@ impl EventStore for ServerEventStore {
             Self::Postgres(store) => store.read_events(persistence_id, from_sequence).await,
             Self::Turso(store) => store.read_events(persistence_id, from_sequence).await,
             Self::Redis(store) => store.read_events(persistence_id, from_sequence).await,
+            Self::TenantRouted(router) => router.read_events(persistence_id, from_sequence).await,
             #[cfg(feature = "sim")]
             Self::Sim(store) => store.read_events(persistence_id, from_sequence).await,
         }
@@ -134,6 +159,11 @@ impl EventStore for ServerEventStore {
                     .save_snapshot(persistence_id, sequence_nr, snapshot)
                     .await
             }
+            Self::TenantRouted(router) => {
+                router
+                    .save_snapshot(persistence_id, sequence_nr, snapshot)
+                    .await
+            }
             #[cfg(feature = "sim")]
             Self::Sim(store) => {
                 store
@@ -151,6 +181,7 @@ impl EventStore for ServerEventStore {
             Self::Postgres(store) => store.load_snapshot(persistence_id).await,
             Self::Turso(store) => store.load_snapshot(persistence_id).await,
             Self::Redis(store) => store.load_snapshot(persistence_id).await,
+            Self::TenantRouted(router) => router.load_snapshot(persistence_id).await,
             #[cfg(feature = "sim")]
             Self::Sim(store) => store.load_snapshot(persistence_id).await,
         }
@@ -164,6 +195,7 @@ impl EventStore for ServerEventStore {
             Self::Postgres(store) => store.list_entity_ids(tenant).await,
             Self::Turso(store) => store.list_entity_ids(tenant).await,
             Self::Redis(store) => store.list_entity_ids(tenant).await,
+            Self::TenantRouted(router) => router.list_entity_ids(tenant).await,
             #[cfg(feature = "sim")]
             Self::Sim(store) => store.list_entity_ids(tenant).await,
         }

@@ -1,0 +1,11 @@
+target/
+.git/
+.claude/
+.desloppify/
+.progress/
+.vision/
+ui/
+node_modules/
+*.png
+*.bak
+scorecard.png

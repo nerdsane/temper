@@ -4,6 +4,7 @@ import { Space_Grotesk } from "next/font/google";
 import "./globals.css";
 import Sidebar from "@/components/Sidebar";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import Providers from "@/components/Providers";
 import { ConnectionProvider } from "@/lib/connection";
 import { DecisionNotifierProvider } from "@/lib/decision-notifier";
 
@@ -22,6 +23,7 @@ export default function RootLayout({
   return (
     <html lang="en" className={`dark ${GeistMono.variable} ${spaceGrotesk.variable}`} suppressHydrationWarning>
       <body className={`${spaceGrotesk.className} antialiased`} suppressHydrationWarning>
+        <Providers>
         <ConnectionProvider>
           <DecisionNotifierProvider>
             <div className="flex h-screen overflow-hidden">
@@ -36,6 +38,7 @@ export default function RootLayout({
             </div>
           </DecisionNotifierProvider>
         </ConnectionProvider>
+        </Providers>
       </body>
     </html>
   );

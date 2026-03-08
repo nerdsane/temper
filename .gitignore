@@ -60,3 +60,4 @@ scripts/generate-graph-json.js
 .proof/
 .code-review-pass
 .dst-review-pass
+.vercel

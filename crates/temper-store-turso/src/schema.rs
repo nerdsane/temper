@@ -236,6 +236,35 @@ pub const CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_design_time_events_tenant
     ON design_time_events(tenant, entity_type);";
 
+// ---------------------------------------------------------------------------
+// Platform DB tables (tenant registry + user access)
+// ---------------------------------------------------------------------------
+
+/// Registry of provisioned tenant databases.
+pub const CREATE_TENANT_REGISTRY_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS tenant_registry (
+    tenant_id TEXT PRIMARY KEY,
+    turso_db_url TEXT NOT NULL,
+    turso_auth_token TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);";
+
+/// User-to-tenant access mappings.
+pub const CREATE_TENANT_USERS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS tenant_users (
+    tenant_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(tenant_id, user_id)
+);";
+
+/// Index for looking up tenants by user.
+pub const CREATE_TENANT_USERS_USER_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_tenant_users_user
+    ON tenant_users(user_id);";
+
 #[cfg(test)]
 mod tests {
     use super::*;

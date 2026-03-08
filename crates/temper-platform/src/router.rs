@@ -4,8 +4,10 @@
 //! The API is the **Temper Data API** at `/tdata`.
 
 use axum::Router;
+use axum::middleware;
 
 use crate::state::PlatformState;
+use crate::tenant_access::tenant_access_check;
 
 /// Build the full platform router.
 ///
@@ -19,7 +21,14 @@ use crate::state::PlatformState;
 /// Tenant is extracted from the `X-Tenant-Id` header. Falls back to the
 /// first registered tenant in the SpecRegistry.
 pub fn build_platform_router(state: PlatformState) -> Router {
+    let tenant_api = crate::tenant_api::tenant_api_router();
+
     temper_server::build_router(state.server.clone())
+        .nest("/api", tenant_api.with_state(state.clone()))
+        .layer(middleware::from_fn_with_state(
+            state,
+            tenant_access_check,
+        ))
 }
 
 #[cfg(test)]

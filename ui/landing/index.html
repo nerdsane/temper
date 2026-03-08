@@ -3,767 +3,420 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Temper — The Operating System for Agents</title>
-  <meta name="description" content="Temper is to agents what an OS is to processes. Every action is verified before it runs, authorized when it runs, and recorded after it runs.">
+  <title>Temper — The Framework Where Agents Build Their Own OS</title>
+  <meta name="description" content="Agent-created tools as formally verified state machines, Cedar authorization, and an evolution loop with human approval.">
   <meta name="theme-color" content="#0a0a0c">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%232dd4bf'/><text x='16' y='23' font-size='20' font-weight='bold' fill='%230a0a0c' text-anchor='middle' font-family='system-ui'>T</text></svg>">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.0/dist/fonts/geist-sans/style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.0/dist/fonts/geist-mono/style.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-
+    
     :root {
       --bg: #0a0a0c;
       --surface: #111115;
-      --glass: rgba(255, 255, 255, 0.02);
-      --glass-hover: rgba(255, 255, 255, 0.04);
-      --border: rgba(255, 255, 255, 0.04);
-      --border-hover: rgba(255, 255, 255, 0.1);
+      --surface-bright: #1a1a20;
+      --border: rgba(255,255,255,0.06);
+      --border-bright: rgba(255,255,255,0.12);
       --teal: #2dd4bf;
-      --teal-dim: rgba(45, 212, 191, 0.12);
-      --teal-glow: rgba(45, 212, 191, 0.08);
+      --teal-dim: rgba(45, 212, 191, 0.1);
+      --teal-glow: rgba(45, 212, 191, 0.2);
       --pink: #f472b6;
-      --lime: #a3e635;
+      --pink-dim: rgba(244, 114, 182, 0.1);
+      --amber: #fbbf24;
       --text: #fafafa;
       --secondary: #a1a1aa;
       --muted: #52525b;
-      --font: 'Space Grotesk', system-ui, -apple-system, sans-serif;
-      --mono: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
+      --font: 'Geist Sans', system-ui, -apple-system, sans-serif;
+      --mono: 'Geist Mono', ui-monospace, monospace;
     }
 
     html { scroll-behavior: smooth; }
-
     body {
       font-family: var(--font);
       background: var(--bg);
       color: var(--text);
-      line-height: 1.7;
+      line-height: 1.6;
       -webkit-font-smoothing: antialiased;
       overflow-x: hidden;
-      min-height: 100vh;
-      position: relative;
     }
 
     #webgl-canvas {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      z-index: -1;
-      pointer-events: none;
-      opacity: 0.6;
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      z-index: -1; pointer-events: none;
+      opacity: 0.4;
     }
 
-    /* ── Ambient mesh gradient ────────────── */
-    body::before {
-      content: '';
-      position: fixed; inset: 0; z-index: 0; pointer-events: none;
-      background:
-        radial-gradient(ellipse 80% 60% at 15% 20%, rgba(45, 212, 191, 0.05) 0%, transparent 60%),
-        radial-gradient(ellipse 60% 50% at 75% 40%, rgba(139, 92, 246, 0.03) 0%, transparent 55%),
-        radial-gradient(ellipse 70% 60% at 50% 80%, rgba(45, 212, 191, 0.03) 0%, transparent 50%);
-    }
-
-    /* ── Noise overlay ───────────────────── */
-    body::after {
-      content: '';
-      position: fixed; inset: 0; z-index: 1; pointer-events: none;
-      opacity: 0.02;
-      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-      background-repeat: repeat;
-      background-size: 256px 256px;
-    }
-
-    /* ── Floating ambient orbs ───────────── */
-    .ambient-orb {
-      position: fixed;
-      border-radius: 50%;
-      pointer-events: none;
-      z-index: 0;
-    }
-    .ambient-orb-1 {
-      width: 600px; height: 600px;
-      top: -10%; left: -5%;
-      background: radial-gradient(circle, rgba(45, 212, 191, 0.04) 0%, transparent 70%);
-      animation: orbDrift1 25s ease-in-out infinite;
-    }
-    .ambient-orb-2 {
-      width: 500px; height: 500px;
-      bottom: -10%; right: -8%;
-      background: radial-gradient(circle, rgba(139, 92, 246, 0.03) 0%, transparent 70%);
-      animation: orbDrift2 30s ease-in-out infinite;
-    }
-    @keyframes orbDrift1 {
-      0%, 100% { transform: translate(0, 0) scale(1); }
-      50% { transform: translate(40px, 30px) scale(1.1); }
-    }
-    @keyframes orbDrift2 {
-      0%, 100% { transform: translate(0, 0) scale(1); }
-      50% { transform: translate(-30px, -40px) scale(1.08); }
-    }
-
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
-
-    a { color: var(--teal); text-decoration: none; transition: color 0.2s; }
-    a:hover { color: #5eead4; }
-
-    .container { max-width: 960px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 2; }
-
-    /* ── Nav ─────────────────────────────── */
+    /* --- NAVIGATION --- */
     nav {
-      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-      background: rgba(10, 10, 12, 0.8);
-      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-    }
-    nav .container { display: flex; align-items: center; justify-content: space-between; height: 52px; }
-    .nav-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; color: var(--text); letter-spacing: -0.02em; }
-    .nav-brand:hover { color: var(--text); }
-    .nav-mark { width: 28px; height: 28px; border-radius: 7px; background: var(--teal); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 14px; color: var(--bg); }
-    .nav-links { display: flex; align-items: center; gap: 28px; list-style: none; }
-    .nav-links a { font-size: 13px; color: var(--secondary); font-weight: 500; }
-    .nav-links a:hover { color: var(--text); }
-    .nav-gh { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; color: var(--text) !important; transition: border-color 0.2s, background 0.2s; }
-    .nav-gh:hover { border-color: var(--teal); background: var(--teal-glow); }
-    .nav-gh svg { opacity: 0.7; }
-    @media (max-width: 640px) { .nav-links li:not(:last-child) { display: none; } }
-
-    /* ── Hero ────────────────────────────── */
-    .hero {
-      padding: 160px 0 140px;
-      text-align: center;
-      position: relative;
-    }
-    .hero-glow {
-      position: absolute; top: 60px; left: 50%; transform: translateX(-50%);
-      width: 600px; height: 600px;
-      background: radial-gradient(circle, rgba(45,212,191,0.08) 0%, transparent 60%);
-      pointer-events: none;
-      animation: glowPulse 8s ease-in-out infinite;
-    }
-    @keyframes glowPulse {
-      0%, 100% { transform: translateX(-50%) scale(1); opacity: 1; }
-      50% { transform: translateX(-50%) scale(1.15); opacity: 0.8; }
-    }
-    .hero .container { position: relative; z-index: 2; }
-    .hero-badge {
-      display: inline-flex; align-items: center; gap: 8px;
-      padding: 6px 14px; border-radius: 100px;
-      background: var(--glass); border: 1px solid var(--border);
-      font-size: 12px; font-weight: 500; color: var(--secondary);
-      margin-bottom: 32px; letter-spacing: 0.04em;
-    }
-    .hero-badge .dot {
-      width: 6px; height: 6px; border-radius: 50%; background: var(--teal);
-      animation: dotPulse 2s ease-in-out infinite;
-    }
-    @keyframes dotPulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.5; }
-    }
-    .hero-mascot {
-      margin-bottom: 32px;
-    }
-    .hero-mascot img {
-      width: 200px; height: auto;
-    }
-    .hero h1 {
-      font-size: clamp(2.5rem, 5.5vw, 4rem);
-      font-weight: 700; letter-spacing: -0.04em; line-height: 1.1;
-      max-width: 680px; margin: 0 auto 24px;
-      background: linear-gradient(135deg, #fafafa 0%, #2dd4bf 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-    .hero-sub {
-      font-size: 18px; color: var(--secondary); max-width: 540px;
-      margin: 0 auto 48px; line-height: 1.7;
-    }
-    .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
-    .btn {
-      display: inline-flex; align-items: center; gap: 8px;
-      padding: 10px 22px; border-radius: 4px;
-      font-family: var(--font); font-size: 14px; font-weight: 600;
-      transition: all 0.2s; cursor: pointer; border: none;
-    }
-    .btn-teal { background: var(--teal); color: var(--bg); }
-    .btn-teal:hover { color: var(--bg); background: #5eead4; transform: translateY(-1px); box-shadow: 0 4px 20px var(--teal-glow); }
-    .btn-glass { background: var(--glass); color: var(--text); border: 1px solid var(--border); }
-    .btn-glass:hover { color: var(--text); background: var(--glass-hover); border-color: var(--border-hover); transform: translateY(-1px); }
-
-    /* ── Sections ────────────────────────── */
-    section { padding: 120px 0; }
-    .section-divider {
-      height: 1px;
-      background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.06) 50%, transparent 100%);
-    }
-    .label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--teal); margin-bottom: 12px; }
-    .heading { font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 600; letter-spacing: -0.02em; margin-bottom: 16px; }
-    .sub { font-size: 16px; color: var(--secondary); max-width: 520px; margin-bottom: 48px; line-height: 1.7; }
-
-    /* ── Scroll animations ───────────────── */
-    .animate-on-scroll {
-      opacity: 0;
-      transform: translateY(16px);
-      transition: opacity 0.6s ease-out, transform 0.6s ease-out;
-    }
-    .animate-on-scroll.visible {
-      opacity: 1;
-      transform: translateY(0) scale(1) translateX(0);
-    }
-    .stagger-1 { transition-delay: 0.05s; }
-    .stagger-2 { transition-delay: 0.1s; }
-    .stagger-3 { transition-delay: 0.15s; }
-    .stagger-4 { transition-delay: 0.2s; }
-    .stagger-5 { transition-delay: 0.25s; }
-
-    /* Card zoom-in */
-    .animate-zoom {
-      opacity: 0;
-      transform: translateY(16px) scale(0.97);
-      transition: opacity 0.6s ease-out, transform 0.6s ease-out;
-    }
-    .animate-zoom.visible {
-      opacity: 1;
-      transform: translateY(0) scale(1);
-    }
-
-    /* Flow slide-from-left */
-    .animate-slide-left {
-      opacity: 0;
-      transform: translateX(-24px);
-      transition: opacity 0.6s ease-out, transform 0.6s ease-out;
-    }
-    .animate-slide-left.visible {
-      opacity: 1;
-      transform: translateX(0);
-    }
-
-    /* Flow slide-from-right */
-    .animate-slide-right {
-      opacity: 0;
-      transform: translateX(24px);
-      transition: opacity 0.6s ease-out, transform 0.6s ease-out;
-    }
-    .animate-slide-right.visible {
-      opacity: 1;
-      transform: translateX(0);
-    }
-
-    /* Steps slide-in from right */
-    .animate-slide-in {
-      opacity: 0;
-      transform: translateX(20px);
-      transition: opacity 0.6s ease-out, transform 0.6s ease-out;
-    }
-    .animate-slide-in.visible {
-      opacity: 1;
-      transform: translateX(0);
-    }
-
-    /* Position rows slide from left */
-    .animate-from-left {
-      opacity: 0;
-      transform: translateX(-12px);
-      transition: opacity 0.5s ease-out, transform 0.5s ease-out;
-    }
-    .animate-from-left.visible {
-      opacity: 1;
-      transform: translateX(0);
-    }
-
-    /* ── About cards ─────────────────────── */
-    .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-    @media (max-width: 640px) { .card-grid { grid-template-columns: 1fr; } }
-    .card {
-      background: rgba(255, 255, 255, 0.02);
-      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-      border: 1px solid rgba(255, 255, 255, 0.04);
-      border-radius: 3px;
-      padding: 28px;
-      transition: border-color 0.25s, background 0.25s, transform 0.25s, box-shadow 0.25s;
-    }
-    .card:hover {
-      border-color: var(--border-hover);
-      background: rgba(255, 255, 255, 0.03);
-      transform: translateY(-2px);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 4px 24px rgba(45, 212, 191, 0.04);
-    }
-    .card-dot {
-      width: 8px; height: 8px; border-radius: 50%; margin-bottom: 16px;
-    }
-    .card-dot.lime { background: var(--lime); box-shadow: 0 0 8px rgba(163, 230, 53, 0.3); }
-    .card-dot.teal { background: var(--teal); box-shadow: 0 0 8px rgba(45, 212, 191, 0.3); }
-    .card-dot.pink { background: var(--pink); box-shadow: 0 0 8px rgba(244, 114, 182, 0.3); }
-    .card h3 { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
-    .card p { font-size: 14px; color: var(--secondary); line-height: 1.6; }
-
-    /* ── Flow diagram ────────────────────── */
-    .flow-diagram { max-width: 640px; margin: 0 auto; }
-    .flow-box {
-      background: rgba(255, 255, 255, 0.02);
-      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-      border: 1px solid rgba(255, 255, 255, 0.04);
-      border-radius: 3px;
-      padding: 24px; text-align: center;
-    }
-    .flow-box h3 { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
-    .flow-box p { font-size: 13px; color: var(--secondary); line-height: 1.6; font-family: var(--mono); }
-    .flow-box.core { border-color: rgba(45, 212, 191, 0.15); }
-    .flow-arrow {
-      display: flex; flex-direction: column; align-items: center; padding: 12px 0; color: var(--muted);
-    }
-    .flow-arrow-line { width: 1px; height: 20px; background: var(--muted); }
-    .flow-arrow-label { font-size: 11px; font-family: var(--mono); color: var(--muted); margin: 6px 0; letter-spacing: 0.04em; }
-    .flow-arrow svg { color: var(--muted); }
-    .flow-core-grid {
-      display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 16px;
-    }
-    .flow-mini {
-      background: rgba(45, 212, 191, 0.06); border: 1px solid rgba(45, 212, 191, 0.1);
-      border-radius: 2px; padding: 10px 8px; font-size: 12px; font-weight: 500; text-align: center;
-    }
-    .flow-secondary-grid {
-      display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px;
-    }
-    .flow-mini-secondary {
-      background: var(--glass); border: 1px solid var(--border);
-      border-radius: 2px; padding: 10px 8px; font-size: 12px; color: var(--secondary); text-align: center;
-    }
-
-    /* ── Steps ───────────────────────────── */
-    .steps-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; }
-    @media (max-width: 768px) { .steps-row { grid-template-columns: 1fr 1fr; } }
-    @media (max-width: 480px) { .steps-row { grid-template-columns: 1fr; } }
-    .step {
-      padding: 24px;
-      background: rgba(255, 255, 255, 0.02);
-      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-      border: 1px solid rgba(255, 255, 255, 0.04);
-      border-radius: 3px;
-      transition: border-color 0.25s, transform 0.25s, box-shadow 0.25s;
-    }
-    .step:hover {
-      border-color: var(--border-hover);
-      transform: translateY(-2px);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 4px 24px rgba(45, 212, 191, 0.04);
-    }
-    .step-n {
-      font-family: var(--mono); font-size: 12px; font-weight: 600;
-      color: var(--teal); margin-bottom: 14px; letter-spacing: 0.06em;
-    }
-    .step h3 { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
-    .step p { font-size: 13px; color: var(--secondary); line-height: 1.6; }
-    .step-callout {
-      margin-top: 32px; padding: 20px 24px;
-      background: var(--glass); border: 1px solid var(--border); border-radius: 3px;
-      border-left: 2px solid rgba(45, 212, 191, 0.3);
-      font-size: 14px; color: var(--secondary); line-height: 1.7;
-    }
-
-    /* ── Use cases ───────────────────────── */
-    .use-case-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-    @media (max-width: 640px) { .use-case-grid { grid-template-columns: 1fr; } }
-    .use-case {
-      background: rgba(255, 255, 255, 0.02);
-      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-      border: 1px solid rgba(255, 255, 255, 0.04);
-      border-radius: 3px;
-      padding: 32px;
-      transition: border-color 0.25s, transform 0.25s, box-shadow 0.25s;
-    }
-    .use-case:hover {
-      border-color: var(--border-hover);
-      transform: translateY(-2px);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 4px 24px rgba(45, 212, 191, 0.04);
-    }
-    .use-case h3 { font-size: 17px; font-weight: 600; margin-bottom: 12px; }
-    .use-case p { font-size: 14px; color: var(--secondary); line-height: 1.7; margin-bottom: 16px; }
-    .use-case-snippet {
-      background: rgba(17, 17, 21, 0.8); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-      border: 1px solid var(--border); border-radius: 2px;
-      padding: 16px; font-family: var(--mono); font-size: 12px; line-height: 1.8;
-      color: var(--secondary); overflow-x: auto; white-space: pre;
-    }
-
-    /* ── Code ────────────────────────────── */
-    .code-box {
-      background: rgba(17, 17, 21, 0.8); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-      border: 1px solid var(--border);
-      border-radius: 3px; overflow: hidden;
-    }
-    .code-bar {
-      display: flex; align-items: center; gap: 8px;
-      padding: 12px 16px; border-bottom: 1px solid var(--border);
-    }
-    .dot-dec { width: 8px; height: 8px; border-radius: 50%; }
-    .dot-r { background: #3f3f46; } .dot-y { background: #3f3f46; } .dot-g { background: #3f3f46; }
-    .code-bar span { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-left: 4px; }
-    .code-body {
-      padding: 20px; font-family: var(--mono); font-size: 13px;
-      line-height: 1.8; overflow-x: auto; white-space: pre; color: var(--secondary);
-    }
-    .c { color: var(--muted); }
-    .g { color: #22c55e; }
-    .t { color: var(--teal); }
-    .f { color: #818cf8; }
-    .k { color: var(--pink); }
-    .s { color: #22c55e; }
-
-    /* ── Positioning ─────────────────────── */
-    .position-list { max-width: 640px; }
-    .position-row {
-      padding: 20px 0;
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(10, 10, 12, 0.7);
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
       border-bottom: 1px solid var(--border);
     }
-    .position-row:last-child { border-bottom: none; }
-    .position-row strong { font-size: 15px; font-weight: 600; display: block; margin-bottom: 4px; }
-    .position-row p { font-size: 14px; color: var(--secondary); line-height: 1.6; }
+    nav .inner { max-width: 1400px; margin: 0 auto; padding: 0 40px; display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .nav-brand { font-weight: 700; font-size: 20px; color: var(--text); text-decoration: none; letter-spacing: -0.02em; }
+    .nav-links { display: flex; align-items: center; gap: 32px; list-style: none; }
+    .nav-links a { font-size: 13px; color: var(--secondary); font-weight: 500; transition: color 0.2s; text-decoration: none; }
+    .nav-links a:hover { color: var(--text); }
+    .nav-gh { display: inline-flex; align-items: center; gap: 8px; padding: 7px 16px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; color: var(--text); transition: all 0.2s; text-decoration: none; font-weight: 600; }
+    .nav-gh:hover { border-color: var(--teal); background: var(--teal-dim); }
 
-    /* ── Footer ──────────────────────────── */
-    footer {
-      padding: 40px 0;
-      position: relative; z-index: 2;
-    }
-    .footer-row {
-      display: flex; align-items: center; justify-content: space-between;
-      flex-wrap: wrap; gap: 16px;
-    }
-    .footer-brand { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
-    .footer-links { display: flex; gap: 20px; list-style: none; }
-    .footer-links a { font-size: 13px; color: var(--muted); }
-    .footer-links a:hover { color: var(--secondary); }
-
-    /* ── Hero animations ─────────────────── */
-    @keyframes fadeUp {
-      from { opacity: 0; transform: translateY(20px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    @keyframes mascotReveal {
-      from { opacity: 0; transform: scale(0.9); filter: blur(4px); }
-      to { opacity: 1; transform: scale(1); filter: blur(0); }
-    }
-    .hero .container > * { animation: fadeUp 0.5s ease-out both; }
-    .hero .container > *:nth-child(1) { animation-delay: 0s; }
-    .hero .container > *:nth-child(2) { animation: mascotReveal 0.6s ease-out both; animation-delay: 0.1s; }
-    .hero .container > *:nth-child(3) { animation-delay: 0.2s; }
-    .hero .container > *:nth-child(4) { animation-delay: 0.3s; }
-    .hero .container > *:nth-child(5) { animation-delay: 0.4s; }
-
-    /* ── Responsive ──────────────────────── */
     @media (max-width: 640px) {
-      section { padding: 80px 0; }
-      .hero { padding: 140px 0 100px; }
-      .hero-mascot img { width: 140px; }
-      .footer-row { flex-direction: column; align-items: flex-start; }
-      .flow-core-grid, .flow-secondary-grid { grid-template-columns: 1fr 1fr; }
-      .ambient-orb { display: none; }
+      .nav-links { display: none; }
+      nav .inner { padding: 0 20px; }
     }
 
-    /* ── Reduced motion ──────────────────── */
-    @media (prefers-reduced-motion: reduce) {
-      .hero .container > * { animation: none; opacity: 1; transform: none; }
-      .animate-on-scroll, .animate-zoom, .animate-slide-left, .animate-slide-right,
-      .animate-slide-in, .animate-from-left { opacity: 1; transform: none; transition: none; }
-      .hero-glow { animation: none; }
-      .hero-badge .dot { animation: none; }
-      .ambient-orb { animation: none; }
-      html { scroll-behavior: auto; }
+    /* --- HERO --- */
+    .hero { min-height: 100vh; display: flex; flex-direction: column; justify-content: center; padding-top: 100px; position: relative; }
+    .hero h1 { font-size: clamp(2.5rem, 8vw, 6rem); font-weight: 700; line-height: 0.95; letter-spacing: -0.05em; margin-bottom: 40px; }
+    .hero .lead { font-size: clamp(1.1rem, 2.5vw, 1.5rem); color: var(--secondary); max-width: 720px; margin-bottom: 64px; }
+    .hero-stats { display: flex; flex-wrap: wrap; gap: 40px; }
+    .stat { display: flex; flex-direction: column; gap: 8px; }
+    .stat-val { font-size: clamp(24px, 4vw, 32px); font-weight: 700; font-family: var(--mono); color: var(--text); letter-spacing: -0.04em; }
+    .stat-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.2em; color: var(--muted); font-weight: 700; }
+
+    /* --- NARRATIVE SECTIONS (STICKY) --- */
+    .narrative-section { position: relative; }
+    .sticky-container { display: flex; gap: 80px; align-items: flex-start; min-height: 100vh; }
+    
+    .text-content { flex: 1; padding: 25vh 0; }
+    .viz-content { flex: 1; position: sticky; top: 0; height: 100vh; display: flex; align-items: center; justify-content: center; z-index: 10; }
+
+    @media (max-width: 1000px) {
+      .sticky-container { flex-direction: column; gap: 0; }
+      .text-content { padding: 80px 0 40px; width: 100%; order: 1; }
+      .viz-content { position: relative; top: 0; height: 400px; padding: 0; width: 100%; order: 2; margin-bottom: 80px; }
     }
+
+    .step-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.25em; color: var(--teal); margin-bottom: 24px; display: block; }
+    h2 { font-size: clamp(2.2rem, 5vw, 3.5rem); font-weight: 700; line-height: 1.05; letter-spacing: -0.04em; margin-bottom: 32px; }
+    .narrative-p { font-size: clamp(1rem, 2vw, 1.2rem); color: var(--secondary); margin-bottom: 32px; max-width: 520px; }
+
+    /* --- UNIFIED VIZ LANGUAGE --- */
+    .viz-canvas {
+      width: 100%; height: 100%; max-width: 460px; max-height: 460px;
+      background: radial-gradient(circle at center, rgba(45, 212, 191, 0.04) 0%, transparent 75%);
+      border: 1px solid var(--border); border-radius: 32px;
+      position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+    }
+
+    /* --- SPECIFIC VIZ: THE SPEC --- */
+    .spec-viz-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; width: 100%; padding: 40px; }
+    .spec-block {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+      font-family: var(--mono); font-size: 11px; color: var(--muted);
+      transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .spec-block.active { border-color: var(--teal); color: var(--text); background: var(--teal-dim); transform: translateY(-4px); box-shadow: 0 10px 20px rgba(0,0,0,0.2); }
+
+    /* --- SPECIFIC VIZ: VERIFICATION --- */
+    .filter-stack { display: flex; flex-direction: column; gap: 12px; width: 85%; }
+    .filter-layer {
+      height: 52px; background: rgba(255,255,255,0.02); border: 1px solid var(--border);
+      border-radius: 10px; position: relative; overflow: hidden;
+      display: flex; align-items: center; padding: 0 20px; font-size: 13px; font-weight: 600; color: var(--muted);
+      transition: all 0.4s;
+    }
+    .filter-layer.active { border-color: var(--teal); color: var(--teal); background: var(--teal-dim); transform: scale(1.02); }
+    .filter-progress { position: absolute; bottom: 0; left: 0; height: 2px; background: var(--teal); width: 0; }
+    .filter-layer.active .filter-progress { animation: progress-fill 2s linear infinite; }
+    @keyframes progress-fill { 0% { width: 0; } 100% { width: 100%; } }
+
+    /* --- SPECIFIC VIZ: MEDIATION --- */
+    .shield-ui {
+      width: 100%; padding: 40px; display: flex; flex-direction: column; align-items: center; text-align: center;
+    }
+    .shield-icon-box {
+      width: 80px; height: 80px; border: 2px solid var(--pink); border-radius: 50%;
+      display: flex; align-items: center; justify-content: center; margin-bottom: 24px;
+      box-shadow: 0 0 40px rgba(244, 114, 182, 0.15); transition: all 0.5s;
+    }
+    .shield-icon-box.active { border-color: var(--teal); box-shadow: 0 0 40px var(--teal-glow); }
+    .shield-icon-box svg { stroke: var(--pink); transition: all 0.5s; }
+    .shield-icon-box.active svg { stroke: var(--teal); }
+    
+    .shield-title { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--pink); margin-bottom: 12px; transition: color 0.5s; }
+    .shield-title.active { color: var(--teal); }
+    .shield-btn {
+      width: 100%; max-width: 240px; padding: 14px; border-radius: 10px; font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.1em; cursor: pointer; transition: all 0.2s;
+      background: var(--teal-dim); border: 1px solid var(--teal); color: var(--teal);
+    }
+    .shield-btn:hover { background: var(--teal); color: var(--bg); }
+
+    /* --- SPECIFIC VIZ: EVOLUTION --- */
+    .evo-loop-container { width: 300px; height: 300px; position: relative; }
+    .evo-svg { width: 100%; height: 100%; overflow: visible; }
+    .evo-path-bg { fill: none; stroke: var(--border); stroke-width: 2; stroke-dasharray: 6 6; }
+    .evo-path-main { fill: none; stroke: var(--teal); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 600; stroke-dashoffset: 600; animation: dash-loop 4s linear infinite; }
+    @keyframes dash-loop { 0% { stroke-dashoffset: 600; } 100% { stroke-dashoffset: 0; } }
+    .evo-label { position: absolute; font-size: 10px; font-family: var(--mono); font-weight: 700; color: var(--muted); transition: color 0.3s; }
+    .evo-label.active { color: var(--teal); text-shadow: 0 0 10px var(--teal-glow); }
+
+    /* --- COMPARISON --- */
+    .comparison-table { width: 100%; border-collapse: collapse; margin-top: 64px; }
+    .comparison-table td { padding: 24px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .comparison-table tr:last-child td { border-bottom: none; }
+    .comparison-table .label-col { font-weight: 700; color: var(--text); width: 25%; font-size: 14px; }
+    .comparison-table .industry-col { color: var(--secondary); width: 37.5%; font-size: 14px; }
+    .comparison-table .temper-col { color: var(--teal); width: 37.5%; font-weight: 500; font-size: 14px; }
+    @media (max-width: 640px) {
+      .comparison-table .label-col { width: 100%; display: block; padding-bottom: 8px; }
+      .comparison-table .industry-col, .comparison-table .temper-col { width: 100%; display: block; padding: 8px 0; }
+    }
+
+    /* --- ROADMAP GRID --- */
+    .roadmap-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 64px; }
+    .r-card {
+      padding: 32px; background: var(--surface); border: 1px solid var(--border); border-radius: 20px;
+      transition: all 0.3s ease;
+    }
+    .r-card:hover { border-color: var(--teal); transform: translateY(-4px); }
+    .r-card h4 { font-size: 1rem; font-weight: 700; margin-bottom: 12px; }
+    .r-card p { color: var(--secondary); font-size: 0.9rem; line-height: 1.5; }
+    @media (max-width: 900px) { .roadmap-grid { grid-template-columns: 1fr; } }
+
+    /* --- CTA --- */
+    .cta { text-align: center; padding: 160px 0; }
+    .cta-button {
+      display: inline-flex; align-items: center; gap: 12px; padding: 18px 44px;
+      background: var(--teal); color: var(--bg); border-radius: 12px;
+      font-weight: 700; font-size: 1rem; text-decoration: none;
+      transition: all 0.3s;
+    }
+    .cta-button:hover { transform: scale(1.05); box-shadow: 0 0 40px var(--teal-glow); }
+
+    footer { padding: 80px 0; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+    footer .inner { display: flex; justify-content: space-between; align-items: center; }
+    @media (max-width: 640px) { footer .inner { flex-direction: column; gap: 32px; text-align: center; } }
+    footer a { color: var(--secondary); text-decoration: none; transition: color 0.2s; }
+    footer a:hover { color: var(--teal); }
+
+    .reveal { opacity: 0; transform: translateY(30px); transition: all 0.8s cubic-bezier(0.16, 1, 0.3, 1); }
+    .reveal.visible { opacity: 1; transform: translateY(0); }
   </style>
 </head>
 <body>
 
 <canvas id="webgl-canvas"></canvas>
 
-<!-- Ambient orbs -->
-<div class="ambient-orb ambient-orb-1"></div>
-<div class="ambient-orb ambient-orb-2"></div>
-
 <nav>
-  <div class="container">
+  <div class="inner">
     <a href="#" class="nav-brand">Temper</a>
     <ul class="nav-links">
-      <li><a href="#about">About</a></li>
-      <li><a href="#how">How It Works</a></li>
-      <li><a href="#use-cases">Use Cases</a></li>
-      <li>
-        <a href="https://github.com/nerdsane/temper" class="nav-gh" target="_blank" rel="noopener">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-          GitHub
-        </a>
-      </li>
+      <li><a href="#vision">Vision</a></li>
+      <li><a href="#how">How it works</a></li>
+      <li><a href="#roadmap">Roadmap</a></li>
+      <li><a href="https://github.com/nerdsane/temper" class="nav-gh" target="_blank">GitHub</a></li>
     </ul>
   </div>
 </nav>
 
-<!-- ── Hero ──────────────────────────────── -->
-<section class="hero">
-  <div class="hero-glow"></div>
-  <div class="container">
-    <div class="hero-badge"><span class="dot"></span> 757 tests &middot; 19 crates &middot; Built with Rust</div>
-    <div class="hero-mascot">
+<!-- HERO -->
+<section class="hero container">
+  <div class="reveal">
+    <div style="margin-bottom: 40px;">
       <picture>
-        <source media="(prefers-color-scheme: light)" srcset="/assets/mascot-vectorized.svg">
-        <img src="/assets/mascot-vectorized-light.svg" width="200" height="200" alt="Temper mascot">
+        <source media="(prefers-color-scheme: dark)" srcset="assets/mascot-vectorized-light.svg">
+        <img src="assets/mascot-vectorized-light.svg" width="120" height="120" alt="Temper">
       </picture>
     </div>
-    <h1>The operating system for agents</h1>
-    <p class="hero-sub">Temper is to agents what an OS is to processes. Every action is verified before it runs, authorized when it runs, and recorded after it runs.</p>
-    <div class="hero-actions">
-      <a href="https://github.com/nerdsane/temper" class="btn btn-teal" target="_blank" rel="noopener">Get Started</a>
-      <a href="https://github.com/nerdsane/temper/blob/main/docs/PAPER.md" class="btn btn-glass" target="_blank" rel="noopener">Read the Paper</a>
+    <h1>The operating system <br>for autonomous agents.</h1>
+    <p class="lead">Agents need more than scripts. They need a formally verified environment where they build and evolve their own capabilities.</p>
+    <div class="hero-stats">
+      <div class="stat"><span class="stat-val">950+</span><span class="stat-lbl">Verified Tests</span></div>
+      <div class="stat"><span class="stat-val">L0–L3</span><span class="stat-lbl">Proof Cascade</span></div>
+      <div class="stat"><span class="stat-val">Cedar</span><span class="stat-lbl">Policy Engine</span></div>
     </div>
   </div>
 </section>
 
-<!-- ── About ─────────────────────────────── -->
-<div class="section-divider"></div>
-<section class="about" id="about">
-  <div class="container">
-    <p class="label">What Agents Get</p>
-    <h2 class="heading">Everything an agent needs to operate safely</h2>
-    <p class="sub">Instead of giving agents raw API keys and direct database access, you give them Temper.</p>
-    <div class="card-grid">
-      <div class="card animate-zoom">
-        <div class="card-dot lime"></div>
-        <h3>Verified state</h3>
-        <p>The agent describes what it needs. Temper generates a state machine, proves it correct across all reachable states, and deploys an API. Bad states are ruled out before the spec loads.</p>
-      </div>
-      <div class="card animate-zoom stagger-1">
-        <div class="card-dot teal"></div>
-        <h3>Governed access</h3>
-        <p>Cedar authorization evaluates every action. Default-deny. When the agent tries something not yet permitted, the denial surfaces to the human for approval.</p>
-      </div>
-      <div class="card animate-zoom stagger-2">
-        <div class="card-dot teal"></div>
-        <h3>Complete audit trail</h3>
-        <p>Every action carries agent identity, before/after state, and the authorization decision that governed it. Multiple agents sharing a Temper instance see each other's changes.</p>
-      </div>
-      <div class="card animate-zoom stagger-3">
-        <div class="card-dot pink"></div>
-        <h3>WASM integrations</h3>
-        <p>External system calls execute through sandboxed WASM modules, gated by Cedar policies. No raw API keys. No direct network access.</p>
-      </div>
-      <div class="card animate-zoom stagger-4">
-        <div class="card-dot teal"></div>
-        <h3>Persistent state + event sourcing</h3>
-        <p>State survives restarts. Every transition is an event in a durable journal. Long-running workflows pick up where they left off.</p>
-      </div>
-      <div class="card animate-zoom stagger-5">
-        <div class="card-dot teal"></div>
-        <h3>Self-describing API</h3>
-        <p>The generated OData v4 API includes a $metadata endpoint. Agents discover the full surface without documentation.</p>
-      </div>
-    </div>
+<!-- VISION -->
+<section class="container" id="vision" style="padding: 120px 0;">
+  <div class="reveal">
+    <span class="step-label">The Vision</span>
+    <h2>From Co-pilots to Systems.</h2>
+    <p class="lead">Current agent speed is bottlenecked by human oversight. We shift the paradigm from agents <em>in the loop</em> to agents <em>on the loop</em>.</p>
+    
+    <table class="comparison-table">
+      <tr>
+        <td class="label-col">Tools</td>
+        <td class="industry-col">Stateless, ad-hoc synthesizers</td>
+        <td class="temper-col">Verified state machines that persist as specs</td>
+      </tr>
+      <tr>
+        <td class="label-col">Security</td>
+        <td class="industry-col">Hardcoded, manual policies</td>
+        <td class="temper-col">Policies derived from behavioral intent</td>
+      </tr>
+      <tr>
+        <td class="label-col">Growth</td>
+        <td class="industry-col">Failures are discarded logs</td>
+        <td class="temper-col">Unmet intents feed the evolution engine</td>
+      </tr>
+    </table>
   </div>
 </section>
 
-<!-- ── How It Works ──────────────────────── -->
-<div class="section-divider"></div>
-<section class="flow" id="how">
-  <div class="container">
-    <p class="label">How It Works</p>
-    <h2 class="heading">One interface. Complete governance.</h2>
-    <p class="sub">Agents interact through a sandboxed Python REPL. Temper mediates all access.</p>
-
-    <div class="flow-diagram">
-      <div class="flow-box animate-slide-left">
-        <h3>Agent</h3>
-        <p>Claude Code, Cursor, OpenClaw, LangChain, ...</p>
-      </div>
-      <div class="flow-arrow">
-        <div class="flow-arrow-line"></div>
-        <div class="flow-arrow-label">MCP (search + execute)</div>
-        <svg width="12" height="8" viewBox="0 0 12 8" fill="none" aria-hidden="true"><path d="M6 8L0 0h12L6 8z" fill="currentColor"/></svg>
-      </div>
-      <div class="flow-box animate-slide-right stagger-1">
-        <h3>Monty Sandbox</h3>
-        <p>temper.start_server() &middot; submit_specs() &middot; action()</p>
-      </div>
-      <div class="flow-arrow">
-        <div class="flow-arrow-line"></div>
-        <svg width="12" height="8" viewBox="0 0 12 8" fill="none" aria-hidden="true"><path d="M6 8L0 0h12L6 8z" fill="currentColor"/></svg>
-      </div>
-      <div class="flow-box core animate-slide-left stagger-2">
-        <h3>Temper Core</h3>
-        <div class="flow-core-grid">
-          <div class="flow-mini">Spec Parse</div>
-          <div class="flow-mini">Verify L0-L3</div>
-          <div class="flow-mini">Deploy</div>
-          <div class="flow-mini">Cedar AuthZ</div>
-          <div class="flow-mini">WASM</div>
-          <div class="flow-mini">OData API</div>
-        </div>
-        <div class="flow-secondary-grid">
-          <div class="flow-mini-secondary">Event Sourcing</div>
-          <div class="flow-mini-secondary">OTEL</div>
-          <div class="flow-mini-secondary">Evolution Engine</div>
+<!-- STEP 1: THE SPEC -->
+<section class="narrative-section container" id="how">
+  <div class="sticky-container">
+    <div class="text-content">
+      <span class="step-label">Step 01 — The Spec</span>
+      <h2>Declarative Intent.</h2>
+      <p class="narrative-p">Everything in Temper starts as a specification. Agents describe what they need — state machines, data models, and policies — and the kernel derives the runtime behavior.</p>
+      <p class="narrative-p">If a transition is not in the spec, it cannot happen. If a policy is not in the store, it is denied. The kernel interprets intent directly.</p>
+    </div>
+    <div class="viz-content">
+      <div class="viz-canvas">
+        <div class="spec-viz-grid" id="spec-blocks">
+          <div class="spec-block">automaton: Memory</div>
+          <div class="spec-block">state: archived</div>
+          <div class="spec-block">action: commit</div>
+          <div class="spec-block">invariant: valid</div>
+          <div class="spec-block">policy: bot_1</div>
+          <div class="spec-block">wasm: store</div>
         </div>
       </div>
-      <div class="flow-arrow">
-        <div class="flow-arrow-line"></div>
-        <svg width="12" height="8" viewBox="0 0 12 8" fill="none" aria-hidden="true"><path d="M6 8L0 0h12L6 8z" fill="currentColor"/></svg>
+    </div>
+  </div>
+</section>
+
+<!-- STEP 2: VERIFICATION -->
+<section class="narrative-section container">
+  <div class="sticky-container">
+    <div class="viz-content">
+      <div class="viz-canvas">
+        <div class="filter-stack" id="filter-stack">
+          <div class="filter-layer" data-step="0">L0 — Z3 SMT Solving <div class="filter-progress"></div></div>
+          <div class="filter-layer" data-step="1">L1 — Model Checking <div class="filter-progress"></div></div>
+          <div class="filter-layer" data-step="2">L2 — DST Simulation <div class="filter-progress"></div></div>
+          <div class="filter-layer" data-step="3">L3 — Property Testing <div class="filter-progress"></div></div>
+        </div>
       </div>
-      <div class="flow-box animate-slide-right stagger-3">
-        <h3>Storage</h3>
-        <p>Postgres or Turso/libSQL</p>
+    </div>
+    <div class="text-content">
+      <span class="step-label">Step 02 — The Proof</span>
+      <h2>Verification Cascade.</h2>
+      <p class="narrative-p">Before a spec is deployed, it must survive four levels of mathematical proof. We prove correctness across every possible execution trace.</p>
+      <p class="narrative-p">The model checker verifies the actual Rust code that runs in production. If you can't prove it, you can't deploy it.</p>
+    </div>
+  </div>
+</section>
+
+<!-- STEP 3: MEDIATION -->
+<section class="narrative-section container">
+  <div class="sticky-container">
+    <div class="text-content">
+      <span class="step-label">Step 03 — Mediation</span>
+      <h2>Cedar Authorization.</h2>
+      <p class="narrative-p">Every action flows through a Cedar authorization engine. Temper operates on a default-deny posture. Access is never assumed.</p>
+      <p class="narrative-p">Denied actions surface as pending decisions. Approve once, and Temper generates the policy that governs the agent forever.</p>
+    </div>
+    <div class="viz-content">
+      <div class="viz-canvas">
+        <div class="shield-ui" id="shield-ui">
+          <div class="shield-icon-box" id="shield-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+          </div>
+          <div class="shield-title" id="shield-status">DENY: Principal::"Agent_1"</div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:24px; line-height:1.4;">Action "Access_DB" requested. <br>No permitted policy found.</div>
+          <div class="shield-btn" id="shield-btn" onclick="approveAction()">Approve Access</div>
+        </div>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ── Verification ──────────────────────── -->
-<div class="section-divider"></div>
-<section class="steps" id="verification">
-  <div class="container">
-    <p class="label">Verification</p>
-    <h2 class="heading">Four levels of proof before production</h2>
-    <p class="sub">Every spec passes all four levels. No exceptions.</p>
-    <div class="steps-row">
-      <div class="step animate-slide-in">
-        <p class="step-n">L0</p>
-        <h3>Z3 SMT</h3>
-        <p>Guards satisfiable, invariants inductive, no unreachable states.</p>
-      </div>
-      <div class="step animate-slide-in stagger-1">
-        <p class="step-n">L1</p>
-        <h3>Stateright</h3>
-        <p>Exhaustive state space exploration, safety + liveness properties.</p>
-      </div>
-      <div class="step animate-slide-in stagger-2">
-        <p class="step-n">L2</p>
-        <h3>Simulation</h3>
-        <p>Fault injection, message delays, drops, crashes. Reproducible via seeded PRNG.</p>
-      </div>
-      <div class="step animate-slide-in stagger-3">
-        <p class="step-n">L3</p>
-        <h3>Proptest</h3>
-        <p>Random action sequences with shrinking to minimal counterexamples.</p>
+<!-- STEP 4: EVOLUTION -->
+<section class="narrative-section container">
+  <div class="sticky-container">
+    <div class="viz-content">
+      <div class="viz-canvas">
+        <div class="evo-loop-container">
+          <svg class="evo-svg" viewBox="0 0 300 300">
+            <circle cx="150" cy="150" r="100" class="evo-path-bg" />
+            <path id="evo-loop-path" d="M150 50 A100 100 0 1 1 149.9 50" class="evo-path-main" />
+          </svg>
+          <div class="evo-label" style="top: 20px; left: 50%; transform: translateX(-50%);" id="evo-txt-0">TRAJECTORY</div>
+          <div class="evo-label" style="top: 150px; right: -20px; transform: translateY(-50%);" id="evo-txt-1">PATTERN</div>
+          <div class="evo-label" style="bottom: 20px; left: 50%; transform: translateX(-50%);" id="evo-txt-2">PROPOSAL</div>
+          <div class="evo-label" style="top: 150px; left: -20px; transform: translateY(-50%);" id="evo-txt-3">HOT-SWAP</div>
+        </div>
       </div>
     </div>
-    <div class="step-callout animate-on-scroll">
-      An agent can't ship an order without payment captured &mdash; not because someone reviewed the code, but because the invariant was proven to hold across all reachable states before the spec was loaded.
+    <div class="text-content">
+      <span class="step-label">Step 04 — Evolution</span>
+      <h2>Closing the Loop.</h2>
+      <p class="narrative-p">Failures in Temper aren't errors — they are training data. Every denied action is recorded as a trajectory entry.</p>
+      <p class="narrative-p">The Evolution Engine analyzes these patterns and proposes spec updates. You approve the verified fix, and the agent OS grows.</p>
     </div>
   </div>
 </section>
 
-<!-- ── Use Cases ──────────────────────────── -->
-<div class="section-divider"></div>
-<section class="use-cases" id="use-cases">
-  <div class="container">
-    <p class="label">Use Cases</p>
-    <h2 class="heading">Two modes, one platform</h2>
-    <p class="sub">Same verification. Same governance. Same audit trail. What changes is who writes the specs and who sets the policies.</p>
-    <div class="use-case-grid">
-      <div class="use-case animate-zoom">
-        <h3>Agent OS</h3>
-        <p>The agent builds and operates. The human sets policies. Cedar's default-deny posture means the agent can't exceed its authorization without explicit human approval.</p>
-        <p>Temper doesn't tell the agent what to do. It mediates the agent's access to state and external systems, ensures actions are authorized, and maintains a verifiable record of everything that happened.</p>
+<!-- ROADMAP -->
+<section class="container" id="roadmap" style="padding: 120px 0;">
+  <div class="reveal">
+    <span class="step-label">Roadmap</span>
+    <h2>Built Bottom-Up.</h2>
+    <p class="lead">From the kernel to full agent execution.</p>
+    
+    <div class="roadmap-grid">
+      <div class="r-card">
+        <span style="font-size:10px; color:var(--teal); font-weight:700;">L1-L2</span>
+        <h4>Persistent State</h4>
+        <p>Verified entities queryable via OData API. Event-sourced truth instead of JSON blobs.</p>
       </div>
-      <div class="use-case animate-zoom stagger-1">
-        <h3>Agent-built applications</h3>
-        <p>Developer agents build full applications. User agents or humans consume them. When users encounter something the app can't do yet, the system captures it as an unmet intent.</p>
-        <div class="use-case-snippet"><span class="c">User: "Split my order into two shipments"</span>
-<span class="c">App:  (no matching action) &rarr; unmet intent</span>
-
-<span class="t">&rarr;</span> Developer agent notified
-<span class="t">&rarr;</span> Spec updated &rarr; verification cascade
-<span class="t">&rarr;</span> Hot-deploy &rarr; next attempt succeeds</div>
+      <div class="r-card">
+        <span style="font-size:10px; color:var(--amber); font-weight:700;">L3-L4</span>
+        <h4>WASM Connectivity</h4>
+        <p>Streaming-capable integrations as sandboxed modules mediated by Cedar policy.</p>
+      </div>
+      <div class="r-card">
+        <span style="font-size:10px; color:var(--muted); font-weight:700;">L5-L6</span>
+        <h4>Agent Execution</h4>
+        <p>Headless executors claiming agent entities. Spawning and shared-state orchestration.</p>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ── Code ──────────────────────────────── -->
-<div class="section-divider"></div>
-<section class="code-section" id="quickstart">
-  <div class="container">
-    <p class="label">Quick Start</p>
-    <h2 class="heading">Agents write Python. Temper handles the rest.</h2>
-    <p class="sub">The Monty sandbox exposes the full Temper API through a typed Python object.</p>
-    <div class="code-box animate-on-scroll">
-      <div class="code-bar">
-        <span class="dot-dec dot-r"></span><span class="dot-dec dot-y"></span><span class="dot-dec dot-g"></span>
-        <span>monty-repl</span>
-      </div>
-      <div class="code-body"><span class="c"># 1. Start the server</span>
-<span class="k">await</span> <span class="f">temper</span>.<span class="f">start_server</span>()
-
-<span class="c"># 2. Describe what you need &mdash; Temper verifies and deploys it</span>
-<span class="k">await</span> <span class="f">temper</span>.<span class="f">submit_specs</span>(<span class="s">"my-app"</span>, {
-    <span class="s">"Order.ioa.toml"</span>: order_spec,
-    <span class="s">"model.csdl.xml"</span>: data_model
-})
-<span class="c"># &rarr; Verification cascade runs (L0-L3)</span>
-<span class="c"># &rarr; API is live if all levels pass</span>
-
-<span class="c"># 3. Operate through the verified API</span>
-<span class="k">await</span> <span class="f">temper</span>.<span class="f">create</span>(<span class="s">"my-app"</span>, <span class="s">"Orders"</span>, {<span class="s">"title"</span>: <span class="s">"New order"</span>})
-<span class="k">await</span> <span class="f">temper</span>.<span class="f">action</span>(<span class="s">"my-app"</span>, <span class="s">"Orders"</span>, <span class="s">"order-1"</span>, <span class="s">"SubmitOrder"</span>, {<span class="s">"items"</span>: <span class="t">3</span>})
-
-<span class="c"># 4. If Cedar denies an action, wait for human approval</span>
-decision = <span class="k">await</span> <span class="f">temper</span>.<span class="f">poll_decision</span>(<span class="s">"my-app"</span>, <span class="s">"PD-abc123"</span>)
-<span class="c"># &rarr; Human approves via Observe UI &rarr; retry succeeds</span></div>
-    </div>
+<!-- CTA -->
+<section class="cta container">
+  <div class="reveal">
+    <h2 style="margin-bottom: 20px;">The living harness is here.</h2>
+    <p class="lead" style="margin-bottom: 48px;">Join us in building the next era of autonomous engineering.</p>
+    <a href="https://github.com/nerdsane/temper" class="cta-button" target="_blank">
+      Get Started on GitHub
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+    </a>
   </div>
 </section>
 
-<!-- ── Positioning ────────────────────────── -->
-<div class="section-divider"></div>
-<section class="positioning">
-  <div class="container">
-    <p class="label">Positioning</p>
-    <h2 class="heading">How Temper is different</h2>
-    <p class="sub">Temper often gets compared to things it isn't.</p>
-    <div class="position-list">
-      <div class="position-row animate-from-left">
-        <strong>Not an agent framework</strong>
-        <p>LangChain, CrewAI, OpenClaw, AutoGen build agents. Temper is the operating layer agents run on top of. You bring your own agent; Temper governs what it can do.</p>
-      </div>
-      <div class="position-row animate-from-left stagger-1">
-        <strong>Not a workflow engine</strong>
-        <p>Temporal and Inngest orchestrate steps. Temper verifies the state machine itself before it runs &mdash; proving invariants hold across all reachable states, not just the happy path.</p>
-      </div>
-      <div class="position-row animate-from-left stagger-2">
-        <strong>Not an API framework</strong>
-        <p>Rails, Django, FastAPI require controllers, routes, middleware. Temper generates the API from specifications. The spec is the app.</p>
-      </div>
-      <div class="position-row animate-from-left stagger-3">
-        <strong>Not a database</strong>
-        <p>Temper uses Postgres or Turso for persistence. It adds a verified state machine layer and event sourcing on top.</p>
-      </div>
+<footer class="container">
+  <div class="inner">
+    <div style="text-align:left;">
+      <a href="#" class="nav-brand">Temper</a>
+      <p style="margin-top:8px; opacity:0.5;">MIT / Apache-2.0</p>
     </div>
-  </div>
-</section>
-
-<!-- ── Footer ────────────────────────────── -->
-<div class="section-divider"></div>
-<footer>
-  <div class="container">
-    <div class="footer-row">
-      <div class="footer-brand">
-        <div class="nav-mark" style="width:22px;height:22px;border-radius:5px;font-size:11px;">T</div>
-        Temper &middot; MIT / Apache-2.0
-      </div>
-      <ul class="footer-links">
-        <li><a href="https://github.com/nerdsane/temper" target="_blank" rel="noopener">GitHub</a></li>
-        <li><a href="https://github.com/nerdsane/temper/blob/main/docs/PAPER.md" target="_blank" rel="noopener">Paper</a></li>
-        <li><a href="https://github.com/nerdsane/temper/blob/main/docs/AGENT_GUIDE.md" target="_blank" rel="noopener">Agent Guide</a></li>
-        <li><a href="https://github.com/nerdsane/temper/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
-      </ul>
+    <div style="display:flex; gap:40px;">
+      <a href="https://github.com/nerdsane/temper/blob/main/docs/PAPER.md">Technical Paper</a>
+      <a href="https://github.com/nerdsane/temper">GitHub</a>
     </div>
   </div>
 </footer>
 
 <script>
-  // ── WebGL Background (GPU Accelerated) ───────────────────
+  // --- WEBGL BACKGROUND ---
   const canvas = document.querySelector('#webgl-canvas');
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -771,142 +424,52 @@ decision = <span class="k">await</span> <span class="f">temper</span>.<span clas
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
-  // Containment System (Dual Shells)
-  const outerCage = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(4, 2),
-    new THREE.MeshBasicMaterial({ color: '#2dd4bf', wireframe: true, transparent: true, opacity: 0.08 })
-  );
-  const innerCage = new THREE.Mesh(
-    new THREE.DodecahedronGeometry(3.5, 1),
-    new THREE.MeshBasicMaterial({ color: '#2dd4bf', wireframe: true, transparent: true, opacity: 0.04 })
-  );
-  scene.add(outerCage, innerCage);
-
-  // Energy Core (Shader-based)
-  const count = 2500; 
+  const count = 2000;
   const geometry = new THREE.BufferGeometry();
   const pos = new Float32Array(count * 3);
-  const offset = new Float32Array(count); 
-
   for(let i = 0; i < count; i++) {
-    // Distribute WITHIN volume (using cubic root for even distribution)
-    const r = Math.pow(Math.random(), 0.33) * 3.2;
-    const theta = Math.random() * Math.PI * 2;
-    const phi = Math.acos(2 * Math.random() - 1);
-    pos[i*3] = r * Math.sin(phi) * Math.cos(theta);
-    pos[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
-    pos[i*3+2] = r * Math.cos(phi);
-    offset[i] = Math.random() * 100;
+    pos[i*3] = (Math.random() - 0.5) * 40;
+    pos[i*3+1] = (Math.random() - 0.5) * 40;
+    pos[i*3+2] = (Math.random() - 0.5) * 40;
   }
   geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geometry.setAttribute('aOffset', new THREE.BufferAttribute(offset, 1));
-
+  
   const material = new THREE.ShaderMaterial({
-    uniforms: {
-      uTime: { value: 0 },
-      uMouse: { value: new THREE.Vector3(0, 0, 0) },
-      uScroll: { value: 0 },
-      uColor: { value: new THREE.Color('#2dd4bf') }
-    },
+    uniforms: { uTime: { value: 0 }, uScroll: { value: 0 }, uColor: { value: new THREE.Color('#2dd4bf') } },
     vertexShader: `
-      uniform float uTime;
-      uniform vec3 uMouse;
-      attribute float aOffset;
-      varying float vGlow;
-      
+      uniform float uTime; uniform float uScroll;
       void main() {
         vec3 p = position;
-        float t = uTime * 0.3 + aOffset;
-        
-        // Fluid motion
-        p.x += sin(t * 0.4 + p.y) * 0.3;
-        p.y += cos(t * 0.5 + p.z) * 0.3;
-        p.z += sin(t * 0.6 + p.x) * 0.3;
-        
-        // Vortex influence
-        float dToMouse = distance(p.xy, uMouse.xy);
-        if(dToMouse < 4.0) {
-          float force = pow((4.0 - dToMouse) / 4.0, 2.0);
-          p.xy += (uMouse.xy - p.xy) * force * 0.3;
-        }
-
-        // Containment
-        float r = length(p);
-        if(r > 3.4) p *= (3.4 / r);
-
+        p.y += sin(uTime * 0.4 + p.x * 0.5) * 0.4;
+        p.x += cos(uTime * 0.4 + p.y * 0.5) * 0.4;
+        p.z += uScroll * 15.0;
+        if(p.z > 20.0) p.z -= 40.0;
         vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-        
-        // Constant size relative to camera, no scroll influence
-        gl_PointSize = (35.0 / -mvPosition.z);
+        gl_PointSize = 1.8 * (20.0 / -mvPosition.z);
         gl_Position = projectionMatrix * mvPosition;
-        
-        vGlow = 1.0 - (r / 3.4);
       }
     `,
     fragmentShader: `
       uniform vec3 uColor;
-      varying float vGlow;
       void main() {
-        float d = distance(gl_PointCoord, vec2(0.5));
-        if(d > 0.5) discard;
-        
-        float strength = pow(1.0 - d * 2.0, 2.0);
-        
-        // Consistent green output
-        gl_FragColor = vec4(uColor * 1.8, strength * (vGlow + 0.2));
+        if(distance(gl_PointCoord, vec2(0.5)) > 0.5) discard;
+        gl_FragColor = vec4(uColor, 0.25);
       }
     `,
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false
+    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
   });
+  
+  const particles = new THREE.Points(geometry, material);
+  scene.add(particles);
+  camera.position.z = 15;
 
-  const fire = new THREE.Points(geometry, material);
-  scene.add(fire);
-
-  camera.position.z = 10;
-
-  // Interaction
-  let targetMouseX = 0, targetMouseY = 0;
-  let scrollY = 0;
-
-  window.addEventListener('mousemove', (e) => {
-    targetMouseX = (e.clientX / window.innerWidth - 0.5) * 8;
-    targetMouseY = -(e.clientY / window.innerHeight - 0.5) * 8;
-  });
-
-  window.addEventListener('scroll', () => { scrollY = window.scrollY; });
-
-  const animate = (time) => {
+  function animate(time) {
     requestAnimationFrame(animate);
-    const t = time * 0.001;
-    const scrollFactor = scrollY * 0.0015;
-
-    material.uniforms.uTime.value = t;
-    material.uniforms.uMouse.value.x += (targetMouseX - material.uniforms.uMouse.value.x) * 0.05;
-    material.uniforms.uMouse.value.y += (targetMouseY - material.uniforms.uMouse.value.y) * 0.05;
-
-    // Synchronize rotation across all core elements
-    const rotY = t * 0.05 + scrollFactor * 2.5;
-    const rotZ = t * 0.03 + scrollFactor * 0.5;
-    
-    outerCage.rotation.y = rotY;
-    outerCage.rotation.z = rotZ;
-    
-    // Core (fire) follows the outer cage exactly
-    fire.rotation.y = rotY;
-    fire.rotation.z = rotZ;
-
-    innerCage.rotation.y = -t * 0.08 - scrollFactor * 3.0;
-    innerCage.rotation.x = t * 0.04 + scrollFactor * 1.2;
-
-    const lookTarget = new THREE.Vector3(targetMouseX * 0.1, targetMouseY * 0.1, 0);
-    camera.position.x += (targetMouseX * 0.2 - camera.position.x) * 0.03;
-    camera.position.y += (targetMouseY * 0.2 - camera.position.y) * 0.03;
-    camera.lookAt(lookTarget);
-
+    material.uniforms.uTime.value = time * 0.001;
+    material.uniforms.uScroll.value = window.scrollY / document.body.scrollHeight;
+    particles.rotation.y = time * 0.00003;
     renderer.render(scene, camera);
-  };
+  }
   animate(0);
 
   window.addEventListener('resize', () => {
@@ -915,15 +478,59 @@ decision = <span class="k">await</span> <span class="f">temper</span>.<span clas
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
+  // --- SCROLL REVEALS ---
   const observer = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        entry.target.classList.add('visible');
-        observer.unobserve(entry.target);
-      }
-    });
+    entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
   }, { threshold: 0.1 });
-  document.querySelectorAll('.animate-on-scroll, .animate-zoom, .animate-slide-left, .animate-slide-right, .animate-slide-in, .animate-from-left').forEach(el => observer.observe(el));
+  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+  // --- ANIMATIONS ---
+  
+  // Spec sequence
+  const blocks = document.querySelectorAll('.spec-block');
+  let bIdx = 0;
+  setInterval(() => {
+    blocks.forEach((b, i) => b.classList.toggle('active', i === bIdx));
+    bIdx = (bIdx + 1) % blocks.length;
+  }, 1200);
+
+  // Filter sequence
+  const layers = document.querySelectorAll('.filter-layer');
+  let lIdx = 0;
+  setInterval(() => {
+    layers.forEach((l, i) => l.classList.toggle('active', i === lIdx));
+    lIdx = (lIdx + 1) % layers.length;
+  }, 2000);
+
+  // Shield interaction
+  window.approveAction = function() {
+    const iconBox = document.getElementById('shield-icon');
+    const status = document.getElementById('shield-status');
+    const btn = document.getElementById('shield-btn');
+    
+    iconBox.classList.add('active');
+    status.classList.add('active');
+    status.innerText = "APPROVED: Principal::\"Agent_1\"";
+    btn.innerText = "POLICY GENERATED";
+    btn.style.pointerEvents = 'none';
+    
+    setTimeout(() => {
+      iconBox.classList.remove('active');
+      status.classList.remove('active');
+      status.innerText = "DENY: Principal::\"Agent_1\"";
+      btn.innerText = "APPROVE ACCESS";
+      btn.style.pointerEvents = 'auto';
+    }, 3000);
+  }
+
+  // Evolution Loop
+  const evoTxts = [0,1,2,3].map(i => document.getElementById(`evo-txt-${i}`));
+  let eIdx = 0;
+  setInterval(() => {
+    evoTxts.forEach((t, i) => t.classList.toggle('active', i === eIdx));
+    eIdx = (eIdx + 1) % 4;
+  }, 1000);
+
 </script>
 
 </body>

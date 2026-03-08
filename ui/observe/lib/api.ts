@@ -28,11 +28,8 @@ import type {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
-/** Admin headers for Observe UI — trusted admin interface for governance decisions. */
-const ADMIN_HEADERS: Record<string, string> = {
-  "X-Temper-Principal-Id": "observe-ui",
-  "X-Temper-Principal-Kind": "admin",
-};
+// Identity headers are now injected by Next.js middleware (auth session → X-Temper-Principal-Id).
+// No hard-coded admin headers needed.
 
 export class ApiError extends Error {
   constructor(
@@ -51,6 +48,10 @@ function isTransient(status: number): boolean {
 async function fetchWithRetry(input: string, init?: RequestInit): Promise<Response> {
   try {
     const res = await fetch(input, init);
+    if (res.status === 401 && typeof window !== "undefined") {
+      window.location.href = "/api/auth/signin";
+      return res;
+    }
     if (!res.ok && isTransient(res.status)) {
       await new Promise((r) => setTimeout(r, 1000));
       return fetch(input, init);
@@ -281,7 +282,7 @@ export async function fetchDecisions(tenant: string, params?: {
   if (params?.status) query.set("status", params.status);
   const qs = query.toString();
   const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions${qs ? `?${qs}` : ""}`;
-  const res = await fetchWithRetry(url, { cache: "no-store", headers: ADMIN_HEADERS });
+  const res = await fetchWithRetry(url, { cache: "no-store" });
   if (!res.ok) throw new ApiError(`Failed to fetch decisions: ${res.status}`, res.status);
   return res.json();
 }
@@ -291,7 +292,7 @@ export async function approveDecision(tenant: string, decisionId: string, scope:
   const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions/${encodeURIComponent(decisionId)}/approve`;
   const res = await fetchWithRetry(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...ADMIN_HEADERS },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ scope }),
   });
   if (!res.ok) throw new ApiError(`Failed to approve decision: ${res.status}`, res.status);
@@ -300,7 +301,7 @@ export async function approveDecision(tenant: string, decisionId: string, scope:
 /** Deny a pending decision */
 export async function denyDecision(tenant: string, decisionId: string): Promise<void> {
   const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions/${encodeURIComponent(decisionId)}/deny`;
-  const res = await fetchWithRetry(url, { method: "POST", headers: ADMIN_HEADERS });
+  const res = await fetchWithRetry(url, { method: "POST" });
   if (!res.ok) throw new ApiError(`Failed to deny decision: ${res.status}`, res.status);
 }
 
@@ -323,7 +324,7 @@ export async function fetchAllDecisions(params?: {
   if (params?.status) query.set("status", params.status);
   const qs = query.toString();
   const url = `${API_BASE}/api/decisions${qs ? `?${qs}` : ""}`;
-  const res = await fetchWithRetry(url, { cache: "no-store", headers: ADMIN_HEADERS });
+  const res = await fetchWithRetry(url, { cache: "no-store" });
   if (!res.ok) throw new ApiError(`Failed to fetch decisions: ${res.status}`, res.status);
   return res.json();
 }
