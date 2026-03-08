@@ -5,7 +5,7 @@
 FROM rust:1-bookworm AS chef
 RUN cargo install cargo-chef --locked
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev python3-dev \
+    pkg-config libssl-dev python3-dev clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
