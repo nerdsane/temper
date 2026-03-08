@@ -16,6 +16,9 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct TursoEventStore {
     db: Arc<Database>,
+    /// True when connected to a remote Turso Cloud instance (libsql:// URL).
+    /// PRAGMAs are skipped for remote connections.
+    is_remote: bool,
 }
 
 impl TursoEventStore {
@@ -42,7 +45,11 @@ impl TursoEventStore {
                 .map_err(storage_error)?
         };
 
-        let store = Self { db: Arc::new(db) };
+        let is_remote = url.starts_with("libsql://");
+        let store = Self {
+            db: Arc::new(db),
+            is_remote,
+        };
         store.migrate().await?;
         Ok(store)
     }
@@ -55,11 +62,12 @@ impl TursoEventStore {
     #[instrument(skip_all, fields(otel.name = "turso.configured_connection"))]
     async fn configured_connection(&self) -> Result<libsql::Connection, PersistenceError> {
         let conn = self.db.connect().map_err(storage_error)?;
-        // busy_timeout returns the old value as a row — use query() and drop it.
-        let _ = conn
-            .query("PRAGMA busy_timeout=30000", ())
-            .await
-            .map_err(storage_error)?;
+        if !self.is_remote {
+            let _ = conn
+                .query("PRAGMA busy_timeout=30000", ())
+                .await
+                .map_err(storage_error)?;
+        }
         Ok(conn)
     }
 
@@ -68,19 +76,18 @@ impl TursoEventStore {
     async fn migrate(&self) -> Result<(), PersistenceError> {
         let conn = self.connection()?;
 
-        // WAL journal mode lets concurrent readers proceed while a writer holds the
-        // lock, and allows multiple writers to serialise without SQLITE_BUSY errors
-        // (combined with busy_timeout). The setting persists in the DB file.
-        //
-        // Both PRAGMAs return a row — use query() and drop the result set.
-        let _ = conn
-            .query("PRAGMA journal_mode=WAL", ())
-            .await
-            .map_err(storage_error)?;
-        let _ = conn
-            .query("PRAGMA busy_timeout=30000", ())
-            .await
-            .map_err(storage_error)?;
+        // PRAGMAs are SQLite-specific and not supported on remote Turso Cloud.
+        // Turso Cloud manages its own journal mode and concurrency.
+        if !self.is_remote {
+            let _ = conn
+                .query("PRAGMA journal_mode=WAL", ())
+                .await
+                .map_err(storage_error)?;
+            let _ = conn
+                .query("PRAGMA busy_timeout=30000", ())
+                .await
+                .map_err(storage_error)?;
+        }
 
         conn.execute(schema::CREATE_EVENTS_TABLE, ())
             .await
