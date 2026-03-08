@@ -45,6 +45,7 @@ async fn process_response(response: reqwest::Response, url: &str) -> Result<Valu
 }
 
 /// Send an HTTP request to the Temper server with agent principal headers.
+#[allow(clippy::too_many_arguments)]
 pub async fn temper_request(
     http: &reqwest::Client,
     base_url: &str,
@@ -69,6 +70,7 @@ pub async fn temper_request(
 }
 
 /// Send a governance request (admin principal) to the Temper server.
+#[allow(clippy::too_many_arguments)]
 pub async fn temper_governance_request(
     http: &reqwest::Client,
     base_url: &str,
@@ -93,6 +95,7 @@ pub async fn temper_governance_request(
 }
 
 /// Core JSON request sender shared by `temper_request` and `temper_governance_request`.
+#[allow(clippy::too_many_arguments)]
 async fn send_json(
     http: &reqwest::Client,
     base_url: &str,
@@ -144,6 +147,7 @@ async fn send_json(
 }
 
 /// Send a request with a raw binary body (e.g. WASM module bytes).
+#[allow(clippy::too_many_arguments)]
 pub async fn temper_request_bytes(
     http: &reqwest::Client,
     base_url: &str,
