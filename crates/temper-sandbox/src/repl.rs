@@ -48,6 +48,7 @@ pub async fn run_repl(config: &ReplConfig, code: &str) -> Result<String> {
                     &base_url,
                     "default",
                     principal_id.as_deref(),
+                    None, // REPL runs locally, no API key needed
                     &function_name,
                     args,
                     &kwargs,

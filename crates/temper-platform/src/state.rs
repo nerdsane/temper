@@ -33,6 +33,8 @@ pub struct PlatformState {
     pub record_store: RecordStore,
     /// Anthropic API key for Claude-powered evolution agents.
     pub api_key: Option<String>,
+    /// Bearer token for API authentication (`TEMPER_API_KEY`).
+    pub api_token: Option<String>,
     /// In-memory spec storage for pending tenant deployments.
     pub spec_store: Arc<RwLock<SpecStore>>,
 }
@@ -54,6 +56,7 @@ impl PlatformState {
             broadcast_tx,
             record_store: RecordStore::new(),
             api_key,
+            api_token: None,
             spec_store: Arc::new(RwLock::new(SpecStore::new())),
         }
     }
@@ -71,6 +74,7 @@ impl PlatformState {
             broadcast_tx,
             record_store: RecordStore::new(),
             api_key,
+            api_token: None,
             spec_store: Arc::new(RwLock::new(SpecStore::new())),
         }
     }

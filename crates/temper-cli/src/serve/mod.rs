@@ -194,6 +194,10 @@ pub async fn run(
     }
 
     let mut state = PlatformState::with_registry(registry, api_key);
+    state.api_token = std::env::var("TEMPER_API_KEY").ok();
+    if state.api_token.is_some() {
+        println!("  API key: configured (Bearer token required)");
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let data_dir = Path::new(&home).join(".local/share/temper");
     state.server.data_dir = data_dir.clone();

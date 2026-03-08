@@ -15,6 +15,7 @@ pub async fn temper_request(
     base_url: &str,
     tenant: &str,
     principal_id: Option<&str>,
+    api_key: Option<&str>,
     method: Method,
     path: &str,
     body: Option<&Value>,
@@ -24,6 +25,10 @@ pub async fn temper_request(
         .request(method, &url)
         .header("X-Tenant-Id", tenant)
         .header("Accept", "application/json");
+
+    if let Some(key) = api_key {
+        request = request.header("Authorization", format!("Bearer {key}"));
+    }
 
     if let Some(pid) = principal_id {
         request = request
@@ -68,6 +73,7 @@ pub async fn temper_governance_request(
     base_url: &str,
     tenant: &str,
     principal_id: Option<&str>,
+    api_key: Option<&str>,
     method: Method,
     path: &str,
     body: Option<&Value>,
@@ -80,6 +86,10 @@ pub async fn temper_governance_request(
         .header("Accept", "application/json")
         .header("X-Temper-Principal-Kind", "admin")
         .header("X-Temper-Principal-Id", admin_id);
+
+    if let Some(key) = api_key {
+        request = request.header("Authorization", format!("Bearer {key}"));
+    }
 
     if let Some(payload) = body {
         request = request.json(payload);
@@ -118,6 +128,7 @@ pub async fn temper_request_bytes(
     base_url: &str,
     tenant: &str,
     principal_id: Option<&str>,
+    api_key: Option<&str>,
     method: Method,
     path: &str,
     body: Vec<u8>,
@@ -127,6 +138,10 @@ pub async fn temper_request_bytes(
         .request(method, &url)
         .header("X-Tenant-Id", tenant)
         .header("Content-Type", "application/wasm");
+
+    if let Some(key) = api_key {
+        request = request.header("Authorization", format!("Bearer {key}"));
+    }
 
     if let Some(pid) = principal_id {
         request = request

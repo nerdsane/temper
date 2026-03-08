@@ -11,6 +11,7 @@
 //!   Temper Data API (`/tdata`), following OData v4 standard.
 
 pub mod agent;
+pub mod bearer_auth;
 pub mod bootstrap;
 pub mod deploy;
 pub mod evolution;

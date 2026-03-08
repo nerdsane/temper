@@ -35,6 +35,9 @@ pub struct McpConfig {
     /// Agent principal ID for `X-Temper-Principal-Id` header. When set, all
     /// requests include agent identity headers for Cedar authorization.
     pub principal_id: Option<String>,
+    /// Bearer token for API authentication (`TEMPER_API_KEY`).
+    /// When set, all requests include `Authorization: Bearer <key>`.
+    pub api_key: Option<String>,
 }
 
 #[cfg(test)]

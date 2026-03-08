@@ -20,6 +20,12 @@ export default auth((req) => {
   requestHeaders.set("X-Temper-Principal-Id", `github:${username}`);
   requestHeaders.set("X-Temper-Principal-Kind", "admin");
 
+  // Inject Bearer token for API authentication when configured.
+  const apiKey = process.env.TEMPER_API_KEY;
+  if (apiKey) {
+    requestHeaders.set("Authorization", `Bearer ${apiKey}`);
+  }
+
   return NextResponse.next({
     request: { headers: requestHeaders },
   });
@@ -38,5 +44,8 @@ export const config = {
     "/specs/:path*",
     "/verify/:path*",
     "/workflows/:path*",
+    // API proxy paths — middleware injects Authorization header before Next.js rewrites proxy to Temper API.
+    "/observe/:path*",
+    "/api/:path*",
   ],
 };

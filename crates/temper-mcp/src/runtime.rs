@@ -39,6 +39,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) binary_path: Option<std::path::PathBuf>,
     pub(crate) http: reqwest::Client,
     pub(crate) principal_id: Option<String>,
+    pub(crate) api_key: Option<String>,
 }
 
 impl RuntimeContext {
@@ -62,6 +63,10 @@ impl RuntimeContext {
             binary_path: std::env::current_exe().ok(),
             http: reqwest::Client::new(),
             principal_id: config.principal_id.clone(),
+            api_key: config
+                .api_key
+                .clone()
+                .or_else(|| std::env::var("TEMPER_API_KEY").ok()), // determinism-ok: startup config
         })
     }
 
@@ -250,6 +255,7 @@ impl RuntimeContext {
         let server_url = self.server_url.clone();
         let app_metadata = self.app_metadata.clone();
         let principal_id = self.principal_id.clone();
+        let api_key = self.api_key.clone();
         let binary_path = self.binary_path.clone();
         let spec = self.spec.clone();
         let apps = self.apps.clone();
@@ -264,6 +270,7 @@ impl RuntimeContext {
                 let server_url = server_url.clone();
                 let app_metadata = app_metadata.clone();
                 let principal_id = principal_id.clone();
+                let api_key = api_key.clone();
                 let binary_path = binary_path.clone();
                 let spec = spec.clone();
                 let apps = apps.clone();
@@ -329,6 +336,7 @@ impl RuntimeContext {
                         &base_url,
                         &tenant,
                         principal_id.as_deref(),
+                        api_key.as_deref(),
                         &function_name,
                         remaining,
                         &kwargs,

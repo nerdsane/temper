@@ -6,6 +6,7 @@
 use axum::Router;
 use axum::middleware;
 
+use crate::bearer_auth::bearer_auth_check;
 use crate::state::PlatformState;
 use crate::tenant_access::tenant_access_check;
 
@@ -25,7 +26,11 @@ pub fn build_platform_router(state: PlatformState) -> Router {
 
     temper_server::build_router(state.server.clone())
         .nest("/api", tenant_api.with_state(state.clone()))
-        .layer(middleware::from_fn_with_state(state, tenant_access_check))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            tenant_access_check,
+        ))
+        .layer(middleware::from_fn_with_state(state, bearer_auth_check))
 }
 
 #[cfg(test)]

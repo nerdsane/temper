@@ -127,6 +127,7 @@ async fn mcp_initialize_handshake() {
         temper_url: None,
         apps: vec![],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -156,6 +157,7 @@ async fn search_returns_filtered_spec_data() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -185,6 +187,7 @@ async fn execute_creates_entity_and_reads_it_back() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -219,6 +222,7 @@ async fn execute_invalid_action_returns_409_cleanly() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -254,6 +258,7 @@ async fn sandbox_blocks_filesystem_access() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -283,6 +288,7 @@ async fn execute_supports_compound_operation() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -317,6 +323,7 @@ async fn search_spec_tenants() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -340,6 +347,7 @@ async fn search_spec_entities() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -367,6 +375,7 @@ async fn search_spec_describe() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -397,6 +406,7 @@ async fn search_spec_actions_from() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -432,6 +442,7 @@ async fn tool_list_includes_loaded_summary() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -471,6 +482,7 @@ async fn execute_show_spec_returns_spec_data() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -505,6 +517,7 @@ async fn e2e_agent_denial_human_approve_retry() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: Some("checkout-bot".to_string()),
+        api_key: None,
     })
     .expect("ctx");
 
@@ -639,6 +652,7 @@ async fn e2e_search_chained_discovery() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -686,6 +700,7 @@ async fn e2e_show_spec_matches_search_describe() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -728,6 +743,7 @@ async fn execute_without_server_returns_helpful_error() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -757,6 +773,7 @@ async fn search_works_without_server() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: None,
+        api_key: None,
     })
     .expect("ctx");
 
@@ -882,6 +899,7 @@ async fn get_decision_status_returns_decision() {
         temper_url: None,
         apps: vec![app("demo", tmp.path())],
         principal_id: Some("status-bot".to_string()),
+        api_key: None,
     })
     .expect("ctx");
 

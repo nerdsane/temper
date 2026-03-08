@@ -19,6 +19,7 @@ pub async fn run(
         temper_url: url,
         apps,
         principal_id: agent_id.or_else(|| Some("mcp-agent".to_string())),
+        api_key: std::env::var("TEMPER_API_KEY").ok(),
     })
     .await
 }
