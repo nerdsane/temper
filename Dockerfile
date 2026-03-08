@@ -30,7 +30,7 @@ RUN cargo build --release --bin temper
 # ── Stage 4: Runtime ────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y \
-    ca-certificates libssl3 python3 \
+    ca-certificates libssl3 python3 libz3-4 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/temper /usr/local/bin/temper
@@ -38,5 +38,5 @@ COPY --from=builder /app/target/release/temper /usr/local/bin/temper
 ENV RUST_LOG=info,temper=debug
 EXPOSE 3000
 
-ENTRYPOINT ["temper"]
-CMD ["serve", "--port", "3000", "--storage", "turso"]
+# No ENTRYPOINT — Railway's startCommand provides the full command.
+CMD ["temper", "serve", "--port", "3000", "--storage", "turso"]
