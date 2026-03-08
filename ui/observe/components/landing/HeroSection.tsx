@@ -25,12 +25,12 @@ export default function HeroSection() {
 
         {/* Heading */}
         <h1 className="text-[clamp(2.5rem,5.5vw,4rem)] font-bold tracking-[-0.04em] leading-[1.1] max-w-[680px] mx-auto mb-6 bg-gradient-to-br from-white to-teal-400 bg-clip-text text-transparent animate-hero-fade-up [animation-delay:0.2s]">
-          The operating system for autonomous agents.
+          The framework where agents build their own OS.
         </h1>
 
         {/* Tagline */}
         <p className="text-lg text-zinc-400 max-w-[540px] mx-auto mb-12 leading-[1.7] animate-hero-fade-up [animation-delay:0.3s]">
-          Agents need more than scripts. They need a formally verified environment where they build and evolve their own capabilities.
+          A tempered agent accumulates capabilities. It describes what it needs, the kernel proves it correct, and every action feeds back into evolution.
         </p>
 
         {/* CTA buttons */}

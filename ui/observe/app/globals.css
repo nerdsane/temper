@@ -149,6 +149,14 @@ code, .font-mono {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
+@keyframes recorded-slide-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes recorded-flash {
+  0% { background-color: rgba(45, 212, 191, 0.1); }
+  100% { background-color: rgba(255, 255, 255, 0.02); }
+}
 
 .animate-orb-drift-1 { animation: orb-drift-1 25s ease-in-out infinite; }
 .animate-orb-drift-2 { animation: orb-drift-2 30s ease-in-out infinite; }
@@ -158,6 +166,8 @@ code, .font-mono {
 .animate-filter-progress { animation: filter-progress 2s linear infinite; }
 .animate-dash-loop { animation: dash-loop 4s linear infinite; }
 .animate-dot-pulse { animation: dot-pulse 2s ease-in-out infinite; }
+.animate-recorded-slide-in { animation: recorded-slide-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+.animate-recorded-flash { animation: recorded-flash 0.8s ease-out forwards; }
 
 /* Reduced motion: disable all custom animations for users who prefer it */
 @media (prefers-reduced-motion: reduce) {
@@ -176,7 +186,9 @@ code, .font-mono {
   .animate-hero-mascot,
   .animate-filter-progress,
   .animate-dash-loop,
-  .animate-dot-pulse {
+  .animate-dot-pulse,
+  .animate-recorded-slide-in,
+  .animate-recorded-flash {
     animation: none !important;
   }
 }

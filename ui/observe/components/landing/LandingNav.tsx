@@ -35,7 +35,7 @@ export default function LandingNav() {
             </a>
           </li>
           <li className="hidden sm:block">
-            <a href="#how" className="text-[13px] text-zinc-400 font-medium hover:text-white no-underline transition-colors">
+            <a href="#step-kernel" className="text-[13px] text-zinc-400 font-medium hover:text-white no-underline transition-colors">
               How it works
             </a>
           </li>
