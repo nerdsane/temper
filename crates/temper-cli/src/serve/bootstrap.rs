@@ -137,7 +137,7 @@ pub(super) async fn build_registry(
         if restored > 0 {
             println!("  Restored {restored} specs from Turso.");
         }
-    } else if let Some(ServerEventStore::TenantRouted(ref router)) = event_store {
+    } else if let Some(ServerEventStore::TenantRouted(router)) = event_store {
         let mut total_restored = 0usize;
         let restored = restore_registry_from_turso(&mut registry, router.platform_store())
             .await
@@ -164,10 +164,10 @@ pub(super) async fn build_registry(
             upsert_loaded_specs_to_postgres(pool, tenant, &loaded).await?;
         } else if let Some(ServerEventStore::Turso(turso)) = event_store {
             upsert_loaded_specs_to_turso(turso, tenant, &loaded).await?;
-        } else if let Some(ServerEventStore::TenantRouted(ref router)) = event_store {
-            if let Ok(store) = router.store_for_tenant(tenant).await {
-                upsert_loaded_specs_to_turso(&store, tenant, &loaded).await?;
-            }
+        } else if let Some(ServerEventStore::TenantRouted(router)) = event_store
+            && let Ok(store) = router.store_for_tenant(tenant).await
+        {
+            upsert_loaded_specs_to_turso(&store, tenant, &loaded).await?;
         }
     }
 
