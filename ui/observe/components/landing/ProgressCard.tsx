@@ -3,10 +3,13 @@
 import { useEffect, useState, useCallback } from "react";
 
 const sections = [
-  { id: "vision", label: "The Vision" },
-  { id: "how", label: "The Spec" },
+  { id: "vision", label: "Tempered Agent" },
+  { id: "step-kernel", label: "The Kernel" },
+  { id: "step-apps", label: "Apps" },
   { id: "step-proof", label: "Verification" },
-  { id: "step-mediation", label: "Mediation" },
+  { id: "step-policy", label: "Governance" },
+  { id: "step-recorded", label: "Trajectories" },
+  { id: "step-growth", label: "Growth" },
   { id: "step-evolution", label: "Evolution" },
   { id: "step-multiagent", label: "Multi-Agent" },
   { id: "roadmap", label: "Roadmap" },

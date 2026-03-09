@@ -5,12 +5,9 @@ export default function CtaSection() {
     <section className="text-center py-[120px] max-sm:py-20">
       <div className="max-w-[960px] mx-auto px-6 relative z-[2]">
         <ScrollReveal>
-          <h2 className="text-[clamp(1.5rem,3vw,2rem)] font-semibold tracking-[-0.02em] mb-4">
-            The living harness is here.
+          <h2 className="text-[clamp(1.5rem,3vw,2rem)] font-semibold tracking-[-0.02em] mb-12">
+            The living harness is coming.
           </h2>
-          <p className="text-base text-zinc-400 max-w-[540px] mx-auto mb-12 leading-[1.7]">
-            Join us in building the next era of autonomous engineering.
-          </p>
           <a
             href="https://github.com/nerdsane/temper"
             target="_blank"
