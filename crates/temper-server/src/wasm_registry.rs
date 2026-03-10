@@ -80,6 +80,14 @@ impl WasmModuleRegistry {
             .map(|((tenant, name), hash)| (tenant.as_str(), name.as_str(), hash.as_str()))
             .collect()
     }
+
+    /// List all built-in modules (name, hash).
+    pub fn all_builtins(&self) -> Vec<(&str, &str)> {
+        self.builtins
+            .iter()
+            .map(|(name, hash)| (name.as_str(), hash.as_str()))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -135,5 +143,20 @@ mod tests {
 
         let beta_modules = registry.modules_for_tenant(&beta);
         assert_eq!(beta_modules.len(), 1);
+    }
+
+    #[test]
+    fn all_builtins_listed() {
+        let mut registry = WasmModuleRegistry::new();
+        registry.register_builtin("http_fetch", "builtin-hash-1");
+        registry.register_builtin("email_send", "builtin-hash-2");
+
+        let builtins = registry.all_builtins();
+        assert_eq!(builtins.len(), 2);
+        assert!(builtins.contains(&("email_send", "builtin-hash-2")));
+        assert!(builtins.contains(&("http_fetch", "builtin-hash-1")));
+
+        // Builtins should not appear in all_modules
+        assert!(registry.all_modules().is_empty());
     }
 }

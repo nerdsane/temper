@@ -249,7 +249,7 @@ async fn remove_user(
 // ── OS App Catalog Endpoints ───────────────────────────────────────
 
 /// `GET /api/os-apps` — list available OS apps.
-async fn list_os_apps() -> impl IntoResponse {
+pub(crate) async fn list_os_apps() -> impl IntoResponse {
     let apps = crate::os_apps::list_os_apps();
     Json(serde_json::json!({ "apps": apps }))
 }
@@ -261,7 +261,7 @@ pub struct InstallOsAppRequest {
 }
 
 /// `POST /api/os-apps/:name/install` — install an OS app into a tenant.
-async fn install_os_app(
+pub(crate) async fn install_os_app(
     State(state): State<PlatformState>,
     axum::extract::Path(app_name): axum::extract::Path<String>,
     Json(req): Json<InstallOsAppRequest>,

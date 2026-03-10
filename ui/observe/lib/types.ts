@@ -456,6 +456,18 @@ export interface FeatureRequest {
   created_at: string;
 }
 
+// --- OS App types ---
+export interface OsApp {
+  name: string;
+  description: string;
+  entity_types: string[];
+  version: string;
+}
+
+export interface OsAppsResponse {
+  apps: OsApp[];
+}
+
 // --- Extended evolution record detail ---
 export interface EvolutionRecordDetail extends EvolutionRecord {
   derived_from?: string;
