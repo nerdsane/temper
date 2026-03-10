@@ -7,7 +7,6 @@ on:
 
 jobs:
   deploy:
-    if: ${{ secrets.RAILWAY_TOKEN != '' && secrets.RAILWAY_PROJECT_ID != '' && secrets.RAILWAY_ENVIRONMENT != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,19 +25,16 @@ jobs:
           RAILWAY_ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
           RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
         run: |
+          if [ -z "$RAILWAY_TOKEN" ] || [ -z "$RAILWAY_PROJECT_ID" ] || [ -z "$RAILWAY_ENVIRONMENT" ]; then
+            echo "Skipping Railway deploy: missing one or more required secrets."
+            echo "- RAILWAY_TOKEN"
+            echo "- RAILWAY_PROJECT_ID"
+            echo "- RAILWAY_ENVIRONMENT"
+            exit 0
+          fi
+
           if [ -n "$RAILWAY_SERVICE" ]; then
             railway up --ci --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --service "$RAILWAY_SERVICE"
           else
             railway up --ci --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT"
           fi
-
-  deploy-skipped:
-    if: ${{ !(secrets.RAILWAY_TOKEN != '' && secrets.RAILWAY_PROJECT_ID != '' && secrets.RAILWAY_ENVIRONMENT != '') }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Skip deploy (missing Railway secrets)
-        run: |
-          echo "Railway deploy skipped because one or more required secrets are missing:"
-          echo "- RAILWAY_TOKEN"
-          echo "- RAILWAY_PROJECT_ID"
-          echo "- RAILWAY_ENVIRONMENT"
