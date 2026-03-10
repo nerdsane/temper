@@ -101,10 +101,10 @@ impl StreamRegistry {
 
         // Evict LRU entries until we have room
         while self.cached_bytes + new_size > self.max_cache_bytes && !self.lru_order.is_empty() {
-            if let Some(evict_key) = self.lru_order.pop_front() {
-                if let Some(evicted) = self.cache.remove(&evict_key) {
-                    self.cached_bytes -= evicted.len();
-                }
+            if let Some(evict_key) = self.lru_order.pop_front()
+                && let Some(evicted) = self.cache.remove(&evict_key)
+            {
+                self.cached_bytes -= evicted.len();
             }
         }
 
