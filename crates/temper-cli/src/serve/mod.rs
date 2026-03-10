@@ -125,10 +125,7 @@ pub async fn run(
     for app_name in &os_apps {
         match temper_platform::install_os_app(&state, "default", app_name) {
             Ok(entities) => {
-                println!(
-                    "  OS app '{app_name}' installed: {}",
-                    entities.join(", ")
-                );
+                println!("  OS app '{app_name}' installed: {}", entities.join(", "));
             }
             Err(e) => {
                 eprintln!("  Warning: failed to install OS app '{app_name}': {e}");

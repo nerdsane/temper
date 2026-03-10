@@ -312,12 +312,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_serve_with_os_app() {
-        let cli = Cli::parse_from([
-            "temper",
-            "serve",
-            "--os-app",
-            "project-management",
-        ]);
+        let cli = Cli::parse_from(["temper", "serve", "--os-app", "project-management"]);
         match cli.command {
             Commands::Serve { os_app, .. } => {
                 assert_eq!(os_app.len(), 1);
