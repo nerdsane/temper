@@ -29,7 +29,7 @@ struct ToolCallParams {
     arguments: Value,
 }
 
-pub(super) async fn dispatch_json_line(ctx: &RuntimeContext, line: &str) -> Option<Value> {
+pub(super) async fn dispatch_json_line(ctx: &mut RuntimeContext, line: &str) -> Option<Value> {
     let raw: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(error) => {
@@ -44,7 +44,7 @@ pub(super) async fn dispatch_json_line(ctx: &RuntimeContext, line: &str) -> Opti
     dispatch_json_value(ctx, raw).await
 }
 
-pub(super) async fn dispatch_json_value(ctx: &RuntimeContext, raw: Value) -> Option<Value> {
+pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) -> Option<Value> {
     let request: JsonRpcRequest = match serde_json::from_value(raw) {
         Ok(value) => value,
         Err(error) => {
@@ -176,6 +176,10 @@ DEVELOPER:\n\
 \x20 await temper.get_policies(tenant) -> Cedar policies\n\
 \x20 await temper.upload_wasm(tenant, module_name, wasm_path) -> upload WASM module\n\
 \x20 await temper.compile_wasm(tenant, module_name, rust_source) -> compile + upload WASM\n\
+\n\
+OS APP CATALOG:\n\
+\x20 await temper.list_apps() -> available pre-built apps (name, description, entity_types)\n\
+\x20 await temper.install_app(app_name) -> install an OS app into the current tenant\n\
 \n\
 GOVERNANCE:\n\
 \x20 await temper.get_decisions(tenant, status?) -> list decisions\n\

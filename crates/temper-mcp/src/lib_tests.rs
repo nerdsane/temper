@@ -35,7 +35,7 @@ fn ctx_for_url(url: &str) -> RuntimeContext {
     .expect("ctx")
 }
 
-async fn rpc(ctx: &RuntimeContext, request: Value) -> Value {
+async fn rpc(ctx: &mut RuntimeContext, request: Value) -> Value {
     dispatch_json_value(ctx, request)
         .await
         .expect("response expected")
@@ -115,10 +115,10 @@ async fn start_test_temper_server() -> (u16, oneshot::Sender<()>) {
 
 #[tokio::test]
 async fn mcp_initialize_handshake() {
-    let ctx = ctx_for_port(3001);
+    let mut ctx = ctx_for_port(3001);
 
     let response = rpc(
-        &ctx,
+        &mut ctx,
         json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -137,10 +137,10 @@ async fn mcp_initialize_handshake() {
 
 #[tokio::test]
 async fn tool_list_has_single_execute_tool() {
-    let ctx = ctx_for_port(3001);
+    let mut ctx = ctx_for_port(3001);
 
     let response = rpc(
-        &ctx,
+        &mut ctx,
         json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -185,10 +185,10 @@ fn from_config_port_mode() {
 #[tokio::test]
 async fn execute_url_mode_works() {
     let (port, shutdown) = start_test_temper_server().await;
-    let ctx = ctx_for_url(&format!("http://127.0.0.1:{port}"));
+    let mut ctx = ctx_for_url(&format!("http://127.0.0.1:{port}"));
 
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             3,
             "execute",
@@ -211,10 +211,10 @@ async fn execute_url_mode_works() {
 #[tokio::test]
 async fn execute_creates_entity_and_reads_it_back() {
     let (port, shutdown) = start_test_temper_server().await;
-    let ctx = ctx_for_port(port);
+    let mut ctx = ctx_for_port(port);
 
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             3,
             "execute",
@@ -238,10 +238,10 @@ return fetched['fields']['customer']
 #[tokio::test]
 async fn execute_invalid_action_returns_409_cleanly() {
     let (port, shutdown) = start_test_temper_server().await;
-    let ctx = ctx_for_port(port);
+    let mut ctx = ctx_for_port(port);
 
     let response = rpc(
-            &ctx,
+            &mut ctx,
             call_tool_request(
                 4,
                 "execute",
@@ -267,10 +267,10 @@ return 'unreachable'
 #[tokio::test]
 async fn execute_supports_compound_operation() {
     let (port, shutdown) = start_test_temper_server().await;
-    let ctx = ctx_for_port(port);
+    let mut ctx = ctx_for_port(port);
 
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             6,
             "execute",
@@ -295,13 +295,13 @@ return fetched['status']
 #[tokio::test]
 async fn execute_specs_returns_data() {
     let (port, shutdown) = start_test_temper_server().await;
-    let ctx = ctx_for_port(port);
+    let mut ctx = ctx_for_port(port);
 
     // The test server uses with_specs() which doesn't populate the spec registry.
     // The /observe/specs endpoint reads from the registry, so it returns an empty list
     // (not a 404). This verifies the specs() method dispatches correctly.
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(10, "execute", "return await temper.specs('demo')"),
     )
     .await;
@@ -325,7 +325,7 @@ async fn e2e_agent_denial_human_approve_retry() {
     let (port, shutdown) = start_test_temper_server().await;
 
     // Use agent identity so Cedar authorization applies (default-deny for agents).
-    let ctx = RuntimeContext::from_config(&McpConfig {
+    let mut ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(port),
         temper_url: None,
         principal_id: Some("checkout-bot".to_string()),
@@ -335,7 +335,7 @@ async fn e2e_agent_denial_human_approve_retry() {
 
     // Step 0: Create entity first (creation bypasses Cedar).
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             20,
             "execute",
@@ -351,7 +351,7 @@ async fn e2e_agent_denial_human_approve_retry() {
 
     // Step 1: Agent tries a bound action — should be denied (403).
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             21,
             "execute",
@@ -375,7 +375,7 @@ async fn e2e_agent_denial_human_approve_retry() {
 
     // Step 2: Agent lists ALL decisions (no status filter) to debug.
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(22, "execute", "return await temper.get_decisions('demo')"),
     )
     .await;
@@ -403,7 +403,7 @@ async fn e2e_agent_denial_human_approve_retry() {
         "return await temper.approve_decision('demo', '{}', 'broad')",
         decision_id
     );
-    let response = rpc(&ctx, call_tool_request(22, "execute", &approve_code)).await;
+    let response = rpc(&mut ctx, call_tool_request(22, "execute", &approve_code)).await;
     let (text, is_error) = tool_text(&response);
     assert!(is_error, "approve_decision should be blocked: {response:#}");
     assert!(
@@ -439,7 +439,7 @@ async fn e2e_agent_denial_human_approve_retry() {
 
     // Step 4: Retry the action — should now succeed (Cedar policy was hot-loaded).
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             24,
             "execute",
@@ -567,7 +567,7 @@ async fn get_decision_status_returns_decision() {
     let (port, shutdown) = start_test_temper_server().await;
 
     // Use agent identity so Cedar authorization applies (default-deny for agents).
-    let ctx = RuntimeContext::from_config(&McpConfig {
+    let mut ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(port),
         temper_url: None,
         principal_id: Some("status-bot".to_string()),
@@ -577,7 +577,7 @@ async fn get_decision_status_returns_decision() {
 
     // Create entity first (creation bypasses Cedar).
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             60,
             "execute",
@@ -590,7 +590,7 @@ async fn get_decision_status_returns_decision() {
 
     // Agent tries an action -- should be denied.
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             61,
             "execute",
@@ -611,7 +611,7 @@ async fn get_decision_status_returns_decision() {
         "return await temper.get_decision_status('demo', '{}')",
         decision_id
     );
-    let response = rpc(&ctx, call_tool_request(62, "execute", &status_code)).await;
+    let response = rpc(&mut ctx, call_tool_request(62, "execute", &status_code)).await;
 
     let _ = shutdown.send(());
 

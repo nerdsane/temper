@@ -82,6 +82,9 @@ enum Commands {
         /// Tenant name (used with --specs-dir to load user specs)
         #[arg(long, default_value = "default")]
         tenant: String,
+        /// Install an OS app into the default tenant at startup (repeatable)
+        #[arg(long)]
+        os_app: Vec<String>,
     },
     /// Start the stdio MCP server for Code Mode
     Mcp {
@@ -122,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
             no_observe,
             specs_dir,
             tenant,
+            os_app,
         } => {
             let storage_explicit =
                 std::env::args().any(|arg| arg == "--storage" || arg.starts_with("--storage="));
@@ -139,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
             {
                 apps.push((tenant.clone(), dir.clone()));
             }
-            serve::run(port, apps, storage, storage_explicit, !no_observe).await?
+            serve::run(port, apps, os_app, storage, storage_explicit, !no_observe).await?
         }
         Commands::Mcp {
             port,
@@ -303,6 +307,43 @@ mod tests {
                 ..
             } => {}
             _ => panic!("expected Serve command with default turso storage"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_with_os_app() {
+        let cli = Cli::parse_from([
+            "temper",
+            "serve",
+            "--os-app",
+            "project-management",
+        ]);
+        match cli.command {
+            Commands::Serve { os_app, .. } => {
+                assert_eq!(os_app.len(), 1);
+                assert_eq!(os_app[0], "project-management");
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_with_multiple_os_apps() {
+        let cli = Cli::parse_from([
+            "temper",
+            "serve",
+            "--os-app",
+            "project-management",
+            "--os-app",
+            "crm",
+        ]);
+        match cli.command {
+            Commands::Serve { os_app, .. } => {
+                assert_eq!(os_app.len(), 2);
+                assert_eq!(os_app[0], "project-management");
+                assert_eq!(os_app[1], "crm");
+            }
+            _ => panic!("expected Serve command"),
         }
     }
 

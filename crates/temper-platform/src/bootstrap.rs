@@ -80,7 +80,7 @@ const AGENT_SPECS: &[(&str, &str)] = &[
 /// 5. Marks all entities as pre-verified
 ///
 /// Panics if any spec fails to parse or verify (fatal startup error).
-fn bootstrap_tenant_specs(
+pub(crate) fn bootstrap_tenant_specs(
     state: &PlatformState,
     tenant: &str,
     csdl_source: &str,

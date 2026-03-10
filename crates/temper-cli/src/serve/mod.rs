@@ -55,6 +55,7 @@ struct LoadedTenantSpecs {
 pub async fn run(
     port: u16,
     apps: Vec<(String, String)>,
+    os_apps: Vec<String>,
     storage: StorageBackend,
     storage_explicit: bool,
     observe: bool,
@@ -119,6 +120,21 @@ pub async fn run(
 
     // Phase 8: Bootstrap system + agent tenants
     bootstrap::bootstrap_tenants(&state, &apps).await;
+
+    // Phase 8b: Install OS apps into default tenant (from --os-app flags)
+    for app_name in &os_apps {
+        match temper_platform::install_os_app(&state, "default", app_name) {
+            Ok(entities) => {
+                println!(
+                    "  OS app '{app_name}' installed: {}",
+                    entities.join(", ")
+                );
+            }
+            Err(e) => {
+                eprintln!("  Warning: failed to install OS app '{app_name}': {e}");
+            }
+        }
+    }
 
     // Phase 9: Bind, start background tasks, serve
     let router = build_platform_router(state.clone());

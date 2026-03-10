@@ -264,6 +264,13 @@ All take `(tenant, entity_set, ...)`. The `entity_set` is the **plural collectio
 | `upload_wasm` | `await temper.upload_wasm(tenant, module_name, wasm_path)` | Upload status |
 | `compile_wasm` | `await temper.compile_wasm(tenant, module_name, rust_source)` | Compile + upload |
 
+### OS App Catalog
+
+| Method | Signature | Returns |
+|--------|-----------|---------|
+| `list_apps` | `await temper.list_apps()` | Available pre-built apps with name, description, entity types |
+| `install_app` | `await temper.install_app(app_name)` | Installs an OS app into the current tenant |
+
 ### Governance
 
 | Method | Signature | Returns |
