@@ -166,13 +166,15 @@ mod tests {
         );
         assert_eq!(response.headers().get("Content-Length").unwrap(), "11");
         assert_eq!(response.headers().get("OData-Version").unwrap(), "4.0");
-        assert!(response
-            .headers()
-            .get("ETag")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .contains("sha256:abc123"));
+        assert!(
+            response
+                .headers()
+                .get("ETag")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("sha256:abc123")
+        );
     }
 
     #[test]

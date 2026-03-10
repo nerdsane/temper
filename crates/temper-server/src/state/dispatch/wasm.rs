@@ -233,7 +233,11 @@ impl crate::state::ServerState {
     ) -> Result<Option<EntityResponse>, String> {
         // Existing action-triggered invocations don't use streams — pass empty registry.
         let streams = Arc::new(std::sync::RwLock::new(StreamRegistry::default()));
-        match self.wasm_engine.invoke(hash, &inv_ctx, host, limits, streams).await {
+        match self
+            .wasm_engine
+            .invoke(hash, &inv_ctx, host, limits, streams)
+            .await
+        {
             Ok(result) if result.success => {
                 if let Some(reason) = denial_tracker.take_denial() {
                     let error_str = format!("authorization denied for http_call: {reason}");

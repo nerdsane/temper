@@ -684,8 +684,7 @@ async fn handle_stream_put(
                     "4.0".parse().unwrap(), // ci-ok: static header value
                 );
                 // Set ETag from entity's content_hash after action dispatch
-                let state_val =
-                    serde_json::to_value(&entity_resp.state).unwrap_or_default();
+                let state_val = serde_json::to_value(&entity_resp.state).unwrap_or_default();
                 if let Some(hash) = state_val.get("content_hash").and_then(|v| v.as_str()) {
                     if let Ok(val) = format!("\"{hash}\"").parse() {
                         response.headers_mut().insert("ETag", val);

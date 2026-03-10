@@ -538,7 +538,10 @@ fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmError> 
                 // Get request body from StreamRegistry (if stream ID provided)
                 let body_bytes = if !body_stream_id.is_empty() {
                     let streams = caller.data().streams.read().expect("streams lock poisoned"); // ci-ok: infallible lock
-                    streams.get_stream(&body_stream_id).map(|b| b.to_vec()).unwrap_or_default()
+                    streams
+                        .get_stream(&body_stream_id)
+                        .map(|b| b.to_vec())
+                        .unwrap_or_default()
                 } else {
                     Vec::new()
                 };
@@ -547,15 +550,23 @@ fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmError> 
                 let host = caller.data().host.clone();
                 let result = tokio::task::block_in_place(|| {
                     // determinism-ok: blocking bridge for WASM host call
-                    tokio::runtime::Handle::current()
-                        .block_on(host.http_call_binary(&method, &url, &headers, &body_bytes))
+                    tokio::runtime::Handle::current().block_on(host.http_call_binary(
+                        &method,
+                        &url,
+                        &headers,
+                        &body_bytes,
+                    ))
                 });
 
                 match result {
                     Ok((status, resp_bytes)) => {
                         // Store response bytes in StreamRegistry (if stream ID provided)
                         if !response_stream_id.is_empty() && !resp_bytes.is_empty() {
-                            let mut streams = caller.data().streams.write().expect("streams lock poisoned"); // ci-ok: infallible lock
+                            let mut streams = caller
+                                .data()
+                                .streams
+                                .write()
+                                .expect("streams lock poisoned"); // ci-ok: infallible lock
                             streams.store_stream(&response_stream_id, resp_bytes);
                         }
                         status as i32
@@ -585,16 +596,10 @@ fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmError> 
                 let key = String::from_utf8_lossy(&key_buf);
 
                 let streams = caller.data().streams.read().expect("streams lock poisoned"); // ci-ok: infallible lock
-                if streams.cache_contains(&key) {
-                    1
-                } else {
-                    0
-                }
+                if streams.cache_contains(&key) { 1 } else { 0 }
             },
         )
-        .map_err(|e| {
-            WasmError::Compilation(format!("failed to link host_cache_contains: {e}"))
-        })?;
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_cache_contains: {e}")))?;
 
     // host_cache_to_stream(key_ptr, key_len, stream_id_ptr, stream_id_len) -> i32
     // Copies cached bytes to a stream. Returns byte count on success, -1 if not cached.
@@ -621,16 +626,18 @@ fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmError> 
                 let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
                 let stream_id = String::from_utf8_lossy(&id_buf).to_string();
 
-                let mut streams = caller.data().streams.write().expect("streams lock poisoned"); // ci-ok: infallible lock
+                let mut streams = caller
+                    .data()
+                    .streams
+                    .write()
+                    .expect("streams lock poisoned"); // ci-ok: infallible lock
                 match streams.cache_to_stream(&key, &stream_id) {
                     Some(byte_count) => byte_count as i32,
                     None => -1,
                 }
             },
         )
-        .map_err(|e| {
-            WasmError::Compilation(format!("failed to link host_cache_to_stream: {e}"))
-        })?;
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_cache_to_stream: {e}")))?;
 
     // host_cache_from_stream(key_ptr, key_len, stream_id_ptr, stream_id_len) -> i32
     // Caches bytes from a stream. Returns 0 on success, -1 on error.
@@ -657,7 +664,11 @@ fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmError> 
                 let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
                 let stream_id = String::from_utf8_lossy(&id_buf).to_string();
 
-                let mut streams = caller.data().streams.write().expect("streams lock poisoned"); // ci-ok: infallible lock
+                let mut streams = caller
+                    .data()
+                    .streams
+                    .write()
+                    .expect("streams lock poisoned"); // ci-ok: infallible lock
                 // Read bytes from stream without consuming it
                 let bytes = match streams.get_stream(&stream_id) {
                     Some(b) => b.to_vec(),

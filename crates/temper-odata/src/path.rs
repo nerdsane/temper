@@ -55,9 +55,7 @@ pub enum ODataPath {
     },
 
     /// The `$value` media stream of an entity, e.g. `/Files('f-1')/$value`.
-    Value {
-        parent: Box<ODataPath>,
-    },
+    Value { parent: Box<ODataPath> },
 }
 
 /// Represents an entity key value.

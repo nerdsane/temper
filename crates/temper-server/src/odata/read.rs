@@ -349,9 +349,7 @@ pub(super) async fn handle_odata_get_for_tenant(
             handle_bound_function(&state, &tenant, &parent, &function, &query_options).await
         }
 
-        ODataPath::Value { ref parent } => {
-            handle_stream_get(&state, &tenant, parent).await
-        }
+        ODataPath::Value { ref parent } => handle_stream_get(&state, &tenant, parent).await,
 
         _ => odata_error(
             StatusCode::NOT_IMPLEMENTED,

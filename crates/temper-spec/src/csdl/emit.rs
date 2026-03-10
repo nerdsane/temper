@@ -431,7 +431,10 @@ mod tests {
         assert!(media.has_stream, "MediaFile should have has_stream=true");
 
         let regular = schema.entity_type("RegularEntity").unwrap();
-        assert!(!regular.has_stream, "RegularEntity should have has_stream=false");
+        assert!(
+            !regular.has_stream,
+            "RegularEntity should have has_stream=false"
+        );
 
         // Round-trip
         let emitted = emit_csdl_xml(&doc);
