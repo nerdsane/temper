@@ -2,6 +2,10 @@
 <!--
   Temper Project Management OS App
   OData v4 data model for issues, projects, cycles, comments, and labels.
+  
+  Extended for multi-agent coordination: implementation tracking fields
+  (repo, branch, worktree, PR) and agent identity (type, session) on
+  Issue and Comment entities.
 -->
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
@@ -73,16 +77,29 @@
         <Property Name="Description" Type="Edm.String"/>
         <Property Name="Status" Type="Temper.ProjectManagement.IssueStatus" Nullable="false"/>
         <Property Name="Priority" Type="Temper.ProjectManagement.IssuePriority"/>
+        <!-- Agent identity -->
         <Property Name="AssigneeId" Type="Edm.String"/>
+        <Property Name="AgentType" Type="Edm.String"/>
+        <Property Name="SessionId" Type="Edm.String"/>
+        <!-- Project/cycle association -->
         <Property Name="ProjectId" Type="Edm.Guid"/>
         <Property Name="CycleId" Type="Edm.Guid"/>
+        <!-- Implementation tracking -->
+        <Property Name="Repo" Type="Edm.String"/>
+        <Property Name="BranchName" Type="Edm.String"/>
+        <Property Name="WorktreePath" Type="Edm.String"/>
+        <Property Name="PrUrl" Type="Edm.String"/>
+        <Property Name="ImplementationNotes" Type="Edm.String"/>
+        <!-- Counters -->
         <Property Name="ReviewCycles" Type="Edm.Int32" DefaultValue="0"/>
         <Property Name="CommentCount" Type="Edm.Int32" DefaultValue="0"/>
         <Property Name="LabelCount" Type="Edm.Int32" DefaultValue="0"/>
+        <!-- Timestamps -->
         <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
         <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
         <Property Name="CompletedAt" Type="Edm.DateTimeOffset"/>
         <Property Name="CancelledAt" Type="Edm.DateTimeOffset"/>
+        <!-- Navigation -->
         <NavigationProperty Name="Project" Type="Temper.ProjectManagement.Project">
           <ReferentialConstraint Property="ProjectId" ReferencedProperty="Id"/>
         </NavigationProperty>
@@ -90,6 +107,7 @@
           <ReferentialConstraint Property="CycleId" ReferencedProperty="Id"/>
         </NavigationProperty>
         <NavigationProperty Name="Comments" Type="Collection(Temper.ProjectManagement.Comment)"/>
+        <!-- Annotations -->
         <Annotation Term="Temper.Vocab.StateMachine.States">
           <Collection>
             <String>Backlog</String><String>Triage</String><String>Todo</String>
@@ -154,6 +172,8 @@
         <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
         <Property Name="IssueId" Type="Edm.Guid" Nullable="false"/>
         <Property Name="AuthorId" Type="Edm.String" Nullable="false"/>
+        <Property Name="AgentType" Type="Edm.String"/>
+        <Property Name="SessionId" Type="Edm.String"/>
         <Property Name="Body" Type="Edm.String" Nullable="false"/>
         <Property Name="Status" Type="Temper.ProjectManagement.CommentStatus" Nullable="false"/>
         <Property Name="EditCount" Type="Edm.Int32" DefaultValue="0"/>
@@ -211,11 +231,13 @@
       <Action Name="Assign" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
         <Parameter Name="AgentId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AgentType" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SessionId" Type="Edm.String"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Backlog</String><String>Triage</String><String>Todo</String><String>InProgress</String></Collection>
         </Annotation>
-        <Annotation Term="Temper.Vocab.Agent.Hint" String="Assign an agent to this issue. Required before StartWork."/>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Assign an agent. AgentType: claude-code, codex, haku, human. SessionId: agent session trace."/>
       </Action>
 
       <Action Name="Unassign" IsBound="true">
@@ -248,22 +270,37 @@
 
       <Action Name="StartWork" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="repo" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="branch_name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="worktree_path" Type="Edm.String"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Todo</String></Collection>
         </Annotation>
         <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="InProgress"/>
-        <Annotation Term="Temper.Vocab.Agent.Hint" String="Start working on the issue. Must have an assignee."/>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Start working. Provide repo (e.g. rita-aga/deep-sci-fi), branch name, and optional worktree path."/>
         <Annotation Term="Temper.Vocab.Agent.CommonPattern" String="1. Assign agent. 2. SetPriority. 3. MoveToTriage. 4. MoveToTodo. 5. StartWork."/>
+      </Action>
+
+      <Action Name="UpdateImplementation" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="implementation_notes" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Issue"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>InProgress</String><String>InReview</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Drop implementation context: what changed, findings, blockers. Append-style."/>
       </Action>
 
       <Action Name="SubmitForReview" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="pr_url" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>InProgress</String></Collection>
         </Annotation>
         <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="InReview"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Submit for review with PR URL."/>
       </Action>
 
       <Action Name="RequestChanges" IsBound="true">
@@ -397,6 +434,19 @@
       </Action>
 
       <!-- Comment Actions -->
+      <Action Name="CommentCreate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Comment"/>
+        <Parameter Name="issue_id" Type="Edm.Guid" Nullable="false"/>
+        <Parameter Name="body" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="author_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="agent_type" Type="Edm.String"/>
+        <Parameter Name="session_id" Type="Edm.String"/>
+        <ReturnType Type="Temper.ProjectManagement.Comment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+      </Action>
+
       <Action Name="CommentEdit" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Comment"/>
         <Parameter Name="body" Type="Edm.String" Nullable="false"/>

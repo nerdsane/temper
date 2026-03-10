@@ -247,7 +247,7 @@ When the app needs external API calls (payments, email, notifications, etc.):
 
 4. **Upload module** before deploying the spec:
    ```bash
-   curl -X POST http://localhost:3333/api/wasm/modules/<module_name> \
+   curl -X POST <TEMPER_URL>/api/wasm/modules/<module_name> \
      -H "X-Tenant-Id: default" \
      -H "Content-Type: application/wasm" \
      --data-binary @target/wasm32-unknown-unknown/release/<module_name>.wasm
@@ -260,7 +260,7 @@ When the app needs external API calls (payments, email, notifications, etc.):
 **ALWAYS use port 3333.** Check if a server is already running before starting a new one:
 
 ```bash
-curl -s http://localhost:3333/observe/health
+curl -s <TEMPER_URL>/observe/health
 ```
 
 - **If it returns JSON** (server already running): Skip starting. Tell the user: "Temper server already running on port 3333. Your app will be added as a new tenant."
@@ -269,7 +269,7 @@ curl -s http://localhost:3333/observe/health
   temper serve --port 3333 &
   ```
 
-Tell the user: "Open http://localhost:3001 to watch specs load and verify in real-time."
+Tell the user: "Open the Observe UI to watch specs load and verify in real-time."
 
 For persistence, set `DATABASE_URL`:
 ```bash
@@ -288,14 +288,14 @@ The endpoint streams newline-delimited JSON (NDJSON). It loads specs, runs verif
 
 **Option A — Local specs directory** (if you have file access to the server machine):
 ```bash
-curl -s -N -X POST http://localhost:3333/api/specs/load-dir \
+curl -s -N -X POST <TEMPER_URL>/api/specs/load-dir \
   -H "Content-Type: application/json" \
   -d '{"tenant":"<app-name>","specs_dir":"./specs"}'
 ```
 
 **Option B — Inline specs over HTTP** (if the server is remote):
 ```bash
-curl -s -N -X POST http://localhost:3333/api/specs/load-inline \
+curl -s -N -X POST <TEMPER_URL>/api/specs/load-inline \
   -H "Content-Type: application/json" \
   -d '{
     "tenant": "<app-name>",
@@ -344,18 +344,18 @@ The response streams one JSON object per line:
 Once all entities pass verification, tell the user the app is live and show them how to interact:
 ```bash
 # List entities
-curl http://localhost:3333/tdata/Orders
+curl <TEMPER_URL>/tdata/Orders
 
 # Create entity
-curl -X POST http://localhost:3333/tdata/Orders \
+curl -X POST <TEMPER_URL>/tdata/Orders \
   -H "Content-Type: application/json" -d '{"title": "My Order"}'
 
 # Invoke action
-curl -X POST http://localhost:3333/tdata/Orders\('entity-id'\)/Ns.SubmitOrder \
+curl -X POST <TEMPER_URL>/tdata/Orders\('entity-id'\)/Ns.SubmitOrder \
   -H "Content-Type: application/json" -d '{}'
 
 # Get single entity
-curl http://localhost:3333/tdata/Orders\('entity-id'\)
+curl <TEMPER_URL>/tdata/Orders\('entity-id'\)
 ```
 
 The API is at `/tdata` (not `/odata`). Invalid actions return 409 Conflict. Unverified entities return 423 Locked.
@@ -364,7 +364,7 @@ The API is at `/tdata` (not `/odata`). Invalid actions return 409 Conflict. Unve
 
 When the user wants to modify the app, edit the spec files directly with the Edit tool, then push again:
 ```bash
-curl -s -X POST http://localhost:3333/api/specs/load-dir \
+curl -s -X POST <TEMPER_URL>/api/specs/load-dir \
   -H "Content-Type: application/json" \
   -d '{"tenant":"<app-name>","specs_dir":"./specs"}'
 ```
@@ -378,7 +378,7 @@ After specs are deployed and verified, you MUST start watching for user failures
 Immediately after successful deployment, start a background polling command using the Bash tool with `run_in_background: true`:
 
 ```bash
-KNOWN=0; while true; do COUNT=$(curl -s http://localhost:3333/observe/trajectories?success=false 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('error_count',0))" 2>/dev/null || echo 0); if [ "$COUNT" -gt "$KNOWN" ]; then echo "NEW_UNMET_INTENTS: $COUNT (was $KNOWN)"; curl -s http://localhost:3333/observe/trajectories?success=false; exit 0; fi; sleep 10; done
+KNOWN=0; while true; do COUNT=$(curl -s <TEMPER_URL>/observe/trajectories?success=false 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('error_count',0))" 2>/dev/null || echo 0); if [ "$COUNT" -gt "$KNOWN" ]; then echo "NEW_UNMET_INTENTS: $COUNT (was $KNOWN)"; curl -s <TEMPER_URL>/observe/trajectories?success=false; exit 0; fi; sleep 10; done
 ```
 
 This polls every 10 seconds. When a new unmet intent appears, the background task completes and you receive a notification.
@@ -396,7 +396,7 @@ This polls every 10 seconds. When a new unmet intent appears, the background tas
 
 When the user asks about feedback or what users want:
 ```bash
-curl http://localhost:3333/observe/trajectories | jq '.failed_intents'
+curl <TEMPER_URL>/observe/trajectories | jq '.failed_intents'
 ```
 
 ---
@@ -509,15 +509,15 @@ temper init <project-name>                    # Scaffold project
 temper serve --port 3333 &                    # Start empty server (Observe UI at :3001)
 temper verify --specs-dir specs/              # Run verification cascade (L0-L3) locally
 # Push specs + verify (streams NDJSON with verification results):
-curl -s -N -X POST http://localhost:3333/api/specs/load-dir \
+curl -s -N -X POST <TEMPER_URL>/api/specs/load-dir \
   -H "Content-Type: application/json" \
   -d '{"tenant":"<name>","specs_dir":"./specs"}'
-curl http://localhost:3333/tdata              # Service document
-curl http://localhost:3333/tdata/\$metadata   # Full CSDL metadata
-curl http://localhost:3333/tdata/Orders       # List entities
-curl -X POST http://localhost:3333/tdata/Orders -H "Content-Type: application/json" -d '{}'  # Create
-curl -X POST http://localhost:3333/tdata/Orders\('id'\)/Ns.Action -d '{}'  # Invoke action
-curl -H "X-Tenant-Id: my-app" http://localhost:3333/tdata/Orders  # Multi-tenant
+curl <TEMPER_URL>/tdata              # Service document
+curl <TEMPER_URL>/tdata/\$metadata   # Full CSDL metadata
+curl <TEMPER_URL>/tdata/Orders       # List entities
+curl -X POST <TEMPER_URL>/tdata/Orders -H "Content-Type: application/json" -d '{}'  # Create
+curl -X POST <TEMPER_URL>/tdata/Orders\('id'\)/Ns.Action -d '{}'  # Invoke action
+curl -H "X-Tenant-Id: my-app" <TEMPER_URL>/tdata/Orders  # Multi-tenant
 ```
 
 ### Directory Layout

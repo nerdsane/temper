@@ -1,0 +1,5 @@
+[env]
+BINDGEN_EXTRA_CLANG_ARGS = "-I/opt/homebrew/opt/z3/include"
+
+[target.aarch64-apple-darwin]
+rustflags = ["-L/opt/homebrew/opt/z3/lib"]
