@@ -24,4 +24,7 @@ pub(crate) struct LoadInlineRequest {
     /// Optional inline `cross-invariants.toml` source.
     #[serde(default)]
     pub(crate) cross_invariants_toml: Option<String>,
+    /// Optional Cedar policy text to bundle with the spec deployment.
+    #[serde(default)]
+    pub(crate) cedar_policies: Option<String>,
 }

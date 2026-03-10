@@ -488,6 +488,35 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_type_in_cedar_context() {
+        let engine = AuthzEngine::permissive();
+        engine
+            .reload_policies(
+                "permit(principal is Agent, action == Action::\"read\", resource is Doc) when { context.agentType == \"claude-code\" };",
+            )
+            .unwrap();
+        // With matching agentType -> Allow
+        let ctx = SecurityContext::from_headers(&[
+            ("X-Temper-Principal-Id".to_string(), "bot-1".to_string()),
+            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+        ]).with_agent_context(Some("bot-1"), None, Some("claude-code"));
+        let mut attrs = HashMap::new();
+        attrs.insert("id".to_string(), serde_json::json!("doc-1"));
+        let result = engine.authorize(&ctx, "read", "Doc", &attrs);
+        assert!(result.is_allowed(), "should allow claude-code agent");
+
+        // Without matching agentType -> Deny
+        let ctx2 = SecurityContext::from_headers(&[
+            ("X-Temper-Principal-Id".to_string(), "bot-2".to_string()),
+            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+        ]).with_agent_context(Some("bot-2"), None, Some("openclaw"));
+        let mut attrs2 = HashMap::new();
+        attrs2.insert("id".to_string(), serde_json::json!("doc-2"));
+        let result2 = engine.authorize(&ctx2, "read", "Doc", &attrs2);
+        assert!(!result2.is_allowed(), "should deny non-claude-code agent");
+    }
+
+    #[test]
     fn test_context_entity_status_in_cedar_context() {
         // Policy that gates on context.ctx_parent_agent_status
         let policy = r#"

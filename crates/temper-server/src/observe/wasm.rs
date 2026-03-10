@@ -90,7 +90,7 @@ pub async fn handle_upload_wasm_module(
 ) -> Result<Json<WasmModuleUploadResponse>, (StatusCode, String)> {
     let tenant = extract_tenant(&headers, &state)?;
     // Cedar authorization: admin bypass, others need manage_wasm.
-    let security_ctx = security_context_from_headers(&headers, None, None);
+    let security_ctx = security_context_from_headers(&headers, None, None, None);
     if !matches!(security_ctx.principal.kind, PrincipalKind::Admin)
         && let Err(denial) = state.authorize_with_context(
             &security_ctx,
@@ -198,7 +198,7 @@ pub async fn handle_delete_wasm_module(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let tenant = extract_tenant(&headers, &state)?;
     // Cedar authorization: admin bypass, others need manage_wasm.
-    let security_ctx = security_context_from_headers(&headers, None, None);
+    let security_ctx = security_context_from_headers(&headers, None, None, None);
     if !matches!(security_ctx.principal.kind, PrincipalKind::Admin)
         && let Err(denial) = state.authorize_with_context(
             &security_ctx,

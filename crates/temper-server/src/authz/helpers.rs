@@ -34,9 +34,10 @@ pub(crate) fn security_context_from_headers(
     headers: &HeaderMap,
     agent_id: Option<&str>,
     session_id: Option<&str>,
+    agent_type: Option<&str>,
 ) -> SecurityContext {
     let temper_headers = extract_temper_headers(headers);
-    SecurityContext::from_headers(&temper_headers).with_agent_context(agent_id, session_id)
+    SecurityContext::from_headers(&temper_headers).with_agent_context(agent_id, session_id, agent_type)
 }
 
 /// Check Cedar authorization for observe endpoints.
@@ -50,7 +51,7 @@ pub(crate) fn require_observe_auth(
     action: &str,
     resource_type: &str,
 ) -> Result<(), axum::http::StatusCode> {
-    let security_ctx = security_context_from_headers(headers, None, None);
+    let security_ctx = security_context_from_headers(headers, None, None, None);
     if matches!(
         security_ctx.principal.kind,
         temper_authz::PrincipalKind::Admin | temper_authz::PrincipalKind::System
@@ -96,7 +97,7 @@ pub(crate) fn observe_tenant_scope(
     }
 
     // No tenant header — admin/system get cross-tenant view.
-    let security_ctx = security_context_from_headers(headers, None, None);
+    let security_ctx = security_context_from_headers(headers, None, None, None);
     if matches!(
         security_ctx.principal.kind,
         temper_authz::PrincipalKind::Admin | temper_authz::PrincipalKind::System
@@ -163,7 +164,7 @@ pub(crate) async fn record_authz_denial(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let pd = PendingDecision::from_denial(
+    let mut pd = PendingDecision::from_denial(
         input.tenant,
         principal_id,
         input.action,
@@ -173,6 +174,8 @@ pub(crate) async fn record_authz_denial(
         input.reason,
         input.module_name,
     );
+    pd.agent_type = input.security_ctx.principal.agent_type.clone();
+    pd.session_id = session_id.clone();
 
     // Broadcast for SSE.
     let _ = state.pending_decision_tx.send(pd.clone());
@@ -230,9 +233,21 @@ pub(crate) async fn record_authz_denial(
         denied_module,
         source: Some(TrajectorySource::Authz),
         spec_governed: None,
+        agent_type: input.security_ctx.principal.agent_type.clone(),
     };
     if let Err(e) = state.persist_trajectory_entry(&traj).await {
         tracing::warn!(error = %e, "failed to persist authz trajectory");
+    }
+
+    // Feed denial into suggestion engine for pattern detection.
+    if let Ok(mut engine) = state.suggestion_engine.write() {
+        engine.record_denial(
+            traj.agent_type.as_deref(),
+            input.action,
+            input.resource_type,
+            input.resource_id,
+            &traj.timestamp,
+        );
     }
 
     pd

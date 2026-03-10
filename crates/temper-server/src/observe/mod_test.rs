@@ -217,7 +217,7 @@ async fn test_tenant_decision_mutations_require_manage_policies() {
                 .header("content-type", "application/json")
                 .header("x-temper-principal-id", "cust-1")
                 .header("x-temper-principal-kind", "customer")
-                .body(Body::from(r#"{"scope":"narrow"}"#))
+                .body(Body::from(r#"{"scope":{"principal":"this_agent","action":"this_action","resource":"this_resource","duration":"always"}}"#))
                 .unwrap(),
         )
         .await
@@ -274,7 +274,7 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
             .header("content-type", "application/json")
             .header("x-temper-principal-id", "admin-1")
             .header("x-temper-principal-kind", "admin")
-            .body(Body::from(r#"{"scope":"broad","decided_by":"admin-1"}"#))
+            .body(Body::from(r#"{"scope":{"principal":"this_agent","action":"this_action","resource":"this_resource","duration":"always"},"decided_by":"admin-1"}"#))
             .unwrap(),
         )
         .await

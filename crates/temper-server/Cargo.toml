@@ -43,6 +43,7 @@ reqwest = { workspace = true }
 sqlx = { workspace = true }
 aes-gcm = { workspace = true }
 thiserror = { workspace = true }
+cedar-policy = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

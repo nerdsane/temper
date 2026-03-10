@@ -28,7 +28,7 @@ pub(crate) async fn handle_load_inline(
     let tenant = body.tenant.clone();
 
     // Cedar authorization gate.
-    let security_ctx = security_context_from_headers(&headers, None, None);
+    let security_ctx = security_context_from_headers(&headers, None, None, None);
     let entity_names: Vec<String> = body
         .specs
         .keys()
@@ -210,6 +210,7 @@ pub(crate) async fn handle_load_inline(
             denied_module: None,
             source: Some(TrajectorySource::Entity),
             spec_governed: None,
+            agent_type: None,
         };
         if let Err(e) = state.persist_trajectory_entry(&traj).await {
             tracing::error!(error = %e, "failed to persist spec submission trajectory");
@@ -219,8 +220,7 @@ pub(crate) async fn handle_load_inline(
     // Write specs to a temp directory
     let tmp_dir = std::env::temp_dir().join(format!("temper-inline-{}", tenant)); // determinism-ok: HTTP handler writes user specs to temp dir for loading
     let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans previous temp dir
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| {
-        // determinism-ok: HTTP handler creates temp dir
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| { // determinism-ok: HTTP handler creates temp dir
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to create temp dir: {e}"),
@@ -229,8 +229,7 @@ pub(crate) async fn handle_load_inline(
 
     for (filename, content) in &body.specs {
         let path = tmp_dir.join(filename);
-        std::fs::write(&path, content).map_err(|e| {
-            // determinism-ok: HTTP handler writes specs
+        std::fs::write(&path, content).map_err(|e| { // determinism-ok: HTTP handler writes specs
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to write {filename}: {e}"),
@@ -239,8 +238,7 @@ pub(crate) async fn handle_load_inline(
     }
 
     if let Some(source) = body.cross_invariants_toml.as_deref() {
-        std::fs::write(tmp_dir.join("cross-invariants.toml"), source).map_err(|e| {
-            // determinism-ok: HTTP handler writes cross-invariants
+        std::fs::write(tmp_dir.join("cross-invariants.toml"), source).map_err(|e| { // determinism-ok: HTTP handler writes cross-invariants
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to write cross-invariants.toml: {e}"),
@@ -250,10 +248,40 @@ pub(crate) async fn handle_load_inline(
 
     // Delegate to load-dir logic with merge=true so agent-submitted specs
     // are added to the existing tenant config instead of replacing it.
+    let cedar_policies = body.cedar_policies.clone();
     let dir_request = LoadDirRequest {
-        tenant,
+        tenant: tenant.clone(),
         specs_dir: tmp_dir.to_string_lossy().to_string(),
         merge: true,
     };
-    handle_load_dir(State(state), Json(dir_request)).await
+    let result = handle_load_dir(State(state.clone()), Json(dir_request)).await;
+
+    if result.is_ok() {
+        if let Some(ref cedar_text) = cedar_policies {
+            if !cedar_text.trim().is_empty() {
+                if let Err(e) = cedar_text.parse::<cedar_policy::PolicySet>() {
+                    tracing::warn!(error = %e, "bundled Cedar policies failed to parse, skipping");
+                } else {
+                    let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+                    let entry = policies.entry(tenant.clone()).or_default();
+                    if !entry.is_empty() {
+                        entry.push('\n');
+                    }
+                    entry.push_str(cedar_text);
+                    let mut combined = String::new();
+                    for text in policies.values() {
+                        combined.push_str(text);
+                        combined.push('\n');
+                    }
+                    if let Err(e) = state.authz.reload_policies(&combined) {
+                        tracing::error!(error = %e, "failed to reload policies with bundled Cedar");
+                    } else {
+                        tracing::info!(tenant = %tenant, "bundled Cedar policies loaded successfully");
+                    }
+                }
+            }
+        }
+    }
+
+    result
 }

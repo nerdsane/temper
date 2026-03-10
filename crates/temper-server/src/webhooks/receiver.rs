@@ -87,6 +87,7 @@ pub async fn handle_webhook(
     let agent_ctx = AgentContext {
         agent_id: Some(format!("webhook:{}", webhook.name)),
         session_id: None,
+        agent_type: None,
     };
 
     match state

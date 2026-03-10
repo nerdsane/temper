@@ -2,10 +2,14 @@
 //!
 //! Connects to a running Temper server, polls for pending decisions,
 //! and allows a human to approve or deny them with scope selection.
+//! Uses [`PolicyScopeMatrix`] for fine-grained Cedar policy generation.
 
 use std::io::{self, Write};
 
 use anyhow::{Context, Result};
+use temper_authz::{
+    ActionScope, DurationScope, PolicyScopeMatrix, PrincipalScope, ResourceScope,
+};
 
 /// Run the `temper decide` interactive loop.
 ///
@@ -37,13 +41,14 @@ pub async fn run(port: u16, tenant: &str) -> Result<()> {
         for decision in &decisions {
             let id = decision["id"].as_str().unwrap_or("unknown");
             let action = decision["action"].as_str().unwrap_or("unknown");
-            let resource = decision["resource"].as_str().unwrap_or("unknown");
-            let principal = decision["principal"].as_str().unwrap_or("unknown");
+            let resource_type = decision["resource_type"].as_str().unwrap_or("unknown");
+            let resource_id = decision["resource_id"].as_str().unwrap_or("unknown");
+            let agent_id = decision["agent_id"].as_str().unwrap_or("unknown");
 
             println!("  Decision: {id}");
-            println!("    Principal: {principal}");
+            println!("    Agent:     {agent_id}");
             println!("    Action:    {action}");
-            println!("    Resource:  {resource}");
+            println!("    Resource:  {resource_type}::{resource_id}");
             println!();
 
             print!("  Allow? [n]arrow / [m]edium / [b]road / [d]eny > ");
@@ -53,10 +58,26 @@ pub async fn run(port: u16, tenant: &str) -> Result<()> {
             io::stdin().read_line(&mut input)?;
             let choice = input.trim().to_lowercase();
 
-            let scope = match choice.as_str() {
-                "n" | "narrow" => Some("narrow"),
-                "m" | "medium" => Some("medium"),
-                "b" | "broad" => Some("broad"),
+            let matrix = match choice.as_str() {
+                "n" | "narrow" => Some(PolicyScopeMatrix {
+                    principal: PrincipalScope::ThisAgent,
+                    action: ActionScope::ThisAction,
+                    resource: ResourceScope::ThisResource,
+                    duration: DurationScope::Always,
+                    agent_type_value: None,
+                    role_value: None,
+                    session_id: None,
+                }),
+                "m" | "medium" => Some(PolicyScopeMatrix::default_for(None)),
+                "b" | "broad" => Some(PolicyScopeMatrix {
+                    principal: PrincipalScope::ThisAgent,
+                    action: ActionScope::AllActionsOnType,
+                    resource: ResourceScope::AnyOfType,
+                    duration: DurationScope::Always,
+                    agent_type_value: None,
+                    role_value: None,
+                    session_id: None,
+                }),
                 "d" | "deny" => None,
                 _ => {
                     println!("  Skipped (invalid input).");
@@ -64,10 +85,10 @@ pub async fn run(port: u16, tenant: &str) -> Result<()> {
                 }
             };
 
-            match scope {
-                Some(scope) => {
-                    approve_decision(&client, &base_url, tenant, id, scope).await?;
-                    println!("  Approved with scope: {scope}");
+            match matrix {
+                Some(m) => {
+                    approve_decision(&client, &base_url, tenant, id, &m).await?;
+                    println!("  Approved with scope: {:?}/{:?}/{:?}", m.principal, m.action, m.resource);
                 }
                 None => {
                     deny_decision(&client, &base_url, tenant, id).await?;
@@ -115,7 +136,7 @@ async fn approve_decision(
     base_url: &str,
     tenant: &str,
     decision_id: &str,
-    scope: &str,
+    scope: &PolicyScopeMatrix,
 ) -> Result<()> {
     let url = format!("{base_url}/api/tenants/{tenant}/decisions/{decision_id}/approve");
     let payload = serde_json::json!({

@@ -6,13 +6,18 @@ mod evolution;
 pub mod metrics;
 pub mod pending_decisions;
 mod persistence;
+pub mod policy_suggestions;
 pub mod trajectory;
 pub mod wasm_invocation_log;
 
 pub use dispatch::{DispatchCommand, DispatchExtOptions};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use metrics::MetricsCollector;
-pub use pending_decisions::{DecisionStatus, PendingDecision, PolicyScope};
+pub use pending_decisions::{
+    ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix,
+    PrincipalScope, ResourceScope,
+};
+pub use policy_suggestions::PolicySuggestionEngine;
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
 
@@ -192,6 +197,8 @@ pub struct ServerState {
     /// registered tenant (legacy single-tenant compat).  When false
     /// (multi-tenant mode), a missing header is rejected with 400.
     pub single_tenant_mode: bool,
+    /// Denial pattern detection engine for Cedar policy suggestions.
+    pub suggestion_engine: Arc<RwLock<PolicySuggestionEngine>>,
 }
 
 #[allow(deprecated)] // ADR-0025 Phase 4: RecordStore used until chain validation replaced
@@ -253,6 +260,7 @@ impl ServerState {
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             listen_port: Arc::new(std::sync::OnceLock::new()),
             single_tenant_mode: true,
+            suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -388,6 +396,7 @@ impl ServerState {
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             listen_port: Arc::new(std::sync::OnceLock::new()),
             single_tenant_mode: false,
+            suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
         };
         state.register_builtin_wasm_modules();
         state
@@ -507,6 +516,7 @@ impl ServerState {
                         _ => None,
                     }),
                     spec_governed: r.spec_governed,
+                    agent_type: None,
                 })
                 .collect(),
             Err(e) => {

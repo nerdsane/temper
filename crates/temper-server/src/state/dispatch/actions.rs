@@ -169,6 +169,7 @@ impl crate::state::ServerState {
                 denied_module: None,
                 source: Some(TrajectorySource::Entity),
                 spec_governed: Some(false),
+                agent_type: agent_ctx.agent_type.clone(),
             };
             if let Err(e) = self.persist_trajectory_entry(&entry).await {
                 tracing::error!(error = %e, "failed to persist trajectory entry");
@@ -231,6 +232,7 @@ impl crate::state::ServerState {
                     denied_module: None,
                     source: Some(TrajectorySource::Entity),
                     spec_governed: None,
+                    agent_type: agent_ctx.agent_type.clone(),
                 };
                 if let Err(persist_err) = self.persist_trajectory_entry(&entry).await {
                     tracing::error!(error = %persist_err, "failed to persist trajectory entry");

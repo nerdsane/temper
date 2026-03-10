@@ -16,7 +16,7 @@ import type {
   WasmInvocationsResponse,
   PendingDecision,
   DecisionsResponse,
-  PolicyScope,
+  PolicyScopeMatrix,
   AgentsResponse,
   AgentHistoryResponse,
   UnmetIntentsResponse,
@@ -290,7 +290,7 @@ export async function fetchDecisions(tenant: string, params?: {
 }
 
 /** Approve a pending decision */
-export async function approveDecision(tenant: string, decisionId: string, scope: PolicyScope): Promise<void> {
+export async function approveDecision(tenant: string, decisionId: string, scope: PolicyScopeMatrix): Promise<void> {
   const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions/${encodeURIComponent(decisionId)}/approve`;
   const res = await fetchWithRetry(url, {
     method: "POST",

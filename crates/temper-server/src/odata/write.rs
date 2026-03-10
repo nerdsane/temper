@@ -89,6 +89,7 @@ fn resolve_entity_type_or_record_404(
             denied_module: None,
             source: Some(TrajectorySource::Platform),
             spec_governed: None,
+            agent_type: agent_ctx.agent_type.clone(),
         };
         {
             let state_c = state.clone();
