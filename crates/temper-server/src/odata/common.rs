@@ -200,6 +200,7 @@ pub(super) async fn load_entity_or_404(
 /// Resolve the parent of a `$value` path to `(set_name, entity_id)`.
 ///
 /// Returns 400 if the parent is not an entity instance.
+#[allow(clippy::result_large_err)]
 pub(super) fn resolve_value_parent(
     parent: &ODataPath,
 ) -> Result<(String, String), axum::response::Response> {
@@ -217,6 +218,7 @@ pub(super) fn resolve_value_parent(
 /// Check that an entity type has `HasStream=true` in its CSDL definition.
 ///
 /// Returns 400 if the entity type does not support `$value`.
+#[allow(clippy::result_large_err)]
 pub(super) fn check_has_stream_or_400(
     state: &ServerState,
     tenant: &TenantId,
