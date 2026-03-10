@@ -163,10 +163,10 @@ pub fn generate_cedar_from_matrix(
         _ => {}
     }
 
-    if matrix.duration == DurationScope::Session {
-        if let Some(ref session_id) = matrix.session_id {
-            conditions.push(format!("context.sessionId == \"{}\"", session_id));
-        }
+    if matrix.duration == DurationScope::Session
+        && let Some(ref session_id) = matrix.session_id
+    {
+        conditions.push(format!("context.sessionId == \"{}\"", session_id));
     }
 
     let when_clause = if conditions.is_empty() {
