@@ -1,0 +1,111 @@
+# File Entity — I/O Automaton Specification
+#
+# Represents a single file within TemperFS. Models the lifecycle from creation
+# through content upload, locking, and archival. Content is stored externally;
+# StreamUpdated is fired by the $value PUT handler after WASM upload succeeds.
+
+[automaton]
+name = "File"
+states = ["Created", "Ready", "Locked", "Archived"]
+initial = "Created"
+
+# --- State Variables ---
+
+[[state]]
+name = "version_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "size_bytes"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "has_content"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "content_hash"
+type = "string"
+initial = ""
+
+[[state]]
+name = "mime_type"
+type = "string"
+initial = ""
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Created"]
+to = "Created"
+params = ["name", "path", "directory_id", "workspace_id", "mime_type"]
+hint = "Create a new file entry. Content is not yet uploaded."
+
+[[action]]
+name = "StreamUpdated"
+kind = "input"
+from = ["Created", "Ready"]
+to = "Ready"
+params = ["content_hash", "size_bytes", "mime_type"]
+effect = '[{ type = "increment", var = "version_count" }, { type = "set_bool", var = "has_content", value = "true" }]'
+hint = "Fired by $value PUT handler after WASM upload succeeds. Updates content metadata and advances to Ready. Not callable from Locked."
+
+[[action]]
+name = "Lock"
+kind = "internal"
+from = ["Ready"]
+to = "Locked"
+hint = "Lock the file to prevent content modifications."
+
+[[action]]
+name = "Unlock"
+kind = "internal"
+from = ["Locked"]
+to = "Ready"
+hint = "Unlock a locked file, re-enabling content modifications."
+
+[[action]]
+name = "Archive"
+kind = "internal"
+from = ["Ready", "Locked"]
+to = "Archived"
+hint = "Archive the file. Terminal state."
+
+# --- Output Actions ---
+
+[[action]]
+name = "FileArchivedEvent"
+kind = "output"
+hint = "Emitted when file transitions to Archived."
+
+[[action]]
+name = "FileContentUpdatedEvent"
+kind = "output"
+hint = "Emitted when file content is updated via StreamUpdated."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "ReadyFilesHaveContent"
+when = ["Ready", "Locked"]
+assert = "has_content"
+
+[[invariant]]
+name = "VersionCountNonNegative"
+when = ["Created", "Ready", "Locked", "Archived"]
+assert = "version_count >= 0"
+
+[[invariant]]
+name = "SizeBytesNonNegative"
+when = ["Created", "Ready", "Locked", "Archived"]
+assert = "size_bytes >= 0"

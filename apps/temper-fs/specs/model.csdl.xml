@@ -1,0 +1,319 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  TemperFS — Governed File System on Temper Primitives
+  OData v4 data model for workspaces, directories, files, and file versions.
+-->
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+
+    <Schema Namespace="Temper.Vocab" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <Term Name="StateMachine.States" Type="Collection(Edm.String)" AppliesTo="EntityType"/>
+      <Term Name="StateMachine.InitialState" Type="Edm.String" AppliesTo="EntityType"/>
+      <Term Name="StateMachine.ValidFromStates" Type="Collection(Edm.String)" AppliesTo="Action"/>
+      <Term Name="StateMachine.TargetState" Type="Edm.String" AppliesTo="Action"/>
+      <Term Name="Agent.Hint" Type="Edm.String" AppliesTo="Action Function EntityType"/>
+      <Term Name="ShardKey" Type="Edm.String" AppliesTo="EntityType"/>
+      <Term Name="AuthZ.CedarPolicy" Type="Edm.String" AppliesTo="EntityType Action Function"/>
+    </Schema>
+
+    <Schema Namespace="Temper.FS" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <!-- ============ Enums ============ -->
+
+      <EnumType Name="WorkspaceStatus">
+        <Member Name="Active" Value="0"/>
+        <Member Name="Frozen" Value="1"/>
+        <Member Name="Archived" Value="2"/>
+      </EnumType>
+
+      <EnumType Name="DirectoryStatus">
+        <Member Name="Active" Value="0"/>
+        <Member Name="Archived" Value="1"/>
+      </EnumType>
+
+      <EnumType Name="FileStatus">
+        <Member Name="Created" Value="0"/>
+        <Member Name="Ready" Value="1"/>
+        <Member Name="Locked" Value="2"/>
+        <Member Name="Archived" Value="3"/>
+      </EnumType>
+
+      <EnumType Name="FileVersionStatus">
+        <Member Name="Current" Value="0"/>
+        <Member Name="Superseded" Value="1"/>
+      </EnumType>
+
+      <!-- ============ Entity Types ============ -->
+
+      <EntityType Name="Workspace">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Temper.FS.WorkspaceStatus" Nullable="false"/>
+        <Property Name="QuotaLimit" Type="Edm.Int64" DefaultValue="0"/>
+        <Property Name="UsedBytes" Type="Edm.Int64" DefaultValue="0"/>
+        <Property Name="FileCount" Type="Edm.Int32" DefaultValue="0"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Directories" Type="Collection(Temper.FS.Directory)"/>
+        <NavigationProperty Name="Files" Type="Collection(Temper.FS.File)"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String><String>Frozen</String><String>Archived</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/workspace.cedar"/>
+      </EntityType>
+
+      <EntityType Name="Directory">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="Path" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Temper.FS.DirectoryStatus" Nullable="false"/>
+        <Property Name="ParentId" Type="Edm.Guid"/>
+        <Property Name="WorkspaceId" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="ItemCount" Type="Edm.Int32" DefaultValue="0"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Workspace" Type="Temper.FS.Workspace">
+          <ReferentialConstraint Property="WorkspaceId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Parent" Type="Temper.FS.Directory">
+          <ReferentialConstraint Property="ParentId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Children" Type="Collection(Temper.FS.Directory)"/>
+        <NavigationProperty Name="Files" Type="Collection(Temper.FS.File)"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection><String>Active</String><String>Archived</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="WorkspaceId"/>
+      </EntityType>
+
+      <EntityType Name="File" HasStream="true">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="Path" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Temper.FS.FileStatus" Nullable="false"/>
+        <Property Name="DirectoryId" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="WorkspaceId" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="VersionCount" Type="Edm.Int32" DefaultValue="0"/>
+        <Property Name="SizeBytes" Type="Edm.Int64" DefaultValue="0"/>
+        <Property Name="HasContent" Type="Edm.Boolean" DefaultValue="false"/>
+        <Property Name="ContentHash" Type="Edm.String"/>
+        <Property Name="MimeType" Type="Edm.String"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Directory" Type="Temper.FS.Directory">
+          <ReferentialConstraint Property="DirectoryId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Workspace" Type="Temper.FS.Workspace">
+          <ReferentialConstraint Property="WorkspaceId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Versions" Type="Collection(Temper.FS.FileVersion)"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Created</String><String>Ready</String>
+            <String>Locked</String><String>Archived</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Created"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="WorkspaceId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/file.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="File entity with binary stream support. Use PUT $value to upload content, GET $value to download."/>
+      </EntityType>
+
+      <EntityType Name="FileVersion">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="FileId" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Status" Type="Temper.FS.FileVersionStatus" Nullable="false"/>
+        <Property Name="VersionNumber" Type="Edm.Int32" Nullable="false"/>
+        <Property Name="ContentHash" Type="Edm.String" Nullable="false"/>
+        <Property Name="SizeBytes" Type="Edm.Int64" Nullable="false"/>
+        <Property Name="CreatedBy" Type="Edm.String"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="File" Type="Temper.FS.File">
+          <ReferentialConstraint Property="FileId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection><String>Current</String><String>Superseded</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Current"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="FileId"/>
+      </EntityType>
+
+      <!-- ============ Bound Actions ============ -->
+
+      <!-- Workspace Actions -->
+      <Action Name="UpdateQuota" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace"/>
+        <Parameter Name="quota_limit" Type="Edm.Int64" Nullable="false"/>
+        <ReturnType Type="Temper.FS.Workspace"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+      </Action>
+
+      <Action Name="IncrementUsage" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace"/>
+        <Parameter Name="size_bytes" Type="Edm.Int64" Nullable="false"/>
+        <ReturnType Type="Temper.FS.Workspace"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+      </Action>
+
+      <Action Name="DecrementUsage" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace"/>
+        <Parameter Name="size_bytes" Type="Edm.Int64" Nullable="false"/>
+        <ReturnType Type="Temper.FS.Workspace"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+      </Action>
+
+      <Action Name="Freeze" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace"/>
+        <ReturnType Type="Temper.FS.Workspace"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Frozen"/>
+      </Action>
+
+      <Action Name="Thaw" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace"/>
+        <ReturnType Type="Temper.FS.Workspace"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Frozen</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Active"/>
+      </Action>
+
+      <Action Name="WorkspaceArchive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace"/>
+        <ReturnType Type="Temper.FS.Workspace"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String><String>Frozen</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
+      </Action>
+
+      <!-- Directory Actions -->
+      <Action Name="AddChild" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Directory"/>
+        <ReturnType Type="Temper.FS.Directory"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+      </Action>
+
+      <Action Name="RemoveChild" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Directory"/>
+        <ReturnType Type="Temper.FS.Directory"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+      </Action>
+
+      <Action Name="DirectoryRename" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Directory"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="path" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.FS.Directory"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+      </Action>
+
+      <Action Name="DirectoryArchive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Directory"/>
+        <ReturnType Type="Temper.FS.Directory"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
+      </Action>
+
+      <!-- File Actions -->
+      <Action Name="StreamUpdated" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.File"/>
+        <Parameter Name="content_hash" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="size_bytes" Type="Edm.Int64" Nullable="false"/>
+        <Parameter Name="mime_type" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.FS.File"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Created</String><String>Ready</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Ready"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Fired by $value PUT handler after WASM blob upload succeeds. Not directly callable by agents."/>
+      </Action>
+
+      <Action Name="Lock" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.File"/>
+        <ReturnType Type="Temper.FS.File"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Ready</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Locked"/>
+      </Action>
+
+      <Action Name="Unlock" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.File"/>
+        <ReturnType Type="Temper.FS.File"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Locked</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Ready"/>
+      </Action>
+
+      <Action Name="FileArchive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.File"/>
+        <ReturnType Type="Temper.FS.File"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Ready</String><String>Locked</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
+      </Action>
+
+      <!-- FileVersion Actions -->
+      <Action Name="Supersede" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.FileVersion"/>
+        <ReturnType Type="Temper.FS.FileVersion"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Current</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Superseded"/>
+      </Action>
+
+      <!-- ============ Entity Container ============ -->
+
+      <EntityContainer Name="TemperFSService">
+        <EntitySet Name="Workspaces" EntityType="Temper.FS.Workspace">
+          <NavigationPropertyBinding Path="Directories" Target="Directories"/>
+          <NavigationPropertyBinding Path="Files" Target="Files"/>
+        </EntitySet>
+        <EntitySet Name="Directories" EntityType="Temper.FS.Directory">
+          <NavigationPropertyBinding Path="Workspace" Target="Workspaces"/>
+          <NavigationPropertyBinding Path="Parent" Target="Directories"/>
+          <NavigationPropertyBinding Path="Children" Target="Directories"/>
+          <NavigationPropertyBinding Path="Files" Target="Files"/>
+        </EntitySet>
+        <EntitySet Name="Files" EntityType="Temper.FS.File">
+          <NavigationPropertyBinding Path="Directory" Target="Directories"/>
+          <NavigationPropertyBinding Path="Workspace" Target="Workspaces"/>
+          <NavigationPropertyBinding Path="Versions" Target="FileVersions"/>
+        </EntitySet>
+        <EntitySet Name="FileVersions" EntityType="Temper.FS.FileVersion">
+          <NavigationPropertyBinding Path="File" Target="Files"/>
+        </EntitySet>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

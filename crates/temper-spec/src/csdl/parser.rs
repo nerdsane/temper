@@ -93,12 +93,14 @@ fn parse_entity_type(
     start: &BytesStart,
 ) -> Result<EntityType, CsdlParseError> {
     let name = required_attr(start, "Name")?;
+    let has_stream = attr_str(start, "HasStream").is_some_and(|v| v == "true");
     let mut et = EntityType {
         name,
         key_properties: Vec::new(),
         properties: Vec::new(),
         navigation_properties: Vec::new(),
         annotations: Vec::new(),
+        has_stream,
     };
 
     let mut buf = Vec::new();

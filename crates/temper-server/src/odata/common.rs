@@ -2,7 +2,7 @@
 
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use temper_odata::path::KeyValue;
+use temper_odata::path::{KeyValue, ODataPath};
 use temper_runtime::tenant::TenantId;
 
 use super::constraints::{
@@ -195,4 +195,52 @@ pub(super) async fn load_entity_or_404(
             )
             .into_response()
         })
+}
+
+/// Resolve the parent of a `$value` path to `(set_name, entity_id)`.
+///
+/// Returns 400 if the parent is not an entity instance.
+pub(super) fn resolve_value_parent(
+    parent: &ODataPath,
+) -> Result<(String, String), axum::response::Response> {
+    match parent {
+        ODataPath::Entity(set_name, key) => Ok((set_name.clone(), extract_key(key))),
+        _ => Err(crate::response::odata_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidPath",
+            "$value must follow an entity instance, e.g. /Files('id')/$value",
+        )
+        .into_response()),
+    }
+}
+
+/// Check that an entity type has `HasStream=true` in its CSDL definition.
+///
+/// Returns 400 if the entity type does not support `$value`.
+pub(super) fn check_has_stream_or_400(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+) -> Result<(), axum::response::Response> {
+    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+    let has_stream = registry
+        .get_tenant(tenant)
+        .map(|tc| {
+            tc.csdl
+                .schemas
+                .iter()
+                .flat_map(|s| &s.entity_types)
+                .any(|et| et.name == entity_type && et.has_stream)
+        })
+        .unwrap_or(false);
+    if has_stream {
+        Ok(())
+    } else {
+        Err(crate::response::odata_error(
+            StatusCode::BAD_REQUEST,
+            "NotAMediaEntity",
+            &format!("Entity type '{entity_type}' does not support $value (HasStream=false)"),
+        )
+        .into_response())
+    }
 }

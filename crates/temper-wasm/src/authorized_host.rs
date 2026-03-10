@@ -116,6 +116,29 @@ impl WasmHost for AuthorizedWasmHost {
         }
     }
 
+    async fn http_call_binary(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<(u16, Vec<u8>), String> {
+        let domain = extract_domain(url);
+        match self
+            .gate
+            .authorize_http_call(domain, method, url, &self.ctx)
+        {
+            WasmAuthzDecision::Allow => {
+                self.inner
+                    .http_call_binary(method, url, headers, body)
+                    .await
+            }
+            WasmAuthzDecision::Deny(reason) => Err(format!(
+                "authorization denied for http_call_binary to {domain}: {reason}"
+            )),
+        }
+    }
+
     fn get_secret(&self, key: &str) -> Result<String, String> {
         match self.gate.authorize_secret_access(key, &self.ctx) {
             WasmAuthzDecision::Allow => self.inner.get_secret(key),

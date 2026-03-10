@@ -1,4 +1,4 @@
-//! OData JSON response formatting.
+//! OData response formatting (JSON, XML, and binary stream).
 
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -58,6 +58,41 @@ impl IntoResponse for ODataXmlResponse {
     }
 }
 
+/// An OData stream response for `$value` endpoints.
+///
+/// Returns raw bytes with appropriate Content-Type, Content-Length, and optional ETag headers.
+/// Used for binary content streams (file uploads/downloads via HasStream entities).
+pub struct ODataStreamResponse {
+    /// HTTP status code for the response.
+    pub status: StatusCode,
+    /// Raw binary body payload.
+    pub body: Vec<u8>,
+    /// MIME type for the Content-Type header.
+    pub content_type: String,
+    /// Optional ETag for cache validation (typically the content hash).
+    pub etag: Option<String>,
+}
+
+impl IntoResponse for ODataStreamResponse {
+    fn into_response(self) -> Response {
+        let mut response = Response::builder()
+            .status(self.status)
+            .header("Content-Type", self.content_type)
+            .header("Content-Length", self.body.len().to_string())
+            .header("OData-Version", "4.0")
+            .body(axum::body::Body::from(self.body))
+            .expect("valid response"); // ci-ok: static headers always valid
+        if let Some(etag) = self.etag {
+            response.headers_mut().insert(
+                "ETag",
+                HeaderValue::from_str(&format!("\"{etag}\""))
+                    .unwrap_or_else(|_| HeaderValue::from_static("\"unknown\"")),
+            );
+        }
+        response
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +148,43 @@ mod tests {
         let resp = odata_error(StatusCode::FORBIDDEN, "AuthzDenied", "not allowed");
         let response = resp.into_response();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn odata_stream_response_headers() {
+        let resp = ODataStreamResponse {
+            status: StatusCode::OK,
+            body: b"hello world".to_vec(),
+            content_type: "application/octet-stream".to_string(),
+            etag: Some("sha256:abc123".to_string()),
+        };
+        let response = resp.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("Content-Type").unwrap(),
+            "application/octet-stream"
+        );
+        assert_eq!(response.headers().get("Content-Length").unwrap(), "11");
+        assert_eq!(response.headers().get("OData-Version").unwrap(), "4.0");
+        assert!(response
+            .headers()
+            .get("ETag")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("sha256:abc123"));
+    }
+
+    #[test]
+    fn odata_stream_response_no_etag() {
+        let resp = ODataStreamResponse {
+            status: StatusCode::NO_CONTENT,
+            body: vec![],
+            content_type: "application/toml".to_string(),
+            etag: None,
+        };
+        let response = resp.into_response();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(response.headers().get("ETag").is_none());
     }
 }

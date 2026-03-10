@@ -53,6 +53,11 @@ pub enum ODataPath {
         parent: Box<ODataPath>,
         function: String,
     },
+
+    /// The `$value` media stream of an entity, e.g. `/Files('f-1')/$value`.
+    Value {
+        parent: Box<ODataPath>,
+    },
 }
 
 /// Represents an entity key value.
@@ -185,6 +190,13 @@ fn parse_entity_segment(segment: &str) -> Result<ODataPath, ODataError> {
 /// - A qualified bound function: `Namespace.Function()` (contains a dot, ends with `()`)
 /// - Another entity set access with key: `Items(123)`
 fn parse_continuation_segment(segment: &str, parent: ODataPath) -> Result<ODataPath, ODataError> {
+    // $value: media stream endpoint
+    if segment == "$value" {
+        return Ok(ODataPath::Value {
+            parent: Box::new(parent),
+        });
+    }
+
     // Check if this is a qualified name (contains dot) — bound operation
     if segment.contains('.') {
         // Bound function: ends with ()
@@ -547,6 +559,45 @@ mod tests {
     #[test]
     fn parse_unmatched_paren() {
         let result = parse_path("/Orders('abc-123'");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_value_on_entity() {
+        let result = parse_path("/Files('f-1')/$value").unwrap();
+        assert_eq!(
+            result,
+            ODataPath::Value {
+                parent: Box::new(ODataPath::Entity(
+                    "Files".into(),
+                    KeyValue::Single("f-1".into())
+                )),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_value_on_navigation_entity() {
+        let result = parse_path("/Directories('d-1')/Files('f-1')/$value").unwrap();
+        assert_eq!(
+            result,
+            ODataPath::Value {
+                parent: Box::new(ODataPath::NavigationEntity {
+                    parent: Box::new(ODataPath::Entity(
+                        "Directories".into(),
+                        KeyValue::Single("d-1".into())
+                    )),
+                    property: "Files".into(),
+                    key: KeyValue::Single("f-1".into()),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_bare_value_fails() {
+        // $value at root level is not valid
+        let result = parse_path("/$value");
         assert!(result.is_err());
     }
 }

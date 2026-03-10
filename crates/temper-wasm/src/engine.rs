@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use wasmtime::{Caller, Config, Engine, Linker, Module, Store};
 
 use crate::host_trait::WasmHost;
+use crate::stream::StreamRegistry;
 use crate::types::{
     MAX_MODULE_SIZE, WasmInvocationContext, WasmInvocationResult, WasmResourceLimits,
 };
@@ -59,6 +60,9 @@ struct HostState {
     /// Resource limits for this invocation (unused field kept for future memory limiting).
     #[allow(dead_code)]
     limits: WasmResourceLimits,
+    /// Stream registry for binary data transfer between host and WASM guest.
+    /// Bytes never enter WASM memory — WASM references them by stream ID.
+    streams: Arc<RwLock<StreamRegistry>>,
 }
 
 /// WASM engine: compile, cache, invoke modules.
@@ -148,6 +152,7 @@ impl WasmEngine {
         context: &WasmInvocationContext,
         host: Arc<dyn WasmHost>,
         limits: &WasmResourceLimits,
+        streams: Arc<RwLock<StreamRegistry>>,
     ) -> Result<WasmInvocationResult, WasmError> {
         let cached = {
             let cache = self.cache.read().expect("cache lock poisoned");
@@ -167,6 +172,7 @@ impl WasmEngine {
             result_json: None,
             host,
             limits: limits.clone(),
+            streams,
         };
         let mut store = Store::new(&self.engine, host_state);
         store
@@ -463,6 +469,266 @@ fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmError> 
             },
         )
         .map_err(|e| WasmError::Compilation(format!("failed to link host_http_call: {e}")))?;
+
+    // host_http_call_stream(method_ptr, method_len, url_ptr, url_len,
+    //                       headers_ptr, headers_len,
+    //                       body_stream_id_ptr, body_stream_id_len,
+    //                       response_stream_id_ptr, response_stream_id_len) -> i32
+    // Returns HTTP status code, or -1 on error.
+    // Bytes flow through StreamRegistry, never through WASM memory.
+    #[allow(clippy::too_many_arguments)]
+    linker
+        .func_wrap(
+            "env",
+            "host_http_call_stream",
+            |mut caller: Caller<'_, HostState>,
+             method_ptr: i32,
+             method_len: i32,
+             url_ptr: i32,
+             url_len: i32,
+             headers_ptr: i32,
+             headers_len: i32,
+             body_stream_id_ptr: i32,
+             body_stream_id_len: i32,
+             response_stream_id_ptr: i32,
+             response_stream_id_len: i32|
+             -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else {
+                    return -1;
+                };
+
+                // Read method
+                let mut method_buf = vec![0u8; method_len as usize];
+                let _ = memory.read(&caller, method_ptr as usize, &mut method_buf);
+                let method = String::from_utf8_lossy(&method_buf).to_string();
+
+                // Read URL
+                let mut url_buf = vec![0u8; url_len as usize];
+                let _ = memory.read(&caller, url_ptr as usize, &mut url_buf);
+                let url = String::from_utf8_lossy(&url_buf).to_string();
+
+                // Read headers (JSON array of [key, value] pairs)
+                let headers: Vec<(String, String)> = if headers_len > 0 {
+                    let mut hdr_buf = vec![0u8; headers_len as usize];
+                    let _ = memory.read(&caller, headers_ptr as usize, &mut hdr_buf);
+                    serde_json::from_slice(&hdr_buf).unwrap_or_default()
+                } else {
+                    vec![]
+                };
+
+                // Read body stream ID
+                let body_stream_id = if body_stream_id_len > 0 {
+                    let mut id_buf = vec![0u8; body_stream_id_len as usize];
+                    let _ = memory.read(&caller, body_stream_id_ptr as usize, &mut id_buf);
+                    String::from_utf8_lossy(&id_buf).to_string()
+                } else {
+                    String::new()
+                };
+
+                // Read response stream ID
+                let response_stream_id = if response_stream_id_len > 0 {
+                    let mut id_buf = vec![0u8; response_stream_id_len as usize];
+                    let _ = memory.read(&caller, response_stream_id_ptr as usize, &mut id_buf);
+                    String::from_utf8_lossy(&id_buf).to_string()
+                } else {
+                    String::new()
+                };
+
+                // Get request body from StreamRegistry (if stream ID provided)
+                let body_bytes = if !body_stream_id.is_empty() {
+                    let streams = caller.data().streams.read().expect("streams lock poisoned"); // ci-ok: infallible lock
+                    streams.get_stream(&body_stream_id).map(|b| b.to_vec()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                // Bridge async -> sync for HTTP call with binary body
+                let host = caller.data().host.clone();
+                let result = tokio::task::block_in_place(|| {
+                    // determinism-ok: blocking bridge for WASM host call
+                    tokio::runtime::Handle::current()
+                        .block_on(host.http_call_binary(&method, &url, &headers, &body_bytes))
+                });
+
+                match result {
+                    Ok((status, resp_bytes)) => {
+                        // Store response bytes in StreamRegistry (if stream ID provided)
+                        if !response_stream_id.is_empty() && !resp_bytes.is_empty() {
+                            let mut streams = caller.data().streams.write().expect("streams lock poisoned"); // ci-ok: infallible lock
+                            streams.store_stream(&response_stream_id, resp_bytes);
+                        }
+                        status as i32
+                    }
+                    Err(_) => -1,
+                }
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!("failed to link host_http_call_stream: {e}"))
+        })?;
+
+    // host_cache_contains(key_ptr, key_len) -> i32
+    // Returns 1 if cached, 0 if not.
+    linker
+        .func_wrap(
+            "env",
+            "host_cache_contains",
+            |mut caller: Caller<'_, HostState>, key_ptr: i32, key_len: i32| -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else {
+                    return 0;
+                };
+
+                let mut key_buf = vec![0u8; key_len as usize];
+                let _ = memory.read(&caller, key_ptr as usize, &mut key_buf);
+                let key = String::from_utf8_lossy(&key_buf);
+
+                let streams = caller.data().streams.read().expect("streams lock poisoned"); // ci-ok: infallible lock
+                if streams.cache_contains(&key) {
+                    1
+                } else {
+                    0
+                }
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!("failed to link host_cache_contains: {e}"))
+        })?;
+
+    // host_cache_to_stream(key_ptr, key_len, stream_id_ptr, stream_id_len) -> i32
+    // Copies cached bytes to a stream. Returns byte count on success, -1 if not cached.
+    linker
+        .func_wrap(
+            "env",
+            "host_cache_to_stream",
+            |mut caller: Caller<'_, HostState>,
+             key_ptr: i32,
+             key_len: i32,
+             stream_id_ptr: i32,
+             stream_id_len: i32|
+             -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else {
+                    return -1;
+                };
+
+                let mut key_buf = vec![0u8; key_len as usize];
+                let _ = memory.read(&caller, key_ptr as usize, &mut key_buf);
+                let key = String::from_utf8_lossy(&key_buf).to_string();
+
+                let mut id_buf = vec![0u8; stream_id_len as usize];
+                let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
+                let stream_id = String::from_utf8_lossy(&id_buf).to_string();
+
+                let mut streams = caller.data().streams.write().expect("streams lock poisoned"); // ci-ok: infallible lock
+                match streams.cache_to_stream(&key, &stream_id) {
+                    Some(byte_count) => byte_count as i32,
+                    None => -1,
+                }
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!("failed to link host_cache_to_stream: {e}"))
+        })?;
+
+    // host_cache_from_stream(key_ptr, key_len, stream_id_ptr, stream_id_len) -> i32
+    // Caches bytes from a stream. Returns 0 on success, -1 on error.
+    linker
+        .func_wrap(
+            "env",
+            "host_cache_from_stream",
+            |mut caller: Caller<'_, HostState>,
+             key_ptr: i32,
+             key_len: i32,
+             stream_id_ptr: i32,
+             stream_id_len: i32|
+             -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else {
+                    return -1;
+                };
+
+                let mut key_buf = vec![0u8; key_len as usize];
+                let _ = memory.read(&caller, key_ptr as usize, &mut key_buf);
+                let key = String::from_utf8_lossy(&key_buf).to_string();
+
+                let mut id_buf = vec![0u8; stream_id_len as usize];
+                let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
+                let stream_id = String::from_utf8_lossy(&id_buf).to_string();
+
+                let mut streams = caller.data().streams.write().expect("streams lock poisoned"); // ci-ok: infallible lock
+                // Read bytes from stream without consuming it
+                let bytes = match streams.get_stream(&stream_id) {
+                    Some(b) => b.to_vec(),
+                    None => return -1,
+                };
+                streams.cache_put(&key, bytes);
+                0
+            },
+        )
+        .map_err(|e| {
+            WasmError::Compilation(format!("failed to link host_cache_from_stream: {e}"))
+        })?;
+
+    // host_hash_stream(stream_id_ptr, stream_id_len,
+    //                  algorithm_ptr, algorithm_len,
+    //                  result_buf_ptr, result_buf_len) -> i32
+    // Computes hash of stream bytes. Returns bytes written to result_buf, or -1 on error.
+    // Algorithm chosen by WASM (hot-reloadable): "sha256", "blake3", etc.
+    linker
+        .func_wrap(
+            "env",
+            "host_hash_stream",
+            |mut caller: Caller<'_, HostState>,
+             stream_id_ptr: i32,
+             stream_id_len: i32,
+             algorithm_ptr: i32,
+             algorithm_len: i32,
+             result_buf_ptr: i32,
+             result_buf_len: i32|
+             -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else {
+                    return -1;
+                };
+
+                // Read stream ID
+                let mut id_buf = vec![0u8; stream_id_len as usize];
+                let _ = memory.read(&caller, stream_id_ptr as usize, &mut id_buf);
+                let stream_id = String::from_utf8_lossy(&id_buf).to_string();
+
+                // Read algorithm
+                let mut algo_buf = vec![0u8; algorithm_len as usize];
+                let _ = memory.read(&caller, algorithm_ptr as usize, &mut algo_buf);
+                let algorithm = String::from_utf8_lossy(&algo_buf).to_string();
+
+                // Hash stream bytes in-place (no clone)
+                let streams = caller.data().streams.read().expect("streams lock poisoned"); // ci-ok: infallible lock
+                let Some(bytes) = streams.get_stream(&stream_id) else {
+                    return -1;
+                };
+
+                let hex_hash = match algorithm.as_str() {
+                    "sha256" => {
+                        let mut hasher = Sha256::new();
+                        hasher.update(bytes);
+                        format!("sha256:{:x}", hasher.finalize())
+                    }
+                    _ => return -1,
+                };
+                drop(streams);
+
+                // Write hex hash to result buffer
+                let hash_bytes = hex_hash.as_bytes();
+                if hash_bytes.len() > result_buf_len as usize {
+                    return -1; // buffer too small
+                }
+                let _ = memory.write(&mut caller, result_buf_ptr as usize, hash_bytes);
+                hash_bytes.len() as i32
+            },
+        )
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_hash_stream: {e}")))?;
 
     Ok(())
 }

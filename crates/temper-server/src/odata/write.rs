@@ -1,5 +1,7 @@
 //! OData write handlers (`POST`, `PATCH`, `PUT`, `DELETE`).
 
+use std::sync::{Arc, RwLock};
+
 use axum::extract::Query;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -7,12 +9,14 @@ use axum::response::IntoResponse;
 use temper_odata::path::{ODataPath, parse_path};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
+use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
 
 use super::bindings::dispatch_bound_action;
 use super::common::{
-    constraint_violation_response, extract_key, extract_tenant, load_entity_or_404,
-    resolve_entity_type, run_write_prechecks, verification_gate_response,
+    check_has_stream_or_400, constraint_violation_response, extract_key, extract_tenant,
+    load_entity_or_404, resolve_entity_type, resolve_value_parent, run_write_prechecks,
+    verification_gate_response,
 };
 use super::constraints::pre_delete_relation_checks;
 use super::response::annotate_entity;
@@ -453,10 +457,16 @@ pub async fn handle_odata_put(
                     .into_response(),
             }
         }
+        ODataPath::Value { parent } => {
+            let agent_ctx = extract_agent_context(&headers);
+            handle_stream_put(&state, &tenant, &parent, &headers, body, &agent_ctx)
+                .await
+                .into_response()
+        }
         _ => odata_error(
             StatusCode::METHOD_NOT_ALLOWED,
             "MethodNotAllowed",
-            "PUT only supported on entity instances",
+            "PUT only supported on entity instances or $value",
         )
         .into_response(),
     }
@@ -540,5 +550,155 @@ pub async fn handle_odata_delete(
             "DELETE only supported on entity instances",
         )
         .into_response(),
+    }
+}
+
+/// Handle PUT on `$value` — upload binary content via WASM blob_adapter.
+///
+/// Flow:
+/// 1. Resolve parent entity from ODataPath
+/// 2. Verify entity type has `HasStream=true` in CSDL
+/// 3. Register upload bytes in StreamRegistry
+/// 4. Invoke WASM blob_adapter (handles auth, hashing, caching, upload)
+/// 5. Dispatch whatever action WASM returns (e.g. StreamUpdated)
+/// 6. Return 204 No Content with ETag
+#[instrument(skip_all, fields(otel.name = "PUT $value"))]
+async fn handle_stream_put(
+    state: &ServerState,
+    tenant: &TenantId,
+    parent: &ODataPath,
+    headers: &HeaderMap,
+    body: axum::body::Bytes,
+    agent_ctx: &AgentContext,
+) -> axum::response::Response {
+    // 1. Resolve parent to (set_name, entity_id)
+    let (set_name, key) = match resolve_value_parent(parent) {
+        Ok(pair) => pair,
+        Err(resp) => return resp,
+    };
+
+    let entity_type = match resolve_entity_type_or_404(state, tenant, &set_name) {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
+
+    // 2. Check HasStream=true on the entity type via CSDL
+    if let Err(resp) = check_has_stream_or_400(state, tenant, &entity_type) {
+        return resp;
+    }
+
+    if let Err(resp) = check_verification_gate_or_423(state, tenant, &entity_type) {
+        return *resp;
+    }
+
+    // 3. Get entity state (needed by WASM for content_hash, etc.)
+    let entity_state = match state
+        .get_tenant_entity_state(tenant, &entity_type, &key)
+        .await
+    {
+        Ok(resp) => serde_json::to_value(&resp.state).unwrap_or_default(),
+        Err(e) => {
+            return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "StateError", &e)
+                .into_response();
+        }
+    };
+
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let size_bytes = body.len() as i64;
+
+    // 4. Register bytes in StreamRegistry
+    let stream_id = format!("upload-{}", temper_runtime::scheduler::sim_uuid());
+    let streams = Arc::new(RwLock::new(StreamRegistry::default()));
+    {
+        let mut s = streams.write().unwrap(); // ci-ok: infallible lock
+        s.register_stream(&stream_id, body.to_vec());
+    }
+
+    // 5. Invoke WASM blob_adapter
+    let inv_ctx = WasmInvocationContext {
+        tenant: tenant.to_string(),
+        entity_type: entity_type.clone(),
+        entity_id: key.clone(),
+        trigger_action: "StreamUpload".to_string(),
+        trigger_params: serde_json::json!({
+            "stream_id": stream_id,
+            "size_bytes": size_bytes,
+            "content_type": content_type,
+            "operation": "put",
+        }),
+        entity_state,
+        agent_id: agent_ctx.agent_id.clone(),
+        session_id: agent_ctx.session_id.clone(),
+        integration_config: std::collections::BTreeMap::new(),
+    };
+
+    let wasm_result = match state
+        .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "WASM blob_adapter invocation failed");
+            return odata_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "BlobAdapterError",
+                &format!("Blob adapter failed: {e}"),
+            )
+            .into_response();
+        }
+    };
+
+    if !wasm_result.success {
+        let error_msg = wasm_result
+            .error
+            .unwrap_or_else(|| "unknown error".to_string());
+        return odata_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "BlobUploadFailed",
+            &error_msg,
+        )
+        .into_response();
+    }
+
+    // 6. Dispatch whatever action WASM returned (e.g. "StreamUpdated")
+    if !wasm_result.callback_action.is_empty() {
+        match state
+            .dispatch_tenant_action(
+                tenant,
+                &entity_type,
+                &key,
+                &wasm_result.callback_action,
+                wasm_result.callback_params,
+                agent_ctx,
+            )
+            .await
+        {
+            Ok(entity_resp) => {
+                let mut response = StatusCode::NO_CONTENT.into_response();
+                response.headers_mut().insert(
+                    "OData-Version",
+                    "4.0".parse().unwrap(), // ci-ok: static header value
+                );
+                // Set ETag from entity's content_hash after action dispatch
+                let state_val =
+                    serde_json::to_value(&entity_resp.state).unwrap_or_default();
+                if let Some(hash) = state_val.get("content_hash").and_then(|v| v.as_str()) {
+                    if let Ok(val) = format!("\"{hash}\"").parse() {
+                        response.headers_mut().insert("ETag", val);
+                    }
+                }
+                response
+            }
+            Err(e) => {
+                // Action dispatch failed (e.g., locked file rejects StreamUpdated)
+                odata_error(StatusCode::CONFLICT, "ActionRejected", &e).into_response()
+            }
+        }
+    } else {
+        StatusCode::NO_CONTENT.into_response()
     }
 }
