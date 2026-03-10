@@ -14,5 +14,5 @@ pub use engine::{AuthzDecision, AuthzEngine};
 pub use error::{AuthzDenial, AuthzError};
 pub use policy_gen::{
     ActionScope, DurationScope, PolicyScopeMatrix, PrincipalScope, ResourceScope,
-    generate_cedar_from_matrix,
+    generate_cedar_from_matrix, validate_policy_scope_matrix,
 };

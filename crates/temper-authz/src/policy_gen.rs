@@ -98,6 +98,43 @@ impl PolicyScopeMatrix {
     }
 }
 
+/// Validate that a scope matrix is internally consistent.
+///
+/// Returns an error if required companion fields are missing or empty:
+/// - `principal = AgentsOfType` requires non-empty `agent_type_value`
+/// - `principal = AgentsWithRole` requires non-empty `role_value`
+/// - `duration = Session` requires non-empty `session_id`
+pub fn validate_policy_scope_matrix(matrix: &PolicyScopeMatrix) -> Result<(), String> {
+    if matrix.principal == PrincipalScope::AgentsOfType {
+        let Some(agent_type) = matrix.agent_type_value.as_deref() else {
+            return Err("principal=agents_of_type requires agent_type_value".to_string());
+        };
+        if agent_type.trim().is_empty() {
+            return Err("principal=agents_of_type requires non-empty agent_type_value".to_string());
+        }
+    }
+
+    if matrix.principal == PrincipalScope::AgentsWithRole {
+        let Some(role) = matrix.role_value.as_deref() else {
+            return Err("principal=agents_with_role requires role_value".to_string());
+        };
+        if role.trim().is_empty() {
+            return Err("principal=agents_with_role requires non-empty role_value".to_string());
+        }
+    }
+
+    if matrix.duration == DurationScope::Session {
+        let Some(session_id) = matrix.session_id.as_deref() else {
+            return Err("duration=session requires session_id".to_string());
+        };
+        if session_id.trim().is_empty() {
+            return Err("duration=session requires non-empty session_id".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 /// Generate a Cedar permit statement from a scope matrix.
 ///
 /// Each matrix dimension maps to a specific Cedar clause:
@@ -321,5 +358,47 @@ mod tests {
         assert_eq!(m.resource, ResourceScope::AnyOfType);
         assert_eq!(m.duration, DurationScope::Always);
         assert_eq!(m.agent_type_value, Some("claude-code".to_string()));
+    }
+
+    #[test]
+    fn validate_matrix_requires_agent_type_for_agents_of_type() {
+        let m = PolicyScopeMatrix {
+            principal: PrincipalScope::AgentsOfType,
+            action: ActionScope::ThisAction,
+            resource: ResourceScope::AnyOfType,
+            duration: DurationScope::Always,
+            agent_type_value: None,
+            role_value: None,
+            session_id: None,
+        };
+        assert!(validate_policy_scope_matrix(&m).is_err());
+    }
+
+    #[test]
+    fn validate_matrix_requires_role_for_agents_with_role() {
+        let m = PolicyScopeMatrix {
+            principal: PrincipalScope::AgentsWithRole,
+            action: ActionScope::ThisAction,
+            resource: ResourceScope::AnyOfType,
+            duration: DurationScope::Always,
+            agent_type_value: None,
+            role_value: None,
+            session_id: None,
+        };
+        assert!(validate_policy_scope_matrix(&m).is_err());
+    }
+
+    #[test]
+    fn validate_matrix_requires_session_for_session_duration() {
+        let m = PolicyScopeMatrix {
+            principal: PrincipalScope::ThisAgent,
+            action: ActionScope::ThisAction,
+            resource: ResourceScope::AnyOfType,
+            duration: DurationScope::Session,
+            agent_type_value: None,
+            role_value: None,
+            session_id: None,
+        };
+        assert!(validate_policy_scope_matrix(&m).is_err());
     }
 }

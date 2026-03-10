@@ -11,8 +11,8 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       return token;
     },
     session({ session, token }) {
-      if (token.githubUsername) {
-        (session as any).githubUsername = token.githubUsername;
+      if (typeof token.githubUsername === "string") {
+        session.githubUsername = token.githubUsername;
       }
       return session;
     },

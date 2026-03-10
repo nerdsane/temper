@@ -15,10 +15,16 @@ export default auth((req) => {
   }
 
   // For authenticated requests proxied to the Temper API, inject identity headers.
-  const username = (req.auth as any).githubUsername || req.auth.user?.name || "unknown";
+  const username = (req.auth.githubUsername || req.auth.user?.name || "unknown").trim() || "unknown";
+  const adminAllowlist = (process.env.TEMPER_ADMIN_GITHUB_USERS || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
+  const principalKind = adminAllowlist.includes(username.toLowerCase()) ? "admin" : "customer";
+
   const requestHeaders = new Headers(req.headers);
   requestHeaders.set("X-Temper-Principal-Id", `github:${username}`);
-  requestHeaders.set("X-Temper-Principal-Kind", "admin");
+  requestHeaders.set("X-Temper-Principal-Kind", principalKind);
 
   // Inject Bearer token for API authentication when configured.
   const apiKey = process.env.TEMPER_API_KEY;

@@ -76,6 +76,13 @@ pub(crate) async fn handle_approve_decision(
     }
 
     let scope = body.scope;
+    if let Err(e) = temper_authz::validate_policy_scope_matrix(&scope) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid policy scope matrix: {e}"),
+        )
+            .into_response();
+    }
 
     // Read decision from Turso (single source of truth).
     let mut decision: PendingDecision = {

@@ -167,8 +167,9 @@ fn handle_generate_cedar_policy(
     // Parse scope_matrix from params, or build a default matrix based on the legacy scope string.
     let matrix: temper_authz::PolicyScopeMatrix =
         if let Some(matrix_val) = params.get("scope_matrix") {
-            serde_json::from_value(matrix_val.clone())
-                .unwrap_or_else(|_| temper_authz::PolicyScopeMatrix::default_for(None))
+            serde_json::from_value(matrix_val.clone()).map_err(|e| {
+                format!("GenerateCedarPolicy: invalid scope_matrix for entity '{entity_id}': {e}")
+            })?
         } else {
             match scope {
                 "narrow" => temper_authz::PolicyScopeMatrix {
@@ -192,6 +193,9 @@ fn handle_generate_cedar_policy(
                 _ => temper_authz::PolicyScopeMatrix::default_for(None),
             }
         };
+    temper_authz::validate_policy_scope_matrix(&matrix).map_err(|e| {
+        format!("GenerateCedarPolicy: invalid scope_matrix for entity '{entity_id}': {e}")
+    })?;
     let generated_policy = temper_authz::generate_cedar_from_matrix(
         agent_id,
         action_name,

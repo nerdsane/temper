@@ -98,14 +98,14 @@ pub async fn tenant_access_check(
                 Err(StatusCode::FORBIDDEN)
             }
         }
-        Err(_) => {
-            // DB error — fail open for availability (log it).
-            tracing::warn!(
+        Err(e) => {
+            tracing::error!(
                 principal = %principal_id,
                 tenant = %tenant_id,
-                "failed to check tenant access, allowing request"
+                error = %e,
+                "failed to check tenant access"
             );
-            Ok(next.run(req).await)
+            Err(StatusCode::SERVICE_UNAVAILABLE)
         }
     }
 }
