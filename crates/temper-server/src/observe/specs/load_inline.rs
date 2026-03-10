@@ -259,32 +259,31 @@ pub(crate) async fn handle_load_inline(
     };
     let result = handle_load_dir(State(state.clone()), Json(dir_request)).await;
 
-    if result.is_ok() {
-        if let Some(ref cedar_text) = cedar_policies {
-            if !cedar_text.trim().is_empty() {
-                if let Err(e) = cedar_text.parse::<cedar_policy::PolicySet>() {
-                    tracing::warn!(error = %e, "bundled Cedar policies failed to parse, skipping");
-                } else {
-                    let Ok(mut policies) = state.tenant_policies.write() else {
-                        tracing::error!("tenant_policies lock poisoned, skipping Cedar merge");
-                        return result;
-                    };
-                    let entry = policies.entry(tenant.clone()).or_default();
-                    if !entry.is_empty() {
-                        entry.push('\n');
-                    }
-                    entry.push_str(cedar_text);
-                    let mut combined = String::new();
-                    for text in policies.values() {
-                        combined.push_str(text);
-                        combined.push('\n');
-                    }
-                    if let Err(e) = state.authz.reload_policies(&combined) {
-                        tracing::error!(error = %e, "failed to reload policies with bundled Cedar");
-                    } else {
-                        tracing::info!(tenant = %tenant, "bundled Cedar policies loaded successfully");
-                    }
-                }
+    if result.is_ok()
+        && let Some(ref cedar_text) = cedar_policies
+        && !cedar_text.trim().is_empty()
+    {
+        if let Err(e) = cedar_text.parse::<cedar_policy::PolicySet>() {
+            tracing::warn!(error = %e, "bundled Cedar policies failed to parse, skipping");
+        } else {
+            let Ok(mut policies) = state.tenant_policies.write() else {
+                tracing::error!("tenant_policies lock poisoned, skipping Cedar merge");
+                return result;
+            };
+            let entry = policies.entry(tenant.clone()).or_default();
+            if !entry.is_empty() {
+                entry.push('\n');
+            }
+            entry.push_str(cedar_text);
+            let mut combined = String::new();
+            for text in policies.values() {
+                combined.push_str(text);
+                combined.push('\n');
+            }
+            if let Err(e) = state.authz.reload_policies(&combined) {
+                tracing::error!(error = %e, "failed to reload policies with bundled Cedar");
+            } else {
+                tracing::info!(tenant = %tenant, "bundled Cedar policies loaded successfully");
             }
         }
     }
