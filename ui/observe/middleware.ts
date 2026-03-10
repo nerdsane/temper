@@ -7,15 +7,20 @@ export default auth((req) => {
     return NextResponse.next();
   }
 
-  // If not authenticated, redirect to sign-in.
-  if (!req.auth) {
+  // Dev mode bypass: skip OAuth when no GitHub provider is configured.
+  const devBypass = !process.env.AUTH_GITHUB_ID;
+
+  // If not authenticated and not in dev bypass, redirect to sign-in.
+  if (!req.auth && !devBypass) {
     const signInUrl = new URL("/api/auth/signin", req.url);
     signInUrl.searchParams.set("callbackUrl", req.url);
     return NextResponse.redirect(signInUrl);
   }
 
   // For authenticated requests proxied to the Temper API, inject identity headers.
-  const username = (req.auth.githubUsername || req.auth.user?.name || "unknown").trim() || "unknown";
+  const username = devBypass
+    ? (process.env.TEMPER_ADMIN_GITHUB_USERS || "dev-user").split(",")[0].trim()
+    : (req.auth?.githubUsername || req.auth?.user?.name || "unknown").trim() || "unknown";
   const adminAllowlist = (process.env.TEMPER_ADMIN_GITHUB_USERS || "")
     .split(",")
     .map((value) => value.trim().toLowerCase())
@@ -47,6 +52,7 @@ export const config = {
     "/evolution/:path*",
     "/feature-requests/:path*",
     "/integrations/:path*",
+    "/os-apps/:path*",
     "/specs/:path*",
     "/verify/:path*",
     "/workflows/:path*",
