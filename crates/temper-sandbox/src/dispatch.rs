@@ -1,13 +1,6 @@
 //! Unified `temper.*` method dispatch.
 //!
-//! Contains all temper methods except `start_server` (MCP-only, spawns child
-//! process) and `show_spec` (MCP-only, reads local spec data).
-//!
-//! Dispatch is split by domain:
-//! - Entity CRUD: `list`, `get`, `create`, `action`, `patch`, `navigate`
-//! - Governance: `get_decisions`, `get_decision_status`, `poll_decision`
-//! - WASM: `upload_wasm`, `compile_wasm`
-//! - Evolution/Observe: `get_trajectories`, `get_insights`, `get_evolution_records`, `check_sentinel`
+//! Contains all `temper.*` methods dispatched via HTTP to a running Temper server.
 
 use monty::MontyObject;
 use reqwest::Method;
@@ -78,6 +71,34 @@ pub async fn dispatch_temper_method(
         "get_trajectories" | "get_insights" | "get_evolution_records" | "check_sentinel" => {
             dispatch_evolution(ctx, method, args).await
         }
+        // --- Discovery ---
+        "specs" => {
+            temper_request(
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
+                Method::GET,
+                "/observe/specs",
+                None,
+            )
+            .await
+        }
+        "spec_detail" => {
+            let entity_type = expect_string_arg(args, 0, "entity_type", method)?;
+            temper_request(
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
+                Method::GET,
+                &format!("/observe/specs/{entity_type}"),
+                None,
+            )
+            .await
+        }
         // --- Blocked methods ---
         "approve_decision" | "deny_decision" | "set_policy" => Err(format!(
             "temper.{method}() is not available to agents. \
@@ -90,7 +111,8 @@ pub async fn dispatch_temper_method(
              submit_specs, get_policies, \
              upload_wasm, compile_wasm, \
              get_decisions, get_decision_status, poll_decision, \
-             get_trajectories, get_insights, get_evolution_records, check_sentinel"
+             get_trajectories, get_insights, get_evolution_records, check_sentinel, \
+             specs, spec_detail"
         )),
     }
 }

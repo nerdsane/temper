@@ -31,7 +31,7 @@ An agent describes what it needs as declarative specs — state machines, data m
 
 ```python
 # Agent gives itself long-term memory — Temper verifies and deploys it
-await temper.submit_specs("my-harness", {
+await temper.submit_specs("my-app", {
     "Knowledge.ioa.toml": knowledge_spec,   # state machine: agent-generated
     "model.csdl.xml": data_model            # data model: agent-generated
 })
@@ -39,11 +39,11 @@ await temper.submit_specs("my-harness", {
 # → If all levels pass, the knowledge system is live
 
 # Agent stores and retrieves its own knowledge through the verified API
-await temper.create("my-harness", "Knowledge", {
+await temper.create("my-app", "KnowledgeEntries", {
     "content": "service X fails under concurrent writes — use advisory locks",
     "source": "incident-247"
 })
-await temper.action("my-harness", "Knowledge", "k-42", "Link", {
+await temper.action("my-app", "KnowledgeEntries", "k-42", "Link", {
     "related": ["k-12", "k-31"]   # connect insights across sessions
 })
 # → Cedar checks every operation — the agent can read its own entries
@@ -113,14 +113,14 @@ It's an exploration of what happens when you put formal verification, Cedar auth
 
 ### For agents (via MCP)
 
-Temper exposes two MCP tools: `search` (read-only queries) and `execute` (state-changing operations). An agent connects to Temper as an MCP server and interacts through a Python REPL sandbox.
+Temper exposes a single MCP tool — `execute` — which runs Python in a sandboxed REPL against a running Temper server. The agent discovers specs, creates entities, invokes actions, and manages governance all through the `temper.*` API.
 
 ```python
-# 1. Start a Temper server
-await temper.start_server("my-harness", port=4001)
+# 1. Discover what's deployed
+specs = await temper.specs("my-app")
 
 # 2. Submit specs — the agent describes what it needs
-await temper.submit_specs("my-harness", {
+await temper.submit_specs("my-app", {
     "Task.ioa.toml": task_spec,       # state machine
     "model.csdl.xml": data_model      # entity schema
 })
@@ -128,41 +128,40 @@ await temper.submit_specs("my-harness", {
 # → If it passes, the API is live
 
 # 3. Create entities and take actions
-task = await temper.create("my-harness", "Task", {
+task = await temper.create("my-app", "Tasks", {
     "title": "Review PR #42",
     "assignee": "agent-codereview"
 })
-await temper.action("my-harness", "Task", task["id"], "Start", {})
+await temper.action("my-app", "Tasks", task["id"], "Start", {})
 
 # 4. Query through OData
-open_tasks = await temper.query(
-    "my-harness", "Task", "$filter=status eq 'InProgress'"
+open_tasks = await temper.list(
+    "my-app", "Tasks", "status eq 'InProgress'"
 )
 ```
 
 ### For humans
 
-Give your agent the Temper MCP server. Add to your project's `.mcp.json`:
+Start a Temper server, then give your agent the MCP client. Add to your project's `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "temper": {
       "command": "temper",
-      "args": ["mcp"]
+      "args": ["mcp", "--port", "3000"]
     }
   }
 }
 ```
 
-This gives the agent two tools: `search` (read-only queries) and `execute` (state-changing operations). The agent interacts through a sandboxed Python REPL with the `temper.*` API.
-
-You can also connect to an existing server or pre-load apps:
+This gives the agent the `execute` tool — a sandboxed Python REPL with the `temper.*` API. The MCP server is a thin client that connects to a running Temper server.
 
 ```bash
-temper mcp                                    # self-contained mode
-temper mcp --port 4001                        # connect to existing server
-temper mcp --app myapp=specs/ --agent-id bot  # load apps, set identity
+temper serve --port 3000                        # start the server
+temper mcp --port 3000                          # connect to local server
+temper mcp --url https://temper.railway.app     # connect to remote server
+temper mcp --port 3000 --agent-id bot           # set agent identity
 ```
 
 Once agents are running, you manage them through the **Observe dashboard** (Next.js UI) or the CLI:
@@ -172,7 +171,7 @@ Once agents are running, you manage them through the **Observe dashboard** (Next
 - **Evolution page**: Spec proposals from the evolution engine. Approve to deploy, deny to discard.
 
 ```bash
-temper serve --port 4001             # start the server
+temper serve --port 3000             # start the server
 temper decide --list                 # see pending decisions
 temper decide --approve <id> medium  # approve with medium scope
 ```
@@ -183,11 +182,11 @@ temper decide --approve <id> medium  # approve with medium scope
 ┌────────────────────────────────────────────────────────┐
 │  Agent (Claude Code, Cursor, LangChain, CrewAI, etc.)  │
 └───────────────────────┬────────────────────────────────┘
-                        │  MCP (search + execute)
+                        │  MCP (execute)
                         ▼
 ┌────────────────────────────────────────────────────────┐
 │  Monty Sandbox (Python REPL)                           │
-│  temper.start_server() · submit_specs() · action()     │
+│  temper.submit_specs() · create() · action() · list()  │
 └───────────────────────┬────────────────────────────────┘
                         │
                         ▼
@@ -320,7 +319,7 @@ Temper is being built bottom-up. Each layer enables the next.
 | Cedar authorization (default-deny, per-action policies, agent identity) | **Done** |
 | OTEL observability (wide events, dual projection to metrics + spans) | **Done** |
 | Postgres and Turso/libSQL persistence backends (multi-tenant) | **Done** |
-| MCP integration — Monty sandbox with `search` and `execute` tools | **Done** |
+| MCP integration — Monty sandbox with `execute` tool (thin client to running server) | **Done** |
 | WASM sandboxed integrations (resource budgets, Cedar-gated) | **Done** |
 | Evolution Engine — O-P-A-D-I record chain, unmet intent capture, approval gate | **Done** |
 | JIT transition tables with hot-swap (live spec updates, zero downtime) | **Done** |
@@ -416,7 +415,7 @@ States, transitions, guards, invariants, and WASM integrations — all in one de
 | **temper-observe** | OTEL spans + metrics, trajectory tracking |
 | **temper-evolution** | O-P-A-D-I record chain, Evolution Engine |
 | **temper-wasm** | WASM sandboxed integrations with per-call resource budgets |
-| **temper-mcp** | MCP server, Monty sandbox (search + execute) |
+| **temper-mcp** | MCP server, Monty sandbox (execute tool, thin client) |
 | **temper-platform** | Hosting platform, verify-deploy pipeline, system OData API |
 | **temper-optimize** | Query + cache optimizer, N+1 detection, safety checker |
 | **temper-store-postgres** | Postgres event journal + snapshots (multi-tenant) |

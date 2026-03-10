@@ -85,7 +85,7 @@ enum Commands {
     },
     /// Start the stdio MCP server for Code Mode
     Mcp {
-        /// Port where Temper HTTP server is running (omit for self-contained mode).
+        /// Port where Temper HTTP server is running.
         /// Mutually exclusive with --url.
         #[arg(short, long, conflicts_with = "url")]
         port: Option<u16>,
@@ -93,9 +93,6 @@ enum Commands {
         /// Mutually exclusive with --port.
         #[arg(long, conflicts_with = "port")]
         url: Option<String>,
-        /// Load an app: --app name=specs-dir (repeatable)
-        #[arg(long)]
-        app: Vec<String>,
         /// Agent identity for Cedar authorization and trajectory logging (default: "mcp-agent")
         #[arg(long)]
         agent_id: Option<String>,
@@ -147,19 +144,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Mcp {
             port,
             url,
-            app,
             agent_id,
-        } => {
-            let mut apps: Vec<(String, String)> = Vec::new();
-            for entry in &app {
-                if let Some((name, path)) = entry.split_once('=') {
-                    apps.push((name.to_string(), path.to_string()));
-                } else {
-                    anyhow::bail!("Invalid --app format: '{entry}'. Expected name=specs-dir");
-                }
-            }
-            mcp::run(port, url, apps, agent_id).await?
-        }
+        } => mcp::run(port, url, agent_id).await?,
     }
 
     Ok(())
@@ -339,25 +325,16 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_parse_mcp_with_port_and_apps() {
-        let cli = Cli::parse_from([
-            "temper",
-            "mcp",
-            "--port",
-            "3001",
-            "--app",
-            "haku-ops=apps/haku-ops/specs",
-        ]);
+    fn test_cli_parse_mcp_with_port() {
+        let cli = Cli::parse_from(["temper", "mcp", "--port", "3001"]);
         match cli.command {
             Commands::Mcp {
                 port,
                 url,
-                app,
                 agent_id,
             } => {
                 assert_eq!(port, Some(3001));
                 assert_eq!(url, None);
-                assert_eq!(app, vec!["haku-ops=apps/haku-ops/specs"]);
                 assert_eq!(agent_id, None);
             }
             _ => panic!("expected Mcp command"),
@@ -366,26 +343,15 @@ mod tests {
 
     #[test]
     fn test_cli_parse_mcp_with_agent_id() {
-        let cli = Cli::parse_from([
-            "temper",
-            "mcp",
-            "--port",
-            "3001",
-            "--agent-id",
-            "haku",
-            "--app",
-            "haku-ops=apps/haku-ops/specs",
-        ]);
+        let cli = Cli::parse_from(["temper", "mcp", "--port", "3001", "--agent-id", "haku"]);
         match cli.command {
             Commands::Mcp {
                 port,
                 url,
-                app,
                 agent_id,
             } => {
                 assert_eq!(port, Some(3001));
                 assert_eq!(url, None);
-                assert_eq!(app, vec!["haku-ops=apps/haku-ops/specs"]);
                 assert_eq!(agent_id, Some("haku".to_string()));
             }
             _ => panic!("expected Mcp command"),
@@ -394,24 +360,15 @@ mod tests {
 
     #[test]
     fn test_cli_parse_mcp_with_url() {
-        let cli = Cli::parse_from([
-            "temper",
-            "mcp",
-            "--url",
-            "https://temper.railway.app",
-            "--app",
-            "demo=specs/demo",
-        ]);
+        let cli = Cli::parse_from(["temper", "mcp", "--url", "https://temper.railway.app"]);
         match cli.command {
             Commands::Mcp {
                 port,
                 url,
-                app,
                 agent_id,
             } => {
                 assert_eq!(port, None);
                 assert_eq!(url, Some("https://temper.railway.app".to_string()));
-                assert_eq!(app, vec!["demo=specs/demo"]);
                 assert_eq!(agent_id, None);
             }
             _ => panic!("expected Mcp command"),

@@ -184,11 +184,8 @@ class McpStdioBridge {
     if (config.agentId) {
       args.push("--agent-id", config.agentId);
     }
-    for (const [appName, appConfig] of Object.entries(config.apps)) {
-      if (appConfig.specsDir) {
-        args.push("--app", `${appName}=${appConfig.specsDir}`);
-      }
-    }
+    // Note: --app flag is on `temper serve`, not `temper mcp`.
+    // The MCP server is a thin client that connects to a running server.
     this.args = args;
   }
 
@@ -442,24 +439,25 @@ class McpStdioBridge {
 const createSearchTool = (bridge: McpStdioBridge) => ({
   name: "temper_search",
   description: [
-    "Inspect loaded Temper IOA specs. Takes a `code` string — Python executed in a sandbox.",
+    "Discover loaded Temper specs and inspect entity types. Takes a `code` string — Python executed in a sandbox.",
+    "",
+    "This is a convenience wrapper that routes to the `execute` tool for read-only discovery operations.",
     "",
     "Available API:",
-    "  await spec.tenants()                          → list loaded tenants",
-    "  await spec.entity_types(tenant)               → entity types for a tenant",
-    "  await spec.get_spec(tenant, entity_type)       → full IOA spec as dict",
-    "  await spec.states(tenant, entity_type)          → list of states",
-    "  await spec.actions(tenant, entity_type)         → list of actions",
-    "  await spec.invariants(tenant, entity_type)      → list of invariants",
+    "  await temper.specs(tenant)                          → loaded specs with states, actions, verification status",
+    "  await temper.spec_detail(tenant, entity_type)       → full spec: actions, guards, invariants, state vars",
+    "  await temper.get_agent_id(tenant)                   → current agent principal ID",
+    "  await temper.list(tenant, entity_set)               → list entities (read-only query)",
+    "  await temper.get(tenant, entity_set, entity_id)     → get single entity",
     "",
-    "Example: return await spec.tenants()",
+    "Example: return await temper.specs('default')",
   ].join("\n"),
   parameters: {
     type: "object",
     properties: {
       code: {
         type: "string",
-        description: "Python code to execute in the Temper spec sandbox",
+        description: "Python code to execute in the Temper sandbox (discovery/read-only operations)",
       },
     },
     required: ["code"],
@@ -469,7 +467,8 @@ const createSearchTool = (bridge: McpStdioBridge) => ({
     if (!code.trim()) {
       return errorResult("code parameter is required");
     }
-    return bridge.callTool("search", code);
+    // The MCP server only exposes `execute` — route all calls through it.
+    return bridge.callTool("execute", code);
   },
 });
 
@@ -478,20 +477,38 @@ const createExecuteTool = (bridge: McpStdioBridge) => ({
   description: [
     "Execute governed operations against a running Temper server. Takes a `code` string — Python executed in a sandbox.",
     "",
-    "Available API:",
-    "  await temper.start_server(**kwargs)             → start Temper runtime",
-    "  await temper.load_specs(tenant, specs_dir)      → load IOA specs from directory",
-    "  await temper.list(tenant, entity_type)           → list entities",
-    "  await temper.get(tenant, entity_type, id)        → get entity by ID",
-    "  await temper.create(tenant, entity_type, body)   → create entity",
-    "  await temper.action(tenant, entity_type, id, action, body=None) → fire action",
-    "  await temper.patch(tenant, entity_type, id, body) → update entity fields",
-    "  await temper.get_decisions(tenant)                → list governance decisions",
-    "  await temper.poll_decision(tenant, decision_id, timeout=120) → wait for human approval",
-    "  await temper.submit_spec(tenant, spec_toml)       → submit IOA spec string",
-    "  await temper.upload_wasm(name, wasm_bytes)         → upload WASM module",
+    "DISCOVERY:",
+    "  await temper.specs(tenant)                                          → loaded specs with states, actions, verification status",
+    "  await temper.spec_detail(tenant, entity_type)                      → full spec: actions, guards, invariants, state vars",
+    "  await temper.get_agent_id(tenant)                                  → current agent principal ID",
+    "",
+    "ENTITY OPERATIONS:",
+    "  await temper.list(tenant, entity_set, filter?)                     → list entities (optional OData $filter string)",
+    "  await temper.get(tenant, entity_set, entity_id)                    → get entity by ID",
+    "  await temper.create(tenant, entity_set, fields)                    → create entity",
+    "  await temper.action(tenant, entity_set, entity_id, action, body)   → invoke action",
+    "  await temper.patch(tenant, entity_set, entity_id, fields)          → update entity fields",
+    "  await temper.navigate(tenant, path, params?)                       → raw OData navigation",
+    "",
+    "DEVELOPER:",
+    "  await temper.submit_specs(tenant, {\"file.ioa.toml\": \"...\", \"model.csdl.xml\": \"...\"}) → submit specs",
+    "  await temper.get_policies(tenant)                                  → Cedar policies",
+    "  await temper.upload_wasm(tenant, module_name, wasm_path)           → upload WASM module",
+    "  await temper.compile_wasm(tenant, module_name, rust_source)        → compile + upload WASM",
+    "",
+    "GOVERNANCE:",
+    "  await temper.get_decisions(tenant, status?)                        → list decisions",
+    "  await temper.get_decision_status(tenant, decision_id)              → check single decision",
+    "  await temper.poll_decision(tenant, decision_id)                    → wait for human decision (120s timeout)",
+    "",
+    "EVOLUTION OBSERVABILITY:",
+    "  await temper.get_trajectories(tenant, entity_type?, failed_only?, limit?) → trajectory spans",
+    "  await temper.get_insights(tenant)                                  → evolution insights",
+    "  await temper.get_evolution_records(tenant, record_type?)           → O-P-A-D-I records",
+    "  await temper.check_sentinel(tenant)                                → trigger evolution engine",
     "",
     "Cedar governance: actions may be denied (403). Use poll_decision to wait for human approval.",
+    "You cannot approve or set policies — only humans can do that.",
     "",
     "Example: return await temper.list('my-app', 'Tasks')",
   ].join("\n"),
@@ -866,11 +883,12 @@ const temperPlugin = {
         if (!bridge.isReady()) return;
 
         try {
-          const result = await bridge.callTool("search", "return await spec.tenants()");
+          // Use the execute tool with temper.specs() for discovery
+          const result = await bridge.callTool("execute", "return await temper.specs('default')");
           if (!result.isError && result.content.length > 0) {
             const summary = result.content[0].text;
             return {
-              systemMessage: `[Temper] Loaded tenants: ${summary}`,
+              systemMessage: `[Temper] Loaded specs: ${summary}`,
             };
           }
         } catch {

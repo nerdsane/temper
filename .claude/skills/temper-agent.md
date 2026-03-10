@@ -40,24 +40,37 @@ You are both the developer and the operator of your own specs. When you encounte
 
 ---
 
+## Architecture
+
+The MCP server (`temper mcp`) is a **thin client** that connects to a running Temper server. It exposes a single MCP tool — `execute` — which runs Python in a sandboxed REPL with the `temper.*` API.
+
+**Prerequisites:** A Temper server must be running. Start one with `temper serve --port 3000`.
+
+**MCP connection:** `temper mcp --port 3000` (local) or `temper mcp --url https://temper.railway.app` (remote).
+
 ## Sandbox Environment
 
 You are operating inside a governed sandbox. You cannot import libraries, access the filesystem, or make network calls directly. All operations go through the `temper` object methods, which are `await`-based. The server enforces Cedar authorization — actions may be denied, requiring human approval before you can proceed.
 
 ## Quick Start
 
-### 1. Start the server
+### 1. Discover what's deployed
 
 ```python
-result = await temper.start_server()
-return result
+# See all loaded specs and their verification status
+specs = await temper.specs("default")
+return specs
 ```
 
-Returns: `{"port": N, "storage": "turso", "observe_url": "http://localhost:3001", "apps": [...], "status": "started"}`
+### 2. Inspect a specific entity type
 
-If already running, returns `{"port": N, "status": "already_running"}`.
+```python
+# Full spec details: actions, guards, invariants, state vars
+detail = await temper.spec_detail("default", "WeatherQuery")
+return detail
+```
 
-### 2. Submit specs (IOA + CSDL)
+### 3. Submit specs (IOA + CSDL)
 
 ```python
 ioa = """[automaton]
@@ -127,7 +140,7 @@ result = await temper.submit_specs("default", {
 return result
 ```
 
-### 3. Create an entity and invoke an action
+### 4. Create an entity and invoke an action
 
 ```python
 created = await temper.create("default", "WeatherQueries", {"id": "q1", "city": "London"})
@@ -135,7 +148,7 @@ result = await temper.action("default", "WeatherQueries", "q1", "FetchWeather", 
 return result
 ```
 
-### 4. Handle authorization denials (CRITICAL)
+### 5. Handle authorization denials (CRITICAL)
 
 When Cedar denies an action, you get a structured response with `status == "authorization_denied"` and a `decision_id`. You MUST surface this to the user, then poll for approval and retry.
 
@@ -207,7 +220,7 @@ created = await temper.create("default", "EmailDrafts", {"id": "email-1"})
 3. **Propose a spec** — design the IOA + CSDL and call `submit_specs()`. Cedar default-deny means this will likely be denied the first time.
 4. **Detect denial** — check for `status == "authorization_denied"` in the response and extract `decision_id`.
 5. **Surface to human** — tell the user what's pending and link to the Observe UI.
-6. **Poll for approval** — call `poll_decision(tenant, decision_id)` to wait (30s max per poll, retry if needed).
+6. **Poll for approval** — call `poll_decision(tenant, decision_id)` to wait (120s timeout, retry if needed).
 7. **On approval, retry** — resubmit the spec, then create and operate on the new entity type.
 
 Agents MUST go through this cycle. They cannot bypass Cedar. Every new entity type requires human approval.
@@ -216,11 +229,13 @@ Agents MUST go through this cycle. They cannot bypass Cedar. Every new entity ty
 
 ## Method Reference
 
-### Lifecycle
+### Discovery
 
 | Method | Signature | Returns |
 |--------|-----------|---------|
-| `start_server` | `await temper.start_server()` | `{"port", "storage", "observe_url", "apps", "status"}` |
+| `specs` | `await temper.specs(tenant)` | Loaded specs with states, actions, verification status |
+| `spec_detail` | `await temper.spec_detail(tenant, entity_type)` | Full spec: actions, guards, invariants, state vars |
+| `get_agent_id` | `await temper.get_agent_id(tenant)` | Current agent principal ID |
 
 ### Entity Operations
 
@@ -228,28 +243,34 @@ All take `(tenant, entity_set, ...)`. The `entity_set` is the **plural collectio
 
 | Method | Signature | Returns |
 |--------|-----------|---------|
-| `list` | `await temper.list(tenant, entity_set)` | Array of entities |
+| `list` | `await temper.list(tenant, entity_set, filter?)` | Array of entities (optional OData `$filter` string) |
 | `get` | `await temper.get(tenant, entity_set, entity_id)` | Single entity |
 | `create` | `await temper.create(tenant, entity_set, fields)` | Created entity |
-| `action` | `await temper.action(tenant, entity_set, entity_id, action_name, params)` | Action result |
+| `action` | `await temper.action(tenant, entity_set, entity_id, action_name, body)` | Action result |
 | `patch` | `await temper.patch(tenant, entity_set, entity_id, fields)` | Updated entity |
+
+### Navigation
+
+| Method | Signature | Returns |
+|--------|-----------|---------|
+| `navigate` | `await temper.navigate(tenant, path, params?)` | Raw OData navigation (GET or POST depending on path) |
 
 ### Spec Operations
 
 | Method | Signature | Returns |
 |--------|-----------|---------|
 | `submit_specs` | `await temper.submit_specs(tenant, {"file.ioa.toml": content, "model.csdl.xml": content})` | Verification results |
-| `show_spec` | `await temper.show_spec(tenant, entity_type)` | Full parsed spec JSON |
 | `get_policies` | `await temper.get_policies(tenant)` | Cedar policies |
 | `upload_wasm` | `await temper.upload_wasm(tenant, module_name, wasm_path)` | Upload status |
 | `compile_wasm` | `await temper.compile_wasm(tenant, module_name, rust_source)` | Compile + upload |
 
-### Governance (Read-Only)
+### Governance
 
 | Method | Signature | Returns |
 |--------|-----------|---------|
-| `get_decisions` | `await temper.get_decisions(tenant)` | Array of pending decisions |
-| `poll_decision` | `await temper.poll_decision(tenant, decision_id)` | Blocks until resolved (30s max) |
+| `get_decisions` | `await temper.get_decisions(tenant, status?)` | Array of decisions (optional status filter) |
+| `get_decision_status` | `await temper.get_decision_status(tenant, decision_id)` | Single decision status |
+| `poll_decision` | `await temper.poll_decision(tenant, decision_id)` | Blocks until resolved (120s timeout) |
 
 ### Evolution Observability (Read-Only)
 
@@ -258,20 +279,15 @@ All take `(tenant, entity_set, ...)`. The `entity_set` is the **plural collectio
 | `get_trajectories` | `await temper.get_trajectories(tenant, entity_type?, failed_only?, limit?)` | Trajectory summary with failed intents |
 | `get_insights` | `await temper.get_insights(tenant)` | Ranked insight records |
 | `get_evolution_records` | `await temper.get_evolution_records(tenant, record_type?)` | O-P-A-D-I records |
-| `check_sentinel` | `await temper.check_sentinel(tenant)` | Sentinel alerts |
+| `check_sentinel` | `await temper.check_sentinel(tenant)` | Trigger evolution engine |
 
-### Search Tool (No Server Required)
+### Blocked Methods
 
-Use `mcp__temper__search` instead of `mcp__temper__execute` for read-only spec queries:
+These will return an error if called — only humans can perform governance writes:
 
-| Method | Signature | Returns |
-|--------|-----------|---------|
-| `tenants` | `await spec.tenants()` | List of tenant names |
-| `entities` | `await spec.entities(tenant)` | List of entity types |
-| `describe` | `await spec.describe(tenant, entity_type)` | Full entity description |
-| `actions` | `await spec.actions(tenant, entity_type)` | List of actions with details |
-| `actions_from` | `await spec.actions_from(tenant, entity_type, state)` | Actions available from a state |
-| `raw` | `await spec.raw(tenant, entity_type)` | Raw IOA spec text |
+- `approve_decision` — blocked
+- `deny_decision` — blocked
+- `set_policy` — blocked
 
 ---
 
@@ -405,9 +421,6 @@ Agent tries action → FAILS (404 entity not found / 409 invalid transition)
 ### Full weather query flow
 
 ```python
-# Start server
-await temper.start_server()
-
 # Submit specs
 await temper.submit_specs("default", {
     "WeatherQuery.ioa.toml": ioa_spec,
@@ -441,12 +454,29 @@ entities = await temper.list("default", "WeatherQueries")
 return entities
 ```
 
-### Check available actions from current state
+### Filter entities with OData
 
-Use the search tool (no server needed):
 ```python
-actions = await spec.actions_from("default", "WeatherQuery", "Idle")
-return actions
+entities = await temper.list("default", "WeatherQueries", "state eq 'Ready'")
+return entities
+```
+
+### Discover available specs and actions
+
+```python
+# All specs for a tenant
+specs = await temper.specs("default")
+
+# Full detail on one entity type
+detail = await temper.spec_detail("default", "WeatherQuery")
+return detail
+```
+
+### Check a single decision status
+
+```python
+status = await temper.get_decision_status("default", "PD-abc123")
+return status
 ```
 
 ---
@@ -491,13 +521,14 @@ For simple entities, a minimal CSDL works:
 | `HTTP 423 Locked` | Entity not verified | Wait for spec verification to complete |
 | `AuthorizationDenied` | Cedar policy denied the action | Use `poll_decision` and wait for human approval |
 | `not available to agents` | Tried to self-approve | Stop — only humans can approve/deny/set policies |
-| `Server not started` | Called method before start_server | Call `await temper.start_server()` first |
+| `unknown temper method` | Called a method that doesn't exist | Check method reference above |
+| `Either --url or --port is required` | MCP server can't connect | Ensure Temper server is running and pass `--port` or `--url` |
 
 ## Sandbox Constraints
 
 - **No imports** — `import os`, `import requests`, etc. are blocked
 - **No filesystem** — `open()`, `os.path`, etc. are blocked
 - **No network** — `urllib`, `socket`, etc. are blocked
-- **2 second timeout** — code must complete within 2 seconds
 - **64 MB memory** — stay within bounds
-- Only `temper.*` and `spec.*` methods are available for I/O
+- Only `temper.*` methods are available for I/O
+- `poll_decision` has a 120-second timeout — retry if it expires

@@ -25,8 +25,9 @@ to CRUD on pre-existing entity types. They cannot:
 - Inspect loaded specs programmatically
 
 Meanwhile, the Temper MCP server (`temper mcp`) already provides all of this through
-two tools — `search` (read-only spec queries) and `execute` (full governed operations)
-— exposed over stdio JSON-RPC 2.0. Claude Code uses this interface today via `.mcp.json`.
+the `execute` tool (full governed operations including discovery via `temper.specs()`
+and `temper.spec_detail()`) — exposed over stdio JSON-RPC 2.0. Claude Code uses this
+interface today via `.mcp.json`.
 
 The gap: OpenClaw agents have no access to the MCP REPL. The plugin speaks HTTP
 directly instead of bridging through the governed sandbox.
@@ -50,15 +51,15 @@ The bridge:
 the `@modelcontextprotocol/sdk` would add a dependency to a currently zero-dep plugin
 for marginal benefit.
 
-### Sub-Decision 2: Two Tools Replace One
+### Sub-Decision 2: Two Tools (Convenience Split)
 
 Register `temper_search` and `temper_execute` as separate OpenClaw agent tools,
-each taking a single `code` string parameter. The tool descriptions include the
-available Python API methods so the agent knows what to call.
+each taking a single `code` string parameter. Both route through the MCP server's
+single `execute` tool. `temper_search` is a convenience wrapper with a description
+focused on read-only discovery methods (`temper.specs()`, `temper.spec_detail()`).
 
-**Why two tools**: Matches the MCP server's native tool split. `search` works without
-a running server (spec inspection only). `execute` requires a server. Keeping them
-separate lets the agent query specs without starting the runtime.
+**Why two tools**: Provides a natural ergonomic split. `temper_search` signals
+read-only intent. Both ultimately use the same underlying `execute` MCP tool.
 
 ### Sub-Decision 3: Keep SSE Service Alongside Bridge
 
@@ -91,8 +92,8 @@ A CLI arg is simpler than an environment variable or runtime RPC method.
 ### Sub-Decision 5: Context Injection via `before_prompt_build`
 
 Use OpenClaw's `before_prompt_build` plugin hook to inject a compact summary of
-loaded Temper tenants and entity types at the start of each agent turn. This uses
-the `search` tool (no server needed) so it's lightweight.
+loaded Temper specs at the start of each agent turn. This calls
+`temper.specs('default')` via the `execute` tool.
 
 **Why**: Gives the agent ambient awareness of what Temper apps are loaded without
 requiring it to call a tool first. Aligns with the "Temper as OS" feel.

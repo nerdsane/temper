@@ -1,7 +1,7 @@
 {
   "id": "openclaw-temper",
   "name": "Temper",
-  "description": "Temper MCP integration — governed REPL tools (temper_search, temper_execute) and real-time entity subscriptions via SSE",
+  "description": "Temper MCP integration — governed REPL tools (temper_execute for all operations, temper_search for discovery) and real-time entity subscriptions via SSE",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -21,7 +21,7 @@
               "items": { "type": "string" },
               "description": "Entity types to subscribe to via SSE"
             },
-            "specsDir": { "type": "string", "description": "Path to specs directory (passed as --app name=specsDir to temper mcp)" }
+            "specsDir": { "type": "string", "description": "Path to specs directory (used by temper serve --app, not by MCP thin client)" }
           },
           "required": ["agent"]
         }

@@ -5509,8 +5509,6 @@ dependencies = [
  "temper-server",
  "temper-spec",
  "temper-store-turso",
- "tempfile",
- "thiserror 2.0.18",
  "tokio",
 ]
 
