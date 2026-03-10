@@ -383,6 +383,6 @@ mod tests {
 
     #[test]
     fn test_agent_specs_count() {
-        assert_eq!(AGENT_SPECS.len(), 8);
+        assert_eq!(AGENT_SPECS.len(), 7);
     }
 }

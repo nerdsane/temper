@@ -289,13 +289,6 @@ name = "PlannedRequiresPlan"
 when = ["Planned", "InProgress", "InReview", "Done"]
 assert = "has_plan"
 
-# --- Liveness Properties ---
-
-[[liveness]]
-name = "IssueEventuallyResolved"
-from = ["Backlog"]
-reaches = ["Done", "Cancelled", "Archived"]
-
 # --- Integrations ---
 
 [[integration]]

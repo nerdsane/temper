@@ -1,14 +1,13 @@
-name: Deploy Observe UI
+name: Deploy Railway
 
 on:
   push:
     branches: [main]
-    paths:
-      - "ui/observe/**"
-      - ".github/workflows/deploy-observe.yml"
+  workflow_dispatch:
 
 jobs:
   deploy:
+    if: ${{ secrets.RAILWAY_TOKEN != '' && secrets.RAILWAY_PROJECT_ID != '' && secrets.RAILWAY_ENVIRONMENT != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,24 +15,30 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: ui/observe/package-lock.json
 
-      - name: Install Vercel CLI
-        run: npm i -g vercel@latest
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli
 
-      - name: Pull Vercel environment
-        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
-        working-directory: ui/observe
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
+          RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
+        run: |
+          if [ -n "$RAILWAY_SERVICE" ]; then
+            railway up --ci --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --service "$RAILWAY_SERVICE"
+          else
+            railway up --ci --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT"
+          fi
 
-      - name: Build
-        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
-        working-directory: ui/observe
-
-      - name: Deploy
-        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
-        working-directory: ui/observe
-
-env:
-  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+  deploy-skipped:
+    if: ${{ !(secrets.RAILWAY_TOKEN != '' && secrets.RAILWAY_PROJECT_ID != '' && secrets.RAILWAY_ENVIRONMENT != '') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip deploy (missing Railway secrets)
+        run: |
+          echo "Railway deploy skipped because one or more required secrets are missing:"
+          echo "- RAILWAY_TOKEN"
+          echo "- RAILWAY_PROJECT_ID"
+          echo "- RAILWAY_ENVIRONMENT"
