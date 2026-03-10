@@ -1,13 +1,14 @@
 // Project Management — Issue Cedar Policies
 //
-// Role separation: planners plan, supervisors approve, implementers execute.
-// No agent can both plan and approve the same issue.
+// Human-in-the-loop model: agents act on human instruction.
+// The planner CAN approve its own plan (because the human told it to).
+// The real gate is the human saying "go ahead" in conversation.
 
 // --- Universal: any agent can create, read, list, comment ---
 
 permit(
   principal,
-  action in [Action::"create", Action::"read", Action::"list", Action::"AddComment", Action::"AddLabel"],
+  action in [Action::"create", Action::"read", Action::"list", Action::"AddComment", Action::"AddLabel", Action::"SetDescription"],
   resource is Issue
 );
 
@@ -21,7 +22,7 @@ permit(
   principal.agent_type in ["supervisor", "human"]
 };
 
-// --- Planning: only the assigned planner ---
+// --- Planning: the assigned planner ---
 
 permit(
   principal,
@@ -31,18 +32,17 @@ permit(
   resource.PlannerId == principal.id
 };
 
-// --- Plan Approval: supervisors and humans only, NOT the planner ---
+// --- Plan Approval: supervisors and humans (planner CAN self-approve) ---
 
 permit(
   principal,
   action in [Action::"ApprovePlan", Action::"RejectPlan", Action::"RevisePlan"],
   resource is Issue
 ) when {
-  principal.agent_type in ["supervisor", "human"] &&
-  resource.PlannerId != principal.id
+  principal.agent_type in ["supervisor", "human"]
 };
 
-// --- Implementation: only the assigned implementer ---
+// --- Implementation: the assigned implementer ---
 
 permit(
   principal,
@@ -52,15 +52,14 @@ permit(
   resource.AssigneeId == principal.id
 };
 
-// --- Review: supervisors and humans, NOT the implementer ---
+// --- Review: supervisors and humans ---
 
 permit(
   principal,
   action in [Action::"ApproveReview", Action::"RequestChanges"],
   resource is Issue
 ) when {
-  principal.agent_type in ["supervisor", "human"] &&
-  resource.AssigneeId != principal.id
+  principal.agent_type in ["supervisor", "human"]
 };
 
 // --- Reopen & Archive: supervisors and humans ---
