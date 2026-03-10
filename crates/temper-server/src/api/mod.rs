@@ -182,7 +182,11 @@ async fn handle_policy_suggestions(
         Ok(engine) => engine.suggestions(),
         Err(_) => vec![],
     };
-    (StatusCode::OK, axum::Json(serde_json::json!({ "suggestions": suggestions }))).into_response()
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "suggestions": suggestions })),
+    )
+        .into_response()
 }
 
 /// Validate and reload combined Cedar policies for a tenant mutation.

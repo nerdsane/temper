@@ -13,6 +13,6 @@ pub use context::{Principal, PrincipalKind, SecurityContext};
 pub use engine::{AuthzDecision, AuthzEngine};
 pub use error::{AuthzDenial, AuthzError};
 pub use policy_gen::{
-    generate_cedar_from_matrix, ActionScope, DurationScope, PolicyScopeMatrix, PrincipalScope,
-    ResourceScope,
+    ActionScope, DurationScope, PolicyScopeMatrix, PrincipalScope, ResourceScope,
+    generate_cedar_from_matrix,
 };

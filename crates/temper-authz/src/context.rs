@@ -133,7 +133,12 @@ impl SecurityContext {
     /// If the principal is anonymous and an agent_id is present, promotes
     /// the principal kind to `Agent` with role `"wasm_module"`.
     /// Merges agent_id and session_id into `context_attrs` for Cedar evaluation.
-    pub fn with_agent_context(mut self, agent_id: Option<&str>, session_id: Option<&str>, agent_type: Option<&str>) -> Self {
+    pub fn with_agent_context(
+        mut self,
+        agent_id: Option<&str>,
+        session_id: Option<&str>,
+        agent_type: Option<&str>,
+    ) -> Self {
         if let Some(aid) = agent_id {
             self.context_attrs.insert(
                 "agentId".to_string(),
@@ -233,8 +238,11 @@ mod tests {
 
     #[test]
     fn test_with_agent_context_promotes_anonymous() {
-        let ctx = SecurityContext::from_headers(&[])
-            .with_agent_context(Some("stripe_charge"), Some("sess-1"), None);
+        let ctx = SecurityContext::from_headers(&[]).with_agent_context(
+            Some("stripe_charge"),
+            Some("sess-1"),
+            None,
+        );
 
         assert_eq!(ctx.principal.id, "stripe_charge");
         assert_eq!(ctx.principal.kind, PrincipalKind::Agent);
@@ -258,7 +266,8 @@ mod tests {
                 "customer".to_string(),
             ),
         ];
-        let ctx = SecurityContext::from_headers(&headers).with_agent_context(Some("agent-1"), None, None);
+        let ctx =
+            SecurityContext::from_headers(&headers).with_agent_context(Some("agent-1"), None, None);
 
         // Should NOT overwrite explicit customer principal
         assert_eq!(ctx.principal.id, "cust-123");
@@ -295,10 +304,7 @@ mod tests {
         let headers = vec![
             ("X-Temper-Principal-Id".to_string(), "bot-1".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-            (
-                "X-Temper-Agent-Type".to_string(),
-                "claude-code".to_string(),
-            ),
+            ("X-Temper-Agent-Type".to_string(), "claude-code".to_string()),
         ];
         let ctx = SecurityContext::from_headers(&headers);
         assert_eq!(ctx.principal.agent_type, Some("claude-code".to_string()));

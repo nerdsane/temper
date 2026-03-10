@@ -220,7 +220,8 @@ pub(crate) async fn handle_load_inline(
     // Write specs to a temp directory
     let tmp_dir = std::env::temp_dir().join(format!("temper-inline-{}", tenant)); // determinism-ok: HTTP handler writes user specs to temp dir for loading
     let _ = std::fs::remove_dir_all(&tmp_dir); // determinism-ok: HTTP handler cleans previous temp dir
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| { // determinism-ok: HTTP handler creates temp dir
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| {
+        // determinism-ok: HTTP handler creates temp dir
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to create temp dir: {e}"),
@@ -229,7 +230,8 @@ pub(crate) async fn handle_load_inline(
 
     for (filename, content) in &body.specs {
         let path = tmp_dir.join(filename);
-        std::fs::write(&path, content).map_err(|e| { // determinism-ok: HTTP handler writes specs
+        std::fs::write(&path, content).map_err(|e| {
+            // determinism-ok: HTTP handler writes specs
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to write {filename}: {e}"),
@@ -238,7 +240,8 @@ pub(crate) async fn handle_load_inline(
     }
 
     if let Some(source) = body.cross_invariants_toml.as_deref() {
-        std::fs::write(tmp_dir.join("cross-invariants.toml"), source).map_err(|e| { // determinism-ok: HTTP handler writes cross-invariants
+        std::fs::write(tmp_dir.join("cross-invariants.toml"), source).map_err(|e| {
+            // determinism-ok: HTTP handler writes cross-invariants
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to write cross-invariants.toml: {e}"),

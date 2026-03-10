@@ -165,33 +165,40 @@ fn handle_generate_cedar_policy(
     }
 
     // Parse scope_matrix from params, or build a default matrix based on the legacy scope string.
-    let matrix: temper_authz::PolicyScopeMatrix = if let Some(matrix_val) = params.get("scope_matrix") {
-        serde_json::from_value(matrix_val.clone())
-            .unwrap_or_else(|_| temper_authz::PolicyScopeMatrix::default_for(None))
-    } else {
-        match scope {
-            "narrow" => temper_authz::PolicyScopeMatrix {
-                principal: temper_authz::PrincipalScope::ThisAgent,
-                action: temper_authz::ActionScope::ThisAction,
-                resource: temper_authz::ResourceScope::ThisResource,
-                duration: temper_authz::DurationScope::Always,
-                agent_type_value: None,
-                role_value: None,
-                session_id: None,
-            },
-            "broad" => temper_authz::PolicyScopeMatrix {
-                principal: temper_authz::PrincipalScope::ThisAgent,
-                action: temper_authz::ActionScope::AllActionsOnType,
-                resource: temper_authz::ResourceScope::AnyOfType,
-                duration: temper_authz::DurationScope::Always,
-                agent_type_value: None,
-                role_value: None,
-                session_id: None,
-            },
-            _ => temper_authz::PolicyScopeMatrix::default_for(None),
-        }
-    };
-    let generated_policy = temper_authz::generate_cedar_from_matrix(agent_id, action_name, resource_type, resource_id, &matrix);
+    let matrix: temper_authz::PolicyScopeMatrix =
+        if let Some(matrix_val) = params.get("scope_matrix") {
+            serde_json::from_value(matrix_val.clone())
+                .unwrap_or_else(|_| temper_authz::PolicyScopeMatrix::default_for(None))
+        } else {
+            match scope {
+                "narrow" => temper_authz::PolicyScopeMatrix {
+                    principal: temper_authz::PrincipalScope::ThisAgent,
+                    action: temper_authz::ActionScope::ThisAction,
+                    resource: temper_authz::ResourceScope::ThisResource,
+                    duration: temper_authz::DurationScope::Always,
+                    agent_type_value: None,
+                    role_value: None,
+                    session_id: None,
+                },
+                "broad" => temper_authz::PolicyScopeMatrix {
+                    principal: temper_authz::PrincipalScope::ThisAgent,
+                    action: temper_authz::ActionScope::AllActionsOnType,
+                    resource: temper_authz::ResourceScope::AnyOfType,
+                    duration: temper_authz::DurationScope::Always,
+                    agent_type_value: None,
+                    role_value: None,
+                    session_id: None,
+                },
+                _ => temper_authz::PolicyScopeMatrix::default_for(None),
+            }
+        };
+    let generated_policy = temper_authz::generate_cedar_from_matrix(
+        agent_id,
+        action_name,
+        resource_type,
+        resource_id,
+        &matrix,
+    );
 
     tracing::info!(
         entity_id = entity_id,

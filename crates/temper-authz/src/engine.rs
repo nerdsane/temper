@@ -499,7 +499,8 @@ mod tests {
         let ctx = SecurityContext::from_headers(&[
             ("X-Temper-Principal-Id".to_string(), "bot-1".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-        ]).with_agent_context(Some("bot-1"), None, Some("claude-code"));
+        ])
+        .with_agent_context(Some("bot-1"), None, Some("claude-code"));
         let mut attrs = HashMap::new();
         attrs.insert("id".to_string(), serde_json::json!("doc-1"));
         let result = engine.authorize(&ctx, "read", "Doc", &attrs);
@@ -509,7 +510,8 @@ mod tests {
         let ctx2 = SecurityContext::from_headers(&[
             ("X-Temper-Principal-Id".to_string(), "bot-2".to_string()),
             ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
-        ]).with_agent_context(Some("bot-2"), None, Some("openclaw"));
+        ])
+        .with_agent_context(Some("bot-2"), None, Some("openclaw"));
         let mut attrs2 = HashMap::new();
         attrs2.insert("id".to_string(), serde_json::json!("doc-2"));
         let result2 = engine.authorize(&ctx2, "read", "Doc", &attrs2);

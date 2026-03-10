@@ -14,8 +14,8 @@ pub use dispatch::{DispatchCommand, DispatchExtOptions};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{
-    ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix,
-    PrincipalScope, ResourceScope,
+    ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix, PrincipalScope,
+    ResourceScope,
 };
 pub use policy_suggestions::PolicySuggestionEngine;
 pub use trajectory::{TrajectoryEntry, TrajectorySource};

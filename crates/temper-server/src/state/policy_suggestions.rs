@@ -4,8 +4,8 @@
 //! `(agent_type, action, resource_type)` and suggests Cedar policies when
 //! a pattern crosses a configurable threshold.
 
-use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A single denial pattern for a specific (agent_type, action, resource_type) triple.
 #[derive(Debug, Clone, Serialize)]
@@ -98,27 +98,35 @@ impl PolicySuggestionEngine {
             resource_type.to_string(),
         );
 
-        let pattern = self.per_action.entry(key.clone()).or_insert_with(|| DenialPattern {
-            agent_type: agent_type.map(String::from),
-            action: action.to_string(),
-            resource_type: resource_type.to_string(),
-            count: 0,
-            first_seen: timestamp.to_string(),
-            last_seen: timestamp.to_string(),
-            distinct_resource_ids: BTreeSet::new(),
-        });
+        let pattern = self
+            .per_action
+            .entry(key.clone())
+            .or_insert_with(|| DenialPattern {
+                agent_type: agent_type.map(String::from),
+                action: action.to_string(),
+                resource_type: resource_type.to_string(),
+                count: 0,
+                first_seen: timestamp.to_string(),
+                last_seen: timestamp.to_string(),
+                distinct_resource_ids: BTreeSet::new(),
+            });
         pattern.count += 1;
         pattern.last_seen = timestamp.to_string();
-        pattern.distinct_resource_ids.insert(resource_id.to_string());
+        pattern
+            .distinct_resource_ids
+            .insert(resource_id.to_string());
 
         // Update cross-action grouping.
         let type_key = (agent_type.map(String::from), resource_type.to_string());
-        let grouped = self.per_type.entry(type_key).or_insert_with(|| GroupedPattern {
-            agent_type: agent_type.map(String::from),
-            resource_type: resource_type.to_string(),
-            denied_actions: BTreeSet::new(),
-            total_denials: 0,
-        });
+        let grouped = self
+            .per_type
+            .entry(type_key)
+            .or_insert_with(|| GroupedPattern {
+                agent_type: agent_type.map(String::from),
+                resource_type: resource_type.to_string(),
+                denied_actions: BTreeSet::new(),
+                total_denials: 0,
+            });
         grouped.denied_actions.insert(action.to_string());
         grouped.total_denials += 1;
     }
@@ -232,8 +240,20 @@ mod tests {
     #[test]
     fn no_suggestions_below_threshold() {
         let mut engine = PolicySuggestionEngine::new();
-        engine.record_denial(Some("claude-code"), "read", "Doc", "doc-1", "2025-01-01T00:00:00Z");
-        engine.record_denial(Some("claude-code"), "read", "Doc", "doc-2", "2025-01-01T00:01:00Z");
+        engine.record_denial(
+            Some("claude-code"),
+            "read",
+            "Doc",
+            "doc-1",
+            "2025-01-01T00:00:00Z",
+        );
+        engine.record_denial(
+            Some("claude-code"),
+            "read",
+            "Doc",
+            "doc-2",
+            "2025-01-01T00:01:00Z",
+        );
         assert!(engine.suggestions().is_empty());
     }
 
@@ -286,7 +306,13 @@ mod tests {
         }
         // 1 action on Order -> individual (if at threshold)
         for i in 0..3 {
-            engine.record_denial(Some("claude-code"), "submit", "Order", &format!("ord-{i}"), "t");
+            engine.record_denial(
+                Some("claude-code"),
+                "submit",
+                "Order",
+                &format!("ord-{i}"),
+                "t",
+            );
         }
         let suggestions = engine.suggestions();
         assert_eq!(suggestions.len(), 2);

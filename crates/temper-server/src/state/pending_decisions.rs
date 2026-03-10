@@ -129,7 +129,11 @@ impl PendingDecision {
     /// Generate Cedar policy text from a scope matrix.
     pub fn generate_policy_from_matrix(&self, matrix: &PolicyScopeMatrix) -> String {
         temper_authz::generate_cedar_from_matrix(
-            &self.agent_id, &self.action, &self.resource_type, &self.resource_id, matrix,
+            &self.agent_id,
+            &self.action,
+            &self.resource_type,
+            &self.resource_id,
+            matrix,
         )
     }
 }

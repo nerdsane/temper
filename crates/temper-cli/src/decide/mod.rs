@@ -7,9 +7,7 @@
 use std::io::{self, Write};
 
 use anyhow::{Context, Result};
-use temper_authz::{
-    ActionScope, DurationScope, PolicyScopeMatrix, PrincipalScope, ResourceScope,
-};
+use temper_authz::{ActionScope, DurationScope, PolicyScopeMatrix, PrincipalScope, ResourceScope};
 
 /// Run the `temper decide` interactive loop.
 ///
@@ -88,7 +86,10 @@ pub async fn run(port: u16, tenant: &str) -> Result<()> {
             match matrix {
                 Some(m) => {
                     approve_decision(&client, &base_url, tenant, id, &m).await?;
-                    println!("  Approved with scope: {:?}/{:?}/{:?}", m.principal, m.action, m.resource);
+                    println!(
+                        "  Approved with scope: {:?}/{:?}/{:?}",
+                        m.principal, m.action, m.resource
+                    );
                 }
                 None => {
                     deny_decision(&client, &base_url, tenant, id).await?;

@@ -37,7 +37,8 @@ pub(crate) fn security_context_from_headers(
     agent_type: Option<&str>,
 ) -> SecurityContext {
     let temper_headers = extract_temper_headers(headers);
-    SecurityContext::from_headers(&temper_headers).with_agent_context(agent_id, session_id, agent_type)
+    SecurityContext::from_headers(&temper_headers)
+        .with_agent_context(agent_id, session_id, agent_type)
 }
 
 /// Check Cedar authorization for observe endpoints.
