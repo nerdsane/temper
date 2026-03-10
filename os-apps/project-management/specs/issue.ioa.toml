@@ -1,17 +1,31 @@
 # Issue Entity — I/O Automaton Specification
 #
 # Core work item for project management. Models issue lifecycle from
-# backlog triage through development, review, completion, and archival.
+# backlog triage through planning, execution, review, and archival.
+#
+# Key design: Planning and execution are separated. One agent drafts the plan,
+# a supervisor approves it, and a (potentially different) agent executes it.
+# Cedar policies enforce role separation between planners, approvers, and implementers.
 
 [automaton]
 name = "Issue"
-states = ["Backlog", "Triage", "Todo", "InProgress", "InReview", "Done", "Cancelled", "Archived"]
+states = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress", "InReview", "Done", "Cancelled", "Archived"]
 initial = "Backlog"
 
 # --- State Variables ---
 
 [[state]]
 name = "assignee_set"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "planner_set"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "has_plan"
 type = "bool"
 initial = "false"
 
@@ -36,6 +50,11 @@ type = "counter"
 initial = "0"
 
 [[state]]
+name = "plan_revision_count"
+type = "counter"
+initial = "0"
+
+[[state]]
 name = "has_description"
 type = "bool"
 initial = "false"
@@ -45,15 +64,15 @@ initial = "false"
 [[action]]
 name = "SetDescription"
 kind = "input"
-from = ["Backlog", "Triage", "Todo", "InProgress", "InReview"]
+from = ["Backlog", "Triage", "Todo", "Planning", "InProgress", "InReview"]
 effect = "set has_description true"
 params = ["description"]
-hint = "Set or update the issue description. Can be done in any non-terminal state."
+hint = "Set or update the issue description."
 
 [[action]]
 name = "SetPriority"
 kind = "input"
-from = ["Backlog", "Triage", "Todo", "InProgress"]
+from = ["Backlog", "Triage", "Todo", "Planning", "InProgress"]
 effect = "increment priority"
 params = ["level"]
 hint = "Set priority level (1=urgent, 2=high, 3=medium, 4=low). Must be set before moving to Todo."
@@ -61,7 +80,7 @@ hint = "Set priority level (1=urgent, 2=high, 3=medium, 4=low). Must be set befo
 [[action]]
 name = "AddLabel"
 kind = "input"
-from = ["Backlog", "Triage", "Todo", "InProgress", "InReview"]
+from = ["Backlog", "Triage", "Todo", "Planning", "InProgress", "InReview"]
 effect = "increment label_count"
 params = ["LabelId"]
 hint = "Attach a label to the issue for categorization."
@@ -69,10 +88,18 @@ hint = "Attach a label to the issue for categorization."
 [[action]]
 name = "Assign"
 kind = "input"
-from = ["Backlog", "Triage", "Todo", "InProgress"]
+from = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress"]
 effect = "set assignee_set true"
 params = ["AgentId"]
-hint = "Assign an agent or person to the issue. Required before starting work."
+hint = "Assign an implementer agent. Can be different from the planner."
+
+[[action]]
+name = "AssignPlanner"
+kind = "input"
+from = ["Backlog", "Triage", "Todo"]
+effect = "set planner_set true"
+params = ["AgentId"]
+hint = "Assign a planner agent to draft the implementation plan."
 
 [[action]]
 name = "Unassign"
@@ -96,19 +123,74 @@ to = "Todo"
 guard = "priority > 0"
 hint = "Accept the issue into the todo queue. Requires a priority to be set."
 
+# --- Planning Phase ---
+
+[[action]]
+name = "BeginPlanning"
+kind = "internal"
+from = ["Todo"]
+to = "Planning"
+guard = "is_true planner_set"
+hint = "Start planning phase. A planner agent drafts the approach."
+
+[[action]]
+name = "WritePlan"
+kind = "input"
+from = ["Planning"]
+effect = "set has_plan true"
+params = ["plan", "acceptance_criteria"]
+hint = "Draft or update the implementation plan. What to do, how, and what done looks like."
+
+[[action]]
+name = "RevisePlan"
+kind = "input"
+from = ["Planning"]
+effect = "increment plan_revision_count"
+params = ["feedback"]
+hint = "Request plan revision with feedback. Planner updates the plan."
+
+[[action]]
+name = "ApprovePlan"
+kind = "internal"
+from = ["Planning"]
+to = "Planned"
+guard = "is_true has_plan"
+hint = "Approve the plan. Only supervisors/humans. Requires a plan to exist."
+
+[[action]]
+name = "RejectPlan"
+kind = "input"
+from = ["Planned"]
+to = "Planning"
+effect = "increment plan_revision_count"
+params = ["reason"]
+hint = "Reject an approved plan and send it back for revision."
+
+# --- Execution Phase ---
+
 [[action]]
 name = "StartWork"
 kind = "internal"
-from = ["Todo"]
+from = ["Planned"]
 to = "InProgress"
 guard = "is_true assignee_set"
-hint = "Begin active work on the issue. Requires an assignee."
+params = ["repo", "branch_name", "worktree_path"]
+hint = "Begin implementation. Requires an assignee and an approved plan."
+
+[[action]]
+name = "UpdateImplementation"
+kind = "input"
+from = ["InProgress", "InReview"]
+effect = "increment comment_count"
+params = ["notes"]
+hint = "Agent drops implementation context -- progress notes, blockers, findings."
 
 [[action]]
 name = "SubmitForReview"
 kind = "internal"
 from = ["InProgress"]
 to = "InReview"
+params = ["pr_url"]
 hint = "Submit completed work for code review or verification."
 
 [[action]]
@@ -118,7 +200,7 @@ from = ["InReview"]
 to = "InProgress"
 effect = "increment review_cycles"
 params = ["feedback"]
-hint = "Reviewer requests changes. Sends issue back to in-progress with feedback."
+hint = "Reviewer requests changes. Sends issue back to in-progress."
 
 [[action]]
 name = "ApproveReview"
@@ -138,10 +220,10 @@ hint = "Reopen a completed issue for further work."
 [[action]]
 name = "Cancel"
 kind = "input"
-from = ["Backlog", "Triage", "Todo", "InProgress"]
+from = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress"]
 to = "Cancelled"
 params = ["reason"]
-hint = "Cancel the issue. Can be cancelled from any active state before review completes."
+hint = "Cancel the issue from any active state before review completes."
 
 [[action]]
 name = "Archive"
@@ -153,12 +235,22 @@ hint = "Archive a completed or cancelled issue. Terminal state."
 [[action]]
 name = "AddComment"
 kind = "input"
-from = ["Backlog", "Triage", "Todo", "InProgress", "InReview", "Done"]
+from = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress", "InReview", "Done"]
 effect = "increment comment_count"
 params = ["CommentId"]
 hint = "Add a comment to the issue."
 
 # --- Output Actions ---
+
+[[action]]
+name = "PlanReadyEvent"
+kind = "output"
+hint = "Emitted when a plan is written and ready for approval."
+
+[[action]]
+name = "PlanApprovedEvent"
+kind = "output"
+hint = "Emitted when a plan is approved. Implementation can begin."
 
 [[action]]
 name = "IssueCompletedEvent"
@@ -184,8 +276,18 @@ assert = "assignee_set"
 
 [[invariant]]
 name = "TodoRequiresPriority"
-when = ["Todo", "InProgress", "InReview", "Done"]
+when = ["Todo", "Planning", "Planned", "InProgress", "InReview", "Done"]
 assert = "priority > 0"
+
+[[invariant]]
+name = "PlanningRequiresPlanner"
+when = ["Planning", "Planned"]
+assert = "planner_set"
+
+[[invariant]]
+name = "PlannedRequiresPlan"
+when = ["Planned", "InProgress", "InReview", "Done"]
+assert = "has_plan"
 
 # --- Liveness Properties ---
 
@@ -195,6 +297,21 @@ from = ["Backlog"]
 reaches = ["Done", "Cancelled", "Archived"]
 
 # --- Integrations ---
+
+[[integration]]
+name = "notify_planner_assigned"
+trigger = "AssignPlanner"
+type = "webhook"
+
+[[integration]]
+name = "notify_plan_ready"
+trigger = "WritePlan"
+type = "webhook"
+
+[[integration]]
+name = "notify_plan_approved"
+trigger = "ApprovePlan"
+type = "webhook"
 
 [[integration]]
 name = "notify_assignee"
