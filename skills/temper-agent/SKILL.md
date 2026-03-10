@@ -46,7 +46,7 @@ The MCP server (`temper mcp`) is a **thin client** that connects to a running Te
 
 **Prerequisites:** A Temper server must be running. Start one with `temper serve --port 3000`.
 
-**MCP connection:** `temper mcp --port 3000` (local) or `temper mcp --url https://temper.railway.app` (remote).
+**MCP connection:** `temper mcp --port 3000` (local) or `temper mcp --url <your-server-url>` (remote).
 
 ## Sandbox Environment
 
@@ -160,7 +160,7 @@ if isinstance(result, dict) and result.get("status") == "authorization_denied":
 
     # Step 1: Tell the human what's pending
     print(f"Action denied by Cedar policy. Decision {decision_id} pending.")
-    print(f"Approve at: http://localhost:3001/decisions")
+    print(f"Approve at: the Observe UI (served by your Temper instance)")
 
     # Step 2: Poll until the human resolves the decision
     decision = await temper.poll_decision("default", decision_id)
@@ -175,7 +175,7 @@ if isinstance(result, dict) and result.get("status") == "authorization_denied":
 return result
 ```
 
-**You CANNOT self-approve.** Calling `approve_decision`, `deny_decision`, or `set_policy` will return an error. A human must approve via the **Observe UI** at http://localhost:3001/decisions — the agent cannot resolve governance decisions.
+**You CANNOT self-approve.** Calling `approve_decision`, `deny_decision`, or `set_policy` will return an error. A human must approve via the **Observe UI** at the Observe UI (served by your Temper instance) — the agent cannot resolve governance decisions.
 
 ---
 
@@ -203,7 +203,7 @@ if result.get("status") == "authorization_denied":
     decision_id = result["decision_id"]
     # Tell the human, then poll
     print(f"Spec submission denied. Decision {decision_id} pending.")
-    print(f"Approve at: http://localhost:3001/decisions")
+    print(f"Approve at: the Observe UI (served by your Temper instance)")
     decision = await temper.poll_decision("default", decision_id)
     if decision["status"] == "Approved":
         # Retry submit_specs — now permitted
@@ -391,7 +391,7 @@ You call action → Cedar evaluates policy → DENIED (403)
 **Rules:**
 - NEVER try to approve your own decisions — governance write methods are not exposed to agents
 - NEVER call `approve_decision`, `deny_decision`, or `set_policy` — they are blocked
-- ALWAYS surface the denial to the user with a link to the **Observe UI**: `http://localhost:3001/decisions`
+- ALWAYS surface the denial to the user with a link to the **Observe UI**: `the Observe UI (served by your Temper instance)`
 - ALWAYS use `poll_decision` to wait after the user has been notified
 - The user approves in the Observe UI (browser) — not through this chat
 
@@ -444,7 +444,7 @@ if isinstance(result, dict) and result.get("status") == "authorization_denied":
     decision_id = result["decision_id"]
     # Surface to user — they approve in the Observe UI, not here
     print(f"Denied by Cedar policy. Decision {decision_id} pending.")
-    print(f"Approve at: http://localhost:3001/decisions")
+    print(f"Approve at: the Observe UI (served by your Temper instance)")
     # Poll until human resolves the decision
     decision = await temper.poll_decision("default", decision_id)
     if decision["status"] == "Approved":

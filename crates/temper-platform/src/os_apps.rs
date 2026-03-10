@@ -89,8 +89,8 @@ pub fn install_os_app(
     tenant: &str,
     app_name: &str,
 ) -> Result<Vec<String>, String> {
-    let bundle = get_os_app(app_name)
-        .ok_or_else(|| format!("OS app '{app_name}' not found in catalog"))?;
+    let bundle =
+        get_os_app(app_name).ok_or_else(|| format!("OS app '{app_name}' not found in catalog"))?;
 
     // Reuse the same bootstrap path as system/agent specs.
     bootstrap::bootstrap_tenant_specs(
@@ -127,11 +127,7 @@ pub fn install_os_app(
 
     tracing::info!(
         "Installed OS app '{app_name}' for tenant '{tenant}': {:?}",
-        bundle
-            .specs
-            .iter()
-            .map(|(t, _)| *t)
-            .collect::<Vec<_>>()
+        bundle.specs.iter().map(|(t, _)| *t).collect::<Vec<_>>()
     );
 
     Ok(entity_types)

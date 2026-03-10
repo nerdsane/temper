@@ -77,7 +77,7 @@ No Postgres to manage. No Redis to manage. Just a file.
 cargo test  # 647 tests
 
 ./target/release/temper serve --storage turso --port 3001
-# OData API at http://localhost:3001/tdata
+# OData API at <TEMPER_URL>/tdata
 # (--app flag is optional: use it only to load specs at startup before first load-dir call)
 ```
 
@@ -239,19 +239,19 @@ If verification fails, the server won't start. Fix the spec first.
 **One step, every session:**
 
 ```bash
-curl -sf http://localhost:3001/tdata -H "X-Tenant-Id: _" > /dev/null 2>&1 \
+curl -sf <TEMPER_URL>/tdata -H "X-Tenant-Id: _" > /dev/null 2>&1 \
   && echo "Temper already running" \
   || { nohup ./target/release/temper serve --storage turso --port 3001 --observe \
          > /tmp/temper.log 2>&1 & sleep 4 && echo "Temper started"; }
 ```
 
-The `--observe` flag auto-starts the Observe UI at `http://localhost:3001`. This is where humans approve or deny governance decisions (see Governance section below).
+The `--observe` flag auto-starts the Observe UI at the Observe UI. This is where humans approve or deny governance decisions (see Governance section below).
 
 **That's it.** Temper auto-reloads your specs on startup — if you've called `load-dir` before, your entity types come back automatically. Your data was never gone (it's in the DB). No extra steps.
 
 Verify it's serving your app:
 ```bash
-curl -s http://localhost:3001/tdata -H "X-Tenant-Id: your-app-name" | \
+curl -s <TEMPER_URL>/tdata -H "X-Tenant-Id: your-app-name" | \
   python3 -c "import sys,json; print([v['name'] for v in json.load(sys.stdin)['value']])"
 ```
 
@@ -260,7 +260,7 @@ curl -s http://localhost:3001/tdata -H "X-Tenant-Id: your-app-name" | \
 The first time you run (new machine, new app), register your specs once:
 
 ```bash
-curl -s -X POST http://localhost:3001/api/specs/load-dir \
+curl -s -X POST <TEMPER_URL>/api/specs/load-dir \
   -H "Content-Type: application/json" \
   -d "{\"tenant\": \"your-app-name\", \"specs_dir\": \"$HOME/workspace/apps/your-app/specs\"}"
 ```
@@ -273,7 +273,7 @@ Re-calling `load-dir` is safe and **hot-swaps** specs — existing entities keep
 
 ## 3. Use the OData API
 
-**Base URL:** `http://localhost:{port}/tdata`
+**Base URL:** `<TEMPER_URL>/tdata`
 **Required header:** `X-Tenant-Id: {your-app}`
 
 ### Action URL Format — Read This First
@@ -288,15 +288,15 @@ POST /tdata/{EntitySet}('{entity-id}')/Temper.{ActionName}
 
 ```bash
 # ✅ correct
-curl -X POST "http://localhost:3001/tdata/Tasks('abc-123')/Temper.Assign" \
+curl -X POST "<TEMPER_URL>/tdata/Tasks('abc-123')/Temper.Assign" \
   -H "Content-Type: application/json" -H "X-Tenant-Id: my-app" \
   -d '{"AssignedTo": "haku"}'
 
 # ❌ wrong — missing Temper. prefix
-curl -X POST "http://localhost:3001/tdata/Tasks('abc-123')/Assign" ...
+curl -X POST "<TEMPER_URL>/tdata/Tasks('abc-123')/Assign" ...
 
 # ❌ wrong — action in query string
-curl -X POST "http://localhost:3001/tdata/Tasks('abc-123')?action=Assign" ...
+curl -X POST "<TEMPER_URL>/tdata/Tasks('abc-123')?action=Assign" ...
 ```
 
 The action name must match exactly what's in your IOA spec (`name = "Assign"`), case-sensitive.
@@ -317,22 +317,22 @@ Illegal transitions return `409 Conflict`. Legal ones return the full entity wit
 
 ```bash
 # Create
-curl -X POST http://localhost:3001/tdata/Tasks \
+curl -X POST <TEMPER_URL>/tdata/Tasks \
   -H "Content-Type: application/json" -H "X-Tenant-Id: my-app" \
   -d '{"Title": "Fix the login bug"}'
 # → returns entity with id, Status: "Open", event log
 
 # Fire action
-curl -X POST "http://localhost:3001/tdata/Tasks('abc-123')/Temper.Assign" \
+curl -X POST "<TEMPER_URL>/tdata/Tasks('abc-123')/Temper.Assign" \
   -H "Content-Type: application/json" -H "X-Tenant-Id: my-app" \
   -d '{"AssignedTo": "haku"}'
 # → returns entity with Status: "InProgress", updated booleans, new event appended
 
 # Read all
-curl http://localhost:3001/tdata/Tasks -H "X-Tenant-Id: my-app"
+curl <TEMPER_URL>/tdata/Tasks -H "X-Tenant-Id: my-app"
 
 # Read one
-curl "http://localhost:3001/tdata/Tasks('abc-123')" -H "X-Tenant-Id: my-app"
+curl "<TEMPER_URL>/tdata/Tasks('abc-123')" -H "X-Tenant-Id: my-app"
 ```
 
 ---
@@ -347,30 +347,30 @@ Temper enforces **Cedar authorization** on all agent actions. By default, agents
 2. Cedar evaluates the policy → **DENIED** (403 Forbidden)
 3. Response includes a **decision ID** (`PD-<uuid>`) and guidance
 4. Agent must **wait** — poll the decisions API until a human approves
-5. Human approves via **Observe UI** (`http://localhost:3001`) or **`temper decide`** CLI
+5. Human approves via **Observe UI** (the Observe UI) or **`temper decide`** CLI
 6. Agent retries the action → **SUCCESS**
 
 ### Agent-Side (curl)
 
 ```bash
 # 1. Action gets denied
-curl -X POST "http://localhost:3001/tdata/Tasks('abc')/Temper.Assign" \
+curl -X POST "<TEMPER_URL>/tdata/Tasks('abc')/Temper.Assign" \
   -H "Content-Type: application/json" -H "X-Tenant-Id: my-app" \
   -d '{"AssignedTo": "haku"}'
 # → 403 {"error": {"code": "AuthorizationDenied", "message": "...PD-abc123..."}}
 
 # 2. Wait for human approval (poll every 2s)
-curl -s "http://localhost:3001/api/tenants/my-app/decisions" | \
+curl -s "<TEMPER_URL>/api/tenants/my-app/decisions" | \
   python3 -c "import sys,json; [print(d) for d in json.load(sys.stdin) if d['status']=='Pending']"
 
 # 3. After human approves, retry
-curl -X POST "http://localhost:3001/tdata/Tasks('abc')/Temper.Assign" ...
+curl -X POST "<TEMPER_URL>/tdata/Tasks('abc')/Temper.Assign" ...
 # → 200 Success
 ```
 
 ### Human Approval Channels
 
-**Observe UI** — browser at `http://localhost:3001/decisions`. Start server with `--observe` flag. Shows pending decisions, approve/deny with scope selection.
+**Observe UI** — browser at `the Observe UI`. Start server with `--observe` flag. Shows pending decisions, approve/deny with scope selection.
 
 **`temper decide` CLI** — terminal-based approval for developers:
 ```bash
@@ -455,7 +455,7 @@ are buffered normally.
 import http.server, urllib.request, urllib.error, os
 from socketserver import ThreadingMixIn
 
-TEMPER = os.environ.get("TEMPER_URL", "http://localhost:3001")
+TEMPER = os.environ.get("TEMPER_URL", "<TEMPER_URL>")
 PORT   = int(os.environ.get("PORT", "8080"))
 HTML   = os.path.join(os.path.dirname(__file__), "index.html")
 
@@ -621,7 +621,7 @@ jq -r '.gateway.port'  ~/.openclaw/openclaw.json
       "openclaw-temper": {
         enabled: true,
         config: {
-          url: "http://127.0.0.1:3001",
+          url: "<TEMPER_URL>",
           temperBinary: "/path/to/temper",  // optional, default: "temper" on PATH
           port: 3001,                       // optional, passed as --port to temper mcp
           agentId: "haku",                  // optional, Cedar principal identity

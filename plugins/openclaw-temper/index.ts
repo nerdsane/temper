@@ -23,6 +23,7 @@ type TemperPluginConfig = {
   temperBinary?: string;
   port?: number;
   agentId?: string;
+  apiKey?: string;
 };
 
 type ToolResult = {
@@ -148,7 +149,13 @@ const parseConfig = (pluginConfig: unknown): TemperPluginConfig => {
       ? pluginConfig.agentId.trim()
       : undefined;
 
+  const apiKey =
+    typeof pluginConfig.apiKey === "string" && pluginConfig.apiKey.trim().length > 0
+      ? pluginConfig.apiKey.trim()
+      : undefined;
+
   return {
+
     url: normalizeBaseUrl(url),
     apps,
     hooksToken,
@@ -156,6 +163,7 @@ const parseConfig = (pluginConfig: unknown): TemperPluginConfig => {
     temperBinary,
     port,
     agentId,
+    apiKey,
   };
 };
 
@@ -173,12 +181,18 @@ class McpStdioBridge {
   private args: string[];
   private logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
 
+  private apiKey?: string;
+
   constructor(config: TemperPluginConfig, logger: McpStdioBridge["logger"]) {
     this.binary = config.temperBinary ?? "temper";
     this.logger = logger;
+    this.apiKey = config.apiKey;
 
     const args = ["mcp"];
-    if (config.port !== undefined) {
+    const isRemote = config.url && !/^https?:\/\/(localhost|127\.0\.0\.1)/i.test(config.url);
+    if (isRemote) {
+      args.push("--url", config.url);
+    } else if (config.port !== undefined) {
       args.push("--port", String(config.port));
     }
     if (config.agentId) {
@@ -268,7 +282,7 @@ class McpStdioBridge {
 
       const child = spawn(this.binary, this.args, {
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env },
+        env: { ...process.env, ...(this.apiKey ? { TEMPER_API_KEY: this.apiKey } : {}) },
       });
 
       this.child = child;

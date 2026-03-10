@@ -249,9 +249,7 @@ impl PersistentSandbox {
                             )),
                         );
                         let mut print = PrintWriter::Disabled;
-                        match call
-                            .resume(ExtFunctionResult::Error(err_exc), &mut print)
-                        {
+                        match call.resume(ExtFunctionResult::Error(err_exc), &mut print) {
                             Ok(p) => {
                                 progress = p;
                                 continue;

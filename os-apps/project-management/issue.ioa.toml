@@ -2,6 +2,11 @@
 #
 # Core work item for project management. Models issue lifecycle from
 # backlog triage through development, review, completion, and archival.
+#
+# Designed for multi-agent coordination: CC agents, Codex agents, and human
+# operators share this board. Agent identity (AssigneeId + AgentType + SessionId)
+# tracks who is doing the work. Implementation fields (repo, branch, worktree,
+# PR URL) track where the work is happening.
 
 [automaton]
 name = "Issue"
@@ -40,6 +45,11 @@ name = "has_description"
 type = "bool"
 initial = "false"
 
+[[state]]
+name = "has_branch"
+type = "bool"
+initial = "false"
+
 # --- Actions: Issue Lifecycle ---
 
 [[action]]
@@ -71,8 +81,8 @@ name = "Assign"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "InProgress"]
 effect = "set assignee_set true"
-params = ["AgentId"]
-hint = "Assign an agent or person to the issue. Required before starting work."
+params = ["AgentId", "AgentType", "SessionId"]
+hint = "Assign an agent to the issue. AgentType: claude-code, codex, haku, human. SessionId: the agent session identifier (e.g. cc-prop-048, codex-tmux-3). Required before starting work."
 
 [[action]]
 name = "Unassign"
@@ -98,18 +108,28 @@ hint = "Accept the issue into the todo queue. Requires a priority to be set."
 
 [[action]]
 name = "StartWork"
-kind = "internal"
+kind = "input"
 from = ["Todo"]
 to = "InProgress"
 guard = "is_true assignee_set"
-hint = "Begin active work on the issue. Requires an assignee."
+effect = "set has_branch true"
+params = ["repo", "branch_name", "worktree_path"]
+hint = "Begin active work. Agent provides repo (e.g. rita-aga/deep-sci-fi), branch name, and worktree path. Requires an assignee."
+
+[[action]]
+name = "UpdateImplementation"
+kind = "input"
+from = ["InProgress", "InReview"]
+params = ["implementation_notes"]
+hint = "Agent drops context about what it changed, what it found, or what is blocked. Append-style — each call adds to the record."
 
 [[action]]
 name = "SubmitForReview"
-kind = "internal"
+kind = "input"
 from = ["InProgress"]
 to = "InReview"
-hint = "Submit completed work for code review or verification."
+params = ["pr_url"]
+hint = "Submit completed work for review. Agent provides the PR URL."
 
 [[action]]
 name = "RequestChanges"
@@ -186,6 +206,11 @@ assert = "assignee_set"
 name = "TodoRequiresPriority"
 when = ["Todo", "InProgress", "InReview", "Done"]
 assert = "priority > 0"
+
+[[invariant]]
+name = "InProgressRequiresBranch"
+when = ["InProgress", "InReview", "Done"]
+assert = "has_branch"
 
 # --- Liveness Properties ---
 

@@ -1,6 +1,7 @@
 # Comment Entity — I/O Automaton Specification
 #
-# Discussion comment on an issue.
+# Discussion comment on an issue. Tracks which agent session left the comment
+# so context can be traced back to specific CC/Codex runs.
 
 [automaton]
 name = "Comment"
@@ -25,8 +26,8 @@ initial = ""
 name = "Create"
 kind = "input"
 from = ["Active"]
-params = ["issue_id", "body", "author_id"]
-hint = "Initialize comment fields when created on an issue."
+params = ["issue_id", "body", "author_id", "agent_type", "session_id"]
+hint = "Initialize comment. author_id: who wrote it. agent_type: claude-code, codex, haku, human. session_id: trace back to specific agent session."
 
 [[action]]
 name = "Edit"
