@@ -24,6 +24,7 @@ temper-store-postgres = { workspace = true }
 temper-store-turso = { workspace = true }
 temper-store-redis = { workspace = true }
 temper-evolution = { workspace = true }
+temper-authz = { workspace = true }
 temper-sdk = { workspace = true }
 sqlx = { workspace = true }
 axum = { workspace = true }

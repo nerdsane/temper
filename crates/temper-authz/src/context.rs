@@ -28,6 +28,8 @@ pub struct Principal {
     pub role: Option<String>,
     /// If this agent is acting on behalf of another principal.
     pub acting_for: Option<String>,
+    /// Agent type classification (e.g. "claude-code", "openclaw").
+    pub agent_type: Option<String>,
     /// Arbitrary attributes for ABAC evaluation.
     pub attributes: HashMap<String, serde_json::Value>,
 }
@@ -55,6 +57,7 @@ impl SecurityContext {
         let mut kind = PrincipalKind::Customer;
         let mut role = None;
         let mut acting_for = None;
+        let mut agent_type = None;
         let mut attributes = HashMap::new();
         let mut context_attrs = HashMap::new();
         let mut correlation_id = uuid::Uuid::now_v7().to_string();
@@ -75,6 +78,7 @@ impl SecurityContext {
                 }
                 "x-temper-agent-role" => role = Some(value.clone()),
                 "x-temper-acting-for" => acting_for = Some(value.clone()),
+                "x-temper-agent-type" => agent_type = Some(value.clone()),
                 "x-temper-correlation-id" => correlation_id = value.clone(),
                 k if k.starts_with("x-temper-attr-") => {
                     let attr_name = k.strip_prefix("x-temper-attr-").unwrap(); // ci-ok: guarded by starts_with
@@ -100,6 +104,7 @@ impl SecurityContext {
                 kind,
                 role,
                 acting_for,
+                agent_type,
                 attributes,
             },
             context_attrs,
@@ -115,6 +120,7 @@ impl SecurityContext {
                 kind: PrincipalKind::System,
                 role: None,
                 acting_for: None,
+                agent_type: None,
                 attributes: HashMap::new(),
             },
             context_attrs: HashMap::new(),
@@ -127,7 +133,12 @@ impl SecurityContext {
     /// If the principal is anonymous and an agent_id is present, promotes
     /// the principal kind to `Agent` with role `"wasm_module"`.
     /// Merges agent_id and session_id into `context_attrs` for Cedar evaluation.
-    pub fn with_agent_context(mut self, agent_id: Option<&str>, session_id: Option<&str>) -> Self {
+    pub fn with_agent_context(
+        mut self,
+        agent_id: Option<&str>,
+        session_id: Option<&str>,
+        agent_type: Option<&str>,
+    ) -> Self {
         if let Some(aid) = agent_id {
             self.context_attrs.insert(
                 "agentId".to_string(),
@@ -147,6 +158,13 @@ impl SecurityContext {
                 "sessionId".to_string(),
                 serde_json::Value::String(sid.to_string()),
             );
+        }
+        if let Some(at) = agent_type {
+            self.context_attrs.insert(
+                "agentType".to_string(),
+                serde_json::Value::String(at.to_string()),
+            );
+            self.principal.agent_type = Some(at.to_string());
         }
         self
     }
@@ -220,8 +238,11 @@ mod tests {
 
     #[test]
     fn test_with_agent_context_promotes_anonymous() {
-        let ctx = SecurityContext::from_headers(&[])
-            .with_agent_context(Some("stripe_charge"), Some("sess-1"));
+        let ctx = SecurityContext::from_headers(&[]).with_agent_context(
+            Some("stripe_charge"),
+            Some("sess-1"),
+            None,
+        );
 
         assert_eq!(ctx.principal.id, "stripe_charge");
         assert_eq!(ctx.principal.kind, PrincipalKind::Agent);
@@ -245,7 +266,8 @@ mod tests {
                 "customer".to_string(),
             ),
         ];
-        let ctx = SecurityContext::from_headers(&headers).with_agent_context(Some("agent-1"), None);
+        let ctx =
+            SecurityContext::from_headers(&headers).with_agent_context(Some("agent-1"), None, None);
 
         // Should NOT overwrite explicit customer principal
         assert_eq!(ctx.principal.id, "cust-123");
@@ -271,9 +293,20 @@ mod tests {
 
     #[test]
     fn test_with_agent_context_none_values() {
-        let ctx = SecurityContext::system().with_agent_context(None, None);
+        let ctx = SecurityContext::system().with_agent_context(None, None, None);
         assert_eq!(ctx.principal.id, "system");
         assert!(!ctx.context_attrs.contains_key("agentId"));
         assert!(!ctx.context_attrs.contains_key("sessionId"));
+    }
+
+    #[test]
+    fn test_from_headers_with_agent_type() {
+        let headers = vec![
+            ("X-Temper-Principal-Id".to_string(), "bot-1".to_string()),
+            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+            ("X-Temper-Agent-Type".to_string(), "claude-code".to_string()),
+        ];
+        let ctx = SecurityContext::from_headers(&headers);
+        assert_eq!(ctx.principal.agent_type, Some("claude-code".to_string()));
     }
 }

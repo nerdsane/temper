@@ -340,7 +340,21 @@ export interface WasmInvocationsResponse {
 
 // --- Pending Decision types ---
 export type DecisionStatus = "pending" | "approved" | "denied" | "expired";
-export type PolicyScope = "narrow" | "medium" | "broad";
+
+export type PrincipalScope = "this_agent" | "agents_with_role" | "agents_of_type" | "any_agent";
+export type ActionScopeOption = "this_action" | "all_actions_on_type" | "all_actions";
+export type ResourceScopeOption = "this_resource" | "any_of_type" | "any_resource";
+export type DurationScope = "session" | "always";
+
+export interface PolicyScopeMatrix {
+  principal: PrincipalScope;
+  action: ActionScopeOption;
+  resource: ResourceScopeOption;
+  duration: DurationScope;
+  agent_type_value?: string;
+  role_value?: string;
+  session_id?: string;
+}
 
 export interface PendingDecision {
   id: string;
@@ -352,12 +366,14 @@ export interface PendingDecision {
   resource_attrs: Record<string, unknown>;
   denial_reason: string;
   module_name?: string;
+  agent_type?: string;
+  session_id?: string;
   created_at: string;
   status: DecisionStatus;
   decided_by?: string;
   decided_at?: string;
   generated_policy?: string;
-  approved_scope?: PolicyScope;
+  approved_scope?: PolicyScopeMatrix;
 }
 
 export interface DecisionsResponse {
@@ -438,6 +454,18 @@ export interface FeatureRequest {
   disposition: FeatureRequestDisposition;
   developer_notes: string | null;
   created_at: string;
+}
+
+// --- OS App types ---
+export interface OsApp {
+  name: string;
+  description: string;
+  entity_types: string[];
+  version: string;
+}
+
+export interface OsAppsResponse {
+  apps: OsApp[];
 }
 
 // --- Extended evolution record detail ---

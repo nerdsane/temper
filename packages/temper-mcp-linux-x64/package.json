@@ -1,0 +1,9 @@
+{
+  "name": "@temper/mcp-linux-x64",
+  "version": "0.1.0",
+  "description": "Temper MCP binary for Linux x64",
+  "license": "MIT",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": ["bin/**/*"]
+}

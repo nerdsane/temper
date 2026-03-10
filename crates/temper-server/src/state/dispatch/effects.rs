@@ -59,6 +59,7 @@ impl crate::state::ServerState {
             denied_module: None,
             source: Some(TrajectorySource::Entity),
             spec_governed: None,
+            agent_type: ctx.agent_ctx.agent_type.clone(),
         };
         if let Err(e) = self.persist_trajectory_entry(&entry).await {
             tracing::error!(error = %e, "failed to persist trajectory entry");
@@ -107,6 +108,7 @@ impl crate::state::ServerState {
                 denied_module: None,
                 source: Some(TrajectorySource::Entity),
                 spec_governed: None,
+                agent_type: ctx.agent_ctx.agent_type.clone(),
             };
             tokio::spawn(async move {
                 // determinism-ok: external side-effect, no simulation-visible state

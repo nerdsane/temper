@@ -532,6 +532,7 @@ impl crate::state::ServerState {
             denied_module: Some(module_name.to_string()),
             source: Some(TrajectorySource::Authz),
             spec_governed: None,
+            agent_type: None,
         };
         let state_c = self.clone();
         #[rustfmt::skip]

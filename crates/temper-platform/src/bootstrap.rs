@@ -54,7 +54,6 @@ const PLAN_IOA: &str = include_str!("specs/plan.ioa.toml");
 const TASK_IOA: &str = include_str!("specs/task.ioa.toml");
 const TOOL_CALL_IOA: &str = include_str!("specs/tool_call.ioa.toml");
 const SCHEDULE_IOA: &str = include_str!("specs/schedule.ioa.toml");
-const HARNESS_IOA: &str = include_str!("specs/harness.ioa.toml");
 const POLICY_IOA: &str = include_str!("specs/policy.ioa.toml");
 const AGENT_CSDL: &str = include_str!("specs/agent_model.csdl.xml");
 
@@ -66,7 +65,6 @@ const AGENT_SPECS: &[(&str, &str)] = &[
     ("Task", TASK_IOA),
     ("ToolCall", TOOL_CALL_IOA),
     ("Schedule", SCHEDULE_IOA),
-    ("Harness", HARNESS_IOA),
     ("Policy", POLICY_IOA),
 ];
 
@@ -80,7 +78,7 @@ const AGENT_SPECS: &[(&str, &str)] = &[
 /// 5. Marks all entities as pre-verified
 ///
 /// Panics if any spec fails to parse or verify (fatal startup error).
-fn bootstrap_tenant_specs(
+pub(crate) fn bootstrap_tenant_specs(
     state: &PlatformState,
     tenant: &str,
     csdl_source: &str,

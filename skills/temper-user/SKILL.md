@@ -9,7 +9,7 @@ Before responding to the user, silently discover what the app can do. Do NOT sho
 ### Step 0: Find the Server
 
 ```bash
-curl -s http://localhost:3333/observe/health
+curl -s <TEMPER_URL>/observe/health
 ```
 
 - **If it fails**: "Hmm, the app isn't running right now. Can you check with your developer?"  Stop here.
@@ -18,7 +18,7 @@ curl -s http://localhost:3333/observe/health
 ### Step 1: Discover the App
 
 ```bash
-curl -s http://localhost:3333/observe/specs | jq '[.[].tenant] | unique'
+curl -s <TEMPER_URL>/observe/specs | jq '[.[].tenant] | unique'
 ```
 
 - **If only one tenant** (excluding "temper-system"): Use it automatically.
@@ -28,8 +28,8 @@ curl -s http://localhost:3333/observe/specs | jq '[.[].tenant] | unique'
 ### Step 2: Learn What the App Can Do
 
 ```bash
-curl -s -H "X-Tenant-Id: {TENANT}" http://localhost:3333/tdata | jq .
-curl -s -H "X-Tenant-Id: {TENANT}" http://localhost:3333/tdata/\$metadata
+curl -s -H "X-Tenant-Id: {TENANT}" <TEMPER_URL>/tdata | jq .
+curl -s -H "X-Tenant-Id: {TENANT}" <TEMPER_URL>/tdata/\$metadata
 ```
 
 Parse these silently. Then greet the user with a friendly summary in plain language:
@@ -58,11 +58,11 @@ Do NOT skip discovery. Every session starts here.
 
 Map natural language to API calls. Always use the Bash tool. Always include `-H "X-Tenant-Id: {TENANT}"` on every call.
 
-**Create:** `POST http://localhost:3333/tdata/{EntitySet}` with JSON body
-**List:** `GET http://localhost:3333/tdata/{EntitySet}`
-**Get one:** `GET http://localhost:3333/tdata/{EntitySet}('id')`
-**Do something:** `POST http://localhost:3333/tdata/{EntitySet}('id')/Ns.{ActionName}` with `{}` body
-**Filter:** `GET http://localhost:3333/tdata/{EntitySet}?$filter=Status eq 'Active'`
+**Create:** `POST <TEMPER_URL>/tdata/{EntitySet}` with JSON body
+**List:** `GET <TEMPER_URL>/tdata/{EntitySet}`
+**Get one:** `GET <TEMPER_URL>/tdata/{EntitySet}('id')`
+**Do something:** `POST <TEMPER_URL>/tdata/{EntitySet}('id')/Ns.{ActionName}` with `{}` body
+**Filter:** `GET <TEMPER_URL>/tdata/{EntitySet}?$filter=Status eq 'Active'`
 
 ## Error Handling
 
@@ -84,7 +84,7 @@ When the user asks for something the app cannot do (no matching entity type, act
 
 1. Use the Bash tool to run:
 ```bash
-curl -s -X POST http://localhost:3333/api/evolution/trajectories/unmet \
+curl -s -X POST <TEMPER_URL>/api/evolution/trajectories/unmet \
   -H "Content-Type: application/json" \
   -d '{"action": "{what_user_asked}", "entity_type": "{closest_entity_or_empty}", "error": "No matching capability"}'
 ```
@@ -95,7 +95,7 @@ curl -s -X POST http://localhost:3333/api/evolution/trajectories/unmet \
 3. **Start watching for spec changes.** Immediately after reporting, snapshot the current specs and start a background polling command using the Bash tool with `run_in_background: true`:
 
 ```bash
-SNAP=$(curl -s http://localhost:3333/observe/specs 2>/dev/null | python3 -c "import sys,json; specs=json.load(sys.stdin); print(sorted([(s['entity_type'],sorted(s['actions']),sorted(s['states']),s.get('verification_status','')) for s in specs]))" 2>/dev/null); while true; do sleep 10; NOW=$(curl -s http://localhost:3333/observe/specs 2>/dev/null | python3 -c "import sys,json; specs=json.load(sys.stdin); print(sorted([(s['entity_type'],sorted(s['actions']),sorted(s['states']),s.get('verification_status','')) for s in specs]))" 2>/dev/null); if [ "$NOW" != "$SNAP" ]; then echo "SPECS_CHANGED"; echo "Before: $SNAP"; echo "After: $NOW"; curl -s http://localhost:3333/observe/specs; exit 0; fi; done
+SNAP=$(curl -s <TEMPER_URL>/observe/specs 2>/dev/null | python3 -c "import sys,json; specs=json.load(sys.stdin); print(sorted([(s['entity_type'],sorted(s['actions']),sorted(s['states']),s.get('verification_status','')) for s in specs]))" 2>/dev/null); while true; do sleep 10; NOW=$(curl -s <TEMPER_URL>/observe/specs 2>/dev/null | python3 -c "import sys,json; specs=json.load(sys.stdin); print(sorted([(s['entity_type'],sorted(s['actions']),sorted(s['states']),s.get('verification_status','')) for s in specs]))" 2>/dev/null); if [ "$NOW" != "$SNAP" ]; then echo "SPECS_CHANGED"; echo "Before: $SNAP"; echo "After: $NOW"; curl -s <TEMPER_URL>/observe/specs; exit 0; fi; done
 ```
 
 This detects ANY change to the specs — new actions, removed actions, new entities, deleted entities, new states, changed verification status, anything.
@@ -114,7 +114,7 @@ Do NOT invent functionality. If the schema does not support it, record, report, 
 When operating against a multi-tenant server, add the tenant header to every curl call:
 
 ```bash
-curl -s -H "X-Tenant-Id: {tenant}" http://localhost:3333/tdata/{EntitySet} | jq .
+curl -s -H "X-Tenant-Id: {tenant}" <TEMPER_URL>/tdata/{EntitySet} | jq .
 ```
 
 Default tenant is used if no `X-Tenant-Id` header is specified.

@@ -53,36 +53,70 @@ export function rateBgColor(rate: number): string {
   return "bg-pink-400";
 }
 
-/** Generate a Cedar policy preview matching the Rust generate_policy() logic. */
+/** Generate a Cedar policy preview from a PolicyScopeMatrix. */
 export function generatePolicyPreview(
   agentId: string,
   action: string,
   resourceType: string,
   resourceId: string,
-  scope: "narrow" | "medium" | "broad",
+  matrix: import("./types").PolicyScopeMatrix,
 ): string {
-  switch (scope) {
-    case "narrow":
-      return `permit(\n  principal == Agent::"${agentId}",\n  action == Action::"${action}",\n  resource == ${resourceType}::"${resourceId}"\n);`;
-    case "medium":
-      return `permit(\n  principal == Agent::"${agentId}",\n  action == Action::"${action}",\n  resource is ${resourceType}\n);`;
-    case "broad":
-      return `permit(\n  principal == Agent::"${agentId}",\n  action,\n  resource is ${resourceType}\n);`;
+  // Principal clause
+  let principalClause: string;
+  switch (matrix.principal) {
+    case "this_agent":
+      principalClause = `principal == Agent::"${agentId}"`;
+      break;
+    case "agents_with_role":
+    case "agents_of_type":
+    case "any_agent":
+      principalClause = "principal is Agent";
+      break;
   }
-}
 
-/** Text color class for a success rate percentage. */
-export function rateColor(rate: number): string {
-  if (rate >= 80) return "text-teal-400";
-  if (rate >= 50) return "text-amber-400";
-  return "text-pink-400";
-}
+  // Action clause
+  let actionClause: string;
+  switch (matrix.action) {
+    case "this_action":
+      actionClause = `action == Action::"${action}"`;
+      break;
+    case "all_actions_on_type":
+    case "all_actions":
+      actionClause = "action";
+      break;
+  }
 
-/** Background color class for a success rate bar. */
-export function rateBgColor(rate: number): string {
-  if (rate >= 80) return "bg-teal-400";
-  if (rate >= 50) return "bg-amber-400";
-  return "bg-pink-400";
+  // Resource clause
+  let resourceClause: string;
+  switch (matrix.resource) {
+    case "this_resource":
+      resourceClause = `resource == ${resourceType}::"${resourceId}"`;
+      break;
+    case "any_of_type":
+      resourceClause = `resource is ${resourceType}`;
+      break;
+    case "any_resource":
+      resourceClause = "resource";
+      break;
+  }
+
+  // When conditions
+  const conditions: string[] = [];
+  if (matrix.principal === "agents_with_role" && matrix.role_value) {
+    conditions.push(`context.role == "${matrix.role_value}"`);
+  }
+  if (matrix.principal === "agents_of_type" && matrix.agent_type_value) {
+    conditions.push(`context.agentType == "${matrix.agent_type_value}"`);
+  }
+  if (matrix.duration === "session" && matrix.session_id) {
+    conditions.push(`context.sessionId == "${matrix.session_id}"`);
+  }
+
+  const whenClause = conditions.length > 0
+    ? `\nwhen { ${conditions.join(" && ")} }`
+    : "";
+
+  return `permit(\n  ${principalClause},\n  ${actionClause},\n  ${resourceClause}\n)${whenClause};`;
 }
 
 /** Group items into "Today" / "Yesterday" / "Older" buckets by date. */

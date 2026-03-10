@@ -90,7 +90,7 @@ pub async fn handle_upload_wasm_module(
 ) -> Result<Json<WasmModuleUploadResponse>, (StatusCode, String)> {
     let tenant = extract_tenant(&headers, &state)?;
     // Cedar authorization: admin bypass, others need manage_wasm.
-    let security_ctx = security_context_from_headers(&headers, None, None);
+    let security_ctx = security_context_from_headers(&headers, None, None, None);
     if !matches!(security_ctx.principal.kind, PrincipalKind::Admin)
         && let Err(denial) = state.authorize_with_context(
             &security_ctx,
@@ -198,7 +198,7 @@ pub async fn handle_delete_wasm_module(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let tenant = extract_tenant(&headers, &state)?;
     // Cedar authorization: admin bypass, others need manage_wasm.
-    let security_ctx = security_context_from_headers(&headers, None, None);
+    let security_ctx = security_context_from_headers(&headers, None, None, None);
     if !matches!(security_ctx.principal.kind, PrincipalKind::Admin)
         && let Err(denial) = state.authorize_with_context(
             &security_ctx,
@@ -299,7 +299,7 @@ pub async fn handle_list_wasm_modules(
 
     let modules: Vec<WasmModuleListEntry> = {
         let wasm_reg = state.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
-        wasm_reg
+        let mut entries: Vec<WasmModuleListEntry> = wasm_reg
             .all_modules()
             .into_iter()
             .filter(|(tenant, _, _)| {
@@ -327,7 +327,31 @@ pub async fn handle_list_wasm_modules(
                     last_invoked_at,
                 }
             })
-            .collect()
+            .collect();
+
+        // Include built-in modules (visible to all tenants, no tenant scope filter).
+        for (name, hash) in wasm_reg.all_builtins() {
+            let cached = state.wasm_engine.is_cached(hash);
+            let (total_invocations, success_count, last_invoked_at) =
+                invocation_stats.get(name).cloned().unwrap_or((0, 0, None));
+            let success_rate = if total_invocations > 0 {
+                success_count as f64 / total_invocations as f64
+            } else {
+                0.0
+            };
+            entries.push(WasmModuleListEntry {
+                tenant: "builtin".to_string(),
+                module_name: name.to_string(),
+                sha256_hash: hash.to_string(),
+                cached,
+                total_invocations,
+                success_count,
+                success_rate,
+                last_invoked_at,
+            });
+        }
+
+        entries
     };
 
     let total = modules.len();

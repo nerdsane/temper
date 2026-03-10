@@ -82,7 +82,7 @@ pub(crate) async fn handle_decide(
     Json(body): Json<DecideRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     // Cedar authorization: admin bypass, others need manage_decisions.
-    let security_ctx = security_context_from_headers(&headers, None, None);
+    let security_ctx = security_context_from_headers(&headers, None, None, None);
     let tenant_hint = headers
         .get("x-tenant-id")
         .and_then(|v| v.to_str().ok())

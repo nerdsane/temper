@@ -1,0 +1,9 @@
+{
+  "name": "@temper/mcp-darwin-arm64",
+  "version": "0.1.0",
+  "description": "Temper MCP binary for macOS ARM64 (Apple Silicon)",
+  "license": "MIT",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": ["bin/**/*"]
+}

@@ -18,7 +18,7 @@ use tracing::instrument;
 
 use super::{empty_decision_list, format_decision_list, require_policy_auth};
 use crate::authz::require_observe_auth;
-use crate::state::{DecisionStatus, PendingDecision, PolicyScope, ServerState};
+use crate::state::{DecisionStatus, PendingDecision, ServerState};
 
 /// Query parameters for listing decisions.
 #[derive(serde::Deserialize)]
@@ -30,8 +30,8 @@ pub(crate) struct DecisionListParams {
 /// Body for approve request.
 #[derive(serde::Deserialize)]
 pub(crate) struct ApproveBody {
-    /// Scope: "narrow", "medium", or "broad".
-    scope: String,
+    /// Policy scope matrix for Cedar generation.
+    scope: temper_authz::PolicyScopeMatrix,
     /// Optional: who approved.
     decided_by: Option<String>,
 }
@@ -75,19 +75,14 @@ pub(crate) async fn handle_approve_decision(
         return resp;
     }
 
-    let scope: PolicyScope = match body.scope.as_str() {
-        "narrow" => PolicyScope::Narrow,
-        "medium" => PolicyScope::Medium,
-        "broad" => PolicyScope::Broad,
-        other => {
-            tracing::warn!(scope = %other, "invalid scope in approve decision request");
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("Invalid scope: {other}. Must be narrow, medium, or broad."),
-            )
-                .into_response();
-        }
-    };
+    let scope = body.scope;
+    if let Err(e) = temper_authz::validate_policy_scope_matrix(&scope) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid policy scope matrix: {e}"),
+        )
+            .into_response();
+    }
 
     // Read decision from Turso (single source of truth).
     let mut decision: PendingDecision = {
@@ -131,7 +126,7 @@ pub(crate) async fn handle_approve_decision(
             .into_response();
     }
 
-    let generated_policy = decision.generate_policy(&scope);
+    let generated_policy = decision.generate_policy_from_matrix(&scope);
     let evolution_record_id = decision.evolution_record_id.clone();
 
     // Build prospective tenant text and validate+reload via shared helper.
@@ -170,7 +165,7 @@ pub(crate) async fn handle_approve_decision(
 
     // Mark decision approved only after policy reload succeeds.
     decision.status = DecisionStatus::Approved;
-    decision.approved_scope = Some(scope);
+    decision.approved_scope = Some(scope.clone());
     decision.generated_policy = Some(generated_policy.clone());
     decision.decided_by = body.decided_by.clone();
     decision.decided_at = Some(sim_now().to_rfc3339());
@@ -197,7 +192,7 @@ pub(crate) async fn handle_approve_decision(
             .unwrap_or_else(|| "unknown".to_string()),
         rationale: format!(
             "Approved with scope: {:?}. Policy: {}",
-            body.scope, generated_policy
+            scope, generated_policy
         ),
         verification_results: None,
         implementation: None,

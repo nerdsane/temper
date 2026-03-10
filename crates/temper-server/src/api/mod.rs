@@ -11,6 +11,7 @@ mod repl;
 mod secrets;
 
 use axum::Router;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
@@ -73,6 +74,10 @@ pub fn build_api_router() -> Router<ServerState> {
             "/tenants/{tenant}/policies/rules",
             post(policies::handle_add_policy_rule),
         )
+        .route(
+            "/tenants/{tenant}/policies/suggestions",
+            get(handle_policy_suggestions),
+        )
         // Decision approve/deny (Phase 4)
         .route(
             "/tenants/{tenant}/decisions",
@@ -117,7 +122,7 @@ pub(crate) async fn require_policy_auth(
     headers: &HeaderMap,
     tenant: &str,
 ) -> Option<axum::response::Response> {
-    let security_ctx = security_context_from_headers(headers, None, None);
+    let security_ctx = security_context_from_headers(headers, None, None, None);
     if matches!(security_ctx.principal.kind, PrincipalKind::Admin) {
         // Admin principals (e.g. Observe UI) always bypass Cedar for policy
         // management. Without this, approving the first policy would lock out
@@ -162,6 +167,26 @@ pub(crate) async fn require_policy_auth(
         );
     }
     None
+}
+
+/// GET /api/tenants/{tenant}/policies/suggestions — suggested policies from denial patterns.
+async fn handle_policy_suggestions(
+    State(state): State<ServerState>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Some(resp) = require_policy_auth(&state, &headers, &tenant).await {
+        return resp;
+    }
+    let suggestions = match state.suggestion_engine.read() {
+        Ok(engine) => engine.suggestions(),
+        Err(_) => vec![],
+    };
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "suggestions": suggestions })),
+    )
+        .into_response()
 }
 
 /// Validate and reload combined Cedar policies for a tenant mutation.

@@ -16,7 +16,7 @@ import type {
   WasmInvocationsResponse,
   PendingDecision,
   DecisionsResponse,
-  PolicyScope,
+  PolicyScopeMatrix,
   AgentsResponse,
   AgentHistoryResponse,
   UnmetIntentsResponse,
@@ -24,6 +24,7 @@ import type {
   ExtendedSentinelCheckResponse,
   FeatureRequest,
   FeatureRequestDisposition,
+  OsAppsResponse,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -68,7 +69,7 @@ export async function fetchSpecs(): Promise<SpecSummary[]> {
   const res = await fetchWithRetry(`${API_BASE}/observe/specs`, { cache: "no-store" });
   if (!res.ok) throw new ApiError(`Failed to fetch specs: ${res.status}`, res.status);
   const data = await res.json();
-  return data.specs;
+  return Array.isArray(data) ? data : data.specs;
 }
 
 export async function fetchSpecDetail(entity: string): Promise<SpecDetail> {
@@ -290,7 +291,7 @@ export async function fetchDecisions(tenant: string, params?: {
 }
 
 /** Approve a pending decision */
-export async function approveDecision(tenant: string, decisionId: string, scope: PolicyScope): Promise<void> {
+export async function approveDecision(tenant: string, decisionId: string, scope: PolicyScopeMatrix): Promise<void> {
   const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/decisions/${encodeURIComponent(decisionId)}/approve`;
   const res = await fetchWithRetry(url, {
     method: "POST",
@@ -413,6 +414,24 @@ export async function fetchFeatureRequests(disposition?: FeatureRequestDispositi
   if (!res.ok) throw new ApiError(`Failed to fetch feature requests: ${res.status}`, res.status);
   const data = await res.json();
   return data.feature_requests;
+}
+
+/** Fetch available OS apps from the catalog */
+export async function fetchOsApps(): Promise<OsAppsResponse> {
+  const res = await fetchWithRetry(`${API_BASE}/observe/os-apps`, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to fetch OS apps: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Install an OS app into a tenant */
+export async function installOsApp(name: string, tenant: string): Promise<Record<string, unknown>> {
+  const res = await fetchWithRetry(`${API_BASE}/observe/os-apps/${encodeURIComponent(name)}/install`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tenant }),
+  });
+  if (!res.ok) throw new ApiError(`Failed to install OS app: ${res.status}`, res.status);
+  return res.json();
 }
 
 /** Update a feature request's disposition and/or developer notes */

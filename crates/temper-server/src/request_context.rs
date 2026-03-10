@@ -16,6 +16,8 @@ pub struct AgentContext {
     pub agent_id: Option<String>,
     /// Optional session identifier (from `X-Session-Id` header).
     pub session_id: Option<String>,
+    /// Optional agent type classification (from `X-Temper-Agent-Type` header).
+    pub agent_type: Option<String>,
 }
 
 impl AgentContext {
@@ -28,6 +30,7 @@ impl AgentContext {
         Self {
             agent_id: Some("system".to_string()),
             session_id: None,
+            agent_type: None,
         }
     }
 }
@@ -56,9 +59,15 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(String::from);
+    let agent_type = headers
+        .get("x-temper-agent-type")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     AgentContext {
         agent_id,
         session_id,
+        agent_type,
     }
 }
 

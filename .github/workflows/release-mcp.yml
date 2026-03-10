@@ -1,0 +1,108 @@
+name: Release MCP
+
+on:
+  push:
+    tags:
+      - 'mcp-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            package: temper-mcp-darwin-arm64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            package: temper-mcp-darwin-x64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            package: temper-mcp-linux-x64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            package: temper-mcp-linux-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            package: temper-mcp-win32-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Build
+        run: cargo build -p temper-cli --release --target ${{ matrix.target }}
+
+      - name: Copy binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p packages/${{ matrix.package }}/bin
+          cp target/${{ matrix.target }}/release/temper packages/${{ matrix.package }}/bin/temper
+
+      - name: Copy binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force -Path packages/${{ matrix.package }}/bin
+          Copy-Item target/${{ matrix.target }}/release/temper.exe packages/${{ matrix.package }}/bin/temper.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}
+          path: packages/${{ matrix.package }}/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Copy artifacts to packages
+        run: |
+          for pkg in temper-mcp-darwin-arm64 temper-mcp-darwin-x64 temper-mcp-linux-x64 temper-mcp-linux-arm64 temper-mcp-win32-x64; do
+            cp -r artifacts/$pkg/* packages/$pkg/
+            chmod +x packages/$pkg/bin/* 2>/dev/null || true
+          done
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for pkg in temper-mcp-darwin-arm64 temper-mcp-darwin-x64 temper-mcp-linux-x64 temper-mcp-linux-arm64 temper-mcp-win32-x64; do
+            cd packages/$pkg
+            npm publish --access public || echo "Failed to publish $pkg"
+            cd ../..
+          done
+
+      - name: Publish main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd packages/temper-mcp
+          npm publish --access public

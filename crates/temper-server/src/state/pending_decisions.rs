@@ -30,17 +30,9 @@ pub enum DecisionStatus {
     Expired,
 }
 
-/// Scope of the generated Cedar policy on approval.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PolicyScope {
-    /// Exact agent + action + resource.
-    Narrow,
-    /// Agent + action + resource type.
-    Medium,
-    /// Agent + all actions + resource type.
-    Broad,
-}
+pub use temper_authz::{
+    ActionScope, DurationScope, PolicyScopeMatrix, PrincipalScope, ResourceScope,
+};
 
 /// A pending authorization decision.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -79,10 +71,16 @@ pub struct PendingDecision {
     pub generated_policy: Option<String>,
     /// Scope of approval (if approved).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approved_scope: Option<PolicyScope>,
+    pub approved_scope: Option<PolicyScopeMatrix>,
     /// Link to the evolution A-Record that analyzed this denial.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evolution_record_id: Option<String>,
+    /// Agent type that was denied (for pattern analysis and Cedar context matching).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    /// Session ID at time of denial (for session-scoped approvals).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl PendingDecision {
@@ -115,6 +113,8 @@ impl PendingDecision {
             generated_policy: None,
             approved_scope: None,
             evolution_record_id: None,
+            agent_type: None,
+            session_id: None,
         }
     }
 
@@ -126,28 +126,15 @@ impl PendingDecision {
         )
     }
 
-    /// Generate Cedar policy text for the given scope.
-    pub fn generate_policy(&self, scope: &PolicyScope) -> String {
-        match scope {
-            PolicyScope::Narrow => {
-                format!(
-                    "permit(\n  principal == Agent::\"{}\",\n  action == Action::\"{}\",\n  resource == {}::\"{}\"\n);",
-                    self.agent_id, self.action, self.resource_type, self.resource_id
-                )
-            }
-            PolicyScope::Medium => {
-                format!(
-                    "permit(\n  principal == Agent::\"{}\",\n  action == Action::\"{}\",\n  resource is {}\n);",
-                    self.agent_id, self.action, self.resource_type
-                )
-            }
-            PolicyScope::Broad => {
-                format!(
-                    "permit(\n  principal == Agent::\"{}\",\n  action,\n  resource is {}\n);",
-                    self.agent_id, self.resource_type
-                )
-            }
-        }
+    /// Generate Cedar policy text from a scope matrix.
+    pub fn generate_policy_from_matrix(&self, matrix: &PolicyScopeMatrix) -> String {
+        temper_authz::generate_cedar_from_matrix(
+            &self.agent_id,
+            &self.action,
+            &self.resource_type,
+            &self.resource_id,
+            matrix,
+        )
     }
 }
 

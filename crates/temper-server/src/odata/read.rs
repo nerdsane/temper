@@ -274,6 +274,7 @@ async fn record_entity_set_not_found(state: &ServerState, tenant: &str, set_name
         denied_module: None,
         source: Some(TrajectorySource::Platform),
         spec_governed: None,
+        agent_type: None,
     };
     if let Err(e) = state.persist_trajectory_entry(&entry).await {
         tracing::error!(error = %e, "failed to persist entity-set-not-found trajectory");

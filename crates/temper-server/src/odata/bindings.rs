@@ -56,6 +56,7 @@ pub(super) async fn dispatch_bound_action(
         headers,
         agent_ctx.agent_id.as_deref(),
         agent_ctx.session_id.as_deref(),
+        None,
     );
 
     // Fetch entity state BEFORE authz check so resource attributes are available.

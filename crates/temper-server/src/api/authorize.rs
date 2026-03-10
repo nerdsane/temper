@@ -34,7 +34,7 @@ pub(crate) async fn handle_authorize(
     headers: HeaderMap,
     axum::Json(body): axum::Json<AuthorizeRequest>,
 ) -> impl IntoResponse {
-    let security_ctx = security_context_from_headers(&headers, Some(&body.agent_id), None);
+    let security_ctx = security_context_from_headers(&headers, Some(&body.agent_id), None, None);
     let resource_attrs = std::collections::BTreeMap::new();
     let tenant = match extract_tenant(&headers, &state) {
         Ok(t) => t,
@@ -140,6 +140,7 @@ pub(crate) async fn handle_audit(
         denied_module: None,
         source: Some(TrajectorySource::Entity),
         spec_governed: Some(false),
+        agent_type: None,
     };
 
     if let Err(e) = state.persist_trajectory_entry(&entry).await {

@@ -4,7 +4,6 @@ use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::spec_loader::generate_loaded_summary;
 use super::{MCP_PROTOCOL_VERSION, MCP_SERVER_NAME, RuntimeContext};
 
 #[derive(Debug, Deserialize)]
@@ -30,7 +29,7 @@ struct ToolCallParams {
     arguments: Value,
 }
 
-pub(super) async fn dispatch_json_line(ctx: &RuntimeContext, line: &str) -> Option<Value> {
+pub(super) async fn dispatch_json_line(ctx: &mut RuntimeContext, line: &str) -> Option<Value> {
     let raw: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(error) => {
@@ -45,7 +44,7 @@ pub(super) async fn dispatch_json_line(ctx: &RuntimeContext, line: &str) -> Opti
     dispatch_json_value(ctx, raw).await
 }
 
-pub(super) async fn dispatch_json_value(ctx: &RuntimeContext, raw: Value) -> Option<Value> {
+pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) -> Option<Value> {
     let request: JsonRpcRequest = match serde_json::from_value(raw) {
         Ok(value) => value,
         Err(error) => {
@@ -78,7 +77,7 @@ pub(super) async fn dispatch_json_value(ctx: &RuntimeContext, raw: Value) -> Opt
         and invoke actions — all governed by Cedar policies. If an action is denied, the \
         decision surfaces to the human developer for approval."
         })),
-        "tools/list" => Ok(json!({ "tools": tool_definitions(ctx) })),
+        "tools/list" => Ok(json!({ "tools": tool_definitions() })),
         "tools/call" => {
             let params: ToolCallParams = match serde_json::from_value(request.params) {
                 Ok(value) => value,
@@ -103,7 +102,6 @@ pub(super) async fn dispatch_json_value(ctx: &RuntimeContext, raw: Value) -> Opt
             };
 
             let tool_result = match params.name.as_str() {
-                "search" => ctx.run_search(code),
                 "execute" => ctx.run_execute(code).await,
                 other => Err(anyhow!(format!("unknown tool '{other}'"))),
             };
@@ -156,82 +154,68 @@ fn json_rpc_error(id: Option<Value>, code: i64, message: String) -> Value {
     })
 }
 
-fn tool_definitions(ctx: &RuntimeContext) -> Vec<Value> {
-    let summary = generate_loaded_summary(&ctx.spec);
-
-    let search_desc = format!(
-        "Explore loaded Temper specs (read-only, no server required). \
-In self-contained mode with no --apps, results will be empty until you submit specs \
-via the execute tool. Use after submit_specs to verify spec structure.\n\n\
-Code receives `spec` with async methods (use `await`):\n\n\
-\x20 await spec.tenants() -> list of tenant names\n\
-\x20 await spec.entities(tenant) -> list of entity type names\n\
-\x20 await spec.describe(tenant, entity_type) -> states, actions, guards, vars\n\
-\x20 await spec.actions(tenant, entity_type) -> all actions with params, from/to, guards\n\
-\x20 await spec.actions_from(tenant, entity_type, state) -> actions available from a state\n\
-\x20 await spec.raw(tenant, entity_type) -> full spec JSON{summary}"
-    );
-
-    let execute_desc = format!(
-        "Run Python against the Temper operating layer. Code receives `temper` with async methods.\n\n\
-WORKFLOW — build and operate governed apps:\n\
-\x20 1. await temper.start_server()  — launch the runtime\n\
-\x20 2. await temper.submit_specs(tenant, {{\"entity.ioa.toml\": \"...\", \"model.csdl.xml\": \"...\"}})\n\
-\x20 3. await temper.create/action/list/get — operate through verified specs\n\n\
-INTEGRATION PATTERN — specs declare [[integration]] sections for external APIs.\n\
-Effects trigger integrations; callbacks re-enter the state machine. You do not\n\
-call external APIs directly — you declare them in the spec and the runtime\n\
-handles execution within governance boundaries.\n\n\
-METHOD REFERENCE:\n\
-\x20 Lifecycle:    start_server\n\
-\x20 Entity ops:   list, get, create, action, patch\n\
-\x20 Developer:    show_spec, submit_specs, get_policies, upload_wasm, compile_wasm\n\
-\x20 Governance:   get_decisions, poll_decision\n\n\
-BUILT-IN MODULE: The server ships with a pre-registered `http_fetch` WASM module.\n\
-Declare `module = \"http_fetch\"` in [[integration]] sections with `url` and `method`\n\
-config keys to call any HTTP API without uploading a custom module.\n\n\
-COMPILE_WASM: Use `await temper.compile_wasm(tenant, module_name, rust_source)` to compile\n\
-Rust source into a WASM module. Source should use `temper_wasm_sdk::prelude::*` and the\n\
-`temper_module!` macro. Returns {{\"status\":\"compiled\",\"module\":name,\"hash\":...,\"size\":...}}\n\
-on success, or compiler errors on failure for self-correction.\n\n\
-Call `await temper.start_server()` before entity/developer/governance methods \
-(unless MCP was started with --port).\n\
+fn tool_definitions() -> Vec<Value> {
+    let execute_desc = "\
+Run Python against the Temper operating layer. Code receives `temper` with async methods.\n\
+\n\
+Requires a running Temper server (--port for local, --url for remote).\n\
+\n\
+DISCOVERY:\n\
+\x20 await temper.specs(tenant) -> loaded specs with states, actions, verification status\n\
+\x20 await temper.spec_detail(tenant, entity_type) -> full spec: actions, guards, invariants, state vars\n\
+\n\
+ENTITY OPERATIONS:\n\
+\x20 await temper.list(tenant, entity_type, filter?) -> list entities\n\
+\x20 await temper.get(tenant, entity_type, entity_id) -> get entity\n\
+\x20 await temper.create(tenant, entity_type, fields) -> create entity\n\
+\x20 await temper.action(tenant, entity_type, entity_id, action_name, body) -> invoke action\n\
+\x20 await temper.patch(tenant, entity_type, entity_id, fields) -> update fields\n\
+\n\
+DEVELOPER:\n\
+\x20 await temper.submit_specs(tenant, {\"entity.ioa.toml\": \"...\", \"model.csdl.xml\": \"...\"}) -> submit specs\n\
+\x20 await temper.get_policies(tenant) -> Cedar policies\n\
+\x20 await temper.upload_wasm(tenant, module_name, wasm_path) -> upload WASM module\n\
+\x20 await temper.compile_wasm(tenant, module_name, rust_source) -> compile + upload WASM\n\
+\n\
+OS APP CATALOG:\n\
+\x20 await temper.list_apps() -> available pre-built apps (name, description, entity_types)\n\
+\x20 await temper.install_app(app_name) -> install an OS app into the current tenant\n\
+\n\
+GOVERNANCE:\n\
+\x20 await temper.get_decisions(tenant, status?) -> list decisions\n\
+\x20 await temper.get_decision_status(tenant, decision_id) -> check single decision\n\
+\x20 await temper.poll_decision(tenant, decision_id) -> wait for human decision (120s timeout)\n\
+\n\
+OBSERVABILITY:\n\
+\x20 await temper.get_trajectories(tenant, entity_type?, failed_only?, limit?) -> trajectory spans\n\
+\x20 await temper.get_insights(tenant) -> evolution insights\n\
+\x20 await temper.get_evolution_records(tenant, record_type?) -> O-P-A-D-I records\n\
+\x20 await temper.check_sentinel(tenant) -> trigger evolution engine\n\
+\n\
+INTEGRATION: specs declare [[integration]] sections for external APIs.\n\
+Use module = \"http_fetch\" with url and method config keys for HTTP integrations.\n\
+\n\
+COMPILE_WASM: Use compile_wasm(tenant, module_name, rust_source) to compile Rust into WASM.\n\
+Source should use `temper_wasm_sdk::prelude::*` and the `temper_module!` macro.\n\
+\n\
 CEDAR GOVERNANCE: actions may be denied by Cedar policy. Denied actions create\n\
 decisions for human approval in the Observe UI or via `temper decide` CLI.\n\
-Use `await temper.poll_decision(tenant, decision_id)` to wait for the human decision.\n\
-You cannot approve or set policies — only humans can do that.{summary}"
-    );
+Use poll_decision(tenant, decision_id) to wait for the human decision.\n\
+You cannot approve or set policies — only humans can do that.";
 
-    vec![
-        json!({
-            "name": "search",
-            "description": search_desc,
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "Python snippet. Use `return ...` as the final statement."
-                    }
-                },
-                "required": ["code"],
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "execute",
-            "description": execute_desc,
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "Python snippet. Use async calls like `await temper.list(...)` and `return ...`."
-                    }
-                },
-                "required": ["code"],
-                "additionalProperties": false
-            }
-        }),
-    ]
+    vec![json!({
+        "name": "execute",
+        "description": execute_desc,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python snippet. Use async calls like `await temper.list(...)` and `return ...`."
+                }
+            },
+            "required": ["code"],
+            "additionalProperties": false
+        }
+    })]
 }

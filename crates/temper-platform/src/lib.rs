@@ -18,6 +18,7 @@ pub mod evolution;
 pub mod hooks;
 pub mod integration;
 pub mod optimization;
+pub mod os_apps;
 pub mod protocol;
 pub mod router;
 pub mod spec_store;
@@ -27,5 +28,6 @@ pub mod tenant_api;
 
 // Re-export primary types at crate root.
 pub use bootstrap::{bootstrap_agent_specs, bootstrap_system_tenant};
+pub use os_apps::{install_os_app, list_os_apps};
 pub use protocol::{PlatformEvent, VerifyStepStatus};
 pub use state::PlatformState;

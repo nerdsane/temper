@@ -5,6 +5,7 @@
 
 use axum::Router;
 use axum::middleware;
+use axum::routing;
 
 use crate::bearer_auth::bearer_auth_check;
 use crate::state::PlatformState;
@@ -24,7 +25,20 @@ use crate::tenant_access::tenant_access_check;
 pub fn build_platform_router(state: PlatformState) -> Router {
     let tenant_api = crate::tenant_api::tenant_api_router();
 
+    // OS Apps observe routes — merged at /observe/* to avoid the /api double-nest
+    // collision between temper-server's /api routes and the platform's /api routes.
+    let os_apps_observe = Router::new()
+        .route(
+            "/observe/os-apps",
+            routing::get(crate::tenant_api::list_os_apps),
+        )
+        .route(
+            "/observe/os-apps/{name}/install",
+            routing::post(crate::tenant_api::install_os_app),
+        );
+
     temper_server::build_router(state.server.clone())
+        .merge(os_apps_observe.with_state(state.clone()))
         .nest("/api", tenant_api.with_state(state.clone()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -88,5 +102,89 @@ mod tests {
                 "{path} should be 404"
             );
         }
+    }
+
+    // ── OS App Catalog Integration Tests ───────────────────────────
+
+    #[tokio::test]
+    async fn test_get_os_apps_returns_200() {
+        let app = build_platform_router(test_state());
+        let response = app
+            .oneshot(Request::get("/api/os-apps").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let apps = json["apps"].as_array().unwrap();
+        assert!(!apps.is_empty());
+        assert_eq!(apps[0]["name"], "project-management");
+    }
+
+    #[tokio::test]
+    async fn test_install_os_app_project_management() {
+        let app = build_platform_router(test_state());
+        let response = app
+            .oneshot(
+                Request::post("/api/os-apps/project-management/install")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"tenant":"test-install"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "installed");
+        let entity_types = json["entity_types"].as_array().unwrap();
+        assert_eq!(entity_types.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_get_observe_os_apps_returns_200() {
+        let app = build_platform_router(test_state());
+        let response = app
+            .oneshot(
+                Request::get("/observe/os-apps")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let apps = json["apps"].as_array().unwrap();
+        assert!(!apps.is_empty());
+        assert_eq!(apps[0]["name"], "project-management");
+    }
+
+    #[tokio::test]
+    async fn test_install_os_app_nonexistent_returns_404() {
+        let app = build_platform_router(test_state());
+        let response = app
+            .oneshot(
+                Request::post("/api/os-apps/nonexistent/install")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"tenant":"test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

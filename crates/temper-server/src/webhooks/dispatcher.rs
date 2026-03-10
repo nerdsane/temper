@@ -236,6 +236,7 @@ mod tests {
             denied_module: None,
             source: None,
             spec_governed: None,
+            agent_type: None,
         }
     }
 

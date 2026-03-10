@@ -1,13 +1,6 @@
 //! Unified `temper.*` method dispatch.
 //!
-//! Contains all temper methods except `start_server` (MCP-only, spawns child
-//! process) and `show_spec` (MCP-only, reads local spec data).
-//!
-//! Dispatch is split by domain:
-//! - Entity CRUD: `list`, `get`, `create`, `action`, `patch`, `navigate`
-//! - Governance: `get_decisions`, `get_decision_status`, `poll_decision`
-//! - WASM: `upload_wasm`, `compile_wasm`
-//! - Evolution/Observe: `get_trajectories`, `get_insights`, `get_evolution_records`, `check_sentinel`
+//! Contains all `temper.*` methods dispatched via HTTP to a running Temper server.
 
 use monty::MontyObject;
 use reqwest::Method;
@@ -78,6 +71,36 @@ pub async fn dispatch_temper_method(
         "get_trajectories" | "get_insights" | "get_evolution_records" | "check_sentinel" => {
             dispatch_evolution(ctx, method, args).await
         }
+        // --- OS App Catalog ---
+        "list_apps" | "install_app" => dispatch_os_apps(ctx, method, args).await,
+        // --- Discovery ---
+        "specs" => {
+            temper_request(
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
+                Method::GET,
+                "/observe/specs",
+                None,
+            )
+            .await
+        }
+        "spec_detail" => {
+            let entity_type = expect_string_arg(args, 0, "entity_type", method)?;
+            temper_request(
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
+                Method::GET,
+                &format!("/observe/specs/{entity_type}"),
+                None,
+            )
+            .await
+        }
         // --- Blocked methods ---
         "approve_decision" | "deny_decision" | "set_policy" => Err(format!(
             "temper.{method}() is not available to agents. \
@@ -90,7 +113,9 @@ pub async fn dispatch_temper_method(
              submit_specs, get_policies, \
              upload_wasm, compile_wasm, \
              get_decisions, get_decision_status, poll_decision, \
-             get_trajectories, get_insights, get_evolution_records, check_sentinel"
+             get_trajectories, get_insights, get_evolution_records, check_sentinel, \
+             list_apps, install_app, \
+             specs, spec_detail"
         )),
     }
 }
@@ -498,6 +523,45 @@ async fn dispatch_evolution(
             .await
         }
         _ => unreachable!("dispatch_evolution called with non-evolution method"),
+    }
+}
+
+/// Dispatch OS app catalog methods.
+async fn dispatch_os_apps(
+    ctx: &DispatchContext<'_>,
+    method: &str,
+    args: &[MontyObject],
+) -> Result<Value, String> {
+    match method {
+        "list_apps" => {
+            temper_request(
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
+                Method::GET,
+                "/api/os-apps",
+                None,
+            )
+            .await
+        }
+        "install_app" => {
+            let app_name = expect_string_arg(args, 0, "app_name", method)?;
+            let payload = serde_json::json!({ "tenant": ctx.tenant });
+            temper_request(
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                ctx.principal_id,
+                ctx.api_key,
+                Method::POST,
+                &format!("/api/os-apps/{app_name}/install"),
+                Some(&payload),
+            )
+            .await
+        }
+        _ => unreachable!("dispatch_os_apps called with non-os-app method"),
     }
 }
 

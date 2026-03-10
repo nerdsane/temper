@@ -5424,6 +5424,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "temper-authz",
  "temper-codegen",
  "temper-evolution",
  "temper-jit",
@@ -5508,8 +5509,6 @@ dependencies = [
  "temper-server",
  "temper-spec",
  "temper-store-turso",
- "tempfile",
- "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -5642,6 +5641,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "axum 0.8.8",
+ "cedar-policy",
  "chrono",
  "criterion",
  "hyper 1.8.1",

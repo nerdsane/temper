@@ -10,7 +10,7 @@ Use `/temper-developer` or read `.claude/skills/temper-developer.md` and follow 
 
 ## IMPORTANT: Using Temper MCP Tools
 
-**When calling `mcp__temper__execute` or `mcp__temper__search` — ALWAYS read `.claude/skills/temper-agent.md` first.** It has the exact Python API, spec format, and governance flow. Without it you will get spec parse errors and method signature mistakes.
+**When calling `mcp__temper__execute` — ALWAYS read `.claude/skills/temper-agent.md` first.** It has the exact Python API, spec format, and governance flow. Without it you will get spec parse errors and method signature mistakes. The MCP server exposes a single `execute` tool (no separate `search` tool).
 
 Use `/temper-agent` or read `.claude/skills/temper-agent.md` and follow its patterns.
 

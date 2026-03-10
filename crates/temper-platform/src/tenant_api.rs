@@ -74,6 +74,8 @@ pub fn tenant_api_router() -> Router<PlatformState> {
             "/tenants/{id}/users/{user_id}",
             routing::delete(remove_user),
         )
+        .route("/os-apps", routing::get(list_os_apps))
+        .route("/os-apps/{name}/install", routing::post(install_os_app))
 }
 
 /// `POST /api/tenants` — provision a new tenant database.
@@ -241,5 +243,46 @@ async fn remove_user(
     match router.remove_tenant_user(&tenant_id, &user_id).await {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+// ── OS App Catalog Endpoints ───────────────────────────────────────
+
+/// `GET /api/os-apps` — list available OS apps.
+pub(crate) async fn list_os_apps() -> impl IntoResponse {
+    let apps = crate::os_apps::list_os_apps();
+    Json(serde_json::json!({ "apps": apps }))
+}
+
+/// Request body for `POST /api/os-apps/:name/install`.
+#[derive(Debug, Deserialize)]
+pub struct InstallOsAppRequest {
+    pub tenant: String,
+}
+
+/// `POST /api/os-apps/:name/install` — install an OS app into a tenant.
+pub(crate) async fn install_os_app(
+    State(state): State<PlatformState>,
+    axum::extract::Path(app_name): axum::extract::Path<String>,
+    Json(req): Json<InstallOsAppRequest>,
+) -> impl IntoResponse {
+    match crate::os_apps::install_os_app(&state, &req.tenant, &app_name) {
+        Ok(entity_types) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "app": app_name,
+                "tenant": req.tenant,
+                "entity_types": entity_types,
+                "status": "installed",
+            })),
+        ),
+        Err(e) if e.contains("not found") => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        ),
     }
 }

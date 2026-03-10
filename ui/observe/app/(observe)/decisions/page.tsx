@@ -14,26 +14,19 @@ import { usePolling, useRelativeTime } from "@/lib/hooks";
 import type {
   DecisionsResponse,
   PendingDecision,
-  PolicyScope,
+  PolicyScopeMatrix,
   SpecSummary,
 } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
 import StatCard from "@/components/StatCard";
+import PolicyBuilder from "@/components/PolicyBuilder";
 import {
   redactSensitiveFields,
-  generatePolicyPreview,
   groupByDate,
 } from "@/lib/utils";
 
 
 const ALL_TENANTS = "__all__";
-
-
-const SCOPE_LABELS: Record<PolicyScope, string> = {
-  narrow: "Narrow -- exact resource only",
-  medium: "Medium -- same resource type",
-  broad: "Broad -- all resources for action",
-};
 
 /** Redact inline secrets in denial reason strings (e.g. "token=sk-abc123"). */
 function redactDenialReason(reason: string): string {
@@ -55,23 +48,13 @@ function DecisionCard({
   showTenant,
 }: {
   decision: PendingDecision;
-  onApprove: (id: string, scope: PolicyScope, tenant: string) => void;
+  onApprove: (id: string, matrix: PolicyScopeMatrix, tenant: string) => void;
   onDeny: (id: string, tenant: string) => void;
   acting: boolean;
   showTenant?: boolean;
 }) {
-  const [scope, setScope] = useState<PolicyScope>("narrow");
-  const [showPreview, setShowPreview] = useState(false);
   const ts = new Date(decision.created_at);
   const timeStr = ts.toLocaleString();
-
-  const policyPreview = generatePolicyPreview(
-    decision.agent_id,
-    decision.action,
-    decision.resource_type,
-    decision.resource_id,
-    scope,
-  );
 
   const redactedAttrs = redactSensitiveFields(decision.resource_attrs);
 
@@ -140,50 +123,14 @@ function DecisionCard({
           )}
       </div>
 
-      {/* Live policy preview */}
-      <div className="mb-3">
-        <button
-          onClick={() => setShowPreview(!showPreview)}
-          className="text-[11px] text-teal-400 hover:text-teal-300 transition-colors"
-        >
-          {showPreview ? "Hide" : "Preview"} policy
-        </button>
-        {showPreview && (
-          <pre className="mt-2 p-2.5 bg-black/30 rounded text-[11px] font-mono text-zinc-400 overflow-x-auto whitespace-pre-wrap border border-white/[0.04]">
-            {policyPreview}
-          </pre>
-        )}
-      </div>
-
-      {/* Actions */}
-      <div className="flex items-center gap-3 pt-2 border-t border-white/[0.04]">
-        <div className="flex items-center gap-2 flex-1">
-          <select
-            value={scope}
-            onChange={(e) => setScope(e.target.value as PolicyScope)}
-            className="bg-[#111115] text-zinc-400 text-xs rounded-sm px-2 py-1.5 focus:outline-none flex-1"
-          >
-            {(Object.keys(SCOPE_LABELS) as PolicyScope[]).map((s) => (
-              <option key={s} value={s}>
-                {SCOPE_LABELS[s]}
-              </option>
-            ))}
-          </select>
-          <button
-            onClick={() => onApprove(decision.id, scope, decision.tenant)}
-            disabled={acting}
-            className="px-3 py-1.5 bg-teal-500/20 hover:bg-teal-500/30 text-teal-400 text-xs rounded-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            Allow
-          </button>
-        </div>
-        <button
-          onClick={() => onDeny(decision.id, decision.tenant)}
+      {/* Policy Builder replaces old scope dropdown */}
+      <div className="pt-2 border-t border-white/[0.04]">
+        <PolicyBuilder
+          decision={decision}
+          onApprove={(matrix) => onApprove(decision.id, matrix, decision.tenant)}
+          onDeny={() => onDeny(decision.id, decision.tenant)}
           disabled={acting}
-          className="px-3 py-1.5 bg-pink-500/20 hover:bg-pink-500/30 text-pink-400 text-xs rounded-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          Deny
-        </button>
+        />
       </div>
     </div>
   );
@@ -239,7 +186,7 @@ function HistoryRow({
           </span>
         </td>
         <td className="px-3.5 py-2.5 font-mono text-zinc-500 text-[11px]">
-          {decision.approved_scope ?? "--"}
+          {decision.approved_scope ? `${decision.approved_scope.principal}/${decision.approved_scope.action}/${decision.approved_scope.resource}` : "--"}
         </td>
         <td className="px-3.5 py-2.5 text-right font-mono text-zinc-600 text-[11px]">
           {decidedTs}
@@ -346,11 +293,11 @@ export default function DecisionsPage() {
   }, [initialLoading, initialError, tenant]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleApprove = useCallback(
-    async (id: string, scope: PolicyScope, decisionTenant: string) => {
+    async (id: string, matrix: PolicyScopeMatrix, decisionTenant: string) => {
       setActingIds((prev) => new Set(prev).add(id));
       setActionError(null);
       try {
-        await approveDecision(decisionTenant, id, scope);
+        await approveDecision(decisionTenant, id, matrix);
         await decisionsPoll.refresh();
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Failed to approve decision";

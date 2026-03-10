@@ -2,9 +2,6 @@ use super::*;
 use temper_sandbox::helpers::format_authz_denied;
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::Path;
-
 use std::sync::Arc;
 
 use axum::Router;
@@ -13,37 +10,32 @@ use temper_runtime::ActorSystem;
 use temper_server::{ServerEventStore, ServerState};
 use temper_spec::parse_csdl;
 use temper_store_turso::TursoEventStore;
-use tempfile::tempdir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-fn write_temp_specs() -> tempfile::TempDir {
-    let dir = tempdir().expect("tempdir");
-    let specs = dir.path();
-
-    fs::write(
-        specs.join("order.ioa.toml"),
-        include_str!("../../../test-fixtures/specs/order.ioa.toml"),
-    )
-    .expect("write ioa");
-
-    fs::write(
-        specs.join("model.csdl.xml"),
-        include_str!("../../../test-fixtures/specs/model.csdl.xml"),
-    )
-    .expect("write csdl");
-
-    dir
+/// Build a RuntimeContext pointing at a local port.
+fn ctx_for_port(port: u16) -> RuntimeContext {
+    RuntimeContext::from_config(&McpConfig {
+        temper_port: Some(port),
+        temper_url: None,
+        principal_id: None,
+        api_key: None,
+    })
+    .expect("ctx")
 }
 
-fn app(name: &str, specs_dir: &Path) -> AppConfig {
-    AppConfig {
-        name: name.to_string(),
-        specs_dir: specs_dir.to_path_buf(),
-    }
+/// Build a RuntimeContext pointing at a URL.
+fn ctx_for_url(url: &str) -> RuntimeContext {
+    RuntimeContext::from_config(&McpConfig {
+        temper_port: None,
+        temper_url: Some(url.to_string()),
+        principal_id: None,
+        api_key: None,
+    })
+    .expect("ctx")
 }
 
-async fn rpc(ctx: &RuntimeContext, request: Value) -> Value {
+async fn rpc(ctx: &mut RuntimeContext, request: Value) -> Value {
     dispatch_json_value(ctx, request)
         .await
         .expect("response expected")
@@ -123,17 +115,10 @@ async fn start_test_temper_server() -> (u16, oneshot::Sender<()>) {
 
 #[tokio::test]
 async fn mcp_initialize_handshake() {
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(3001),
-        temper_url: None,
-        apps: vec![],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
+    let mut ctx = ctx_for_port(3001);
 
     let response = rpc(
-        &ctx,
+        &mut ctx,
         json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -151,49 +136,85 @@ async fn mcp_initialize_handshake() {
 }
 
 #[tokio::test]
-async fn search_returns_filtered_spec_data() {
-    let tmp = write_temp_specs();
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(3001),
+async fn tool_list_has_single_execute_tool() {
+    let mut ctx = ctx_for_port(3001);
+
+    let response = rpc(
+        &mut ctx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        }),
+    )
+    .await;
+
+    let tools = response["result"]["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 1, "should have exactly one tool");
+    assert_eq!(tools[0]["name"], "execute");
+}
+
+#[test]
+fn from_config_requires_port_or_url() {
+    let result = RuntimeContext::from_config(&McpConfig {
+        temper_port: None,
         temper_url: None,
-        apps: vec![app("demo", tmp.path())],
         principal_id: None,
         api_key: None,
-    })
-    .expect("ctx");
+    });
+    assert!(result.is_err(), "should fail without --port or --url");
+    let err = result.err().expect("expected error").to_string();
+    assert!(
+        err.contains("--url") && err.contains("--port"),
+        "error should mention both flags: {err}"
+    );
+}
 
-    // Use the new spec Dataclass API: spec.actions() returns action list (await required)
+#[test]
+fn from_config_url_mode() {
+    let ctx = ctx_for_url("https://api.temper.build/");
+    assert_eq!(ctx.base_url, "https://api.temper.build");
+}
+
+#[test]
+fn from_config_port_mode() {
+    let ctx = ctx_for_port(4000);
+    assert_eq!(ctx.base_url, "http://127.0.0.1:4000");
+}
+
+#[tokio::test]
+async fn execute_url_mode_works() {
+    let (port, shutdown) = start_test_temper_server().await;
+    let mut ctx = ctx_for_url(&format!("http://127.0.0.1:{port}"));
+
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
-            2,
-            "search",
-            "actions = await spec.actions('demo', 'Order')\nreturn [a['name'] for a in actions if a['name'] == 'SubmitOrder']",
+            3,
+            "execute",
+            "return await temper.create('demo', 'Orders', {'id': 'url-mode-1', 'customer': 'Alice'})",
         ),
     )
     .await;
 
+    let _ = shutdown.send(());
+
     let (text, is_error) = tool_text(&response);
-    assert!(!is_error, "search should succeed: {response:#}");
-    let parsed: Value = serde_json::from_str(text).expect("tool text should be json");
-    assert_eq!(parsed, json!(["SubmitOrder"]));
+    assert!(
+        !is_error,
+        "execute via URL mode should succeed: {response:#}"
+    );
+    let parsed: Value = serde_json::from_str(text).expect("json");
+    assert_eq!(parsed["fields"]["customer"], "Alice");
 }
 
 #[tokio::test]
 async fn execute_creates_entity_and_reads_it_back() {
-    let tmp = write_temp_specs();
     let (port, shutdown) = start_test_temper_server().await;
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(port),
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
+    let mut ctx = ctx_for_port(port);
 
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             3,
             "execute",
@@ -216,19 +237,11 @@ return fetched['fields']['customer']
 
 #[tokio::test]
 async fn execute_invalid_action_returns_409_cleanly() {
-    let tmp = write_temp_specs();
     let (port, shutdown) = start_test_temper_server().await;
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(port),
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
+    let mut ctx = ctx_for_port(port);
 
     let response = rpc(
-            &ctx,
+            &mut ctx,
             call_tool_request(
                 4,
                 "execute",
@@ -252,49 +265,12 @@ return 'unreachable'
 }
 
 #[tokio::test]
-async fn sandbox_blocks_filesystem_access() {
-    let tmp = write_temp_specs();
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(3001),
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
-
-    let response = rpc(
-        &ctx,
-        call_tool_request(5, "search", "import os\nreturn open('/etc/passwd').read()"),
-    )
-    .await;
-
-    let (text, is_error) = tool_text(&response);
-    assert!(is_error, "search should fail for filesystem access");
-    assert!(
-        text.contains("blocked OS access")
-            || text.contains("sandbox")
-            || text.contains("NameError")
-            || text.contains("open"),
-        "expected sandbox error, got: {text}"
-    );
-}
-
-#[tokio::test]
 async fn execute_supports_compound_operation() {
-    let tmp = write_temp_specs();
     let (port, shutdown) = start_test_temper_server().await;
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(port),
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
+    let mut ctx = ctx_for_port(port);
 
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             6,
             "execute",
@@ -317,207 +293,41 @@ return fetched['status']
 }
 
 #[tokio::test]
-async fn search_spec_tenants() {
-    let tmp = write_temp_specs();
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(3001),
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
+async fn execute_specs_returns_data() {
+    let (port, shutdown) = start_test_temper_server().await;
+    let mut ctx = ctx_for_port(port);
 
+    // The test server uses with_specs() which doesn't populate the spec registry.
+    // The /observe/specs endpoint reads from the registry, so it returns an empty list
+    // (not a 404). This verifies the specs() method dispatches correctly.
     let response = rpc(
-        &ctx,
-        call_tool_request(7, "search", "return await spec.tenants()"),
+        &mut ctx,
+        call_tool_request(10, "execute", "return await temper.specs('demo')"),
     )
     .await;
+
+    let _ = shutdown.send(());
 
     let (text, is_error) = tool_text(&response);
-    assert!(!is_error, "spec.tenants() should succeed: {response:#}");
+    assert!(!is_error, "specs should succeed: {response:#}");
     let parsed: Value = serde_json::from_str(text).expect("json");
-    assert_eq!(parsed, json!(["demo"]));
-}
-
-#[tokio::test]
-async fn search_spec_entities() {
-    let tmp = write_temp_specs();
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(3001),
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
-
-    let response = rpc(
-        &ctx,
-        call_tool_request(8, "search", "return await spec.entities('demo')"),
-    )
-    .await;
-
-    let (text, is_error) = tool_text(&response);
-    assert!(!is_error, "spec.entities() should succeed: {response:#}");
-    let parsed: Value = serde_json::from_str(text).expect("json");
-    let entities = parsed.as_array().expect("should be array");
     assert!(
-        entities.contains(&json!("Order")),
-        "should include Order: {parsed}"
+        parsed.is_object() || parsed.is_array(),
+        "specs should return structured data: {parsed}"
     );
 }
 
-#[tokio::test]
-async fn search_spec_describe() {
-    let tmp = write_temp_specs();
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(3001),
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
-
-    let response = rpc(
-        &ctx,
-        call_tool_request(
-            9,
-            "search",
-            "desc = await spec.describe('demo', 'Order')\nreturn list(desc.keys())",
-        ),
-    )
-    .await;
-
-    let (text, is_error) = tool_text(&response);
-    assert!(!is_error, "spec.describe() should succeed: {response:#}");
-    let parsed: Value = serde_json::from_str(text).expect("json");
-    let keys = parsed.as_array().expect("should be array");
-    assert!(keys.contains(&json!("states")), "should have states key");
-    assert!(keys.contains(&json!("actions")), "should have actions key");
-    assert!(keys.contains(&json!("vars")), "should have vars key");
-}
-
-#[tokio::test]
-async fn search_spec_actions_from() {
-    let tmp = write_temp_specs();
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(3001),
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
-
-    let response = rpc(
-        &ctx,
-        call_tool_request(
-            10,
-            "search",
-            "actions = await spec.actions_from('demo', 'Order', 'Draft')\nreturn [a['name'] for a in actions]",
-        ),
-    )
-    .await;
-
-    let (text, is_error) = tool_text(&response);
-    assert!(
-        !is_error,
-        "spec.actions_from() should succeed: {response:#}"
-    );
-    let parsed: Value = serde_json::from_str(text).expect("json");
-    let action_names = parsed.as_array().expect("should be array");
-    // Draft state should have SubmitOrder and CancelOrder as available actions
-    assert!(
-        !action_names.is_empty(),
-        "should have actions available from Draft"
-    );
-}
-
-#[tokio::test]
-async fn tool_list_includes_loaded_summary() {
-    let tmp = write_temp_specs();
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(3001),
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
-
-    let response = rpc(
-        &ctx,
-        json!({
-            "jsonrpc": "2.0",
-            "id": 11,
-            "method": "tools/list"
-        }),
-    )
-    .await;
-
-    let tools = response["result"]["tools"].as_array().expect("tools array");
-    let search_desc = tools[0]["description"].as_str().expect("search desc");
-    let execute_desc = tools[1]["description"].as_str().expect("execute desc");
-
-    assert!(
-        search_desc.contains("Loaded: demo"),
-        "search description should include loaded summary: {search_desc}"
-    );
-    assert!(
-        execute_desc.contains("Loaded: demo"),
-        "execute description should include loaded summary: {execute_desc}"
-    );
-    assert!(
-        search_desc.contains("Order"),
-        "search description should list entity types: {search_desc}"
-    );
-}
-
-#[tokio::test]
-async fn execute_show_spec_returns_spec_data() {
-    let tmp = write_temp_specs();
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(3001),
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
-
-    let response = rpc(
-        &ctx,
-        call_tool_request(
-            12,
-            "execute",
-            "spec = await temper.show_spec('demo', 'Order')\nreturn list(spec.keys())",
-        ),
-    )
-    .await;
-
-    let (text, is_error) = tool_text(&response);
-    assert!(!is_error, "show_spec should succeed: {response:#}");
-    let parsed: Value = serde_json::from_str(text).expect("json");
-    let keys = parsed.as_array().expect("should be array");
-    assert!(keys.contains(&json!("states")), "should have states");
-    assert!(keys.contains(&json!("actions")), "should have actions");
-}
-
-/// End-to-end governance flow: agent denied → get decision → human approves
-/// directly (not via agent sandbox) → agent retries → success.
+/// End-to-end governance flow: agent denied -> get decision -> human approves
+/// directly (not via agent sandbox) -> agent retries -> success.
 #[tokio::test]
 #[ignore = "requires Cedar agent default-deny policy in test server setup"]
 async fn e2e_agent_denial_human_approve_retry() {
-    let tmp = write_temp_specs();
     let (port, shutdown) = start_test_temper_server().await;
 
     // Use agent identity so Cedar authorization applies (default-deny for agents).
-    let ctx = RuntimeContext::from_config(&McpConfig {
+    let mut ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(port),
         temper_url: None,
-        apps: vec![app("demo", tmp.path())],
         principal_id: Some("checkout-bot".to_string()),
         api_key: None,
     })
@@ -525,7 +335,7 @@ async fn e2e_agent_denial_human_approve_retry() {
 
     // Step 0: Create entity first (creation bypasses Cedar).
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             20,
             "execute",
@@ -541,7 +351,7 @@ async fn e2e_agent_denial_human_approve_retry() {
 
     // Step 1: Agent tries a bound action — should be denied (403).
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             21,
             "execute",
@@ -558,7 +368,6 @@ async fn e2e_agent_denial_human_approve_retry() {
         text.contains("authorization_denied"),
         "should get structured authorization_denied status, got: {text}"
     );
-    // Verify enhanced error message includes poll_decision guidance.
     assert!(
         text.contains("poll_decision"),
         "denial response should mention poll_decision, got: {text}"
@@ -566,7 +375,7 @@ async fn e2e_agent_denial_human_approve_retry() {
 
     // Step 2: Agent lists ALL decisions (no status filter) to debug.
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(22, "execute", "return await temper.get_decisions('demo')"),
     )
     .await;
@@ -594,7 +403,7 @@ async fn e2e_agent_denial_human_approve_retry() {
         "return await temper.approve_decision('demo', '{}', 'broad')",
         decision_id
     );
-    let response = rpc(&ctx, call_tool_request(22, "execute", &approve_code)).await;
+    let response = rpc(&mut ctx, call_tool_request(22, "execute", &approve_code)).await;
     let (text, is_error) = tool_text(&response);
     assert!(is_error, "approve_decision should be blocked: {response:#}");
     assert!(
@@ -610,7 +419,15 @@ async fn e2e_agent_denial_human_approve_retry() {
         .post(&approve_url)
         .header("X-Temper-Principal-Kind", "admin")
         .header("X-Temper-Principal-Id", "human-test")
-        .json(&json!({ "scope": "broad", "decided_by": "human-test" }))
+        .json(&json!({
+            "scope": {
+                "principal": "any_agent",
+                "action": "all_actions",
+                "resource": "any_resource",
+                "duration": "always"
+            },
+            "decided_by": "human-test"
+        }))
         .send()
         .await
         .expect("approve request");
@@ -622,7 +439,7 @@ async fn e2e_agent_denial_human_approve_retry() {
 
     // Step 4: Retry the action — should now succeed (Cedar policy was hot-loaded).
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             24,
             "execute",
@@ -643,152 +460,6 @@ return result['status']
     );
     let parsed: Value = serde_json::from_str(text).expect("json");
     assert_eq!(parsed, Value::String("Cancelled".to_string()));
-}
-
-/// Verify search spec methods work end-to-end with multiple chained calls.
-#[tokio::test]
-async fn e2e_search_chained_discovery() {
-    let tmp = write_temp_specs();
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(3001),
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
-
-    // Chain: tenants → entities → describe → actions_from in one search call.
-    let response = rpc(
-        &ctx,
-        call_tool_request(
-            30,
-            "search",
-            r#"
-tenants = await spec.tenants()
-entities = await spec.entities(tenants[0])
-desc = await spec.describe(tenants[0], entities[0])
-draft_actions = await spec.actions_from(tenants[0], entities[0], desc['initial'])
-return {
-    'tenant': tenants[0],
-    'entity': entities[0],
-    'states': desc['states'],
-    'initial': desc['initial'],
-    'draft_action_count': len(draft_actions),
-}
-"#,
-        ),
-    )
-    .await;
-
-    let (text, is_error) = tool_text(&response);
-    assert!(!is_error, "chained search should succeed: {response:#}");
-    let result: Value = serde_json::from_str(text).expect("json");
-    assert_eq!(result["tenant"], "demo");
-    assert_eq!(result["entity"], "Order");
-    assert_eq!(result["initial"], "Draft");
-    assert!(
-        result["draft_action_count"].as_i64().unwrap_or(0) > 0,
-        "should have actions from Draft state: {result}"
-    );
-}
-
-/// Verify execute show_spec matches search describe for the same entity.
-#[tokio::test]
-async fn e2e_show_spec_matches_search_describe() {
-    let tmp = write_temp_specs();
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: Some(3001),
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
-
-    // Get spec via search (spec.describe)
-    let search_resp = rpc(
-        &ctx,
-        call_tool_request(40, "search", "return await spec.describe('demo', 'Order')"),
-    )
-    .await;
-    let (search_text, search_err) = tool_text(&search_resp);
-    assert!(!search_err, "search describe failed: {search_resp:#}");
-
-    // Get spec via execute (temper.show_spec)
-    let exec_resp = rpc(
-        &ctx,
-        call_tool_request(
-            41,
-            "execute",
-            "return await temper.show_spec('demo', 'Order')",
-        ),
-    )
-    .await;
-    let (exec_text, exec_err) = tool_text(&exec_resp);
-    assert!(!exec_err, "show_spec failed: {exec_resp:#}");
-
-    // They should return the same data.
-    let search_val: Value = serde_json::from_str(search_text).expect("json");
-    let exec_val: Value = serde_json::from_str(exec_text).expect("json");
-    assert_eq!(
-        search_val, exec_val,
-        "spec.describe and temper.show_spec should return identical data"
-    );
-}
-
-#[tokio::test]
-async fn execute_without_server_returns_helpful_error() {
-    let tmp = write_temp_specs();
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: None,
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
-
-    let response = rpc(
-        &ctx,
-        call_tool_request(50, "execute", "return await temper.list('demo', 'Order')"),
-    )
-    .await;
-
-    let (text, is_error) = tool_text(&response);
-    assert!(is_error, "execute without server should fail");
-    assert!(
-        text.contains("Server not running"),
-        "should get helpful error message, got: {text}"
-    );
-    assert!(
-        text.contains("start_server"),
-        "should mention start_server, got: {text}"
-    );
-}
-
-#[tokio::test]
-async fn search_works_without_server() {
-    let tmp = write_temp_specs();
-    let ctx = RuntimeContext::from_config(&McpConfig {
-        temper_port: None,
-        temper_url: None,
-        apps: vec![app("demo", tmp.path())],
-        principal_id: None,
-        api_key: None,
-    })
-    .expect("ctx");
-
-    let response = rpc(
-        &ctx,
-        call_tool_request(51, "search", "return await spec.tenants()"),
-    )
-    .await;
-
-    let (text, is_error) = tool_text(&response);
-    assert!(!is_error, "search should work without server: {response:#}");
-    let parsed: Value = serde_json::from_str(text).expect("json");
-    assert_eq!(parsed, json!(["demo"]));
 }
 
 #[test]
@@ -893,14 +564,12 @@ fn format_authz_denied_structured_json_without_decision() {
 #[tokio::test]
 #[ignore = "requires Cedar agent default-deny policy in test server setup"]
 async fn get_decision_status_returns_decision() {
-    let tmp = write_temp_specs();
     let (port, shutdown) = start_test_temper_server().await;
 
     // Use agent identity so Cedar authorization applies (default-deny for agents).
-    let ctx = RuntimeContext::from_config(&McpConfig {
+    let mut ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(port),
         temper_url: None,
-        apps: vec![app("demo", tmp.path())],
         principal_id: Some("status-bot".to_string()),
         api_key: None,
     })
@@ -908,7 +577,7 @@ async fn get_decision_status_returns_decision() {
 
     // Create entity first (creation bypasses Cedar).
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             60,
             "execute",
@@ -921,7 +590,7 @@ async fn get_decision_status_returns_decision() {
 
     // Agent tries an action -- should be denied.
     let response = rpc(
-        &ctx,
+        &mut ctx,
         call_tool_request(
             61,
             "execute",
@@ -942,7 +611,7 @@ async fn get_decision_status_returns_decision() {
         "return await temper.get_decision_status('demo', '{}')",
         decision_id
     );
-    let response = rpc(&ctx, call_tool_request(62, "execute", &status_code)).await;
+    let response = rpc(&mut ctx, call_tool_request(62, "execute", &status_code)).await;
 
     let _ = shutdown.send(());
 

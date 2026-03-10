@@ -28,7 +28,7 @@ pub(crate) async fn handle_load_inline(
     let tenant = body.tenant.clone();
 
     // Cedar authorization gate.
-    let security_ctx = security_context_from_headers(&headers, None, None);
+    let security_ctx = security_context_from_headers(&headers, None, None, None);
     let entity_names: Vec<String> = body
         .specs
         .keys()
@@ -210,6 +210,7 @@ pub(crate) async fn handle_load_inline(
             denied_module: None,
             source: Some(TrajectorySource::Entity),
             spec_governed: None,
+            agent_type: None,
         };
         if let Err(e) = state.persist_trajectory_entry(&traj).await {
             tracing::error!(error = %e, "failed to persist spec submission trajectory");
@@ -250,10 +251,42 @@ pub(crate) async fn handle_load_inline(
 
     // Delegate to load-dir logic with merge=true so agent-submitted specs
     // are added to the existing tenant config instead of replacing it.
+    let cedar_policies = body.cedar_policies.clone();
     let dir_request = LoadDirRequest {
-        tenant,
+        tenant: tenant.clone(),
         specs_dir: tmp_dir.to_string_lossy().to_string(),
         merge: true,
     };
-    handle_load_dir(State(state), Json(dir_request)).await
+    let result = handle_load_dir(State(state.clone()), Json(dir_request)).await;
+
+    if result.is_ok()
+        && let Some(ref cedar_text) = cedar_policies
+        && !cedar_text.trim().is_empty()
+    {
+        if let Err(e) = cedar_text.parse::<cedar_policy::PolicySet>() {
+            tracing::warn!(error = %e, "bundled Cedar policies failed to parse, skipping");
+        } else {
+            let Ok(mut policies) = state.tenant_policies.write() else {
+                tracing::error!("tenant_policies lock poisoned, skipping Cedar merge");
+                return result;
+            };
+            let entry = policies.entry(tenant.clone()).or_default();
+            if !entry.is_empty() {
+                entry.push('\n');
+            }
+            entry.push_str(cedar_text);
+            let mut combined = String::new();
+            for text in policies.values() {
+                combined.push_str(text);
+                combined.push('\n');
+            }
+            if let Err(e) = state.authz.reload_policies(&combined) {
+                tracing::error!(error = %e, "failed to reload policies with bundled Cedar");
+            } else {
+                tracing::info!(tenant = %tenant, "bundled Cedar policies loaded successfully");
+            }
+        }
+    }
+
+    result
 }

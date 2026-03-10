@@ -58,6 +58,9 @@ pub struct TrajectoryEntry {
     /// Whether this action was governed by a state-machine spec (`true`) or spec-free (`false`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_governed: Option<bool>,
+    /// Agent type classification (e.g. "claude-code", "openclaw").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
 }
 
 /// Bounded, append-only trajectory log.

@@ -1,0 +1,20 @@
+{
+  "name": "@temper/mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Temper — governed application platform",
+  "license": "MIT",
+  "bin": {
+    "temper-mcp": "bin/temper-mcp.js"
+  },
+  "files": [
+    "bin/**/*",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "@temper/mcp-darwin-arm64": "0.1.0",
+    "@temper/mcp-darwin-x64": "0.1.0",
+    "@temper/mcp-linux-x64": "0.1.0",
+    "@temper/mcp-linux-arm64": "0.1.0",
+    "@temper/mcp-win32-x64": "0.1.0"
+  }
+}
