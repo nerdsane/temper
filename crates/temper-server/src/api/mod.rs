@@ -178,9 +178,9 @@ async fn handle_policy_suggestions(
     if let Some(resp) = require_policy_auth(&state, &headers, &tenant).await {
         return resp;
     }
-    let suggestions = {
-        let engine = state.suggestion_engine.read().unwrap(); // ci-ok: infallible lock
-        engine.suggestions()
+    let suggestions = match state.suggestion_engine.read() {
+        Ok(engine) => engine.suggestions(),
+        Err(_) => vec![],
     };
     (StatusCode::OK, axum::Json(serde_json::json!({ "suggestions": suggestions }))).into_response()
 }

@@ -262,7 +262,10 @@ pub(crate) async fn handle_load_inline(
                 if let Err(e) = cedar_text.parse::<cedar_policy::PolicySet>() {
                     tracing::warn!(error = %e, "bundled Cedar policies failed to parse, skipping");
                 } else {
-                    let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+                    let Ok(mut policies) = state.tenant_policies.write() else {
+                        tracing::error!("tenant_policies lock poisoned, skipping Cedar merge");
+                        return result;
+                    };
                     let entry = policies.entry(tenant.clone()).or_default();
                     if !entry.is_empty() {
                         entry.push('\n');
