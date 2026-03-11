@@ -9,7 +9,7 @@ export default function UserMenu() {
   if (!session?.user) return null;
 
   return (
-    <div className="flex items-center gap-2 px-3 py-2 text-xs text-zinc-400">
+    <div className="flex items-center gap-2 px-3 py-2 text-xs text-[var(--color-text-secondary)]">
       {session.user.image && (
         <Image
           src={session.user.image}
@@ -22,7 +22,7 @@ export default function UserMenu() {
       <span className="truncate max-w-[100px]">{session.user.name}</span>
       <button
         onClick={() => signOut()}
-        className="ml-auto text-zinc-500 hover:text-zinc-300 transition-colors"
+        className="ml-auto text-[var(--color-text-secondary)] hover:text-[var(--color-text-secondary)] transition-colors"
       >
         Sign out
       </button>

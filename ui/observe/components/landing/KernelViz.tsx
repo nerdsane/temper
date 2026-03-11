@@ -100,7 +100,7 @@ export default function KernelViz() {
         x={CX}
         y={layerY(LAYER_COUNT - 1) - 20}
         textAnchor="middle"
-        fill="rgba(255,255,255,0.12)"
+        style={{ fill: 'var(--color-text-muted)' }}
         fontSize="7"
         fontFamily="var(--font-mono), monospace"
         letterSpacing="0.14em"
@@ -115,7 +115,7 @@ export default function KernelViz() {
         y1={connectorTop}
         x2={CX}
         y2={connectorBottom}
-        stroke="rgba(255,255,255,0.04)"
+        style={{ stroke: 'var(--color-border)' }}
         strokeWidth="1"
         strokeDasharray="3 3"
       />
@@ -140,7 +140,7 @@ export default function KernelViz() {
                 height={LAYER_H + 4}
                 rx="6"
                 fill="none"
-                stroke="#2dd4bf"
+                style={{ stroke: 'var(--color-accent-teal)' }}
                 strokeWidth="1"
                 opacity={0.15}
                 filter="url(#k-soft)"
@@ -154,20 +154,18 @@ export default function KernelViz() {
               width={LAYER_W}
               height={LAYER_H}
               rx="4"
-              fill={
-                isActive
-                  ? "rgba(45,212,191,0.08)"
+              style={{
+                fill: isActive
+                  ? 'var(--color-accent-teal-dim)'
                   : isPast
-                    ? "rgba(45,212,191,0.03)"
-                    : "rgba(255,255,255,0.02)"
-              }
-              stroke={
-                isActive
-                  ? "rgba(45,212,191,0.4)"
+                    ? 'color-mix(in srgb, var(--color-accent-teal) 3%, transparent)'
+                    : 'var(--color-bg-elevated)',
+                stroke: isActive
+                  ? 'var(--color-accent-teal-glow)'
                   : isPast
-                    ? `rgba(45,212,191,${0.08 + litOpacity * 0.1})`
-                    : "rgba(255,255,255,0.04)"
-              }
+                    ? `color-mix(in srgb, var(--color-accent-teal) ${Math.round((0.08 + litOpacity * 0.1) * 100)}%, transparent)`
+                    : 'var(--color-border)',
+              }}
               strokeWidth={isActive ? "1.5" : "1"}
             />
 
@@ -176,13 +174,13 @@ export default function KernelViz() {
               x={CX}
               y={y + LAYER_H / 2 - 4}
               textAnchor="middle"
-              fill={
-                isActive
-                  ? "#2dd4bf"
+              style={{
+                fill: isActive
+                  ? 'var(--color-accent-teal)'
                   : isPast
-                    ? "rgba(45,212,191,0.4)"
-                    : "rgba(255,255,255,0.2)"
-              }
+                    ? 'var(--color-accent-teal-glow)'
+                    : 'var(--color-text-muted)',
+              }}
               fontSize="8"
               fontFamily="var(--font-mono), monospace"
               fontWeight="700"
@@ -196,13 +194,13 @@ export default function KernelViz() {
               x={CX}
               y={y + LAYER_H / 2 + 8}
               textAnchor="middle"
-              fill={
-                isActive
-                  ? "rgba(45,212,191,0.6)"
+              style={{
+                fill: isActive
+                  ? 'color-mix(in srgb, var(--color-accent-teal) 60%, transparent)'
                   : isPast
-                    ? "rgba(45,212,191,0.2)"
-                    : "rgba(255,255,255,0.1)"
-              }
+                    ? 'var(--color-accent-teal-glow-mid)'
+                    : 'var(--color-text-muted)',
+              }}
               fontSize="7"
               fontFamily="var(--font-mono), monospace"
             >
@@ -216,11 +214,11 @@ export default function KernelViz() {
                 y={y - GAP / 2 + 1}
                 textAnchor="middle"
                 dominantBaseline="central"
-                fill={
-                  idx === activeLayer - 1 || idx === activeLayer
-                    ? "rgba(45,212,191,0.3)"
-                    : "rgba(255,255,255,0.06)"
-                }
+                style={{
+                  fill: idx === activeLayer - 1 || idx === activeLayer
+                    ? 'color-mix(in srgb, var(--color-accent-teal) 30%, transparent)'
+                    : 'var(--color-border)',
+                }}
                 fontSize="8"
                 fontFamily="var(--font-mono), monospace"
               >
@@ -238,11 +236,11 @@ export default function KernelViz() {
             cx={CX}
             cy={pulseY}
             r="4"
-            fill="#2dd4bf"
+            style={{ fill: 'var(--color-accent-teal)' }}
             opacity="0.85"
             filter="url(#k-glow)"
           />
-          <circle cx={CX} cy={pulseY} r="1.5" fill="white" />
+          <circle cx={CX} cy={pulseY} r="1.5" style={{ fill: 'var(--color-text-primary)' }} />
         </>
       )}
     </svg>

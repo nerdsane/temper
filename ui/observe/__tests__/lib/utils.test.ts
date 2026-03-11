@@ -39,32 +39,32 @@ describe("redactSensitiveFields", () => {
 
 describe("rateColor", () => {
   it("returns teal for rates >= 80", () => {
-    expect(rateColor(80)).toBe("text-teal-400");
-    expect(rateColor(100)).toBe("text-teal-400");
+    expect(rateColor(80)).toBe("text-[var(--color-accent-teal)]");
+    expect(rateColor(100)).toBe("text-[var(--color-accent-teal)]");
   });
 
-  it("returns amber for rates >= 50 and < 80", () => {
-    expect(rateColor(50)).toBe("text-amber-400");
-    expect(rateColor(79)).toBe("text-amber-400");
+  it("returns pink for rates >= 50 and < 80", () => {
+    expect(rateColor(50)).toBe("text-[var(--color-accent-pink)]");
+    expect(rateColor(79)).toBe("text-[var(--color-accent-pink)]");
   });
 
   it("returns pink for rates < 50", () => {
-    expect(rateColor(0)).toBe("text-pink-400");
-    expect(rateColor(49)).toBe("text-pink-400");
+    expect(rateColor(0)).toBe("text-[var(--color-accent-pink)]");
+    expect(rateColor(49)).toBe("text-[var(--color-accent-pink)]");
   });
 });
 
 describe("rateBgColor", () => {
   it("returns teal bg for rates >= 80", () => {
-    expect(rateBgColor(80)).toBe("bg-teal-400");
+    expect(rateBgColor(80)).toBe("bg-[var(--color-accent-teal)]");
   });
 
-  it("returns amber bg for rates >= 50 and < 80", () => {
-    expect(rateBgColor(50)).toBe("bg-amber-400");
+  it("returns pink bg for rates >= 50 and < 80", () => {
+    expect(rateBgColor(50)).toBe("bg-[var(--color-accent-pink)]");
   });
 
   it("returns pink bg for rates < 50", () => {
-    expect(rateBgColor(0)).toBe("bg-pink-400");
+    expect(rateBgColor(0)).toBe("bg-[var(--color-accent-pink)]");
   });
 });
 

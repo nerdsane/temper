@@ -8,16 +8,16 @@ describe("StatusBadge", () => {
     expect(screen.getByText("Open")).toBeInTheDocument();
   });
 
-  it("uses teal colors for known 'active' status", () => {
+  it("uses sky colors for known 'active' status", () => {
     const { container } = render(<StatusBadge status="active" />);
     const badge = container.querySelector("span")!;
-    expect(badge.className).toContain("text-teal-400");
+    expect(badge.className).toContain("text-[var(--color-accent-teal)]");
   });
 
-  it("uses pink colors for known 'cancelled' status", () => {
+  it("uses amber colors for known 'cancelled' status", () => {
     const { container } = render(<StatusBadge status="cancelled" />);
     const badge = container.querySelector("span")!;
-    expect(badge.className).toContain("text-pink-400");
+    expect(badge.className).toContain("text-[var(--color-accent-pink)]");
   });
 
   it("assigns consistent hash-based colors for unknown states", () => {

@@ -22,12 +22,12 @@ function levelToStepName(level: string): string | null {
 function DetailSkeleton() {
   return (
     <div className="animate-pulse">
-      <div className="h-3.5 bg-zinc-800/40 rounded w-20 mb-3" />
-      <div className="h-6 bg-zinc-800/60 rounded w-44 mb-1.5" />
-      <div className="h-3.5 bg-zinc-800/40 rounded w-64 mb-6" />
+      <div className="h-3.5 bg-[var(--color-border)] rounded w-20 mb-3" />
+      <div className="h-6 bg-[var(--color-border)] rounded w-44 mb-1.5" />
+      <div className="h-3.5 bg-[var(--color-border)] rounded w-64 mb-6" />
       <div className="space-y-4">
         {[0, 1, 2].map((i) => (
-          <div key={i} className="bg-[#111115] rounded-lg p-4 h-56" />
+          <div key={i} className="bg-[var(--color-bg-surface)] rounded-[2px] p-4 h-56" />
         ))}
       </div>
     </div>
@@ -36,17 +36,17 @@ function DetailSkeleton() {
 
 function StatusBanner({ status }: { status: string }) {
   const configs: Record<string, { bg: string; text: string; label: string }> = {
-    loading: { bg: "bg-teal-500/5", text: "text-teal-400", label: "Loading specs..." },
-    verifying: { bg: "bg-yellow-500/5", text: "text-yellow-400", label: "Verification in progress" },
-    completed: { bg: "bg-teal-500/5", text: "text-teal-400", label: "All entities verified and deployed" },
-    failed: { bg: "bg-pink-500/5", text: "text-pink-400", label: "Some entities failed verification" },
+    loading: { bg: "bg-[var(--color-accent-teal-dim)]", text: "text-[var(--color-accent-teal)]", label: "Loading specs..." },
+    verifying: { bg: "bg-[var(--color-accent-pink-dim)]", text: "text-[var(--color-accent-pink)]", label: "Verification in progress" },
+    completed: { bg: "bg-[var(--color-accent-teal-dim)]", text: "text-[var(--color-accent-teal)]", label: "All entities verified and deployed" },
+    failed: { bg: "bg-[var(--color-accent-pink-dim)]", text: "text-[var(--color-accent-pink)]", label: "Some entities failed verification" },
   };
   const c = configs[status] ?? configs.loading;
   const isActive = status === "loading" || status === "verifying";
 
   return (
-    <div className={`${c.bg} rounded-lg px-3.5 py-2.5 mb-5 flex items-center gap-2.5`}>
-      {isActive && <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" />}
+    <div className={`${c.bg} rounded-[2px] px-3.5 py-2.5 mb-5 flex items-center gap-2.5`}>
+      {isActive && <div className="w-1.5 h-1.5 bg-[var(--color-accent-pink)] rounded-full animate-pulse" />}
       {!isActive && (
         <span className={`text-sm ${c.text}`}>
           {status === "completed" ? "\u2713" : "\u2717"}
@@ -154,18 +154,18 @@ export default function WorkflowDetailPage() {
     <div className="animate-fade-in">
       {/* Breadcrumb */}
       <div className="mb-3">
-        <Link href="/workflows" className="text-[12px] text-zinc-600 hover:text-zinc-400 transition-colors">
+        <Link href="/workflows" className="text-[12px] text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] transition-colors">
           Workflows
         </Link>
-        <span className="text-zinc-700 mx-1.5">/</span>
-        <span className="text-[12px] text-zinc-400">{tenant}</span>
+        <span className="text-[var(--color-text-muted)] mx-1.5">/</span>
+        <span className="text-[12px] text-[var(--color-text-secondary)]">{tenant}</span>
       </div>
 
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <div>
-          <h1 className="text-2xl font-bold text-zinc-100 tracking-tight font-display">{tenant}</h1>
-          <p className="text-[13px] text-zinc-600 mt-0.5">
+          <h1 className="text-2xl text-[var(--color-text-primary)] tracking-tight font-serif">{tenant}</h1>
+          <p className="text-[13px] text-[var(--color-text-muted)] mt-0.5">
             {workflow.entities.length} {workflow.entities.length === 1 ? "entity" : "entities"}
             {workflow.runtime_events_count > 0 && (
               <span className="ml-2">
@@ -192,34 +192,34 @@ export default function WorkflowDetailPage() {
           return (
             <div
               key={entity.entity_type}
-              className={`bg-[#111115] rounded-lg p-4 ${
-                entityFailed ? "bg-pink-500/5" : ""
+              className={`bg-[var(--color-bg-surface)] rounded-[2px] p-4 ${
+                entityFailed ? "bg-[var(--color-accent-pink-dim)]" : ""
               }`}
             >
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2.5">
-                  <h3 className="text-sm font-semibold text-zinc-200 font-mono tracking-tight">
+                  <h3 className="text-sm font-semibold text-[var(--color-text-primary)] font-mono tracking-tight">
                     {entity.entity_type}
                   </h3>
                   {entityDone && !entityFailed && (
-                    <span className="text-[10px] bg-teal-500/10 text-teal-400 px-2 py-0.5 rounded-full font-mono">
+                    <span className="text-[10px] bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] px-2 py-0.5 rounded-full font-mono">
                       Verified
                     </span>
                   )}
                   {entityFailed && (
-                    <span className="text-[10px] bg-pink-500/10 text-pink-400 px-2 py-0.5 rounded-full font-mono">
+                    <span className="text-[10px] bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)] px-2 py-0.5 rounded-full font-mono">
                       Failed
                     </span>
                   )}
                   {!entityDone && !entityFailed && (
-                    <span className="text-[10px] bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded-full font-mono">
+                    <span className="text-[10px] bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)] px-2 py-0.5 rounded-full font-mono">
                       In Progress
                     </span>
                   )}
                 </div>
                 <Link
                   href={`/specs/${entity.entity_type}`}
-                  className="text-[11px] text-teal-400 hover:text-teal-300 transition-colors"
+                  className="text-[11px] text-[var(--color-accent-teal)] hover:text-[var(--color-accent-teal)] transition-colors"
                 >
                   View Spec
                 </Link>
@@ -238,27 +238,27 @@ export default function WorkflowDetailPage() {
       {/* Live event stream */}
       {liveEvents.length > 0 && (
         <div className="mt-6">
-          <h2 className="text-[15px] font-semibold text-zinc-200 mb-3 tracking-tight">Live Events</h2>
-          <div className="bg-[#111115] rounded-lg overflow-hidden">
+          <h2 className="text-[15px] font-semibold text-[var(--color-text-primary)] mb-3 tracking-tight">Live Events</h2>
+          <div className="bg-[var(--color-bg-surface)] rounded-[2px] overflow-hidden">
             <div className="max-h-56 overflow-y-auto">
               {liveEvents.slice().reverse().map((event, i) => (
                 <div
                   key={i}
-                  className="flex items-center gap-2.5 px-3.5 py-2 border-b border-white/[0.03] last:border-b-0 animate-slide-in"
+                  className="flex items-center gap-2.5 px-3.5 py-2 border-b border-[var(--color-border)] last:border-b-0 animate-slide-in"
                 >
                   <div className={`w-1 h-1 rounded-full flex-shrink-0 ${
-                    event.passed === true ? "bg-teal-400" :
-                    event.passed === false ? "bg-pink-400" :
-                    "bg-teal-400"
+                    event.passed === true ? "bg-[var(--color-accent-teal)]" :
+                    event.passed === false ? "bg-[var(--color-accent-pink)]" :
+                    "bg-[var(--color-accent-teal)]"
                   }`} />
-                  <span className="text-[11px] font-mono text-zinc-500 flex-shrink-0">
+                  <span className="text-[11px] font-mono text-[var(--color-text-secondary)] flex-shrink-0">
                     {event.entity_type}
                   </span>
-                  <span className="text-[11px] text-zinc-400 truncate">
+                  <span className="text-[11px] text-[var(--color-text-secondary)] truncate">
                     {event.summary}
                   </span>
                   {event.timestamp && (
-                    <span className="text-[10px] font-mono text-zinc-700 flex-shrink-0 ml-auto">
+                    <span className="text-[10px] font-mono text-[var(--color-text-muted)] flex-shrink-0 ml-auto">
                       {new Date(event.timestamp).toLocaleTimeString("en-US", {
                         hour: "2-digit",
                         minute: "2-digit",

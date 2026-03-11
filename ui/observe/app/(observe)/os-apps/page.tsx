@@ -75,13 +75,13 @@ export default function OsAppsPage() {
   if (initialLoading) {
     return (
       <div className="animate-pulse">
-        <div className="h-6 bg-zinc-800/60 rounded w-40 mb-1.5" />
-        <div className="h-3.5 bg-zinc-800/40 rounded w-72 mb-6" />
+        <div className="h-6 bg-[var(--color-border)] rounded w-40 mb-1.5" />
+        <div className="h-3.5 bg-[var(--color-border)] rounded w-72 mb-6" />
         <div className="grid grid-cols-2 gap-3 mb-6">
           {[0, 1].map((i) => (
-            <div key={i} className="glass rounded-lg p-4">
-              <div className="h-3 bg-zinc-800/50 rounded w-20 mb-2" />
-              <div className="h-8 bg-zinc-800/50 rounded w-10" />
+            <div key={i} className="glass rounded-[2px] p-4">
+              <div className="h-3 bg-[var(--color-border)] rounded w-20 mb-2" />
+              <div className="h-8 bg-[var(--color-border)] rounded w-10" />
             </div>
           ))}
         </div>
@@ -97,8 +97,8 @@ export default function OsAppsPage() {
     <div className="animate-fade-in">
       {/* Header */}
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-zinc-100 tracking-tight font-display">OS Apps</h1>
-        <p className="text-sm text-zinc-600 mt-0.5">
+        <h1 className="text-2xl text-[var(--color-text-primary)] tracking-tight font-serif">OS Apps</h1>
+        <p className="text-sm text-[var(--color-text-muted)] mt-0.5">
           Pre-built application specs ready to install
         </p>
       </div>
@@ -114,8 +114,8 @@ export default function OsAppsPage() {
         <div
           className={`mb-4 px-4 py-2.5 rounded text-[13px] ${
             installResult.status === "installed"
-              ? "bg-teal-500/10 text-teal-400 border border-teal-500/20"
-              : "bg-pink-500/10 text-pink-400 border border-pink-500/20"
+              ? "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] border border-[var(--color-accent-teal)]/20"
+              : "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)] border border-[var(--color-accent-pink)]/20"
           }`}
         >
           {installResult.status === "installed"
@@ -134,25 +134,25 @@ export default function OsAppsPage() {
             return (
               <div
                 key={app.name}
-                className="glass rounded-lg p-5 flex flex-col gap-3"
+                className="glass rounded-[2px] p-5 flex flex-col gap-3"
               >
                 {/* Title row */}
                 <div className="flex items-start justify-between">
                   <div>
-                    <h3 className="text-[15px] font-semibold text-zinc-200 tracking-tight">
+                    <h3 className="text-[15px] font-semibold text-[var(--color-text-primary)] tracking-tight">
                       {app.name}
                     </h3>
-                    <span className="text-[10px] font-mono text-zinc-600">v{app.version}</span>
+                    <span className="text-[10px] font-mono text-[var(--color-text-muted)]">v{app.version}</span>
                   </div>
                   {isInstalled ? (
-                    <span className="text-[10px] font-medium bg-teal-500/15 text-teal-400 px-2 py-1 rounded">
+                    <span className="text-[10px] font-medium bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] px-2 py-1 rounded">
                       Installed
                     </span>
                   ) : (
                     <button
                       onClick={() => handleInstall(app.name)}
                       disabled={isInstalling}
-                      className="text-[11px] font-medium bg-zinc-100/10 text-zinc-300 px-3 py-1.5 rounded hover:bg-zinc-100/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="text-[11px] font-medium bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] px-3 py-1.5 rounded hover:bg-[var(--color-border)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {isInstalling ? "Installing..." : "Install"}
                     </button>
@@ -160,7 +160,7 @@ export default function OsAppsPage() {
                 </div>
 
                 {/* Description */}
-                <p className="text-[13px] text-zinc-500 leading-relaxed">
+                <p className="text-[13px] text-[var(--color-text-secondary)] leading-relaxed">
                   {app.description}
                 </p>
 
@@ -171,8 +171,8 @@ export default function OsAppsPage() {
                       key={et}
                       className={`text-[10px] font-mono px-2 py-0.5 rounded ${
                         loadedEntityTypes.has(et)
-                          ? "bg-teal-500/10 text-teal-400"
-                          : "bg-zinc-500/10 text-zinc-500"
+                          ? "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)]"
+                          : "bg-[var(--color-accent-lime-dim)] text-[var(--color-text-secondary)]"
                       }`}
                     >
                       {et}
@@ -184,8 +184,8 @@ export default function OsAppsPage() {
           })}
         </div>
       ) : (
-        <div className="glass rounded-lg p-6 text-center">
-          <p className="text-sm text-zinc-500">No OS apps available in the catalog.</p>
+        <div className="glass rounded-[2px] p-6 text-center">
+          <p className="text-sm text-[var(--color-text-secondary)]">No OS apps available in the catalog.</p>
         </div>
       )}
     </div>

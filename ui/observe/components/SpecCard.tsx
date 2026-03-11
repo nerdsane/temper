@@ -17,11 +17,11 @@ function VerificationBadge({ spec }: { spec: SpecSummary }) {
       : null;
 
   const config: Record<string, { bg: string; text: string; label: string; pulse?: boolean }> = {
-    pending: { bg: "bg-zinc-500/10", text: "text-zinc-500", label: "Pending" },
-    running: { bg: "bg-yellow-500/10", text: "text-yellow-400", label: "Verifying...", pulse: true },
-    passed: { bg: "bg-teal-500/10", text: "text-teal-400", label: "Verified" },
-    failed: { bg: "bg-pink-500/10", text: "text-pink-400", label: "Failed" },
-    partial: { bg: "bg-yellow-500/10", text: "text-yellow-400", label: levelInfo ? `Partial (${levelInfo})` : "Partial" },
+    pending: { bg: "bg-[var(--color-accent-lime-dim)]", text: "text-[var(--color-text-secondary)]", label: "Pending" },
+    running: { bg: "bg-[var(--color-accent-pink-dim)]", text: "text-[var(--color-accent-pink)]", label: "Verifying...", pulse: true },
+    passed: { bg: "bg-[var(--color-accent-teal-dim)]", text: "text-[var(--color-accent-teal)]", label: "Verified" },
+    failed: { bg: "bg-[var(--color-accent-pink-dim)]", text: "text-[var(--color-accent-pink)]", label: "Failed" },
+    partial: { bg: "bg-[var(--color-accent-pink-dim)]", text: "text-[var(--color-accent-pink)]", label: levelInfo ? `Partial (${levelInfo})` : "Partial" },
   };
 
   const c = config[status] ?? config.pending;
@@ -53,14 +53,14 @@ export default function SpecCard({ spec }: SpecCardProps) {
   return (
     <Link href={`/specs/${spec.entity_type}`}>
       <div
-        className={`bg-[#111115] rounded-lg p-5 hover:bg-white/[0.02] transition-colors cursor-pointer group ${cardFlash}`}
+        className={`bg-[var(--color-bg-surface)] rounded-[2px] p-5 hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer group ${cardFlash}`}
         onAnimationEnd={() => setCardFlash("")}
       >
         <div className="flex items-start justify-between mb-2.5">
-          <h3 className="text-base font-semibold text-zinc-100 tracking-tight truncate min-w-0" title={spec.entity_type}>{spec.entity_type}</h3>
+          <h3 className="text-base font-semibold text-[var(--color-text-primary)] tracking-tight truncate min-w-0" title={spec.entity_type}>{spec.entity_type}</h3>
           <div className="flex gap-1.5">
             <VerificationBadge spec={spec} />
-            <span className="text-[10px] font-mono bg-teal-500/10 text-teal-400 px-2 py-0.5 rounded-full">
+            <span className="text-[10px] font-mono bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] px-2 py-0.5 rounded-full">
               IOA
             </span>
           </div>
@@ -68,16 +68,16 @@ export default function SpecCard({ spec }: SpecCardProps) {
 
         <div className="space-y-1.5">
           <div className="flex items-center justify-between text-sm">
-            <span className="text-zinc-600">States</span>
-            <span className="font-mono text-zinc-400">{spec.states.length}</span>
+            <span className="text-[var(--color-text-muted)]">States</span>
+            <span className="font-mono text-[var(--color-text-secondary)]">{spec.states.length}</span>
           </div>
           <div className="flex items-center justify-between text-sm">
-            <span className="text-zinc-600">Actions</span>
-            <span className="font-mono text-zinc-400">{spec.actions.length}</span>
+            <span className="text-[var(--color-text-muted)]">Actions</span>
+            <span className="font-mono text-[var(--color-text-secondary)]">{spec.actions.length}</span>
           </div>
           <div className="flex items-center justify-between text-sm">
-            <span className="text-zinc-600">Initial</span>
-            <span className="font-mono text-lime-400">{spec.initial_state}</span>
+            <span className="text-[var(--color-text-muted)]">Initial</span>
+            <span className="font-mono text-[var(--color-accent-lime)]">{spec.initial_state}</span>
           </div>
         </div>
 
@@ -87,8 +87,8 @@ export default function SpecCard({ spec }: SpecCardProps) {
               key={state}
               className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
                 state === spec.initial_state
-                  ? "bg-lime-500/10 text-lime-400"
-                  : "bg-white/[0.03] text-zinc-500"
+                  ? "bg-[var(--color-accent-lime-dim)] text-[var(--color-accent-lime)]"
+                  : "bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)]"
               }`}
             >
               {state}
@@ -99,7 +99,7 @@ export default function SpecCard({ spec }: SpecCardProps) {
         <div className="mt-3 flex gap-2">
           <button
             type="button"
-            className="text-[11px] text-teal-400 hover:text-teal-300 transition-colors"
+            className="text-[11px] text-[var(--color-accent-teal)] hover:text-[var(--color-accent-teal)] transition-colors"
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();

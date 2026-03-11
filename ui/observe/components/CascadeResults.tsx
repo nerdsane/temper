@@ -19,16 +19,16 @@ interface CascadeResultsProps {
 }
 
 /* ── palette ────────────────────────────────────────── */
-const G = "text-teal-400";              // pass accent text
-const B = "text-pink-400";              // fail accent text
-const G_DOT = "bg-teal-400";
-const B_DOT = "bg-pink-400";
-const G_GRAD = "from-teal-500/8";
-const B_GRAD = "from-pink-500/8";
+const G = "text-[var(--color-accent-teal)]";              // pass accent text
+const B = "text-[var(--color-accent-pink)]";              // fail accent text
+const G_DOT = "bg-[var(--color-accent-teal)]";
+const B_DOT = "bg-[var(--color-accent-pink)]";
+const G_GRAD = "from-[var(--color-accent-teal-dim)]";
+const B_GRAD = "from-[var(--color-accent-pink-dim)]";
 
 /* ── shared glass ───────────────────────────────────── */
-const GLASS = "bg-white/[0.025] rounded-lg";
-const INNER = "bg-white/[0.02] rounded-lg";
+const GLASS = "bg-[var(--color-bg-elevated)] rounded-[2px]";
+const INNER = "bg-[var(--color-bg-elevated)] rounded-[2px]";
 
 /* ── tiny helpers ───────────────────────────────────── */
 function Dot({ passed }: { passed: boolean }) {
@@ -38,7 +38,7 @@ function Dot({ passed }: { passed: boolean }) {
 function Chevron({ open }: { open: boolean }) {
   return (
     <svg
-      className={`w-3.5 h-3.5 text-zinc-600 transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+      className={`w-3.5 h-3.5 text-[var(--color-text-muted)] transition-transform duration-200 ${open ? "rotate-180" : ""}`}
       fill="none" stroke="currentColor" viewBox="0 0 24 24"
     >
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 9l-7 7-7-7" />
@@ -56,12 +56,12 @@ function StateTable({ state, label }: { state: SmtState; label?: string }) {
 
   return (
     <div>
-      {label && <div className="text-[10px] text-zinc-500 mb-1 uppercase tracking-wider">{label}</div>}
+      {label && <div className="text-[10px] text-[var(--color-text-secondary)] mb-1 uppercase tracking-wider">{label}</div>}
       <div className={`${INNER} p-2`}>
         {rows.map(([k, v]) => (
           <div key={k} className="flex justify-between gap-4 py-px">
-            <span className="font-mono text-[11px] text-zinc-500">{k}</span>
-            <span className="font-mono text-[11px] text-zinc-300">{v}</span>
+            <span className="font-mono text-[11px] text-[var(--color-text-secondary)]">{k}</span>
+            <span className="font-mono text-[11px] text-[var(--color-text-secondary)]">{v}</span>
           </div>
         ))}
       </div>
@@ -75,11 +75,11 @@ function SmtPanel({ data }: { data: SmtDetails }) {
     <div className="space-y-4">
       {data.guard_satisfiability?.length > 0 && (
         <div>
-          <div className="text-[11px] text-zinc-400 mb-2 uppercase tracking-wider">Guard Satisfiability</div>
-          <div className={`${INNER} divide-y divide-white/[0.03]`}>
+          <div className="text-[11px] text-[var(--color-text-secondary)] mb-2 uppercase tracking-wider">Guard Satisfiability</div>
+          <div className={`${INNER} divide-y divide-[var(--color-border)]`}>
             {data.guard_satisfiability.map(([action, sat]) => (
               <div key={action} className="flex items-center justify-between px-3 py-1.5">
-                <span className="font-mono text-[11px] text-zinc-300">{action}</span>
+                <span className="font-mono text-[11px] text-[var(--color-text-secondary)]">{action}</span>
                 <Dot passed={sat} />
               </div>
             ))}
@@ -89,11 +89,11 @@ function SmtPanel({ data }: { data: SmtDetails }) {
 
       {data.inductive_invariants?.length > 0 && (
         <div>
-          <div className="text-[11px] text-zinc-400 mb-2 uppercase tracking-wider">Inductive Invariants</div>
-          <div className={`${INNER} divide-y divide-white/[0.03]`}>
+          <div className="text-[11px] text-[var(--color-text-secondary)] mb-2 uppercase tracking-wider">Inductive Invariants</div>
+          <div className={`${INNER} divide-y divide-[var(--color-border)]`}>
             {data.inductive_invariants.map(([name, holds]) => (
               <div key={name} className="flex items-center justify-between px-3 py-1.5">
-                <span className="font-mono text-[11px] text-zinc-300">{name}</span>
+                <span className="font-mono text-[11px] text-[var(--color-text-secondary)]">{name}</span>
                 <span className={`font-mono text-[10px] ${holds ? G : B}`}>
                   {holds ? "inductive" : "non-inductive"}
                 </span>
@@ -105,10 +105,10 @@ function SmtPanel({ data }: { data: SmtDetails }) {
 
       {data.unreachable_states?.length > 0 && (
         <div>
-          <div className="text-[11px] text-zinc-400 mb-2 uppercase tracking-wider">Unreachable States</div>
+          <div className="text-[11px] text-[var(--color-text-secondary)] mb-2 uppercase tracking-wider">Unreachable States</div>
           <div className="flex flex-wrap gap-1.5">
             {data.unreachable_states.map((s) => (
-              <span key={s} className={`font-mono text-[10px] px-2 py-0.5 rounded-full ${INNER} border border-white/[0.04] text-zinc-400`}>
+              <span key={s} className={`font-mono text-[10px] px-2 py-0.5 rounded-full ${INNER} border border-[var(--color-border)] text-[var(--color-text-secondary)]`}>
                 {s}
               </span>
             ))}
@@ -124,13 +124,13 @@ function ModelCheckPanel({ data }: { data: ModelCheckDetails }) {
   return (
     <div className="space-y-4">
       <div className="flex gap-5 font-mono text-[11px]">
-        <span className="text-zinc-500">states <span className="text-zinc-300">{data.states_explored?.toLocaleString()}</span></span>
-        <span className="text-zinc-500">complete <span className={data.is_complete ? G : B}>{String(data.is_complete)}</span></span>
+        <span className="text-[var(--color-text-secondary)]">states <span className="text-[var(--color-text-secondary)]">{data.states_explored?.toLocaleString()}</span></span>
+        <span className="text-[var(--color-text-secondary)]">complete <span className={data.is_complete ? G : B}>{String(data.is_complete)}</span></span>
       </div>
 
       {data.counterexamples?.length > 0 && (
         <div>
-          <div className="text-[11px] text-zinc-400 mb-2 uppercase tracking-wider">
+          <div className="text-[11px] text-[var(--color-text-secondary)] mb-2 uppercase tracking-wider">
             Counterexamples ({data.counterexamples.length})
           </div>
           <div className="space-y-2">
@@ -141,7 +141,7 @@ function ModelCheckPanel({ data }: { data: ModelCheckDetails }) {
                   <div className="space-y-1.5 ml-1">
                     {cx.trace.map((step, j) => (
                       <div key={j} className="flex items-start gap-2.5">
-                        <span className="font-mono text-[10px] text-zinc-600 w-3 text-right flex-shrink-0 pt-0.5">{j}</span>
+                        <span className="font-mono text-[10px] text-[var(--color-text-muted)] w-3 text-right flex-shrink-0 pt-0.5">{j}</span>
                         <div className="flex-1"><StateTable state={step} /></div>
                       </div>
                     ))}
@@ -166,13 +166,13 @@ function InvariantViolationCard({ v }: { v: InvariantViolation }) {
     <div className={`${GLASS} p-3 bg-gradient-to-r ${B_GRAD} to-transparent`}>
       <div className="flex items-center justify-between mb-2">
         <span className={`font-mono text-[12px] ${B}`}>{v.invariant}</span>
-        <span className="text-[10px] font-mono text-zinc-600">tick {v.tick}</span>
+        <span className="text-[10px] font-mono text-[var(--color-text-muted)]">tick {v.tick}</span>
       </div>
       <div className="flex items-center gap-2 mb-3 font-mono text-[11px]">
-        <span className="text-zinc-500">actor</span>
-        <span className="text-zinc-300">{v.actor_id}</span>
-        <span className="text-zinc-700">/</span>
-        <span className="text-zinc-500">action</span>
+        <span className="text-[var(--color-text-secondary)]">actor</span>
+        <span className="text-[var(--color-text-secondary)]">{v.actor_id}</span>
+        <span className="text-[var(--color-text-muted)]">/</span>
+        <span className="text-[var(--color-text-secondary)]">action</span>
         <span className={B}>{v.action}</span>
       </div>
       <div className="grid grid-cols-2 gap-2">
@@ -190,26 +190,26 @@ function LivenessGroupCard({ property, violations }: { property: string; violati
     <div className={`${GLASS} overflow-hidden bg-gradient-to-r ${B_GRAD} to-transparent`}>
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between p-3 text-left hover:bg-white/[0.015] transition-colors"
+        className="w-full flex items-center justify-between p-3 text-left hover:bg-[var(--color-bg-elevated)] transition-colors"
       >
         <span className={`font-mono text-[12px] ${B}`}>{property}</span>
         <div className="flex items-center gap-2.5">
-          <span className="text-[10px] font-mono text-zinc-500">
+          <span className="text-[10px] font-mono text-[var(--color-text-secondary)]">
             {violations.length} actor{violations.length !== 1 ? "s" : ""}
           </span>
           <Chevron open={isOpen} />
         </div>
       </button>
       {isOpen && (
-        <div className="border-t border-white/[0.03] divide-y divide-white/[0.03]">
+        <div className="border-t border-[var(--color-border)] divide-y divide-[var(--color-border)]">
           {violations.map((v, i) => (
             <div key={i} className="p-3">
               <div className="flex items-center gap-2 mb-1.5 font-mono text-[11px]">
-                <span className="text-zinc-500">actor</span>
-                <span className="text-zinc-300">{v.actor_id}</span>
+                <span className="text-[var(--color-text-secondary)]">actor</span>
+                <span className="text-[var(--color-text-secondary)]">{v.actor_id}</span>
               </div>
               {v.description && (
-                <div className="text-[11px] text-zinc-400 mb-2">{v.description}</div>
+                <div className="text-[11px] text-[var(--color-text-secondary)] mb-2">{v.description}</div>
               )}
               <StateTable state={v.final_state} label="Stuck State" />
             </div>
@@ -231,16 +231,16 @@ function SimulationPanel({ data }: { data: SimulationDetails }) {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap gap-x-5 gap-y-1 font-mono text-[11px]">
-        <span className="text-zinc-500">ticks <span className="text-zinc-300">{data.ticks}</span></span>
-        <span className="text-zinc-500">transitions <span className="text-zinc-300">{data.total_transitions}</span></span>
-        <span className="text-zinc-500">messages <span className="text-zinc-300">{data.total_messages}</span></span>
-        <span className="text-zinc-500">dropped <span className={data.total_dropped > 0 ? B : "text-zinc-300"}>{data.total_dropped}</span></span>
-        <span className="text-zinc-500">seed <span className="text-zinc-300">{data.seed}</span></span>
+        <span className="text-[var(--color-text-secondary)]">ticks <span className="text-[var(--color-text-secondary)]">{data.ticks}</span></span>
+        <span className="text-[var(--color-text-secondary)]">transitions <span className="text-[var(--color-text-secondary)]">{data.total_transitions}</span></span>
+        <span className="text-[var(--color-text-secondary)]">messages <span className="text-[var(--color-text-secondary)]">{data.total_messages}</span></span>
+        <span className="text-[var(--color-text-secondary)]">dropped <span className={data.total_dropped > 0 ? B : "text-[var(--color-text-secondary)]"}>{data.total_dropped}</span></span>
+        <span className="text-[var(--color-text-secondary)]">seed <span className="text-[var(--color-text-secondary)]">{data.seed}</span></span>
       </div>
 
       {data.violations?.length > 0 && (
         <div>
-          <div className="text-[11px] text-zinc-400 mb-2 uppercase tracking-wider">
+          <div className="text-[11px] text-[var(--color-text-secondary)] mb-2 uppercase tracking-wider">
             Invariant Violations ({data.violations.length})
           </div>
           <div className="space-y-2">
@@ -251,7 +251,7 @@ function SimulationPanel({ data }: { data: SimulationDetails }) {
 
       {Object.keys(livenessGroups).length > 0 && (
         <div>
-          <div className="text-[11px] text-zinc-400 mb-2 uppercase tracking-wider">
+          <div className="text-[11px] text-[var(--color-text-secondary)] mb-2 uppercase tracking-wider">
             Liveness Violations ({data.liveness_violations.length})
           </div>
           <div className="space-y-2">
@@ -273,8 +273,8 @@ function SimulationPanel({ data }: { data: SimulationDetails }) {
 function PropTestPanel({ data }: { data: PropTestDetails }) {
   return (
     <div className="space-y-4">
-      <div className="font-mono text-[11px] text-zinc-500">
-        cases <span className="text-zinc-300">{data.total_cases}</span>
+      <div className="font-mono text-[11px] text-[var(--color-text-secondary)]">
+        cases <span className="text-[var(--color-text-secondary)]">{data.total_cases}</span>
       </div>
 
       {data.failure && (
@@ -283,11 +283,11 @@ function PropTestPanel({ data }: { data: PropTestDetails }) {
 
           {data.failure.action_sequence?.length > 0 && (
             <div className="mb-3">
-              <div className="text-[10px] text-zinc-500 mb-1.5 uppercase tracking-wider">Minimal Action Sequence</div>
+              <div className="text-[10px] text-[var(--color-text-secondary)] mb-1.5 uppercase tracking-wider">Minimal Action Sequence</div>
               <div className={`${INNER} p-2 space-y-0.5`}>
                 {data.failure.action_sequence.map((action, i) => (
                   <div key={i} className="flex gap-2.5 font-mono text-[11px]">
-                    <span className="text-zinc-600 w-4 text-right">{i + 1}.</span>
+                    <span className="text-[var(--color-text-muted)] w-4 text-right">{i + 1}.</span>
                     <span className={B}>{action}</span>
                   </div>
                 ))}
@@ -297,8 +297,8 @@ function PropTestPanel({ data }: { data: PropTestDetails }) {
 
           {data.failure.final_state && (
             <div>
-              <div className="text-[10px] text-zinc-500 mb-1.5 uppercase tracking-wider">Final State</div>
-              <pre className={`${INNER} p-2 font-mono text-[11px] text-zinc-300 whitespace-pre-wrap`}>
+              <div className="text-[10px] text-[var(--color-text-secondary)] mb-1.5 uppercase tracking-wider">Final State</div>
+              <pre className={`${INNER} p-2 font-mono text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap`}>
                 {data.failure.final_state}
               </pre>
             </div>
@@ -324,22 +324,22 @@ export function VerificationDetailsPanel({ details }: { details: VerificationDet
 
   return (
     <div className="space-y-2">
-      <div className="text-[11px] text-zinc-400 mb-2 uppercase tracking-wider">
+      <div className="text-[11px] text-[var(--color-text-secondary)] mb-2 uppercase tracking-wider">
         Violations ({details.length})
       </div>
       {details.map((d, i) => (
         <div key={i} className={`${GLASS} p-3 bg-gradient-to-r ${B_GRAD} to-transparent`}>
           <div className="flex items-center justify-between mb-1.5">
             <span className={`font-mono text-[12px] ${B}`}>{d.property}</span>
-            <span className="text-[10px] font-mono text-zinc-600">
+            <span className="text-[10px] font-mono text-[var(--color-text-muted)]">
               {kindLabel[d.kind] ?? d.kind}
             </span>
           </div>
-          <div className="text-[11px] text-zinc-400 mb-1">{d.description}</div>
+          <div className="text-[11px] text-[var(--color-text-secondary)] mb-1">{d.description}</div>
           {d.actor_id && (
             <div className="flex items-center gap-2 font-mono text-[11px]">
-              <span className="text-zinc-500">actor</span>
-              <span className="text-zinc-300">{d.actor_id}</span>
+              <span className="text-[var(--color-text-secondary)]">actor</span>
+              <span className="text-[var(--color-text-secondary)]">{d.actor_id}</span>
             </div>
           )}
         </div>
@@ -361,13 +361,13 @@ function LevelDetailPanel({ level }: { level: VerificationLevel }) {
       return <VerificationDetailsPanel details={level.details} />;
     }
     return (
-      <pre className={`${INNER} p-2.5 font-mono text-[11px] text-zinc-400 whitespace-pre-wrap`}>
+      <pre className={`${INNER} p-2.5 font-mono text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap`}>
         {level.details}
       </pre>
     );
   }
 
-  return <div className="text-[11px] text-zinc-600 italic">No details available</div>;
+  return <div className="text-[11px] text-[var(--color-text-muted)] italic">No details available</div>;
 }
 
 /* ── main component ─────────────────────────────────── */
@@ -389,8 +389,8 @@ export default function CascadeResults({ levels, allPassed }: CascadeResultsProp
       <div className={`relative overflow-hidden ${GLASS} p-4`}>
         <div className={`absolute inset-0 bg-gradient-to-r ${allPassed ? G_GRAD : B_GRAD} to-transparent pointer-events-none`} />
         <div className="relative flex items-center gap-3.5">
-          <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-            allPassed ? "bg-teal-400/10" : "bg-pink-400/10"
+          <div className={`w-8 h-8 rounded-[2px] flex items-center justify-center ${
+            allPassed ? "bg-[var(--color-accent-teal-dim)]" : "bg-[var(--color-accent-pink-dim)]"
           }`}>
             <span className={`text-lg ${allPassed ? G : B}`}>
               {allPassed ? "\u2713" : "\u2717"}
@@ -400,7 +400,7 @@ export default function CascadeResults({ levels, allPassed }: CascadeResultsProp
             <div className={`text-sm font-semibold tracking-tight ${allPassed ? G : B}`}>
               {allPassed ? "All Levels Passed" : "Verification Failed"}
             </div>
-            <div className="text-[12px] text-zinc-500">
+            <div className="text-[12px] text-[var(--color-text-secondary)]">
               {levels.filter((l) => l.passed).length} of {levels.length} levels passed
             </div>
           </div>
@@ -422,27 +422,27 @@ export default function CascadeResults({ levels, allPassed }: CascadeResultsProp
           >
             <button
               onClick={() => toggle(i)}
-              className="w-full flex items-center justify-between p-3 text-left hover:bg-white/[0.015] transition-colors"
+              className="w-full flex items-center justify-between p-3 text-left hover:bg-[var(--color-bg-elevated)] transition-colors"
             >
               <div className="flex items-center gap-3">
                 <Dot passed={isSkipped ? true : level.passed} />
                 <div>
-                  <div className="font-mono text-[13px] text-zinc-300">{level.level}</div>
-                  <div className={`text-[12px] mt-0.5 ${isSkipped ? "text-zinc-700" : "text-zinc-500"}`}>
+                  <div className="font-mono text-[13px] text-[var(--color-text-secondary)]">{level.level}</div>
+                  <div className={`text-[12px] mt-0.5 ${isSkipped ? "text-[var(--color-text-muted)]" : "text-[var(--color-text-secondary)]"}`}>
                     {level.summary}
                   </div>
                 </div>
               </div>
               <div className="flex items-center gap-3">
                 {level.duration_ms !== undefined && level.duration_ms > 0 && (
-                  <span className="text-[10px] font-mono text-zinc-600">{level.duration_ms}ms</span>
+                  <span className="text-[10px] font-mono text-[var(--color-text-muted)]">{level.duration_ms}ms</span>
                 )}
                 {hasDetails && <Chevron open={isExpanded} />}
               </div>
             </button>
 
             {isExpanded && (
-              <div className="px-3 pb-3 border-t border-white/[0.03]">
+              <div className="px-3 pb-3 border-t border-[var(--color-border)]">
                 <div className="mt-3">
                   <LevelDetailPanel level={level} />
                 </div>

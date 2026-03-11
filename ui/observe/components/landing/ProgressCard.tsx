@@ -54,11 +54,11 @@ export default function ProgressCard() {
 
   return (
     <aside
-      className={`fixed top-20 right-6 z-[999] w-[220px] p-5 bg-[rgba(17,17,21,0.92)] backdrop-blur-2xl border border-white/[0.04] rounded-[3px] transition-all duration-400 max-[1100px]:hidden ${
+      className={`fixed top-20 right-6 z-[999] w-[220px] p-5 bg-[color-mix(in_srgb,var(--color-bg-surface)_92%,transparent)] backdrop-blur-2xl border border-[var(--color-border)] rounded-[3px] transition-all duration-400 max-[1100px]:hidden ${
         visible ? "opacity-100 translate-x-0 pointer-events-auto" : "opacity-0 translate-x-5 pointer-events-none"
       }`}
     >
-      <div className="text-[9px] font-bold uppercase tracking-[0.15em] text-zinc-600 mb-3.5">In this page</div>
+      <div className="text-[9px] font-bold uppercase tracking-[0.15em] text-[var(--color-text-muted)] mb-3.5">In this page</div>
       <ul className="list-none m-0 p-0 flex flex-col">
         {sections.map((section, i) => (
           <li key={section.id}>
@@ -69,10 +69,10 @@ export default function ProgressCard() {
               }}
               className={`text-xs py-1.5 pl-3 border-l-2 w-full text-left cursor-pointer bg-transparent transition-colors duration-200 ${
                 i === activeIdx
-                  ? "text-teal-400 border-teal-400 font-semibold"
+                  ? "text-[var(--color-accent-teal)] border-[var(--color-accent-teal)] font-semibold"
                   : i < activeIdx
-                    ? "text-zinc-400 border-white/[0.08]"
-                    : "text-zinc-600 border-transparent hover:text-zinc-400"
+                    ? "text-[var(--color-text-secondary)] border-[var(--color-border-hover)]"
+                    : "text-[var(--color-text-muted)] border-transparent hover:text-[var(--color-text-secondary)]"
               }`}
             >
               {section.label}
@@ -80,11 +80,11 @@ export default function ProgressCard() {
           </li>
         ))}
       </ul>
-      <div className="mt-4 pt-3.5 border-t border-white/[0.04]">
-        <div className="text-[9px] font-bold uppercase tracking-[0.12em] text-zinc-600 mb-2">Progress</div>
-        <div className="w-full h-[3px] bg-white/[0.04] rounded-sm overflow-hidden">
+      <div className="mt-4 pt-3.5 border-t border-[var(--color-border)]">
+        <div className="text-[9px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-muted)] mb-2">Progress</div>
+        <div className="w-full h-[3px] bg-[var(--color-bg-elevated)] rounded-sm overflow-hidden">
           <div
-            className="h-full bg-teal-400 rounded-sm transition-[width] duration-400 ease-out"
+            className="h-full bg-[var(--color-accent-teal)] rounded-sm transition-[width] duration-400 ease-out"
             style={{ width: `${progress}%` }}
           />
         </div>

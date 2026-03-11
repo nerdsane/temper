@@ -26,14 +26,14 @@ export default function VerificationViz() {
           key={i}
           className={`h-12 border rounded-[3px] relative overflow-hidden flex items-center px-4 text-xs font-semibold transition-all duration-400 ${
             i === activeIdx
-              ? "border-teal-400/30 text-teal-400 bg-[rgba(45,212,191,0.12)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
-              : "bg-white/[0.02] border-white/[0.04] text-zinc-600"
+              ? "border-[var(--color-accent-teal)]/30 text-[var(--color-accent-teal)] bg-[var(--color-accent-teal-dim)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+              : "bg-[var(--color-bg-elevated)] border-[var(--color-border)] text-[var(--color-text-muted)]"
           }`}
         >
           {text}
           {/* Progress bar */}
           <div
-            className={`absolute bottom-0 left-0 h-0.5 bg-teal-400 ${
+            className={`absolute bottom-0 left-0 h-0.5 bg-[var(--color-accent-teal)] ${
               i === activeIdx ? "animate-filter-progress" : "w-0"
             }`}
           />

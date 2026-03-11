@@ -145,31 +145,31 @@ export default function VerificationPage() {
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <div>
-          <div className="flex items-center gap-1.5 text-[12px] text-zinc-600 mb-1">
-            <Link href="/" className="hover:text-zinc-400 transition-colors">Dashboard</Link>
+          <div className="flex items-center gap-1.5 text-[12px] text-[var(--color-text-muted)] mb-1">
+            <Link href="/" className="hover:text-[var(--color-text-secondary)] transition-colors">Dashboard</Link>
             <span>/</span>
-            <span className="text-zinc-400">Verification</span>
+            <span className="text-[var(--color-text-secondary)]">Verification</span>
             <span>/</span>
-            <span className="text-zinc-400">{entity}</span>
+            <span className="text-[var(--color-text-secondary)]">{entity}</span>
           </div>
-          <h1 className="text-2xl font-bold text-zinc-100 tracking-tight font-display">
+          <h1 className="text-2xl text-[var(--color-text-primary)] tracking-tight font-serif">
             Verification: {entity}
           </h1>
-          <p className="text-[13px] text-zinc-600 mt-0.5">
+          <p className="text-[13px] text-[var(--color-text-muted)] mt-0.5">
             5-level verification cascade (L0 SMT, L1 Model Check, L2 DST, L2b Actor Sim, L3 PropTest)
           </p>
         </div>
         <div className="flex gap-2.5">
           <Link
             href={`/specs/${entity}`}
-            className="px-3.5 py-1.5 bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 text-[13px] rounded-md transition-colors"
+            className="px-3.5 py-1.5 bg-[var(--color-bg-elevated)] hover:bg-[var(--color-border-hover)] text-[var(--color-text-secondary)] text-[13px] rounded-[2px] transition-colors"
           >
             View Spec
           </Link>
           <button
             onClick={handleRunVerification}
             disabled={loading}
-            className="px-3.5 py-1.5 bg-teal-500 hover:bg-teal-400 disabled:bg-teal-600 disabled:cursor-not-allowed text-white text-[13px] rounded-md transition-colors"
+            className="px-3.5 py-1.5 bg-[var(--color-accent-teal)] hover:bg-[var(--color-accent-teal)] disabled:bg-[var(--color-accent-teal)]/50 disabled:cursor-not-allowed text-[var(--color-bg-primary)] text-[13px] rounded-[2px] transition-colors"
           >
             {loading ? "Running..." : result ? "Re-run Verification" : "Run Verification"}
           </button>
@@ -178,7 +178,7 @@ export default function VerificationPage() {
 
       {/* Stepper Progress */}
       {(loading || hasAnyProgress) && (
-        <div className="glass rounded-lg p-5 mb-5">
+        <div className="glass rounded-[2px] p-5 mb-5">
           <div className="flex items-center gap-1">
             {steps.map((step, i) => (
               <div key={step.label} className="flex items-center flex-1 last:flex-initial">
@@ -187,12 +187,12 @@ export default function VerificationPage() {
                   <div
                     className={`w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-mono transition-all duration-300 ${
                       step.status === "passed"
-                        ? "bg-teal-500/20 text-teal-400 ring-1 ring-teal-500/40"
+                        ? "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] ring-1 ring-[var(--color-accent-teal)]/40"
                         : step.status === "failed"
-                          ? "bg-pink-500/20 text-pink-400 ring-1 ring-pink-500/40"
+                          ? "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)] ring-1 ring-[var(--color-accent-pink)]/40"
                           : step.status === "running"
-                            ? "bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/40 animate-pulse"
-                            : "bg-white/[0.04] text-zinc-600 ring-1 ring-white/[0.06]"
+                            ? "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)] ring-1 ring-[var(--color-accent-pink)]/40 animate-pulse"
+                            : "bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] ring-1 ring-[var(--color-border)]"
                     }`}
                   >
                     {step.status === "passed" ? (
@@ -204,7 +204,7 @@ export default function VerificationPage() {
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
                       </svg>
                     ) : step.status === "running" ? (
-                      <div className="w-2 h-2 bg-amber-400 rounded-full" />
+                      <div className="w-2 h-2 bg-[var(--color-accent-pink)] rounded-full" />
                     ) : (
                       <span>{i}</span>
                     )}
@@ -212,12 +212,12 @@ export default function VerificationPage() {
                   <span
                     className={`text-[10px] mt-1.5 whitespace-nowrap ${
                       step.status === "passed"
-                        ? "text-teal-400"
+                        ? "text-[var(--color-accent-teal)]"
                         : step.status === "failed"
-                          ? "text-pink-400"
+                          ? "text-[var(--color-accent-pink)]"
                           : step.status === "running"
-                            ? "text-amber-400"
-                            : "text-zinc-600"
+                            ? "text-[var(--color-accent-pink)]"
+                            : "text-[var(--color-text-muted)]"
                     }`}
                   >
                     {step.label}
@@ -228,10 +228,10 @@ export default function VerificationPage() {
                   <div
                     className={`flex-1 h-px mx-2 mt-[-18px] transition-colors duration-300 ${
                       step.status === "passed"
-                        ? "bg-teal-500/40"
+                        ? "bg-[var(--color-accent-teal)]/40"
                         : step.status === "failed"
-                          ? "bg-pink-500/40"
-                          : "bg-white/[0.06]"
+                          ? "bg-[var(--color-accent-pink)]/40"
+                          : "bg-[var(--color-bg-elevated)]"
                     }`}
                   />
                 )}
@@ -254,7 +254,7 @@ export default function VerificationPage() {
       {!loading && result && (
         <>
           {!cachedLoading && !hasAnyProgress && (
-            <div className="mb-3 text-[11px] text-zinc-600">
+            <div className="mb-3 text-[11px] text-[var(--color-text-muted)]">
               Showing cached results from background verification. Click &quot;Re-run Verification&quot; to run again.
             </div>
           )}
@@ -265,15 +265,15 @@ export default function VerificationPage() {
       {/* Initial prompt (only when no cached results and not loading) */}
       {!loading && !result && !error && !cachedLoading && (
         <div className="text-center py-10">
-          <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-white/[0.04] mb-4">
-            <svg className="w-5 h-5 text-zinc-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-[var(--color-bg-elevated)] mb-4">
+            <svg className="w-5 h-5 text-[var(--color-text-muted)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
             </svg>
           </div>
-          <p className="text-zinc-500 text-[13px] mb-3">Click &quot;Run Verification&quot; to start the cascade</p>
+          <p className="text-[var(--color-text-secondary)] text-[13px] mb-3">Click &quot;Run Verification&quot; to start the cascade</p>
           <button
             onClick={handleRunVerification}
-            className="px-3.5 py-1.5 bg-teal-500 hover:bg-teal-400 text-white text-[13px] rounded-md transition-colors"
+            className="px-3.5 py-1.5 bg-[var(--color-accent-teal)] hover:bg-[var(--color-accent-teal)] text-[var(--color-bg-primary)] text-[13px] rounded-[2px] transition-colors"
           >
             Run Verification
           </button>
@@ -283,7 +283,7 @@ export default function VerificationPage() {
       {/* Loading cached results */}
       {cachedLoading && !loading && !result && (
         <div className="flex items-center justify-center h-28">
-          <div className="text-zinc-600 text-[13px]">Checking for cached verification results...</div>
+          <div className="text-[var(--color-text-muted)] text-[13px]">Checking for cached verification results...</div>
         </div>
       )}
     </div>

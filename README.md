@@ -54,6 +54,10 @@ The kernel is a thin Rust runtime that interprets whatever the mediation pipelin
 
 ## Why Temper?
 
+Models are an API call. The model-facing scaffolding — prompt templates, output parsers, tool wrappers — is being absorbed by smarter models. What remains is the world-facing infrastructure: state, authorization, verification, persistence. That's the layer that compounds.
+
+Skills should be code with a signature. Harnesses should be too — and agents should be the ones writing and rewriting them.
+
 | What's developing in the field | Temper's angle |
 |---|---|
 | Agents synthesize tools at runtime | Those tools are verified state machines that persist as specs |
@@ -62,6 +66,7 @@ The kernel is a thin Rust runtime that interprets whatever the mediation pipelin
 | Observability shows what happened | Unmet intents feed back into spec proposals with human approval |
 | Declarative agent specs for portability | Declarative specs for correctness — verified, then deployed |
 | Durable execution engines | Spec defines what the system does; durability follows from event sourcing |
+| Harnesses as static scaffolding | Harnesses as specs — agents program and rewrite them through the same verify-deploy loop |
 
 It's an exploration of what happens when you put formal verification, Cedar authorization, and evolution feedback into the same loop.
 
@@ -301,7 +306,7 @@ Temper is being built bottom-up. Each layer enables the next.
 
 **Layer 3 — Integrations.** Agents need to reach external systems. Instead of bespoke tool implementations per agent, Temper provides an integration layer where agents write integrations as WASM modules + specs. Cedar mediates which integrations an agent can use.
 
-**Layer 4 — Harness composition.** With apps for tracking work, a filesystem for state, and integrations for external systems — agents have what they need to design complete harnesses as specs: what polls what, what reviews what, what gates what.
+**Layer 4 — Harness composition.** The harness should always be rewritable. With apps for tracking work, a filesystem for state, and integrations for external systems — agents have what they need to design complete harnesses as specs: what polls what, what reviews what, what gates what. Skills and harnesses are both code with a signature — declarative specs that agents author, verify, and rewrite as they evolve.
 
 **Layer 5 — Pure Temper agent.** An agent whose only tool is Temper. No raw filesystem, no shell, no bespoke API clients. Everything mediated, queryable, auditable.
 

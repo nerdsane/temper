@@ -189,29 +189,29 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
   };
 
   return (
-    <div className="bg-[#111115] rounded-lg p-4 relative">
+    <div className="bg-[var(--color-bg-surface)] rounded-[2px] p-4 relative">
       {/* Controls */}
       <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5">
-        <span className="text-[10px] text-zinc-600 font-mono mr-1">
+        <span className="text-[10px] text-[var(--color-text-muted)] font-mono mr-1">
           {Math.round(zoom * 100)}%
         </span>
         <button
           onClick={() => setZoom((z) => Math.min(3, z * 1.2))}
-          className="w-6 h-6 flex items-center justify-center rounded bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 text-xs transition-colors"
+          className="w-6 h-6 flex items-center justify-center rounded bg-[var(--color-bg-elevated)] hover:bg-[var(--color-border-hover)] text-[var(--color-text-secondary)] text-xs transition-colors"
           title="Zoom in"
         >
           +
         </button>
         <button
           onClick={() => setZoom((z) => Math.max(0.3, z * 0.8))}
-          className="w-6 h-6 flex items-center justify-center rounded bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 text-xs transition-colors"
+          className="w-6 h-6 flex items-center justify-center rounded bg-[var(--color-bg-elevated)] hover:bg-[var(--color-border-hover)] text-[var(--color-text-secondary)] text-xs transition-colors"
           title="Zoom out"
         >
           -
         </button>
         <button
           onClick={resetView}
-          className="px-2 h-6 flex items-center justify-center rounded bg-white/[0.04] hover:bg-white/[0.08] text-zinc-500 text-[10px] transition-colors"
+          className="px-2 h-6 flex items-center justify-center rounded bg-[var(--color-bg-elevated)] hover:bg-[var(--color-border-hover)] text-[var(--color-text-secondary)] text-[10px] transition-colors"
           title="Fit to view"
         >
           Fit
@@ -247,7 +247,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
               refY="3.5"
               orient="auto"
             >
-              <polygon points="0 0, 10 3.5, 0 7" fill="#52525b" />
+              <polygon points="0 0, 10 3.5, 0 7" style={{ fill: 'var(--color-border)' }} />
             </marker>
             <marker
               id="arrowhead-teal"
@@ -257,7 +257,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
               refY="3.5"
               orient="auto"
             >
-              <polygon points="0 0, 10 3.5, 0 7" fill="#2dd4bf" />
+              <polygon points="0 0, 10 3.5, 0 7" style={{ fill: 'var(--color-accent-teal)' }} />
             </marker>
           </defs>
 
@@ -275,7 +275,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                   <path
                     d={`M ${cx - 20} ${cy} C ${cx - 30} ${cy - 45}, ${cx + 30} ${cy - 45}, ${cx + 20} ${cy}`}
                     fill="none"
-                    stroke="#3f3f46"
+                    style={{ stroke: 'var(--color-border)' }}
                     strokeWidth="1.5"
                     markerEnd="url(#arrowhead)"
                   />
@@ -283,7 +283,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                     x={cx}
                     y={cy - 35}
                     textAnchor="middle"
-                    className="text-[10px] fill-zinc-400 font-mono"
+                    className="text-[10px] fill-[var(--color-text-secondary)] font-mono"
                   >
                     {edge.label}
                   </text>
@@ -312,7 +312,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                 <path
                   d={path}
                   fill="none"
-                  stroke="#3f3f46"
+                  style={{ stroke: 'var(--color-border)' }}
                   strokeWidth="1.5"
                   markerEnd="url(#arrowhead)"
                 />
@@ -320,7 +320,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                   x={labelPt.x}
                   y={labelPt.y + labelOffset}
                   textAnchor="middle"
-                  className="text-[10px] fill-zinc-400 font-mono"
+                  className="text-[10px] fill-[var(--color-text-secondary)] font-mono"
                 >
                   {edge.label}
                 </text>
@@ -338,7 +338,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                   y1={node.y}
                   x2={node.x - NODE_WIDTH / 2 - 2}
                   y2={node.y}
-                  stroke="#2dd4bf"
+                  style={{ stroke: 'var(--color-accent-teal)' }}
                   strokeWidth="2"
                   markerEnd="url(#arrowhead-teal)"
                 />
@@ -346,7 +346,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                   cx={node.x - 105}
                   cy={node.y}
                   r="4"
-                  fill="#2dd4bf"
+                  style={{ fill: 'var(--color-accent-teal)' }}
                 />
               </g>
             ))}
@@ -362,7 +362,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                   height={NODE_HEIGHT + 10}
                   rx={10}
                   fill="none"
-                  stroke="#6b7280"
+                  style={{ stroke: 'var(--color-text-muted)' }}
                   strokeWidth="1.5"
                   strokeDasharray="4 2"
                 />
@@ -373,9 +373,11 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                 width={NODE_WIDTH - 4}
                 height={NODE_HEIGHT - 4}
                 rx={8}
-                fill={node.isInitial ? "#042f2e" : node.isTerminal ? "#1c1917" : "#111115"}
-                stroke={node.isInitial ? "#2dd4bf" : node.isTerminal ? "#78716c" : "#3f3f46"}
-                strokeWidth={node.isInitial ? 2 : 1.5}
+                style={{
+                  fill: node.isInitial ? 'var(--color-accent-teal-dim)' : node.isTerminal ? 'var(--color-bg-elevated)' : 'var(--color-bg-surface)',
+                  stroke: node.isInitial ? 'var(--color-accent-teal)' : node.isTerminal ? 'var(--color-text-muted)' : 'var(--color-border)',
+                  strokeWidth: node.isInitial ? 2 : 1.5,
+                }}
               />
               <text
                 x={node.x}
@@ -383,7 +385,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
                 textAnchor="middle"
                 dominantBaseline="middle"
                 className={`text-sm font-mono ${
-                  node.isInitial ? "fill-teal-400" : node.isTerminal ? "fill-zinc-500" : "fill-zinc-200"
+                  node.isInitial ? "fill-[var(--color-accent-teal)]" : node.isTerminal ? "fill-[var(--color-text-secondary)]" : "fill-[var(--color-text-primary)]"
                 }`}
               >
                 {node.name}

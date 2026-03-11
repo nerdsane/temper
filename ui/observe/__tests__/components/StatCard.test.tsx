@@ -16,14 +16,14 @@ describe("StatCard", () => {
   });
 
   it("applies custom color class", () => {
-    render(<StatCard label="Rate" value="95%" color="text-teal-400" />);
+    render(<StatCard label="Rate" value="95%" color="text-[var(--color-accent-teal)]" />);
     const valueEl = screen.getByText("95%");
-    expect(valueEl.className).toContain("text-teal-400");
+    expect(valueEl.className).toContain("text-[var(--color-accent-teal)]");
   });
 
   it("uses default color when none provided", () => {
     render(<StatCard label="Count" value={0} />);
     const valueEl = screen.getByText("0");
-    expect(valueEl.className).toContain("text-zinc-100");
+    expect(valueEl.className).toContain("text-[var(--color-text-primary)]");
   });
 });

@@ -1,7 +1,7 @@
 "use client";
 
-import dynamic from "next/dynamic";
 import LandingNav from "@/components/landing/LandingNav";
+import FlowSparksBackground from "@/components/FlowSparksBackground";
 import ProgressCard from "@/components/landing/ProgressCard";
 import HeroSection from "@/components/landing/HeroSection";
 import VisionSection from "@/components/landing/VisionSection";
@@ -20,19 +20,17 @@ import CtaSection from "@/components/landing/CtaSection";
 import LandingFooter from "@/components/landing/LandingFooter";
 import SectionDivider from "@/components/landing/SectionDivider";
 
-const WebGLBackground = dynamic(() => import("@/components/landing/WebGLBackground"), { ssr: false });
-
 export default function LandingPage() {
   return (
     <div className="scroll-smooth">
-      <WebGLBackground />
+      <FlowSparksBackground />
 
-      {/* Ambient orbs */}
-      <div className="fixed rounded-full pointer-events-none z-0 w-[600px] h-[600px] -top-[10%] -left-[5%] bg-[radial-gradient(circle,rgba(45,212,191,0.04)_0%,transparent_70%)] animate-orb-drift-1 max-sm:hidden" />
-      <div className="fixed rounded-full pointer-events-none z-0 w-[500px] h-[500px] -bottom-[10%] -right-[8%] bg-[radial-gradient(circle,rgba(139,92,246,0.03)_0%,transparent_70%)] animate-orb-drift-2 max-sm:hidden" />
+      {/* Ambient orbs — more warm orange/bronze */}
+      <div className="fixed rounded-full pointer-events-none z-0 w-[600px] h-[600px] -top-[10%] -left-[5%] animate-orb-drift-1 max-sm:hidden" style={{ background: 'radial-gradient(circle, color-mix(in srgb, var(--color-accent-pink) 5%, transparent) 0%, transparent 70%)' }} />
+      <div className="fixed rounded-full pointer-events-none z-0 w-[500px] h-[500px] -bottom-[10%] -right-[8%] animate-orb-drift-2 max-sm:hidden" style={{ background: 'radial-gradient(circle, color-mix(in srgb, var(--color-accent-pink) 4%, transparent) 0%, transparent 70%)' }} />
 
       {/* Ambient mesh gradient overlay */}
-      <div className="fixed inset-0 z-0 pointer-events-none bg-[radial-gradient(ellipse_80%_60%_at_15%_20%,rgba(45,212,191,0.05)_0%,transparent_60%),radial-gradient(ellipse_60%_50%_at_75%_40%,rgba(139,92,246,0.03)_0%,transparent_55%),radial-gradient(ellipse_70%_60%_at_50%_80%,rgba(45,212,191,0.03)_0%,transparent_50%)]" />
+      <div className="fixed inset-0 z-0 pointer-events-none" style={{ background: 'radial-gradient(ellipse 80% 60% at 15% 20%, color-mix(in srgb, var(--color-accent-pink) 5%, transparent) 0%, transparent 60%), radial-gradient(ellipse 60% 50% at 75% 40%, color-mix(in srgb, var(--color-accent-teal) 3%, transparent) 0%, transparent 55%), radial-gradient(ellipse 70% 60% at 50% 80%, color-mix(in srgb, var(--color-accent-pink) 4%, transparent) 0%, transparent 50%)' }} />
 
       <LandingNav />
       <ProgressCard />

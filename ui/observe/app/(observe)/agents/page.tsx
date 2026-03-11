@@ -9,9 +9,9 @@ import ErrorDisplay from "@/components/ErrorDisplay";
 import StatCard from "@/components/StatCard";
 
 function rateBgClass(rate: number): string {
-  if (rate >= 80) return "bg-teal-500/15 text-teal-400";
-  if (rate >= 50) return "bg-amber-500/15 text-amber-400";
-  return "bg-pink-500/15 text-pink-400";
+  if (rate >= 80) return "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)]";
+  if (rate >= 50) return "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)]";
+  return "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)]";
 }
 
 export default function AgentsPage() {
@@ -61,13 +61,13 @@ export default function AgentsPage() {
   if (agentsPoll.loading && !data) {
     return (
       <div className="animate-pulse">
-        <div className="h-6 bg-zinc-800/60 rounded w-36 mb-1.5" />
-        <div className="h-3.5 bg-zinc-800/40 rounded w-64 mb-6" />
+        <div className="h-6 bg-[var(--color-border)] rounded w-36 mb-1.5" />
+        <div className="h-3.5 bg-[var(--color-border)] rounded w-64 mb-6" />
         <div className="grid grid-cols-4 gap-3 mb-6">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="glass rounded-lg p-4">
-              <div className="h-3 bg-zinc-800/50 rounded w-20 mb-2" />
-              <div className="h-8 bg-zinc-800/50 rounded w-10" />
+            <div key={i} className="glass rounded-[2px] p-4">
+              <div className="h-3 bg-[var(--color-border)] rounded w-20 mb-2" />
+              <div className="h-8 bg-[var(--color-border)] rounded w-10" />
             </div>
           ))}
         </div>
@@ -80,16 +80,16 @@ export default function AgentsPage() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-zinc-100 tracking-tight font-display">
+          <h1 className="text-2xl text-[var(--color-text-primary)] tracking-tight font-serif">
             Agents
           </h1>
-          <p className="text-sm text-zinc-600 mt-0.5">
+          <p className="text-sm text-[var(--color-text-muted)] mt-0.5">
             Agent activity, success rates, and authorization denials
           </p>
         </div>
         <div className="flex items-center gap-3">
           {lastUpdated && (
-            <span className="text-xs text-zinc-600">
+            <span className="text-xs text-[var(--color-text-muted)]">
               Updated {lastUpdated}
             </span>
           )}
@@ -102,19 +102,19 @@ export default function AgentsPage() {
         <StatCard
           label="Total Denials"
           value={totalDenials}
-          color={totalDenials > 0 ? "text-pink-400" : undefined}
+          color={totalDenials > 0 ? "text-[var(--color-accent-pink)]" : undefined}
         />
         <StatCard
           label="Total Errors"
           value={totalErrors}
-          color={totalErrors > 0 ? "text-amber-400" : undefined}
+          color={totalErrors > 0 ? "text-[var(--color-accent-pink)]" : undefined}
         />
         <StatCard
           label="Active Agents"
           value={
             data?.agents.filter((a) => a.last_active_at !== null).length ?? 0
           }
-          color="text-teal-400"
+          color="text-[var(--color-accent-teal)]"
         />
       </div>
 
@@ -122,30 +122,30 @@ export default function AgentsPage() {
       {data && data.agents.length > 0 ? (
         <div className="glass rounded overflow-hidden">
           <table className="w-full text-[13px]">
-            <thead className="sticky top-0 bg-[#111115]/90 backdrop-blur-sm z-10">
-              <tr className="border-b border-white/[0.06]">
-                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+            <thead className="sticky top-0 bg-[color-mix(in_srgb,var(--color-bg-surface)_90%,transparent)] backdrop-blur-sm z-10">
+              <tr className="border-b border-[var(--color-border)]">
+                <th className="text-left px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-xs uppercase tracking-wider">
                   Agent ID
                 </th>
-                <th className="text-right px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                <th className="text-right px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-xs uppercase tracking-wider">
                   Total
                 </th>
-                <th className="text-right px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                <th className="text-right px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-xs uppercase tracking-wider">
                   Success
                 </th>
-                <th className="text-right px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                <th className="text-right px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-xs uppercase tracking-wider">
                   Errors
                 </th>
-                <th className="text-right px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                <th className="text-right px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-xs uppercase tracking-wider">
                   Denials
                 </th>
-                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                <th className="text-left px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-xs uppercase tracking-wider">
                   Rate
                 </th>
-                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                <th className="text-left px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-xs uppercase tracking-wider">
                   Entity Types
                 </th>
-                <th className="text-right px-3.5 py-2.5 text-zinc-600 font-medium text-xs uppercase tracking-wider">
+                <th className="text-right px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-xs uppercase tracking-wider">
                   Last Active
                 </th>
               </tr>
@@ -160,23 +160,23 @@ export default function AgentsPage() {
                   <tr
                     key={agent.agent_id}
                     onClick={() => router.push(`/agents/${encodeURIComponent(agent.agent_id)}`)}
-                    className={`border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors cursor-pointer ${i % 2 === 1 ? "bg-white/[0.01]" : ""}`}
+                    className={`border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer ${i % 2 === 1 ? "bg-[var(--color-bg-elevated)]" : ""}`}
                   >
                     <td className="px-3.5 py-2.5">
-                      <span className="font-mono text-zinc-200">
+                      <span className="font-mono text-[var(--color-text-primary)]">
                         {agent.agent_id}
                       </span>
                     </td>
-                    <td className="px-3.5 py-2.5 text-right font-mono text-zinc-400">
+                    <td className="px-3.5 py-2.5 text-right font-mono text-[var(--color-text-secondary)]">
                       {agent.total_actions}
                     </td>
-                    <td className="px-3.5 py-2.5 text-right font-mono text-teal-400">
+                    <td className="px-3.5 py-2.5 text-right font-mono text-[var(--color-accent-teal)]">
                       {agent.success_count}
                     </td>
-                    <td className="px-3.5 py-2.5 text-right font-mono text-amber-400">
+                    <td className="px-3.5 py-2.5 text-right font-mono text-[var(--color-accent-pink)]">
                       {agent.error_count}
                     </td>
-                    <td className="px-3.5 py-2.5 text-right font-mono text-pink-400">
+                    <td className="px-3.5 py-2.5 text-right font-mono text-[var(--color-accent-pink)]">
                       {agent.denial_count}
                     </td>
                     <td className="px-3.5 py-2.5">
@@ -191,14 +191,14 @@ export default function AgentsPage() {
                         {agent.entity_types.map((et) => (
                           <span
                             key={et}
-                            className="text-[10px] font-mono bg-white/[0.04] text-zinc-500 px-1.5 py-0.5 rounded-sm"
+                            className="text-[10px] font-mono bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] px-1.5 py-0.5 rounded-sm"
                           >
                             {et}
                           </span>
                         ))}
                       </div>
                     </td>
-                    <td className="px-3.5 py-2.5 text-right font-mono text-zinc-600 text-[11px]">
+                    <td className="px-3.5 py-2.5 text-right font-mono text-[var(--color-text-muted)] text-[11px]">
                       {lastActive}
                     </td>
                   </tr>
@@ -208,8 +208,8 @@ export default function AgentsPage() {
           </table>
         </div>
       ) : (
-        <div className="glass rounded-lg p-6 text-center">
-          <p className="text-sm text-zinc-500">
+        <div className="glass rounded-[2px] p-6 text-center">
+          <p className="text-sm text-[var(--color-text-secondary)]">
             No agent activity recorded yet.
           </p>
         </div>

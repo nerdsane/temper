@@ -26,7 +26,7 @@ const nodes = [
 ];
 
 // Label positions relative to nodes (inside SVG)
-const labelAnchors: { dx: number; dy: number; anchor: string }[] = [
+const labelAnchors: { dx: number; dy: number; anchor: "start" | "middle" | "end" }[] = [
   { dx: 0, dy: -28, anchor: "middle" },     // top → above
   { dx: 28, dy: 0, anchor: "start" },       // right → right of node
   { dx: 0, dy: 32, anchor: "middle" },      // bottom → below
@@ -118,7 +118,7 @@ export default function EvolutionViz() {
       {/* Trail: a partial stroke that follows behind the particle */}
       <path
         d={loopPath}
-        stroke="#2dd4bf"
+        stroke="#7dd3fc"
         strokeWidth="1.5"
         strokeLinecap="round"
         fill="none"
@@ -156,7 +156,7 @@ export default function EvolutionViz() {
             <path
               d="M-3,-3 L2,0 L-3,3"
               fill="none"
-              stroke="#2dd4bf"
+              stroke="#7dd3fc"
               strokeWidth="1"
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -178,7 +178,7 @@ export default function EvolutionViz() {
                 cy={node.y}
                 r="18"
                 fill="none"
-                stroke="#2dd4bf"
+                stroke="#7dd3fc"
                 strokeWidth="1"
                 opacity={0.3 * (1 - progress * 0.6)}
                 filter="url(#node-glow)"
@@ -189,8 +189,8 @@ export default function EvolutionViz() {
               cx={node.x}
               cy={node.y}
               r="13"
-              fill={isActive ? "rgba(45,212,191,0.12)" : "rgba(255,255,255,0.02)"}
-              stroke={isActive ? "rgba(45,212,191,0.6)" : "rgba(255,255,255,0.08)"}
+              fill={isActive ? "rgba(125,211,252,0.12)" : "rgba(255,255,255,0.02)"}
+              stroke={isActive ? "rgba(125,211,252,0.6)" : "rgba(255,255,255,0.08)"}
               strokeWidth="1.5"
             />
             {/* Icon */}
@@ -199,7 +199,7 @@ export default function EvolutionViz() {
               y={node.y + 1}
               textAnchor="middle"
               dominantBaseline="central"
-              fill={isActive ? "#2dd4bf" : "rgba(255,255,255,0.2)"}
+              fill={isActive ? "#7dd3fc" : "rgba(255,255,255,0.2)"}
               fontSize="10"
             >
               {stages[i].icon}
@@ -213,7 +213,7 @@ export default function EvolutionViz() {
         cx={particle.x}
         cy={particle.y}
         r="5"
-        fill="#2dd4bf"
+        fill="#7dd3fc"
         opacity="0.8"
         filter="url(#evo-glow)"
       />
@@ -237,7 +237,7 @@ export default function EvolutionViz() {
               y={node.y + la.dy}
               textAnchor={la.anchor}
               dominantBaseline={i === 2 ? "hanging" : i === 0 ? "auto" : "central"}
-              fill={isActive ? "#2dd4bf" : "rgba(255,255,255,0.2)"}
+              fill={isActive ? "#7dd3fc" : "rgba(255,255,255,0.2)"}
               fontSize="8"
               fontFamily="var(--font-mono), monospace"
               fontWeight="700"

@@ -18,8 +18,8 @@ export default function ErrorDisplay({
   return (
     <div className="flex items-center justify-center min-h-[256px]">
       <div className="text-center max-w-md">
-        <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-pink-500/10 mb-4">
-          <svg className="w-5 h-5 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-[var(--color-accent-pink-dim)] mb-4">
+          <svg className="w-5 h-5 text-[var(--color-accent-pink)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -28,20 +28,20 @@ export default function ErrorDisplay({
             />
           </svg>
         </div>
-        <h3 className="text-base font-semibold text-zinc-200 mb-1">{title}</h3>
-        <p className="text-sm text-zinc-500 mb-4">{message}</p>
+        <h3 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{title}</h3>
+        <p className="text-sm text-[var(--color-text-secondary)] mb-4">{message}</p>
         <div className="flex items-center justify-center gap-2.5">
           {retry && (
             <button
               onClick={retry}
-              className="px-3.5 py-1.5 bg-teal-500 hover:bg-teal-400 text-white text-sm rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-teal-400 focus:ring-offset-2 focus:ring-offset-[#0a0a0c]"
+              className="px-3.5 py-1.5 bg-[var(--color-accent-teal)] hover:bg-[var(--color-accent-teal)] text-[var(--color-bg-primary)] text-sm rounded-[2px] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-accent-teal)] focus:ring-offset-2 focus:ring-offset-[var(--color-bg-primary)]"
             >
               Retry
             </button>
           )}
           <Link
             href={backHref}
-            className="px-3.5 py-1.5 bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 text-sm rounded-md transition-colors"
+            className="px-3.5 py-1.5 bg-[var(--color-bg-elevated)] hover:bg-[var(--color-border-hover)] text-[var(--color-text-secondary)] text-sm rounded-[2px] transition-colors"
           >
             {backLabel}
           </Link>

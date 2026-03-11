@@ -70,9 +70,9 @@ const outputs = [
 ];
 
 const TOKEN_COLORS: Record<string, string> = {
-  heading: "#2dd4bf",
-  key: "rgba(161,161,170,0.7)",
-  value: "#2dd4bf",
+  heading: "var(--color-accent-teal)",
+  key: "var(--color-text-secondary)",
+  value: "var(--color-accent-teal)",
 };
 
 const CYCLE_MS = 4800;
@@ -104,16 +104,16 @@ export default function AppsViz() {
     <div className="flex flex-col items-center w-full h-full p-5 gap-0 justify-center">
       {/* Spec snippet — styled as a tiny code editor */}
       <div
-        className="w-full max-w-[280px] rounded-[3px] border border-white/[0.06] bg-white/[0.02] overflow-hidden"
-        style={{ boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)" }}
+        className="w-full max-w-[280px] rounded-[3px] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] overflow-hidden"
+        style={{ boxShadow: "inset 0 1px 0 var(--color-bg-elevated)" }}
       >
         {/* Title bar */}
-        <div className="flex items-center gap-1.5 px-2.5 py-1.5 border-b border-white/[0.04]">
-          <div className="w-[5px] h-[5px] rounded-full bg-white/[0.08]" />
-          <div className="w-[5px] h-[5px] rounded-full bg-white/[0.08]" />
-          <div className="w-[5px] h-[5px] rounded-full bg-white/[0.08]" />
+        <div className="flex items-center gap-1.5 px-2.5 py-1.5 border-b border-[var(--color-border)]">
+          <div className="w-[5px] h-[5px] rounded-full bg-[var(--color-bg-elevated)]" />
+          <div className="w-[5px] h-[5px] rounded-full bg-[var(--color-bg-elevated)]" />
+          <div className="w-[5px] h-[5px] rounded-full bg-[var(--color-bg-elevated)]" />
           <span
-            className="ml-1.5 text-zinc-600"
+            className="ml-1.5 text-[var(--color-text-muted)]"
             style={{
               fontFamily: "var(--font-mono), monospace",
               fontSize: "6px",
@@ -139,12 +139,12 @@ export default function AppsViz() {
               {/* Line number */}
               <span
                 className="w-[22px] text-right pr-[6px] select-none flex-shrink-0"
-                style={{ color: "rgba(113,113,122,0.4)" }}
+                style={{ color: "var(--color-text-muted)" }}
               >
                 {line.num}
               </span>
               {/* Content */}
-              <span className="pl-[6px] border-l border-white/[0.04]">
+              <span className="pl-[6px] border-l border-[var(--color-border)]">
                 {line.tokens.length === 0 ? (
                   <span>&nbsp;</span>
                 ) : (
@@ -179,7 +179,7 @@ export default function AppsViz() {
           y1="0"
           x2="12"
           y2="22"
-          stroke="rgba(255,255,255,0.08)"
+          style={{ stroke: 'var(--color-border)' }}
           strokeWidth="1"
           strokeDasharray="3 2"
         />
@@ -187,7 +187,7 @@ export default function AppsViz() {
         <path
           d="M8,19 L12,25 L16,19"
           fill="none"
-          stroke="#2dd4bf"
+          style={{ stroke: 'var(--color-accent-teal)' }}
           strokeWidth="1"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -198,7 +198,7 @@ export default function AppsViz() {
           cx="12"
           cy={2 + pulse * 20}
           r="1.5"
-          fill="#2dd4bf"
+          style={{ fill: 'var(--color-accent-teal)' }}
           opacity={0.6}
         />
       </svg>
@@ -216,13 +216,13 @@ export default function AppsViz() {
               className="rounded-[3px] border px-3 py-2.5 transition-all duration-500"
               style={{
                 borderColor: isActive
-                  ? `rgba(45,212,191,${0.2 + intensity * 0.2})`
-                  : "rgba(255,255,255,0.04)",
+                  ? `color-mix(in srgb, var(--color-accent-teal) ${Math.round((0.2 + intensity * 0.2) * 100)}%, transparent)`
+                  : "var(--color-border)",
                 background: isActive
-                  ? `rgba(45,212,191,${0.06 + intensity * 0.08})`
-                  : "rgba(255,255,255,0.02)",
+                  ? `color-mix(in srgb, var(--color-accent-teal) ${Math.round((0.06 + intensity * 0.08) * 100)}%, transparent)`
+                  : "var(--color-bg-elevated)",
                 boxShadow: isActive
-                  ? `inset 0 1px 0 rgba(255,255,255,0.04), 0 4px 24px rgba(45,212,191,${intensity * 0.06})`
+                  ? `inset 0 1px 0 var(--color-border), 0 4px 24px color-mix(in srgb, var(--color-accent-teal) ${Math.round(intensity * 6)}%, transparent)`
                   : "none",
                 transitionTimingFunction: "cubic-bezier(0.16, 1, 0.3, 1)",
               }}
@@ -232,7 +232,7 @@ export default function AppsViz() {
                 style={{
                   fontFamily: "var(--font-mono), monospace",
                   fontSize: "8px",
-                  color: isActive ? "#2dd4bf" : "rgba(255,255,255,0.2)",
+                  color: isActive ? "var(--color-accent-teal)" : "var(--color-text-muted)",
                   transition: "color 500ms cubic-bezier(0.16, 1, 0.3, 1)",
                 }}
               >
@@ -243,8 +243,8 @@ export default function AppsViz() {
                   fontFamily: "var(--font-mono), monospace",
                   fontSize: "6.5px",
                   color: isActive
-                    ? "rgba(161,161,170,0.8)"
-                    : "rgba(255,255,255,0.08)",
+                    ? "var(--color-text-secondary)"
+                    : "var(--color-text-muted)",
                   transition: "color 500ms cubic-bezier(0.16, 1, 0.3, 1)",
                 }}
               >

@@ -3,23 +3,23 @@
 import { useRef, useState, useEffect } from "react";
 
 const KNOWN_COLORS: Record<string, string> = {
-  active: "bg-teal-500/15 text-teal-400",
-  done: "bg-teal-500/15 text-teal-400",
-  completed: "bg-teal-500/15 text-teal-400",
-  cancelled: "bg-pink-500/15 text-pink-400",
-  failed: "bg-pink-500/15 text-pink-400",
-  error: "bg-pink-500/15 text-pink-400",
+  active: "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)]",
+  done: "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)]",
+  completed: "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)]",
+  cancelled: "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)]",
+  failed: "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)]",
+  error: "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)]",
 };
 
 const HASH_PALETTES = [
-  "bg-teal-500/15 text-teal-400",
-  "bg-yellow-500/15 text-yellow-400",
-  "bg-violet-500/15 text-violet-300",
-  "bg-lime-500/15 text-lime-400",
-  "bg-pink-500/15 text-pink-400",
-  "bg-orange-500/15 text-orange-400",
-  "bg-cyan-500/15 text-cyan-400",
-  "bg-fuchsia-500/15 text-fuchsia-400",
+  "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)]",
+  "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)]",
+  "bg-[var(--color-accent-lime-dim)] text-[var(--color-accent-lime)]",
+  "bg-[var(--color-accent-lime-dim)] text-[var(--color-accent-lime)]",
+  "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)]",
+  "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)]",
+  "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)]",
+  "bg-[var(--color-accent-lime-dim)] text-[var(--color-accent-lime)]",
 ];
 
 function hashString(str: string): number {

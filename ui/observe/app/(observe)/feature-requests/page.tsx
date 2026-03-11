@@ -14,18 +14,18 @@ import type {
 import ErrorDisplay from "@/components/ErrorDisplay";
 
 const categoryColors: Record<PlatformGapCategory, string> = {
-  MissingMethod: "bg-violet-500/15 text-violet-300",
-  GovernanceBlocked: "bg-pink-500/15 text-pink-400",
-  UnsupportedIntegration: "bg-yellow-500/15 text-yellow-400",
-  MissingCapability: "bg-teal-500/15 text-teal-400",
+  MissingMethod: "bg-[var(--color-accent-lime-dim)] text-[var(--color-accent-lime)]",
+  GovernanceBlocked: "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)]",
+  UnsupportedIntegration: "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)]",
+  MissingCapability: "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)]",
 };
 
 const dispositionColors: Record<FeatureRequestDisposition, string> = {
-  Open: "bg-yellow-500/15 text-yellow-400",
+  Open: "bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)]",
   Acknowledged: "bg-blue-500/15 text-blue-400",
-  Planned: "bg-lime-500/15 text-lime-400",
-  WontFix: "bg-zinc-500/15 text-zinc-500",
-  Resolved: "bg-teal-500/15 text-teal-400",
+  Planned: "bg-[var(--color-accent-lime-dim)] text-[var(--color-accent-lime)]",
+  WontFix: "bg-[var(--color-accent-lime-dim)] text-[var(--color-text-secondary)]",
+  Resolved: "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)]",
 };
 
 const DISPOSITIONS: FeatureRequestDisposition[] = [
@@ -52,55 +52,55 @@ function FeatureRequestCard({
   const createdAt = new Date(request.created_at).toLocaleString();
 
   return (
-    <div className="bg-[#111115] rounded-lg p-4 animate-fade-in">
+    <div className="bg-[var(--color-bg-surface)] rounded-[2px] p-4 animate-fade-in">
       {/* Header row */}
       <div className="flex items-start justify-between mb-3">
         <div className="flex items-center gap-2 flex-wrap">
           <span
             className={`text-xs font-medium px-1.5 py-0.5 rounded ${
-              categoryColors[request.category] ?? "bg-zinc-500/15 text-zinc-400"
+              categoryColors[request.category] ?? "bg-[var(--color-accent-lime-dim)] text-[var(--color-text-secondary)]"
             }`}
           >
             {request.category}
           </span>
           <span
             className={`text-xs font-medium px-1.5 py-0.5 rounded ${
-              dispositionColors[request.disposition] ?? "bg-zinc-500/15 text-zinc-400"
+              dispositionColors[request.disposition] ?? "bg-[var(--color-accent-lime-dim)] text-[var(--color-text-secondary)]"
             }`}
           >
             {request.disposition}
           </span>
-          <span className="text-xs font-mono text-zinc-700">
+          <span className="text-xs font-mono text-[var(--color-text-muted)]">
             {request.id.slice(0, 12)}
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs font-mono text-zinc-500">
+          <span className="text-xs font-mono text-[var(--color-text-secondary)]">
             {request.frequency}x
           </span>
         </div>
       </div>
 
       {/* Description */}
-      <p className="text-sm text-zinc-300 mb-3">{request.description}</p>
+      <p className="text-sm text-[var(--color-text-secondary)] mb-3">{request.description}</p>
 
       {/* Trajectory refs */}
       {request.trajectory_refs.length > 0 && (
         <div className="flex items-center gap-2 mb-3">
-          <span className="text-[10px] text-zinc-600 uppercase tracking-wider">
+          <span className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider">
             Trajectories
           </span>
           <div className="flex flex-wrap gap-1">
             {request.trajectory_refs.slice(0, 5).map((ref) => (
               <span
                 key={ref}
-                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500"
+                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)]"
               >
                 {ref.slice(0, 12)}
               </span>
             ))}
             {request.trajectory_refs.length > 5 && (
-              <span className="text-[10px] font-mono text-zinc-600">
+              <span className="text-[10px] font-mono text-[var(--color-text-muted)]">
                 +{request.trajectory_refs.length - 5} more
               </span>
             )}
@@ -110,16 +110,16 @@ function FeatureRequestCard({
 
       {/* Developer notes */}
       {request.developer_notes && !showNotes && (
-        <div className="mb-3 px-3 py-2 bg-black/20 rounded text-xs text-zinc-400">
+        <div className="mb-3 px-3 py-2 bg-black/20 rounded text-xs text-[var(--color-text-secondary)]">
           {request.developer_notes}
         </div>
       )}
 
       {/* Timestamp */}
-      <div className="text-[10px] text-zinc-700 mb-3 font-mono">{createdAt}</div>
+      <div className="text-[10px] text-[var(--color-text-muted)] mb-3 font-mono">{createdAt}</div>
 
       {/* Actions */}
-      <div className="flex items-center gap-2 pt-2 border-t border-white/[0.04]">
+      <div className="flex items-center gap-2 pt-2 border-t border-[var(--color-border)]">
         {DISPOSITIONS.filter((d) => d !== request.disposition).map((d) => (
           <button
             key={d}
@@ -127,14 +127,14 @@ function FeatureRequestCard({
             disabled={acting}
             className={`px-2.5 py-1 text-[11px] rounded-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
               d === "Resolved"
-                ? "bg-teal-500/20 hover:bg-teal-500/30 text-teal-400"
+                ? "bg-[var(--color-accent-teal-dim)] hover:bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)]"
                 : d === "WontFix"
-                  ? "bg-zinc-500/20 hover:bg-zinc-500/30 text-zinc-400"
+                  ? "bg-[var(--color-accent-lime-dim)] hover:bg-[var(--color-accent-lime-dim)] text-[var(--color-text-secondary)]"
                   : d === "Planned"
-                    ? "bg-lime-500/20 hover:bg-lime-500/30 text-lime-400"
+                    ? "bg-[var(--color-accent-lime-dim)] hover:bg-[var(--color-accent-lime-dim)] text-[var(--color-accent-lime)]"
                     : d === "Acknowledged"
                       ? "bg-blue-500/20 hover:bg-blue-500/30 text-blue-400"
-                      : "bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400"
+                      : "bg-[var(--color-accent-pink-dim)] hover:bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)]"
             }`}
           >
             {d === "WontFix" ? "Won't Fix" : d}
@@ -142,7 +142,7 @@ function FeatureRequestCard({
         ))}
         <button
           onClick={() => setShowNotes(!showNotes)}
-          className="ml-auto text-[11px] text-zinc-600 hover:text-zinc-400 transition-colors"
+          className="ml-auto text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] transition-colors"
         >
           {showNotes ? "Hide Notes" : "Add Notes"}
         </button>
@@ -156,7 +156,7 @@ function FeatureRequestCard({
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             placeholder="Developer notes..."
-            className="flex-1 bg-black/30 border border-white/[0.06] rounded-sm px-2.5 py-1.5 text-xs text-zinc-300 placeholder-zinc-700 focus:outline-none focus:border-teal-500/30"
+            className="flex-1 bg-black/30 border border-[var(--color-border)] rounded-sm px-2.5 py-1.5 text-xs text-[var(--color-text-secondary)] placeholder-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent-teal)]/30"
           />
           <button
             onClick={() => {
@@ -164,7 +164,7 @@ function FeatureRequestCard({
               setShowNotes(false);
             }}
             disabled={acting}
-            className="px-2.5 py-1.5 bg-teal-500/20 hover:bg-teal-500/30 text-teal-400 text-xs rounded-sm transition-colors disabled:opacity-40"
+            className="px-2.5 py-1.5 bg-[var(--color-accent-teal-dim)] hover:bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] text-xs rounded-sm transition-colors disabled:opacity-40"
           >
             Save
           </button>
@@ -231,13 +231,13 @@ export default function FeatureRequestsPage() {
   if (featuresPoll.loading && !requests) {
     return (
       <div className="animate-pulse">
-        <div className="h-6 bg-zinc-800/60 rounded w-48 mb-1.5" />
-        <div className="h-3.5 bg-zinc-800/40 rounded w-72 mb-6" />
+        <div className="h-6 bg-[var(--color-border)] rounded w-48 mb-1.5" />
+        <div className="h-3.5 bg-[var(--color-border)] rounded w-72 mb-6" />
         <div className="grid grid-cols-4 gap-3 mb-6">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="glass rounded-lg p-4">
-              <div className="h-3 bg-zinc-800/50 rounded w-20 mb-2" />
-              <div className="h-8 bg-zinc-800/50 rounded w-10" />
+            <div key={i} className="glass rounded-[2px] p-4">
+              <div className="h-3 bg-[var(--color-border)] rounded w-20 mb-2" />
+              <div className="h-8 bg-[var(--color-border)] rounded w-10" />
             </div>
           ))}
         </div>
@@ -260,51 +260,51 @@ export default function FeatureRequestsPage() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-zinc-100 tracking-tight font-display">
+          <h1 className="text-2xl text-[var(--color-text-primary)] tracking-tight font-serif">
             Feature Requests
           </h1>
-          <p className="text-sm text-zinc-600 mt-0.5">
+          <p className="text-sm text-[var(--color-text-muted)] mt-0.5">
             Platform gaps detected from trajectory analysis and agent feedback
           </p>
         </div>
         <div className="flex items-center gap-3">
           {counts.open > 0 && (
             <div className="flex items-center gap-1.5">
-              <div className="w-2 h-2 bg-yellow-400 rounded-full" />
-              <span className="text-xs text-yellow-400">
+              <div className="w-2 h-2 bg-[var(--color-accent-pink)] rounded-full" />
+              <span className="text-xs text-[var(--color-accent-pink)]">
                 {counts.open} open
               </span>
             </div>
           )}
           {lastUpdated && (
-            <span className="text-xs text-zinc-600">Updated {lastUpdated}</span>
+            <span className="text-xs text-[var(--color-text-muted)]">Updated {lastUpdated}</span>
           )}
         </div>
       </div>
 
       {/* Summary Cards */}
       <div className="grid grid-cols-4 gap-3 mb-6">
-        <div className="glass rounded-lg p-4">
-          <div className="text-xs text-zinc-600">Open</div>
-          <div className={`text-4xl font-bold font-mono mt-0.5 ${counts.open > 0 ? "text-yellow-400" : "text-zinc-100"}`}>
+        <div className="glass rounded-[2px] p-4">
+          <div className="text-xs text-[var(--color-text-muted)]">Open</div>
+          <div className={`text-4xl font-bold font-mono mt-0.5 ${counts.open > 0 ? "text-[var(--color-accent-pink)]" : "text-[var(--color-text-primary)]"}`}>
             {counts.open}
           </div>
         </div>
-        <div className="glass rounded-lg p-4">
-          <div className="text-xs text-zinc-600">Planned</div>
-          <div className="text-4xl font-bold font-mono mt-0.5 text-lime-400">
+        <div className="glass rounded-[2px] p-4">
+          <div className="text-xs text-[var(--color-text-muted)]">Planned</div>
+          <div className="text-4xl font-bold font-mono mt-0.5 text-[var(--color-accent-lime)]">
             {counts.planned}
           </div>
         </div>
-        <div className="glass rounded-lg p-4">
-          <div className="text-xs text-zinc-600">Resolved</div>
-          <div className="text-4xl font-bold font-mono mt-0.5 text-teal-400">
+        <div className="glass rounded-[2px] p-4">
+          <div className="text-xs text-[var(--color-text-muted)]">Resolved</div>
+          <div className="text-4xl font-bold font-mono mt-0.5 text-[var(--color-accent-teal)]">
             {counts.resolved}
           </div>
         </div>
-        <div className="glass rounded-lg p-4">
-          <div className="text-xs text-zinc-600">Total</div>
-          <div className="text-4xl font-bold font-mono mt-0.5 text-zinc-100">
+        <div className="glass rounded-[2px] p-4">
+          <div className="text-xs text-[var(--color-text-muted)]">Total</div>
+          <div className="text-4xl font-bold font-mono mt-0.5 text-[var(--color-text-primary)]">
             {counts.total}
           </div>
         </div>
@@ -319,8 +319,8 @@ export default function FeatureRequestsPage() {
               onClick={() => setActiveTab(tab)}
               className={`text-xs px-2 py-1 rounded transition-colors ${
                 activeTab === tab
-                  ? "text-teal-400 border-b-2 border-teal-400"
-                  : "text-zinc-600 hover:text-zinc-400"
+                  ? "text-[var(--color-accent-teal)] border-b-2 border-[var(--color-accent-teal)]"
+                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
               }`}
             >
               {tab === "all" ? "All" : tab === "WontFix" ? "Won't Fix" : tab}
@@ -331,8 +331,8 @@ export default function FeatureRequestsPage() {
 
       {/* Request Cards */}
       {filteredRequests.length === 0 ? (
-        <div className="glass rounded-lg p-6 text-center">
-          <p className="text-sm text-zinc-500">
+        <div className="glass rounded-[2px] p-6 text-center">
+          <p className="text-sm text-[var(--color-text-secondary)]">
             {activeTab === "all"
               ? "No feature requests yet. They will appear as platform gaps are detected."
               : `No feature requests with disposition "${activeTab === "WontFix" ? "Won't Fix" : activeTab}".`}

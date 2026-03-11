@@ -49,8 +49,8 @@ export default function RecordedViz() {
       <div
         className="text-[7px] uppercase tracking-[0.15em] mb-3 pb-2 flex"
         style={{
-          color: "rgba(255,255,255,0.25)",
-          borderBottom: "1px solid rgba(255,255,255,0.06)",
+          color: "var(--color-text-muted)",
+          borderBottom: "1px solid var(--color-border)",
         }}
       >
         <span className="w-[60px] shrink-0">agent</span>
@@ -76,12 +76,12 @@ export default function RecordedViz() {
               } ${isFlashing ? "animate-recorded-flash" : ""}`}
               style={{
                 opacity,
-                backgroundColor: isFlashing ? undefined : "rgba(255,255,255,0.02)",
+                backgroundColor: isFlashing ? undefined : "var(--color-bg-elevated)",
               }}
             >
               <span
                 className="w-[60px] shrink-0 truncate"
-                style={{ color: "rgba(255,255,255,0.5)" }}
+                style={{ color: "var(--color-text-secondary)" }}
               >
                 {entry.agent}
               </span>
@@ -89,22 +89,22 @@ export default function RecordedViz() {
                 className="w-[52px] shrink-0"
                 style={{
                   color: entry.allowed
-                    ? "rgba(255,255,255,0.7)"
-                    : "#f472b6",
+                    ? "var(--color-text-primary)"
+                    : "var(--color-accent-pink)",
                 }}
               >
                 {entry.action}
               </span>
               <span
                 className="flex-1 min-w-0 truncate"
-                style={{ color: "rgba(255,255,255,0.35)" }}
+                style={{ color: "var(--color-text-muted)" }}
               >
                 {entry.transition}
               </span>
               <span
                 className="w-[52px] shrink-0 text-right font-semibold"
                 style={{
-                  color: entry.allowed ? "#2dd4bf" : "#f472b6",
+                  color: entry.allowed ? "var(--color-accent-teal)" : "var(--color-accent-pink)",
                   fontSize: entry.allowed ? "8px" : "7px",
                 }}
               >

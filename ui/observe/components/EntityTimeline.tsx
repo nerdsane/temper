@@ -7,8 +7,8 @@ interface EntityTimelineProps {
 export default function EntityTimeline({ events }: EntityTimelineProps) {
   if (events.length === 0) {
     return (
-      <div className="bg-[#111115] rounded-lg p-6 text-center">
-        <p className="text-[13px] text-zinc-500">No events recorded yet.</p>
+      <div className="bg-[var(--color-bg-surface)] rounded-[2px] p-6 text-center">
+        <p className="text-[13px] text-[var(--color-text-secondary)]">No events recorded yet.</p>
       </div>
     );
   }
@@ -16,7 +16,7 @@ export default function EntityTimeline({ events }: EntityTimelineProps) {
   return (
     <div className="relative">
       {/* Timeline line */}
-      <div className="absolute left-3.5 top-2 bottom-2 w-px bg-white/[0.06]" />
+      <div className="absolute left-3.5 top-2 bottom-2 w-px bg-[var(--color-border)]" />
 
       <div className="space-y-0">
         {events.map((event, i) => {
@@ -41,40 +41,40 @@ export default function EntityTimeline({ events }: EntityTimelineProps) {
                 <div
                   className={`w-7 h-7 rounded-full flex items-center justify-center ${
                     isFirst
-                      ? "bg-teal-500/10"
+                      ? "bg-[var(--color-accent-teal-dim)]"
                       : isLast
-                      ? "bg-lime-500/10"
-                      : "bg-zinc-900"
+                      ? "bg-[var(--color-accent-lime-dim)]"
+                      : "bg-[var(--color-bg-surface)]"
                   }`}
                 >
                   <div
                     className={`w-1.5 h-1.5 rounded-full ${
                       isFirst
-                        ? "bg-teal-400"
+                        ? "bg-[var(--color-accent-teal)]"
                         : isLast
-                        ? "bg-lime-400"
-                        : "bg-zinc-500"
+                        ? "bg-[var(--color-accent-lime)]"
+                        : "bg-[var(--color-text-muted)]"
                     }`}
                   />
                 </div>
               </div>
 
               {/* Event content */}
-              <div className="flex-1 bg-[#111115] rounded-lg p-2.5 min-w-0">
+              <div className="flex-1 bg-[var(--color-bg-surface)] rounded-[2px] p-2.5 min-w-0">
                 <div className="flex items-center justify-between mb-0.5">
-                  <span className="font-mono text-[13px] text-teal-400 font-medium">
+                  <span className="font-mono text-[13px] text-[var(--color-accent-teal)] font-medium">
                     {event.action}
                   </span>
-                  <span className="text-[10px] text-zinc-600 font-mono">
+                  <span className="text-[10px] text-[var(--color-text-muted)] font-mono">
                     {dateStr} {timeStr}
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5 text-[13px]">
-                  <span className="font-mono text-zinc-500">{event.from_state}</span>
-                  <span className="text-zinc-700">{"->"}</span>
-                  <span className="font-mono text-zinc-300">{event.to_state}</span>
+                  <span className="font-mono text-[var(--color-text-secondary)]">{event.from_state}</span>
+                  <span className="text-[var(--color-text-muted)]">{"->"}</span>
+                  <span className="font-mono text-[var(--color-text-secondary)]">{event.to_state}</span>
                 </div>
-                <div className="text-[11px] text-zinc-600 mt-0.5">
+                <div className="text-[11px] text-[var(--color-text-muted)] mt-0.5">
                   by {event.actor}
                 </div>
               </div>

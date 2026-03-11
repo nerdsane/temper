@@ -41,16 +41,16 @@ export function redactSensitiveFields(obj: unknown): unknown {
 
 /** Map a success rate (0–100) to a text color class. */
 export function rateColor(rate: number): string {
-  if (rate >= 80) return "text-teal-400";
-  if (rate >= 50) return "text-amber-400";
-  return "text-pink-400";
+  if (rate >= 80) return "text-[var(--color-accent-teal)]";
+  if (rate >= 50) return "text-[var(--color-accent-pink)]";
+  return "text-[var(--color-accent-pink)]";
 }
 
 /** Map a success rate (0–100) to a background color class. */
 export function rateBgColor(rate: number): string {
-  if (rate >= 80) return "bg-teal-400";
-  if (rate >= 50) return "bg-amber-400";
-  return "bg-pink-400";
+  if (rate >= 80) return "bg-[var(--color-accent-teal)]";
+  if (rate >= 50) return "bg-[var(--color-accent-pink)]";
+  return "bg-[var(--color-accent-pink)]";
 }
 
 /** Generate a Cedar policy preview from a PolicyScopeMatrix. */

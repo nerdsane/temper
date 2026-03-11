@@ -38,14 +38,14 @@ describe("SpecCard", () => {
     expect(screen.getByText("2")).toBeInTheDocument();
   });
 
-  it("highlights the initial state with lime styling", () => {
+  it("highlights the initial state with slate styling", () => {
     render(<SpecCard spec={mockSpec} />);
     // "Open" appears multiple times - once as initial state value, once as state badge
     const openElements = screen.getAllByText("Open");
-    const limeElement = openElements.find(
-      (el) => el.className.includes("text-lime-400"),
+    const slateElement = openElements.find(
+      (el) => el.className.includes("text-[var(--color-accent-lime)]"),
     );
-    expect(limeElement).toBeTruthy();
+    expect(slateElement).toBeTruthy();
   });
 
   it("renders all state badges", () => {

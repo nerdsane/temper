@@ -112,7 +112,7 @@ export default function TemperedAgentViz() {
                 cy={cy}
                 r={ring.radius}
                 fill="none"
-                stroke="#2dd4bf"
+                stroke="#7dd3fc"
                 strokeWidth="2"
                 opacity={0.35 * opacity}
                 filter="url(#ta-ring-glow)"
@@ -127,8 +127,8 @@ export default function TemperedAgentViz() {
               fill="none"
               stroke={
                 isGlowing
-                  ? "rgba(45,212,191,0.25)"
-                  : "rgba(45,212,191,0.08)"
+                  ? "rgba(125,211,252,0.25)"
+                  : "rgba(125,211,252,0.08)"
               }
               strokeWidth="1.5"
               strokeDasharray="4 3"
@@ -140,7 +140,7 @@ export default function TemperedAgentViz() {
               y={cy - ring.radius - 6}
               textAnchor="middle"
               fill={
-                isGlowing ? "#2dd4bf" : "rgba(45,212,191,0.45)"
+                isGlowing ? "#7dd3fc" : "rgba(125,211,252,0.45)"
               }
               fontSize="7"
               fontFamily="var(--font-mono), monospace"
@@ -163,7 +163,7 @@ export default function TemperedAgentViz() {
                   r="1.5"
                   fill={
                     isGlowing
-                      ? "rgba(45,212,191,0.5)"
+                      ? "rgba(125,211,252,0.5)"
                       : "rgba(255,255,255,0.08)"
                   }
                 />
@@ -179,7 +179,7 @@ export default function TemperedAgentViz() {
         cy={cy}
         r="22"
         fill="none"
-        stroke="#2dd4bf"
+        stroke="#7dd3fc"
         strokeWidth="1"
         opacity="0.15"
         filter="url(#ta-soft)"
@@ -188,15 +188,15 @@ export default function TemperedAgentViz() {
         cx={cx}
         cy={cy}
         r="16"
-        fill="rgba(45,212,191,0.08)"
-        stroke="rgba(45,212,191,0.45)"
+        fill="rgba(125,211,252,0.08)"
+        stroke="rgba(125,211,252,0.45)"
         strokeWidth="1.5"
       />
       <circle
         cx={cx}
         cy={cy}
         r="5"
-        fill="#2dd4bf"
+        fill="#7dd3fc"
         opacity="0.7"
         filter="url(#ta-core-glow)"
       />

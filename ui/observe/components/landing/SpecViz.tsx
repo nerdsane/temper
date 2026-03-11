@@ -26,10 +26,10 @@ export default function SpecViz() {
       {blocks.map((text, i) => (
         <div
           key={i}
-          className={`bg-white/[0.02] border rounded-[3px] p-3.5 font-mono text-[11px] transition-all duration-500 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)] ${
+          className={`bg-[var(--color-bg-elevated)] border rounded-[3px] p-3.5 font-mono text-[11px] transition-all duration-500 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)] ${
             i === activeIdx
-              ? "border-teal-400/30 text-white bg-[rgba(45,212,191,0.12)] -translate-y-0.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_24px_rgba(45,212,191,0.04)]"
-              : "border-white/[0.04] text-zinc-600"
+              ? "border-[var(--color-accent-teal)]/30 text-[var(--color-text-primary)] bg-[var(--color-accent-teal-dim)] -translate-y-0.5 shadow-[inset_0_1px_0_var(--color-border),0_4px_24px_var(--color-accent-teal-dim)]"
+              : "border-[var(--color-border)] text-[var(--color-text-muted)]"
           }`}
         >
           {text}

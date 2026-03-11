@@ -98,29 +98,28 @@ export default function SharedStateViz() {
       {/* ── Connection lines (clean verticals + one diagonal) ── */}
       {/* Agent A → Task (straight down) */}
       <line x1={COL_L} y1={ROW_AGENT + 18} x2={COL_L} y2={ROW_STATE - 22}
-        stroke={beat === 0 ? "rgba(45,212,191,0.2)" : "rgba(255,255,255,0.04)"}
+        style={{ stroke: beat === 0 ? 'var(--color-accent-teal-glow-mid)' : 'var(--color-border)' }}
         strokeWidth="1" />
       {/* Agent B → Order (straight down) */}
       <line x1={COL_R} y1={ROW_AGENT + 18} x2={COL_R} y2={ROW_STATE - 22}
-        stroke={beat === 1 ? "rgba(45,212,191,0.2)" : "rgba(255,255,255,0.04)"}
+        style={{ stroke: beat === 1 ? 'var(--color-accent-teal-glow-mid)' : 'var(--color-border)' }}
         strokeWidth="1" />
       {/* Executor → Task (angled up-left) */}
       <line x1={CX} y1={ROW_EXEC - 18} x2={COL_L} y2={ROW_STATE + 22}
-        stroke={beat === 2 ? "rgba(45,212,191,0.2)" : "rgba(255,255,255,0.04)"}
+        style={{ stroke: beat === 2 ? 'var(--color-accent-teal-glow-mid)' : 'var(--color-border)' }}
         strokeWidth="1" />
       {/* Executor → Order (angled up-right, dormant) */}
       <line x1={CX} y1={ROW_EXEC - 18} x2={COL_R} y2={ROW_STATE + 22}
-        stroke="rgba(255,255,255,0.04)" strokeWidth="1" strokeDasharray="4 4" />
+        style={{ stroke: 'var(--color-border)' }} strokeWidth="1" strokeDasharray="4 4" />
 
       {/* ── State layer container ── */}
       <rect
         x="72" y={ROW_STATE - 30} width="176" height="60" rx="4"
-        fill="rgba(255,255,255,0.015)"
-        stroke="rgba(255,255,255,0.05)"
+        style={{ fill: 'var(--color-bg-elevated)', stroke: 'var(--color-border)' }}
         strokeWidth="1"
       />
       <text x={CX} y={ROW_STATE - 35}
-        textAnchor="middle" fill="rgba(255,255,255,0.12)"
+        textAnchor="middle" style={{ fill: 'var(--color-text-muted)' }}
         fontSize="6.5" fontFamily="var(--font-mono), monospace"
         letterSpacing="0.12em" fontWeight="500">
         EVENT-SOURCED STATE
@@ -133,17 +132,19 @@ export default function SharedStateViz() {
           <g key={ent.label}>
             <rect
               x={ent.x - 28} y={ent.y - 16} width="56" height="32" rx="3"
-              fill={lit ? "rgba(45,212,191,0.08)" : "rgba(255,255,255,0.02)"}
-              stroke={lit ? "rgba(45,212,191,0.35)" : "rgba(255,255,255,0.06)"}
+              style={{
+                fill: lit ? 'var(--color-accent-teal-dim)' : 'var(--color-bg-elevated)',
+                stroke: lit ? 'color-mix(in srgb, var(--color-accent-teal) 35%, transparent)' : 'var(--color-border)',
+              }}
               strokeWidth="1"
             />
             <text x={ent.x} y={ent.y - 4} textAnchor="middle"
-              fill={lit ? "#2dd4bf" : "rgba(255,255,255,0.3)"}
+              style={{ fill: lit ? 'var(--color-accent-teal)' : 'var(--color-text-muted)' }}
               fontSize="8" fontFamily="var(--font-mono), monospace" fontWeight="700">
               {ent.label}
             </text>
             <text x={ent.x} y={ent.y + 9} textAnchor="middle"
-              fill={lit ? "rgba(45,212,191,0.6)" : "rgba(255,255,255,0.12)"}
+              style={{ fill: lit ? 'color-mix(in srgb, var(--color-accent-teal) 60%, transparent)' : 'var(--color-text-muted)' }}
               fontSize="7" fontFamily="var(--font-mono), monospace">
               {lit ? ent.states[current.stateIdx] : ent.states[0]}
             </text>
@@ -161,26 +162,28 @@ export default function SharedStateViz() {
           <g key={a.id}>
             {active && (
               <circle cx={a.x} cy={a.y} r="19" fill="none"
-                stroke="#2dd4bf" strokeWidth="1" opacity={0.2} filter="url(#ss-soft)" />
+                style={{ stroke: 'var(--color-accent-teal)' }} strokeWidth="1" opacity={0.2} filter="url(#ss-soft)" />
             )}
             <circle cx={a.x} cy={a.y} r="14"
-              fill={active ? "rgba(45,212,191,0.08)" : "rgba(255,255,255,0.02)"}
-              stroke={active ? "rgba(45,212,191,0.45)" : "rgba(255,255,255,0.06)"}
+              style={{
+                fill: active ? 'var(--color-accent-teal-dim)' : 'var(--color-bg-elevated)',
+                stroke: active ? 'color-mix(in srgb, var(--color-accent-teal) 45%, transparent)' : 'var(--color-border)',
+              }}
               strokeWidth="1.5" />
             <text x={a.x} y={a.y + 1} textAnchor="middle" dominantBaseline="central"
-              fill={active ? "#2dd4bf" : "rgba(255,255,255,0.2)"}
+              style={{ fill: active ? 'var(--color-accent-teal)' : 'var(--color-text-muted)' }}
               fontSize="9" fontFamily="var(--font-mono), monospace" fontWeight="700">
               {a.id}
             </text>
             <text x={a.x} y={labelY} textAnchor="middle"
-              fill={active ? "rgba(45,212,191,0.7)" : "rgba(255,255,255,0.12)"}
+              style={{ fill: active ? 'color-mix(in srgb, var(--color-accent-teal) 70%, transparent)' : 'var(--color-text-muted)' }}
               fontSize="7" fontFamily="var(--font-mono), monospace"
               fontWeight="600" letterSpacing="0.06em">
               {a.label}
             </text>
             {active && progress > 0.4 && (
               <text x={a.x} y={actionY} textAnchor="middle"
-                fill="rgba(161,161,170,0.5)" fontSize="6.5"
+                style={{ fill: 'var(--color-text-secondary)' }} fontSize="6.5"
                 fontFamily="var(--font-mono), monospace">
                 {current.dir === "write" ? "write ↓" : "read ↑"}
               </text>
@@ -193,9 +196,9 @@ export default function SharedStateViz() {
       {pulseVisible && (
         <>
           <circle cx={pulseX} cy={pulseY} r="4"
-            fill={current.dir === "write" ? "#2dd4bf" : "#a78bfa"}
+            style={{ fill: current.dir === "write" ? 'var(--color-accent-teal)' : 'var(--color-accent-violet)' }}
             opacity="0.85" filter="url(#ss-glow)" />
-          <circle cx={pulseX} cy={pulseY} r="1.5" fill="white" />
+          <circle cx={pulseX} cy={pulseY} r="1.5" style={{ fill: 'var(--color-text-primary)' }} />
         </>
       )}
     </svg>

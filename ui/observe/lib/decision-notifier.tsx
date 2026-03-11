@@ -44,23 +44,23 @@ function ToastCard({
 }) {
   const d = toast.decision;
   return (
-    <div className="glass rounded-lg p-3 animate-slide-in-up max-w-sm">
+    <div className="glass rounded-[2px] p-3 animate-slide-in-up max-w-sm">
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
-          <div className="w-2 h-2 rounded-full bg-pink-400 animate-pulse flex-shrink-0" />
-          <span className="text-xs font-mono text-zinc-200 truncate">
+          <div className="w-2 h-2 rounded-full bg-[var(--color-accent-pink)] animate-pulse flex-shrink-0" />
+          <span className="text-xs font-mono text-[var(--color-text-primary)] truncate">
             {d.agent_id}
           </span>
         </div>
         <button
           onClick={() => onDismiss(toast.id)}
-          className="text-zinc-600 hover:text-zinc-400 text-xs flex-shrink-0"
+          className="text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] text-xs flex-shrink-0"
         >
           &times;
         </button>
       </div>
-      <div className="mt-1.5 text-[11px] text-zinc-400">
-        <span className="text-teal-400 font-mono">{d.action}</span>
+      <div className="mt-1.5 text-[11px] text-[var(--color-text-secondary)]">
+        <span className="text-[var(--color-accent-teal)] font-mono">{d.action}</span>
         {" on "}
         <span className="font-mono">
           {d.resource_type}::{d.resource_id}
@@ -69,7 +69,7 @@ function ToastCard({
       <div className="mt-2">
         <Link
           href="/decisions"
-          className="text-[11px] text-teal-400 hover:text-teal-300 transition-colors"
+          className="text-[11px] text-[var(--color-accent-teal)] hover:text-[var(--color-accent-teal)] transition-colors"
         >
           Review &rarr;
         </Link>
@@ -86,17 +86,17 @@ function AggregateToast({
   onDismiss: () => void;
 }) {
   return (
-    <div className="glass rounded-lg p-3 animate-slide-in-up max-w-sm">
+    <div className="glass rounded-[2px] p-3 animate-slide-in-up max-w-sm">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-pink-400 animate-pulse" />
-          <span className="text-xs text-zinc-200">
+          <div className="w-2 h-2 rounded-full bg-[var(--color-accent-pink)] animate-pulse" />
+          <span className="text-xs text-[var(--color-text-primary)]">
             {count} decisions need approval
           </span>
         </div>
         <button
           onClick={onDismiss}
-          className="text-zinc-600 hover:text-zinc-400 text-xs"
+          className="text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] text-xs"
         >
           &times;
         </button>
@@ -104,7 +104,7 @@ function AggregateToast({
       <div className="mt-2">
         <Link
           href="/decisions"
-          className="text-[11px] text-teal-400 hover:text-teal-300 transition-colors"
+          className="text-[11px] text-[var(--color-accent-teal)] hover:text-[var(--color-accent-teal)] transition-colors"
         >
           Review all &rarr;
         </Link>

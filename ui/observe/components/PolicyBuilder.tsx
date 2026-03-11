@@ -55,7 +55,7 @@ function RadioGroup<T extends string>({
 }) {
   return (
     <div className="space-y-1.5">
-      <div className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">{label}</div>
+      <div className="text-[10px] text-[var(--color-text-secondary)] uppercase tracking-wider font-medium">{label}</div>
       <div className="flex flex-wrap gap-1.5">
         {options.map((opt) => (
           <button
@@ -65,8 +65,8 @@ function RadioGroup<T extends string>({
             title={opt.description}
             className={`px-2.5 py-1 text-[11px] rounded-sm transition-colors ${
               value === opt.value
-                ? "bg-teal-500/20 text-teal-400 ring-1 ring-teal-500/30"
-                : "bg-white/[0.03] text-zinc-500 hover:bg-white/[0.06] hover:text-zinc-400"
+                ? "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] ring-1 ring-[var(--color-accent-teal)]"
+                : "bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-secondary)]"
             }`}
           >
             {opt.label}
@@ -133,12 +133,12 @@ export default function PolicyBuilder({ decision, onApprove, onDeny, disabled }:
         <button
           type="button"
           onClick={() => setShowPreview(!showPreview)}
-          className="text-[10px] text-zinc-500 hover:text-zinc-400 uppercase tracking-wider"
+          className="text-[10px] text-[var(--color-text-secondary)] hover:text-[var(--color-text-secondary)] uppercase tracking-wider"
         >
           {showPreview ? "Hide" : "Show"} Cedar preview
         </button>
         {showPreview && (
-          <pre className="mt-1.5 p-2 bg-black/30 rounded text-[11px] text-teal-400/80 font-mono overflow-x-auto">
+          <pre className="mt-1.5 p-2 bg-black/30 rounded text-[11px] text-[var(--color-accent-teal)] font-mono overflow-x-auto opacity-80">
             {preview}
           </pre>
         )}
@@ -150,7 +150,7 @@ export default function PolicyBuilder({ decision, onApprove, onDeny, disabled }:
           type="button"
           disabled={disabled}
           onClick={() => onApprove(matrix)}
-          className="px-3 py-1.5 text-xs bg-teal-500/20 text-teal-400 rounded hover:bg-teal-500/30 disabled:opacity-50 transition-colors"
+          className="px-3 py-1.5 text-xs bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] rounded hover:bg-[var(--color-accent-teal-dim)] disabled:opacity-50 transition-colors"
         >
           Approve
         </button>
@@ -158,7 +158,7 @@ export default function PolicyBuilder({ decision, onApprove, onDeny, disabled }:
           type="button"
           disabled={disabled}
           onClick={onDeny}
-          className="px-3 py-1.5 text-xs bg-pink-500/10 text-pink-400 rounded hover:bg-pink-500/20 disabled:opacity-50 transition-colors"
+          className="px-3 py-1.5 text-xs bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)] rounded hover:bg-[var(--color-accent-pink-dim)] disabled:opacity-50 transition-colors"
         >
           Deny
         </button>

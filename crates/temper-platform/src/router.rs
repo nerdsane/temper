@@ -4,8 +4,8 @@
 //! The API is the **Temper Data API** at `/tdata`.
 
 use axum::Router;
-use axum::middleware;
 use axum::http::StatusCode;
+use axum::middleware;
 use axum::routing;
 
 use crate::bearer_auth::bearer_auth_check;

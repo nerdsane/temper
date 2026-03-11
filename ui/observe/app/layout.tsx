@@ -1,7 +1,21 @@
 import type { Metadata } from "next";
-import { GeistMono } from "geist/font/mono";
-import { GeistSans } from "geist/font/sans";
+import { Plus_Jakarta_Sans } from "next/font/google";
+import { Source_Serif_4 } from "next/font/google";
 import "./globals.css";
+
+const jakarta = Plus_Jakarta_Sans({
+  subsets: ["latin"],
+  variable: "--font-jakarta",
+  display: "swap",
+});
+
+const sourceSerif = Source_Serif_4({
+  subsets: ["latin"],
+  variable: "--font-source-serif",
+  display: "swap",
+  weight: ["300", "400"],
+  style: ["normal", "italic"],
+});
 
 export const metadata: Metadata = {
   title: "Temper",
@@ -14,8 +28,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`dark ${GeistMono.variable} ${GeistSans.variable}`} suppressHydrationWarning>
-      <body className={`${GeistSans.className} antialiased`} suppressHydrationWarning>
+    <html lang="en" className={`dark ${jakarta.variable} ${sourceSerif.variable}`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: `(function(){try{var t=localStorage.getItem('temper-theme');if(t==='light'){document.documentElement.classList.remove('dark');document.documentElement.classList.add('light')}}catch(e){}})()` }} />
+      </head>
+      <body className={`${jakarta.className} antialiased`} suppressHydrationWarning>
         {children}
       </body>
     </html>

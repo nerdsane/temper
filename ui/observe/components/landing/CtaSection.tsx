@@ -5,14 +5,14 @@ export default function CtaSection() {
     <section className="text-center py-[120px] max-sm:py-20">
       <div className="max-w-[960px] mx-auto px-6 relative z-[2]">
         <ScrollReveal>
-          <h2 className="text-[clamp(1.5rem,3vw,2rem)] font-semibold tracking-[-0.02em] mb-12">
-            The living harness is coming.
+          <h2 className="text-[clamp(1.5rem,3vw,2rem)] font-serif tracking-[-0.02em] mb-12">
+            The living harness is <em className="italic text-[var(--color-accent-teal)]">coming.</em>
           </h2>
           <a
             href="https://github.com/nerdsane/temper"
             target="_blank"
             rel="noopener"
-            className="inline-flex items-center gap-2 px-[22px] py-2.5 bg-teal-400 text-[#0a0a0c] rounded font-semibold text-sm no-underline transition-all hover:bg-teal-300 hover:-translate-y-px hover:shadow-[0_4px_20px_rgba(45,212,191,0.08)]"
+            className="inline-flex items-center gap-2 px-[22px] py-2.5 bg-[var(--color-accent-teal)] text-[var(--color-bg-primary)] rounded font-semibold text-sm no-underline transition-all hover:bg-[var(--color-accent-teal)] hover:-translate-y-px hover:shadow-[0_4px_20px_var(--color-accent-teal-dim)]"
           >
             Get Started on GitHub
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">

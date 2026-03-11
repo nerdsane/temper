@@ -7,6 +7,7 @@ import { useConnection } from "@/lib/connection";
 import { useDecisionNotifier } from "@/lib/decision-notifier";
 import { fetchUnmetIntents } from "@/lib/api";
 import UserMenu from "@/components/UserMenu";
+import ThemeToggle from "@/components/ThemeToggle";
 
 function NavIcon({ icon }: { icon: string }) {
   switch (icon) {
@@ -115,13 +116,13 @@ export default function Sidebar() {
   };
 
   return (
-    <aside className="w-52 bg-[#0a0a0c]/80 backdrop-blur-xl border-r border-white/[0.06] flex flex-col h-screen">
+    <aside className="w-52 bg-[var(--color-bg-primary)]/80 backdrop-blur-xl border-r border-[var(--color-border)] flex flex-col h-screen">
       {/* Logo / Title */}
       <div className="px-4 py-3.5">
         <Link href="/dashboard" className="flex items-center gap-2.5">
           <div>
-            <div className="text-[15px] font-bold text-zinc-100 tracking-tight font-display">Temper</div>
-            <div className="text-[10px] text-zinc-600 tracking-wide uppercase">Observe</div>
+            <div className="text-[15px] font-bold text-[var(--color-text-primary)] tracking-tight font-display">Temper</div>
+            <div className="text-[10px] text-[var(--color-text-muted)] tracking-wide uppercase">Observe</div>
           </div>
         </Link>
       </div>
@@ -132,23 +133,23 @@ export default function Sidebar() {
           <Link
             key={item.href}
             href={item.href}
-            className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-sm text-[13px] font-display transition-colors ${
+            className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-[2px] text-[13px] font-display transition-colors ${
               isActive(item.href)
-                ? "text-zinc-100 bg-white/[0.06]"
+                ? "text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)]"
                 : item.label === "Decisions" && pendingCount > 0
-                  ? "text-pink-400 bg-pink-500/10 hover:bg-pink-500/15"
-                  : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
+                  ? "text-[var(--color-accent-pink)] bg-[var(--color-accent-pink-dim)] hover:bg-[var(--color-accent-pink-dim)]"
+                  : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-elevated)]"
             }`}
           >
             <NavIcon icon={item.icon} />
             {item.label}
             {item.label === "Decisions" && pendingCount > 0 && (
-              <span className="ml-auto text-[10px] font-mono bg-pink-500/20 text-pink-400 px-1.5 py-0.5 rounded-full min-w-[20px] text-center" aria-label={`${pendingCount} pending decisions`}>
+              <span className="ml-auto text-[10px] font-mono bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)] px-1.5 py-0.5 rounded-full min-w-[20px] text-center" aria-label={`${pendingCount} pending decisions`}>
                 {pendingCount > 99 ? "99+" : pendingCount}
               </span>
             )}
             {item.label === "Evolution" && unmetCount > 0 && (
-              <span className="ml-auto text-[10px] font-mono bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded-full min-w-[20px] text-center" aria-label={`${unmetCount} unmet intents`}>
+              <span className="ml-auto text-[10px] font-mono bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)] px-1.5 py-0.5 rounded-full min-w-[20px] text-center" aria-label={`${unmetCount} unmet intents`}>
                 {unmetCount > 99 ? "99+" : unmetCount}
               </span>
             )}
@@ -157,18 +158,21 @@ export default function Sidebar() {
       </nav>
 
       {/* User */}
-      <div className="border-t border-white/[0.06]">
+      <div className="border-t border-[var(--color-border)]">
         <UserMenu />
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-3 border-t border-white/[0.06] flex items-center justify-between">
-        <div className="text-[10px] text-zinc-700 font-mono">TEMPER v0.1.0</div>
-        <div className="flex items-center gap-1.5" aria-label={checking ? "Checking connection" : connected ? "Connected" : "Disconnected"}>
-          <div className={`w-1.5 h-1.5 rounded-full ${checking ? "bg-zinc-600" : connected ? "bg-teal-400" : "bg-pink-400"}`} />
-          <span className={`text-[10px] font-mono ${checking ? "text-zinc-600" : connected ? "text-zinc-600" : "text-pink-400"}`}>
-            {checking ? "..." : connected ? "" : "offline"}
-          </span>
+      <div className="px-4 py-3 border-t border-[var(--color-border)] flex items-center justify-between">
+        <div className="text-[10px] text-[var(--color-text-muted)] font-mono">TEMPER v0.1.0</div>
+        <div className="flex items-center gap-2">
+          <ThemeToggle />
+          <div className="flex items-center gap-1.5" aria-label={checking ? "Checking connection" : connected ? "Connected" : "Disconnected"}>
+            <div className={`w-1.5 h-1.5 rounded-full ${checking ? "bg-[var(--color-text-muted)]" : connected ? "bg-[var(--color-accent-teal)]" : "bg-[var(--color-accent-pink)]"}`} />
+            <span className={`text-[10px] font-mono ${checking ? "text-[var(--color-text-muted)]" : connected ? "text-[var(--color-text-muted)]" : "text-[var(--color-accent-pink)]"}`}>
+              {checking ? "..." : connected ? "" : "offline"}
+            </span>
+          </div>
         </div>
       </div>
     </aside>

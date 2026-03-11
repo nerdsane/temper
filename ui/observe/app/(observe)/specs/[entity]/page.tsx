@@ -11,12 +11,12 @@ import ErrorDisplay from "@/components/ErrorDisplay";
 function SpecSkeleton() {
   return (
     <div className="animate-pulse">
-      <div className="h-3.5 bg-zinc-800/40 rounded w-44 mb-1.5" />
-      <div className="h-6 bg-zinc-800/60 rounded w-52 mb-5" />
-      <div className="h-4 bg-zinc-800/50 rounded w-28 mb-2.5" />
-      <div className="bg-[#111115] rounded-lg h-56 mb-6" />
-      <div className="h-4 bg-zinc-800/50 rounded w-24 mb-2.5" />
-      <div className="bg-[#111115] rounded-lg h-44" />
+      <div className="h-3.5 bg-[var(--color-border)] rounded w-44 mb-1.5" />
+      <div className="h-6 bg-[var(--color-border)] rounded w-52 mb-5" />
+      <div className="h-4 bg-[var(--color-border)] rounded w-28 mb-2.5" />
+      <div className="bg-[var(--color-bg-surface)] rounded-[2px] h-56 mb-6" />
+      <div className="h-4 bg-[var(--color-border)] rounded w-24 mb-2.5" />
+      <div className="bg-[var(--color-bg-surface)] rounded-[2px] h-44" />
     </div>
   );
 }
@@ -69,18 +69,18 @@ export default function SpecViewer() {
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <div>
-          <div className="flex items-center gap-1.5 text-[12px] text-zinc-600 mb-1">
-            <Link href="/" className="hover:text-zinc-400 transition-colors">Dashboard</Link>
+          <div className="flex items-center gap-1.5 text-[12px] text-[var(--color-text-muted)] mb-1">
+            <Link href="/" className="hover:text-[var(--color-text-secondary)] transition-colors">Dashboard</Link>
             <span>/</span>
-            <span className="text-zinc-400">Specs</span>
+            <span className="text-[var(--color-text-secondary)]">Specs</span>
             <span>/</span>
-            <span className="text-zinc-400">{spec.entity_type}</span>
+            <span className="text-[var(--color-text-secondary)]">{spec.entity_type}</span>
           </div>
-          <h1 className="text-2xl font-bold text-zinc-100 tracking-tight font-display">{spec.entity_type} Spec</h1>
+          <h1 className="text-2xl text-[var(--color-text-primary)] tracking-tight font-serif">{spec.entity_type} Spec</h1>
         </div>
         <Link
           href={`/verify/${spec.entity_type}`}
-          className="px-3.5 py-1.5 bg-teal-500 hover:bg-teal-400 text-white text-[13px] rounded-md transition-colors"
+          className="px-3.5 py-1.5 bg-[var(--color-accent-teal)] hover:bg-[var(--color-accent-teal)] text-[var(--color-bg-primary)] text-[13px] rounded-[2px] transition-colors"
         >
           Run Verification
         </Link>
@@ -88,19 +88,19 @@ export default function SpecViewer() {
 
       {/* State Machine Diagram */}
       <div className="mb-6">
-        <h2 className="text-base font-semibold text-zinc-200 mb-2.5 tracking-tight">State Machine</h2>
+        <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-2.5 tracking-tight">State Machine</h2>
         <StateMachineGraph spec={spec} />
-        <div className="flex gap-5 mt-2.5 text-[11px] text-zinc-600">
+        <div className="flex gap-5 mt-2.5 text-[11px] text-[var(--color-text-muted)]">
           <div className="flex items-center gap-1.5">
-            <div className="w-2.5 h-2.5 rounded border border-teal-500/50 bg-teal-500/10" />
+            <div className="w-2.5 h-2.5 rounded border border-[var(--color-accent-teal)]/50 bg-[var(--color-accent-teal-dim)]" />
             <span>Initial state</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <div className="w-2.5 h-2.5 rounded border border-zinc-700 bg-zinc-900" />
+            <div className="w-2.5 h-2.5 rounded border border-[var(--color-border)] bg-[var(--color-bg-surface)]" />
             <span>Normal state</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <div className="w-2.5 h-2.5 rounded border border-dashed border-zinc-600 bg-zinc-900" />
+            <div className="w-2.5 h-2.5 rounded border border-dashed border-[var(--color-text-muted)] bg-[var(--color-bg-surface)]" />
             <span>Terminal state</span>
           </div>
         </div>
@@ -108,44 +108,44 @@ export default function SpecViewer() {
 
       {/* Transition Table */}
       <div className="mb-6">
-        <h2 className="text-base font-semibold text-zinc-200 mb-2.5 tracking-tight">Transitions</h2>
-        <div className="bg-[#111115] rounded-lg overflow-hidden">
+        <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-2.5 tracking-tight">Transitions</h2>
+        <div className="bg-[var(--color-bg-surface)] rounded-[2px] overflow-hidden">
           <table className="w-full text-[13px]">
             <thead>
-              <tr className="border-b border-white/[0.06]">
-                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Action</th>
-                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Kind</th>
-                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">From</th>
-                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">To</th>
-                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Guard</th>
-                <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Effect</th>
+              <tr className="border-b border-[var(--color-border)]">
+                <th className="text-left px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-[11px] uppercase tracking-wider">Action</th>
+                <th className="text-left px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-[11px] uppercase tracking-wider">Kind</th>
+                <th className="text-left px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-[11px] uppercase tracking-wider">From</th>
+                <th className="text-left px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-[11px] uppercase tracking-wider">To</th>
+                <th className="text-left px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-[11px] uppercase tracking-wider">Guard</th>
+                <th className="text-left px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-[11px] uppercase tracking-wider">Effect</th>
               </tr>
             </thead>
             <tbody>
               {spec.actions.map((action, i) => (
                 <tr
                   key={i}
-                  className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors"
+                  className="border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors"
                 >
-                  <td className="px-3.5 py-2 font-mono text-teal-400">{action.name}</td>
+                  <td className="px-3.5 py-2 font-mono text-[var(--color-accent-teal)]">{action.name}</td>
                   <td className="px-3.5 py-2">
                     <span
                       className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${
                         action.kind === "input"
-                          ? "bg-teal-500/10 text-teal-400"
-                          : "bg-violet-500/10 text-violet-400"
+                          ? "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)]"
+                          : "bg-[var(--color-accent-lime-dim)] text-[var(--color-accent-lime)]"
                       }`}
                     >
                       {action.kind}
                     </span>
                   </td>
-                  <td className="px-3.5 py-2 font-mono text-zinc-400">{action.from.join(", ")}</td>
-                  <td className="px-3.5 py-2 font-mono text-zinc-400">{action.to ?? <span className="text-zinc-700">--</span>}</td>
-                  <td className="px-3.5 py-2 font-mono text-yellow-400/70 text-[11px]">
-                    {action.guards.length > 0 ? action.guards.join("; ") : <span className="text-zinc-700">--</span>}
+                  <td className="px-3.5 py-2 font-mono text-[var(--color-text-secondary)]">{action.from.join(", ")}</td>
+                  <td className="px-3.5 py-2 font-mono text-[var(--color-text-secondary)]">{action.to ?? <span className="text-[var(--color-text-muted)]">--</span>}</td>
+                  <td className="px-3.5 py-2 font-mono text-[var(--color-accent-pink)]/70 text-[11px]">
+                    {action.guards.length > 0 ? action.guards.join("; ") : <span className="text-[var(--color-text-muted)]">--</span>}
                   </td>
-                  <td className="px-3.5 py-2 font-mono text-zinc-500 text-[11px]">
-                    {action.effects.length > 0 ? action.effects.join("; ") : <span className="text-zinc-700">--</span>}
+                  <td className="px-3.5 py-2 font-mono text-[var(--color-text-secondary)] text-[11px]">
+                    {action.effects.length > 0 ? action.effects.join("; ") : <span className="text-[var(--color-text-muted)]">--</span>}
                   </td>
                 </tr>
               ))}
@@ -156,29 +156,29 @@ export default function SpecViewer() {
 
       {/* Invariants */}
       <div className="mb-6">
-        <h2 className="text-base font-semibold text-zinc-200 mb-2.5 tracking-tight">Invariants</h2>
+        <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-2.5 tracking-tight">Invariants</h2>
         {spec.invariants.length === 0 ? (
-          <div className="bg-[#111115] rounded-lg p-6 text-center">
-            <p className="text-[13px] text-zinc-500">No invariants defined.</p>
+          <div className="bg-[var(--color-bg-surface)] rounded-[2px] p-6 text-center">
+            <p className="text-[13px] text-[var(--color-text-secondary)]">No invariants defined.</p>
           </div>
         ) : (
           <div className="space-y-1.5">
             {spec.invariants.map((inv, i) => (
               <div
                 key={i}
-                className="bg-[#111115] rounded-lg p-3"
+                className="bg-[var(--color-bg-surface)] rounded-[2px] p-3"
               >
                 <div className="flex items-center gap-2 mb-1.5">
-                  <span className="text-[13px] font-semibold text-zinc-200">{inv.name}</span>
+                  <span className="text-[13px] font-semibold text-[var(--color-text-primary)]">{inv.name}</span>
                 </div>
                 <div className="text-[13px] space-y-0.5">
                   <div className="flex gap-2">
-                    <span className="text-zinc-600 w-14 flex-shrink-0 text-[11px]">when</span>
-                    <code className="font-mono text-yellow-400/70 text-[11px]">{inv.when.length > 0 ? inv.when.join(", ") : "always"}</code>
+                    <span className="text-[var(--color-text-muted)] w-14 flex-shrink-0 text-[11px]">when</span>
+                    <code className="font-mono text-[var(--color-accent-pink)]/70 text-[11px]">{inv.when.length > 0 ? inv.when.join(", ") : "always"}</code>
                   </div>
                   <div className="flex gap-2">
-                    <span className="text-zinc-600 w-14 flex-shrink-0 text-[11px]">assert</span>
-                    <code className="font-mono text-teal-400/70 text-[11px]">{inv.assertion}</code>
+                    <span className="text-[var(--color-text-muted)] w-14 flex-shrink-0 text-[11px]">assert</span>
+                    <code className="font-mono text-[var(--color-accent-teal)]/70 text-[11px]">{inv.assertion}</code>
                   </div>
                 </div>
               </div>
@@ -189,30 +189,30 @@ export default function SpecViewer() {
 
       {/* State Variables */}
       <div className="mb-6">
-        <h2 className="text-base font-semibold text-zinc-200 mb-2.5 tracking-tight">State Variables</h2>
+        <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-2.5 tracking-tight">State Variables</h2>
         {spec.state_variables.length === 0 ? (
-          <div className="bg-[#111115] rounded-lg p-6 text-center">
-            <p className="text-[13px] text-zinc-500">No state variables defined.</p>
+          <div className="bg-[var(--color-bg-surface)] rounded-[2px] p-6 text-center">
+            <p className="text-[13px] text-[var(--color-text-secondary)]">No state variables defined.</p>
           </div>
         ) : (
-          <div className="bg-[#111115] rounded-lg overflow-hidden">
+          <div className="bg-[var(--color-bg-surface)] rounded-[2px] overflow-hidden">
             <table className="w-full text-[13px]">
               <thead>
-                <tr className="border-b border-white/[0.06]">
-                  <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Name</th>
-                  <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Type</th>
-                  <th className="text-left px-3.5 py-2.5 text-zinc-600 font-medium text-[11px] uppercase tracking-wider">Initial Value</th>
+                <tr className="border-b border-[var(--color-border)]">
+                  <th className="text-left px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-[11px] uppercase tracking-wider">Name</th>
+                  <th className="text-left px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-[11px] uppercase tracking-wider">Type</th>
+                  <th className="text-left px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-[11px] uppercase tracking-wider">Initial Value</th>
                 </tr>
               </thead>
               <tbody>
                 {spec.state_variables.map((v, i) => (
                   <tr
                     key={i}
-                    className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors"
+                    className="border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors"
                   >
-                    <td className="px-3.5 py-2 font-mono text-zinc-200">{v.name}</td>
-                    <td className="px-3.5 py-2 font-mono text-purple-400 text-[11px]">{v.var_type}</td>
-                    <td className="px-3.5 py-2 font-mono text-zinc-500 text-[11px]">{v.initial}</td>
+                    <td className="px-3.5 py-2 font-mono text-[var(--color-text-primary)]">{v.name}</td>
+                    <td className="px-3.5 py-2 font-mono text-[var(--color-accent-lime)] text-[11px]">{v.var_type}</td>
+                    <td className="px-3.5 py-2 font-mono text-[var(--color-text-secondary)] text-[11px]">{v.initial}</td>
                   </tr>
                 ))}
               </tbody>
