@@ -115,7 +115,7 @@ temper-authz = { path = "crates/temper-authz" }
 temper-observe = { path = "crates/temper-observe" }
 temper-verify = { path = "crates/temper-verify" }
 temper-store-postgres = { path = "crates/temper-store-postgres" }
-temper-store-turso = { path = "crates/temper-store-turso" }
+temper-store-turso = { path = "crates/temper-store-turso", features = ["cloud"] }
 temper-store-redis = { path = "crates/temper-store-redis" }
 temper-store-sim = { path = "crates/temper-store-sim" }
 temper-server = { path = "crates/temper-server" }

@@ -320,17 +320,16 @@ pub(crate) async fn install_os_app(
     Json(req): Json<InstallOsAppRequest>,
 ) -> impl IntoResponse {
     // Ensure tenant exists in persistence before loading specs.
-    if let Some(ref store) = state.server.event_store {
-        if let Some(router) = store.tenant_router() {
-            if let Err(e) = router.ensure_tenant(&req.tenant).await {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "error": format!("failed to ensure tenant in persistence: {e}"),
-                    })),
-                );
-            }
-        }
+    if let Some(ref store) = state.server.event_store
+        && let Some(router) = store.tenant_router()
+        && let Err(e) = router.ensure_tenant(&req.tenant).await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to ensure tenant in persistence: {e}"),
+            })),
+        );
     }
 
     match crate::os_apps::install_os_app(&state, &req.tenant, &app_name) {
