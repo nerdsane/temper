@@ -21,7 +21,7 @@ jobs:
             os: macos-latest
             package: temper-mcp-darwin-arm64
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
             package: temper-mcp-darwin-x64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
@@ -44,6 +44,24 @@ jobs:
         with:
           toolchain: nightly-2026-02-08
           targets: ${{ matrix.target }}
+
+      - name: Install z3 (macOS)
+        if: runner.os == 'macOS'
+        run: brew install z3
+
+      - name: Install z3 (Linux)
+        if: runner.os == 'Linux' && !matrix.use_cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libz3-dev
+
+      - name: Install z3 (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install z3 -y
+          echo "Z3_SYS_Z3_HEADER=C:\ProgramData\chocolatey\lib\z3\tools\include\z3.h" >> $env:GITHUB_ENV
+          echo "LIBZ3_SYS_Z3_HEADER=C:\ProgramData\chocolatey\lib\z3\tools\include\z3.h" >> $env:GITHUB_ENV
+          echo "C:\ProgramData\chocolatey\lib\z3\tools\bin" >> $env:GITHUB_PATH
 
       - name: Install cross
         if: matrix.use_cross
