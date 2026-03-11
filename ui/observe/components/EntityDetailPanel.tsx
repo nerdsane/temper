@@ -9,12 +9,14 @@ import StatusBadge from "@/components/StatusBadge";
 interface EntityDetailPanelProps {
   entityType: string;
   entityId: string;
+  tenant?: string;
   onClose: () => void;
 }
 
 export default function EntityDetailPanel({
   entityType,
   entityId,
+  tenant,
   onClose,
 }: EntityDetailPanelProps) {
   const [history, setHistory] = useState<EntityHistory | null>(null);
@@ -25,14 +27,14 @@ export default function EntityDetailPanel({
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchEntityHistory(entityType, entityId);
+      const data = await fetchEntityHistory(entityType, entityId, tenant);
       setHistory(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load entity");
     } finally {
       setLoading(false);
     }
-  }, [entityType, entityId]);
+  }, [entityType, entityId, tenant]);
 
   useEffect(() => {
     load();
@@ -236,7 +238,7 @@ export default function EntityDetailPanel({
               {/* Open Full Page */}
               <div className="pt-2">
                 <Link
-                  href={`/entities/${entityType}/${entityId}`}
+                  href={`/entities/${entityType}/${entityId}${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`}
                   className="flex items-center justify-center gap-1.5 w-full py-2 rounded-[2px] bg-[var(--color-bg-elevated)] hover:bg-[var(--color-border-hover)] text-[12px] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
                 >
                   Open full page

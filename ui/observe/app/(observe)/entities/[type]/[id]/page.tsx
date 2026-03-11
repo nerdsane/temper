@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { fetchEntityHistory } from "@/lib/api";
 import type { EntityHistory } from "@/lib/types";
@@ -35,8 +35,10 @@ function EntitySkeleton() {
 
 export default function EntityInspector() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const entityType = params.type as string;
   const entityId = params.id as string;
+  const tenant = searchParams.get("tenant") ?? undefined;
   const [history, setHistory] = useState<EntityHistory | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +47,7 @@ export default function EntityInspector() {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchEntityHistory(entityType, entityId);
+      const data = await fetchEntityHistory(entityType, entityId, tenant);
       setHistory(data);
     } catch (err) {
       setError(
@@ -54,7 +56,7 @@ export default function EntityInspector() {
     } finally {
       setLoading(false);
     }
-  }, [entityType, entityId]);
+  }, [entityType, entityId, tenant]);
 
   useEffect(() => {
     load();

@@ -458,6 +458,14 @@ export default function DecisionsPage() {
         <StatCard label="Total" value={data?.total ?? 0} />
       </div>
 
+      {/* Polling error banner */}
+      {decisionsPoll.error && !data && (
+        <div role="alert" className="mb-4 flex items-center justify-between gap-2 rounded bg-[var(--color-accent-pink-dim)] border border-[var(--color-accent-pink)]/20 px-4 py-2.5">
+          <p className="text-sm text-[var(--color-accent-pink)]">Failed to load decisions: {decisionsPoll.error}</p>
+          <button onClick={() => decisionsPoll.refresh()} className="text-[var(--color-accent-teal)] hover:text-[var(--color-accent-teal)] text-xs flex-shrink-0">Retry</button>
+        </div>
+      )}
+
       {/* Action error banner */}
       {actionError && (
         <div role="alert" className="mb-4 flex items-center justify-between gap-2 rounded bg-[var(--color-accent-pink-dim)] border border-[var(--color-accent-pink)]/20 px-4 py-2.5">

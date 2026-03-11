@@ -40,6 +40,7 @@ export interface SpecDetail {
 }
 
 export interface EntitySummary {
+  tenant: string;
   entity_type: string;
   entity_id: string;
   actor_status: string;

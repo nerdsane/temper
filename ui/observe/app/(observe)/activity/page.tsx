@@ -26,7 +26,7 @@ export default function ActivityPage() {
   const [newFailedCount, setNewFailedCount] = useState(0);
 
   // Entity detail panel state
-  const [selectedEntity, setSelectedEntity] = useState<{ type: string; id: string } | null>(null);
+  const [selectedEntity, setSelectedEntity] = useState<{ type: string; id: string; tenant: string } | null>(null);
 
   // Entity table state
   const [searchQuery, setSearchQuery] = useState("");
@@ -400,7 +400,7 @@ export default function ActivityPage() {
                   <tr
                     key={eKey}
                     className={`border-b border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] transition-colors cursor-pointer ${isNew ? "animate-highlight-new" : ""}`}
-                    onClick={() => setSelectedEntity({ type: entity.entity_type, id: entity.entity_id })}
+                    onClick={() => setSelectedEntity({ type: entity.entity_type, id: entity.entity_id, tenant: entity.tenant })}
                     onAnimationEnd={() => { if (isNew) setNewEntityKeys((prev) => { const next = new Set(prev); next.delete(eKey); return next; }); }}
                   >
                     <td className="px-3.5 py-2.5 font-mono text-[var(--color-text-secondary)]">{entity.entity_type}</td>
@@ -410,7 +410,7 @@ export default function ActivityPage() {
                     </td>
                     <td className="px-3.5 py-2.5 text-right">
                       <Link
-                        href={`/entities/${entity.entity_type}/${entity.entity_id}`}
+                        href={`/entities/${entity.entity_type}/${entity.entity_id}?tenant=${encodeURIComponent(entity.tenant)}`}
                         className="text-[11px] text-[var(--color-accent-teal)] hover:text-[var(--color-accent-teal)] transition-colors"
                         onClick={(e) => e.stopPropagation()}
                       >
@@ -530,6 +530,7 @@ export default function ActivityPage() {
         <EntityDetailPanel
           entityType={selectedEntity.type}
           entityId={selectedEntity.id}
+          tenant={selectedEntity.tenant}
           onClose={() => setSelectedEntity(null)}
         />
       )}

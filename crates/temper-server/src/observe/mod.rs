@@ -98,6 +98,8 @@ pub struct StateVarDetail {
 /// Entity instance summary.
 #[derive(Serialize, Deserialize)]
 pub struct EntityInstanceSummary {
+    /// Tenant that owns this entity.
+    pub tenant: String,
     /// Entity type.
     pub entity_type: String,
     /// Entity ID.

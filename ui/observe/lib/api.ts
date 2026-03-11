@@ -100,10 +100,15 @@ export async function runVerification(entity: string): Promise<VerificationResul
 export async function fetchEntityHistory(
   entityType: string,
   entityId: string,
+  tenant?: string,
 ): Promise<EntityHistory> {
+  const headers: Record<string, string> = {};
+  if (tenant) {
+    headers["X-Tenant-Id"] = tenant;
+  }
   const res = await fetchWithRetry(
     `${API_BASE}/observe/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}/history`,
-    { cache: "no-store" },
+    { cache: "no-store", headers },
   );
   if (!res.ok)
     throw new ApiError(

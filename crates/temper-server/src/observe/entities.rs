@@ -43,6 +43,7 @@ pub(crate) async fn handle_list_entities(
                 .map(|(s, t)| (Some(s.clone()), Some(t.to_rfc3339())))
                 .unwrap_or((None, None));
             Some(EntityInstanceSummary {
+                tenant: parts.first().unwrap_or(&"default").to_string(),
                 entity_type: parts.get(1).unwrap_or(&"unknown").to_string(),
                 entity_id: parts.get(2).unwrap_or(&"unknown").to_string(),
                 actor_status: "active".to_string(),
