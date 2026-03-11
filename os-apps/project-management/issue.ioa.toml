@@ -40,6 +40,16 @@ type = "counter"
 initial = "0"
 
 [[state]]
+name = "has_parent"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "sub_issue_count"
+type = "counter"
+initial = "0"
+
+[[state]]
 name = "comment_count"
 type = "counter"
 initial = "0"
@@ -58,6 +68,31 @@ initial = "0"
 name = "has_description"
 type = "bool"
 initial = "false"
+
+# --- Actions: Parent/Sub-Issue Hierarchy ---
+
+[[action]]
+name = "SetParent"
+kind = "input"
+from = ["Backlog", "Triage", "Todo", "Planning", "InProgress"]
+effect = "set has_parent true"
+params = ["ParentIssueId"]
+hint = "Set the parent issue. Turns this issue into a sub-issue."
+
+[[action]]
+name = "RemoveParent"
+kind = "input"
+from = ["Backlog", "Triage", "Todo", "Planning", "InProgress"]
+effect = "set has_parent false"
+hint = "Remove the parent issue link, making this a top-level issue again."
+
+[[action]]
+name = "AddSubIssue"
+kind = "input"
+from = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress", "InReview"]
+effect = "increment sub_issue_count"
+params = ["SubIssueId"]
+hint = "Add a sub-issue to this issue. The sub-issue's ParentIssueId should reference this issue."
 
 # --- Actions: Issue Lifecycle ---
 

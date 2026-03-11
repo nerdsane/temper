@@ -108,6 +108,7 @@ mod tests {
     async fn health_check_passes_without_auth() {
         let app = app_with_token(Some("secret123".into()));
         let resp = app
+            .clone()
             .oneshot(HttpRequest::get("/tdata").body(Body::empty()).unwrap())
             .await
             .unwrap();

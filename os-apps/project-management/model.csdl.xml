@@ -97,6 +97,8 @@
         <Property Name="WorktreePath" Type="Edm.String"/>
         <Property Name="PrUrl" Type="Edm.String"/>
         <Property Name="ImplementationNotes" Type="Edm.String"/>
+        <Property Name="ParentIssueId" Type="Edm.Guid"/>
+        <Property Name="SubIssueCount" Type="Edm.Int32" DefaultValue="0"/>
         <Property Name="ProjectId" Type="Edm.Guid"/>
         <Property Name="CycleId" Type="Edm.Guid"/>
         <Property Name="ReviewCycles" Type="Edm.Int32" DefaultValue="0"/>
@@ -113,6 +115,10 @@
         <NavigationProperty Name="Cycle" Type="Temper.ProjectManagement.Cycle">
           <ReferentialConstraint Property="CycleId" ReferencedProperty="Id"/>
         </NavigationProperty>
+        <NavigationProperty Name="ParentIssue" Type="Temper.ProjectManagement.Issue">
+          <ReferentialConstraint Property="ParentIssueId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="SubIssues" Type="Collection(Temper.ProjectManagement.Issue)"/>
         <NavigationProperty Name="Comments" Type="Collection(Temper.ProjectManagement.Comment)"/>
         <Annotation Term="Temper.Vocab.StateMachine.States">
           <Collection>
@@ -212,6 +218,36 @@
       </EntityType>
 
       <!-- ============ Bound Actions ============ -->
+
+      <!-- Issue Parent/Sub-Issue Actions -->
+      <Action Name="SetParent" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="ParentIssueId" Type="Edm.Guid" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Issue"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Backlog</String><String>Triage</String><String>Todo</String><String>Planning</String><String>InProgress</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Set the parent issue. Turns this issue into a sub-issue."/>
+      </Action>
+
+      <Action Name="RemoveParent" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <ReturnType Type="Temper.ProjectManagement.Issue"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Backlog</String><String>Triage</String><String>Todo</String><String>Planning</String><String>InProgress</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Remove the parent issue link."/>
+      </Action>
+
+      <Action Name="AddSubIssue" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="SubIssueId" Type="Edm.Guid" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Issue"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Backlog</String><String>Triage</String><String>Todo</String><String>Planning</String><String>Planned</String><String>InProgress</String><String>InReview</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.Agent.Hint" String="Add a sub-issue to this issue."/>
+      </Action>
 
       <!-- Issue Actions -->
       <Action Name="SetDescription" IsBound="true">
@@ -525,6 +561,8 @@
 
       <EntityContainer Name="ProjectManagementService">
         <EntitySet Name="Issues" EntityType="Temper.ProjectManagement.Issue">
+          <NavigationPropertyBinding Path="ParentIssue" Target="Issues"/>
+          <NavigationPropertyBinding Path="SubIssues" Target="Issues"/>
           <NavigationPropertyBinding Path="Project" Target="Projects"/>
           <NavigationPropertyBinding Path="Cycle" Target="Cycles"/>
           <NavigationPropertyBinding Path="Comments" Target="Comments"/>

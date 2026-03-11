@@ -235,6 +235,41 @@ impl TenantStoreRouter {
         Ok(out)
     }
 
+    /// Remove a tenant entirely.
+    ///
+    /// Deletes the tenant from `tenant_registry`, removes associated users,
+    /// and evicts the in-memory store connection.
+    #[instrument(skip_all, fields(tenant_id, otel.name = "router.remove_tenant"))]
+    pub async fn remove_tenant(&self, tenant_id: &str) -> Result<bool, PersistenceError> {
+        let conn = self.platform.connection().map_err(storage_error)?;
+
+        // Delete associated users first.
+        conn.execute(
+            "DELETE FROM tenant_users WHERE tenant_id = ?1",
+            libsql::params![tenant_id],
+        )
+        .await
+        .map_err(storage_error)?;
+
+        // Delete from registry.
+        let result = conn
+            .execute(
+                "DELETE FROM tenant_registry WHERE tenant_id = ?1",
+                libsql::params![tenant_id],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        // Evict from in-memory cache.
+        self.tenants.write().await.remove(tenant_id);
+
+        let removed = result > 0;
+        if removed {
+            info!(tenant_id, "Tenant removed from registry");
+        }
+        Ok(removed)
+    }
+
     /// Remove a user from a tenant.
     #[instrument(skip_all, fields(tenant_id, user_id, otel.name = "router.remove_tenant_user"))]
     pub async fn remove_tenant_user(

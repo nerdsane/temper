@@ -434,6 +434,15 @@ export async function installOsApp(name: string, tenant: string): Promise<Record
   return res.json();
 }
 
+/** Delete a tenant */
+export async function deleteTenant(tenantId: string): Promise<Record<string, unknown>> {
+  const res = await fetchWithRetry(`${API_BASE}/observe/tenants/${encodeURIComponent(tenantId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new ApiError(`Failed to delete tenant: ${res.status}`, res.status);
+  return res.json();
+}
+
 /** Update a feature request's disposition and/or developer notes */
 export async function updateFeatureRequest(
   id: string,

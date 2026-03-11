@@ -27,9 +27,9 @@ pub fn build_platform_router(state: PlatformState) -> Router {
     let tenant_api = crate::tenant_api::tenant_api_router();
     let health = Router::new().route("/healthz", routing::get(|| async { StatusCode::OK }));
 
-    // OS Apps observe routes — merged at /observe/* to avoid the /api double-nest
+    // Platform observe routes — merged at /observe/* to avoid the /api double-nest
     // collision between temper-server's /api routes and the platform's /api routes.
-    let os_apps_observe = Router::new()
+    let platform_observe = Router::new()
         .route(
             "/observe/os-apps",
             routing::get(crate::tenant_api::list_os_apps),
@@ -37,11 +37,15 @@ pub fn build_platform_router(state: PlatformState) -> Router {
         .route(
             "/observe/os-apps/{name}/install",
             routing::post(crate::tenant_api::install_os_app),
+        )
+        .route(
+            "/observe/tenants/{id}",
+            routing::delete(crate::tenant_api::delete_tenant),
         );
 
     temper_server::build_router(state.server.clone())
         .merge(health)
-        .merge(os_apps_observe.with_state(state.clone()))
+        .merge(platform_observe.with_state(state.clone()))
         .nest("/api", tenant_api.with_state(state.clone()))
         .layer(middleware::from_fn_with_state(
             state.clone(),

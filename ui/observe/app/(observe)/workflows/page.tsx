@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
-import { fetchWorkflows } from "@/lib/api";
+import { fetchWorkflows, deleteTenant } from "@/lib/api";
 import { usePolling } from "@/lib/hooks";
 import type { WorkflowsResponse, AppWorkflow } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
@@ -9,21 +9,21 @@ import Link from "next/link";
 
 function StatusIndicator({ status }: { status: string }) {
   const config: Record<string, { color: string; label: string; animate?: boolean }> = {
-    loading: { color: "bg-teal-400", label: "Loading", animate: true },
-    verifying: { color: "bg-yellow-400", label: "Verifying", animate: true },
-    completed: { color: "bg-teal-400", label: "Verified" },
-    failed: { color: "bg-pink-400", label: "Failed" },
+    loading: { color: "bg-[var(--color-accent-teal)]", label: "Loading", animate: true },
+    verifying: { color: "bg-[var(--color-accent-pink)]", label: "Verifying", animate: true },
+    completed: { color: "bg-[var(--color-accent-teal)]", label: "Verified" },
+    failed: { color: "bg-[var(--color-accent-pink)]", label: "Failed" },
   };
   const c = config[status] ?? config.loading;
   return (
     <div className="flex items-center gap-1.5">
       <div className={`w-1.5 h-1.5 rounded-full ${c.color} ${c.animate ? "animate-pulse" : ""}`} />
-      <span className="text-[11px] text-zinc-500">{c.label}</span>
+      <span className="text-[11px] text-[var(--color-text-secondary)]">{c.label}</span>
     </div>
   );
 }
 
-function AppCard({ workflow }: { workflow: AppWorkflow }) {
+function AppCard({ workflow, onDelete }: { workflow: AppWorkflow; onDelete: (tenant: string) => void }) {
   const totalSteps = workflow.entities.length * 7;
   const completedSteps = workflow.entities.reduce(
     (acc, e) => acc + e.steps.filter((s) => s.status === "completed" || s.status === "failed").length,
@@ -37,32 +37,45 @@ function AppCard({ workflow }: { workflow: AppWorkflow }) {
   return (
     <Link
       href={`/workflows/${workflow.tenant}`}
-      className="block bg-[#111115] rounded-lg p-5 hover:bg-white/[0.02] transition-colors group"
+      className="block bg-[var(--color-bg-surface)] rounded-[2px] p-5 hover:bg-[var(--color-bg-elevated)] transition-colors group"
     >
       <div className="flex items-center justify-between mb-2.5">
-        <h3 className="text-base font-semibold text-zinc-100 tracking-tight">{workflow.tenant}</h3>
-        <StatusIndicator status={workflow.status} />
+        <h3 className="text-base font-semibold text-[var(--color-text-primary)] tracking-tight">{workflow.tenant}</h3>
+        <div className="flex items-center gap-2">
+          <StatusIndicator status={workflow.status} />
+          {workflow.tenant !== "temper-system" && (
+            <button
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(workflow.tenant); }}
+              className="opacity-0 group-hover:opacity-100 transition-opacity text-[var(--color-text-muted)] hover:text-[var(--color-accent-pink)] p-1"
+              title={`Delete tenant ${workflow.tenant}`}
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Entity count */}
-      <div className="text-[13px] text-zinc-500 mb-2.5">
+      <div className="text-[13px] text-[var(--color-text-secondary)] mb-2.5">
         {workflow.entities.length} {workflow.entities.length === 1 ? "entity" : "entities"}
         {workflow.runtime_events_count > 0 && (
-          <span className="ml-2.5 text-zinc-600">
+          <span className="ml-2.5 text-[var(--color-text-muted)]">
             {workflow.runtime_events_count} runtime events
           </span>
         )}
       </div>
 
       {/* Progress bar */}
-      <div className="h-1 bg-white/[0.04] rounded-full overflow-hidden mb-2.5">
+      <div className="h-1 bg-[var(--color-bg-elevated)] rounded-full overflow-hidden mb-2.5">
         <div
           className={`h-full rounded-full transition-all duration-500 ${
             workflow.status === "failed" || !allPassed
-              ? "bg-pink-500"
+              ? "bg-[var(--color-accent-pink)]"
               : workflow.status === "completed"
-              ? "bg-teal-500"
-              : "bg-teal-500"
+              ? "bg-[var(--color-accent-teal)]"
+              : "bg-[var(--color-accent-teal)]"
           }`}
           style={{ width: `${progressPct}%` }}
         />
@@ -79,17 +92,17 @@ function AppCard({ workflow }: { workflow: AppWorkflow }) {
           );
           const entityRunning = entity.steps.some((s) => s.status === "running");
           const dotColor = entityFailed
-            ? "bg-pink-400"
+            ? "bg-[var(--color-accent-pink)]"
             : entityDone
-            ? "bg-teal-400"
+            ? "bg-[var(--color-accent-teal)]"
             : entityRunning
-            ? "bg-amber-400 animate-pulse"
-            : "bg-zinc-600";
+            ? "bg-[var(--color-accent-pink)] animate-pulse"
+            : "bg-[var(--color-text-muted)]";
 
           return (
             <div key={entity.entity_type} className="flex items-center gap-1.5">
               <div className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
-              <span className="text-[11px] text-zinc-500 font-mono">{entity.entity_type}</span>
+              <span className="text-[11px] text-[var(--color-text-secondary)] font-mono">{entity.entity_type}</span>
             </div>
           );
         })}
@@ -101,11 +114,11 @@ function AppCard({ workflow }: { workflow: AppWorkflow }) {
 function WorkflowsSkeleton() {
   return (
     <div className="animate-pulse">
-      <div className="h-6 bg-zinc-800/60 rounded w-36 mb-1.5" />
-      <div className="h-3.5 bg-zinc-800/40 rounded w-72 mb-6" />
+      <div className="h-6 bg-[var(--color-border)] rounded w-36 mb-1.5" />
+      <div className="h-3.5 bg-[var(--color-border)] rounded w-72 mb-6" />
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {[0, 1].map((i) => (
-          <div key={i} className="bg-[#111115] rounded-lg p-4 h-36" />
+          <div key={i} className="bg-[var(--color-bg-surface)] rounded-[2px] p-4 h-36" />
         ))}
       </div>
     </div>
@@ -115,6 +128,7 @@ function WorkflowsSkeleton() {
 export default function WorkflowsPage() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [initialError, setInitialError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   const poll = usePolling<WorkflowsResponse>({
     fetcher: fetchWorkflows,
@@ -132,6 +146,19 @@ export default function WorkflowsPage() {
       });
   }, []);
 
+  const handleDelete = async (tenant: string) => {
+    if (!confirm(`Delete tenant "${tenant}"? This removes all specs and data.`)) return;
+    setDeleting(tenant);
+    try {
+      await deleteTenant(tenant);
+      poll.refresh();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to delete tenant");
+    } finally {
+      setDeleting(null);
+    }
+  };
+
   if (initialLoading) return <WorkflowsSkeleton />;
   if (initialError)
     return (
@@ -145,8 +172,8 @@ export default function WorkflowsPage() {
   return (
     <div className="animate-fade-in">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-zinc-100 tracking-tight font-display">Workflows</h1>
-        <p className="text-sm text-zinc-600 mt-0.5">
+        <h1 className="text-2xl text-[var(--color-text-primary)] tracking-tight font-serif">Workflows</h1>
+        <p className="text-sm text-[var(--color-text-muted)] mt-0.5">
           App deployment workflows — spec loading, verification cascade, and runtime
         </p>
       </div>
@@ -154,15 +181,15 @@ export default function WorkflowsPage() {
       {workflows.length === 0 ? (
         <div className="flex items-center justify-center min-h-[256px]">
           <div className="text-center max-w-md">
-            <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-white/[0.04] mb-4">
-              <svg className="w-5 h-5 text-zinc-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-[var(--color-bg-elevated)] mb-4">
+              <svg className="w-5 h-5 text-[var(--color-text-muted)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
             </div>
-            <h3 className="text-base font-semibold text-zinc-200 mb-1">No app workflows</h3>
-            <p className="text-sm text-zinc-500">
+            <h3 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">No app workflows</h3>
+            <p className="text-sm text-[var(--color-text-secondary)]">
               Start the server with{" "}
-              <code className="font-mono text-[11px] bg-white/[0.04] px-1.5 py-0.5 rounded">
+              <code className="font-mono text-[11px] bg-[var(--color-bg-elevated)] px-1.5 py-0.5 rounded">
                 temper serve --app name=specs-dir
               </code>
             </p>
@@ -170,8 +197,8 @@ export default function WorkflowsPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {workflows.map((w) => (
-            <AppCard key={w.tenant} workflow={w} />
+          {workflows.filter((w) => w.tenant !== deleting).map((w) => (
+            <AppCard key={w.tenant} workflow={w} onDelete={handleDelete} />
           ))}
         </div>
       )}

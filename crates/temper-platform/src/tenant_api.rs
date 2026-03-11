@@ -1,11 +1,12 @@
 //! REST API for tenant management.
 //!
 //! Routes:
-//! - `POST /api/tenants`              — create/provision a new tenant
-//! - `GET  /api/tenants`              — list all tenants
-//! - `POST /api/tenants/:id/users`    — add a user to a tenant
+//! - `POST   /api/tenants`              — create/provision a new tenant
+//! - `GET    /api/tenants`              — list all tenants
+//! - `DELETE /api/tenants/:id`          — remove a tenant
+//! - `POST   /api/tenants/:id/users`    — add a user to a tenant
 //! - `DELETE /api/tenants/:id/users/:user_id` — remove a user from a tenant
-//! - `GET  /api/tenants/:id/users`    — list users for a tenant
+//! - `GET    /api/tenants/:id/users`    — list users for a tenant
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -66,6 +67,7 @@ pub struct UserInfo {
 pub fn tenant_api_router() -> Router<PlatformState> {
     Router::new()
         .route("/tenants", routing::post(create_tenant).get(list_tenants))
+        .route("/tenants/{id}", routing::delete(delete_tenant))
         .route(
             "/tenants/{id}/users",
             routing::post(add_user).get(list_users),
@@ -146,6 +148,53 @@ async fn list_tenants(State(state): State<PlatformState>) -> impl IntoResponse {
                 Json(serde_json::json!(TenantListResponse { tenants })),
             )
         }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// `DELETE /api/tenants/:id` — remove a tenant and its data.
+pub(crate) async fn delete_tenant(
+    State(state): State<PlatformState>,
+    axum::extract::Path(tenant_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let Some(ref store) = state.server.event_store else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "no event store configured"})),
+        );
+    };
+
+    let Some(router) = store.tenant_router() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "tenant management requires routed storage mode"})),
+        );
+    };
+
+    // Remove from persistence (Turso registry + users).
+    match router.remove_tenant(&tenant_id).await {
+        Ok(true) => {
+            // Also remove from in-memory SpecRegistry.
+            let tid = temper_runtime::tenant::TenantId::new(&tenant_id);
+            {
+                let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
+                registry.remove_tenant(&tid);
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "deleted": true,
+                    "tenant_id": tenant_id,
+                })),
+            )
+        }
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("tenant '{tenant_id}' not found")})),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
