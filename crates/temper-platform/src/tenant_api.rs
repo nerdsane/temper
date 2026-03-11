@@ -332,7 +332,6 @@ pub(crate) async fn install_os_app(
         );
     }
 
-
     match crate::os_apps::install_os_app(&state, &req.tenant, &app_name) {
         Ok(entity_types) => (
             StatusCode::OK,
