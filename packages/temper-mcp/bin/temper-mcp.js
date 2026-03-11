@@ -5,11 +5,11 @@ const os = require("os");
 const path = require("path");
 
 const PLATFORM_PACKAGES = {
-  "darwin-arm64": "@temper/mcp-darwin-arm64",
-  "darwin-x64": "@temper/mcp-darwin-x64",
-  "linux-x64": "@temper/mcp-linux-x64",
-  "linux-arm64": "@temper/mcp-linux-arm64",
-  "win32-x64": "@temper/mcp-win32-x64",
+  "darwin-arm64": "temper-mcp-darwin-arm64",
+  "darwin-x64": "temper-mcp-darwin-x64",
+  "linux-x64": "temper-mcp-linux-x64",
+  "linux-arm64": "temper-mcp-linux-arm64",
+  "win32-x64": "temper-mcp-win32-x64",
 };
 
 const platformKey = `${os.platform()}-${os.arch()}`;
@@ -35,7 +35,7 @@ try {
   console.error(
     `Could not find the binary package ${pkg}. ` +
     `This usually means the optional dependency was not installed.\n` +
-    `Try reinstalling: npm install @temper/mcp`
+    `Try reinstalling: npm install temper-mcp`
   );
   process.exit(1);
 }

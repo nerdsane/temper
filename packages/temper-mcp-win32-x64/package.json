@@ -1,5 +1,5 @@
 {
-  "name": "@temper/mcp-win32-x64",
+  "name": "temper-mcp-win32-x64",
   "version": "0.1.0",
   "description": "Temper MCP binary for Windows x64",
   "license": "MIT",

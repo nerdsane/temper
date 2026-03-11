@@ -1,5 +1,5 @@
 {
-  "name": "@temper/mcp-linux-x64",
+  "name": "temper-mcp-linux-x64",
   "version": "0.1.0",
   "description": "Temper MCP binary for Linux x64",
   "license": "MIT",

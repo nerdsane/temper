@@ -1,4 +1,4 @@
-# @temper/mcp
+# temper-mcp
 
 MCP server for [Temper](https://temper.build) — the governed application platform.
 
@@ -6,13 +6,13 @@ MCP server for [Temper](https://temper.build) — the governed application platf
 
 ```bash
 # Add to Claude Code
-claude mcp add temper -- npx -y @temper/mcp --url https://api.temper.build
+claude mcp add temper -- npx -y temper-mcp --url https://api.temper.build
 
 # With API key
-claude mcp add temper -e TEMPER_API_KEY=sk-xxx -- npx -y @temper/mcp --url https://api.temper.build
+claude mcp add temper -e TEMPER_API_KEY=sk-xxx -- npx -y temper-mcp --url https://api.temper.build
 
 # Self-hosted
-claude mcp add temper -- npx -y @temper/mcp --url http://localhost:3000
+claude mcp add temper -- npx -y temper-mcp --url http://localhost:3000
 ```
 
 ## What is Temper?
