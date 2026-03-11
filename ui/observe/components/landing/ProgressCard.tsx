@@ -84,8 +84,8 @@ export default function ProgressCard() {
         <div className="text-[9px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-muted)] mb-2">Progress</div>
         <div className="w-full h-[3px] bg-[var(--color-bg-elevated)] rounded-sm overflow-hidden">
           <div
-            className="h-full bg-[var(--color-accent-teal)] rounded-sm transition-[width] duration-400 ease-out"
-            style={{ width: `${progress}%` }}
+            className="h-full bg-[var(--color-accent-teal)] rounded-sm transition-[width] duration-400"
+            style={{ width: `${progress}%`, transitionTimingFunction: 'cubic-bezier(0.16, 1, 0.3, 1)' }}
           />
         </div>
       </div>

@@ -44,8 +44,8 @@ export default function ScrollReveal({
   return (
     <div
       ref={ref}
-      className={`transition-all duration-600 ease-out ${visible ? "translate-y-0 translate-x-0 scale-100 opacity-100" : hiddenClasses[animation]} ${className}`}
-      style={{ transitionDelay: `${delay}ms` }}
+      className={`transition-all duration-600 ${visible ? "translate-y-0 translate-x-0 scale-100 opacity-100" : hiddenClasses[animation]} ${className}`}
+      style={{ transitionDelay: `${delay}ms`, transitionTimingFunction: 'cubic-bezier(0.16, 1, 0.3, 1)' }}
     >
       {children}
     </div>

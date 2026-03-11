@@ -18,7 +18,7 @@ export default function ObserveLayout({
             </div>
             <main className="flex-1 overflow-y-auto bg-[var(--color-bg-primary)]">
               <div className="grain-overlay" />
-              <div className="max-w-6xl mx-auto px-6 py-5 relative z-10">
+              <div className="max-w-6xl mx-auto px-6 py-5 relative z-10 animate-content-reveal">
                 <ErrorBoundary>{children}</ErrorBoundary>
               </div>
             </main>

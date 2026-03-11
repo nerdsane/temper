@@ -110,7 +110,16 @@ code, .font-mono {
 }
 
 .animate-fade-in {
-  animation: fadeIn 0.3s ease-out forwards;
+  animation: fadeIn 0.3s var(--ease) forwards;
+}
+
+/* ── Dashboard content entrance (staggered reveal) */
+@keyframes content-reveal {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-content-reveal {
+  animation: content-reveal 0.5s var(--ease) both;
 }
 
 /* ── Highlight flash (accent bg pulse on new items) */
@@ -118,7 +127,7 @@ code, .font-mono {
   0% { background-color: var(--color-accent-teal-dim); }
   100% { background-color: transparent; }
 }
-.animate-highlight-new { animation: highlight-flash 0.8s ease-out forwards; }
+.animate-highlight-new { animation: highlight-flash 0.8s var(--ease) forwards; }
 
 /* ── Status flash (box-shadow pulse on state change) */
 @keyframes status-flash-teal {
@@ -131,30 +140,30 @@ code, .font-mono {
   50% { box-shadow: 0 0 8px 2px var(--color-accent-pink-glow-mid); }
   100% { box-shadow: 0 0 0 0 transparent; }
 }
-.animate-flash-teal { animation: status-flash-teal 0.6s ease-out forwards; }
-.animate-flash-pink { animation: status-flash-pink 0.6s ease-out forwards; }
+.animate-flash-teal { animation: status-flash-teal 0.6s var(--ease) forwards; }
+.animate-flash-pink { animation: status-flash-pink 0.6s var(--ease) forwards; }
 
 /* ── Nudge entrance (subtle 12px slide for list items) */
 @keyframes nudge-in-right {
   from { opacity: 0; transform: translateX(12px); }
   to { opacity: 1; transform: translateX(0); }
 }
-.animate-slide-in { animation: nudge-in-right 0.25s ease-out forwards; }
-.animate-item-slide-in { animation: nudge-in-right 0.3s ease-out forwards; }
+.animate-slide-in { animation: nudge-in-right 0.25s var(--ease) forwards; }
+.animate-item-slide-in { animation: nudge-in-right 0.35s var(--ease) forwards; }
 
 /* ── Panel entrance (full slide from right edge) */
 @keyframes panel-slide-in-right {
   from { opacity: 0; transform: translateX(100%); }
   to { opacity: 1; transform: translateX(0); }
 }
-.animate-slide-in-right { animation: panel-slide-in-right 0.2s ease-out forwards; }
+.animate-slide-in-right { animation: panel-slide-in-right 0.25s var(--ease) forwards; }
 
 /* ── Toast entrance (slide up from bottom) */
 @keyframes slide-in-up {
-  from { opacity: 0; transform: translateY(12px) scale(0.95); }
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
-.animate-slide-in-up { animation: slide-in-up 0.2s ease-out forwards; }
+.animate-slide-in-up { animation: slide-in-up 0.25s var(--ease) forwards; }
 
 /* Glass utility */
 .glass {
@@ -243,13 +252,13 @@ code, .font-mono {
 .animate-orb-drift-1 { animation: orb-drift-1 25s ease-in-out infinite; }
 .animate-orb-drift-2 { animation: orb-drift-2 30s ease-in-out infinite; }
 .animate-glow-pulse { animation: glow-pulse 8s ease-in-out infinite; }
-.animate-hero-fade-up { animation: hero-fade-up 0.5s ease-out both; }
-.animate-hero-mascot { animation: hero-mascot-reveal 0.6s ease-out both; animation-delay: 0.1s; }
+.animate-hero-fade-up { animation: hero-fade-up 0.5s var(--ease) both; }
+.animate-hero-mascot { animation: hero-mascot-reveal 0.6s var(--ease) both; animation-delay: 0.1s; }
 .animate-filter-progress { animation: filter-progress 2s linear infinite; }
 .animate-dash-loop { animation: dash-loop 4s linear infinite; }
 .animate-dot-pulse { animation: dot-pulse 2s ease-in-out infinite; }
-.animate-recorded-slide-in { animation: recorded-slide-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-.animate-recorded-flash { animation: recorded-flash 0.8s ease-out forwards; }
+.animate-recorded-slide-in { animation: recorded-slide-in 0.4s var(--ease) forwards; }
+.animate-recorded-flash { animation: recorded-flash 0.8s var(--ease) forwards; }
 
 /* Reduced motion: disable all custom animations for users who prefer it */
 @media (prefers-reduced-motion: reduce) {
@@ -269,6 +278,7 @@ code, .font-mono {
   .animate-filter-progress,
   .animate-dash-loop,
   .animate-dot-pulse,
+  .animate-content-reveal,
   .animate-recorded-slide-in,
   .animate-recorded-flash {
     animation: none !important;
