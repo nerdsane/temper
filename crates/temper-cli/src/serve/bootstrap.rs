@@ -61,13 +61,22 @@ pub(super) async fn init_storage(
                     Some(format!("{home}/.local/share/temper/tenants"))
                 });
 
-                let router = TenantStoreRouter::new(
+                let mut router = TenantStoreRouter::new(
                     &platform_url,
                     platform_token.as_deref(),
                     local_base_dir,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to create tenant store router: {e}"))?;
+
+                // Wire Turso Cloud provisioning when API credentials are available.
+                if let (Ok(api_token), Ok(org)) =
+                    (std::env::var("TURSO_API_TOKEN"), std::env::var("TURSO_ORG"))
+                {
+                    let group = std::env::var("TURSO_GROUP").ok();
+                    router = router.with_cloud_config(api_token, org, group);
+                    println!("  Cloud provisioning: enabled");
+                }
 
                 let tenant_count = router.connected_tenants().await.len();
                 println!(
