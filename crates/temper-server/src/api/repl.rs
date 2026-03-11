@@ -57,7 +57,7 @@ pub(crate) async fn handle_repl(
         rt.block_on(async move {
             let config = temper_sandbox::repl::ReplConfig {
                 server_port: port,
-                principal_id,
+                agent_id: principal_id,
             };
             temper_sandbox::repl::run_repl(&config, &code).await
         })

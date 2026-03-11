@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::helpers::{
     escape_odata_key, expect_json_object_arg, expect_string_arg, optional_string_arg,
 };
-use crate::http::{temper_governance_request, temper_request, temper_request_bytes};
+use crate::http::{AgentIdentity, temper_governance_request, temper_request, temper_request_bytes};
 
 /// Shared context for dispatching temper methods.
 pub struct DispatchContext<'a> {
@@ -20,8 +20,12 @@ pub struct DispatchContext<'a> {
     pub base_url: &'a str,
     /// Tenant ID.
     pub tenant: &'a str,
-    /// Agent principal ID for Cedar authorization.
-    pub principal_id: Option<&'a str>,
+    /// Agent instance ID for Cedar authorization and trajectory attribution.
+    pub agent_id: Option<&'a str>,
+    /// Agent software type (e.g. `claude-code`).
+    pub agent_type: Option<&'a str>,
+    /// Session ID for grouping actions within a conversation.
+    pub session_id: Option<&'a str>,
     /// Optional closure to resolve entity type to entity set name.
     pub entity_set_resolver: Option<&'a (dyn Fn(&str) -> String + Send + Sync)>,
     /// Optional path to temper binary (for `compile_wasm` SDK resolution).
@@ -31,6 +35,15 @@ pub struct DispatchContext<'a> {
 }
 
 impl<'a> DispatchContext<'a> {
+    /// Build the agent identity triple for HTTP requests.
+    fn identity(&self) -> AgentIdentity<'a> {
+        AgentIdentity {
+            agent_id: self.agent_id,
+            agent_type: self.agent_type,
+            session_id: self.session_id,
+        }
+    }
+
     /// Resolve an entity type name to an entity set name.
     fn resolve_set(&self, entity_or_set: &str) -> String {
         if let Some(resolver) = self.entity_set_resolver {
@@ -79,7 +92,7 @@ pub async fn dispatch_temper_method(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
                 "/observe/specs",
@@ -93,7 +106,7 @@ pub async fn dispatch_temper_method(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
                 &format!("/observe/specs/{entity_type}"),
@@ -142,7 +155,7 @@ async fn dispatch_entity(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
                 &path,
@@ -151,7 +164,7 @@ async fn dispatch_entity(
             .await?;
             Ok(body.get("value").cloned().unwrap_or(body))
         }
-        "get_agent_id" => Ok(serde_json::json!(ctx.principal_id.unwrap_or(""))),
+        "get_agent_id" => Ok(serde_json::json!(ctx.agent_id.unwrap_or(""))),
         "get" => {
             let entity = expect_string_arg(args, 0, "entity_type", method)?;
             let entity_id = expect_string_arg(args, 1, "entity_id", method)?;
@@ -161,7 +174,7 @@ async fn dispatch_entity(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
                 &format!("/tdata/{set}('{key}')"),
@@ -178,7 +191,7 @@ async fn dispatch_entity(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::POST,
                 &format!("/tdata/{set}"),
@@ -198,7 +211,7 @@ async fn dispatch_entity(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::POST,
                 &format!("/tdata/{set}('{key}')/Temper.{action_name}"),
@@ -217,7 +230,7 @@ async fn dispatch_entity(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::PATCH,
                 &format!("/tdata/{set}('{key}')"),
@@ -239,7 +252,7 @@ async fn dispatch_entity(
                         ctx.http,
                         ctx.base_url,
                         ctx.tenant,
-                        ctx.principal_id,
+                        &ctx.identity(),
                         ctx.api_key,
                         Method::POST,
                         &format!("/tdata/{path}"),
@@ -251,7 +264,7 @@ async fn dispatch_entity(
                     ctx.http,
                     ctx.base_url,
                     ctx.tenant,
-                    ctx.principal_id,
+                    &ctx.identity(),
                     ctx.api_key,
                     Method::GET,
                     &format!("/tdata/{path}"),
@@ -264,7 +277,7 @@ async fn dispatch_entity(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
                 &format!("/tdata/{path}"),
@@ -290,7 +303,7 @@ async fn dispatch_specs(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::POST,
                 "/api/specs/load-inline",
@@ -303,7 +316,7 @@ async fn dispatch_specs(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
                 &format!("/api/tenants/{}/policies", ctx.tenant),
@@ -332,7 +345,7 @@ async fn dispatch_governance(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
                 &path,
@@ -346,7 +359,7 @@ async fn dispatch_governance(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
                 &format!("/api/tenants/{}/decisions", ctx.tenant),
@@ -376,21 +389,30 @@ async fn dispatch_governance(
             let http = ctx.http.clone();
             let base_url = ctx.base_url.to_string();
             let tenant_str = ctx.tenant.to_string();
-            let pid = ctx.principal_id.map(|s| s.to_string());
+            let agent_id_owned = ctx.agent_id.map(|s| s.to_string());
+            let agent_type_owned = ctx.agent_type.map(|s| s.to_string());
+            let session_id_owned = ctx.session_id.map(|s| s.to_string());
             let api_key = ctx.api_key.map(|s| s.to_string());
             let (decision, _outcome) =
                 crate::governance::poll_decision(&decision_id, &config, || {
                     let http = http.clone();
                     let base_url = base_url.clone();
                     let tenant_str = tenant_str.clone();
-                    let pid = pid.clone();
+                    let agent_id_owned = agent_id_owned.clone();
+                    let agent_type_owned = agent_type_owned.clone();
+                    let session_id_owned = session_id_owned.clone();
                     let api_key = api_key.clone();
                     async move {
+                        let identity = AgentIdentity {
+                            agent_id: agent_id_owned.as_deref(),
+                            agent_type: agent_type_owned.as_deref(),
+                            session_id: session_id_owned.as_deref(),
+                        };
                         temper_governance_request(
                             &http,
                             &base_url,
                             &tenant_str,
-                            pid.as_deref(),
+                            &identity,
                             api_key.as_deref(),
                             Method::GET,
                             &format!("/api/tenants/{tenant_str}/decisions"),
@@ -423,7 +445,7 @@ async fn dispatch_wasm(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::POST,
                 &format!("/api/wasm/modules/{module_name}"),
@@ -470,7 +492,7 @@ async fn dispatch_evolution(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
                 &path,
@@ -483,7 +505,7 @@ async fn dispatch_evolution(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
                 "/observe/evolution/insights",
@@ -501,7 +523,7 @@ async fn dispatch_evolution(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
                 &path,
@@ -514,7 +536,7 @@ async fn dispatch_evolution(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::POST,
                 "/api/evolution/sentinel/check",
@@ -538,7 +560,7 @@ async fn dispatch_os_apps(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
                 "/api/os-apps",
@@ -553,7 +575,7 @@ async fn dispatch_os_apps(
                 ctx.http,
                 ctx.base_url,
                 ctx.tenant,
-                ctx.principal_id,
+                &ctx.identity(),
                 ctx.api_key,
                 Method::POST,
                 &format!("/api/os-apps/{app_name}/install"),
@@ -649,7 +671,7 @@ temper-wasm-sdk = {{ path = "{sdk_path}" }}
         ctx.http,
         ctx.base_url,
         ctx.tenant,
-        ctx.principal_id,
+        &ctx.identity(),
         ctx.api_key,
         Method::POST,
         &format!("/api/wasm/modules/{module_name}"),

@@ -18,7 +18,9 @@ use super::protocol::dispatch_json_line;
 pub(crate) struct RuntimeContext {
     pub(crate) base_url: String,
     pub(crate) http: reqwest::Client,
-    pub(crate) principal_id: Option<String>,
+    pub(crate) agent_id: Option<String>,
+    pub(crate) agent_type: Option<String>,
+    pub(crate) session_id: Option<String>,
     pub(crate) api_key: Option<String>,
     sandbox: temper_sandbox::runner::PersistentSandbox,
 }
@@ -36,7 +38,9 @@ impl RuntimeContext {
         Ok(Self {
             base_url,
             http: reqwest::Client::new(),
-            principal_id: config.principal_id.clone(),
+            agent_id: config.agent_id.clone(),
+            agent_type: config.agent_type.clone(),
+            session_id: config.session_id.clone(),
             api_key: config
                 .api_key
                 .clone()
@@ -48,7 +52,9 @@ impl RuntimeContext {
     pub(crate) async fn run_execute(&mut self, code: &str) -> Result<String> {
         let http = self.http.clone();
         let base_url = self.base_url.clone();
-        let principal_id = self.principal_id.clone();
+        let agent_id = self.agent_id.clone();
+        let agent_type = self.agent_type.clone();
+        let session_id = self.session_id.clone();
         let api_key = self.api_key.clone();
 
         self.sandbox
@@ -59,7 +65,9 @@ impl RuntimeContext {
                  kwargs: Vec<(MontyObject, MontyObject)>| {
                     let http = http.clone();
                     let base_url = base_url.clone();
-                    let principal_id = principal_id.clone();
+                    let agent_id = agent_id.clone();
+                    let agent_type = agent_type.clone();
+                    let session_id = session_id.clone();
                     let api_key = api_key.clone();
                     async move {
                         if !kwargs.is_empty() {
@@ -88,7 +96,9 @@ impl RuntimeContext {
                             http: &http,
                             base_url: &base_url,
                             tenant: &tenant,
-                            principal_id: principal_id.as_deref(),
+                            agent_id: agent_id.as_deref(),
+                            agent_type: agent_type.as_deref(),
+                            session_id: session_id.as_deref(),
                             entity_set_resolver: None,
                             binary_path: None,
                             api_key: api_key.as_deref(),

@@ -14,6 +14,22 @@ Use `/temper-developer` or read `.claude/skills/temper-developer.md` and follow 
 
 Use `/temper-agent` or read `.claude/skills/temper-agent.md` and follow its patterns.
 
+## PM App: Planning/Planned Workflow
+
+Issues in the Project Management OS App use a **Planning → Planned** phase with role separation:
+
+1. **Supervisor** triages issue, assigns a planner (`AssignPlanner`) and implementer (`Assign`)
+2. **Planner** calls `BeginPlanning` → drafts plan via `WritePlan` (plan + acceptance_criteria)
+3. **Supervisor/Human** reviews and calls `ApprovePlan` → issue moves to `Planned`
+4. **Implementer** calls `StartWork` (requires approved plan + assignee) → implements → `SubmitForReview`
+
+**Role separation is Cedar-enforced:**
+- Planner cannot approve their own plan (`resource.PlannerId != principal.id`)
+- Implementer cannot approve their own review (`resource.AssigneeId != principal.id`)
+- Only supervisors/humans can triage, approve plans, and approve reviews
+
+**Agent API:** Read `.claude/skills/temper-agent.md` for the full Temper Python API including planning methods (`begin_planning`, `write_plan`, `approve_plan`).
+
 ## What is Temper?
 A conversational application platform. Developers describe what they want through conversation — the system generates specs, verifies them, and deploys entity actors. End users interact through a separate production chat. Unmet user intents feed back through the Evolution Engine for developer approval.
 

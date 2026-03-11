@@ -43,6 +43,7 @@ open = "5"
 base64 = "0.22"
 sha2 = { workspace = true }
 hex = "0.4"
+hostname = { workspace = true }
 url = "2"
 urlencoding = "2"
 termimad = "0.34.1"

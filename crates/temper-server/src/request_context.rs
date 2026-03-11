@@ -8,11 +8,16 @@ use axum::http::HeaderMap;
 
 /// Agent identity context extracted from HTTP headers.
 ///
-/// Threads `X-Agent-Id` and `X-Session-Id` through the dispatch chain
-/// for attribution in trajectories, events, and WASM invocations.
+/// Threads identity through the dispatch chain for attribution in
+/// trajectories, events, and WASM invocations.
+///
+/// All identity headers use the `X-Temper-*` namespace:
+/// - `X-Temper-Principal-Id` — unique agent instance ID
+/// - `X-Temper-Agent-Type` — agent software classification (e.g. `claude-code`)
+/// - `X-Session-Id` — session grouping
 #[derive(Debug, Clone, Default)]
 pub struct AgentContext {
-    /// Optional agent identifier (from `X-Agent-Id` header).
+    /// Optional agent identifier (from `X-Temper-Principal-Id` header).
     pub agent_id: Option<String>,
     /// Optional session identifier (from `X-Session-Id` header).
     pub session_id: Option<String>,
@@ -37,23 +42,14 @@ impl AgentContext {
 
 /// Extract agent identity from request headers.
 ///
-/// Reads `X-Agent-Id` and `X-Session-Id` headers. Returns defaults
-/// (both `None`) if headers are absent or empty.
+/// Reads `X-Temper-Principal-Id`, `X-Session-Id`, and `X-Temper-Agent-Type`.
+/// Returns defaults (all `None`) if headers are absent or empty.
 pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
     let agent_id = headers
-        .get("x-agent-id")
+        .get("x-temper-principal-id")
         .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .or_else(|| {
-            // Fall back to X-Temper-Principal-Id for agents using the
-            // Cedar security context headers instead of X-Agent-Id.
-            headers
-                .get("x-temper-principal-id")
-                .and_then(|v| v.to_str().ok())
-                .filter(|s| !s.is_empty() && s != &"anonymous")
-                .map(String::from)
-        });
+        .filter(|s| !s.is_empty() && *s != "anonymous")
+        .map(String::from);
     let session_id = headers
         .get("x-session-id")
         .and_then(|v| v.to_str().ok())
@@ -77,13 +73,15 @@ mod tests {
     use axum::http::HeaderMap;
 
     #[test]
-    fn extract_agent_context_both_present() {
+    fn extract_agent_context_principal_and_session() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-agent-id", "agent-007".parse().unwrap());
+        headers.insert("x-temper-principal-id", "cc-a1b2c3".parse().unwrap());
         headers.insert("x-session-id", "sess-abc".parse().unwrap());
+        headers.insert("x-temper-agent-type", "claude-code".parse().unwrap());
         let ctx = extract_agent_context(&headers);
-        assert_eq!(ctx.agent_id.as_deref(), Some("agent-007"));
+        assert_eq!(ctx.agent_id.as_deref(), Some("cc-a1b2c3"));
         assert_eq!(ctx.session_id.as_deref(), Some("sess-abc"));
+        assert_eq!(ctx.agent_type.as_deref(), Some("claude-code"));
     }
 
     #[test]
@@ -92,33 +90,17 @@ mod tests {
         let ctx = extract_agent_context(&headers);
         assert!(ctx.agent_id.is_none());
         assert!(ctx.session_id.is_none());
+        assert!(ctx.agent_type.is_none());
     }
 
     #[test]
     fn extract_agent_context_empty_values() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-agent-id", "".parse().unwrap());
+        headers.insert("x-temper-principal-id", "".parse().unwrap());
         headers.insert("x-session-id", "".parse().unwrap());
         let ctx = extract_agent_context(&headers);
         assert!(ctx.agent_id.is_none());
         assert!(ctx.session_id.is_none());
-    }
-
-    #[test]
-    fn extract_agent_context_falls_back_to_temper_principal() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-temper-principal-id", "checkout-bot".parse().unwrap());
-        let ctx = extract_agent_context(&headers);
-        assert_eq!(ctx.agent_id.as_deref(), Some("checkout-bot"));
-    }
-
-    #[test]
-    fn extract_agent_context_prefers_x_agent_id() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-agent-id", "agent-007".parse().unwrap());
-        headers.insert("x-temper-principal-id", "checkout-bot".parse().unwrap());
-        let ctx = extract_agent_context(&headers);
-        assert_eq!(ctx.agent_id.as_deref(), Some("agent-007"));
     }
 
     #[test]

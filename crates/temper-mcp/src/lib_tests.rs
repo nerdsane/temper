@@ -18,7 +18,9 @@ fn ctx_for_port(port: u16) -> RuntimeContext {
     RuntimeContext::from_config(&McpConfig {
         temper_port: Some(port),
         temper_url: None,
-        principal_id: None,
+        agent_id: None,
+        agent_type: None,
+        session_id: None,
         api_key: None,
     })
     .expect("ctx")
@@ -29,7 +31,9 @@ fn ctx_for_url(url: &str) -> RuntimeContext {
     RuntimeContext::from_config(&McpConfig {
         temper_port: None,
         temper_url: Some(url.to_string()),
-        principal_id: None,
+        agent_id: None,
+        agent_type: None,
+        session_id: None,
         api_key: None,
     })
     .expect("ctx")
@@ -159,7 +163,9 @@ fn from_config_requires_port_or_url() {
     let result = RuntimeContext::from_config(&McpConfig {
         temper_port: None,
         temper_url: None,
-        principal_id: None,
+        agent_id: None,
+        agent_type: None,
+        session_id: None,
         api_key: None,
     });
     assert!(result.is_err(), "should fail without --port or --url");
@@ -328,7 +334,9 @@ async fn e2e_agent_denial_human_approve_retry() {
     let mut ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(port),
         temper_url: None,
-        principal_id: Some("checkout-bot".to_string()),
+        agent_id: Some("checkout-bot".to_string()),
+        agent_type: Some("claude-code".to_string()),
+        session_id: None,
         api_key: None,
     })
     .expect("ctx");
@@ -570,7 +578,9 @@ async fn get_decision_status_returns_decision() {
     let mut ctx = RuntimeContext::from_config(&McpConfig {
         temper_port: Some(port),
         temper_url: None,
-        principal_id: Some("status-bot".to_string()),
+        agent_id: Some("status-bot".to_string()),
+        agent_type: Some("claude-code".to_string()),
+        session_id: None,
         api_key: None,
     })
     .expect("ctx");

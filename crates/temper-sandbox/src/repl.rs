@@ -15,8 +15,8 @@ use crate::runner::run_sandbox;
 pub struct ReplConfig {
     /// Port of the running Temper HTTP server.
     pub server_port: u16,
-    /// Agent principal ID for `X-Temper-Principal-Id` header.
-    pub principal_id: Option<String>,
+    /// Agent ID for `X-Temper-Principal-Id` header.
+    pub agent_id: Option<String>,
 }
 
 /// Run Python code in the Temper Monty sandbox via the REPL endpoint.
@@ -26,7 +26,7 @@ pub struct ReplConfig {
 pub async fn run_repl(config: &ReplConfig, code: &str) -> Result<String> {
     let http = reqwest::Client::new();
     let base_url = format!("http://127.0.0.1:{}", config.server_port);
-    let principal_id = config.principal_id.clone();
+    let agent_id = config.agent_id.clone();
 
     run_sandbox(
         code,
@@ -35,7 +35,7 @@ pub async fn run_repl(config: &ReplConfig, code: &str) -> Result<String> {
         |function_name: String, args: Vec<MontyObject>, kwargs: Vec<(MontyObject, MontyObject)>| {
             let http = http.clone();
             let base_url = base_url.clone();
-            let principal_id = principal_id.clone();
+            let agent_id = agent_id.clone();
             async move {
                 // Strip self arg (dataclass method calls include self as args[0])
                 let args = if args.is_empty() {
@@ -47,7 +47,9 @@ pub async fn run_repl(config: &ReplConfig, code: &str) -> Result<String> {
                     http: &http,
                     base_url: &base_url,
                     tenant: "default",
-                    principal_id: principal_id.as_deref(),
+                    agent_id: agent_id.as_deref(),
+                    agent_type: None,
+                    session_id: None,
                     entity_set_resolver: None,
                     binary_path: None,
                     api_key: None,

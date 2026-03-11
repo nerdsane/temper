@@ -96,8 +96,8 @@ enum Commands {
         /// Mutually exclusive with --port.
         #[arg(long, conflicts_with = "port")]
         url: Option<String>,
-        /// Agent identity for Cedar authorization and trajectory logging (default: "mcp-agent")
-        #[arg(long)]
+        /// Override auto-derived agent identity (deprecated: identity is now auto-derived)
+        #[arg(long, hide = true)]
         agent_id: Option<String>,
     },
 }
