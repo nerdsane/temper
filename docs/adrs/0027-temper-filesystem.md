@@ -321,15 +321,15 @@ TemperFS app code (IOA specs, CSDL, Cedar, reactions) goes through the existing 
 
 | Component | Hot-reloadable? | Location |
 |-----------|-----------------|----------|
-| File/Directory/Workspace states, transitions, guards | Yes | `apps/temper-fs/specs/*.ioa.toml` |
-| Authorization policies | Yes | `apps/temper-fs/policies/*.cedar` |
-| Reaction rules (FileVersion, Workspace usage) | Yes | `apps/temper-fs/reactions/reactions.toml` |
-| Blob storage auth (S3 Sig V4) | Yes | `apps/temper-fs/wasm/blob_adapter/` |
-| Caching strategy (check, populate, dedup) | Yes | `apps/temper-fs/wasm/blob_adapter/` |
-| Hash algorithm (SHA-256, BLAKE3, etc.) | Yes | `apps/temper-fs/wasm/blob_adapter/` via `host_hash_stream` |
-| Action name + params (StreamUpdated, etc.) | Yes | `apps/temper-fs/wasm/blob_adapter/` returns action/params |
-| URL construction (endpoint, bucket) | Yes | `apps/temper-fs/wasm/blob_adapter/` via integration_config |
-| CSDL schema (HasStream, nav properties) | Yes | `apps/temper-fs/schema/model.csdl.xml` |
+| File/Directory/Workspace states, transitions, guards | Yes | `os-apps/temper-fs/specs/*.ioa.toml` |
+| Authorization policies | Yes | `os-apps/temper-fs/policies/*.cedar` |
+| Reaction rules (FileVersion, Workspace usage) | Yes | `os-apps/temper-fs/reactions/reactions.toml` |
+| Blob storage auth (S3 Sig V4) | Yes | `os-apps/temper-fs/wasm/blob_adapter/` |
+| Caching strategy (check, populate, dedup) | Yes | `os-apps/temper-fs/wasm/blob_adapter/` |
+| Hash algorithm (SHA-256, BLAKE3, etc.) | Yes | `os-apps/temper-fs/wasm/blob_adapter/` via `host_hash_stream` |
+| Action name + params (StreamUpdated, etc.) | Yes | `os-apps/temper-fs/wasm/blob_adapter/` returns action/params |
+| URL construction (endpoint, bucket) | Yes | `os-apps/temper-fs/wasm/blob_adapter/` via integration_config |
+| CSDL schema (HasStream, nav properties) | Yes | `os-apps/temper-fs/schema/model.csdl.xml` |
 | `$value` endpoint routing | No | `crates/temper-server/` (generic framework) |
 | StreamRegistry (dumb byte store) | No | `crates/temper-wasm/` (generic framework) |
 | Host functions (stream, cache, hash) | No | `crates/temper-wasm/` (generic framework) |
@@ -362,4 +362,4 @@ The Rust framework code is **generic** — it works for any entity type with `Ha
 
 Framework enhancements ($value routing, StreamRegistry, streaming host functions) are additive — they don't modify existing behavior. Rollback is removing unused code.
 
-TemperFS app (IOA specs, CSDL, Cedar, reactions, WASM blob_adapter) lives in `apps/temper-fs/` and can be unregistered from SpecRegistry without affecting other apps.
+TemperFS app (IOA specs, CSDL, Cedar, reactions, WASM blob_adapter) lives in `os-apps/temper-fs/` and can be unregistered from SpecRegistry without affecting other apps.
