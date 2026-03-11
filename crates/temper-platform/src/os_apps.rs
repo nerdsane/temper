@@ -22,6 +22,8 @@ const PM_LABEL_IOA: &str = include_str!("../../../os-apps/project-management/lab
 const PM_CSDL: &str = include_str!("../../../os-apps/project-management/model.csdl.xml");
 const PM_CEDAR_ISSUE: &str =
     include_str!("../../../os-apps/project-management/policies/issue.cedar");
+const PM_CEDAR_PROJECT: &str =
+    include_str!("../../../os-apps/project-management/policies/project.cedar");
 
 // ── Temper FS OS App ───────────────────────────────────────────────
 
@@ -100,7 +102,7 @@ pub fn get_os_app(name: &str) -> Option<OsAppBundle> {
         "project-management" => Some(OsAppBundle {
             specs: PM_SPECS,
             csdl: PM_CSDL,
-            cedar_policies: &[PM_CEDAR_ISSUE],
+            cedar_policies: &[PM_CEDAR_ISSUE, PM_CEDAR_PROJECT],
         }),
         "temper-fs" => Some(OsAppBundle {
             specs: FS_SPECS,
