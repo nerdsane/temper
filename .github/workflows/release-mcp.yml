@@ -35,8 +35,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-02-08
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools
@@ -96,7 +97,7 @@ jobs:
         run: |
           for pkg in temper-mcp-darwin-arm64 temper-mcp-darwin-x64 temper-mcp-linux-x64 temper-mcp-linux-arm64 temper-mcp-win32-x64; do
             cd packages/$pkg
-            npm publish --access public || echo "Failed to publish $pkg"
+            npm publish || echo "Failed to publish $pkg"
             cd ../..
           done
 
@@ -105,4 +106,4 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd packages/temper-mcp
-          npm publish --access public
+          npm publish
