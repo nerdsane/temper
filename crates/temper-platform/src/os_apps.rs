@@ -23,6 +23,16 @@ const PM_CSDL: &str = include_str!("../../../os-apps/project-management/model.cs
 const PM_CEDAR_ISSUE: &str =
     include_str!("../../../os-apps/project-management/policies/issue.cedar");
 
+// ── Temper FS OS App ───────────────────────────────────────────────
+
+const FS_FILE_IOA: &str = include_str!("../../../os-apps/temper-fs/specs/file.ioa.toml");
+const FS_DIR_IOA: &str = include_str!("../../../os-apps/temper-fs/specs/directory.ioa.toml");
+const FS_VERSION_IOA: &str = include_str!("../../../os-apps/temper-fs/specs/file_version.ioa.toml");
+const FS_WORKSPACE_IOA: &str = include_str!("../../../os-apps/temper-fs/specs/workspace.ioa.toml");
+const FS_CSDL: &str = include_str!("../../../os-apps/temper-fs/specs/model.csdl.xml");
+const FS_CEDAR_FILE: &str = include_str!("../../../os-apps/temper-fs/policies/file.cedar");
+const FS_CEDAR_WORKSPACE: &str =
+    include_str!("../../../os-apps/temper-fs/policies/workspace.cedar");
 /// Metadata for an OS app in the catalog.
 #[derive(Debug, Clone, Serialize)]
 pub struct OsAppEntry {
@@ -55,13 +65,29 @@ const PM_SPECS: &[(&str, &str)] = &[
     ("Label", PM_LABEL_IOA),
 ];
 
+/// Temper FS app specs.
+const FS_SPECS: &[(&str, &str)] = &[
+    ("File", FS_FILE_IOA),
+    ("Directory", FS_DIR_IOA),
+    ("FileVersion", FS_VERSION_IOA),
+    ("Workspace", FS_WORKSPACE_IOA),
+];
+
 /// All available OS apps.
-static OS_APP_CATALOG: &[OsAppEntry] = &[OsAppEntry {
-    name: "project-management",
-    description: "Issue tracking with projects, cycles, labels, and comments",
-    entity_types: &["Issue", "Project", "Cycle", "Comment", "Label"],
-    version: "0.1.0",
-}];
+static OS_APP_CATALOG: &[OsAppEntry] = &[
+    OsAppEntry {
+        name: "project-management",
+        description: "Issue tracking with projects, cycles, labels, and comments",
+        entity_types: &["Issue", "Project", "Cycle", "Comment", "Label"],
+        version: "0.1.0",
+    },
+    OsAppEntry {
+        name: "temper-fs",
+        description: "Governed filesystem with workspaces, directories, files, and versioning",
+        entity_types: &["File", "Directory", "FileVersion", "Workspace"],
+        version: "0.1.0",
+    },
+];
 
 /// List all available OS apps.
 pub fn list_os_apps() -> &'static [OsAppEntry] {
@@ -75,6 +101,11 @@ pub fn get_os_app(name: &str) -> Option<OsAppBundle> {
             specs: PM_SPECS,
             csdl: PM_CSDL,
             cedar_policies: &[PM_CEDAR_ISSUE],
+        }),
+        "temper-fs" => Some(OsAppBundle {
+            specs: FS_SPECS,
+            csdl: FS_CSDL,
+            cedar_policies: &[FS_CEDAR_FILE, FS_CEDAR_WORKSPACE],
         }),
         _ => None,
     }
