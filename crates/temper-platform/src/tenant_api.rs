@@ -310,11 +310,29 @@ pub struct InstallOsAppRequest {
 }
 
 /// `POST /api/os-apps/:name/install` — install an OS app into a tenant.
+///
+/// Ensures the tenant is registered in persistence (Turso) before loading
+/// specs into the in-memory registry. Without this, actors would fail to
+/// persist events because the storage layer rejects unknown tenants.
 pub(crate) async fn install_os_app(
     State(state): State<PlatformState>,
     axum::extract::Path(app_name): axum::extract::Path<String>,
     Json(req): Json<InstallOsAppRequest>,
 ) -> impl IntoResponse {
+    // Ensure tenant exists in persistence before loading specs.
+    if let Some(ref store) = state.server.event_store {
+        if let Some(router) = store.tenant_router() {
+            if let Err(e) = router.ensure_tenant(&req.tenant).await {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("failed to ensure tenant in persistence: {e}"),
+                    })),
+                );
+            }
+        }
+    }
+
     match crate::os_apps::install_os_app(&state, &req.tenant, &app_name) {
         Ok(entity_types) => (
             StatusCode::OK,

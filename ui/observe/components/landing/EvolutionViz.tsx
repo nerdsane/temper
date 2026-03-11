@@ -109,7 +109,7 @@ export default function EvolutionViz() {
       {/* Background loop path (dashed) */}
       <path
         d={loopPath}
-        stroke="rgba(255,255,255,0.05)"
+        style={{ stroke: 'var(--color-border)' }}
         strokeWidth="1"
         strokeDasharray="6 4"
         fill="none"
@@ -118,7 +118,7 @@ export default function EvolutionViz() {
       {/* Trail: a partial stroke that follows behind the particle */}
       <path
         d={loopPath}
-        stroke="#7dd3fc"
+        style={{ stroke: 'var(--color-accent-teal)' }}
         strokeWidth="1.5"
         strokeLinecap="round"
         fill="none"
@@ -131,19 +131,8 @@ export default function EvolutionViz() {
       {nodes.map((node, i) => {
         const next = nodes[(i + 1) % nodes.length];
         const cp = controlPoints[i];
-        // Midpoint of quadratic bezier at t=0.5
         const mx = 0.25 * node.x + 0.5 * cp.x + 0.25 * next.x;
         const my = 0.25 * node.y + 0.5 * cp.y + 0.25 * next.y;
-        // Tangent at t=0.5 for rotation
-        const tx = -node.x + 2 * cp.x - next.x; // derivative direction (negated for forward)
-        const ty = -node.y + 2 * cp.y - next.y;
-        const fwd_x = next.x - node.x;
-        const fwd_y = next.y - node.y;
-        const angle = Math.atan2(
-          -node.y + 2 * (0.5) * (cp.y - node.y) + next.y - node.y ? fwd_y : ty,
-          -node.x + 2 * (0.5) * (cp.x - node.x) + next.x - node.x ? fwd_x : tx,
-        );
-        // Simpler: just use the direction from node to next
         const simpleAngle = Math.atan2(next.y - node.y, next.x - node.x);
 
         return (
@@ -156,7 +145,7 @@ export default function EvolutionViz() {
             <path
               d="M-3,-3 L2,0 L-3,3"
               fill="none"
-              stroke="#7dd3fc"
+              style={{ stroke: 'var(--color-accent-teal)' }}
               strokeWidth="1"
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -178,7 +167,7 @@ export default function EvolutionViz() {
                 cy={node.y}
                 r="18"
                 fill="none"
-                stroke="#7dd3fc"
+                style={{ stroke: 'var(--color-accent-teal)' }}
                 strokeWidth="1"
                 opacity={0.3 * (1 - progress * 0.6)}
                 filter="url(#node-glow)"
@@ -189,8 +178,14 @@ export default function EvolutionViz() {
               cx={node.x}
               cy={node.y}
               r="13"
-              fill={isActive ? "rgba(125,211,252,0.12)" : "rgba(255,255,255,0.02)"}
-              stroke={isActive ? "rgba(125,211,252,0.6)" : "rgba(255,255,255,0.08)"}
+              style={{
+                fill: isActive
+                  ? 'color-mix(in srgb, var(--color-accent-teal) 12%, transparent)'
+                  : 'var(--color-bg-elevated)',
+                stroke: isActive
+                  ? 'color-mix(in srgb, var(--color-accent-teal) 60%, transparent)'
+                  : 'var(--color-border)'
+              }}
               strokeWidth="1.5"
             />
             {/* Icon */}
@@ -199,7 +194,11 @@ export default function EvolutionViz() {
               y={node.y + 1}
               textAnchor="middle"
               dominantBaseline="central"
-              fill={isActive ? "#7dd3fc" : "rgba(255,255,255,0.2)"}
+              style={{
+                fill: isActive
+                  ? 'var(--color-accent-teal)'
+                  : 'var(--color-text-muted)'
+              }}
               fontSize="10"
             >
               {stages[i].icon}
@@ -213,7 +212,7 @@ export default function EvolutionViz() {
         cx={particle.x}
         cy={particle.y}
         r="5"
-        fill="#7dd3fc"
+        style={{ fill: 'var(--color-accent-teal)' }}
         opacity="0.8"
         filter="url(#evo-glow)"
       />
@@ -221,7 +220,7 @@ export default function EvolutionViz() {
         cx={particle.x}
         cy={particle.y}
         r="2"
-        fill="white"
+        style={{ fill: 'var(--color-text-primary)' }}
       />
 
       {/* Labels (inside SVG to avoid overflow clipping) */}
@@ -237,7 +236,11 @@ export default function EvolutionViz() {
               y={node.y + la.dy}
               textAnchor={la.anchor}
               dominantBaseline={i === 2 ? "hanging" : i === 0 ? "auto" : "central"}
-              fill={isActive ? "#7dd3fc" : "rgba(255,255,255,0.2)"}
+              style={{
+                fill: isActive
+                  ? 'var(--color-accent-teal)'
+                  : 'var(--color-text-muted)'
+              }}
               fontSize="8"
               fontFamily="var(--font-mono), monospace"
               fontWeight="700"
@@ -250,7 +253,11 @@ export default function EvolutionViz() {
               y={node.y + la.dy + (i === 0 ? -11 : i === 2 ? 13 : 12)}
               textAnchor={la.anchor}
               dominantBaseline={i === 2 ? "hanging" : i === 0 ? "auto" : "central"}
-              fill={isActive ? "rgba(161,161,170,0.8)" : "rgba(255,255,255,0.1)"}
+              style={{
+                fill: isActive
+                  ? 'var(--color-text-secondary)'
+                  : 'color-mix(in srgb, var(--color-text-muted) 50%, transparent)'
+              }}
               fontSize="7"
               fontFamily="var(--font-mono), monospace"
             >

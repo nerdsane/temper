@@ -39,18 +39,15 @@ export default function TemperedAgentViz() {
         const ringEnd = ringStart + RING_APPEAR_MS;
 
         if (elapsed >= ringStart && elapsed < ringEnd) {
-          // Eased fade-in during appearance window
           const t = (elapsed - ringStart) / RING_APPEAR_MS;
           const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
           newOpacities[i] = eased;
           activeGlow = i;
         } else if (elapsed >= ringEnd) {
-          // After appearance, check if we're in the hold phase or past it
           const holdEnd = rings.length * RING_APPEAR_MS + HOLD_MS;
           if (elapsed < holdEnd) {
             newOpacities[i] = 1;
           } else {
-            // Fade out all rings during the reset gap
             const fadeT = (elapsed - holdEnd) / (CYCLE_MS - holdEnd);
             const fadeEased = 1 - fadeT * fadeT;
             newOpacities[i] = Math.max(0, fadeEased);
@@ -112,7 +109,7 @@ export default function TemperedAgentViz() {
                 cy={cy}
                 r={ring.radius}
                 fill="none"
-                stroke="#7dd3fc"
+                style={{ stroke: 'var(--color-accent-teal)' }}
                 strokeWidth="2"
                 opacity={0.35 * opacity}
                 filter="url(#ta-ring-glow)"
@@ -125,11 +122,11 @@ export default function TemperedAgentViz() {
               cy={cy}
               r={ring.radius}
               fill="none"
-              stroke={
-                isGlowing
-                  ? "rgba(125,211,252,0.25)"
-                  : "rgba(125,211,252,0.08)"
-              }
+              style={{
+                stroke: isGlowing
+                  ? 'color-mix(in srgb, var(--color-accent-teal) 25%, transparent)'
+                  : 'color-mix(in srgb, var(--color-accent-teal) 8%, transparent)'
+              }}
               strokeWidth="1.5"
               strokeDasharray="4 3"
             />
@@ -139,9 +136,11 @@ export default function TemperedAgentViz() {
               x={cx}
               y={cy - ring.radius - 6}
               textAnchor="middle"
-              fill={
-                isGlowing ? "#7dd3fc" : "rgba(125,211,252,0.45)"
-              }
+              style={{
+                fill: isGlowing
+                  ? 'var(--color-accent-teal)'
+                  : 'color-mix(in srgb, var(--color-accent-teal) 45%, transparent)'
+              }}
               fontSize="7"
               fontFamily="var(--font-mono), monospace"
               fontWeight="700"
@@ -161,11 +160,11 @@ export default function TemperedAgentViz() {
                   cx={dx}
                   cy={dy}
                   r="1.5"
-                  fill={
-                    isGlowing
-                      ? "rgba(125,211,252,0.5)"
-                      : "rgba(255,255,255,0.08)"
-                  }
+                  style={{
+                    fill: isGlowing
+                      ? 'color-mix(in srgb, var(--color-accent-teal) 50%, transparent)'
+                      : 'var(--color-border)'
+                  }}
                 />
               );
             })}
@@ -179,7 +178,7 @@ export default function TemperedAgentViz() {
         cy={cy}
         r="22"
         fill="none"
-        stroke="#7dd3fc"
+        style={{ stroke: 'var(--color-accent-teal)' }}
         strokeWidth="1"
         opacity="0.15"
         filter="url(#ta-soft)"
@@ -188,26 +187,28 @@ export default function TemperedAgentViz() {
         cx={cx}
         cy={cy}
         r="16"
-        fill="rgba(125,211,252,0.08)"
-        stroke="rgba(125,211,252,0.45)"
+        style={{
+          fill: 'color-mix(in srgb, var(--color-accent-teal) 8%, transparent)',
+          stroke: 'color-mix(in srgb, var(--color-accent-teal) 45%, transparent)'
+        }}
         strokeWidth="1.5"
       />
       <circle
         cx={cx}
         cy={cy}
         r="5"
-        fill="#7dd3fc"
+        style={{ fill: 'var(--color-accent-teal)' }}
         opacity="0.7"
         filter="url(#ta-core-glow)"
       />
-      <circle cx={cx} cy={cy} r="2" fill="white" />
+      <circle cx={cx} cy={cy} r="2" style={{ fill: 'var(--color-text-primary)' }} />
 
       {/* Core label */}
       <text
         x={cx}
         y={cy + 30}
         textAnchor="middle"
-        fill="rgba(255,255,255,0.25)"
+        style={{ fill: 'var(--color-text-muted)' }}
         fontSize="7"
         fontFamily="var(--font-mono), monospace"
         fontWeight="600"

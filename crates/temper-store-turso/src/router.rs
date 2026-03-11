@@ -287,6 +287,43 @@ impl TenantStoreRouter {
         Ok(())
     }
 
+    /// Ensure a tenant exists in the persistence layer.
+    ///
+    /// If the tenant is already registered, returns `Ok(true)` (already existed).
+    /// If not, provisions a new database and registers it, returning `Ok(false)`.
+    #[instrument(skip_all, fields(tenant_id, otel.name = "router.ensure_tenant"))]
+    pub async fn ensure_tenant(&self, tenant_id: &str) -> Result<bool, PersistenceError> {
+        {
+            let tenants = self.tenants.read().await;
+            if tenants.contains_key(tenant_id) {
+                return Ok(true);
+            }
+        }
+        // Not in memory — check if in DB but not yet connected.
+        let conn = self.platform.connection().map_err(storage_error)?;
+        let mut rows = conn
+            .query(
+                "SELECT turso_db_url, turso_auth_token FROM tenant_registry WHERE tenant_id = ?1",
+                libsql::params![tenant_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        if let Some(row) = rows.next().await.map_err(storage_error)? {
+            // Exists in DB but not connected — reconnect.
+            let db_url: String = row.get::<String>(0).map_err(storage_error)?;
+            let auth_token: Option<String> = row.get::<Option<String>>(1).ok().flatten();
+            let store = TursoEventStore::new(&db_url, auth_token.as_deref()).await?;
+            self.tenants
+                .write()
+                .await
+                .insert(tenant_id.to_string(), store);
+            return Ok(true);
+        }
+        // Not in DB either — provision new.
+        self.register_tenant(tenant_id).await?;
+        Ok(false)
+    }
+
     /// Register and connect a new tenant.
     ///
     /// In local mode, creates a new SQLite file in `local_base_dir`.

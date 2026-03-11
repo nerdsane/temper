@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Temper — Editorial Direction v3</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300..700;1,14..32,300..700&family=Instrument+Serif:ital@0;1&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --sans: 'Inter', -apple-system, system-ui, sans-serif;
+    --serif: 'Instrument Serif', Georgia, 'Times New Roman', serif;
+    --mono: 'SF Mono', 'Cascadia Code', Menlo, monospace;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+    --fast: 120ms;
+  }
+
+  body {
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    font-optical-sizing: auto;
+    font-kerning: normal;
+    font-variant-ligatures: common-ligatures contextual;
+    transition: background 0.2s var(--ease), color 0.2s var(--ease);
+  }
+
+  /* ── Dark ── */
+  body.dark {
+    --bg: #0A0A0A;
+    --bg-subtle: #111111;
+    --fg: #E5E5E5;
+    --fg-2: #A3A3A3;
+    --fg-3: #666666;
+    --rule: rgba(255,255,255,0.08);
+    --rule-heavy: #E5E5E5;
+    --fill-hover: rgba(255,255,255,0.04);
+    --btn-bg: #E5E5E5; --btn-fg: #0A0A0A; --btn-hover: #D4D4D4;
+    --accent: #2dd4bf;
+    --accent-dim: rgba(45,212,191,0.10);
+    --accent-fg: #0A0A0A;
+    --success: #4ade80; --error: #f472b6; --warning: #fbbf24;
+    background: var(--bg); color: var(--fg);
+  }
+
+  /* ── Light ── */
+  body.light {
+    --bg: #FFFFFF;
+    --bg-subtle: #FAFAFA;
+    --fg: #171717;
+    --fg-2: #525252;
+    --fg-3: #A3A3A3;
+    --rule: rgba(0,0,0,0.08);
+    --rule-heavy: #171717;
+    --fill-hover: rgba(0,0,0,0.03);
+    --btn-bg: #171717; --btn-fg: #FFFFFF; --btn-hover: #262626;
+    --accent: #0d9488;
+    --accent-dim: rgba(13,148,136,0.07);
+    --accent-fg: #FFFFFF;
+    --success: #16a34a; --error: #be185d; --warning: #b45309;
+    background: var(--bg); color: var(--fg);
+  }
+
+
+  /* ════════════════════════════════════════════ */
+  /*  TOOLBAR                                     */
+  /* ════════════════════════════════════════════ */
+  .toolbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 10px 20px; background: var(--bg);
+    border-bottom: 1px solid var(--rule);
+  }
+  .toolbar .sep { width: 1px; height: 16px; background: var(--rule); margin: 0 10px; }
+  .toolbar .lbl {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--fg-3); margin-right: 6px;
+  }
+  .toolbar button {
+    font-family: var(--sans); font-size: 12px; font-weight: 500;
+    padding: 5px 12px; border-radius: 2px; border: 1px solid var(--rule);
+    background: transparent; color: var(--fg-2); cursor: pointer;
+    transition: all var(--fast) var(--ease);
+  }
+  .toolbar button:hover { color: var(--fg); }
+  .toolbar button.on { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+
+  /* ════════════════════════════════════════════ */
+  /*  LAYOUT                                      */
+  /* ════════════════════════════════════════════ */
+  .page { padding: 64px 0 96px; max-width: 960px; margin: 0 auto; }
+  .col { padding: 0 48px; }
+
+  /* ── Editorial section header: thick rule + folio label ── */
+  .section-head {
+    border-top: 2px solid var(--rule-heavy);
+    padding-top: 12px;
+    margin-top: 72px;
+    margin-bottom: 40px;
+  }
+  .section-head .folio {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--fg-3);
+  }
+
+  /* ── Thin rule divider ── */
+  .rule { border: none; border-top: 1px solid var(--rule); margin: 40px 0; }
+
+  /* ════════════════════════════════════════════ */
+  /*  HERO — editorial serif heading              */
+  /* ════════════════════════════════════════════ */
+  .hero { padding: 80px 0 0; }
+  .hero h1 {
+    font-family: var(--serif);
+    font-size: 64px;
+    font-weight: 400;
+    letter-spacing: -0.02em;
+    line-height: 1.05;
+    color: var(--fg);
+  }
+  .hero h1 em {
+    font-style: italic;
+    color: var(--accent);
+  }
+  .hero .lede {
+    font-size: 17px; line-height: 1.7; color: var(--fg-2);
+    max-width: 520px; margin-top: 24px;
+  }
+  .hero-actions {
+    margin-top: 40px; display: flex; gap: 16px; align-items: center;
+  }
+
+  /* Buttons */
+  .btn {
+    font-family: var(--sans); font-size: 13px; font-weight: 500;
+    padding: 9px 22px; border-radius: 2px; border: none;
+    background: var(--btn-bg); color: var(--btn-fg);
+    cursor: pointer; transition: background var(--fast) var(--ease);
+    letter-spacing: -0.005em;
+  }
+  .btn:hover { background: var(--btn-hover); }
+  .btn-ghost {
+    background: none; border: 1px solid var(--rule);
+    color: var(--fg-2);
+  }
+  .btn-ghost:hover { border-color: var(--fg-3); color: var(--fg); background: var(--fill-hover); }
+  .btn-sm {
+    font-size: 12px; padding: 4px 10px;
+  }
+  .btn-accent-ghost {
+    background: var(--accent-dim); color: var(--accent);
+    border: none; padding: 7px 16px;
+  }
+  .link-text {
+    font-size: 13px; font-weight: 500; color: var(--fg-2);
+    text-decoration: none; cursor: pointer;
+    transition: color var(--fast) var(--ease);
+  }
+  .link-text:hover { color: var(--fg); }
+  .link-text .arr {
+    display: inline-block; transition: transform var(--fast) var(--ease);
+    margin-left: 2px;
+  }
+  .link-text:hover .arr { transform: translateX(3px); }
+
+  /* ════════════════════════════════════════════ */
+  /*  DASHBOARD — editorial layout                */
+  /* ════════════════════════════════════════════ */
+  .dash {
+    display: grid;
+    grid-template-columns: 176px 1px 1fr;
+    min-height: 540px;
+  }
+
+  /* Sidebar as simple text column */
+  .dash-nav { padding: 0 20px 0 0; }
+  .dash-logo {
+    font-size: 14px; font-weight: 600; letter-spacing: -0.02em;
+    margin-bottom: 32px; display: flex; align-items: center; gap: 7px;
+  }
+  .dash-logo .mark { width: 14px; height: 14px; border-radius: 2px; background: var(--accent); }
+  .dash-links { list-style: none; }
+  .dash-links li a {
+    display: block; padding: 5px 0; font-size: 13px; font-weight: 400;
+    color: var(--fg-3); text-decoration: none;
+    transition: color var(--fast) var(--ease);
+  }
+  .dash-links li a:hover { color: var(--fg); }
+  .dash-links li a.active { color: var(--fg); font-weight: 500; }
+
+  /* Vertical rule between nav and content */
+  .dash-rule { background: var(--rule); }
+
+  .dash-main { padding: 0 0 0 32px; }
+  .dash-header {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding-bottom: 20px; border-bottom: 1px solid var(--rule);
+    margin-bottom: 36px;
+  }
+  .dash-title {
+    font-family: var(--serif); font-size: 22px; font-weight: 400;
+    letter-spacing: -0.01em;
+  }
+
+  /* Stats as ruled columns — newspaper stock ticker style */
+  .stats {
+    display: flex;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 32px;
+    margin-bottom: 36px;
+  }
+  .stat {
+    flex: 1;
+    padding-right: 24px;
+  }
+  .stat + .stat {
+    padding-left: 24px;
+    border-left: 1px solid var(--rule);
+  }
+  .stat-label {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--fg-3);
+    margin-bottom: 6px;
+  }
+  .stat-val {
+    font-family: var(--mono); font-size: 26px; font-weight: 500;
+    letter-spacing: -0.03em; line-height: 1.1;
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+  .stat-val .unit { font-size: 14px; color: var(--fg-3); font-weight: 400; }
+  .stat-delta {
+    font-size: 12px; margin-top: 3px; color: var(--fg-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-delta.up { color: var(--success); }
+
+  /* Table — minimal, ruled */
+  .tbl { width: 100%; border-collapse: collapse; }
+  .tbl th {
+    text-align: left; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--fg-3); padding: 0 0 8px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .tbl td {
+    font-size: 13px; padding: 10px 0; color: var(--fg-2);
+    border-bottom: 1px solid var(--rule);
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+  .tbl tr:last-child td { border-bottom: none; }
+  .tbl tr { transition: color var(--fast) var(--ease); }
+  .tbl tr:hover td { color: var(--fg); }
+  .tbl .name { color: var(--fg); font-weight: 450; }
+  .tbl .mono { font-family: var(--mono); font-size: 12px; color: var(--fg-3); }
+  .tbl .s-ok { color: var(--success); }
+  .tbl .s-err { color: var(--error); }
+  .tbl .s-accent { color: var(--accent); }
+  .tbl .s-warn { color: var(--warning); }
+  .tbl .s-mute { color: var(--fg-3); }
+  .tbl th + th, .tbl td + td { padding-left: 20px; }
+
+  /* ════════════════════════════════════════════ */
+  /*  COMPONENTS — asymmetric 7/5 grid            */
+  /* ════════════════════════════════════════════ */
+  .comp-row {
+    display: grid;
+    grid-template-columns: 7fr 5fr;
+    gap: 48px;
+  }
+  .comp-row + .comp-row { margin-top: 40px; padding-top: 40px; border-top: 1px solid var(--rule); }
+  .comp-label {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--fg-3); margin-bottom: 16px;
+  }
+
+  /* Tags */
+  .tag-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+  .tag { font-size: 11px; font-weight: 500; padding: 2px 7px; border-radius: 2px; }
+  .tag-default { background: var(--fill-hover); color: var(--fg-2); border: 1px solid var(--rule); }
+  .tag-accent { background: var(--accent-dim); color: var(--accent); }
+  .tag-ok { color: var(--success); background: transparent; border: 1px solid; border-color: currentColor; opacity: 0.7; }
+  .tag-err { color: var(--error); background: transparent; border: 1px solid; border-color: currentColor; opacity: 0.7; }
+  .tag-warn { color: var(--warning); background: transparent; border: 1px solid; border-color: currentColor; opacity: 0.7; }
+
+  /* Inputs — underline only */
+  .field { margin-bottom: 20px; }
+  .field-label { font-size: 12px; font-weight: 500; color: var(--fg-2); margin-bottom: 6px; display: block; }
+  .field-input {
+    font-family: var(--sans); font-size: 14px;
+    width: 100%; padding: 8px 0; border: none;
+    border-bottom: 1px solid var(--rule);
+    background: transparent; color: var(--fg);
+    outline: none; transition: border-color var(--fast) var(--ease);
+  }
+  .field-input::placeholder { color: var(--fg-3); }
+  .field-input:focus { border-color: var(--accent); }
+
+  /* Settings */
+  .setting-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 0;
+  }
+  .setting-row + .setting-row { border-top: 1px solid var(--rule); }
+  .setting-label { font-size: 13px; color: var(--fg-2); }
+  .switch {
+    width: 30px; height: 16px; border-radius: 8px; position: relative;
+    background: var(--rule); cursor: pointer; transition: background var(--fast) var(--ease);
+  }
+  .switch::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--fg-2); transition: all var(--fast) var(--ease);
+  }
+  .switch.on { background: var(--accent); }
+  .switch.on::after { transform: translateX(14px); background: var(--accent-fg); }
+
+  .link-accent { font-size: 13px; font-weight: 500; color: var(--accent); text-decoration: none; }
+  .link-accent:hover { text-decoration: underline; }
+
+  /* ════════════════════════════════════════════ */
+  /*  TYPOGRAPHY SPECIMEN                         */
+  /* ════════════════════════════════════════════ */
+  .specimen {}
+  .specimen-row {
+    display: grid; grid-template-columns: 140px 1fr;
+    gap: 16px; align-items: baseline;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .specimen-row:last-child { border-bottom: none; }
+  .specimen-meta {
+    font-family: var(--mono); font-size: 11px; color: var(--fg-3);
+  }
+
+  /* ════════════════════════════════════════════ */
+  /*  PALETTE                                     */
+  /* ════════════════════════════════════════════ */
+  .pal-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 32px;
+  }
+  .pal-section-label {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--fg-3); margin-bottom: 12px;
+  }
+  .pal-item {
+    display: flex; align-items: center; gap: 12px; padding: 6px 0;
+  }
+  .pal-swatch { width: 28px; height: 28px; border-radius: 2px; flex-shrink: 0; }
+  .pal-name { font-size: 13px; font-weight: 450; }
+  .pal-hex { font-family: var(--mono); font-size: 11px; color: var(--fg-3); margin-left: auto; }
+</style>
+</head>
+<body class="dark">
+
+<div class="toolbar">
+  <span class="lbl">Mode</span>
+  <button onclick="setMode('light')">Light</button>
+  <button onclick="setMode('dark')" class="on">Dark</button>
+</div>
+
+<div class="page">
+<div class="col">
+
+  <!-- ━━━━ HERO ━━━━ -->
+  <div class="hero">
+    <h1>Build apps from<br><em>conversation</em></h1>
+    <p class="lede">Describe what you want. The system generates verified specs, deploys actors, and evolves through use.</p>
+    <div class="hero-actions">
+      <button class="btn">Get started</button>
+      <a class="link-text" href="#">Documentation <span class="arr">&rarr;</span></a>
+    </div>
+  </div>
+
+  <!-- ━━━━ DASHBOARD ━━━━ -->
+  <div class="section-head">
+    <span class="folio">Dashboard</span>
+  </div>
+
+  <div class="dash">
+    <div class="dash-nav">
+      <div class="dash-logo">
+        <div class="mark"></div>
+        temper
+      </div>
+      <ul class="dash-links">
+        <li><a href="#" class="active">Overview</a></li>
+        <li><a href="#">Entities</a></li>
+        <li><a href="#">Transitions</a></li>
+        <li><a href="#">Trajectories</a></li>
+        <li><a href="#">Tenants</a></li>
+        <li><a href="#">Specs</a></li>
+      </ul>
+    </div>
+    <div class="dash-rule"></div>
+    <div class="dash-main">
+      <div class="dash-header">
+        <h2 class="dash-title">Overview</h2>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <button class="btn btn-ghost btn-sm">Last 24h</button>
+          <button class="btn btn-sm">Deploy</button>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-label">Active entities</div>
+          <div class="stat-val">2,847</div>
+          <div class="stat-delta up">+12.4%</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Transitions / min</div>
+          <div class="stat-val">156</div>
+          <div class="stat-delta">+0.8%</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Unmet intents</div>
+          <div class="stat-val">3</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Verification</div>
+          <div class="stat-val">99.2<span class="unit">%</span></div>
+        </div>
+      </div>
+
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>Entity</th>
+            <th>State</th>
+            <th>Last transition</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name">Issue #1042</td>
+            <td class="mono">in_progress</td>
+            <td class="mono">2m ago</td>
+            <td class="s-ok">Verified</td>
+          </tr>
+          <tr>
+            <td class="name">Project Alpha</td>
+            <td class="mono">active</td>
+            <td class="mono">14m ago</td>
+            <td class="s-ok">Verified</td>
+          </tr>
+          <tr>
+            <td class="name">Cycle Q1-2026</td>
+            <td class="mono">review</td>
+            <td class="mono">1h ago</td>
+            <td class="s-accent">Evolving</td>
+          </tr>
+          <tr>
+            <td class="name">Label: Critical</td>
+            <td class="mono">archived</td>
+            <td class="mono">3d ago</td>
+            <td class="s-mute">Idle</td>
+          </tr>
+          <tr>
+            <td class="name">Deploy #47</td>
+            <td class="mono">failed</td>
+            <td class="mono">4d ago</td>
+            <td class="s-err">Failed</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ━━━━ COMPONENTS ━━━━ -->
+  <div class="section-head">
+    <span class="folio">Components</span>
+  </div>
+
+  <div class="comp-row">
+    <div>
+      <div class="comp-label">Actions</div>
+      <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+        <button class="btn">Deploy</button>
+        <button class="btn btn-ghost">Cancel</button>
+        <button class="btn btn-accent-ghost">Evolve</button>
+      </div>
+      <div class="tag-row">
+        <span class="tag tag-ok">Verified</span>
+        <span class="tag tag-err">Failed</span>
+        <span class="tag tag-warn">Pending</span>
+        <span class="tag tag-accent">Evolving</span>
+        <span class="tag tag-default">Idle</span>
+      </div>
+    </div>
+    <div>
+      <div class="comp-label">Annotation</div>
+      <p style="font-size: 13px; color: var(--fg-2); line-height: 1.65;">
+        Actions use a solid primary button for the main CTA. Ghost outline for secondary. Status tags use border-only treatment with opacity — no heavy fills.
+      </p>
+    </div>
+  </div>
+
+  <div class="comp-row">
+    <div>
+      <div class="comp-label">Inputs</div>
+      <div class="field">
+        <label class="field-label">Entity name</label>
+        <input class="field-input" placeholder="e.g. project-tracker" />
+      </div>
+      <div class="field">
+        <label class="field-label">Tenant</label>
+        <input class="field-input" value="acme-corp" />
+      </div>
+      <a class="link-accent">View documentation &rarr;</a>
+    </div>
+    <div>
+      <div class="comp-label">Settings</div>
+      <div class="setting-row">
+        <span class="setting-label">Dark mode</span>
+        <div class="switch on"></div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Auto-deploy</span>
+        <div class="switch on"></div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Telemetry</span>
+        <div class="switch"></div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Notifications</span>
+        <div class="switch"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ━━━━ TYPOGRAPHY ━━━━ -->
+  <div class="section-head">
+    <span class="folio">Typography</span>
+  </div>
+
+  <div class="specimen">
+    <div class="specimen-row">
+      <span class="specimen-meta">Serif / 64 / 400</span>
+      <span style="font-family: var(--serif); font-size: 64px; font-weight: 400; letter-spacing: -0.02em; line-height: 1.05;">Build apps</span>
+    </div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Serif / 22 / 400</span>
+      <span style="font-family: var(--serif); font-size: 22px; font-weight: 400; letter-spacing: -0.01em; line-height: 1.3;">Overview</span>
+    </div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Sans / 18 / 500</span>
+      <span style="font-size: 18px; font-weight: 500; letter-spacing: -0.02em;">Entity transitions</span>
+    </div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Sans / 14 / 400</span>
+      <span style="font-size: 14px;">The system generates verified specs and deploys entity actors.</span>
+    </div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Sans / 13 / 450</span>
+      <span style="font-size: 13px; font-weight: 450; color: var(--fg-2);">Secondary body text for descriptions and metadata.</span>
+    </div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Mono / 12</span>
+      <span style="font-family: var(--mono); font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums;">in_progress · 2m ago · 99.2%</span>
+    </div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Caps / 11 / 500</span>
+      <span style="font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-3);">Section Label</span>
+    </div>
+  </div>
+
+  <!-- ━━━━ PALETTE ━━━━ -->
+  <div class="section-head">
+    <span class="folio">Palette</span>
+  </div>
+
+  <div class="pal-grid">
+    <div>
+      <div class="pal-section-label">Semantic</div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--accent);"></div>
+        <span class="pal-name">Accent</span>
+        <span class="pal-hex" id="ph-accent"></span>
+      </div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--success);"></div>
+        <span class="pal-name">Success</span>
+        <span class="pal-hex" id="ph-success"></span>
+      </div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--error);"></div>
+        <span class="pal-name">Error</span>
+        <span class="pal-hex" id="ph-error"></span>
+      </div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--warning);"></div>
+        <span class="pal-name">Warning</span>
+        <span class="pal-hex" id="ph-warning"></span>
+      </div>
+    </div>
+    <div>
+      <div class="pal-section-label">Neutrals</div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--fg);"></div>
+        <span class="pal-name">Foreground</span>
+        <span class="pal-hex" id="ph-fg"></span>
+      </div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--fg-2);"></div>
+        <span class="pal-name">Secondary</span>
+        <span class="pal-hex" id="ph-fg2"></span>
+      </div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--fg-3);"></div>
+        <span class="pal-name">Muted</span>
+        <span class="pal-hex" id="ph-fg3"></span>
+      </div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--bg); border: 1px solid var(--rule);"></div>
+        <span class="pal-name">Background</span>
+        <span class="pal-hex" id="ph-bg"></span>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+<script>
+  const vals = {
+    dark: { accent:'#2dd4bf', success:'#4ade80', error:'#f472b6', warning:'#fbbf24', fg:'#E5E5E5', fg2:'#A3A3A3', fg3:'#666666', bg:'#0A0A0A' },
+    light: { accent:'#0d9488', success:'#16a34a', error:'#be185d', warning:'#b45309', fg:'#171717', fg2:'#525252', fg3:'#A3A3A3', bg:'#FFFFFF' }
+  };
+  let mode = 'dark';
+
+  function setMode(m) {
+    mode = m;
+    document.body.className = m;
+    document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('on'));
+    document.querySelector('.toolbar button:nth-child(' + (m === 'light' ? 2 : 3) + ')').classList.add('on');
+    const v = vals[m];
+    document.getElementById('ph-accent').textContent = v.accent;
+    document.getElementById('ph-success').textContent = v.success;
+    document.getElementById('ph-error').textContent = v.error;
+    document.getElementById('ph-warning').textContent = v.warning;
+    document.getElementById('ph-fg').textContent = v.fg;
+    document.getElementById('ph-fg2').textContent = v.fg2;
+    document.getElementById('ph-fg3').textContent = v.fg3;
+    document.getElementById('ph-bg').textContent = v.bg;
+  }
+  setMode('dark');
+</script>
+
+</body>
+</html>

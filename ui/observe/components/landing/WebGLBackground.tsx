@@ -20,14 +20,14 @@ export default function WebGLBackground() {
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
       // Wireframe cages
-      // Note: THREE.js cannot use CSS vars; hex values should match --color-accent-teal
+      // Note: THREE.js cannot use CSS vars; hex values must match Dark Temper --color-accent-teal
       const outerCage = new THREE.Mesh(
         new THREE.IcosahedronGeometry(4, 2),
-        new THREE.MeshBasicMaterial({ color: "#7dd3fc", wireframe: true, transparent: true, opacity: 0.08 }), // --color-accent-teal
+        new THREE.MeshBasicMaterial({ color: "#9333ea", wireframe: true, transparent: true, opacity: 0.08 }), // --color-accent-teal (violet)
       );
       const innerCage = new THREE.Mesh(
         new THREE.DodecahedronGeometry(3.5, 1),
-        new THREE.MeshBasicMaterial({ color: "#7dd3fc", wireframe: true, transparent: true, opacity: 0.04 }), // --color-accent-teal
+        new THREE.MeshBasicMaterial({ color: "#9333ea", wireframe: true, transparent: true, opacity: 0.04 }), // --color-accent-teal (violet)
       );
       scene.add(outerCage, innerCage);
 
@@ -53,7 +53,7 @@ export default function WebGLBackground() {
           uTime: { value: 0 },
           uMouse: { value: new THREE.Vector3(0, 0, 0) },
           uScroll: { value: 0 },
-          uColor: { value: new THREE.Color("#7dd3fc") }, // --color-accent-teal
+          uColor: { value: new THREE.Color("#9333ea") }, // --color-accent-teal (violet)
           uColorAccent: { value: new THREE.Color("#ffffff") },
         },
         vertexShader: `
