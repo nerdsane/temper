@@ -15,7 +15,7 @@ use crate::state::PlatformState;
 ///
 /// Behavior:
 /// - No `api_token` configured → passthrough (local dev backward compat)
-/// - Health check path `/tdata` exact → passthrough (Railway healthcheck)
+/// - Health check paths `/healthz` and `/tdata` exact → passthrough
 /// - Valid `Authorization: Bearer <token>` → passthrough
 /// - Missing or invalid token → 401 Unauthorized
 pub async fn bearer_auth_check(
@@ -28,8 +28,10 @@ pub async fn bearer_auth_check(
         return Ok(next.run(req).await);
     };
 
-    // Allow health check without auth (Railway probes this).
-    if req.uri().path() == "/tdata" && req.method() == axum::http::Method::GET {
+    // Allow health checks without auth (Railway probes these paths).
+    if req.method() == axum::http::Method::GET
+        && (req.uri().path() == "/tdata" || req.uri().path() == "/healthz")
+    {
         return Ok(next.run(req).await);
     }
 
@@ -82,6 +84,7 @@ mod tests {
         state.api_token = token;
         Router::new()
             .route("/tdata", get(ok_handler))
+            .route("/healthz", get(ok_handler))
             .route("/tdata/Orders", get(ok_handler))
             .route("/api/specs", get(ok_handler))
             .layer(middleware::from_fn_with_state(
@@ -109,6 +112,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp_healthz = app
+            .oneshot(HttpRequest::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp_healthz.status(), StatusCode::OK);
     }
 
     #[tokio::test]

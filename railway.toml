@@ -3,6 +3,6 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "sh -c 'temper serve --port $PORT --storage turso'"
-healthcheckPath = "/tdata"
+healthcheckPath = "/healthz"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"

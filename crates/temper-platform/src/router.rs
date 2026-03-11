@@ -5,6 +5,7 @@
 
 use axum::Router;
 use axum::middleware;
+use axum::http::StatusCode;
 use axum::routing;
 
 use crate::bearer_auth::bearer_auth_check;
@@ -24,6 +25,7 @@ use crate::tenant_access::tenant_access_check;
 /// first registered tenant in the SpecRegistry.
 pub fn build_platform_router(state: PlatformState) -> Router {
     let tenant_api = crate::tenant_api::tenant_api_router();
+    let health = Router::new().route("/healthz", routing::get(|| async { StatusCode::OK }));
 
     // OS Apps observe routes — merged at /observe/* to avoid the /api double-nest
     // collision between temper-server's /api routes and the platform's /api routes.
@@ -38,6 +40,7 @@ pub fn build_platform_router(state: PlatformState) -> Router {
         );
 
     temper_server::build_router(state.server.clone())
+        .merge(health)
         .merge(os_apps_observe.with_state(state.clone()))
         .nest("/api", tenant_api.with_state(state.clone()))
         .layer(middleware::from_fn_with_state(
@@ -83,6 +86,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_healthz_route_returns_200() {
+        let app = build_platform_router(test_state());
+        let response = app
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
