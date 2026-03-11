@@ -3,9 +3,11 @@
 //! Exercises the full compile → instantiate → run path using a real WASM
 //! module (`echo_integration.wasm`) built from `crates/temper-wasm/tests/fixtures/echo-integration-src`.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use temper_wasm::{SimWasmHost, WasmEngine, WasmError, WasmInvocationContext, WasmResourceLimits};
+use temper_wasm::{
+    SimWasmHost, StreamRegistry, WasmEngine, WasmError, WasmInvocationContext, WasmResourceLimits,
+};
 
 /// Pre-built echo integration WASM binary (avoids needing wasm32 target in CI).
 const ECHO_WASM: &[u8] = include_bytes!("fixtures/echo_integration.wasm");
@@ -44,8 +46,9 @@ async fn invoke_echo_module_end_to_end() {
     );
 
     // Invoke
+    let streams = Arc::new(RwLock::new(StreamRegistry::default()));
     let result = engine
-        .invoke(&hash, &ctx, host, &WasmResourceLimits::default())
+        .invoke(&hash, &ctx, host, &WasmResourceLimits::default(), streams)
         .await
         .expect("invoke should succeed");
 
@@ -86,12 +89,14 @@ async fn invoke_missing_module_returns_error() {
     let ctx = build_context();
     let host = Arc::new(SimWasmHost::new());
 
+    let streams = Arc::new(RwLock::new(StreamRegistry::default()));
     let result = engine
         .invoke(
             "nonexistent_hash_abc123",
             &ctx,
             host,
             &WasmResourceLimits::default(),
+            streams,
         )
         .await;
 
@@ -114,8 +119,9 @@ async fn invoke_with_http_failure_still_succeeds() {
     // Use a host that returns errors for HTTP calls
     let host = Arc::new(SimWasmHost::new().with_default_response(500, "internal error"));
 
+    let streams = Arc::new(RwLock::new(StreamRegistry::default()));
     let result = engine
-        .invoke(&hash, &ctx, host, &WasmResourceLimits::default())
+        .invoke(&hash, &ctx, host, &WasmResourceLimits::default(), streams)
         .await
         .expect("invoke should succeed even with HTTP error response");
 

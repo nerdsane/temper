@@ -12,8 +12,8 @@ use temper_observe::wide_event;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{
-    AuthorizedWasmHost, ProductionWasmHost, WasmAuthzContext, WasmAuthzGate, WasmHost,
-    WasmInvocationContext, WasmResourceLimits,
+    AuthorizedWasmHost, ProductionWasmHost, StreamRegistry, WasmAuthzContext, WasmAuthzGate,
+    WasmHost, WasmInvocationContext, WasmResourceLimits,
 };
 
 use super::{
@@ -231,7 +231,13 @@ impl crate::state::ServerState {
         limits: &WasmResourceLimits,
         denial_tracker: &HttpCallAuthzDenialTracker,
     ) -> Result<Option<EntityResponse>, String> {
-        match self.wasm_engine.invoke(hash, &inv_ctx, host, limits).await {
+        // Existing action-triggered invocations don't use streams — pass empty registry.
+        let streams = Arc::new(std::sync::RwLock::new(StreamRegistry::default()));
+        match self
+            .wasm_engine
+            .invoke(hash, &inv_ctx, host, limits, streams)
+            .await
+        {
             Ok(result) if result.success => {
                 if let Some(reason) = denial_tracker.take_denial() {
                     let error_str = format!("authorization denied for http_call: {reason}");
@@ -536,5 +542,59 @@ impl crate::state::ServerState {
             }
         });
         Some(decision_id)
+    }
+
+    /// Invoke a WASM module directly (not triggered by an entity action).
+    ///
+    /// Used by `$value` handlers for blob operations. The WASM module controls
+    /// the entire blob lifecycle (auth, hashing, caching, upload/download) via
+    /// streaming host functions. Bytes never enter WASM memory.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn invoke_wasm_direct(
+        &self,
+        tenant: &TenantId,
+        module_name: &str,
+        context: WasmInvocationContext,
+        streams: Arc<std::sync::RwLock<StreamRegistry>>,
+    ) -> Result<temper_wasm::WasmInvocationResult, String> {
+        // Resolve module hash
+        let module_hash = {
+            let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
+            wasm_reg
+                .get_hash(tenant, module_name)
+                .map(|s| s.to_string())
+        };
+        let hash = module_hash.ok_or_else(|| {
+            format!("WASM module '{module_name}' not found for tenant '{tenant}'")
+        })?;
+
+        // Build authorized host chain
+        let base_gate = self.wasm_authz_gate();
+        let authz_ctx = WasmAuthzContext {
+            tenant: tenant.to_string(),
+            module_name: module_name.to_string(),
+            agent_id: context.agent_id.clone(),
+            session_id: context.session_id.clone(),
+            entity_type: context.entity_type.clone(),
+            trigger_action: context.trigger_action.clone(),
+        };
+        let tenant_secrets = self.get_authorized_wasm_secrets(tenant, &*base_gate, &authz_ctx);
+        let inner: Arc<dyn WasmHost> = Arc::new(ProductionWasmHost::new(tenant_secrets));
+        let host: Arc<dyn WasmHost> =
+            Arc::new(AuthorizedWasmHost::new(inner, base_gate, authz_ctx));
+        let limits = WasmResourceLimits::default();
+
+        tracing::info!(
+            tenant = %tenant,
+            module = %module_name,
+            hash = %hash,
+            trigger = %context.trigger_action,
+            "invoking WASM module directly for $value"
+        );
+
+        self.wasm_engine
+            .invoke(&hash, &context, host, &limits, streams)
+            .await
+            .map_err(|e| e.to_string())
     }
 }

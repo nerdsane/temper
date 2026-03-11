@@ -1,0 +1,78 @@
+# Directory Entity — I/O Automaton Specification
+#
+# Hierarchical container within a workspace. Tracks child items and supports
+# rename, move, and archival operations.
+
+[automaton]
+name = "Directory"
+states = ["Active", "Archived"]
+initial = "Active"
+
+# --- State Variables ---
+
+[[state]]
+name = "item_count"
+type = "counter"
+initial = "0"
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["name", "path", "parent_id", "workspace_id"]
+hint = "Create a new directory at the given path within a workspace."
+
+[[action]]
+name = "AddChild"
+kind = "input"
+from = ["Active"]
+to = "Active"
+effect = "increment item_count"
+hint = "Register a child item (file or subdirectory) in this directory."
+
+[[action]]
+name = "RemoveChild"
+kind = "input"
+from = ["Active"]
+to = "Active"
+guard = "min item_count 1"
+effect = "decrement item_count"
+hint = "Remove a child item from this directory. Requires at least one child."
+
+[[action]]
+name = "Rename"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["name", "path"]
+hint = "Rename the directory and update its path."
+
+[[action]]
+name = "Archive"
+kind = "internal"
+from = ["Active"]
+to = "Archived"
+guard = "max item_count 1"
+hint = "Archive an empty directory. Must contain no children. Terminal state."
+
+# --- Output Actions ---
+
+[[action]]
+name = "DirectoryArchivedEvent"
+kind = "output"
+hint = "Emitted when directory transitions to Archived."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "ItemCountNonNegative"
+when = ["Active", "Archived"]
+assert = "item_count >= 0"

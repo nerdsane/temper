@@ -81,7 +81,14 @@ fn emit_enum_type(out: &mut String, et: &EnumType) {
 }
 
 fn emit_entity_type(out: &mut String, et: &EntityType) {
-    out.push_str(&format!("      <EntityType Name=\"{}\">\n", et.name));
+    if et.has_stream {
+        out.push_str(&format!(
+            "      <EntityType Name=\"{}\" HasStream=\"true\">\n",
+            et.name
+        ));
+    } else {
+        out.push_str(&format!("      <EntityType Name=\"{}\">\n", et.name));
+    }
 
     // Key
     if !et.key_properties.is_empty() {
@@ -396,6 +403,46 @@ mod tests {
             schema.entity_containers[0].entity_sets[0].entity_type,
             "Test.Widget"
         );
+    }
+
+    #[test]
+    fn emit_round_trips_has_stream() {
+        let xml = r#"<?xml version="1.0"?>
+        <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+          <edmx:DataServices>
+            <Schema Namespace="Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+              <EntityType Name="MediaFile" HasStream="true">
+                <Key><PropertyRef Name="Id"/></Key>
+                <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+                <Property Name="Name" Type="Edm.String"/>
+              </EntityType>
+              <EntityType Name="RegularEntity">
+                <Key><PropertyRef Name="Id"/></Key>
+                <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+              </EntityType>
+            </Schema>
+          </edmx:DataServices>
+        </edmx:Edmx>"#;
+
+        let doc = parse_csdl(xml).unwrap();
+        let schema = &doc.schemas[0];
+
+        let media = schema.entity_type("MediaFile").unwrap();
+        assert!(media.has_stream, "MediaFile should have has_stream=true");
+
+        let regular = schema.entity_type("RegularEntity").unwrap();
+        assert!(
+            !regular.has_stream,
+            "RegularEntity should have has_stream=false"
+        );
+
+        // Round-trip
+        let emitted = emit_csdl_xml(&doc);
+        let doc2 = parse_csdl(&emitted).unwrap();
+        let schema2 = &doc2.schemas[0];
+
+        assert!(schema2.entity_type("MediaFile").unwrap().has_stream);
+        assert!(!schema2.entity_type("RegularEntity").unwrap().has_stream);
     }
 
     #[test]

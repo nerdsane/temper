@@ -1,20 +1,23 @@
 //! OData read handlers (`GET` and metadata/service endpoints).
 
+use std::sync::{Arc, RwLock};
+
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use temper_odata::path::{ODataPath, parse_path};
 use temper_odata::query::parse_query_options;
 use temper_runtime::tenant::TenantId;
+use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
 
 use super::common::{
-    extract_key, extract_tenant, has_expand_options, resolve_entity_type, tenant_csdl_xml,
-    tenant_entity_sets,
+    check_has_stream_or_400, extract_key, extract_tenant, has_expand_options, resolve_entity_type,
+    resolve_value_parent, tenant_csdl_xml, tenant_entity_sets,
 };
 use super::response::annotate_entity;
 use crate::query_eval::{apply_query_options, expand_entity, select_fields};
-use crate::response::{ODataResponse, ODataXmlResponse, odata_error};
+use crate::response::{ODataResponse, ODataStreamResponse, ODataXmlResponse, odata_error};
 use crate::state::ServerState;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use temper_runtime::scheduler::sim_now;
@@ -346,6 +349,8 @@ pub(super) async fn handle_odata_get_for_tenant(
         ODataPath::BoundFunction { parent, function } => {
             handle_bound_function(&state, &tenant, &parent, &function, &query_options).await
         }
+
+        ODataPath::Value { ref parent } => handle_stream_get(&state, &tenant, parent).await,
 
         _ => odata_error(
             StatusCode::NOT_IMPLEMENTED,
@@ -837,4 +842,145 @@ pub async fn handle_hints(State(state): State<ServerState>) -> impl IntoResponse
         status: StatusCode::OK,
         body: serde_json::to_value(&hints).unwrap_or_default(),
     }
+}
+
+/// Handle GET on `$value` — download binary content via WASM blob_adapter.
+///
+/// Flow:
+/// 1. Resolve parent entity from ODataPath
+/// 2. Verify entity type has `HasStream=true` in CSDL
+/// 3. Get entity state (content_hash, mime_type, etc.)
+/// 4. Invoke WASM blob_adapter (handles auth, caching, download)
+/// 5. Read downloaded bytes from StreamRegistry
+/// 6. Return binary response
+#[instrument(skip_all, fields(otel.name = "GET $value"))]
+async fn handle_stream_get(
+    state: &ServerState,
+    tenant: &TenantId,
+    parent: &ODataPath,
+) -> axum::response::Response {
+    // 1. Resolve parent to (set_name, entity_id)
+    let (set_name, key) = match resolve_value_parent(parent) {
+        Ok(pair) => pair,
+        Err(resp) => return resp,
+    };
+
+    let entity_type = match resolve_entity_type(state, tenant, &set_name) {
+        Some(t) => t,
+        None => {
+            return odata_error(
+                StatusCode::NOT_FOUND,
+                "EntitySetNotFound",
+                &format!("Entity set '{set_name}' not found"),
+            )
+            .into_response();
+        }
+    };
+
+    // 2. Check HasStream=true
+    if let Err(resp) = check_has_stream_or_400(state, tenant, &entity_type) {
+        return resp;
+    }
+
+    // 3. Get entity state
+    let entity_state = match state
+        .get_tenant_entity_state(tenant, &entity_type, &key)
+        .await
+    {
+        Ok(resp) => serde_json::to_value(&resp.state).unwrap_or_default(),
+        Err(_) => {
+            return odata_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                &format!("{set_name}('{key}') not found"),
+            )
+            .into_response();
+        }
+    };
+
+    // 4. Check if entity has content
+    let has_content = entity_state
+        .get("has_content")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !has_content {
+        return odata_error(
+            StatusCode::NOT_FOUND,
+            "NoContent",
+            &format!("{set_name}('{key}') has no content yet"),
+        )
+        .into_response();
+    }
+
+    // 5. Invoke WASM blob_adapter for download
+    let response_stream_id = format!("download-{}", temper_runtime::scheduler::sim_uuid());
+    let streams = Arc::new(RwLock::new(StreamRegistry::default()));
+
+    let inv_ctx = WasmInvocationContext {
+        tenant: tenant.to_string(),
+        entity_type: entity_type.clone(),
+        entity_id: key.clone(),
+        trigger_action: "StreamDownload".to_string(),
+        trigger_params: serde_json::json!({
+            "stream_id": response_stream_id,
+            "operation": "get",
+        }),
+        entity_state: entity_state.clone(),
+        agent_id: None,
+        session_id: None,
+        integration_config: std::collections::BTreeMap::new(),
+    };
+
+    let wasm_result = match state
+        .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams.clone())
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "WASM blob_adapter download failed");
+            return odata_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "BlobAdapterError",
+                &format!("Blob adapter failed: {e}"),
+            )
+            .into_response();
+        }
+    };
+
+    if !wasm_result.success {
+        let error_msg = wasm_result
+            .error
+            .unwrap_or_else(|| "unknown error".to_string());
+        return odata_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "BlobDownloadFailed",
+            &error_msg,
+        )
+        .into_response();
+    }
+
+    // 6. Read bytes from StreamRegistry
+    let body_bytes = {
+        let mut s = streams.write().unwrap(); // ci-ok: infallible lock
+        s.take_stream(&response_stream_id).unwrap_or_default()
+    };
+
+    // Extract content_type and etag from WASM result or entity state
+    let content_type = entity_state
+        .get("mime_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let etag = entity_state
+        .get("content_hash")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    ODataStreamResponse {
+        status: StatusCode::OK,
+        body: body_bytes,
+        content_type,
+        etag,
+    }
+    .into_response()
 }

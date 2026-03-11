@@ -28,6 +28,8 @@ pub struct EntityType {
     pub properties: Vec<Property>,
     pub navigation_properties: Vec<NavigationProperty>,
     pub annotations: Vec<Annotation>,
+    /// Whether this entity type supports the OData `$value` media stream (HasStream="true").
+    pub has_stream: bool,
 }
 
 /// A scalar property on an EntityType.
@@ -296,6 +298,7 @@ mod tests {
                             value: AnnotationValue::String("Draft".into()),
                         },
                     ],
+                    has_stream: false,
                 },
                 EntityType {
                     name: "Customer".into(),
@@ -303,6 +306,7 @@ mod tests {
                     properties: vec![],
                     navigation_properties: vec![],
                     annotations: vec![],
+                    has_stream: false,
                 },
             ],
             enum_types: vec![EnumType {

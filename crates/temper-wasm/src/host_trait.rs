@@ -25,6 +25,19 @@ pub trait WasmHost: Send + Sync {
     /// Retrieve a secret by key.
     fn get_secret(&self, key: &str) -> Result<String, String>;
 
+    /// Make an HTTP request with binary body. Returns (status_code, response_bytes).
+    ///
+    /// Used by streaming host functions where the request body and response are
+    /// raw bytes (not UTF-8 strings). The host reads/writes bytes from/to
+    /// StreamRegistry; WASM never touches raw binary data.
+    async fn http_call_binary(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<(u16, Vec<u8>), String>;
+
     /// Log a message at the given level.
     fn log(&self, level: &str, message: &str);
 }
@@ -85,6 +98,42 @@ impl WasmHost for ProductionWasmHost {
         Ok((status, resp_body))
     }
 
+    async fn http_call_binary(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<(u16, Vec<u8>), String> {
+        let mut builder = match method.to_uppercase().as_str() {
+            "GET" => self.client.get(url),
+            "POST" => self.client.post(url),
+            "PUT" => self.client.put(url),
+            "DELETE" => self.client.delete(url),
+            "PATCH" => self.client.patch(url),
+            other => return Err(format!("unsupported HTTP method: {other}")),
+        };
+
+        for (k, v) in headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+
+        if !body.is_empty() {
+            builder = builder.body(body.to_vec());
+        }
+
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| format!("HTTP binary request failed: {e}"))?;
+        let status = resp.status().as_u16();
+        let resp_bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("failed to read binary response body: {e}"))?;
+        Ok((status, resp_bytes.to_vec()))
+    }
+
     fn get_secret(&self, key: &str) -> Result<String, String> {
         self.secrets
             .get(key)
@@ -108,10 +157,14 @@ impl WasmHost for ProductionWasmHost {
 pub struct SimWasmHost {
     /// Canned HTTP responses: URL pattern -> (status, body).
     responses: BTreeMap<String, (u16, String)>,
+    /// Canned binary HTTP responses: URL pattern -> (status, bytes).
+    binary_responses: BTreeMap<String, (u16, Vec<u8>)>,
     /// Canned secrets.
     secrets: BTreeMap<String, String>,
     /// Default response for URLs not in the map.
     default_response: (u16, String),
+    /// Default binary response for URLs not in the binary map.
+    default_binary_response: (u16, Vec<u8>),
 }
 
 impl SimWasmHost {
@@ -119,8 +172,10 @@ impl SimWasmHost {
     pub fn new() -> Self {
         Self {
             responses: BTreeMap::new(),
+            binary_responses: BTreeMap::new(),
             secrets: BTreeMap::new(),
             default_response: (200, r#"{"ok": true}"#.to_string()),
+            default_binary_response: (200, Vec::new()),
         }
     }
 
@@ -128,6 +183,13 @@ impl SimWasmHost {
     pub fn with_response(mut self, url: &str, status: u16, body: &str) -> Self {
         self.responses
             .insert(url.to_string(), (status, body.to_string()));
+        self
+    }
+
+    /// Add a canned binary HTTP response for a URL.
+    pub fn with_binary_response(mut self, url: &str, status: u16, bytes: Vec<u8>) -> Self {
+        self.binary_responses
+            .insert(url.to_string(), (status, bytes));
         self
     }
 
@@ -140,6 +202,12 @@ impl SimWasmHost {
     /// Set the default response for unmatched URLs.
     pub fn with_default_response(mut self, status: u16, body: &str) -> Self {
         self.default_response = (status, body.to_string());
+        self
+    }
+
+    /// Set the default binary response for unmatched URLs.
+    pub fn with_default_binary_response(mut self, status: u16, bytes: Vec<u8>) -> Self {
+        self.default_binary_response = (status, bytes);
         self
     }
 }
@@ -165,6 +233,21 @@ impl WasmHost for SimWasmHost {
             .cloned()
             .unwrap_or_else(|| self.default_response.clone());
         Ok((status, body))
+    }
+
+    async fn http_call_binary(
+        &self,
+        _method: &str,
+        url: &str,
+        _headers: &[(String, String)],
+        _body: &[u8],
+    ) -> Result<(u16, Vec<u8>), String> {
+        let (status, bytes) = self
+            .binary_responses
+            .get(url)
+            .cloned()
+            .unwrap_or_else(|| self.default_binary_response.clone());
+        Ok((status, bytes))
     }
 
     fn get_secret(&self, key: &str) -> Result<String, String> {

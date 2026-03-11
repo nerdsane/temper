@@ -1,0 +1,77 @@
+# FileVersion Entity — I/O Automaton Specification
+#
+# Immutable record of a specific file version. Created when content is uploaded
+# and superseded when a newer version replaces it.
+
+[automaton]
+name = "FileVersion"
+states = ["Current", "Superseded"]
+initial = "Current"
+
+# --- State Variables ---
+
+[[state]]
+name = "file_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "version_number"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "content_hash"
+type = "string"
+initial = ""
+
+[[state]]
+name = "size_bytes"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "created_by"
+type = "string"
+initial = ""
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Current"]
+to = "Current"
+params = ["file_id", "version_number", "content_hash", "size_bytes", "created_by"]
+hint = "Create a new file version record with content metadata."
+
+[[action]]
+name = "Supersede"
+kind = "internal"
+from = ["Current"]
+to = "Superseded"
+hint = "Mark this version as superseded by a newer version."
+
+# --- Output Actions ---
+
+[[action]]
+name = "FileVersionSupersededEvent"
+kind = "output"
+hint = "Emitted when a file version is superseded."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "SupersededIsFinal"
+when = ["Superseded"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "VersionNumberNonNegative"
+when = ["Current", "Superseded"]
+assert = "version_number >= 0"
+
+[[invariant]]
+name = "SizeBytesNonNegative"
+when = ["Current", "Superseded"]
+assert = "size_bytes >= 0"
