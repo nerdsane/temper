@@ -529,3 +529,293 @@ async fn test_cors_header_present() {
         "*"
     );
 }
+
+const AGENT_DEFINITION_CSDL_XML: &str =
+    include_str!("../../../test-fixtures/specs/agent_definition.csdl.xml");
+const AGENT_DEFINITION_IOA: &str =
+    include_str!("../../../test-fixtures/specs/agent_definition.ioa.toml");
+const PROGRAM_DEFINITION_IOA: &str =
+    include_str!("../../../test-fixtures/specs/program_definition.ioa.toml");
+const PROCESS_IOA: &str = include_str!("../../../test-fixtures/specs/process.ioa.toml");
+
+fn test_state_with_agent_definition_ioa() -> ServerState {
+    let csdl = parse_csdl(AGENT_DEFINITION_CSDL_XML).unwrap();
+    let system = ActorSystem::new("test-agent-platform");
+    let mut specs = std::collections::BTreeMap::new();
+    specs.insert(
+        "AgentDefinition".to_string(),
+        AGENT_DEFINITION_IOA.to_string(),
+    );
+    specs.insert(
+        "ProgramDefinition".to_string(),
+        PROGRAM_DEFINITION_IOA.to_string(),
+    );
+    specs.insert("Process".to_string(), PROCESS_IOA.to_string());
+    ServerState::with_specs(
+        system,
+        csdl,
+        AGENT_DEFINITION_CSDL_XML.to_string(),
+        specs,
+    )
+}
+
+#[tokio::test]
+async fn test_agent_definition_csdl_crud_over_tdata() {
+    let app = build_router(test_state_with_agent_definition_ioa());
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/AgentDefinitions")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "id": "ci-fixer-001",
+                        "name": "ci-fixer",
+                        "system_prompt": "You diagnose CI failures and propose fixes.",
+                        "model_provider": "anthropic",
+                        "model_name": "claude-sonnet-4-6",
+                        "model_max_tokens": 8192,
+                        "tools_json": "[\"datadog_logs_search\",\"bash\"]",
+                        "labels_json": "{\"team\":\"ci-platform\"}",
+                        "created_at": "2026-03-11T10:00:00Z",
+                        "updated_at": "2026-03-11T10:00:00Z"
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let get_response = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/AgentDefinitions('ci-fixer-001')")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = axum::body::to_bytes(get_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(get_json["fields"]["name"], "ci-fixer");
+    assert_eq!(
+        get_json["fields"]["system_prompt"],
+        "You diagnose CI failures and propose fixes."
+    );
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/AgentDefinitions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = axum::body::to_bytes(list_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let list_json: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+    let values = list_json["value"].as_array().unwrap();
+    assert_eq!(values.len(), 1);
+
+    let patch_response = app
+        .clone()
+        .oneshot(
+            Request::patch("/tdata/AgentDefinitions('ci-fixer-001')")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "system_prompt": "You diagnose CI failures, summarize root causes, and propose fixes.",
+                        "updated_at": "2026-03-11T11:00:00Z"
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch_response.status(), StatusCode::OK);
+
+    let patch_body = axum::body::to_bytes(patch_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let patch_json: serde_json::Value = serde_json::from_slice(&patch_body).unwrap();
+    assert_eq!(
+        patch_json["fields"]["system_prompt"],
+        "You diagnose CI failures, summarize root causes, and propose fixes."
+    );
+
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::delete("/tdata/AgentDefinitions('ci-fixer-001')")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+    let missing_response = app
+        .oneshot(
+            Request::get("/tdata/AgentDefinitions('ci-fixer-001')")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_processes_csdl_api_only_lifecycle() {
+    let app = build_router(test_state_with_agent_definition_ioa());
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Processes")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "id": "proc-001",
+                        "definition_kind": "agent",
+                        "definition_id": "ci-fixer-001",
+                        "status": "Ready",
+                        "created_at": "2026-03-11T10:00:00Z",
+                        "updated_at": "2026-03-11T10:00:00Z"
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let start_response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Processes('proc-001')/Temper.AgentV1.StartProcess")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "user_prompt": "Diagnose CI failures for PR #42"
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(start_response.status(), StatusCode::OK);
+    let start_body = axum::body::to_bytes(start_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let start_json: serde_json::Value = serde_json::from_slice(&start_body).unwrap();
+    assert_eq!(start_json["status"], "Running");
+
+    let send_input_response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Processes('proc-001')/Temper.AgentV1.SendInput")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "user_prompt": "Proceed with the fix."
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(send_input_response.status(), StatusCode::OK);
+    let send_input_body = axum::body::to_bytes(send_input_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let send_input_json: serde_json::Value = serde_json::from_slice(&send_input_body).unwrap();
+    assert_eq!(send_input_json["status"], "Running");
+
+    let suspend_response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Processes('proc-001')/Temper.AgentV1.SuspendProcess")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(suspend_response.status(), StatusCode::OK);
+    let suspend_body = axum::body::to_bytes(suspend_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let suspend_json: serde_json::Value = serde_json::from_slice(&suspend_body).unwrap();
+    assert_eq!(suspend_json["status"], "Suspended");
+
+    let resume_response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Processes('proc-001')/Temper.AgentV1.ResumeProcess")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resume_response.status(), StatusCode::OK);
+    let resume_body = axum::body::to_bytes(resume_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let resume_json: serde_json::Value = serde_json::from_slice(&resume_body).unwrap();
+    assert_eq!(resume_json["status"], "Running");
+
+    let terminate_response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Processes('proc-001')/Temper.AgentV1.TerminateProcess")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "reason": "user_requested"
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(terminate_response.status(), StatusCode::OK);
+    let terminate_body = axum::body::to_bytes(terminate_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let terminate_json: serde_json::Value = serde_json::from_slice(&terminate_body).unwrap();
+    assert_eq!(terminate_json["status"], "Terminated");
+
+    // Invalid transition: cannot resume after terminated.
+    let invalid_resume = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Processes('proc-001')/Temper.AgentV1.ResumeProcess")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_resume.status(), StatusCode::CONFLICT);
+
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::delete("/tdata/Processes('proc-001')")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+}

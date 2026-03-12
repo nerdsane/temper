@@ -1,0 +1,13 @@
+# ProgramDefinition entity -- minimal state machine to enable actor-backed CRUD
+# through /tdata/ProgramDefinitions.
+
+[automaton]
+name = "ProgramDefinition"
+states = ["Ready"]
+initial = "Ready"
+
+[[action]]
+name = "Touch"
+kind = "input"
+from = ["Ready"]
+to = "Ready"

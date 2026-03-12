@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.AgentV1" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="AgentDefinition">
+        <Key>
+          <PropertyRef Name="id"/>
+        </Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="name" Type="Edm.String" Nullable="false"/>
+        <Property Name="system_prompt" Type="Edm.String" Nullable="false"/>
+        <Property Name="model_provider" Type="Edm.String" Nullable="false"/>
+        <Property Name="model_name" Type="Edm.String" Nullable="false"/>
+        <Property Name="model_max_tokens" Type="Edm.Int32"/>
+        <Property Name="tools_json" Type="Edm.String" Nullable="false"/>
+        <Property Name="labels_json" Type="Edm.String" Nullable="false"/>
+        <Property Name="status" Type="Edm.String" Nullable="false"/>
+        <Property Name="created_at" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="updated_at" Type="Edm.DateTimeOffset" Nullable="false"/>
+      </EntityType>
+
+      <EntityType Name="ProgramDefinition">
+        <Key>
+          <PropertyRef Name="id"/>
+        </Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="name" Type="Edm.String" Nullable="false"/>
+        <Property Name="module_uri" Type="Edm.String" Nullable="false"/>
+        <Property Name="tools_json" Type="Edm.String" Nullable="false"/>
+        <Property Name="labels_json" Type="Edm.String" Nullable="false"/>
+        <Property Name="status" Type="Edm.String" Nullable="false"/>
+        <Property Name="created_at" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="updated_at" Type="Edm.DateTimeOffset" Nullable="false"/>
+      </EntityType>
+
+      <EntityType Name="Process">
+        <Key>
+          <PropertyRef Name="id"/>
+        </Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="definition_kind" Type="Edm.String" Nullable="false"/>
+        <Property Name="definition_id" Type="Edm.String" Nullable="false"/>
+        <Property Name="status" Type="Edm.String" Nullable="false"/>
+        <Property Name="user_prompt" Type="Edm.String"/>
+        <Property Name="last_input_json" Type="Edm.String"/>
+        <Property Name="error" Type="Edm.String"/>
+        <Property Name="created_at" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="updated_at" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="started_at" Type="Edm.DateTimeOffset"/>
+        <Property Name="terminated_at" Type="Edm.DateTimeOffset"/>
+      </EntityType>
+
+      <Action Name="StartProcess" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentV1.Process"/>
+        <Parameter Name="user_prompt" Type="Edm.String"/>
+        <ReturnType Type="Temper.AgentV1.Process"/>
+      </Action>
+
+      <Action Name="SendInput" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentV1.Process"/>
+        <Parameter Name="user_prompt" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.AgentV1.Process"/>
+      </Action>
+
+      <Action Name="SuspendProcess" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentV1.Process"/>
+        <ReturnType Type="Temper.AgentV1.Process"/>
+      </Action>
+
+      <Action Name="ResumeProcess" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentV1.Process"/>
+        <ReturnType Type="Temper.AgentV1.Process"/>
+      </Action>
+
+      <Action Name="TerminateProcess" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentV1.Process"/>
+        <Parameter Name="reason" Type="Edm.String"/>
+        <ReturnType Type="Temper.AgentV1.Process"/>
+      </Action>
+
+      <EntityContainer Name="Container">
+        <EntitySet Name="AgentDefinitions" EntityType="Temper.AgentV1.AgentDefinition"/>
+        <EntitySet Name="ProgramDefinitions" EntityType="Temper.AgentV1.ProgramDefinition"/>
+        <EntitySet Name="Processes" EntityType="Temper.AgentV1.Process"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

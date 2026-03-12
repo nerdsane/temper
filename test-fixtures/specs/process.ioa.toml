@@ -1,0 +1,37 @@
+# Process entity -- API-only lifecycle state machine for phase 1.
+# This defines surface semantics only (no background execution loop).
+
+[automaton]
+name = "Process"
+states = ["Ready", "Running", "Suspended", "Terminated", "Failed"]
+initial = "Ready"
+
+[[action]]
+name = "StartProcess"
+kind = "input"
+from = ["Ready"]
+to = "Running"
+
+[[action]]
+name = "SendInput"
+kind = "input"
+from = ["Running"]
+to = "Running"
+
+[[action]]
+name = "SuspendProcess"
+kind = "input"
+from = ["Running"]
+to = "Suspended"
+
+[[action]]
+name = "ResumeProcess"
+kind = "input"
+from = ["Suspended"]
+to = "Running"
+
+[[action]]
+name = "TerminateProcess"
+kind = "input"
+from = ["Ready", "Running", "Suspended", "Failed"]
+to = "Terminated"

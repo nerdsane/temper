@@ -1,0 +1,13 @@
+# AgentDefinition entity -- minimal state machine to enable actor-backed CRUD
+# through /tdata/AgentDefinitions.
+
+[automaton]
+name = "AgentDefinition"
+states = ["Ready"]
+initial = "Ready"
+
+[[action]]
+name = "Touch"
+kind = "input"
+from = ["Ready"]
+to = "Ready"
