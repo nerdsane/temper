@@ -94,11 +94,12 @@ fn resolve_otel_config() -> Option<ResolvedOtelConfig> {
     }
 
     if let (Some(otlp), Some(otel_exporter)) = (&otlp_endpoint, &otel_exporter_endpoint)
-        && otlp != otel_exporter {
-            eprintln!(
-                "Both OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_ENDPOINT are set. Using OTLP_ENDPOINT."
-            );
-        }
+        && otlp != otel_exporter
+    {
+        eprintln!(
+            "Both OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_ENDPOINT are set. Using OTLP_ENDPOINT."
+        );
+    }
 
     let (endpoint, endpoint_source) = if let Some(endpoint) = otlp_endpoint {
         (endpoint, EndpointSource::OtlpEndpoint)
