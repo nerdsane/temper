@@ -79,6 +79,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            target/
           key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-check-
 
@@ -111,6 +112,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            target/
           key: ${{ runner.os }}-cargo-integrity-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-integrity-
 
@@ -184,6 +186,7 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     needs: check
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -201,6 +204,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            target/
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
 
@@ -231,6 +235,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            target/
           key: ${{ runner.os }}-cargo-verify-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-verify-
 
