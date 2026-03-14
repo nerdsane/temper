@@ -23,6 +23,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Instant;
 
 use temper_jit::table::TransitionTable;
 use temper_observe::wide_event;
@@ -231,7 +232,9 @@ impl EntityActor {
         store: &ServerEventStore,
         persistence_id: &str,
         state: &mut EntityState,
+        tenant: &str,
     ) {
+        let replay_start = Instant::now();
         let mut from_sequence = 0;
         let mut loaded_snapshot = false;
 
@@ -357,6 +360,11 @@ impl EntityActor {
                 );
             }
         }
+        crate::runtime_metrics::record_event_replay_duration(
+            replay_start.elapsed(),
+            tenant,
+            &state.entity_type,
+        );
     }
 }
 
@@ -395,7 +403,14 @@ impl Actor for EntityActor {
         // Re-evaluates each event through the TransitionTable to reconstruct
         // all state variables (status, counters, booleans) — not just item_count.
         if let Some(ref store) = self.event_store {
-            Self::replay_events(&table, store, &self.persistence_id(), &mut state).await;
+            Self::replay_events(
+                &table,
+                store,
+                &self.persistence_id(),
+                &mut state,
+                &self.tenant,
+            )
+            .await;
         }
 
         // Persist a bootstrap Created event for first-time entities so initial

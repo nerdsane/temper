@@ -130,6 +130,12 @@ pub(super) async fn upsert_loaded_specs_to_turso(
             .await
             .with_context(|| format!("Failed to clear tenant constraints for {tenant} in Turso"))?;
     }
+    if let Some(policy_text) = loaded.cedar_policy_text.as_deref() {
+        turso
+            .upsert_tenant_policy(tenant, policy_text)
+            .await
+            .with_context(|| format!("Failed to persist Cedar policy for {tenant} in Turso"))?;
+    }
     Ok(())
 }
 

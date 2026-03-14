@@ -129,16 +129,28 @@ pub async fn install_os_app(
         get_os_app(app_name).ok_or_else(|| format!("OS app '{app_name}' not found in catalog"))?;
 
     // Build the full Cedar policy text for this tenant (existing + new).
+    // Keep this idempotent across repeated installs/restarts by skipping
+    // policy blocks that are already present.
     let combined_policy = if !bundle.cedar_policies.is_empty() {
-        let combined: String = bundle.cedar_policies.join("\n");
         let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
         let existing = policies.get(tenant).cloned().unwrap_or_default();
-        let full_text = if existing.is_empty() {
-            combined
+        let mut full_text = existing.clone();
+        for policy in bundle.cedar_policies {
+            let candidate = policy.trim();
+            if candidate.is_empty() || existing.contains(candidate) || full_text.contains(candidate)
+            {
+                continue;
+            }
+            if !full_text.is_empty() {
+                full_text.push('\n');
+            }
+            full_text.push_str(candidate);
+        }
+        if full_text.trim().is_empty() {
+            None
         } else {
-            format!("{existing}\n{combined}")
-        };
-        Some(full_text)
+            Some(full_text)
+        }
     } else {
         None
     };
@@ -328,6 +340,28 @@ mod tests {
         let result = install_os_app(&state, "test", "nonexistent").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found in catalog"));
+    }
+
+    #[tokio::test]
+    async fn test_install_os_app_policy_merge_is_idempotent() {
+        let state = PlatformState::new(None);
+        install_os_app(&state, "test-ws", "project-management")
+            .await
+            .expect("first install");
+        let first_policy = {
+            let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+            policies.get("test-ws").expect("tenant policy").clone()
+        };
+
+        install_os_app(&state, "test-ws", "project-management")
+            .await
+            .expect("second install");
+
+        let second_policy = {
+            let policies = state.server.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+            policies.get("test-ws").expect("tenant policy").clone()
+        };
+        assert_eq!(first_policy, second_policy);
     }
 
     /// Proves the full install → persist → reboot → restore cycle.

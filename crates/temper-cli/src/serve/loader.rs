@@ -1,6 +1,6 @@
 //! Spec file loading, linting, and trajectory hydration.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 
@@ -141,6 +141,7 @@ pub(super) fn load_into_registry(
     let ioa_sources = read_ioa_sources(specs_path)?;
     let reactions = read_reactions(specs_path)?;
     let cross_invariants_toml = read_cross_invariants_toml(specs_path)?;
+    let cedar_policy_text = build_tenant_cedar_policy(specs_path, ioa_sources.keys())?;
 
     let lint_findings = lint_tenant_specs(&csdl, &ioa_sources)?;
     let mut lint_errors = Vec::new();
@@ -214,6 +215,7 @@ pub(super) fn load_into_registry(
             .unwrap_or_default(),
         ioa_sources,
         cross_invariants_toml,
+        cedar_policy_text,
     })
 }
 
@@ -270,6 +272,73 @@ pub(super) fn read_cross_invariants_toml(specs_dir: &Path) -> Result<Option<Stri
     let source =
         fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
     Ok(Some(source))
+}
+
+/// Build tenant Cedar policy text from `specs/policies/*.cedar`.
+///
+/// Behavior:
+/// - Concatenates all `.cedar` files in lexical filename order.
+/// - Tracks entity-scoped files by stem (e.g. `order.cedar` -> `Order`).
+/// - For each entity type without a corresponding `.cedar` file, appends a
+///   generated permit-all fallback policy so legacy entities stay operable.
+/// - Leaves all other resource types at Cedar default-deny.
+pub(super) fn build_tenant_cedar_policy<'a>(
+    specs_dir: &Path,
+    entity_types: impl Iterator<Item = &'a String>,
+) -> Result<Option<String>> {
+    let policies_dir = specs_dir.join("policies");
+    let mut policy_chunks: Vec<String> = Vec::new();
+    let mut covered_entities = BTreeSet::new();
+
+    if policies_dir.is_dir() {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(&policies_dir)
+            .with_context(|| format!("Failed to read {}", policies_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("cedar"))
+            {
+                files.push(path);
+            }
+        }
+        files.sort();
+
+        for path in files {
+            let text = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read Cedar policy: {}", path.display()))?;
+            if !text.trim().is_empty() {
+                policy_chunks.push(text);
+            }
+
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                covered_entities.insert(to_pascal_case(stem));
+            }
+        }
+    }
+
+    let mut entities: Vec<String> = entity_types.cloned().collect();
+    entities.sort();
+    for entity in entities {
+        if covered_entities.contains(&entity) {
+            continue;
+        }
+        policy_chunks.push(format!(
+            "permit(\n    principal,\n    action,\n    resource is {entity}\n);"
+        ));
+    }
+
+    if policy_chunks.is_empty() {
+        return Ok(None);
+    }
+
+    let combined = policy_chunks.join("\n\n");
+    temper_authz::AuthzEngine::new(&combined)
+        .map_err(|e| anyhow::anyhow!("Failed to parse combined Cedar policies: {e}"))?;
+    Ok(Some(combined))
 }
 
 #[cfg(test)]
@@ -345,5 +414,59 @@ effect = "set phantom true"
         };
         assert!(err.to_string().contains("Semantic lint failed"));
         assert!(registry.get_tenant(&TenantId::new("lint-tenant")).is_none());
+    }
+
+    #[test]
+    fn build_tenant_cedar_policy_adds_permit_fallback_for_missing_entity_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let specs_dir = tmp.path();
+        std::fs::create_dir_all(specs_dir.join("policies")).expect("policies dir");
+        std::fs::write(
+            specs_dir.join("policies").join("order.cedar"),
+            "permit(principal, action, resource is Order);",
+        )
+        .expect("write order policy");
+
+        let entities = vec!["Order".to_string(), "Issue".to_string()];
+        let combined = build_tenant_cedar_policy(specs_dir, entities.iter())
+            .expect("build policy")
+            .expect("non-empty policy text");
+
+        assert!(combined.contains("resource is Order"));
+        assert!(combined.contains("resource is Issue"));
+
+        let engine = temper_authz::AuthzEngine::new(&combined).expect("policy parses");
+        let customer_ctx = temper_authz::SecurityContext::from_headers(&[
+            ("x-temper-principal-id".to_string(), "cust-1".to_string()),
+            (
+                "x-temper-principal-kind".to_string(),
+                "customer".to_string(),
+            ),
+        ]);
+
+        let issue = engine.authorize(
+            &customer_ctx,
+            "read",
+            "Issue",
+            &std::collections::HashMap::from([(
+                "id".to_string(),
+                serde_json::Value::String("issue-1".to_string()),
+            )]),
+        );
+        assert!(matches!(issue, temper_authz::AuthzDecision::Allow));
+
+        let ungoverned = engine.authorize(
+            &customer_ctx,
+            "read",
+            "UnguardedType",
+            &std::collections::HashMap::from([(
+                "id".to_string(),
+                serde_json::Value::String("x".to_string()),
+            )]),
+        );
+        assert!(matches!(
+            ungoverned,
+            temper_authz::AuthzDecision::Deny(temper_authz::AuthzDenial::NoMatchingPermit)
+        ));
     }
 }

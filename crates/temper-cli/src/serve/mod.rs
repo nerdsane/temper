@@ -11,7 +11,7 @@ mod bootstrap;
 mod loader;
 mod storage;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -26,6 +26,7 @@ use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
+use temper_server::runtime_metrics::{init_runtime_metrics, spawn_runtime_metrics_sampler};
 use temper_server::state::DesignTimeEvent;
 use temper_verify::cascade::VerificationCascade;
 
@@ -38,6 +39,7 @@ struct LoadedTenantSpecs {
     pub csdl_xml: String,
     pub ioa_sources: HashMap<String, String>,
     pub cross_invariants_toml: Option<String>,
+    pub cedar_policy_text: Option<String>,
 }
 
 /// Run the `temper serve` command.
@@ -61,16 +63,21 @@ pub async fn run(
     observe: bool,
 ) -> Result<()> {
     let _otel_guard = init_observability("temper-platform");
+    init_runtime_metrics();
+    temper_authz::init_metrics();
+    temper_store_turso::init_metrics();
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
     // Phase 1: Storage backend
     let (pg_pool, event_store) = bootstrap::init_storage(storage, storage_explicit).await?;
 
     // Phase 2: Registry (restore + disk apps)
-    let registry = bootstrap::build_registry(pg_pool.as_ref(), &event_store, &apps).await?;
+    let (registry, mut tenant_policy_seed) =
+        bootstrap::build_registry(pg_pool.as_ref(), &event_store, &apps).await?;
 
     // Assemble platform state
     let mut state = PlatformState::with_registry(registry, api_key);
+    spawn_runtime_metrics_sampler(state.server.clone());
     state.api_token = std::env::var("TEMPER_API_KEY").ok();
     if state.api_token.is_some() {
         println!("  API key: configured (Bearer token required)");
@@ -80,7 +87,10 @@ pub async fn run(
     state.server.data_dir = data_dir.clone();
 
     // Phase 3: Auto-reload previously registered specs
-    let auto_reloaded = bootstrap::auto_reload_specs(&state, &data_dir);
+    let (auto_reloaded, auto_reloaded_policies) = bootstrap::auto_reload_specs(&state, &data_dir);
+    tenant_policy_seed.extend(auto_reloaded_policies);
+
+    seed_cedar_policies(&state, tenant_policy_seed);
     println!(
         "  Auto-reloaded {auto_reloaded} specs entries from {}",
         data_dir.join("specs-registry.json").display()
@@ -121,17 +131,8 @@ pub async fn run(
     // Phase 8: Bootstrap system + agent tenants
     bootstrap::bootstrap_tenants(&state, &apps).await;
 
-    // Phase 8b: Install OS apps into default tenant (from --os-app flags)
-    for app_name in &os_apps {
-        match temper_platform::install_os_app(&state, "default", app_name).await {
-            Ok(entities) => {
-                println!("  OS app '{app_name}' installed: {}", entities.join(", "));
-            }
-            Err(e) => {
-                eprintln!("  Warning: failed to install OS app '{app_name}': {e}");
-            }
-        }
-    }
+    // Phase 8b: Restore persisted OS apps + apply CLI `--os-app` requests.
+    bootstrap::bootstrap_installed_os_apps(&state, &os_apps).await;
 
     // Phase 9: Bind, start background tasks, serve
     let router = build_platform_router(state.clone());
@@ -159,6 +160,25 @@ pub async fn run(
         .context("Server error")?;
 
     Ok(())
+}
+
+fn seed_cedar_policies(state: &PlatformState, tenant_policy_seed: BTreeMap<String, String>) {
+    let combined = {
+        let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        for (tenant, policy_text) in tenant_policy_seed {
+            policies.insert(tenant, policy_text);
+        }
+        let mut combined = String::new();
+        for text in policies.values() {
+            combined.push_str(text);
+            combined.push('\n');
+        }
+        combined
+    };
+
+    if let Err(e) = state.server.authz.reload_policies(&combined) {
+        eprintln!("  Warning: failed to load Cedar policies from app specs: {e}");
+    }
 }
 
 fn spawn_optimization_loop(state: &PlatformState) {

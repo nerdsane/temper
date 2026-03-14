@@ -3,6 +3,7 @@
 //! Each function represents an explicit phase of the startup pipeline.
 //! The `run` coordinator in `mod.rs` calls these in sequence.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -128,8 +129,9 @@ pub(super) async fn build_registry(
     pg_pool: Option<&sqlx::PgPool>,
     event_store: &Option<ServerEventStore>,
     apps: &[(String, String)],
-) -> Result<SpecRegistry> {
+) -> Result<(SpecRegistry, BTreeMap<String, String>)> {
     let mut registry = SpecRegistry::new();
+    let mut tenant_policy_seed = BTreeMap::new();
 
     // Restore from persistent backend first.
     if let Some(pool) = pg_pool {
@@ -169,6 +171,9 @@ pub(super) async fn build_registry(
     for (tenant, specs_dir) in apps {
         println!("  Loading app: {tenant} from {specs_dir}");
         let loaded = load_into_registry(&mut registry, specs_dir, tenant)?;
+        if let Some(text) = loaded.cedar_policy_text.as_ref() {
+            tenant_policy_seed.insert(tenant.clone(), text.clone());
+        }
         if let Some(pool) = pg_pool {
             upsert_loaded_specs_to_postgres(pool, tenant, &loaded).await?;
         } else if let Some(ServerEventStore::Turso(turso)) = event_store {
@@ -180,13 +185,17 @@ pub(super) async fn build_registry(
         }
     }
 
-    Ok(registry)
+    Ok((registry, tenant_policy_seed))
 }
 
 /// Phase 3: Auto-reload previously registered specs from `specs-registry.json`.
-pub(super) fn auto_reload_specs(state: &PlatformState, data_dir: &Path) -> usize {
+pub(super) fn auto_reload_specs(
+    state: &PlatformState,
+    data_dir: &Path,
+) -> (usize, BTreeMap<String, String>) {
     let specs_registry_path = data_dir.join("specs-registry.json");
     let mut auto_reloaded = 0usize;
+    let mut tenant_policy_seed = BTreeMap::new();
 
     if let Ok(content) = fs::read_to_string(&specs_registry_path)
         && let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
@@ -203,7 +212,12 @@ pub(super) fn auto_reload_specs(state: &PlatformState, data_dir: &Path) -> usize
             };
 
             match loaded {
-                Ok(_) => auto_reloaded += 1,
+                Ok(loaded) => {
+                    auto_reloaded += 1;
+                    if let Some(text) = loaded.cedar_policy_text {
+                        tenant_policy_seed.insert(tenant.clone(), text);
+                    }
+                }
                 Err(e) => {
                     eprintln!(
                         "  Warning: failed to auto-reload app {tenant} from {specs_dir}: {e}"
@@ -213,7 +227,7 @@ pub(super) fn auto_reload_specs(state: &PlatformState, data_dir: &Path) -> usize
         }
     }
 
-    auto_reloaded
+    (auto_reloaded, tenant_policy_seed)
 }
 
 /// Phase 4: Load webhook configurations from app directories.
@@ -406,6 +420,83 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
         for tenant in tenant_router.connected_tenants().await {
             let cache = load_verified_cache(state, &tenant).await;
             temper_platform::bootstrap_agent_specs(state, &tenant, &cache);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OsAppBootstrapSource {
+    Persisted,
+    Cli,
+}
+
+fn tenant_has_os_app_specs(state: &PlatformState, tenant: &str, app_name: &str) -> bool {
+    let Some(bundle) = temper_platform::os_apps::get_os_app(app_name) else {
+        return false;
+    };
+    let tenant_id = TenantId::new(tenant);
+    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+    bundle
+        .specs
+        .iter()
+        .all(|(entity_type, _)| registry.get_table(&tenant_id, entity_type).is_some())
+}
+
+/// Phase 8b: Restore persisted OS apps and apply `--os-app` requests.
+///
+/// Why this exists:
+/// - agent bootstrap (Phase 8) can replace tenant specs;
+/// - OS app installs are durably tracked in `tenant_installed_apps`.
+///
+/// This phase replays persisted installs so app entities remain available
+/// after restart, and then applies explicit CLI installs for `default`.
+pub(super) async fn bootstrap_installed_os_apps(state: &PlatformState, os_apps: &[String]) {
+    let mut requested: BTreeMap<(String, String), OsAppBootstrapSource> = BTreeMap::new();
+
+    if let Some(ref store) = state.server.event_store
+        && let Some(turso) = store.platform_turso_store()
+    {
+        match turso.list_all_installed_apps().await {
+            Ok(installed) => {
+                for (tenant, app_name) in installed {
+                    requested.insert((tenant, app_name), OsAppBootstrapSource::Persisted);
+                }
+            }
+            Err(e) => {
+                eprintln!("  Warning: failed to load installed OS apps: {e}");
+            }
+        }
+    }
+
+    for app_name in os_apps {
+        requested
+            .entry(("default".to_string(), app_name.clone()))
+            .and_modify(|source| *source = OsAppBootstrapSource::Cli)
+            .or_insert(OsAppBootstrapSource::Cli);
+    }
+
+    for ((tenant, app_name), source) in requested {
+        if tenant_has_os_app_specs(state, &tenant, &app_name) {
+            continue;
+        }
+        match temper_platform::install_os_app(state, &tenant, &app_name).await {
+            Ok(entities) => match source {
+                OsAppBootstrapSource::Persisted => {
+                    println!(
+                        "  Restored OS app '{app_name}' for '{tenant}': {}",
+                        entities.join(", ")
+                    );
+                }
+                OsAppBootstrapSource::Cli => {
+                    println!(
+                        "  OS app '{app_name}' installed for '{tenant}': {}",
+                        entities.join(", ")
+                    );
+                }
+            },
+            Err(e) => {
+                eprintln!("  Warning: failed to install OS app '{app_name}' for '{tenant}': {e}");
+            }
         }
     }
 }

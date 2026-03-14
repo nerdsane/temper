@@ -72,8 +72,8 @@ proptest = "1"
 
 # OpenTelemetry
 opentelemetry = "0.28"
-opentelemetry-otlp = { version = "0.28", features = ["logs"] }
-opentelemetry_sdk = { version = "0.28", features = ["logs"] }
+opentelemetry-otlp = { version = "0.28", features = ["logs", "metrics"] }
+opentelemetry_sdk = { version = "0.28", features = ["logs", "metrics"] }
 opentelemetry-appender-tracing = "0.28"
 tracing-opentelemetry = "0.29"
 

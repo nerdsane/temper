@@ -6,6 +6,7 @@ use tracing::instrument;
 
 use super::{TursoEventStore, TursoWasmInvocationRow, TursoWasmModuleRow};
 use crate::TursoWasmInvocationInsert;
+use crate::metrics::TursoQueryTimer;
 
 impl TursoEventStore {
     /// Upsert a WASM module binary for a tenant.
@@ -20,6 +21,7 @@ impl TursoEventStore {
         wasm_bytes: &[u8],
         sha256_hash: &str,
     ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.upsert_wasm_module");
         let conn = self.configured_connection().await?;
         conn.execute(
             "INSERT INTO wasm_modules (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at)
@@ -44,6 +46,7 @@ impl TursoEventStore {
         tenant: &str,
         module_name: &str,
     ) -> Result<Option<TursoWasmModuleRow>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_wasm_module");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
@@ -68,6 +71,7 @@ impl TursoEventStore {
         &self,
         tenant: &str,
     ) -> Result<Vec<TursoWasmModuleRow>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_all_wasm_modules");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
@@ -92,6 +96,7 @@ impl TursoEventStore {
     pub async fn load_wasm_modules_all_tenants(
         &self,
     ) -> Result<Vec<TursoWasmModuleRow>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_wasm_modules_all_tenants");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
@@ -116,6 +121,7 @@ impl TursoEventStore {
         &self,
         entry: &TursoWasmInvocationInsert<'_>,
     ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.persist_wasm_invocation");
         let conn = self.configured_connection().await?;
         let success_val: i64 = if entry.success { 1 } else { 0 };
         let duration_val: i64 = entry.duration_ms as i64;
@@ -147,6 +153,7 @@ impl TursoEventStore {
         &self,
         limit: i64,
     ) -> Result<Vec<TursoWasmInvocationRow>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_recent_wasm_invocations");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
@@ -185,6 +192,7 @@ impl TursoEventStore {
         tenant: &str,
         module_name: &str,
     ) -> Result<bool, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.delete_wasm_module");
         let conn = self.configured_connection().await?;
         let affected = conn
             .execute(

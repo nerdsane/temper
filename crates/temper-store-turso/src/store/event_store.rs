@@ -8,6 +8,7 @@ use temper_runtime::tenant::parse_persistence_id_parts;
 use tracing::instrument;
 
 use super::TursoEventStore;
+use crate::metrics::TursoQueryTimer;
 
 impl EventStore for TursoEventStore {
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
@@ -17,6 +18,7 @@ impl EventStore for TursoEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.append");
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
@@ -107,6 +109,7 @@ impl EventStore for TursoEventStore {
         persistence_id: &str,
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.read_events");
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
@@ -160,6 +163,7 @@ impl EventStore for TursoEventStore {
         sequence_nr: u64,
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.save_snapshot");
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
@@ -191,6 +195,7 @@ impl EventStore for TursoEventStore {
         &self,
         persistence_id: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_snapshot");
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
@@ -220,6 +225,7 @@ impl EventStore for TursoEventStore {
         &self,
         tenant: &str,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.list_entity_ids");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(

@@ -5,6 +5,7 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
 use super::TursoEventStore;
+use crate::metrics::TursoQueryTimer;
 
 impl TursoEventStore {
     /// Query decisions for a specific tenant with optional status filter.
@@ -14,6 +15,7 @@ impl TursoEventStore {
         tenant: &str,
         status: Option<&str>,
     ) -> Result<Vec<String>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.query_decisions");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
@@ -38,6 +40,7 @@ impl TursoEventStore {
         &self,
         status: Option<&str>,
     ) -> Result<Vec<String>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.query_all_decisions");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
@@ -59,6 +62,7 @@ impl TursoEventStore {
     /// Get a single pending decision by ID, returning the full JSON data.
     #[instrument(skip_all, fields(id, otel.name = "turso.get_pending_decision"))]
     pub async fn get_pending_decision(&self, id: &str) -> Result<Option<String>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.get_pending_decision");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
@@ -83,6 +87,7 @@ impl TursoEventStore {
         status: &str,
         data_json: &str,
     ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.upsert_pending_decision");
         let conn = self.configured_connection().await?;
         conn.execute(
             "INSERT INTO pending_decisions (id, tenant, status, data, updated_at) \
@@ -101,6 +106,7 @@ impl TursoEventStore {
         &self,
         limit: i64,
     ) -> Result<Vec<String>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_pending_decisions");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
@@ -124,6 +130,7 @@ impl TursoEventStore {
         tenant: &str,
         policy_text: &str,
     ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.upsert_tenant_policy");
         let conn = self.configured_connection().await?;
         conn.execute(
             "INSERT INTO tenant_policies (tenant, policy_text, updated_at) \
@@ -139,6 +146,7 @@ impl TursoEventStore {
     /// Load all tenant Cedar policies.
     #[instrument(skip_all, fields(otel.name = "turso.load_tenant_policies"))]
     pub async fn load_tenant_policies(&self) -> Result<Vec<(String, String)>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_tenant_policies");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(

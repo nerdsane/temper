@@ -15,6 +15,7 @@ use libsql::{Builder, Database};
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
+use crate::metrics::TursoQueryTimer;
 use crate::schema;
 
 mod authz;
@@ -44,6 +45,7 @@ impl TursoEventStore {
     /// `auth_token`: Turso auth token (`None` for local SQLite).
     #[instrument(skip_all, fields(otel.name = "turso.new"))]
     pub async fn new(url: &str, auth_token: Option<&str>) -> Result<Self, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.new");
         let db = if url.starts_with("libsql://") {
             let token = auth_token.ok_or_else(|| {
                 tracing::error!("auth token is required for libsql:// URLs");
@@ -77,6 +79,7 @@ impl TursoEventStore {
     /// time to wait for the write lock instead of immediately returning SQLITE_BUSY.
     #[instrument(skip_all, fields(otel.name = "turso.configured_connection"))]
     async fn configured_connection(&self) -> Result<libsql::Connection, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.configured_connection");
         let conn = self.db.connect().map_err(storage_error)?;
         if !self.is_remote {
             let _ = conn
@@ -90,6 +93,7 @@ impl TursoEventStore {
     /// Run schema migrations on connect.
     #[instrument(skip_all, fields(otel.name = "turso.migrate"))]
     async fn migrate(&self) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.migrate");
         let conn = self.connection()?;
 
         // PRAGMAs are SQLite-specific and not supported on remote Turso Cloud.

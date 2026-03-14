@@ -22,6 +22,7 @@ pub mod registry_bootstrap;
 pub mod request_context;
 mod response;
 mod router;
+pub mod runtime_metrics;
 pub mod secrets;
 #[cfg(feature = "observe")]
 pub mod sentinel;

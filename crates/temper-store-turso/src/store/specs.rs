@@ -6,6 +6,7 @@ use tracing::instrument;
 
 use super::{TursoEventStore, TursoSpecRow};
 use crate::TursoSpecVerificationUpdate;
+use crate::metrics::TursoQueryTimer;
 
 impl TursoEventStore {
     /// Upsert a spec source (IOA + CSDL) for a tenant/entity_type.
@@ -22,6 +23,7 @@ impl TursoEventStore {
         csdl_xml: &str,
         content_hash: &str,
     ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.upsert_spec");
         let conn = self.configured_connection().await?;
         // When content_hash matches the existing row, keep verification intact.
         // Otherwise reset to pending so the cascade re-runs.
@@ -54,6 +56,7 @@ impl TursoEventStore {
         entity_type: &str,
         update: TursoSpecVerificationUpdate<'_>,
     ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.persist_spec_verification");
         let conn = self.configured_connection().await?;
         conn.execute(
             "UPDATE specs SET
@@ -88,6 +91,7 @@ impl TursoEventStore {
         &self,
         tenant: &str,
     ) -> Result<std::collections::BTreeMap<String, (String, bool)>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_verification_cache");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
@@ -117,6 +121,7 @@ impl TursoEventStore {
         tenant_id: &str,
         app_name: &str,
     ) -> Result<bool, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.is_app_installed");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
@@ -135,6 +140,7 @@ impl TursoEventStore {
         tenant_id: &str,
         app_name: &str,
     ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.record_installed_app");
         let conn = self.configured_connection().await?;
         conn.execute(
             "INSERT OR IGNORE INTO tenant_installed_apps (tenant_id, app_name) VALUES (?1, ?2)",
@@ -148,6 +154,7 @@ impl TursoEventStore {
     /// List all installed apps across all tenants (for boot + UI).
     #[instrument(skip_all, fields(otel.name = "turso.list_all_installed_apps"))]
     pub async fn list_all_installed_apps(&self) -> Result<Vec<(String, String)>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.list_all_installed_apps");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
@@ -169,6 +176,7 @@ impl TursoEventStore {
     /// Remove all installed app records for a tenant (for deletion cleanup).
     #[instrument(skip_all, fields(tenant_id, otel.name = "turso.remove_installed_apps"))]
     pub async fn remove_installed_apps(&self, tenant_id: &str) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.remove_installed_apps");
         let conn = self.configured_connection().await?;
         conn.execute(
             "DELETE FROM tenant_installed_apps WHERE tenant_id = ?1",
@@ -184,6 +192,7 @@ impl TursoEventStore {
     /// Load all persisted specs (for startup recovery).
     #[instrument(skip_all, fields(otel.name = "turso.load_specs"))]
     pub async fn load_specs(&self) -> Result<Vec<TursoSpecRow>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_specs");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(

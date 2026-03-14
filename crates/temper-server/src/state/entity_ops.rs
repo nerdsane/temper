@@ -14,6 +14,7 @@ use super::ServerState;
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
+use crate::runtime_metrics;
 
 fn actor_idle_timeout_secs() -> i64 {
     static ACTOR_IDLE_TIMEOUT: OnceLock<i64> = OnceLock::new();
@@ -95,6 +96,7 @@ impl ServerState {
                     count = entities.len(),
                     "populated entity index from event store"
                 );
+                runtime_metrics::record_server_state_metrics(self);
             }
             Err(e) => {
                 tracing::error!(
@@ -128,6 +130,7 @@ impl ServerState {
                         discovered = entities.len(),
                         "hydrated entities from event store"
                     );
+                    runtime_metrics::record_server_state_metrics(self);
                 }
                 Err(e) => {
                     tracing::error!(
@@ -237,6 +240,7 @@ impl ServerState {
                 .insert(entity_id.to_string());
         }
         self.touch_actor_access(&key);
+        runtime_metrics::record_server_state_metrics(self);
 
         Some(actor_ref)
     }
@@ -264,6 +268,7 @@ impl ServerState {
                 ids.remove(entity_id);
             }
         }
+        runtime_metrics::record_server_state_metrics(self);
     }
 
     /// List all entity IDs for a (tenant, entity_type) pair.
@@ -646,6 +651,7 @@ impl ServerState {
         }
 
         if passivated > 0 {
+            runtime_metrics::record_server_state_metrics(self);
             tracing::info!(count = passivated, timeout_secs, "passivated idle actors");
         }
     }
