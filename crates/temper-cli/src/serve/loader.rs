@@ -427,7 +427,7 @@ effect = "set phantom true"
         )
         .expect("write order policy");
 
-        let entities = vec!["Order".to_string(), "Issue".to_string()];
+        let entities = ["Order".to_string(), "Issue".to_string()];
         let combined = build_tenant_cedar_policy(specs_dir, entities.iter())
             .expect("build policy")
             .expect("non-empty policy text");
