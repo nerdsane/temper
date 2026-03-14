@@ -10,7 +10,7 @@ use std::sync::RwLock;
 
 use cedar_policy::{
     Authorizer, Context, Decision, Entities, Entity, EntityUid, PolicySet, Request,
-    Response as CedarResponse,
+    Response as CedarResponse, Schema,
 };
 
 use crate::context::{PrincipalKind, SecurityContext};
@@ -44,18 +44,21 @@ impl AuthzDecision {
 /// authorization requests. Supports hot-reload of policies via [`reload_policies`].
 pub struct AuthzEngine {
     policy_set: RwLock<PolicySet>,
+    schema: RwLock<Schema>,
     authorizer: Authorizer,
 }
 
 impl AuthzEngine {
     /// Create a new AuthzEngine from Cedar policy text.
     pub fn new(policy_text: &str) -> Result<Self, AuthzError> {
+        let schema = load_authz_schema()?;
         let policy_set = policy_text
             .parse::<PolicySet>()
             .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
 
         Ok(Self {
             policy_set: RwLock::new(policy_set),
+            schema: RwLock::new(schema),
             authorizer: Authorizer::new(),
         })
     }
@@ -67,6 +70,9 @@ impl AuthzEngine {
     pub fn empty() -> Self {
         Self {
             policy_set: RwLock::new(PolicySet::new()),
+            schema: RwLock::new(
+                load_authz_schema().expect("embedded authz Cedar schema must parse"),
+            ),
             authorizer: Authorizer::new(),
         }
     }
@@ -80,6 +86,9 @@ impl AuthzEngine {
             PolicySet::from_str("permit(principal, action, resource);").unwrap_or_default();
         Self {
             policy_set: RwLock::new(policy_set),
+            schema: RwLock::new(
+                load_authz_schema().expect("embedded authz Cedar schema must parse"),
+            ),
             authorizer: Authorizer::new(),
         }
     }
@@ -88,6 +97,7 @@ impl AuthzEngine {
     /// then atomically swaps the policy set. If parsing fails, the existing
     /// policies remain in effect and an error is returned.
     pub fn reload_policies(&self, policy_text: &str) -> Result<(), AuthzError> {
+        let new_schema = load_authz_schema()?;
         let new_policy_set = policy_text
             .parse::<PolicySet>()
             .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
@@ -96,7 +106,12 @@ impl AuthzEngine {
             .policy_set
             .write()
             .map_err(|e| AuthzError::Engine(format!("policy lock poisoned: {e}")))?;
+        let mut schema = self
+            .schema
+            .write()
+            .map_err(|e| AuthzError::Engine(format!("schema lock poisoned: {e}")))?;
         *current = new_policy_set;
+        *schema = new_schema;
         Ok(())
     }
 
@@ -197,6 +212,10 @@ impl AuthzEngine {
         // access (`principal.agent_type in [...]`).
         let mut principal_attrs: HashMap<String, cedar_policy::RestrictedExpression> =
             HashMap::new();
+        principal_attrs.insert(
+            "id".to_string(),
+            cedar_policy::RestrictedExpression::new_string(security_ctx.principal.id.clone()),
+        );
         if let Some(ref agent_type) = security_ctx.principal.agent_type {
             principal_attrs.insert(
                 "agent_type".to_string(),
@@ -213,8 +232,22 @@ impl AuthzEngine {
             insert_json_as_cedar(&mut principal_attrs, key.clone(), value);
         }
 
+        let schema = match self.schema.read() {
+            Ok(s) => s,
+            Err(e) => {
+                return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
+                    "schema lock poisoned: {e}"
+                )));
+            }
+        };
+        let schema_opt = if security_ctx.principal.attributes.is_empty() {
+            Some(&*schema)
+        } else {
+            None
+        };
+
         let entities = match Entity::new(principal_uid.clone(), principal_attrs, HashSet::new()) {
-            Ok(entity) => match Entities::from_entities([entity], None) {
+            Ok(entity) => match Entities::from_entities([entity], schema_opt) {
                 Ok(e) => e,
                 Err(e) => {
                     return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
@@ -234,7 +267,7 @@ impl AuthzEngine {
             action_uid,
             resource_uid,
             context,
-            None, // no schema validation for now
+            None, // request validation stays schema-less: actions/resources are tenant-defined
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -339,11 +372,52 @@ fn resource_id_from_attrs(attrs: &HashMap<String, serde_json::Value>) -> String 
         .to_string()
 }
 
+const AUTHZ_CEDAR_SCHEMA: &str = r#"
+entity Agent = {
+  id: String,
+  agent_type?: String,
+  role?: String
+};
+
+entity Admin = {
+  id: String,
+  agent_type?: String,
+  role?: String
+};
+
+entity Human = {
+  id: String,
+  agent_type?: String,
+  role?: String
+};
+
+entity Customer = {
+  id: String,
+  agent_type?: String,
+  role?: String
+};
+
+entity System = {
+  id: String,
+  agent_type?: String,
+  role?: String
+};
+"#;
+
+fn load_authz_schema() -> Result<Schema, AuthzError> {
+    let (schema, _warnings) = Schema::from_cedarschema_str(AUTHZ_CEDAR_SCHEMA)
+        .map_err(|e| AuthzError::Engine(format!("failed to parse embedded Cedar schema: {e}")))?;
+    Ok(schema)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::context::SecurityContext;
     use crate::error::AuthzDenial;
+
+    const PM_ISSUE_POLICY: &str =
+        include_str!("../../../os-apps/project-management/specs/policies/issue.cedar");
 
     fn admin_context() -> SecurityContext {
         SecurityContext::from_headers(&[
@@ -631,6 +705,51 @@ mod tests {
     }
 
     #[test]
+    fn test_principal_agent_type_set_membership_filtering() {
+        let policy = r#"
+            permit(
+                principal is Agent,
+                action == Action::"Assign",
+                resource is Issue
+            ) when {
+                ["supervisor", "human"].contains(principal.agent_type)
+            };
+        "#;
+        let engine = AuthzEngine::new(policy).unwrap();
+
+        let mut attrs = HashMap::new();
+        attrs.insert("id".to_string(), serde_json::json!("issue-1"));
+
+        let supervisor_ctx = SecurityContext::from_headers(&[
+            (
+                "X-Temper-Principal-Id".to_string(),
+                "bot-supervisor".to_string(),
+            ),
+            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+            ("X-Temper-Agent-Type".to_string(), "supervisor".to_string()),
+        ]);
+        let supervisor_decision = engine.authorize(&supervisor_ctx, "Assign", "Issue", &attrs);
+        assert!(
+            supervisor_decision.is_allowed(),
+            "set membership should allow supervisor agent_type: {supervisor_decision:?}"
+        );
+
+        let worker_ctx = SecurityContext::from_headers(&[
+            (
+                "X-Temper-Principal-Id".to_string(),
+                "bot-worker".to_string(),
+            ),
+            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+            ("X-Temper-Agent-Type".to_string(), "worker".to_string()),
+        ]);
+        let worker_decision = engine.authorize(&worker_ctx, "Assign", "Issue", &attrs);
+        assert!(
+            !worker_decision.is_allowed(),
+            "set membership should deny non-listed agent_type"
+        );
+    }
+
+    #[test]
     fn test_context_entity_status_in_cedar_context() {
         // Policy that gates on context.ctx_parent_agent_status
         let policy = r#"
@@ -679,6 +798,52 @@ mod tests {
         assert!(
             !decision.is_allowed(),
             "should deny with wrong context entity status"
+        );
+    }
+
+    #[test]
+    fn test_pm_assign_denies_openclaw_agent_type() {
+        let engine = AuthzEngine::new(PM_ISSUE_POLICY).unwrap();
+
+        let ctx = SecurityContext::from_headers(&[
+            (
+                "X-Temper-Principal-Id".to_string(),
+                "bot-openclaw".to_string(),
+            ),
+            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+            ("X-Temper-Agent-Type".to_string(), "openclaw".to_string()),
+        ]);
+
+        let mut attrs = HashMap::new();
+        attrs.insert("id".to_string(), serde_json::json!("issue-1"));
+
+        let decision = engine.authorize(&ctx, "Assign", "Issue", &attrs);
+        assert!(
+            !decision.is_allowed(),
+            "openclaw agent_type must be denied for Assign: {decision:?}"
+        );
+    }
+
+    #[test]
+    fn test_pm_assign_allows_supervisor_agent_type() {
+        let engine = AuthzEngine::new(PM_ISSUE_POLICY).unwrap();
+
+        let ctx = SecurityContext::from_headers(&[
+            (
+                "X-Temper-Principal-Id".to_string(),
+                "bot-supervisor".to_string(),
+            ),
+            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+            ("X-Temper-Agent-Type".to_string(), "supervisor".to_string()),
+        ]);
+
+        let mut attrs = HashMap::new();
+        attrs.insert("id".to_string(), serde_json::json!("issue-1"));
+
+        let decision = engine.authorize(&ctx, "Assign", "Issue", &attrs);
+        assert!(
+            decision.is_allowed(),
+            "supervisor agent_type must be allowed for Assign: {decision:?}"
         );
     }
 }
