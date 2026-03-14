@@ -92,10 +92,13 @@ async fn dst_tenant_a_cannot_dispatch_task() {
             &agent,
         )
         .await;
-    let resp = r.expect("spec-free dispatch should succeed");
     assert!(
-        !resp.spec_governed,
-        "should be spec-free (no Task spec in tenant-a)"
+        r.is_err(),
+        "ungoverned entity type should be denied (no Task spec in tenant-a)"
+    );
+    assert!(
+        r.unwrap_err().contains("not governed"),
+        "error should mention ungoverned entity type"
     );
 }
 
@@ -143,10 +146,13 @@ async fn dst_tenant_b_cannot_dispatch_order() {
             &agent,
         )
         .await;
-    let resp = r.expect("spec-free dispatch should succeed");
     assert!(
-        !resp.spec_governed,
-        "should be spec-free (no Order spec in tenant-b)"
+        r.is_err(),
+        "ungoverned entity type should be denied (no Order spec in tenant-b)"
+    );
+    assert!(
+        r.unwrap_err().contains("not governed"),
+        "error should mention ungoverned entity type"
     );
 }
 

@@ -1,6 +1,6 @@
 use tracing::instrument;
 
-use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
+use crate::entity_actor::{EntityMsg, EntityResponse};
 use crate::request_context::AgentContext;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use temper_runtime::scheduler::sim_now;
@@ -151,50 +151,15 @@ impl crate::state::ServerState {
         await_integration: bool,
     ) -> Result<EntityResponse, DispatchError> {
         let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
-            // Spec-free dispatch: no transition table, but Cedar allowed the action.
-            let entry = TrajectoryEntry {
-                timestamp: sim_now().to_rfc3339(),
-                tenant: tenant.to_string(),
-                entity_type: entity_type.to_string(),
-                entity_id: entity_id.to_string(),
-                action: action.to_string(),
-                success: true,
-                from_status: None,
-                to_status: None,
-                error: None,
-                agent_id: agent_ctx.agent_id.clone(),
-                session_id: agent_ctx.session_id.clone(),
-                authz_denied: None,
-                denied_resource: None,
-                denied_module: None,
-                source: Some(TrajectorySource::Entity),
-                spec_governed: Some(false),
-                agent_type: agent_ctx.agent_type.clone(),
-            };
-            if let Err(e) = self.persist_trajectory_entry(&entry).await {
-                tracing::error!(error = %e, "failed to persist trajectory entry");
-            }
-            return Ok(EntityResponse {
-                success: true,
-                state: EntityState {
-                    entity_type: entity_type.to_string(),
-                    entity_id: entity_id.to_string(),
-                    status: String::new(),
-                    item_count: 0,
-                    counters: std::collections::BTreeMap::new(),
-                    booleans: std::collections::BTreeMap::new(),
-                    lists: std::collections::BTreeMap::new(),
-                    fields: serde_json::json!({}),
-                    events: std::collections::VecDeque::new(),
-                    total_event_count: 0,
-                    sequence_nr: 0,
-                },
-                error: None,
-                custom_effects: vec![],
-                scheduled_actions: vec![],
-                spawn_requests: vec![],
-                spec_governed: false,
-            });
+            // Default-deny: entity type has no registered spec.
+            tracing::warn!(
+                tenant = %tenant,
+                entity_type,
+                entity_id,
+                action,
+                "rejecting action on ungoverned entity type (no spec registered)"
+            );
+            return Err(DispatchError::Ungoverned(entity_type.to_string()));
         };
 
         // Pre-resolve cross-entity state gates (Gap 1: Agent OS).

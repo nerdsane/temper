@@ -59,6 +59,27 @@ pub(super) async fn dispatch_bound_action(
         agent_ctx.agent_type.as_deref(),
     );
 
+    // Default-deny: reject actions on entity types with no registered spec.
+    let is_governed = {
+        let registry = state.registry.read().expect("registry lock poisoned");
+        registry.get_spec(tenant, entity_type).is_some()
+    } || state.transition_tables.contains_key(entity_type);
+
+    if !is_governed {
+        http_span.set_status(Status::error("EntityTypeNotGoverned"));
+        http_span.set_attribute(OtelKeyValue::new("http.status_code", 404i64));
+        let end_time: std::time::SystemTime = sim_now().into();
+        http_span.end_with_timestamp(end_time);
+        return odata_error(
+            StatusCode::NOT_FOUND,
+            "EntityTypeNotGoverned",
+            &format!(
+                "Entity type '{entity_type}' has no registered spec — actions are denied by default"
+            ),
+        )
+        .into_response();
+    }
+
     // Fetch entity state BEFORE authz check so resource attributes are available.
     let current_state = match state
         .get_tenant_entity_state(tenant, entity_type, key_str)
