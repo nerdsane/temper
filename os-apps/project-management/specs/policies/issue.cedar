@@ -19,7 +19,7 @@ permit(
   action in [Action::"MoveToTriage", Action::"MoveToTodo", Action::"SetPriority", Action::"Assign", Action::"AssignPlanner", Action::"Unassign", Action::"Cancel"],
   resource is Issue
 ) when {
-  principal.agent_type in ["supervisor", "human"]
+  principal.agent_type == "supervisor" || principal.agent_type == "human"
 };
 
 // --- Planning: the assigned planner ---
@@ -39,7 +39,7 @@ permit(
   action in [Action::"ApprovePlan", Action::"RejectPlan", Action::"RevisePlan"],
   resource is Issue
 ) when {
-  principal.agent_type in ["supervisor", "human"]
+  principal.agent_type == "supervisor" || principal.agent_type == "human"
 };
 
 // --- Implementation: the assigned implementer ---
@@ -59,7 +59,7 @@ permit(
   action in [Action::"ApproveReview", Action::"RequestChanges"],
   resource is Issue
 ) when {
-  principal.agent_type in ["supervisor", "human"]
+  principal.agent_type == "supervisor" || principal.agent_type == "human"
 };
 
 // --- Reopen & Archive: supervisors and humans ---
@@ -69,5 +69,5 @@ permit(
   action in [Action::"Reopen", Action::"Archive"],
   resource is Issue
 ) when {
-  principal.agent_type in ["supervisor", "human"]
+  principal.agent_type == "supervisor" || principal.agent_type == "human"
 };
