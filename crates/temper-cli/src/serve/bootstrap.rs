@@ -417,8 +417,7 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
     }
 
     let default_cache = load_verified_cache(state, "default").await;
-    let default_hashes =
-        temper_platform::bootstrap_agent_specs(state, "default", &default_cache);
+    let default_hashes = temper_platform::bootstrap_agent_specs(state, "default", &default_cache);
     if let Some(turso) = turso {
         temper_platform::persist_agent_verification(turso, "default", &default_hashes).await;
     }

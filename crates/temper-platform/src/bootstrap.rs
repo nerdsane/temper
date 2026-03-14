@@ -237,9 +237,7 @@ pub(crate) async fn persist_bootstrap_verification(
             .upsert_spec(tenant, entity_type, ioa_source, csdl_source, content_hash)
             .await
         {
-            tracing::warn!(
-                "Failed to persist bootstrap spec {tenant}/{entity_type}: {e}"
-            );
+            tracing::warn!("Failed to persist bootstrap spec {tenant}/{entity_type}: {e}");
             continue;
         }
 
@@ -258,18 +256,13 @@ pub(crate) async fn persist_bootstrap_verification(
             )
             .await
         {
-            tracing::warn!(
-                "Failed to persist verification status for {tenant}/{entity_type}: {e}"
-            );
+            tracing::warn!("Failed to persist verification status for {tenant}/{entity_type}: {e}");
         }
     }
 }
 
 /// Persist system tenant spec verification to Turso.
-pub async fn persist_system_verification(
-    turso: &TursoEventStore,
-    hashes: &[(String, String)],
-) {
+pub async fn persist_system_verification(turso: &TursoEventStore, hashes: &[(String, String)]) {
     persist_bootstrap_verification(turso, SYSTEM_TENANT, SYSTEM_SPECS, SYSTEM_CSDL, hashes).await;
 }
 
