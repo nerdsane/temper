@@ -177,8 +177,9 @@ impl OtelGuard {
 ///
 /// Resolution order for the OTLP endpoint:
 /// 1. `OTLP_ENDPOINT` env var → full OTEL export to that endpoint
-/// 2. `LOGFIRE_TOKEN` env var → full OTEL export to Logfire default endpoint
-/// 3. Neither → stderr-only logging (no OTEL export)
+/// 2. `OTEL_EXPORTER_OTLP_ENDPOINT` env var → full OTEL export to that endpoint
+/// 3. `LOGFIRE_TOKEN` env var → full OTEL export to Logfire default endpoint
+/// 4. Neither → stderr-only logging (no OTEL export)
 ///
 /// When `LOGFIRE_TOKEN` is set, an `Authorization: Bearer <token>` header
 /// is injected into all OTLP exporters regardless of which endpoint is used.
@@ -363,7 +364,10 @@ pub fn init_tracing(
         .with(fmt_layer)
         .with(otel_trace_layer)
         .with(otel_log_layer)
-        .init();
+        .try_init()
+        .map_err(|e| {
+            std::io::Error::other(format!("failed to initialize tracing subscriber: {e}"))
+        })?;
 
     tracing::info!(
         endpoint,
@@ -390,8 +394,117 @@ pub fn init_stderr_only() {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,hyper=warn,h2=warn"));
 
-    tracing_subscriber::registry()
+    if let Err(e) = tracing_subscriber::registry()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer().with_target(true))
-        .init();
+        .try_init()
+    {
+        eprintln!("stderr tracing subscriber already initialized: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    const TEST_ENV_VARS: [&str; 3] = [
+        "OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "LOGFIRE_TOKEN",
+    ];
+
+    fn with_test_env(values: &[(&str, Option<&str>)], f: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().expect("env mutex must lock");
+        let snapshot: Vec<(&str, Option<String>)> = TEST_ENV_VARS
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect();
+
+        for (key, value) in values {
+            match value {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+
+        f();
+
+        for (key, value) in snapshot {
+            match value {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_config_prefers_otlp_endpoint() {
+        with_test_env(
+            &[
+                ("OTLP_ENDPOINT", Some("http://otlp:4318")),
+                ("OTEL_EXPORTER_OTLP_ENDPOINT", Some("http://other:4318")),
+                ("LOGFIRE_TOKEN", Some("abc123")),
+            ],
+            || {
+                let config = resolve_otel_config().expect("config should resolve");
+                assert_eq!(config.endpoint, "http://otlp:4318");
+                assert_eq!(config.endpoint_source.as_str(), "OTLP_ENDPOINT");
+                assert_eq!(config.logfire_token.as_deref(), Some("abc123"));
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_config_uses_exporter_endpoint_when_otlp_missing() {
+        with_test_env(
+            &[
+                ("OTLP_ENDPOINT", None),
+                ("OTEL_EXPORTER_OTLP_ENDPOINT", Some("http://collector:4318")),
+                ("LOGFIRE_TOKEN", None),
+            ],
+            || {
+                let config = resolve_otel_config().expect("config should resolve");
+                assert_eq!(config.endpoint, "http://collector:4318");
+                assert_eq!(
+                    config.endpoint_source.as_str(),
+                    "OTEL_EXPORTER_OTLP_ENDPOINT"
+                );
+                assert_eq!(config.logfire_token, None);
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_config_falls_back_to_logfire_token() {
+        with_test_env(
+            &[
+                ("OTLP_ENDPOINT", None),
+                ("OTEL_EXPORTER_OTLP_ENDPOINT", None),
+                ("LOGFIRE_TOKEN", Some("abc123")),
+            ],
+            || {
+                let config = resolve_otel_config().expect("config should resolve");
+                assert_eq!(config.endpoint, LOGFIRE_ENDPOINT);
+                assert_eq!(config.endpoint_source.as_str(), "LOGFIRE_TOKEN");
+                assert_eq!(config.logfire_token.as_deref(), Some("abc123"));
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_config_ignores_empty_values() {
+        with_test_env(
+            &[
+                ("OTLP_ENDPOINT", Some("   ")),
+                ("OTEL_EXPORTER_OTLP_ENDPOINT", Some("")),
+                ("LOGFIRE_TOKEN", Some(" ")),
+            ],
+            || {
+                let config = resolve_otel_config();
+                assert!(config.is_none(), "all-empty env vars should disable OTEL");
+            },
+        );
+    }
 }

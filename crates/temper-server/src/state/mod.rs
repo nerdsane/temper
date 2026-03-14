@@ -11,7 +11,7 @@ mod runtime_metrics;
 pub mod trajectory;
 pub mod wasm_invocation_log;
 
-pub use dispatch::{DispatchCommand, DispatchExtOptions};
+pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{

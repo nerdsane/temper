@@ -23,47 +23,7 @@ impl crate::state::ServerState {
         action_name = cmd.action,
     ))]
     pub async fn dispatch(&self, cmd: DispatchCommand<'_>) -> Result<EntityResponse, String> {
-        let response = self
-            .dispatch_tenant_action_core(
-                cmd.tenant,
-                cmd.entity_type,
-                cmd.entity_id,
-                cmd.action,
-                cmd.params,
-                cmd.agent_ctx,
-                cmd.await_integration,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)
-        if response.success {
-            let dispatcher = self
-                .reaction_dispatcher
-                .read()
-                .ok()
-                .and_then(|slot| slot.clone());
-            if let Some(dispatcher) = dispatcher {
-                let fields = serde_json::to_value(&response.state.fields).unwrap_or_default();
-                dispatcher
-                    .dispatch_reactions(
-                        self,
-                        cmd.tenant,
-                        cmd.entity_type,
-                        cmd.entity_id,
-                        cmd.action,
-                        &response.state.status,
-                        &fields,
-                        0,
-                    )
-                    .await;
-            }
-        }
-
-        // Scheduled actions are handled inside run_post_dispatch_effects
-        // (called from dispatch_tenant_action_core).
-
-        Ok(response)
+        self.dispatch_typed(cmd).await.map_err(|e| e.to_string())
     }
 
     /// Dispatch an action to an entity actor (legacy single-tenant).
@@ -124,7 +84,30 @@ impl crate::state::ServerState {
         params: serde_json::Value,
         options: DispatchExtOptions<'_>,
     ) -> Result<EntityResponse, String> {
-        self.dispatch(DispatchCommand {
+        self.dispatch_tenant_action_ext_typed(
+            tenant,
+            entity_type,
+            entity_id,
+            action,
+            params,
+            options,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    /// Typed variant of [`dispatch_tenant_action_ext`](Self::dispatch_tenant_action_ext).
+    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_tenant_action_ext_typed", tenant = %tenant, entity_type, entity_id, action_name = action))]
+    pub async fn dispatch_tenant_action_ext_typed(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        action: &str,
+        params: serde_json::Value,
+        options: DispatchExtOptions<'_>,
+    ) -> Result<EntityResponse, DispatchError> {
+        self.dispatch_typed(DispatchCommand {
             tenant,
             entity_type,
             entity_id,
@@ -134,6 +117,61 @@ impl crate::state::ServerState {
             await_integration: options.await_integration,
         })
         .await
+    }
+
+    async fn dispatch_typed(
+        &self,
+        cmd: DispatchCommand<'_>,
+    ) -> Result<EntityResponse, DispatchError> {
+        let DispatchCommand {
+            tenant,
+            entity_type,
+            entity_id,
+            action,
+            params,
+            agent_ctx,
+            await_integration,
+        } = cmd;
+
+        let response = self
+            .dispatch_tenant_action_core(
+                tenant,
+                entity_type,
+                entity_id,
+                action,
+                params,
+                agent_ctx,
+                await_integration,
+            )
+            .await?;
+
+        // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)
+        if response.success {
+            let dispatcher = self
+                .reaction_dispatcher
+                .read()
+                .ok()
+                .and_then(|slot| slot.clone());
+            if let Some(dispatcher) = dispatcher {
+                let fields = serde_json::to_value(&response.state.fields).unwrap_or_default();
+                dispatcher
+                    .dispatch_reactions(
+                        self,
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        action,
+                        &response.state.status,
+                        &fields,
+                        0,
+                    )
+                    .await;
+            }
+        }
+
+        // Scheduled actions are handled inside run_post_dispatch_effects
+        // (called from dispatch_tenant_action_core).
+        Ok(response)
     }
 
     /// Core dispatch without reaction cascade (used by ReactionDispatcher to
@@ -150,7 +188,10 @@ impl crate::state::ServerState {
         agent_ctx: &AgentContext,
         await_integration: bool,
     ) -> Result<EntityResponse, DispatchError> {
-        let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
+        if !self
+            .is_entity_type_governed(tenant, entity_type)
+            .map_err(DispatchError::Internal)?
+        {
             // Default-deny: entity type has no registered spec.
             tracing::warn!(
                 tenant = %tenant,
@@ -160,6 +201,12 @@ impl crate::state::ServerState {
                 "rejecting action on ungoverned entity type (no spec registered)"
             );
             return Err(DispatchError::Ungoverned(entity_type.to_string()));
+        }
+
+        let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
+            return Err(DispatchError::Internal(format!(
+                "failed to resolve actor for governed entity type '{entity_type}'"
+            )));
         };
 
         // Pre-resolve cross-entity state gates (Gap 1: Agent OS).

@@ -7,7 +7,8 @@ use temper_runtime::persistence::{
 use temper_runtime::tenant::parse_persistence_id_parts;
 use tracing::instrument;
 
-use super::{TursoEventStore, record_turso_query_duration};
+use super::TursoEventStore;
+use super::instrumentation::record_turso_query_duration;
 
 impl EventStore for TursoEventStore {
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
