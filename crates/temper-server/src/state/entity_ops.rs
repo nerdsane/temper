@@ -83,14 +83,16 @@ impl ServerState {
 
         match store.list_entity_ids(tenant.as_str()).await {
             Ok(entities) => {
-                let mut index = self.entity_index.write().unwrap(); // ci-ok: infallible lock
-                for (entity_type, entity_id) in &entities {
-                    let index_key = format!("{tenant}:{entity_type}");
-                    index
-                        .entry(index_key)
-                        .or_default()
-                        .insert(entity_id.clone());
-                }
+                {
+                    let mut index = self.entity_index.write().unwrap(); // ci-ok: infallible lock
+                    for (entity_type, entity_id) in &entities {
+                        let index_key = format!("{tenant}:{entity_type}");
+                        index
+                            .entry(index_key)
+                            .or_default()
+                            .insert(entity_id.clone());
+                    }
+                } // write lock dropped before metrics call
                 tracing::info!(
                     tenant = %tenant,
                     count = entities.len(),
