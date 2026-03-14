@@ -6,12 +6,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 
 use cedar_policy::{
     Authorizer, Context, Decision, Entities, Entity, EntityUid, PolicySet, Request,
     Response as CedarResponse, Schema,
 };
+use opentelemetry::global;
+use opentelemetry::metrics::Counter;
 
 use crate::context::{PrincipalKind, SecurityContext};
 use crate::error::{AuthzDenial, AuthzError};
@@ -133,6 +135,8 @@ impl AuthzEngine {
         resource_type: &str,
         resource_attrs: &HashMap<String, serde_json::Value>,
     ) -> AuthzDecision {
+        cedar_evaluations_counter().add(1, &[]);
+
         // Build Cedar principal
         let principal_type = match security_ctx.principal.kind {
             PrincipalKind::Customer => "Customer",
@@ -324,6 +328,16 @@ impl AuthzEngine {
         }
         self.authorize(security_ctx, action, resource_type, resource_attrs)
     }
+}
+
+fn cedar_evaluations_counter() -> &'static Counter<u64> {
+    static COUNTER: OnceLock<Counter<u64>> = OnceLock::new();
+    COUNTER.get_or_init(|| {
+        global::meter("temper-authz")
+            .u64_counter("temper_cedar_evaluations_total")
+            .with_description("Total number of Cedar authorization evaluations.")
+            .build()
+    })
 }
 
 /// Insert a `serde_json::Value` into a Cedar context map, converting to the

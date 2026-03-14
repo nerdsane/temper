@@ -7,7 +7,7 @@ use temper_runtime::persistence::{
 use temper_runtime::tenant::parse_persistence_id_parts;
 use tracing::instrument;
 
-use super::TursoEventStore;
+use super::{TursoEventStore, record_turso_query_duration};
 
 impl EventStore for TursoEventStore {
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
@@ -25,15 +25,22 @@ impl EventStore for TursoEventStore {
             .await
             .map_err(storage_error)?;
 
-        let mut rows = tx
+        let select_start = std::time::Instant::now();
+        let rows_result = tx
             .query(
                 "SELECT COALESCE(MAX(sequence_nr), 0)
                  FROM events
                  WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
                 params![tenant, entity_type, entity_id],
             )
-            .await
-            .map_err(storage_error)?;
+            .await;
+        record_turso_query_duration(
+            select_start.elapsed(),
+            "query",
+            "transaction",
+            rows_result.is_ok(),
+        );
+        let mut rows = rows_result.map_err(storage_error)?;
 
         let current_seq = match rows.next().await.map_err(storage_error)? {
             Some(row) => row.get::<i64>(0).map_err(storage_error)? as u64,
@@ -66,6 +73,7 @@ impl EventStore for TursoEventStore {
                 PersistenceError::Serialization(e.to_string())
             })?;
 
+            let insert_start = std::time::Instant::now();
             let insert_result = tx
                 .execute(
                     "INSERT INTO events
@@ -82,6 +90,12 @@ impl EventStore for TursoEventStore {
                     ],
                 )
                 .await;
+            record_turso_query_duration(
+                insert_start.elapsed(),
+                "execute",
+                "transaction",
+                insert_result.is_ok(),
+            );
 
             if let Err(e) = insert_result {
                 let msg = e.to_string();

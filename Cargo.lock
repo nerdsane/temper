@@ -5392,6 +5392,7 @@ name = "temper-authz"
 version = "0.1.0"
 dependencies = [
  "cedar-policy",
+ "opentelemetry",
  "serde",
  "serde_json",
  "temper-runtime",
@@ -5733,6 +5734,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "libsql",
+ "opentelemetry",
  "reqwest",
  "serde",
  "serde_json",

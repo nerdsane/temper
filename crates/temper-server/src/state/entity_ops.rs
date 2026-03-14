@@ -70,6 +70,22 @@ impl ServerState {
         }
     }
 
+    /// Number of currently active (in-memory) entity actors.
+    pub fn active_actor_count(&self) -> u64 {
+        self.actor_registry
+            .read()
+            .map(|registry| registry.len() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Number of entities currently tracked by the in-memory entity index.
+    pub fn active_entity_count(&self) -> u64 {
+        self.entity_index
+            .read()
+            .map(|index| index.values().map(|ids| ids.len() as u64).sum())
+            .unwrap_or(0)
+    }
+
     /// Populate `entity_index` from the event store without spawning actors.
     ///
     /// This is the memory-safe startup/list path: we discover persisted
