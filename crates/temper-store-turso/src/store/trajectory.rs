@@ -15,7 +15,8 @@ impl TursoEventStore {
         entry: TursoTrajectoryInsert<'_>,
     ) -> Result<(), PersistenceError> {
         let conn = self.configured_connection().await?;
-        conn.execute(
+        let execute_res = conn
+            .execute(
             "INSERT INTO trajectories \
              (tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
               agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at) \
@@ -40,7 +41,31 @@ impl TursoEventStore {
             ],
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(storage_error);
+        if let Err(ref error) = execute_res {
+            tracing::warn!(
+                tenant = entry.tenant,
+                entity_type = entry.entity_type,
+                entity_id = entry.entity_id,
+                action = entry.action,
+                success = entry.success,
+                source = ?entry.source,
+                authz_denied = ?entry.authz_denied,
+                error = %error,
+                "trajectory.store.write"
+            );
+        }
+        execute_res?;
+        tracing::info!(
+            tenant = entry.tenant,
+            entity_type = entry.entity_type,
+            entity_id = entry.entity_id,
+            action = entry.action,
+            success = entry.success,
+            source = ?entry.source,
+            authz_denied = ?entry.authz_denied,
+            "trajectory.store.write"
+        );
         Ok(())
     }
 
@@ -61,12 +86,17 @@ impl TursoEventStore {
                 params![limit],
             )
             .await
-            .map_err(storage_error)?;
+            .map_err(|e| {
+                let error = storage_error(e);
+                tracing::warn!(limit, error = %error, "trajectory.store.read");
+                error
+            })?;
 
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
             out.push(Self::row_to_trajectory(&row)?);
         }
+        tracing::debug!(limit, count = out.len(), "trajectory.store.read");
         Ok(out)
     }
 
@@ -179,6 +209,16 @@ impl TursoEventStore {
         }
 
         let error_count = total.saturating_sub(success_count);
+        tracing::info!(
+            entity_type,
+            action,
+            success_filter,
+            total,
+            success_count,
+            error_count,
+            failed_limit,
+            "trajectory.store.read"
+        );
         Ok(TrajectoryStats {
             total,
             success_count,
@@ -222,6 +262,14 @@ impl TursoEventStore {
         while let Some(row) = rows.next().await.map_err(storage_error)? {
             out.push(Self::row_to_trajectory(&row)?);
         }
+        tracing::info!(
+            agent_id,
+            tenant,
+            entity_type,
+            limit,
+            count = out.len(),
+            "trajectory.store.read"
+        );
         Ok(out)
     }
 
@@ -268,6 +316,7 @@ impl TursoEventStore {
                 last_active_at: row.get::<String>(5).map_err(storage_error)?,
             });
         }
+        tracing::info!(tenant, count = out.len(), "trajectory.store.read");
         Ok(out)
     }
 }

@@ -150,7 +150,16 @@ pub fn check_rules(
     let mut alerts = Vec::new();
 
     for rule in rules {
-        if let Some(observed_value) = (rule.check)(state, trajectory_entries) {
+        let observed = (rule.check)(state, trajectory_entries);
+        if let Some(observed_value) = observed {
+            tracing::warn!(
+                rule = %rule.name,
+                source = %rule.source,
+                threshold_field = %rule.threshold_field,
+                threshold_value = rule.threshold_value,
+                observed_value,
+                "evolution.sentinel"
+            );
             let id_suffix = &sim_uuid().to_string()[..8];
             let year = now.format("%Y");
             let record_id = format!("O-{year}-{id_suffix}");
@@ -182,9 +191,23 @@ pub fn check_rules(
                 rule_name: rule.name.clone(),
                 record,
             });
+        } else {
+            tracing::debug!(
+                rule = %rule.name,
+                source = %rule.source,
+                threshold_field = %rule.threshold_field,
+                threshold_value = rule.threshold_value,
+                "evolution.sentinel"
+            );
         }
     }
 
+    tracing::info!(
+        rules_count = rules.len(),
+        alerts_count = alerts.len(),
+        trajectory_count = trajectory_entries.len(),
+        "evolution.sentinel"
+    );
     alerts
 }
 

@@ -19,6 +19,7 @@ use temper_evolution::{
     RecordHeader, RecordType, Trend, classify_insight, compute_priority_score,
 };
 
+use super::trace_record_creation;
 use crate::protocol::PlatformEvent;
 use crate::state::PlatformState;
 
@@ -31,9 +32,11 @@ where
         + 'static,
 {
     let Some(pg_store) = state.server.pg_record_store.clone() else {
+        tracing::debug!("evolution.store.unavailable");
         return;
     };
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!("evolution.store.runtime_unavailable");
         return;
     };
     handle.spawn(persist(pg_store));
@@ -79,6 +82,15 @@ impl UnmetIntentCollector {
             ])
             .start(&tracer);
 
+        tracing::warn!(
+            tenant = %unmet.tenant,
+            user_intent = %unmet.user_intent,
+            attempted_tool = %unmet.attempted_tool,
+            trace_id = %unmet.trace_id,
+            timestamp = %unmet.timestamp.to_rfc3339(),
+            "unmet_intent"
+        );
+
         let record_store = &state.record_store;
 
         // Create O-Record (Observation)
@@ -101,12 +113,23 @@ impl UnmetIntentCollector {
             }),
         };
         let o_id = o_record.header.id.clone();
+        trace_record_creation(
+            "Observation",
+            &o_id,
+            &o_record.header.created_by,
+            o_record.header.derived_from.as_deref(),
+            Some(&unmet.tenant),
+        );
         let o_record_for_pg = o_record.clone();
         record_store.insert_observation(o_record);
         persist_evolution_record_to_pg(state, move |pg_store| {
             Box::pin(async move {
                 if let Err(e) = pg_store.insert_observation(&o_record_for_pg).await {
-                    tracing::warn!(record_id = %o_record_for_pg.header.id, error = %e, "failed to persist observation to postgres");
+                    tracing::warn!(
+                        record_id = %o_record_for_pg.header.id,
+                        error = %e,
+                        "evolution.store.write"
+                    );
                 }
             })
         });
@@ -122,6 +145,23 @@ impl UnmetIntentCollector {
 
         let category = classify_insight(&signal);
         let priority = compute_priority_score(&signal);
+        tracing::info!(
+            tenant = %unmet.tenant,
+            attempted_tool = %unmet.attempted_tool,
+            intent = %signal.intent,
+            volume = signal.volume,
+            success_rate = signal.success_rate,
+            category = ?category,
+            priority_score = priority,
+            "evolution.insight"
+        );
+        tracing::info!(
+            tenant = %unmet.tenant,
+            attempted_tool = %unmet.attempted_tool,
+            category = ?category,
+            priority_score = priority,
+            "evolution.pattern"
+        );
 
         let recommendation = format!(
             "Add '{}' capability for tenant '{}'",
@@ -137,13 +177,24 @@ impl UnmetIntentCollector {
             priority_score: priority,
         };
         let i_id = i_record.header.id.clone();
+        trace_record_creation(
+            "Insight",
+            &i_id,
+            &i_record.header.created_by,
+            i_record.header.derived_from.as_deref(),
+            Some(&unmet.tenant),
+        );
         record_store.insert_insight(i_record.clone());
         let i_record_for_pg = i_record.clone();
         let i_id_for_pg = i_id.clone();
         persist_evolution_record_to_pg(state, move |pg_store| {
             Box::pin(async move {
                 if let Err(e) = pg_store.insert_insight(&i_record_for_pg).await {
-                    tracing::warn!(record_id = %i_id_for_pg, error = %e, "failed to persist insight to postgres");
+                    tracing::warn!(
+                        record_id = %i_id_for_pg,
+                        error = %e,
+                        "evolution.store.write"
+                    );
                 }
             })
         });
@@ -165,6 +216,13 @@ impl UnmetIntentCollector {
 
         // High-priority intents get an additional event
         if priority >= HIGH_PRIORITY_THRESHOLD {
+            tracing::warn!(
+                tenant = %unmet.tenant,
+                user_intent = %unmet.user_intent,
+                priority_score = priority,
+                threshold = HIGH_PRIORITY_THRESHOLD,
+                "evolution.insight"
+            );
             state.broadcast(PlatformEvent::EvolutionEvent {
                 event_type: "high_priority_intent".into(),
                 summary: format!(
@@ -203,11 +261,28 @@ impl UnmetIntentCollector {
             implementation: None,
         };
 
+        trace_record_creation(
+            "Decision",
+            &d_record.header.id,
+            &d_record.header.created_by,
+            d_record.header.derived_from.as_deref(),
+            None,
+        );
         record_store.insert_decision(d_record.clone());
+        tracing::info!(
+            request_id,
+            decision = ?d_record.decision,
+            rationale = rationale.unwrap_or("No rationale provided"),
+            "evolution.feedback"
+        );
         persist_evolution_record_to_pg(state, move |pg_store| {
             Box::pin(async move {
                 if let Err(e) = pg_store.insert_decision(&d_record).await {
-                    tracing::warn!(record_id = %d_record.header.id, error = %e, "failed to persist decision to postgres");
+                    tracing::warn!(
+                        record_id = %d_record.header.id,
+                        error = %e,
+                        "evolution.store.write"
+                    );
                 }
             })
         });

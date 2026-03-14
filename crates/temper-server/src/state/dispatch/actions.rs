@@ -200,6 +200,15 @@ impl crate::state::ServerState {
                 action,
                 "rejecting action on ungoverned entity type (no spec registered)"
             );
+            tracing::warn!(
+                tenant = %tenant,
+                entity_type,
+                entity_id,
+                action,
+                source = "Entity",
+                authz_denied = false,
+                "unmet_intent"
+            );
             return Err(DispatchError::Ungoverned(entity_type.to_string()));
         }
 
@@ -247,6 +256,31 @@ impl crate::state::ServerState {
                     spec_governed: None,
                     agent_type: agent_ctx.agent_type.clone(),
                 };
+                tracing::info!(
+                    tenant = %entry.tenant,
+                    entity_type = %entry.entity_type,
+                    entity_id = %entry.entity_id,
+                    action = %entry.action,
+                    success = entry.success,
+                    from_status = ?entry.from_status,
+                    to_status = ?entry.to_status,
+                    error = ?entry.error,
+                    source = ?entry.source,
+                    authz_denied = ?entry.authz_denied,
+                    "trajectory.entry"
+                );
+                if !entry.success {
+                    tracing::warn!(
+                        tenant = %entry.tenant,
+                        entity_type = %entry.entity_type,
+                        entity_id = %entry.entity_id,
+                        action = %entry.action,
+                        error = ?entry.error,
+                        authz_denied = ?entry.authz_denied,
+                        source = ?entry.source,
+                        "unmet_intent"
+                    );
+                }
                 if let Err(persist_err) = self.persist_trajectory_entry(&entry).await {
                     tracing::error!(error = %persist_err, "failed to persist trajectory entry");
                 }

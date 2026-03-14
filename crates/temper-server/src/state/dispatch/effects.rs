@@ -61,6 +61,31 @@ impl crate::state::ServerState {
             spec_governed: None,
             agent_type: ctx.agent_ctx.agent_type.clone(),
         };
+        tracing::info!(
+            tenant = %entry.tenant,
+            entity_type = %entry.entity_type,
+            entity_id = %entry.entity_id,
+            action = %entry.action,
+            success = entry.success,
+            from_status = ?entry.from_status,
+            to_status = ?entry.to_status,
+            error = ?entry.error,
+            source = ?entry.source,
+            authz_denied = ?entry.authz_denied,
+            "trajectory.entry"
+        );
+        if !entry.success {
+            tracing::warn!(
+                tenant = %entry.tenant,
+                entity_type = %entry.entity_type,
+                entity_id = %entry.entity_id,
+                action = %entry.action,
+                error = ?entry.error,
+                authz_denied = ?entry.authz_denied,
+                source = ?entry.source,
+                "unmet_intent"
+            );
+        }
         if let Err(e) = self.persist_trajectory_entry(&entry).await {
             tracing::error!(error = %e, "failed to persist trajectory entry");
         }
@@ -108,6 +133,31 @@ impl crate::state::ServerState {
                 spec_governed: None,
                 agent_type: ctx.agent_ctx.agent_type.clone(),
             };
+            tracing::info!(
+                tenant = %entry.tenant,
+                entity_type = %entry.entity_type,
+                entity_id = %entry.entity_id,
+                action = %entry.action,
+                success = entry.success,
+                from_status = ?entry.from_status,
+                to_status = ?entry.to_status,
+                error = ?entry.error,
+                source = ?entry.source,
+                authz_denied = ?entry.authz_denied,
+                "trajectory.entry"
+            );
+            if !entry.success {
+                tracing::warn!(
+                    tenant = %entry.tenant,
+                    entity_type = %entry.entity_type,
+                    entity_id = %entry.entity_id,
+                    action = %entry.action,
+                    error = ?entry.error,
+                    authz_denied = ?entry.authz_denied,
+                    source = ?entry.source,
+                    "unmet_intent"
+                );
+            }
             tokio::spawn(async move {
                 // determinism-ok: external side-effect, no simulation-visible state
                 dispatcher.dispatch(&entry);
