@@ -239,16 +239,16 @@ impl crate::state::ServerState {
                     ctx.agent_ctx,
                     ctx.action_params,
                 );
-                self.dispatch_adapter_integrations(
-                    ctx.tenant,
-                    ctx.entity_type,
-                    ctx.entity_id,
-                    ctx.action,
-                    &response.custom_effects,
-                    &response.state,
-                    ctx.agent_ctx,
-                    ctx.action_params,
-                );
+                self.dispatch_adapter_integrations(super::adapter::AdapterDispatchInput {
+                    tenant: ctx.tenant,
+                    entity_type: ctx.entity_type,
+                    entity_id: ctx.entity_id,
+                    action: ctx.action,
+                    custom_effects: &response.custom_effects,
+                    entity_state: &response.state,
+                    agent_ctx: ctx.agent_ctx,
+                    action_params: ctx.action_params,
+                });
             }
         }
 

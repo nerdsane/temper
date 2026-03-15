@@ -15,29 +15,29 @@ struct AdapterDispatchCtx<'a> {
     mode: WasmDispatchMode,
 }
 
+pub(crate) struct AdapterDispatchInput<'a> {
+    pub(crate) tenant: &'a TenantId,
+    pub(crate) entity_type: &'a str,
+    pub(crate) entity_id: &'a str,
+    pub(crate) action: &'a str,
+    pub(crate) custom_effects: &'a [String],
+    pub(crate) entity_state: &'a EntityState,
+    pub(crate) agent_ctx: &'a AgentContext,
+    pub(crate) action_params: &'a serde_json::Value,
+}
+
 impl crate::state::ServerState {
     /// Dispatch native adapter integrations for custom effects in background mode.
-    #[allow(clippy::too_many_arguments)]
-    pub fn dispatch_adapter_integrations(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        custom_effects: &[String],
-        entity_state: &EntityState,
-        agent_ctx: &AgentContext,
-        action_params: &serde_json::Value,
-    ) {
+    pub(crate) fn dispatch_adapter_integrations(&self, input: AdapterDispatchInput<'_>) {
         let state = self.clone();
-        let tenant = tenant.clone();
-        let entity_type = entity_type.to_string();
-        let entity_id = entity_id.to_string();
-        let action = action.to_string();
-        let custom_effects = custom_effects.to_vec();
-        let entity_state = entity_state.clone();
-        let agent_ctx = agent_ctx.clone();
-        let action_params = action_params.clone();
+        let tenant = input.tenant.clone();
+        let entity_type = input.entity_type.to_string();
+        let entity_id = input.entity_id.to_string();
+        let action = input.action.to_string();
+        let custom_effects = input.custom_effects.to_vec();
+        let entity_state = input.entity_state.clone();
+        let agent_ctx = input.agent_ctx.clone();
+        let action_params = input.action_params.clone();
 
         tokio::spawn(async move {
             // determinism-ok: async integration side-effects run outside simulation core
@@ -65,7 +65,10 @@ impl crate::state::ServerState {
         req: &WasmDispatchRequest<'_>,
     ) -> Result<Option<EntityResponse>, String> {
         let integrations = {
-            let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
+            let registry = self
+                .registry
+                .read()
+                .map_err(|e| format!("registry lock poisoned: {e}"))?;
             registry
                 .get_spec(req.tenant, req.entity_type)
                 .map(|spec| spec.integrations.clone())
