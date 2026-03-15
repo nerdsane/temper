@@ -67,6 +67,31 @@ name = "agent_type_id"
 type = "string"
 initial = ""
 
+[[state]]
+name = "org_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "reports_to"
+type = "string"
+initial = ""
+
+[[state]]
+name = "adapter_type"
+type = "string"
+initial = "mcp"
+
+[[state]]
+name = "budget_monthly_cents"
+type = "string"
+initial = "0"
+
+[[state]]
+name = "cost_consumed_cents"
+type = "string"
+initial = "0"
+
 # --- Actions: Agent Lifecycle ---
 
 [[action]]
@@ -85,11 +110,25 @@ to = "Working"
 hint = "Agent begins executing toward the assigned goal."
 
 [[action]]
+name = "SetOrganization"
+kind = "input"
+from = ["Idle", "Assigned"]
+params = ["org_id", "reports_to", "budget_monthly_cents"]
+hint = "Bind this agent to an organization and optional manager relationship."
+
+[[action]]
 name = "Checkpoint"
 kind = "input"
 from = ["Working"]
 params = ["conversation"]
 hint = "Save the current LLM conversation state for crash recovery. Stays in Working."
+
+[[action]]
+name = "RecordCost"
+kind = "input"
+from = ["Working"]
+params = ["cost_cents", "cost_consumed_cents"]
+hint = "Track spending events while the agent is working."
 
 [[action]]
 name = "Block"

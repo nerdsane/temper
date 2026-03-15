@@ -1,0 +1,122 @@
+# Organization Entity — Team and budget controls for orchestration.
+
+[automaton]
+name = "Organization"
+states = ["Setup", "Active", "Paused", "Archived"]
+initial = "Setup"
+
+# --- State Variables ---
+
+[[state]]
+name = "name"
+type = "string"
+initial = ""
+
+[[state]]
+name = "description"
+type = "string"
+initial = ""
+
+[[state]]
+name = "member_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "budget_monthly_cents"
+type = "string"
+initial = "0"
+
+[[state]]
+name = "budget_consumed_cents"
+type = "string"
+initial = "0"
+
+[[state]]
+name = "active_runs"
+type = "counter"
+initial = "0"
+
+# --- Actions ---
+
+[[action]]
+name = "Configure"
+kind = "input"
+from = ["Setup"]
+params = ["name", "description", "budget_monthly_cents"]
+hint = "Configure organization metadata and monthly budget."
+
+[[action]]
+name = "Activate"
+kind = "input"
+from = ["Setup"]
+to = "Active"
+hint = "Activate organization for scheduling and execution."
+
+[[action]]
+name = "AddMember"
+kind = "input"
+from = ["Active"]
+params = ["member_id"]
+hint = "Add a member to the organization roster."
+effect = [{ type = "increment", var = "member_count" }]
+
+[[action]]
+name = "RemoveMember"
+kind = "input"
+from = ["Active"]
+params = ["member_id"]
+guard = "member_count > 0"
+hint = "Remove a member from the organization roster."
+effect = [{ type = "decrement", var = "member_count" }]
+
+[[action]]
+name = "RecordCost"
+kind = "input"
+from = ["Active"]
+params = ["amount_cents", "budget_consumed_cents"]
+hint = "Record budget consumption for orchestration work using caller-provided cumulative totals."
+
+[[action]]
+name = "ResetBudgetCycle"
+kind = "input"
+from = ["Active", "Paused"]
+hint = "Mark budget cycle rollover."
+
+[[action]]
+name = "Pause"
+kind = "input"
+from = ["Active"]
+to = "Paused"
+hint = "Pause organization execution activity."
+
+[[action]]
+name = "Resume"
+kind = "input"
+from = ["Paused"]
+to = "Active"
+hint = "Resume organization execution activity."
+
+[[action]]
+name = "Archive"
+kind = "input"
+from = ["Setup", "Active", "Paused"]
+to = "Archived"
+hint = "Archive organization. Terminal state."
+
+# --- Invariants ---
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "ActiveRequiresName"
+when = ["Active", "Paused", "Archived"]
+assert = "name != ''"
+
+[[invariant]]
+name = "MemberCountNonNegative"
+when = ["Setup", "Active", "Paused", "Archived"]
+assert = "member_count >= 0"

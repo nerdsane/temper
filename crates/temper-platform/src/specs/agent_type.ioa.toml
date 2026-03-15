@@ -36,6 +36,16 @@ name = "max_turns"
 type = "string"
 initial = "200"
 
+[[state]]
+name = "adapter_config"
+type = "string"
+initial = "{}"
+
+[[state]]
+name = "default_budget_cents"
+type = "string"
+initial = "0"
+
 # --- Actions ---
 
 [[action]]
@@ -43,14 +53,14 @@ name = "Define"
 kind = "input"
 from = ["Draft"]
 to = "Active"
-params = ["name", "system_prompt", "tool_set", "model", "max_turns"]
+params = ["name", "system_prompt", "tool_set", "model", "max_turns", "adapter_config", "default_budget_cents"]
 hint = "Define the agent type configuration and activate it."
 
 [[action]]
 name = "Update"
 kind = "input"
 from = ["Active"]
-params = ["system_prompt", "tool_set", "model", "max_turns"]
+params = ["system_prompt", "tool_set", "model", "max_turns", "adapter_config", "default_budget_cents"]
 hint = "Update an active agent type's configuration. Stays Active."
 
 [[action]]

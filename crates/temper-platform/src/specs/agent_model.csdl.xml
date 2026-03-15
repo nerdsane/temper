@@ -44,6 +44,8 @@
         <Property Name="tool_set" Type="Edm.String"/>
         <Property Name="model" Type="Edm.String"/>
         <Property Name="max_turns" Type="Edm.String"/>
+        <Property Name="adapter_config" Type="Edm.String"/>
+        <Property Name="default_budget_cents" Type="Edm.String"/>
       </EntityType>
 
       <EntityType Name="Agent">
@@ -62,6 +64,11 @@
         <Property Name="child_agent_ids" Type="Collection(Edm.String)"/>
         <Property Name="last_child_id" Type="Edm.String"/>
         <Property Name="agent_type_id" Type="Edm.String"/>
+        <Property Name="org_id" Type="Edm.String"/>
+        <Property Name="reports_to" Type="Edm.String"/>
+        <Property Name="adapter_type" Type="Edm.String"/>
+        <Property Name="budget_monthly_cents" Type="Edm.String"/>
+        <Property Name="cost_consumed_cents" Type="Edm.String"/>
         <NavigationProperty Name="Task" Type="Temper.Task" Nullable="true">
           <ReferentialConstraint Property="task_id" ReferencedProperty="id"/>
         </NavigationProperty>

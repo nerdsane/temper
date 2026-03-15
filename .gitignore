@@ -42,6 +42,8 @@ apps/scratch/
 .slop/
 .worktrees/
 .progress/
+.claude/worktrees/
+.claude/hooks/session-start-temper.sh
 
 # Node.js (observe UI)
 node_modules/

@@ -37,6 +37,7 @@ use temper_runtime::scheduler::sim_now;
 use temper_spec::csdl::CsdlDocument;
 use temper_store_postgres::PostgresEventStore;
 
+use crate::adapters::AdapterRegistry;
 use crate::entity_actor::EntityMsg;
 use crate::event_store::ServerEventStore;
 use crate::events::EntityStateChange;
@@ -178,6 +179,8 @@ pub struct ServerState {
     pub reaction_dispatcher: Arc<RwLock<Option<Arc<ReactionDispatcher>>>>,
     /// Optional webhook dispatcher for external system notifications.
     pub webhook_dispatcher: Option<Arc<WebhookDispatcher>>,
+    /// Native adapter integration registry (`type = "adapter"` dispatch path).
+    pub adapter_registry: Arc<AdapterRegistry>,
     /// WASM module registry: maps (tenant, module_name) → sha256_hash.
     pub wasm_module_registry: Arc<RwLock<WasmModuleRegistry>>,
     /// WASM execution engine: compiles, caches, and invokes sandboxed modules.
@@ -260,6 +263,7 @@ impl ServerState {
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
+            adapter_registry: Arc::new(AdapterRegistry::with_builtins()),
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
             wasm_engine: Arc::new(WasmEngine::default()),
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
@@ -397,6 +401,7 @@ impl ServerState {
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
+            adapter_registry: Arc::new(AdapterRegistry::with_builtins()),
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
             wasm_engine: Arc::new(WasmEngine::default()),
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),

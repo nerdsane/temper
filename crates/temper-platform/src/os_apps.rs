@@ -33,6 +33,18 @@ const FS_CSDL: &str = include_str!("../../../os-apps/temper-fs/specs/model.csdl.
 const FS_CEDAR_FILE: &str = include_str!("../../../os-apps/temper-fs/policies/file.cedar");
 const FS_CEDAR_WORKSPACE: &str =
     include_str!("../../../os-apps/temper-fs/policies/workspace.cedar");
+
+// ── Agent Orchestration OS App ────────────────────────────────────
+
+const AO_HEARTBEAT_IOA: &str =
+    include_str!("../../../os-apps/agent-orchestration/specs/heartbeat_run.ioa.toml");
+const AO_ORG_IOA: &str =
+    include_str!("../../../os-apps/agent-orchestration/specs/organization.ioa.toml");
+const AO_BUDGET_IOA: &str =
+    include_str!("../../../os-apps/agent-orchestration/specs/budget_ledger.ioa.toml");
+const AO_CSDL: &str = include_str!("../../../os-apps/agent-orchestration/specs/model.csdl.xml");
+const AO_CEDAR: &str =
+    include_str!("../../../os-apps/agent-orchestration/policies/orchestration.cedar");
 /// Metadata for an OS app in the catalog.
 #[derive(Debug, Clone, Serialize)]
 pub struct OsAppEntry {
@@ -73,6 +85,13 @@ const FS_SPECS: &[(&str, &str)] = &[
     ("Workspace", FS_WORKSPACE_IOA),
 ];
 
+/// Agent orchestration app specs.
+const AO_SPECS: &[(&str, &str)] = &[
+    ("HeartbeatRun", AO_HEARTBEAT_IOA),
+    ("Organization", AO_ORG_IOA),
+    ("BudgetLedger", AO_BUDGET_IOA),
+];
+
 /// All available OS apps.
 static OS_APP_CATALOG: &[OsAppEntry] = &[
     OsAppEntry {
@@ -85,6 +104,12 @@ static OS_APP_CATALOG: &[OsAppEntry] = &[
         name: "temper-fs",
         description: "Governed filesystem with workspaces, directories, files, and versioning",
         entity_types: &["File", "Directory", "FileVersion", "Workspace"],
+        version: "0.1.0",
+    },
+    OsAppEntry {
+        name: "agent-orchestration",
+        description: "Agent heartbeat orchestration with organizations and budget ledgering",
+        entity_types: &["HeartbeatRun", "Organization", "BudgetLedger"],
         version: "0.1.0",
     },
 ];
@@ -106,6 +131,11 @@ pub fn get_os_app(name: &str) -> Option<OsAppBundle> {
             specs: FS_SPECS,
             csdl: FS_CSDL,
             cedar_policies: &[FS_CEDAR_FILE, FS_CEDAR_WORKSPACE],
+        }),
+        "agent-orchestration" => Some(OsAppBundle {
+            specs: AO_SPECS,
+            csdl: AO_CSDL,
+            cedar_policies: &[AO_CEDAR],
         }),
         _ => None,
     }
@@ -275,13 +305,53 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_orchestration_specs_parse() {
+        for (entity_type, ioa_source) in AO_SPECS {
+            let result = automaton::parse_automaton(ioa_source);
+            assert!(
+                result.is_ok(),
+                "Agent Orchestration spec {} failed to parse: {:?}",
+                entity_type,
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_orchestration_csdl_parses() {
+        let result = parse_csdl(AO_CSDL);
+        assert!(
+            result.is_ok(),
+            "Agent Orchestration CSDL failed to parse: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_agent_orchestration_specs_verify() {
+        for (entity_type, ioa_source) in AO_SPECS {
+            let cascade = VerificationCascade::from_ioa(ioa_source)
+                .with_sim_seeds(3)
+                .with_prop_test_cases(30);
+            let result = cascade.run();
+            assert!(
+                result.all_passed,
+                "Agent Orchestration spec {} failed verification",
+                entity_type
+            );
+        }
+    }
+
+    #[test]
     fn test_list_os_apps_returns_catalog() {
         let apps = list_os_apps();
-        assert_eq!(apps.len(), 2);
+        assert_eq!(apps.len(), 3);
         assert_eq!(apps[0].name, "project-management");
         assert_eq!(apps[0].entity_types.len(), 5);
         assert_eq!(apps[1].name, "temper-fs");
         assert_eq!(apps[1].entity_types.len(), 4);
+        assert_eq!(apps[2].name, "agent-orchestration");
+        assert_eq!(apps[2].entity_types.len(), 3);
     }
 
     #[test]
@@ -290,6 +360,16 @@ mod tests {
         assert!(bundle.is_some());
         let bundle = bundle.unwrap();
         assert_eq!(bundle.specs.len(), 5);
+        assert!(!bundle.csdl.is_empty());
+        assert_eq!(bundle.cedar_policies.len(), 1);
+    }
+
+    #[test]
+    fn test_get_os_app_agent_orchestration() {
+        let bundle = get_os_app("agent-orchestration");
+        assert!(bundle.is_some());
+        let bundle = bundle.unwrap();
+        assert_eq!(bundle.specs.len(), 3);
         assert!(!bundle.csdl.is_empty());
         assert_eq!(bundle.cedar_policies.len(), 1);
     }
@@ -320,6 +400,24 @@ mod tests {
         assert!(registry.get_table(&tenant, "Cycle").is_some());
         assert!(registry.get_table(&tenant, "Comment").is_some());
         assert!(registry.get_table(&tenant, "Label").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_install_agent_orchestration_registers_entities() {
+        let state = PlatformState::new(None);
+        let result = install_os_app(&state, "test-ao", "agent-orchestration").await;
+        assert!(result.is_ok());
+        let entities = result.unwrap();
+        assert_eq!(entities.len(), 3);
+        assert!(entities.contains(&"HeartbeatRun".to_string()));
+        assert!(entities.contains(&"Organization".to_string()));
+        assert!(entities.contains(&"BudgetLedger".to_string()));
+
+        let registry = state.registry.read().unwrap();
+        let tenant = TenantId::new("test-ao");
+        assert!(registry.get_table(&tenant, "HeartbeatRun").is_some());
+        assert!(registry.get_table(&tenant, "Organization").is_some());
+        assert!(registry.get_table(&tenant, "BudgetLedger").is_some());
     }
 
     #[tokio::test]

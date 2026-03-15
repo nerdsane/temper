@@ -53,7 +53,8 @@ impl ServerState {
             .clamp(1, 86_400);
 
         let state = self.clone();
-        tokio::spawn(async move { // determinism-ok: background metrics export loop
+        tokio::spawn(async move {
+            // determinism-ok: background metrics export loop
             let instruments = RuntimeMetricInstruments::new();
             let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

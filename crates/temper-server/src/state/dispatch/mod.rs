@@ -9,6 +9,7 @@ use temper_runtime::tenant::TenantId;
 use temper_wasm::{WasmAuthzContext, WasmAuthzDecision, WasmAuthzGate};
 
 mod actions;
+mod adapter;
 mod cross_entity;
 mod effects;
 mod wasm;
