@@ -29,6 +29,13 @@ async fn persist_evolution_record(
     data_json: &str,
 ) -> Result<(), String> {
     let Some(turso) = state.persistent_store() else {
+        tracing::debug!(
+            record_id,
+            record_type,
+            status,
+            created_by,
+            "evolution.store.unavailable"
+        );
         return Ok(());
     };
     turso
@@ -41,7 +48,26 @@ async fn persist_evolution_record(
             data_json,
         )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            tracing::warn!(
+                record_id,
+                record_type,
+                status,
+                created_by,
+                error = %e,
+                "evolution.store.write"
+            );
+            e.to_string()
+        })?;
+    tracing::info!(
+        record_id,
+        record_type,
+        status,
+        created_by,
+        derived_from,
+        "evolution.store.write"
+    );
+    Ok(())
 }
 
 /// Create an entity in the temper-system tenant, logging a warning on failure.
@@ -75,6 +101,15 @@ async fn persist_alerts(
 ) -> Result<Vec<serde_json::Value>, StatusCode> {
     let mut results = Vec::new();
     for alert in alerts {
+        tracing::warn!(
+            rule = %alert.rule_name,
+            record_id = %alert.record.header.id,
+            source = %alert.record.source,
+            classification = ?alert.record.classification,
+            observed_value = ?alert.record.observed_value,
+            threshold = ?alert.record.threshold_value,
+            "evolution.sentinel"
+        );
         let data_json = serde_json::to_string(&alert.record).unwrap_or_default();
         if let Err(e) = persist_evolution_record(
             state,
@@ -87,7 +122,11 @@ async fn persist_alerts(
         )
         .await
         {
-            tracing::error!(record_id = %alert.record.header.id, error = %e, "failed to persist sentinel observation");
+            tracing::warn!(
+                record_id = %alert.record.header.id,
+                error = %e,
+                "evolution.store.write"
+            );
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
 
@@ -128,6 +167,15 @@ async fn persist_insights(
 ) -> Vec<serde_json::Value> {
     let mut results = Vec::new();
     for insight in insights {
+        tracing::info!(
+            record_id = %insight.header.id,
+            category = ?insight.category,
+            intent = %insight.signal.intent,
+            volume = insight.signal.volume,
+            success_rate = insight.signal.success_rate,
+            priority_score = insight.priority_score,
+            "evolution.insight"
+        );
         let data_json = serde_json::to_string(insight).unwrap_or_default();
         if let Err(e) = persist_evolution_record(
             state,
@@ -140,7 +188,7 @@ async fn persist_insights(
         )
         .await
         {
-            tracing::error!(record_id = %insight.header.id, error = %e, "failed to persist insight");
+            tracing::warn!(record_id = %insight.header.id, error = %e, "evolution.store.write");
         }
 
         let insight_id = format!("INS-{}", sim_uuid());
@@ -184,12 +232,26 @@ pub(crate) async fn handle_sentinel_check(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_observe_auth(&state, &headers, "run_sentinel", "Evolution")?;
     let trajectory_entries = state.load_trajectory_entries(10_000).await;
+    tracing::info!(
+        trajectory_count = trajectory_entries.len(),
+        "evolution.sentinel"
+    );
 
     let rules = sentinel::default_rules();
     let alerts = sentinel::check_rules(&rules, &state, &trajectory_entries);
+    if alerts.is_empty() {
+        tracing::info!(rule_count = rules.len(), "evolution.sentinel");
+    } else {
+        tracing::warn!(
+            rule_count = rules.len(),
+            alerts_count = alerts.len(),
+            "evolution.sentinel"
+        );
+    }
     let results = persist_alerts(&state, &alerts).await?;
 
     let insights = insight_generator::generate_insights(&trajectory_entries);
+    tracing::info!(insights_count = insights.len(), "evolution.insight");
     let insight_results = persist_insights(&state, &insights).await;
 
     Ok(Json(serde_json::json!({
@@ -211,6 +273,21 @@ pub(crate) async fn handle_unmet_intents(
     let intents = insight_generator::generate_unmet_intents(&trajectory_entries);
     let open_count = intents.iter().filter(|i| i.status == "open").count();
     let resolved_count = intents.iter().filter(|i| i.status == "resolved").count();
+    if open_count > 0 {
+        tracing::warn!(
+            open_count,
+            resolved_count,
+            total = intents.len(),
+            "unmet_intent"
+        );
+    } else {
+        tracing::info!(
+            open_count,
+            resolved_count,
+            total = intents.len(),
+            "unmet_intent"
+        );
+    }
 
     Ok(Json(serde_json::json!({
         "intents": intents,

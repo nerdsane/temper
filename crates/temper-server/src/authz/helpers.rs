@@ -266,7 +266,10 @@ pub(crate) async fn record_authz_denial(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header::HeaderValue as AxumHeaderValue;
     use axum::http::{HeaderMap, HeaderName, HeaderValue};
+    use serde_json::Value;
+    use temper_authz::PrincipalKind;
 
     #[test]
     fn extract_temper_headers_filters_correctly() {
@@ -310,5 +313,50 @@ mod tests {
         let result = extract_temper_headers(&headers);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "x-temper-test");
+    }
+
+    #[test]
+    fn security_context_from_headers_preserves_agent_type_from_http_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-temper-principal-id",
+            AxumHeaderValue::from_static("bot-1"),
+        );
+        headers.insert(
+            "x-temper-principal-kind",
+            AxumHeaderValue::from_static("agent"),
+        );
+        headers.insert(
+            "x-temper-agent-type",
+            AxumHeaderValue::from_static("supervisor"),
+        );
+
+        let ctx = security_context_from_headers(&headers, None, None, None);
+        assert_eq!(ctx.principal.kind, PrincipalKind::Agent);
+        assert_eq!(ctx.principal.id, "bot-1");
+        assert_eq!(ctx.principal.agent_type.as_deref(), Some("supervisor"));
+    }
+
+    #[test]
+    fn security_context_from_headers_preserves_principal_attrs_from_http_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-temper-principal-id",
+            AxumHeaderValue::from_static("bot-1"),
+        );
+        headers.insert(
+            "x-temper-principal-kind",
+            AxumHeaderValue::from_static("agent"),
+        );
+        headers.insert(
+            "x-temper-attr-region",
+            AxumHeaderValue::from_static("us-east-1"),
+        );
+
+        let ctx = security_context_from_headers(&headers, None, None, None);
+        assert_eq!(
+            ctx.principal.attributes.get("region"),
+            Some(&Value::String("us-east-1".to_string()))
+        );
     }
 }

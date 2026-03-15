@@ -114,13 +114,34 @@ impl TursoEventStore {
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.insert_evolution_record");
         let conn = self.configured_connection().await?;
-        conn.execute(
+        let execute_res = conn
+            .execute(
             "INSERT INTO evolution_records (id, record_type, status, created_by, derived_from, data, timestamp) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
             params![id, record_type, status, created_by, derived_from, data_json],
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(storage_error);
+        if let Err(ref error) = execute_res {
+            tracing::warn!(
+                record_id = id,
+                record_type,
+                status,
+                created_by,
+                derived_from,
+                error = %error,
+                "evolution.store.write"
+            );
+        }
+        execute_res?;
+        tracing::info!(
+            record_id = id,
+            record_type,
+            status,
+            created_by,
+            derived_from,
+            "evolution.store.write"
+        );
         Ok(())
     }
 
@@ -142,9 +163,18 @@ impl TursoEventStore {
             .map_err(storage_error)?;
 
         let Some(row) = rows.next().await.map_err(storage_error)? else {
+            tracing::debug!(record_id = id, found = false, "evolution.store.read");
             return Ok(None);
         };
-        Ok(Some(Self::row_to_evolution_record(&row)?))
+        let parsed = Self::row_to_evolution_record(&row)?;
+        tracing::info!(
+            record_id = id,
+            record_type = parsed.record_type.as_str(),
+            status = parsed.status.as_str(),
+            found = true,
+            "evolution.store.read"
+        );
+        Ok(Some(parsed))
     }
 
     /// List evolution records with optional type and status filters.
@@ -172,6 +202,12 @@ impl TursoEventStore {
         while let Some(row) = rows.next().await.map_err(storage_error)? {
             out.push(Self::row_to_evolution_record(&row)?);
         }
+        tracing::info!(
+            record_type,
+            status,
+            count = out.len(),
+            "evolution.store.read"
+        );
         Ok(out)
     }
 
@@ -209,6 +245,7 @@ impl TursoEventStore {
                 .partial_cmp(&score_a)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        tracing::info!(count = out.len(), "evolution.insight");
         Ok(out)
     }
 

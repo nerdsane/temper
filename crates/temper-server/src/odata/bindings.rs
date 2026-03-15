@@ -12,7 +12,7 @@ use super::response::annotate_entity;
 use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
 use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_error};
-use crate::state::{DispatchExtOptions, ServerState};
+use crate::state::{DispatchError, DispatchExtOptions, ServerState};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_bound_action(
@@ -59,6 +59,34 @@ pub(super) async fn dispatch_bound_action(
         agent_ctx.agent_type.as_deref(),
     );
 
+    // Default-deny: reject actions on entity types with no registered spec.
+    let is_governed = match state.is_entity_type_governed(tenant, entity_type) {
+        Ok(value) => value,
+        Err(e) => {
+            http_span.set_status(Status::error(e.clone()));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
+            let end_time: std::time::SystemTime = sim_now().into();
+            http_span.end_with_timestamp(end_time);
+            return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "RegistryError", &e)
+                .into_response();
+        }
+    };
+
+    if !is_governed {
+        http_span.set_status(Status::error("EntityTypeNotGoverned"));
+        http_span.set_attribute(OtelKeyValue::new("http.status_code", 404i64));
+        let end_time: std::time::SystemTime = sim_now().into();
+        http_span.end_with_timestamp(end_time);
+        return odata_error(
+            StatusCode::NOT_FOUND,
+            "EntityTypeNotGoverned",
+            &format!(
+                "Entity type '{entity_type}' has no registered spec — actions are denied by default"
+            ),
+        )
+        .into_response();
+    }
+
     // Fetch entity state BEFORE authz check so resource attributes are available.
     let current_state = match state
         .get_tenant_entity_state(tenant, entity_type, key_str)
@@ -95,13 +123,22 @@ pub(super) async fn dispatch_bound_action(
     // Read [[context_entity]] declarations from the spec, resolve target entity
     // statuses, and inject as ctx_{name}_status into resource_attrs.
     {
-        let context_entities: Vec<temper_spec::automaton::ContextEntityDecl> = {
-            let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
-            registry
-                .get_spec(tenant, entity_type)
-                .map(|s| s.automaton.context_entities.clone())
-                .unwrap_or_default()
-        };
+        let context_entities: Vec<temper_spec::automaton::ContextEntityDecl> =
+            match state.registry.read() {
+                Ok(registry) => registry
+                    .get_spec(tenant, entity_type)
+                    .map(|s| s.automaton.context_entities.clone())
+                    .unwrap_or_default(),
+                Err(e) => {
+                    let msg = format!("registry lock poisoned: {e}");
+                    http_span.set_status(Status::error(msg.clone()));
+                    http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
+                    let end_time: std::time::SystemTime = sim_now().into();
+                    http_span.end_with_timestamp(end_time);
+                    return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "RegistryError", &msg)
+                        .into_response();
+                }
+            };
 
         for ce in &context_entities {
             let target_id = current_state
@@ -124,9 +161,16 @@ pub(super) async fn dispatch_bound_action(
         }
     }
 
-    let has_spec = {
-        let registry = state.registry.read().expect("registry lock poisoned");
-        registry.get_spec(tenant, entity_type).is_some()
+    let has_spec = match state.has_registered_spec(tenant, entity_type) {
+        Ok(value) => value,
+        Err(e) => {
+            http_span.set_status(Status::error(e.clone()));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
+            let end_time: std::time::SystemTime = sim_now().into();
+            http_span.end_with_timestamp(end_time);
+            return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "RegistryError", &e)
+                .into_response();
+        }
     };
     resource_attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
 
@@ -210,7 +254,7 @@ pub(super) async fn dispatch_bound_action(
     }
 
     let result = state
-        .dispatch_tenant_action_ext(
+        .dispatch_tenant_action_ext_typed(
             tenant,
             entity_type,
             key_str,
@@ -237,30 +281,16 @@ pub(super) async fn dispatch_bound_action(
                 http_span.set_status(Status::Ok);
                 http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
 
-                if !response.spec_governed {
-                    let body = serde_json::json!({
-                        "action": action,
-                        "entityId": key_str,
-                        "recorded": true,
-                        "specGoverned": false,
-                    });
-                    ODataResponse {
-                        status: StatusCode::OK,
-                        body,
-                    }
-                    .into_response()
-                } else {
-                    let body = annotate_entity(
-                        serde_json::to_value(&response.state).unwrap_or_default(),
-                        format!("$metadata#{set_name}/$entity"),
-                        None,
-                    );
-                    ODataResponse {
-                        status: StatusCode::OK,
-                        body,
-                    }
-                    .into_response()
+                let body = annotate_entity(
+                    serde_json::to_value(&response.state).unwrap_or_default(),
+                    format!("$metadata#{set_name}/$entity"),
+                    None,
+                );
+                ODataResponse {
+                    status: StatusCode::OK,
+                    body,
                 }
+                .into_response()
             } else {
                 http_span.set_status(Status::error(response.error.clone().unwrap_or_default()));
                 http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
@@ -272,10 +302,19 @@ pub(super) async fn dispatch_bound_action(
                 .into_response()
             }
         }
+        Err(DispatchError::Ungoverned(entity)) => {
+            let reason = format!(
+                "Entity type '{entity}' has no registered spec — actions are denied by default"
+            );
+            http_span.set_status(Status::error("EntityTypeNotGoverned"));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 404i64));
+            odata_error(StatusCode::NOT_FOUND, "EntityTypeNotGoverned", &reason).into_response()
+        }
         Err(e) => {
-            http_span.set_status(Status::error(e.clone()));
+            let reason = e.to_string();
+            http_span.set_status(Status::error(reason.clone()));
             http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
-            odata_error(StatusCode::INTERNAL_SERVER_ERROR, "DispatchError", &e).into_response()
+            odata_error(StatusCode::INTERNAL_SERVER_ERROR, "DispatchError", &reason).into_response()
         }
     };
 

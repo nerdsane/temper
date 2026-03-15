@@ -8,7 +8,7 @@ use temper_runtime::tenant::parse_persistence_id_parts;
 use tracing::instrument;
 
 use super::TursoEventStore;
-use crate::metrics::TursoQueryTimer;
+use super::instrumentation::record_turso_query_duration;
 
 impl EventStore for TursoEventStore {
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
@@ -18,7 +18,6 @@ impl EventStore for TursoEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        let _query_timer = TursoQueryTimer::start("turso.append");
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
@@ -27,15 +26,22 @@ impl EventStore for TursoEventStore {
             .await
             .map_err(storage_error)?;
 
-        let mut rows = tx
+        let select_start = std::time::Instant::now();
+        let rows_result = tx
             .query(
                 "SELECT COALESCE(MAX(sequence_nr), 0)
                  FROM events
                  WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
                 params![tenant, entity_type, entity_id],
             )
-            .await
-            .map_err(storage_error)?;
+            .await;
+        record_turso_query_duration(
+            select_start.elapsed(),
+            "query",
+            "transaction",
+            rows_result.is_ok(),
+        );
+        let mut rows = rows_result.map_err(storage_error)?;
 
         let current_seq = match rows.next().await.map_err(storage_error)? {
             Some(row) => row.get::<i64>(0).map_err(storage_error)? as u64,
@@ -68,6 +74,7 @@ impl EventStore for TursoEventStore {
                 PersistenceError::Serialization(e.to_string())
             })?;
 
+            let insert_start = std::time::Instant::now();
             let insert_result = tx
                 .execute(
                     "INSERT INTO events
@@ -84,6 +91,12 @@ impl EventStore for TursoEventStore {
                     ],
                 )
                 .await;
+            record_turso_query_duration(
+                insert_start.elapsed(),
+                "execute",
+                "transaction",
+                insert_result.is_ok(),
+            );
 
             if let Err(e) = insert_result {
                 let msg = e.to_string();
@@ -109,7 +122,6 @@ impl EventStore for TursoEventStore {
         persistence_id: &str,
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
-        let _query_timer = TursoQueryTimer::start("turso.read_events");
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
@@ -163,7 +175,6 @@ impl EventStore for TursoEventStore {
         sequence_nr: u64,
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
-        let _query_timer = TursoQueryTimer::start("turso.save_snapshot");
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
@@ -195,7 +206,6 @@ impl EventStore for TursoEventStore {
         &self,
         persistence_id: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
-        let _query_timer = TursoQueryTimer::start("turso.load_snapshot");
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let conn = self.configured_connection().await?;
@@ -225,7 +235,6 @@ impl EventStore for TursoEventStore {
         &self,
         tenant: &str,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
-        let _query_timer = TursoQueryTimer::start("turso.list_entity_ids");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(

@@ -1,0 +1,47 @@
+# BudgetLedger Entity — Append-only organization cost records.
+
+[automaton]
+name = "BudgetLedger"
+states = ["Recorded"]
+initial = "Recorded"
+
+# --- State Variables ---
+
+[[state]]
+name = "org_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "agent_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "run_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "amount_cents"
+type = "string"
+initial = ""
+
+[[state]]
+name = "tokens"
+type = "string"
+initial = ""
+
+[[state]]
+name = "category"
+type = "string"
+initial = ""
+
+# --- Actions ---
+
+[[action]]
+name = "Record"
+kind = "input"
+from = ["Recorded"]
+params = ["org_id", "agent_id", "run_id", "amount_cents", "tokens", "category"]
+hint = "Append a normalized budget event for audit and reporting."

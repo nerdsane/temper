@@ -71,6 +71,47 @@ impl ServerState {
         }
     }
 
+    /// Number of currently active (in-memory) entity actors.
+    pub fn active_actor_count(&self) -> u64 {
+        self.actor_registry
+            .read()
+            .map(|registry| registry.len() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Number of entities currently tracked by the in-memory entity index.
+    pub fn active_entity_count(&self) -> u64 {
+        self.entity_index
+            .read()
+            .map(|index| index.values().map(|ids| ids.len() as u64).sum())
+            .unwrap_or(0)
+    }
+
+    /// Returns `true` when a tenant/entity_type has a registered spec.
+    pub(crate) fn has_registered_spec(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Result<bool, String> {
+        self.registry
+            .read()
+            .map(|registry| registry.get_spec(tenant, entity_type).is_some())
+            .map_err(|e| format!("registry lock poisoned: {e}"))
+    }
+
+    /// Returns `true` when dispatch should be allowed for the entity type.
+    ///
+    /// This includes both tenant-scoped specs and legacy single-tenant
+    /// transition tables.
+    pub(crate) fn is_entity_type_governed(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Result<bool, String> {
+        Ok(self.has_registered_spec(tenant, entity_type)?
+            || self.transition_tables.contains_key(entity_type))
+    }
+
     /// Populate `entity_index` from the event store without spawning actors.
     ///
     /// This is the memory-safe startup/list path: we discover persisted

@@ -8,6 +8,7 @@ use temper_runtime::tenant::TenantId;
 use temper_wasm::{WasmAuthzContext, WasmAuthzDecision, WasmAuthzGate};
 
 mod actions;
+mod adapter;
 mod cross_entity;
 mod effects;
 mod wasm;
@@ -62,6 +63,10 @@ pub enum DispatchError {
     #[error("authorization denied: {0}")]
     #[allow(dead_code)] // Reserved for structured error handling migration
     AuthzDenied(String),
+
+    /// The entity type has no registered spec — all actions are denied by default.
+    #[error("entity type '{0}' is not governed by any registered spec")]
+    Ungoverned(String),
 
     /// An internal error (serialization, persistence, unexpected state).
     #[error("{0}")]

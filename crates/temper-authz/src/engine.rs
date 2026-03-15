@@ -6,32 +6,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::RwLock;
-use std::time::Instant;
+use std::sync::{OnceLock, RwLock};
 
 use cedar_policy::{
     Authorizer, Context, Decision, Entities, Entity, EntityUid, PolicySet, Request,
     Response as CedarResponse,
 };
+use opentelemetry::global;
+use opentelemetry::metrics::Counter;
 
 use crate::context::{PrincipalKind, SecurityContext};
 use crate::error::{AuthzDenial, AuthzError};
-
-fn decision_metric_label(decision: &AuthzDecision) -> &'static str {
-    match decision {
-        AuthzDecision::Allow => "allow",
-        AuthzDecision::Deny(
-            AuthzDenial::InvalidPrincipal(_)
-            | AuthzDenial::InvalidAction(_)
-            | AuthzDenial::InvalidResource(_)
-            | AuthzDenial::InvalidContext(_)
-            | AuthzDenial::EngineError(_),
-        ) => "error",
-        AuthzDecision::Deny(AuthzDenial::PolicyDenied { .. } | AuthzDenial::NoMatchingPermit) => {
-            "deny"
-        }
-    }
-}
 
 /// The result of an authorization check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,168 +120,169 @@ impl AuthzEngine {
         resource_type: &str,
         resource_attrs: &HashMap<String, serde_json::Value>,
     ) -> AuthzDecision {
-        let started = Instant::now();
-        let decision = (|| {
-            // Build Cedar principal
-            let principal_type = match security_ctx.principal.kind {
-                PrincipalKind::Customer => "Customer",
-                PrincipalKind::Agent => "Agent",
-                PrincipalKind::Admin => "Admin",
-                PrincipalKind::System => "System",
-            };
+        cedar_evaluations_counter().add(1, &[]);
 
-            let principal_uid = match EntityUid::from_str(&format!(
-                "{}::\"{}\"",
-                principal_type, security_ctx.principal.id
-            )) {
-                Ok(uid) => uid,
-                Err(e) => {
-                    return AuthzDecision::Deny(AuthzDenial::InvalidPrincipal(e.to_string()));
-                }
-            };
+        // Build Cedar principal
+        let principal_type = match security_ctx.principal.kind {
+            PrincipalKind::Customer => "Customer",
+            PrincipalKind::Agent => "Agent",
+            PrincipalKind::Admin => "Admin",
+            PrincipalKind::System => "System",
+        };
 
-            // Build Cedar action
-            let action_uid = match EntityUid::from_str(&format!("Action::\"{}\"", action)) {
-                Ok(uid) => uid,
-                Err(e) => {
-                    return AuthzDecision::Deny(AuthzDenial::InvalidAction(e.to_string()));
-                }
-            };
-
-            // Build Cedar resource
-            let resource_uid = match EntityUid::from_str(&format!(
-                "{}::\"{}\"",
-                resource_type,
-                resource_id_from_attrs(resource_attrs)
-            )) {
-                Ok(uid) => uid,
-                Err(e) => {
-                    return AuthzDecision::Deny(AuthzDenial::InvalidResource(e.to_string()));
-                }
-            };
-
-            // Build Cedar context from security context attrs + resource attrs
-            let mut ctx_map: HashMap<String, cedar_policy::RestrictedExpression> = HashMap::new();
-
-            // Add principal attributes to context
-            if let Some(ref role) = security_ctx.principal.role {
-                ctx_map.insert(
-                    "role".to_string(),
-                    cedar_policy::RestrictedExpression::new_string(role.clone()),
-                );
+        let principal_uid = match EntityUid::from_str(&format!(
+            "{}::\"{}\"",
+            principal_type, security_ctx.principal.id
+        )) {
+            Ok(uid) => uid,
+            Err(e) => {
+                return AuthzDecision::Deny(AuthzDenial::InvalidPrincipal(e.to_string()));
             }
-            if let Some(ref acting_for) = security_ctx.principal.acting_for {
-                ctx_map.insert(
-                    "actingFor".to_string(),
-                    cedar_policy::RestrictedExpression::new_string(acting_for.clone()),
-                );
+        };
+
+        // Build Cedar action
+        let action_uid = match EntityUid::from_str(&format!("Action::\"{}\"", action)) {
+            Ok(uid) => uid,
+            Err(e) => {
+                return AuthzDecision::Deny(AuthzDenial::InvalidAction(e.to_string()));
             }
+        };
 
-            // Add context attributes
-            for (key, value) in &security_ctx.context_attrs {
-                insert_json_as_cedar(&mut ctx_map, key.clone(), value);
+        // Build Cedar resource
+        let resource_uid = match EntityUid::from_str(&format!(
+            "{}::\"{}\"",
+            resource_type,
+            resource_id_from_attrs(resource_attrs)
+        )) {
+            Ok(uid) => uid,
+            Err(e) => {
+                return AuthzDecision::Deny(AuthzDenial::InvalidResource(e.to_string()));
             }
+        };
 
-            // Inject resource attributes into context (enables Cedar policies to
-            // reference entity state and cross-entity context via `context.key`).
-            for (key, value) in resource_attrs {
-                insert_json_as_cedar(&mut ctx_map, key.clone(), value);
+        // Build Cedar context from security context attrs + resource attrs
+        let mut ctx_map: HashMap<String, cedar_policy::RestrictedExpression> = HashMap::new();
+
+        // Add principal attributes to context
+        if let Some(ref role) = security_ctx.principal.role {
+            ctx_map.insert(
+                "role".to_string(),
+                cedar_policy::RestrictedExpression::new_string(role.clone()),
+            );
+        }
+        if let Some(ref acting_for) = security_ctx.principal.acting_for {
+            ctx_map.insert(
+                "actingFor".to_string(),
+                cedar_policy::RestrictedExpression::new_string(acting_for.clone()),
+            );
+        }
+
+        // Add context attributes
+        for (key, value) in &security_ctx.context_attrs {
+            insert_json_as_cedar(&mut ctx_map, key.clone(), value);
+        }
+
+        // Inject resource attributes into context (enables Cedar policies to
+        // reference entity state and cross-entity context via `context.key`).
+        for (key, value) in resource_attrs {
+            insert_json_as_cedar(&mut ctx_map, key.clone(), value);
+        }
+
+        // Build context and request
+        let context = match Context::from_pairs(ctx_map) {
+            Ok(c) => c,
+            Err(e) => {
+                return AuthzDecision::Deny(AuthzDenial::InvalidContext(e.to_string()));
             }
+        };
 
-            // Build context and request
-            let context = match Context::from_pairs(ctx_map) {
-                Ok(c) => c,
-                Err(e) => {
-                    return AuthzDecision::Deny(AuthzDenial::InvalidContext(e.to_string()));
-                }
-            };
-
-            // Build principal entity with attributes so Cedar can resolve both
-            // exact UID matches (`principal == Agent::"bot-1"`) and attribute
-            // access (`principal.agent_type in [...]`).
-            let mut principal_attrs: HashMap<String, cedar_policy::RestrictedExpression> =
-                HashMap::new();
-            if let Some(ref agent_type) = security_ctx.principal.agent_type {
-                principal_attrs.insert(
-                    "agent_type".to_string(),
-                    cedar_policy::RestrictedExpression::new_string(agent_type.clone()),
-                );
-            }
-            if let Some(ref role) = security_ctx.principal.role {
-                principal_attrs.insert(
-                    "role".to_string(),
-                    cedar_policy::RestrictedExpression::new_string(role.clone()),
-                );
-            }
-            for (key, value) in &security_ctx.principal.attributes {
-                insert_json_as_cedar(&mut principal_attrs, key.clone(), value);
-            }
-
-            let entities = match Entity::new(principal_uid.clone(), principal_attrs, HashSet::new())
-            {
-                Ok(entity) => match Entities::from_entities([entity], None) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                            "failed to build entity store: {e}"
-                        )));
-                    }
-                },
-                Err(e) => {
-                    return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                        "failed to build principal entity: {e}"
-                    )));
-                }
-            };
-
-            let request = match Request::new(
-                principal_uid,
-                action_uid,
-                resource_uid,
-                context,
-                None, // no schema validation for now
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                        "invalid request: {e}"
-                    )));
-                }
-            };
-
-            let policy_set = match self.policy_set.read() {
-                Ok(ps) => ps,
-                Err(e) => {
-                    return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                        "policy lock poisoned: {e}"
-                    )));
-                }
-            };
-            let response: CedarResponse =
-                self.authorizer
-                    .is_authorized(&request, &policy_set, &entities);
-
-            match response.decision() {
-                Decision::Allow => AuthzDecision::Allow,
-                Decision::Deny => {
-                    let policy_ids: Vec<String> = response
-                        .diagnostics()
-                        .reason()
-                        .map(|id| id.to_string())
-                        .collect();
-                    if policy_ids.is_empty() {
-                        AuthzDecision::Deny(AuthzDenial::NoMatchingPermit)
-                    } else {
-                        AuthzDecision::Deny(AuthzDenial::PolicyDenied { policy_ids })
-                    }
-                }
-            }
-        })();
-        crate::metrics::record_cedar_evaluation(
-            started.elapsed(),
-            decision_metric_label(&decision),
+        // Build principal entity with attributes so Cedar can resolve both
+        // exact UID matches (`principal == Agent::"bot-1"`) and attribute
+        // access (`principal.agent_type in [...]`).
+        let mut principal_attrs: HashMap<String, cedar_policy::RestrictedExpression> =
+            HashMap::new();
+        principal_attrs.insert(
+            "id".to_string(),
+            cedar_policy::RestrictedExpression::new_string(security_ctx.principal.id.clone()),
         );
-        decision
+        if let Some(ref agent_type) = security_ctx.principal.agent_type {
+            principal_attrs.insert(
+                "agent_type".to_string(),
+                cedar_policy::RestrictedExpression::new_string(agent_type.clone()),
+            );
+        }
+        if let Some(ref role) = security_ctx.principal.role {
+            principal_attrs.insert(
+                "role".to_string(),
+                cedar_policy::RestrictedExpression::new_string(role.clone()),
+            );
+        }
+        for (key, value) in &security_ctx.principal.attributes {
+            insert_json_as_cedar(&mut principal_attrs, key.clone(), value);
+        }
+
+        // Entity schema validation is intentionally None: principal attributes
+        // include tenant-defined custom attrs that can't be predicted by a
+        // static schema. Policy-level type checking suffices.
+
+        let entities = match Entity::new(principal_uid.clone(), principal_attrs, HashSet::new()) {
+            Ok(entity) => match Entities::from_entities([entity], None) {
+                Ok(e) => e,
+                Err(e) => {
+                    return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
+                        "failed to build entity store: {e}"
+                    )));
+                }
+            },
+            Err(e) => {
+                return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
+                    "failed to build principal entity: {e}"
+                )));
+            }
+        };
+
+        let request = match Request::new(
+            principal_uid,
+            action_uid,
+            resource_uid,
+            context,
+            None, // schema-less: actions/resources are tenant-defined
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
+                    "invalid request: {e}"
+                )));
+            }
+        };
+
+        let policy_set = match self.policy_set.read() {
+            Ok(ps) => ps,
+            Err(e) => {
+                return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
+                    "policy lock poisoned: {e}"
+                )));
+            }
+        };
+        let response: CedarResponse =
+            self.authorizer
+                .is_authorized(&request, &policy_set, &entities);
+
+        match response.decision() {
+            Decision::Allow => AuthzDecision::Allow,
+            Decision::Deny => {
+                let policy_ids: Vec<String> = response
+                    .diagnostics()
+                    .reason()
+                    .map(|id| id.to_string())
+                    .collect();
+                if policy_ids.is_empty() {
+                    AuthzDecision::Deny(AuthzDenial::NoMatchingPermit)
+                } else {
+                    AuthzDecision::Deny(AuthzDenial::PolicyDenied { policy_ids })
+                }
+            }
+        }
     }
 
     /// Quick check: is this a system principal (bypasses all checks)?
@@ -317,6 +303,16 @@ impl AuthzEngine {
         }
         self.authorize(security_ctx, action, resource_type, resource_attrs)
     }
+}
+
+fn cedar_evaluations_counter() -> &'static Counter<u64> {
+    static COUNTER: OnceLock<Counter<u64>> = OnceLock::new();
+    COUNTER.get_or_init(|| {
+        global::meter("temper-authz")
+            .u64_counter("temper_cedar_evaluations_total")
+            .with_description("Total number of Cedar authorization evaluations.")
+            .build()
+    })
 }
 
 /// Insert a `serde_json::Value` into a Cedar context map, converting to the
@@ -370,6 +366,9 @@ mod tests {
     use super::*;
     use crate::context::SecurityContext;
     use crate::error::AuthzDenial;
+
+    const PM_ISSUE_POLICY: &str =
+        include_str!("../../../os-apps/project-management/specs/policies/issue.cedar");
 
     fn admin_context() -> SecurityContext {
         SecurityContext::from_headers(&[
@@ -657,6 +656,51 @@ mod tests {
     }
 
     #[test]
+    fn test_principal_agent_type_set_membership_filtering() {
+        let policy = r#"
+            permit(
+                principal is Agent,
+                action == Action::"Assign",
+                resource is Issue
+            ) when {
+                ["supervisor", "human"].contains(principal.agent_type)
+            };
+        "#;
+        let engine = AuthzEngine::new(policy).unwrap();
+
+        let mut attrs = HashMap::new();
+        attrs.insert("id".to_string(), serde_json::json!("issue-1"));
+
+        let supervisor_ctx = SecurityContext::from_headers(&[
+            (
+                "X-Temper-Principal-Id".to_string(),
+                "bot-supervisor".to_string(),
+            ),
+            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+            ("X-Temper-Agent-Type".to_string(), "supervisor".to_string()),
+        ]);
+        let supervisor_decision = engine.authorize(&supervisor_ctx, "Assign", "Issue", &attrs);
+        assert!(
+            supervisor_decision.is_allowed(),
+            "set membership should allow supervisor agent_type: {supervisor_decision:?}"
+        );
+
+        let worker_ctx = SecurityContext::from_headers(&[
+            (
+                "X-Temper-Principal-Id".to_string(),
+                "bot-worker".to_string(),
+            ),
+            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+            ("X-Temper-Agent-Type".to_string(), "worker".to_string()),
+        ]);
+        let worker_decision = engine.authorize(&worker_ctx, "Assign", "Issue", &attrs);
+        assert!(
+            !worker_decision.is_allowed(),
+            "set membership should deny non-listed agent_type"
+        );
+    }
+
+    #[test]
     fn test_context_entity_status_in_cedar_context() {
         // Policy that gates on context.ctx_parent_agent_status
         let policy = r#"
@@ -705,6 +749,52 @@ mod tests {
         assert!(
             !decision.is_allowed(),
             "should deny with wrong context entity status"
+        );
+    }
+
+    #[test]
+    fn test_pm_assign_denies_openclaw_agent_type() {
+        let engine = AuthzEngine::new(PM_ISSUE_POLICY).unwrap();
+
+        let ctx = SecurityContext::from_headers(&[
+            (
+                "X-Temper-Principal-Id".to_string(),
+                "bot-openclaw".to_string(),
+            ),
+            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+            ("X-Temper-Agent-Type".to_string(), "openclaw".to_string()),
+        ]);
+
+        let mut attrs = HashMap::new();
+        attrs.insert("id".to_string(), serde_json::json!("issue-1"));
+
+        let decision = engine.authorize(&ctx, "Assign", "Issue", &attrs);
+        assert!(
+            !decision.is_allowed(),
+            "openclaw agent_type must be denied for Assign: {decision:?}"
+        );
+    }
+
+    #[test]
+    fn test_pm_assign_allows_supervisor_agent_type() {
+        let engine = AuthzEngine::new(PM_ISSUE_POLICY).unwrap();
+
+        let ctx = SecurityContext::from_headers(&[
+            (
+                "X-Temper-Principal-Id".to_string(),
+                "bot-supervisor".to_string(),
+            ),
+            ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+            ("X-Temper-Agent-Type".to_string(), "supervisor".to_string()),
+        ]);
+
+        let mut attrs = HashMap::new();
+        attrs.insert("id".to_string(), serde_json::json!("issue-1"));
+
+        let decision = engine.authorize(&ctx, "Assign", "Issue", &attrs);
+        assert!(
+            decision.is_allowed(),
+            "supervisor agent_type must be allowed for Assign: {decision:?}"
         );
     }
 }

@@ -531,6 +531,31 @@ impl crate::state::ServerState {
             spec_governed: None,
             agent_type: None,
         };
+        tracing::info!(
+            tenant = %traj.tenant,
+            entity_type = %traj.entity_type,
+            entity_id = %traj.entity_id,
+            action = %traj.action,
+            success = traj.success,
+            from_status = ?traj.from_status,
+            to_status = ?traj.to_status,
+            error = ?traj.error,
+            source = ?traj.source,
+            authz_denied = ?traj.authz_denied,
+            "trajectory.entry"
+        );
+        if !traj.success {
+            tracing::warn!(
+                tenant = %traj.tenant,
+                entity_type = %traj.entity_type,
+                entity_id = %traj.entity_id,
+                action = %traj.action,
+                error = ?traj.error,
+                authz_denied = ?traj.authz_denied,
+                source = ?traj.source,
+                "unmet_intent"
+            );
+        }
         let state_c = self.clone();
         #[rustfmt::skip]
         tokio::spawn(async move { // determinism-ok: background persist

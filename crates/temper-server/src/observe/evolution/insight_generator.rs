@@ -51,8 +51,10 @@ struct TrajectorySignal {
 /// resolved vs open unmet intents.
 pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Vec<InsightRecord> {
     if entries.is_empty() {
+        tracing::debug!("evolution.insight");
         return Vec::new();
     }
+    tracing::info!(entry_count = entries.len(), "evolution.insight");
 
     // Phase 1: Aggregate by (entity_type, action).
     let mut signals: BTreeMap<(String, String), TrajectorySignal> = BTreeMap::new();
@@ -95,6 +97,11 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
         .filter(|s| s.has_submit_spec)
         .map(|s| s.entity_type.clone())
         .collect();
+    tracing::info!(
+        signal_count = signals.len(),
+        submitted_type_count = submitted_types.len(),
+        "evolution.insight"
+    );
 
     // Phase 3: Generate insights.
     let mut insights = Vec::new();
@@ -150,6 +157,27 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
             } else {
                 compute_priority_score(&insight_signal).max(0.5)
             };
+            if resolved {
+                tracing::info!(
+                    entity_type = %signal.entity_type,
+                    action = %signal.action,
+                    total = signal.total,
+                    success_rate,
+                    resolved,
+                    priority_score = priority,
+                    "evolution.pattern"
+                );
+            } else {
+                tracing::warn!(
+                    entity_type = %signal.entity_type,
+                    action = %signal.action,
+                    total = signal.total,
+                    success_rate,
+                    resolved,
+                    priority_score = priority,
+                    "evolution.pattern"
+                );
+            }
             insights.push(build_insight(
                 insight_signal,
                 recommendation,
@@ -177,6 +205,14 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
                 growth_rate: None,
             };
 
+            tracing::warn!(
+                entity_type = %signal.entity_type,
+                action = %signal.action,
+                total = signal.total,
+                authz_denials = signal.authz_denials,
+                success_rate,
+                "evolution.pattern"
+            );
             insights.push(build_insight(insight_signal, recommendation, None));
             continue;
         }
@@ -197,6 +233,15 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
         }
 
         let category = classify_insight(&insight_signal);
+        tracing::info!(
+            entity_type = %signal.entity_type,
+            action = %signal.action,
+            total = signal.total,
+            success_rate,
+            priority_score = priority,
+            category = ?category,
+            "evolution.pattern"
+        );
         let recommendation = match category {
             temper_evolution::records::InsightCategory::UnmetIntent => {
                 format!(
@@ -243,6 +288,7 @@ pub(crate) fn generate_insights(entries: &[crate::state::TrajectoryEntry]) -> Ve
             .partial_cmp(&a.priority_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    tracing::info!(insight_count = insights.len(), "evolution.insight");
     insights
 }
 
@@ -320,7 +366,7 @@ pub(crate) fn generate_unmet_intents(
         }
     }
 
-    failures
+    let intents: Vec<UnmetIntent> = failures
         .into_values()
         .map(|accum| {
             let resolved = submitted_specs.contains_key(&accum.entity_type);
@@ -355,7 +401,27 @@ pub(crate) fn generate_unmet_intents(
                 recommendation,
             }
         })
-        .collect()
+        .collect();
+    let open_count = intents.iter().filter(|i| i.status == "open").count();
+    let resolved_count = intents.iter().filter(|i| i.status == "resolved").count();
+    if open_count > 0 {
+        tracing::warn!(
+            entry_count = entries.len(),
+            intents_count = intents.len(),
+            open_count,
+            resolved_count,
+            "unmet_intent"
+        );
+    } else {
+        tracing::info!(
+            entry_count = entries.len(),
+            intents_count = intents.len(),
+            open_count,
+            resolved_count,
+            "unmet_intent"
+        );
+    }
+    intents
 }
 
 /// Minimum number of platform-source trajectory failures before generating a FR-Record.

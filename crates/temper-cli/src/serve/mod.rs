@@ -153,6 +153,7 @@ pub async fn run(
     }
     spawn_optimization_loop(&state);
     spawn_actor_passivation_loop(&state);
+    state.server.spawn_runtime_metrics_loop();
 
     println!("Listening on http://0.0.0.0:{actual_port}");
     axum::serve(listener, router)

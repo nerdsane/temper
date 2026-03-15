@@ -10,6 +10,7 @@
 //! are detected — the developer still holds the approval gate (D-Record).
 
 use crate::agent::{ChatClient, ClaudeClient, ClaudeError, Message};
+use tracing::instrument;
 
 /// Formalizes observations into problem statements (O→P).
 ///
@@ -68,13 +69,31 @@ impl<C: ChatClient> ObservationAgent<C> {
     /// - `attempted_tool`: the action that failed
     /// - `tenant`: which tenant
     /// - `trace_id`: for correlation
+    #[instrument(skip_all, fields(otel.name = "evolution.agent.formalize", context_len = observation_context.len()))]
     pub async fn formalize(&self, observation_context: &str) -> Result<String, ClaudeError> {
+        tracing::info!(context_len = observation_context.len(), "evolution.agent");
         let messages = vec![Message::user(format!(
             "Formalize this observation into a problem statement:\n\n{}",
             observation_context,
         ))];
-
-        self.client.chat(&messages, OBSERVATION_SYSTEM_PROMPT).await
+        let result = self.client.chat(&messages, OBSERVATION_SYSTEM_PROMPT).await;
+        match &result {
+            Ok(response) => {
+                tracing::info!(
+                    context_len = observation_context.len(),
+                    output_len = response.len(),
+                    "evolution.agent"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    context_len = observation_context.len(),
+                    error = %error,
+                    "evolution.agent"
+                );
+            }
+        }
+        result
     }
 }
 
@@ -144,11 +163,17 @@ impl<C: ChatClient> AnalysisAgent<C> {
     ///
     /// `problem_statement` is the P-Record output from ObservationAgent.
     /// `current_specs` is a map of entity_type → IOA TOML source for context.
+    #[instrument(skip_all, fields(otel.name = "evolution.agent.analyze", specs_count = current_specs.len()))]
     pub async fn analyze(
         &self,
         problem_statement: &str,
         current_specs: &[(String, String)],
     ) -> Result<String, ClaudeError> {
+        tracing::info!(
+            problem_len = problem_statement.len(),
+            specs_count = current_specs.len(),
+            "evolution.agent"
+        );
         let mut prompt = format!(
             "Analyze this problem and propose spec changes:\n\n{}\n\n",
             problem_statement,
@@ -164,7 +189,24 @@ impl<C: ChatClient> AnalysisAgent<C> {
         }
 
         let messages = vec![Message::user(prompt)];
-        self.client.chat(&messages, ANALYSIS_SYSTEM_PROMPT).await
+        let result = self.client.chat(&messages, ANALYSIS_SYSTEM_PROMPT).await;
+        match &result {
+            Ok(response) => {
+                tracing::info!(
+                    specs_count = current_specs.len(),
+                    output_len = response.len(),
+                    "evolution.agent"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    specs_count = current_specs.len(),
+                    error = %error,
+                    "evolution.agent"
+                );
+            }
+        }
+        result
     }
 }
 

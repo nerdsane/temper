@@ -4,6 +4,7 @@
 //! The entity actor uses JIT TransitionTables for state machine transitions,
 //! ensuring the same logic verified by DST runs in production.
 
+pub mod adapters;
 #[cfg(feature = "observe")]
 mod api;
 pub mod authz;

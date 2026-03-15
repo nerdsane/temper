@@ -17,7 +17,8 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
-.env.railway
+.env.*
+!.env.example
 
 # Secrets
 *.pem
@@ -42,6 +43,8 @@ apps/scratch/
 .slop/
 .worktrees/
 .progress/
+.claude/worktrees/
+.claude/hooks/session-start-temper.sh
 
 # Node.js (observe UI)
 node_modules/
@@ -64,3 +67,5 @@ scripts/generate-graph-json.js
 .vercel
 .desloppify/
 scorecard.png
+.claude/hooks/session-start-temper.sh
+.claude/worktrees/
