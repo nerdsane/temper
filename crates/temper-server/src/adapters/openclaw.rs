@@ -102,15 +102,15 @@ impl AgentAdapter for OpenClawAdapter {
             let frame = frame
                 .map_err(|e| AdapterError::Execution(format!("openclaw receive failed: {e}")))?;
 
-            if let Some(text) = frame_to_text(frame) {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if is_terminal_frame(&json) {
-                        last_payload = json;
-                        terminal_seen = true;
-                        break;
-                    }
+            if let Some(text) = frame_to_text(frame)
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+            {
+                if is_terminal_frame(&json) {
                     last_payload = json;
+                    terminal_seen = true;
+                    break;
                 }
+                last_payload = json;
             }
         }
 

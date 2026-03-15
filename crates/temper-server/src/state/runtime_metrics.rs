@@ -76,7 +76,7 @@ fn read_process_resident_memory_bytes() -> Option<u64> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        return None;
+        None
     }
 
     #[cfg(target_os = "linux")]
