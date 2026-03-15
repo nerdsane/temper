@@ -86,18 +86,18 @@ impl TrajectoryLog {
 
     /// Append an entry, evicting the oldest if at capacity.
     pub fn push(&mut self, entry: TrajectoryEntry) {
-        if self.entries.len() >= self.capacity {
-            if let Some(evicted) = self.entries.pop_front() {
-                tracing::info!(
-                    tenant = %evicted.tenant,
-                    entity_type = %evicted.entity_type,
-                    entity_id = %evicted.entity_id,
-                    action = %evicted.action,
-                    success = evicted.success,
-                    capacity = self.capacity,
-                    "trajectory.eviction"
-                );
-            }
+        if self.entries.len() >= self.capacity
+            && let Some(evicted) = self.entries.pop_front()
+        {
+            tracing::info!(
+                tenant = %evicted.tenant,
+                entity_type = %evicted.entity_type,
+                entity_id = %evicted.entity_id,
+                action = %evicted.action,
+                success = evicted.success,
+                capacity = self.capacity,
+                "trajectory.eviction"
+            );
         }
         tracing::debug!(
             tenant = %entry.tenant,
