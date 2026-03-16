@@ -269,6 +269,13 @@ Temper persists this mapping to `~/.local/share/temper/specs-registry.json`. Aft
 
 Re-calling `load-dir` is safe and **hot-swaps** specs — existing entities keep their current state, the new spec takes effect immediately. Use it to iterate on specs without losing data.
 
+**⚠️ Spec changes are hot-reloads, not PRs.** The activation path for spec changes is:
+1. Edit the `.ioa.toml` / `.csdl.xml` file
+2. Call `load-dir` (or `submit_specs` via MCP)
+3. Verification runs → spec takes effect immediately
+
+Git-commit for version tracking. But do NOT create pull requests for spec-only changes. PRs are for Temper platform code (Rust). Specs are your tools — you iterate on them live.
+
 ---
 
 ## 3. Use the OData API
@@ -591,6 +598,69 @@ Bad notification:
 
 ---
 
+## 5.5. Approval UX — Discord/Telegram/Slack Buttons
+
+**Cedar gates are only as good as the approval UX.** If approving is painful, agents will route around it. Make approval frictionless.
+
+### The Pattern: Chat Platform Approval Bridge
+
+When Cedar denies an agent action, the agent sends the human an approval message on their chat platform (Discord, Telegram, Slack) with interactive buttons. The human taps Approve or Deny. The platform routes the interaction back through OpenClaw, which resolves the Temper decision with the human's identity as the Cedar principal.
+
+```
+Agent tries action → Cedar DENIES → Temper creates Decision (PD-xxx)
+Agent sends Discord message:
+  "🔒 Cedar denied: Fire 'Approve' on Issue ISS-042
+   Context: Moving from InReview → Done
+   [Approve] [Deny]"
+Human taps [Approve]
+OpenClaw receives button interaction (human's Discord ID)
+OpenClaw calls Temper: resolve Decision PD-xxx, principal=human
+Temper validates principal has approval rights → Decision approved
+Temper fires webhook → Agent retries action → SUCCESS
+```
+
+### Why This Works
+
+- **The agent is the messenger, not the approver.** The button interaction carries the human's platform identity. The agent can't forge it.
+- **Cedar principal mapping:** The human's Discord/Telegram/Slack user ID maps to a Cedar principal with approval rights. Configure this in Cedar policies.
+- **Audit trail:** Every approval is recorded in Temper with the human's principal, timestamp, and scope.
+- **Convergence:** Over time, the human sets broader policies ("agent X can do Y on entity type Z") and approvals become rare.
+
+### Implementation (OpenClaw + Discord)
+
+**Reusable components** — Discord supports persistent buttons that survive message edits. Use `reusable: true` so the button stays active.
+
+```javascript
+// When Cedar denies, send approval message
+message(action="send", channel="discord", target="<human-dm-channel>",
+  accountId="<agent-bot>",
+  components={
+    text: "🔒 **Cedar denied:** Fire `Approve` on Issue ISS-042\nMoving from InReview → Done",
+    reusable: true,
+    blocks: [
+      { type: "buttons", buttons: [
+        { label: "Approve", style: "success" },
+        { label: "Deny", style: "danger" }
+      ]}
+    ]
+  })
+```
+
+**On button press** — OpenClaw routes the interaction to the agent session. The agent:
+1. Identifies the decision ID from context
+2. Calls `temper.action('tenant', 'Decisions', 'PD-xxx', 'Approve', {principal: human_id})`
+3. Retries the original action
+
+### Don't Create Shortcuts
+
+If you find yourself writing a "ResolveDone" or "ForceComplete" action to skip states because Cedar approval is too slow — **stop.** The problem is the approval UX, not the state machine. Fix the UX:
+
+- Pre-authorize routine operations in Cedar (broad scope policies)
+- Use chat buttons for the rest (one tap, zero context switch)
+- Batch approvals in the Observe UI for bulk operations
+
+The state machine is the process. Cedar is the gate. The buttons are the key. Don't remove the gate because the key is inconvenient.
+
 ## 6. Wire the OpenClaw Plugin
 
 **This is required for any OpenClaw agent.** The plugin is the event system — it's how Temper state changes reach your agent session. Without it, your agent is blind to transitions your human makes in the UI.
@@ -852,3 +922,37 @@ check the Sessions tab" is actionable.
 
 **Speed.** A small Temper app should take minutes: spec → seed → HTML → proxy → tunnel → notify.
 ```
+
+---
+
+## The Meta-Loop Agent
+
+Temper has two kinds of agents:
+
+**Application agents** build tools for themselves and their humans. They author specs, create entities, fire actions, build UIs. They operate *on* Temper.
+
+**The meta-loop agent** improves Temper itself. It operates *about* Temper:
+
+1. **Watches Logfire** for Temper's own traces — error rates, slow queries, failed hydrations, Cedar evaluation latency
+2. **Reads unmet intents** across all tenants — what are agents trying to do that keeps failing? Are there spec patterns that keep breaking verification?
+3. **Analyzes Cedar denial patterns** — are policies too restrictive? Too permissive? Are agents routing around them?
+4. **Checks verification failures** — L0-L3 failures indicate design issues in specs. The meta-agent can suggest fixes.
+5. **Proposes platform PRs** — unlike spec changes (which are hot-reloaded), platform improvements to Temper's Rust codebase go through PRs with CI.
+
+The meta-agent is the immune system. Application agents are the organs. Both are necessary.
+
+### Architecture
+
+```
+Application Agent                    Meta-Loop Agent
+    │                                     │
+    ├─ writes specs                       ├─ reads Logfire traces
+    ├─ hot-reloads                        ├─ reads unmet intents
+    ├─ creates entities                   ├─ reads Cedar denials
+    ├─ fires actions                      ├─ reads verification failures
+    ├─ builds UIs                         ├─ proposes Rust PRs
+    │                                     ├─ proposes spec templates
+    └─ operates ON Temper                 └─ operates ABOUT Temper
+```
+
+The meta-agent can also propose **spec templates** — reusable patterns that application agents can adopt. "Every agent needs a Task entity? Here's a verified template." This is how the platform evolves: the meta-agent watches what works, extracts patterns, and offers them as OS apps.

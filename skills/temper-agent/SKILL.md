@@ -23,6 +23,22 @@ If Cedar denies an action, you surface it to the human. They approve. You retry.
 
 No task is too simple for governance. No task is outside Temper's scope. If it changes state, it goes through Temper.
 
+### You Build Your Own Tools
+
+This is the core insight: **you are not just an operator — you are a toolsmith.** When you need a capability that doesn't exist, you don't file a ticket. You write a spec, hot-reload it, and now you have it.
+
+The authoring loop:
+1. **Write the spec** — `.ioa.toml` for the state machine, `.csdl.xml` for the data model
+2. **Submit it** — `await temper.submit_specs(tenant, specs)` → L0-L3 verification runs immediately
+3. **If verification fails** — fix the spec and resubmit. This is iteration, not deployment.
+4. **If Cedar denies** — surface it to the human for approval. They approve the spec, not a PR.
+5. **Hot-reload** — the spec takes effect immediately. No restart, no deploy, no PR cycle.
+6. **Iterate** — edit the spec, resubmit, hot-reload. Existing entities keep their state.
+
+**Spec changes are NOT pull requests.** They are live edits. Git-track them for history, but the activation path is hot-reload, not CI/CD. If you find yourself making a PR for a spec change, you're doing it wrong.
+
+**Walk the states, don't skip them.** If you need to move an entity from state A to state D, fire the transitions A→B→C→D. Each transition has its own Cedar gate. Don't create shortcut actions like "ResolveDone" that bypass the state machine — that defeats the entire purpose. If the walk is too slow, the answer is better approval UX (see below), not weaker specs.
+
 ### The Evolution Loop
 
 When you try something and it fails (404 entity not found, 409 invalid transition), Temper automatically records the failure as a trajectory entry. This is not an error to apologize for — it is the system working as designed:
@@ -37,6 +53,33 @@ You try action → FAILS (no matching spec)
 ```
 
 You are both the developer and the operator of your own specs. When you encounter a gap, you close it.
+### The Meta-Loop: Improving Temper Itself
+
+Beyond building application tools, there's a second loop: **improving the platform.** An agent (or a dedicated meta-agent) should:
+
+1. **Watch Logfire traces** for Temper's own performance — slow queries, failed hydrations, error patterns
+2. **Read unmet intents** that agents keep hitting but can't resolve — these are spec gaps or platform gaps
+3. **Analyze Cedar policy denials** — are agents being blocked on legitimate work? Policy gaps.
+4. **Check verification failures** — specs that fail L0-L3 indicate design issues
+5. **Propose platform improvements** — as PRs to Temper's Rust codebase (this IS a PR, unlike spec changes)
+
+The distinction: **spec changes are hot-reloaded** (your tools). **Platform changes are PRs** (Temper itself). Don't confuse the two.
+
+### Approval UX — Don't Route Around Cedar
+
+When Cedar denies an action, the temptation is to create a bypass (a shortcut action, a direct API call, a "sudo" mode). **Don't.** The correct response is to make approval frictionless for your human.
+
+**Approval channels (in order of preference):**
+
+1. **Chat platform buttons** — if your agent runs on Discord/Telegram/Slack, send the human an approval message with Approve/Deny buttons. They tap, the decision resolves, you continue. One tap, inline, no context switch.
+2. **Observe UI** — browser-based, always available at your Temper instance. Best for batch approvals or reviewing multiple pending decisions.
+3. **`temper decide` CLI** — terminal-based, good for developers already in a shell.
+
+The key: **the approval comes from the human's identity, not the agent's.** The agent is the messenger. The human's platform identity (Discord user ID, etc.) maps to a Cedar principal with approval rights. The agent cannot forge this.
+
+Over time, the human sets broader Cedar policies ("Haku can fire any action on Issues except Delete") and approvals become rare. The system converges toward trust through demonstrated behavior, not through upfront permission grants.
+
+
 
 ---
 
