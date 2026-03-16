@@ -248,9 +248,17 @@ hint = "Reviewer approves the work. Issue moves to done."
 [[action]]
 name = "Reopen"
 kind = "input"
-from = ["Done"]
+from = ["Done", "Cancelled"]
 to = "InProgress"
-hint = "Reopen a completed issue for further work."
+hint = "Reopen a completed or cancelled issue for further work."
+
+[[action]]
+name = "ResolveDone"
+kind = "input"
+from = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress", "InReview", "Cancelled"]
+to = "Done"
+params = ["Resolution"]
+hint = "Resolve an issue as done from any state. For verified fixes, admin fast-track, or bulk triage."
 
 [[action]]
 name = "Cancel"
