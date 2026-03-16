@@ -61,6 +61,7 @@ pub async fn run(
     storage: StorageBackend,
     storage_explicit: bool,
     observe: bool,
+    verify_subprocess: bool,
 ) -> Result<()> {
     let _otel_guard = init_observability("temper-platform");
     init_runtime_metrics();
@@ -96,6 +97,14 @@ pub async fn run(
         data_dir.join("specs-registry.json").display()
     );
     state.server.rebuild_reaction_dispatcher();
+
+    // Configure subprocess verification if requested.
+    if verify_subprocess {
+        let bin = std::env::current_exe() // determinism-ok: read once at startup
+            .unwrap_or_else(|_| std::path::PathBuf::from("temper"));
+        state.server.verify_subprocess_bin = Some(Arc::new(bin));
+        println!("  Verification mode: subprocess (30s timeout per entity)");
+    }
 
     // Phase 4: Webhooks
     state.server.webhook_dispatcher = bootstrap::load_webhooks(&apps);
@@ -473,15 +482,24 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
 
             println!("  [verify] Starting verification for {entity}...");
 
-            // Run the cascade in a blocking task (CPU-intensive).
             let entity_clone = entity.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                VerificationCascade::from_ioa(&ioa_source)
-                    .with_sim_seeds(5)
-                    .with_prop_test_cases(100)
-                    .run()
-            })
-            .await;
+
+            // Run the cascade: in subprocess (isolated) or in-process (default).
+            let result: Result<temper_verify::CascadeResult, String> = if let Some(bin) =
+                server.verify_subprocess_bin.as_deref()
+            {
+                temper_server::observe::subprocess_verify::verify_in_subprocess(bin, &ioa_source)
+                    .await
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    VerificationCascade::from_ioa(&ioa_source)
+                        .with_sim_seeds(5)
+                        .with_prop_test_cases(100)
+                        .run()
+                })
+                .await
+                .map_err(|e| e.to_string())
+            };
 
             match result {
                 Ok(cascade_result) => {
@@ -595,14 +613,14 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                     }
                 }
                 Err(e) => {
-                    eprintln!("  [verify] {entity_clone}: verification task panicked: {e}");
+                    eprintln!("  [verify] {entity_clone}: verification failed: {e}");
 
                     let verification_result = EntityVerificationResult {
                         all_passed: false,
                         levels: vec![EntityLevelSummary {
                             level: "Error".to_string(),
                             passed: false,
-                            summary: format!("Verification task panicked: {e}"),
+                            summary: format!("Verification failed: {e}"),
                             details: None,
                         }],
                         verified_at: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
@@ -642,7 +660,7 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                             kind: "verify_done".to_string(),
                             entity_type: entity_clone,
                             tenant: tenant.clone(),
-                            summary: "Verification panicked".to_string(),
+                            summary: format!("Verification failed: {e}"),
                             level: None,
                             passed: Some(false),
                             timestamp: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code

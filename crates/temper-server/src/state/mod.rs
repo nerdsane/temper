@@ -218,6 +218,12 @@ pub struct ServerState {
     pub single_tenant_mode: bool,
     /// Denial pattern detection engine for Cedar policy suggestions.
     pub suggestion_engine: Arc<RwLock<PolicySuggestionEngine>>,
+    /// When set, spec verification runs in an isolated child process.
+    ///
+    /// Points to the `temper` binary that supports the `verify-ioa` subcommand.
+    /// Each entity's IOA source is written to stdin; the result is read from stdout
+    /// as JSON. A 30-second timeout is applied per entity.
+    pub verify_subprocess_bin: Option<Arc<std::path::PathBuf>>,
 }
 
 #[allow(deprecated)] // ADR-0025 Phase 4: RecordStore used until chain validation replaced
@@ -282,6 +288,7 @@ impl ServerState {
             listen_port: Arc::new(std::sync::OnceLock::new()),
             single_tenant_mode: true,
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
+            verify_subprocess_bin: None,
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -420,6 +427,7 @@ impl ServerState {
             listen_port: Arc::new(std::sync::OnceLock::new()),
             single_tenant_mode: false,
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
+            verify_subprocess_bin: None,
         };
         state.register_builtin_wasm_modules();
         state

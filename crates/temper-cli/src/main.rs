@@ -11,6 +11,7 @@ mod mcp;
 mod serve;
 mod util;
 mod verify;
+mod verify_ioa;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -85,7 +86,22 @@ enum Commands {
         /// Install an OS app into the default tenant at startup (repeatable)
         #[arg(long)]
         os_app: Vec<String>,
+        /// Run spec verification in an isolated subprocess (panics/hangs won't crash the server).
+        ///
+        /// Each entity's IOA source is written to stdin of `temper verify-ioa`;
+        /// the result is read from stdout as JSON. A 30-second timeout is applied
+        /// per entity. Exit 0 = pass; non-zero or timeout = failure.
+        #[arg(long)]
+        verify_subprocess: bool,
     },
+    /// Run the verification cascade on IOA TOML source read from stdin.
+    ///
+    /// Reads the full IOA TOML source from stdin, runs the verification cascade,
+    /// and writes a JSON-encoded `CascadeResult` to stdout.
+    /// Exits 0 if all levels pass; exits 1 if any level fails or an error occurs.
+    ///
+    /// This subcommand is used internally by `temper serve --verify-subprocess`.
+    VerifyIoa,
     /// Start the stdio MCP server for Code Mode
     Mcp {
         /// Port where Temper HTTP server is running.
@@ -118,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
             output_dir,
         } => codegen::run(&specs_dir, &output_dir)?,
         Commands::Verify { specs_dir } => verify::run(&specs_dir)?,
+        Commands::VerifyIoa => verify_ioa::run()?,
         Commands::Serve {
             port,
             storage,
@@ -126,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
             specs_dir,
             tenant,
             os_app,
+            verify_subprocess,
         } => {
             let storage_explicit =
                 std::env::args().any(|arg| arg == "--storage" || arg.starts_with("--storage="));
@@ -143,7 +161,16 @@ async fn main() -> anyhow::Result<()> {
             {
                 apps.push((tenant.clone(), dir.clone()));
             }
-            serve::run(port, apps, os_app, storage, storage_explicit, !no_observe).await?
+            serve::run(
+                port,
+                apps,
+                os_app,
+                storage,
+                storage_explicit,
+                !no_observe,
+                verify_subprocess,
+            )
+            .await?
         }
         Commands::Mcp {
             port,
