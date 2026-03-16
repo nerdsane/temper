@@ -174,10 +174,9 @@ pub async fn install_os_app(
         get_os_app(app_name).ok_or_else(|| format!("OS app '{app_name}' not found in catalog"))?;
     let tenant_id = TenantId::new(tenant);
 
-    // Classify each bundle spec as added / updated / skipped based on the
-    // current in-memory registry state, using SHA-256 content hashes to
-    // detect whether the IOA source has actually changed.
-    let (mut added, mut updated, mut skipped): (Vec<String>, Vec<String>, Vec<String>) = {
+    // Classify each bundle spec as added / updated / skipped, and compute the
+    // merged CSDL — both require the registry read lock, so we do them together.
+    let (mut added, mut updated, mut skipped, merged_csdl) = {
         let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
         let mut added = Vec::new();
         let mut updated = Vec::new();
@@ -198,24 +197,20 @@ pub async fn install_os_app(
                 }
             }
         }
-        (added, updated, skipped)
-    };
-    // Sort for deterministic output.
-    added.sort();
-    updated.sort();
-    skipped.sort();
-
-    // OS app installs must preserve existing tenant types.
-    let merged_csdl = {
-        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
-        if let Some(existing) = registry.get_tenant(&tenant_id) {
+        // OS app installs must preserve existing tenant types.
+        let merged_csdl = if let Some(existing) = registry.get_tenant(&tenant_id) {
             let incoming = parse_csdl(bundle.csdl)
                 .map_err(|e| format!("Failed to parse CSDL for OS app '{app_name}': {e}"))?;
             emit_csdl_xml(&merge_csdl(&existing.csdl, &incoming))
         } else {
             bundle.csdl.to_string()
-        }
+        };
+        (added, updated, skipped, merged_csdl)
     };
+    // Sort for deterministic output.
+    added.sort();
+    updated.sort();
+    skipped.sort();
 
     // Build the full Cedar policy text for this tenant (existing + new).
     let combined_policy = if !bundle.cedar_policies.is_empty() {
