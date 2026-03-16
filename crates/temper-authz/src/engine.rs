@@ -225,18 +225,38 @@ impl AuthzEngine {
         // include tenant-defined custom attrs that can't be predicted by a
         // static schema. Policy-level type checking suffices.
 
-        let entities = match Entity::new(principal_uid.clone(), principal_attrs, HashSet::new()) {
-            Ok(entity) => match Entities::from_entities([entity], None) {
-                Ok(e) => e,
+        let principal_entity =
+            match Entity::new(principal_uid.clone(), principal_attrs, HashSet::new()) {
+                Ok(entity) => entity,
                 Err(e) => {
                     return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                        "failed to build entity store: {e}"
+                        "failed to build principal entity: {e}"
                     )));
                 }
-            },
+            };
+
+        // Build resource entity with attributes so Cedar can resolve
+        // `resource.Field` references (e.g. `resource.AgentId == principal.id`).
+        let mut resource_entity_attrs: HashMap<String, cedar_policy::RestrictedExpression> =
+            HashMap::new();
+        for (key, value) in resource_attrs {
+            insert_json_as_cedar(&mut resource_entity_attrs, key.clone(), value);
+        }
+        let resource_entity =
+            match Entity::new(resource_uid.clone(), resource_entity_attrs, HashSet::new()) {
+                Ok(entity) => entity,
+                Err(e) => {
+                    return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
+                        "failed to build resource entity: {e}"
+                    )));
+                }
+            };
+
+        let entities = match Entities::from_entities([principal_entity, resource_entity], None) {
+            Ok(e) => e,
             Err(e) => {
                 return AuthzDecision::Deny(AuthzDenial::EngineError(format!(
-                    "failed to build principal entity: {e}"
+                    "failed to build entity store: {e}"
                 )));
             }
         };
