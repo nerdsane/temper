@@ -21,8 +21,9 @@ impl TursoEventStore {
             .execute(
             "INSERT INTO trajectories \
              (tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-              agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+              agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, \
+              request_body, intent) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 entry.tenant,
                 entry.entity_type,
@@ -39,7 +40,9 @@ impl TursoEventStore {
                 entry.denied_module,
                 entry.source,
                 entry.spec_governed.map(|b| b as i64),
-                entry.created_at
+                entry.created_at,
+                entry.request_body,
+                entry.intent
             ],
         )
         .await
@@ -82,7 +85,8 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at \
+                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, \
+                        request_body, intent \
                  FROM trajectories \
                  ORDER BY created_at DESC \
                  LIMIT ?1",
@@ -103,7 +107,7 @@ impl TursoEventStore {
         Ok(out)
     }
 
-    /// Parse a trajectory row from a libsql Row (16 columns).
+    /// Parse a trajectory row from a libsql Row (18 columns).
     fn row_to_trajectory(row: &libsql::Row) -> Result<TursoTrajectoryRow, PersistenceError> {
         Ok(TursoTrajectoryRow {
             tenant: row.get::<String>(0).map_err(storage_error)?,
@@ -128,6 +132,8 @@ impl TursoEventStore {
                 .map_err(storage_error)?
                 .map(|v| v != 0),
             created_at: row.get::<String>(15).map_err(storage_error)?,
+            request_body: row.get::<Option<String>>(16).map_err(storage_error)?,
+            intent: row.get::<Option<String>>(17).map_err(storage_error)?,
         })
     }
 
@@ -135,6 +141,7 @@ impl TursoEventStore {
     #[instrument(skip_all, fields(otel.name = "turso.query_trajectory_stats"))]
     pub async fn query_trajectory_stats(
         &self,
+        tenant: Option<&str>,
         entity_type: Option<&str>,
         action: Option<&str>,
         success_filter: Option<bool>,
@@ -149,10 +156,16 @@ impl TursoEventStore {
                 "SELECT COUNT(*) AS total, \
                         COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success_count \
                  FROM trajectories \
-                 WHERE (?1 IS NULL OR entity_type = ?1) \
-                   AND (?2 IS NULL OR action = ?2) \
-                   AND (?3 IS NULL OR success = ?3)",
-                params![entity_type, action, success_filter.map(|b| b as i64)],
+                 WHERE (?1 IS NULL OR tenant = ?1) \
+                   AND (?2 IS NULL OR entity_type = ?2) \
+                   AND (?3 IS NULL OR action = ?3) \
+                   AND (?4 IS NULL OR success = ?4)",
+                params![
+                    tenant,
+                    entity_type,
+                    action,
+                    success_filter.map(|b| b as i64)
+                ],
             )
             .await
             .map_err(storage_error)?;
@@ -173,8 +186,9 @@ impl TursoEventStore {
                         COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success, \
                         COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) AS error \
                  FROM trajectories \
+                 WHERE (?1 IS NULL OR tenant = ?1) \
                  GROUP BY action",
-                (),
+                params![tenant],
             )
             .await
             .map_err(storage_error)?;
@@ -193,16 +207,18 @@ impl TursoEventStore {
         }
         drop(rows);
 
-        // Failed intents (newest first).
+        // Failed intents (newest first), optionally scoped to tenant.
         let mut rows = conn
             .query(
                 "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at \
+                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, \
+                        request_body, intent \
                  FROM trajectories \
                  WHERE success = 0 \
+                   AND (?1 IS NULL OR tenant = ?1) \
                  ORDER BY created_at DESC \
-                 LIMIT ?1",
-                params![failed_limit],
+                 LIMIT ?2",
+                params![tenant, failed_limit],
             )
             .await
             .map_err(storage_error)?;
@@ -214,6 +230,7 @@ impl TursoEventStore {
 
         let error_count = total.saturating_sub(success_count);
         tracing::info!(
+            tenant,
             entity_type,
             action,
             success_filter,
@@ -251,7 +268,8 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at \
+                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, \
+                        request_body, intent \
                  FROM trajectories \
                  WHERE agent_id = ?1 \
                    AND (?2 IS NULL OR tenant = ?2) \

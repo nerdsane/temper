@@ -561,6 +561,8 @@ impl ServerState {
                     }),
                     spec_governed: r.spec_governed,
                     agent_type: None,
+                    request_body: r.request_body.and_then(|s| serde_json::from_str(&s).ok()),
+                    intent: r.intent,
                 })
                 .collect(),
             Err(e) => {

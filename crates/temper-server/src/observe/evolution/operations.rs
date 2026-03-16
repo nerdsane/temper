@@ -267,9 +267,19 @@ pub(crate) async fn handle_sentinel_check(
 pub(crate) async fn handle_unmet_intents(
     State(state): State<ServerState>,
     headers: HeaderMap,
+    Query(params): Query<BTreeMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
+    let tenant_filter = params.get("tenant").map(|s| s.as_str());
     let trajectory_entries = state.load_trajectory_entries(10_000).await;
+    let trajectory_entries: Vec<_> = if let Some(t) = tenant_filter {
+        trajectory_entries
+            .into_iter()
+            .filter(|e| e.tenant == t)
+            .collect()
+    } else {
+        trajectory_entries
+    };
     let intents = insight_generator::generate_unmet_intents(&trajectory_entries);
     let open_count = intents.iter().filter(|i| i.status == "open").count();
     let resolved_count = intents.iter().filter(|i| i.status == "resolved").count();

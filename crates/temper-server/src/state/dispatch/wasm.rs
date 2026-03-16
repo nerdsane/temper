@@ -530,6 +530,8 @@ impl crate::state::ServerState {
             source: Some(TrajectorySource::Authz),
             spec_governed: None,
             agent_type: None,
+            request_body: None,
+            intent: None,
         };
         tracing::info!(
             tenant = %traj.tenant,

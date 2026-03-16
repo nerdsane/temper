@@ -313,6 +313,12 @@ pub(crate) struct UnmetIntent {
     pub resolved_by: Option<String>,
     /// Recommendation text.
     pub recommendation: String,
+    /// Sample request body from the most recent failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_body: Option<serde_json::Value>,
+    /// Sample intent from X-Intent header.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_intent: Option<String>,
 }
 
 /// Accumulator for unmet-intent grouping.
@@ -323,6 +329,8 @@ struct UnmetIntentAccum {
     count: u64,
     first_seen: String,
     last_seen: String,
+    sample_body: Option<serde_json::Value>,
+    sample_intent: Option<String>,
 }
 
 /// Generate unmet intent summaries from trajectory data.
@@ -360,9 +368,18 @@ pub(crate) fn generate_unmet_intents(
                 count: 0,
                 first_seen: entry.timestamp.clone(),
                 last_seen: entry.timestamp.clone(),
+                sample_body: None,
+                sample_intent: None,
             });
             accum.count += 1;
             accum.last_seen = entry.timestamp.clone();
+            // Capture the most recent non-None body/intent as sample.
+            if entry.request_body.is_some() {
+                accum.sample_body = entry.request_body.clone();
+            }
+            if entry.intent.is_some() {
+                accum.sample_intent = entry.intent.clone();
+            }
         }
     }
 
@@ -399,6 +416,8 @@ pub(crate) fn generate_unmet_intents(
                 },
                 resolved_by,
                 recommendation,
+                sample_body: accum.sample_body,
+                sample_intent: accum.sample_intent,
             }
         })
         .collect();
@@ -556,6 +575,8 @@ mod tests {
             source: None,
             spec_governed: None,
             agent_type: None,
+            request_body: None,
+            intent: None,
         }
     }
 

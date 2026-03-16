@@ -237,6 +237,8 @@ mod tests {
             source: None,
             spec_governed: None,
             agent_type: None,
+            request_body: None,
+            intent: None,
         }
     }
 

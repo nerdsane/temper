@@ -197,6 +197,8 @@ impl TursoEventStore {
             schema::ALTER_TRAJECTORIES_ADD_DENIED_MODULE,
             schema::ALTER_TRAJECTORIES_ADD_SOURCE,
             schema::ALTER_TRAJECTORIES_ADD_SPEC_GOVERNED,
+            schema::ALTER_TRAJECTORIES_ADD_REQUEST_BODY,
+            schema::ALTER_TRAJECTORIES_ADD_INTENT,
         ] {
             let _ = conn.execute(stmt, ()).await; // ignore "duplicate column" errors
         }
@@ -290,6 +292,10 @@ pub struct TursoTrajectoryRow {
     pub spec_governed: Option<bool>,
     /// ISO-8601 timestamp.
     pub created_at: String,
+    /// JSON-serialized request body (up to 4 KB).
+    pub request_body: Option<String>,
+    /// Explicit intent from X-Intent header.
+    pub intent: Option<String>,
 }
 
 /// Aggregated trajectory statistics.

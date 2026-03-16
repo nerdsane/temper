@@ -15,6 +15,7 @@ use axum::http::HeaderMap;
 /// - `X-Temper-Principal-Id` — unique agent instance ID
 /// - `X-Temper-Agent-Type` — agent software classification (e.g. `claude-code`)
 /// - `X-Session-Id` — session grouping
+/// - `X-Intent` — caller-supplied description of what they were trying to do
 #[derive(Debug, Clone, Default)]
 pub struct AgentContext {
     /// Optional agent identifier (from `X-Temper-Principal-Id` header).
@@ -23,6 +24,11 @@ pub struct AgentContext {
     pub session_id: Option<String>,
     /// Optional agent type classification (from `X-Temper-Agent-Type` header).
     pub agent_type: Option<String>,
+    /// Optional intent description (from `X-Intent` header).
+    ///
+    /// Captured on failed requests so the Evolution Engine can surface
+    /// exactly what the agent was trying to accomplish.
+    pub intent: Option<String>,
 }
 
 impl AgentContext {
@@ -36,6 +42,7 @@ impl AgentContext {
             agent_id: Some("system".to_string()),
             session_id: None,
             agent_type: None,
+            intent: None,
         }
     }
 }
@@ -60,10 +67,16 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(String::from);
+    let intent = headers
+        .get("x-intent")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     AgentContext {
         agent_id,
         session_id,
         agent_type,
+        intent,
     }
 }
 
@@ -82,6 +95,23 @@ mod tests {
         assert_eq!(ctx.agent_id.as_deref(), Some("cc-a1b2c3"));
         assert_eq!(ctx.session_id.as_deref(), Some("sess-abc"));
         assert_eq!(ctx.agent_type.as_deref(), Some("claude-code"));
+        assert!(ctx.intent.is_none());
+    }
+
+    #[test]
+    fn extract_agent_context_captures_x_intent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-intent", "approve the invoice".parse().unwrap());
+        let ctx = extract_agent_context(&headers);
+        assert_eq!(ctx.intent.as_deref(), Some("approve the invoice"));
+    }
+
+    #[test]
+    fn extract_agent_context_ignores_empty_x_intent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-intent", "".parse().unwrap());
+        let ctx = extract_agent_context(&headers);
+        assert!(ctx.intent.is_none());
     }
 
     #[test]

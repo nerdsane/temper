@@ -255,6 +255,8 @@ impl crate::state::ServerState {
                     source: Some(TrajectorySource::Entity),
                     spec_governed: None,
                     agent_type: agent_ctx.agent_type.clone(),
+                    request_body: Some(action_params.clone()),
+                    intent: agent_ctx.intent.clone(),
                 };
                 tracing::info!(
                     tenant = %entry.tenant,

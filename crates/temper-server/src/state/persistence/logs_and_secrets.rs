@@ -38,6 +38,19 @@ impl ServerState {
         let Some(turso) = self.persistent_store() else {
             return Ok(());
         };
+        let request_body_json = entry.request_body.as_ref().and_then(|v| {
+            let s = serde_json::to_string(v).ok()?;
+            Some(if s.len() > 4096 {
+                // Truncate at a valid UTF-8 char boundary at or below 4096 bytes.
+                let mut end = 4096;
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                s[..end].to_string()
+            } else {
+                s
+            })
+        });
         turso
             .persist_trajectory(TursoTrajectoryInsert {
                 tenant: &entry.tenant,
@@ -60,6 +73,8 @@ impl ServerState {
                 }),
                 spec_governed: entry.spec_governed,
                 created_at: &entry.timestamp,
+                request_body: request_body_json.as_deref(),
+                intent: entry.intent.as_deref(),
             })
             .await
             .map_err(|e| {
