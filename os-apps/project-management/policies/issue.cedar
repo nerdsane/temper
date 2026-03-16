@@ -62,6 +62,16 @@ permit(
   ["supervisor", "human"].contains(principal.agent_type)
 };
 
+// --- Resolve Done: supervisors and humans can fast-track ---
+
+permit(
+  principal,
+  action in [Action::"ResolveDone"],
+  resource is Issue
+) when {
+  ["supervisor", "human"].contains(principal.agent_type)
+};
+
 // --- Reopen & Archive: supervisors and humans ---
 
 permit(
