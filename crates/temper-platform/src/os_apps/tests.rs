@@ -134,13 +134,21 @@ async fn test_install_os_app_registers_entities() {
     let state = PlatformState::new(None);
     let result = install_os_app(&state, "test-pm", "project-management").await;
     assert!(result.is_ok());
-    let entities = result.unwrap();
-    assert_eq!(entities.len(), 5);
-    assert!(entities.contains(&"Issue".to_string()));
-    assert!(entities.contains(&"Project".to_string()));
-    assert!(entities.contains(&"Cycle".to_string()));
-    assert!(entities.contains(&"Comment".to_string()));
-    assert!(entities.contains(&"Label".to_string()));
+    let result = result.unwrap();
+    // Fresh tenant — all 5 specs should be new.
+    assert_eq!(
+        result.added.len(),
+        5,
+        "expected 5 added: {:?}",
+        result.added
+    );
+    assert!(result.updated.is_empty());
+    assert!(result.skipped.is_empty());
+    assert!(result.added.contains(&"Issue".to_string()));
+    assert!(result.added.contains(&"Project".to_string()));
+    assert!(result.added.contains(&"Cycle".to_string()));
+    assert!(result.added.contains(&"Comment".to_string()));
+    assert!(result.added.contains(&"Label".to_string()));
 
     // Verify entities are in the registry.
     let registry = state.registry.read().unwrap();
@@ -157,11 +165,18 @@ async fn test_install_agent_orchestration_registers_entities() {
     let state = PlatformState::new(None);
     let result = install_os_app(&state, "test-ao", "agent-orchestration").await;
     assert!(result.is_ok());
-    let entities = result.unwrap();
-    assert_eq!(entities.len(), 3);
-    assert!(entities.contains(&"HeartbeatRun".to_string()));
-    assert!(entities.contains(&"Organization".to_string()));
-    assert!(entities.contains(&"BudgetLedger".to_string()));
+    let result = result.unwrap();
+    assert_eq!(
+        result.added.len(),
+        3,
+        "expected 3 added: {:?}",
+        result.added
+    );
+    assert!(result.updated.is_empty());
+    assert!(result.skipped.is_empty());
+    assert!(result.added.contains(&"HeartbeatRun".to_string()));
+    assert!(result.added.contains(&"Organization".to_string()));
+    assert!(result.added.contains(&"BudgetLedger".to_string()));
 
     let registry = state.registry.read().unwrap();
     let tenant = TenantId::new("test-ao");
@@ -222,9 +237,24 @@ async fn test_install_multiple_os_apps_merges_and_is_idempotent() {
         );
     }
 
-    install_os_app(&state, "test-merge", "project-management")
+    let reinstall = install_os_app(&state, "test-merge", "project-management")
         .await
         .expect("reinstall project-management");
+
+    // Reinstall of identical specs should skip all 5.
+    assert!(
+        reinstall.added.is_empty(),
+        "no new entities expected on reinstall"
+    );
+    assert!(
+        reinstall.updated.is_empty(),
+        "no updates expected on reinstall of identical specs"
+    );
+    assert_eq!(
+        reinstall.skipped.len(),
+        5,
+        "all 5 PM specs should be skipped on identical reinstall"
+    );
 
     let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
     let mut entity_types = registry
@@ -274,8 +304,8 @@ async fn test_os_app_install_survives_restart() {
 
     let result = install_os_app(&state, "test-ws", "project-management").await;
     assert!(result.is_ok(), "install failed: {:?}", result.err());
-    let entities = result.unwrap();
-    assert_eq!(entities.len(), 5);
+    let result = result.unwrap();
+    assert_eq!(result.added.len(), 5);
 
     // Verify specs are in the in-memory registry.
     {

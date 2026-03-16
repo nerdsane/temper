@@ -31,6 +31,6 @@ pub use bootstrap::{
     bootstrap_agent_specs, bootstrap_system_tenant, persist_agent_verification,
     persist_system_verification,
 };
-pub use os_apps::{install_os_app, list_os_apps};
+pub use os_apps::{InstallResult, install_os_app, list_os_apps};
 pub use protocol::{PlatformEvent, VerifyStepStatus};
 pub use state::PlatformState;

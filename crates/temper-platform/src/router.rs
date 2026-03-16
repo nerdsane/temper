@@ -163,8 +163,11 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "installed");
-        let entity_types = json["entity_types"].as_array().unwrap();
-        assert_eq!(entity_types.len(), 5);
+        // Fresh install — all 5 PM specs should be added.
+        let added = json["added"].as_array().unwrap();
+        assert_eq!(added.len(), 5);
+        assert!(json["updated"].as_array().unwrap().is_empty());
+        assert!(json["skipped"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
