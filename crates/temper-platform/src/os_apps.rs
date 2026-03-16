@@ -16,6 +16,17 @@ use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
 use crate::bootstrap;
 use crate::state::PlatformState;
 
+/// Result of an OS app installation, categorising each spec by what happened.
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallResult {
+    /// Entity types registered for the first time.
+    pub added: Vec<String>,
+    /// Entity types that already existed but whose IOA source changed.
+    pub updated: Vec<String>,
+    /// Entity types whose IOA source was byte-for-byte identical — skipped.
+    pub skipped: Vec<String>,
+}
+
 // ── Project Management OS App ──────────────────────────────────────
 
 const PM_ISSUE_IOA: &str = include_str!("../../../os-apps/project-management/issue.ioa.toml");
@@ -158,22 +169,48 @@ pub async fn install_os_app(
     state: &PlatformState,
     tenant: &str,
     app_name: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<InstallResult, String> {
     let bundle =
         get_os_app(app_name).ok_or_else(|| format!("OS app '{app_name}' not found in catalog"))?;
     let tenant_id = TenantId::new(tenant);
 
-    // OS app installs must preserve existing tenant types.
-    let merged_csdl = {
+    // Classify each bundle spec as added / updated / skipped, and compute the
+    // merged CSDL — both require the registry read lock, so we do them together.
+    let (mut added, mut updated, mut skipped, merged_csdl) = {
         let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
-        if let Some(existing) = registry.get_tenant(&tenant_id) {
+        let mut added = Vec::new();
+        let mut updated = Vec::new();
+        let mut skipped = Vec::new();
+        for (entity_type, ioa_source) in bundle.specs {
+            let incoming_hash = temper_store_turso::spec_content_hash(ioa_source);
+            match registry.get_spec(&tenant_id, entity_type) {
+                Some(existing) => {
+                    let existing_hash = temper_store_turso::spec_content_hash(&existing.ioa_source);
+                    if incoming_hash == existing_hash {
+                        skipped.push(entity_type.to_string());
+                    } else {
+                        updated.push(entity_type.to_string());
+                    }
+                }
+                None => {
+                    added.push(entity_type.to_string());
+                }
+            }
+        }
+        // OS app installs must preserve existing tenant types.
+        let merged_csdl = if let Some(existing) = registry.get_tenant(&tenant_id) {
             let incoming = parse_csdl(bundle.csdl)
                 .map_err(|e| format!("Failed to parse CSDL for OS app '{app_name}': {e}"))?;
             emit_csdl_xml(&merge_csdl(&existing.csdl, &incoming))
         } else {
             bundle.csdl.to_string()
-        }
+        };
+        (added, updated, skipped, merged_csdl)
     };
+    // Sort for deterministic output.
+    added.sort();
+    updated.sort();
+    skipped.sort();
 
     // Build the full Cedar policy text for this tenant (existing + new).
     let combined_policy = if !bundle.cedar_policies.is_empty() {
@@ -228,25 +265,36 @@ pub async fn install_os_app(
     }
 
     // ── Step 2: Bootstrap into memory (verification + registry). ────
-    let verified_cache = if let Some(ref store) = state.server.event_store
-        && let Some(turso) = store.platform_turso_store()
-    {
-        turso
-            .load_verification_cache(tenant)
-            .await
-            .unwrap_or_default()
-    } else {
-        std::collections::BTreeMap::new()
-    };
-    bootstrap::bootstrap_tenant_specs(
-        state,
-        tenant,
-        &merged_csdl,
-        bundle.specs,
-        true,
-        &format!("OS-App({app_name})"),
-        &verified_cache,
-    );
+    // Only process specs whose content has changed (added or updated);
+    // skipped specs are already loaded with identical content.
+    let specs_to_bootstrap: Vec<(&str, &str)> = bundle
+        .specs
+        .iter()
+        .filter(|(entity_type, _)| !skipped.contains(&entity_type.to_string()))
+        .map(|(et, src)| (*et, *src))
+        .collect();
+
+    if !specs_to_bootstrap.is_empty() {
+        let verified_cache = if let Some(ref store) = state.server.event_store
+            && let Some(turso) = store.platform_turso_store()
+        {
+            turso
+                .load_verification_cache(tenant)
+                .await
+                .unwrap_or_default()
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        bootstrap::bootstrap_tenant_specs(
+            state,
+            tenant,
+            &merged_csdl,
+            &specs_to_bootstrap,
+            true,
+            &format!("OS-App({app_name})"),
+            &verified_cache,
+        );
+    }
 
     // ── Step 3: Load Cedar policies into memory. ────────────────────
     if let Some(ref policy_text) = combined_policy {
@@ -263,18 +311,19 @@ pub async fn install_os_app(
         }
     }
 
-    let entity_types = bundle
-        .specs
-        .iter()
-        .map(|(name, _)| name.to_string())
-        .collect();
-
     tracing::info!(
-        "Installed OS app '{app_name}' for tenant '{tenant}': {:?}",
-        bundle.specs.iter().map(|(t, _)| *t).collect::<Vec<_>>()
+        "Installed OS app '{app_name}' for tenant '{tenant}': \
+         added={:?} updated={:?} skipped={:?}",
+        added,
+        updated,
+        skipped,
     );
 
-    Ok(entity_types)
+    Ok(InstallResult {
+        added,
+        updated,
+        skipped,
+    })
 }
 
 #[cfg(test)]

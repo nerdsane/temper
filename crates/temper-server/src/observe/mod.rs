@@ -9,6 +9,7 @@ pub(crate) mod evolution;
 mod metrics;
 pub(crate) mod specs;
 mod specs_helpers;
+pub mod subprocess_verify;
 mod verification;
 pub(crate) mod wasm;
 use axum::Router;

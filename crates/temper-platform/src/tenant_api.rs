@@ -338,12 +338,14 @@ pub(crate) async fn install_os_app(
     }
 
     match crate::os_apps::install_os_app(&state, &req.tenant, &app_name).await {
-        Ok(entity_types) => (
+        Ok(result) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "app": app_name,
                 "tenant": req.tenant,
-                "entity_types": entity_types,
+                "added": result.added,
+                "updated": result.updated,
+                "skipped": result.skipped,
                 "status": "installed",
             })),
         ),

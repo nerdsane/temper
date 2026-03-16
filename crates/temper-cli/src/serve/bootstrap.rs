@@ -502,17 +502,31 @@ pub(super) async fn bootstrap_installed_os_apps(state: &PlatformState, os_apps: 
             continue;
         }
         match temper_platform::install_os_app(state, &tenant, &app_name).await {
-            Ok(entities) => match source {
+            Ok(result) => match source {
                 OsAppBootstrapSource::Persisted => {
+                    let all: Vec<String> = result
+                        .added
+                        .iter()
+                        .chain(&result.updated)
+                        .chain(&result.skipped)
+                        .cloned()
+                        .collect();
                     println!(
                         "  Restored OS app '{app_name}' for '{tenant}': {}",
-                        entities.join(", ")
+                        all.join(", ")
                     );
                 }
                 OsAppBootstrapSource::Cli => {
+                    let all: Vec<String> = result
+                        .added
+                        .iter()
+                        .chain(&result.updated)
+                        .chain(&result.skipped)
+                        .cloned()
+                        .collect();
                     println!(
                         "  OS app '{app_name}' installed for '{tenant}': {}",
-                        entities.join(", ")
+                        all.join(", ")
                     );
                 }
             },
