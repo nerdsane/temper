@@ -178,6 +178,77 @@ async fn test_install_os_app_nonexistent_returns_error() {
     assert!(result.unwrap_err().contains("not found in catalog"));
 }
 
+#[tokio::test]
+async fn test_install_multiple_os_apps_merges_and_is_idempotent() {
+    let state = PlatformState::new(None);
+    let tenant = TenantId::new("test-merge");
+
+    install_os_app(&state, "test-merge", "project-management")
+        .await
+        .expect("install project-management");
+
+    install_os_app(&state, "test-merge", "agent-orchestration")
+        .await
+        .expect("install agent-orchestration");
+
+    {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        for entity_type in [
+            "Issue",
+            "Project",
+            "Cycle",
+            "Comment",
+            "Label",
+            "HeartbeatRun",
+            "Organization",
+            "BudgetLedger",
+        ] {
+            assert!(
+                registry.get_table(&tenant, entity_type).is_some(),
+                "{entity_type} should remain available after multi-app install"
+            );
+        }
+
+        // Existing tenant mappings should still resolve after app merge.
+        assert_eq!(
+            registry.resolve_entity_type(&tenant, "Issues").as_deref(),
+            Some("Issue")
+        );
+        assert_eq!(
+            registry
+                .resolve_entity_type(&tenant, "HeartbeatRuns")
+                .as_deref(),
+            Some("HeartbeatRun")
+        );
+    }
+
+    install_os_app(&state, "test-merge", "project-management")
+        .await
+        .expect("reinstall project-management");
+
+    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+    let mut entity_types = registry
+        .entity_types(&tenant)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    entity_types.sort();
+
+    assert_eq!(
+        entity_types,
+        vec![
+            "BudgetLedger".to_string(),
+            "Comment".to_string(),
+            "Cycle".to_string(),
+            "HeartbeatRun".to_string(),
+            "Issue".to_string(),
+            "Label".to_string(),
+            "Organization".to_string(),
+            "Project".to_string(),
+        ]
+    );
+}
+
 /// Proves the full install → persist → reboot → restore cycle.
 ///
 /// 1. Install OS app with a real Turso-backed SQLite DB.

@@ -26,3 +26,4 @@ tokio = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tempfile = "3"
+wiremock = { workspace = true }

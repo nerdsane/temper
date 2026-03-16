@@ -87,6 +87,7 @@ pub(crate) fn bootstrap_tenant_specs(
     tenant: &str,
     csdl_source: &str,
     specs: &[(&str, &str)],
+    merge: bool,
     label: &str,
     verified_cache: &BTreeMap<String, (String, bool)>,
 ) -> Vec<(String, String)> {
@@ -140,7 +141,17 @@ pub(crate) fn bootstrap_tenant_specs(
     let tenant_id = TenantId::new(tenant);
     {
         let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
-        registry.register_tenant(tenant_id.clone(), csdl, csdl_source.to_string(), specs);
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                tenant_id.clone(),
+                csdl,
+                csdl_source.to_string(),
+                specs,
+                Vec::new(),
+                None,
+                merge,
+            )
+            .unwrap_or_else(|e| panic!("failed to register {label} specs for '{tenant}': {e}"));
         let now = temper_runtime::scheduler::sim_now().to_rfc3339();
         for (entity_type, _) in specs {
             registry.set_verification_status(
@@ -182,6 +193,7 @@ pub fn bootstrap_system_tenant(
         SYSTEM_TENANT,
         SYSTEM_CSDL,
         SYSTEM_SPECS,
+        false,
         "System",
         verified_cache,
     )
@@ -202,6 +214,7 @@ pub fn bootstrap_agent_specs(
         tenant,
         AGENT_CSDL,
         AGENT_SPECS,
+        false,
         "Agent",
         verified_cache,
     )

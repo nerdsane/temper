@@ -41,6 +41,9 @@ pub struct TenantStoreRouter {
     /// Turso Cloud database group for new databases.
     #[cfg(feature = "cloud")]
     turso_group: Option<String>,
+    /// Turso Cloud API base URL.
+    #[cfg(feature = "cloud")]
+    turso_api_base_url: String,
     /// Base directory for local file-based tenant databases (dev mode).
     local_base_dir: Option<String>,
 }
@@ -99,6 +102,8 @@ impl TenantStoreRouter {
             turso_org: None,
             #[cfg(feature = "cloud")]
             turso_group: None,
+            #[cfg(feature = "cloud")]
+            turso_api_base_url: "https://api.turso.tech".to_string(),
             local_base_dir,
         };
 
@@ -511,7 +516,8 @@ impl TenantStoreRouter {
         // Create the database.
         let resp = client
             .post(format!(
-                "https://api.turso.tech/v1/organizations/{org}/databases"
+                "{}/v1/organizations/{org}/databases",
+                self.turso_api_base_url
             ))
             .bearer_auth(api_token)
             .json(&body)
@@ -519,37 +525,79 @@ impl TenantStoreRouter {
             .await
             .map_err(|e| PersistenceError::Storage(format!("Turso API request failed: {e}")))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body_text = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "<no body>".to_string());
-            return Err(PersistenceError::Storage(format!(
-                "Turso API returned {status}: {body_text}"
-            )));
-        }
-
-        let create_resp: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| PersistenceError::Storage(format!("Turso API response parse: {e}")))?;
-
-        let hostname = create_resp["database"]["Hostname"]
-            .as_str()
-            .or_else(|| create_resp["database"]["hostname"].as_str())
-            .ok_or_else(|| {
-                PersistenceError::Storage(format!(
-                    "Turso API missing hostname in response: {create_resp}"
+        let hostname = if resp.status() == reqwest::StatusCode::CONFLICT {
+            // DB already exists: recover by reading its hostname and creating a fresh token.
+            let lookup_resp = client
+                .get(format!(
+                    "{}/v1/organizations/{org}/databases/{db_name}",
+                    self.turso_api_base_url
                 ))
+                .bearer_auth(api_token)
+                .send()
+                .await
+                .map_err(|e| {
+                    PersistenceError::Storage(format!("Turso API lookup request failed: {e}"))
+                })?;
+
+            if !lookup_resp.status().is_success() {
+                let status = lookup_resp.status();
+                let body_text = lookup_resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<no body>".to_string());
+                return Err(PersistenceError::Storage(format!(
+                    "Turso API database lookup returned {status}: {body_text}"
+                )));
+            }
+
+            let lookup_json: serde_json::Value = lookup_resp.json().await.map_err(|e| {
+                PersistenceError::Storage(format!("Turso API database lookup parse: {e}"))
             })?;
+
+            lookup_json["database"]["Hostname"]
+                .as_str()
+                .or_else(|| lookup_json["database"]["hostname"].as_str())
+                .ok_or_else(|| {
+                    PersistenceError::Storage(format!(
+                        "Turso API missing hostname in lookup response: {lookup_json}"
+                    ))
+                })?
+                .to_string()
+        } else {
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body_text = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<no body>".to_string());
+                return Err(PersistenceError::Storage(format!(
+                    "Turso API returned {status}: {body_text}"
+                )));
+            }
+
+            let create_resp: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| PersistenceError::Storage(format!("Turso API response parse: {e}")))?;
+
+            create_resp["database"]["Hostname"]
+                .as_str()
+                .or_else(|| create_resp["database"]["hostname"].as_str())
+                .ok_or_else(|| {
+                    PersistenceError::Storage(format!(
+                        "Turso API missing hostname in response: {create_resp}"
+                    ))
+                })?
+                .to_string()
+        };
 
         let db_url = format!("libsql://{hostname}");
 
-        // Create an auth token for the new database.
+        // Create an auth token for the database (new or existing).
         let token_resp = client
             .post(format!(
-                "https://api.turso.tech/v1/organizations/{org}/databases/{db_name}/auth/tokens"
+                "{}/v1/organizations/{org}/databases/{db_name}/auth/tokens",
+                self.turso_api_base_url
             ))
             .bearer_auth(api_token)
             .json(&serde_json::json!({}))
@@ -662,6 +710,7 @@ impl EventStore for TenantStoreRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libsql::params;
 
     #[tokio::test]
     async fn test_router_local_dev() {
@@ -767,5 +816,123 @@ mod tests {
             .expect("remove");
         let bob_tenants = router.tenants_for_user("github:bob").await.expect("query");
         assert!(bob_tenants.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_tenant_reconnects_existing_registry_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let platform_path = dir.path().join("platform.db");
+        let tenant_db_path = dir.path().join("preprovisioned.db");
+        let platform_url = format!("file:{}", platform_path.display());
+        let tenant_db_url = format!("file:{}", tenant_db_path.display());
+
+        let router = TenantStoreRouter::new(&platform_url, None, None)
+            .await
+            .expect("router");
+
+        let conn = router.platform_store().connection().expect("conn");
+        conn.execute(
+            "INSERT INTO tenant_registry (tenant_id, turso_db_url, turso_auth_token)
+             VALUES (?1, ?2, ?3)",
+            params!["preprovisioned", tenant_db_url, Option::<String>::None],
+        )
+        .await
+        .expect("insert registry row");
+
+        let existed = router
+            .ensure_tenant("preprovisioned")
+            .await
+            .expect("ensure existing tenant");
+        assert!(existed, "existing tenant should report already existed");
+
+        let connected = router.connected_tenants().await;
+        assert!(
+            connected.contains(&"preprovisioned".to_string()),
+            "tenant should be connected after ensure_tenant"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_tenant_is_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let platform_path = dir.path().join("platform.db");
+        let platform_url = format!("file:{}", platform_path.display());
+
+        let router = TenantStoreRouter::new(
+            &platform_url,
+            None,
+            Some(dir.path().join("tenants").to_string_lossy().to_string()),
+        )
+        .await
+        .expect("router creation");
+
+        let first = router.ensure_tenant("repeat").await.expect("first ensure");
+        let second = router.ensure_tenant("repeat").await.expect("second ensure");
+
+        assert!(!first, "first ensure should provision the tenant");
+        assert!(
+            second,
+            "second ensure should be idempotent and reuse tenant"
+        );
+
+        let tenants = router.list_tenants().await.expect("list tenants");
+        assert_eq!(tenants, vec!["repeat".to_string()]);
+    }
+
+    #[cfg(feature = "cloud")]
+    #[tokio::test]
+    async fn test_provision_cloud_database_recovers_from_conflict() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let org = "acme";
+        let db_name = "temper-alpha";
+
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/organizations/{org}/databases")))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": "database already exists"
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/organizations/{org}/databases/{db_name}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "database": {
+                    "hostname": "alpha.db.turso.io"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/v1/organizations/{org}/databases/{db_name}/auth/tokens"
+            )))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "jwt": "token-123"
+            })))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let platform_path = dir.path().join("platform.db");
+        let platform_url = format!("file:{}", platform_path.display());
+
+        let mut router = TenantStoreRouter::new(&platform_url, None, None)
+            .await
+            .expect("router");
+        router = router.with_cloud_config("api-token".to_string(), org.to_string(), None);
+        router.turso_api_base_url = server.uri();
+
+        let (db_url, auth_token) = router
+            .provision_cloud_database("alpha", "api-token", org)
+            .await
+            .expect("provision should recover from 409");
+
+        assert_eq!(db_url, "libsql://alpha.db.turso.io");
+        assert_eq!(auth_token.as_deref(), Some("token-123"));
     }
 }

@@ -7,7 +7,11 @@
 //! Install reuses [`crate::bootstrap::bootstrap_tenant_specs`] so every OS app
 //! goes through the same verification cascade as system specs.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
+use temper_runtime::tenant::TenantId;
+use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
 
 use crate::bootstrap;
 use crate::state::PlatformState;
@@ -157,6 +161,19 @@ pub async fn install_os_app(
 ) -> Result<Vec<String>, String> {
     let bundle =
         get_os_app(app_name).ok_or_else(|| format!("OS app '{app_name}' not found in catalog"))?;
+    let tenant_id = TenantId::new(tenant);
+
+    // OS app installs must preserve existing tenant types.
+    let merged_csdl = {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        if let Some(existing) = registry.get_tenant(&tenant_id) {
+            let incoming = parse_csdl(bundle.csdl)
+                .map_err(|e| format!("Failed to parse CSDL for OS app '{app_name}': {e}"))?;
+            emit_csdl_xml(&merge_csdl(&existing.csdl, &incoming))
+        } else {
+            bundle.csdl.to_string()
+        }
+    };
 
     // Build the full Cedar policy text for this tenant (existing + new).
     let combined_policy = if !bundle.cedar_policies.is_empty() {
@@ -178,10 +195,23 @@ pub async fn install_os_app(
     if let Some(ref store) = state.server.event_store
         && let Some(turso) = store.platform_turso_store()
     {
+        let mut spec_sources: BTreeMap<String, String> = turso
+            .load_specs()
+            .await
+            .map_err(|e| format!("Failed to load existing specs for tenant '{tenant}': {e}"))?
+            .into_iter()
+            .filter(|row| row.tenant == tenant)
+            .map(|row| (row.entity_type, row.ioa_source))
+            .collect();
+
         for (entity_type, ioa_source) in bundle.specs {
-            let hash = temper_store_turso::spec_content_hash(ioa_source);
+            spec_sources.insert((*entity_type).to_string(), (*ioa_source).to_string());
+        }
+
+        for (entity_type, ioa_source) in spec_sources {
+            let hash = temper_store_turso::spec_content_hash(&ioa_source);
             turso
-                .upsert_spec(tenant, entity_type, ioa_source, bundle.csdl, &hash)
+                .upsert_spec(tenant, &entity_type, &ioa_source, &merged_csdl, &hash)
                 .await
                 .map_err(|e| format!("Failed to persist spec {entity_type}: {e}"))?;
         }
@@ -211,8 +241,9 @@ pub async fn install_os_app(
     bootstrap::bootstrap_tenant_specs(
         state,
         tenant,
-        bundle.csdl,
+        &merged_csdl,
         bundle.specs,
+        true,
         &format!("OS-App({app_name})"),
         &verified_cache,
     );
@@ -246,5 +277,6 @@ pub async fn install_os_app(
     Ok(entity_types)
 }
 
+#[cfg(test)]
 #[cfg(test)]
 mod tests;
