@@ -3,6 +3,11 @@
 //! Provides commands for parsing specifications, generating code,
 //! running model checks, and managing Temper projects.
 
+/// Use jemalloc to aggressively return freed pages to the OS via MADV_DONTNEED,
+/// preventing the RSS bloat caused by glibc malloc on Debian bookworm (Railway).
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod codegen;
 mod decide;
 mod init;

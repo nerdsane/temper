@@ -132,24 +132,11 @@ async fn fetch_event_log(state: &ServerState) -> Vec<crate::state::DesignTimeEve
     }
 }
 
-/// Fetch per-tenant trajectory counts from Turso.
+/// Fetch per-tenant trajectory counts from Turso using a SQL aggregate query.
+///
+/// Previously loaded up to 100,000 raw rows just to count them in Rust.
 async fn fetch_runtime_counts(state: &ServerState) -> std::collections::BTreeMap<String, u64> {
-    let Some(turso) = state.persistent_store() else {
-        return std::collections::BTreeMap::new();
-    };
-    match turso.load_recent_trajectories(100_000).await {
-        Ok(rows) => {
-            let mut counts = std::collections::BTreeMap::new();
-            for row in &rows {
-                *counts.entry(row.tenant.clone()).or_insert(0) += 1;
-            }
-            counts
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to read trajectory counts from Turso");
-            std::collections::BTreeMap::new()
-        }
-    }
+    state.count_trajectories_by_tenant().await
 }
 
 /// Build a step from an event log entry matching a given kind.

@@ -36,6 +36,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+tikv-jemallocator = { workspace = true }
 dirs = "6"
 dotenvy = { workspace = true }
 uuid = { workspace = true }
