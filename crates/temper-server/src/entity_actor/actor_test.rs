@@ -269,3 +269,84 @@ async fn dst_multiple_actors_independent() {
     assert_eq!(r2.state.status, "Draft");
     assert_eq!(r2.state.item_count, 1);
 }
+
+/// Verify that replay skips events whose payload cannot be deserialized against
+/// the current `EntityEvent` schema (schema evolution resilience).
+///
+/// The actor must reach a consistent final state using only the events that
+/// parsed successfully, and must NOT panic on the schema-mismatched event.
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn replay_skips_schema_mismatched_events() {
+    use temper_store_sim::SimEventStore;
+
+    let store = Arc::new(crate::event_store::ServerEventStore::Sim(
+        SimEventStore::no_faults(42),
+    ));
+    let pid = "default:Order:schema-evo-1";
+
+    // Event 1: valid CancelOrder — parseable as EntityEvent.
+    let good_env = PersistenceEnvelope {
+        sequence_nr: 0, // overwritten by SimEventStore to 1
+        event_type: "CancelOrder".to_string(),
+        payload: serde_json::json!({
+            "action": "CancelOrder",
+            "from_status": "Draft",
+            "to_status": "Cancelled",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "params": {}
+        }),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: pid.to_string(),
+        },
+    };
+
+    // Event 2: schema-mismatched — "action" is an integer, not a String.
+    // Simulates a legacy event written under a previous schema version.
+    let bad_env = PersistenceEnvelope {
+        sequence_nr: 0, // overwritten by SimEventStore to 2
+        event_type: "LegacyAction".to_string(),
+        payload: serde_json::json!({
+            "action": 999,
+            "unknown_legacy_field": "leftover_from_old_schema"
+        }),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: pid.to_string(),
+        },
+    };
+
+    store.append(pid, 0, &[good_env]).await.unwrap();
+    store.append(pid, 1, &[bad_env]).await.unwrap();
+
+    let system = ActorSystem::new("sim-replay-schema");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        "schema-evo-1",
+        order_table(),
+        serde_json::json!({}),
+        store,
+    );
+    let actor_ref = system.spawn(actor, "schema-evo-1");
+
+    let response: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    // Actor started cleanly despite the bad event.
+    assert!(response.success);
+    // The valid CancelOrder event was applied → status is Cancelled.
+    assert_eq!(response.state.status, "Cancelled");
+    // Both sequence numbers consumed (bad event's seq_nr was still advanced).
+    assert_eq!(response.state.sequence_nr, 2);
+    // Only the good event contributed to total_event_count.
+    assert_eq!(response.state.total_event_count, 1);
+}

@@ -234,7 +234,7 @@ impl EntityActor {
         state: &mut EntityState,
         tenant: &str,
     ) {
-        let replay_start = Instant::now();
+        let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
         let mut from_sequence = 0;
         let mut loaded_snapshot = false;
 
@@ -293,41 +293,57 @@ impl EntityActor {
                         break;
                     }
 
-                    if let Ok(event) = parsed_event {
-                        // Re-evaluate through TransitionTable to get effects.
-                        // Build the same EvalContext the handler would have used.
-                        let eval_ctx = super::effects::build_eval_context(state);
+                    match parsed_event {
+                        Ok(event) => {
+                            // Re-evaluate through TransitionTable to get effects.
+                            // Build the same EvalContext the handler would have used.
+                            let eval_ctx = super::effects::build_eval_context(state);
 
-                        if let Some(result) =
-                            table.evaluate_ctx(&state.status, &eval_ctx, &event.action)
-                        {
-                            if result.success {
-                                // Shared effect application — same code as handle() and simulation.
-                                let from_status = event.from_status.clone();
-                                let (_custom_effects, _scheduled_actions, _spawn_requests) =
-                                    super::effects::apply_effects(
+                            if let Some(result) =
+                                table.evaluate_ctx(&state.status, &eval_ctx, &event.action)
+                            {
+                                if result.success {
+                                    // Shared effect application — same code as handle() and simulation.
+                                    let from_status = event.from_status.clone();
+                                    let (_custom_effects, _scheduled_actions, _spawn_requests) =
+                                        super::effects::apply_effects(
+                                            state,
+                                            &result.effects,
+                                            &event.params,
+                                        );
+                                    super::effects::apply_new_state_fallback(
                                         state,
-                                        &result.effects,
-                                        &event.params,
+                                        &from_status,
+                                        &result.new_state,
                                     );
-                                super::effects::apply_new_state_fallback(
-                                    state,
-                                    &from_status,
-                                    &result.new_state,
-                                );
+                                }
+                            } else {
+                                // TransitionTable doesn't know this action — fall back
+                                // to the stored to_status (safe: status is always stored).
+                                state.status = event.to_status.clone();
                             }
-                        } else {
-                            // TransitionTable doesn't know this action — fall back
-                            // to the stored to_status (safe: status is always stored).
-                            state.status = event.to_status.clone();
+
+                            // Sync action params into fields — mirrors the live
+                            // process_action() path (effects.rs:155) so data fields
+                            // like Title, Description, Priority survive replay.
+                            super::effects::sync_fields(state, &event.params);
+
+                            state.push_event_bounded(event);
                         }
-
-                        // Sync action params into fields — mirrors the live
-                        // process_action() path (effects.rs:155) so data fields
-                        // like Title, Description, Priority survive replay.
-                        super::effects::sync_fields(state, &event.params);
-
-                        state.push_event_bounded(event);
+                        Err(e) => {
+                            // Schema-mismatched event: log and skip rather than panic.
+                            // This preserves entity hydration across spec evolution —
+                            // the last valid state is used and replay continues.
+                            tracing::warn!(
+                                entity = %state.entity_id,
+                                event_id = %env.metadata.event_id,
+                                sequence_nr = env.sequence_nr,
+                                event_type = %env.event_type,
+                                error = %e,
+                                "skipping event with incompatible schema during replay"
+                            );
+                            crate::runtime_metrics::record_replay_error(tenant, &state.entity_type);
+                        }
                     }
                     state.sequence_nr = env.sequence_nr;
                 }
