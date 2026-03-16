@@ -90,7 +90,9 @@ impl AgentAdapter for OpenClawAdapter {
         socket
             .send(Message::Text(wait_msg.to_string().into()))
             .await
-            .map_err(|e| AdapterError::Execution(format!("openclaw agent.wait send failed: {e}")))?;
+            .map_err(|e| {
+                AdapterError::Execution(format!("openclaw agent.wait send failed: {e}"))
+            })?;
 
         let mut last_payload = serde_json::json!({});
         let mut terminal_seen = false;

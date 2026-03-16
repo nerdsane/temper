@@ -39,7 +39,8 @@ impl crate::state::ServerState {
         let agent_ctx = input.agent_ctx.clone();
         let action_params = input.action_params.clone();
 
-        tokio::spawn(async move { // determinism-ok: async integration side-effects run outside simulation core
+        tokio::spawn(async move {
+            // determinism-ok: async integration side-effects run outside simulation core
             let req = WasmDispatchRequest {
                 tenant: &tenant,
                 entity_type: &entity_type,

@@ -23,7 +23,7 @@ fn is_private_ip(ip: IpAddr) -> bool {
             v4.is_loopback()          // 127.0.0.0/8
             || v4.is_private()        // 10/8, 172.16/12, 192.168/16
             || v4.is_link_local()     // 169.254/16 (AWS metadata)
-            || v4.octets()[0] == 0    // 0.0.0.0/8
+            || v4.octets()[0] == 0 // 0.0.0.0/8
         }
         IpAddr::V6(v6) => v6.is_loopback(), // ::1
     }
