@@ -71,3 +71,13 @@ permit(
 ) when {
   ["supervisor", "human"].contains(principal.agent_type)
 };
+
+// --- Observe: supervisors and humans can read evolution data ---
+
+permit(
+  principal,
+  action in [Action::"read_evolution", Action::"read_observe", Action::"read_trajectories"],
+  resource
+) when {
+  ["supervisor", "human"].contains(principal.agent_type)
+};
