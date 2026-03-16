@@ -53,7 +53,7 @@ async fn run_claude(
     ctx: &AdapterContext,
     resume: Option<&str>,
 ) -> Result<AdapterResult, AdapterError> {
-    let started = Instant::now();
+    let started = Instant::now(); // determinism-ok: wall-clock timing for adapter duration
 
     let command_name = ctx
         .integration_config
@@ -77,12 +77,6 @@ async fn run_claude(
         && !skills_path.trim().is_empty()
     {
         command.arg("--add-dir").arg(skills_path);
-    }
-
-    if let Some(extra_args) = ctx.integration_config.get("args") {
-        for arg in extra_args.split_whitespace() {
-            command.arg(arg);
-        }
     }
 
     if let Some(workdir) = ctx.integration_config.get("workdir")

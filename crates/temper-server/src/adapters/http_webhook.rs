@@ -1,10 +1,33 @@
 //! Generic HTTP adapter.
 
+use std::net::IpAddr; // determinism-ok: IP parsing for SSRF prevention, no network I/O
 use std::time::Instant;
 
 use async_trait::async_trait;
 
 use super::{AdapterContext, AdapterError, AdapterResult, AgentAdapter};
+
+/// Check whether a URL targets a private/loopback address (SSRF prevention).
+fn is_private_url(url: &str) -> bool {
+    let domain = temper_wasm::authorized_host::extract_domain(url);
+    if let Ok(ip) = domain.parse::<IpAddr>() {
+        return ip.is_loopback() || is_private_ip(ip);
+    }
+    matches!(domain, "localhost" | "metadata.google.internal")
+}
+
+/// Returns true for RFC-1918, link-local, and cloud metadata IPs.
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()          // 127.0.0.0/8
+            || v4.is_private()        // 10/8, 172.16/12, 192.168/16
+            || v4.is_link_local()     // 169.254/16 (AWS metadata)
+            || v4.octets()[0] == 0    // 0.0.0.0/8
+        }
+        IpAddr::V6(v6) => v6.is_loopback(), // ::1
+    }
+}
 
 /// Adapter implementation for generic HTTP callback execution.
 #[derive(Debug, Default)]
@@ -17,7 +40,7 @@ impl AgentAdapter for HttpWebhookAdapter {
     }
 
     async fn execute(&self, ctx: AdapterContext) -> Result<AdapterResult, AdapterError> {
-        let started = Instant::now();
+        let started = Instant::now(); // determinism-ok: wall-clock timing for adapter duration
 
         let url = ctx
             .integration_config
@@ -27,6 +50,16 @@ impl AgentAdapter for HttpWebhookAdapter {
             .ok_or_else(|| {
                 AdapterError::Invocation("missing adapter config key 'url'".to_string())
             })?;
+
+        let allow_private = ctx
+            .integration_config
+            .get("allow_private_urls")
+            .is_some_and(|v| v == "true");
+        if !allow_private && is_private_url(&url) {
+            return Err(AdapterError::Invocation(format!(
+                "SSRF blocked: adapter URL targets private/loopback address: {url}"
+            )));
+        }
 
         let method = ctx
             .integration_config

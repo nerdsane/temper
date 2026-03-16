@@ -78,10 +78,26 @@ params = ["amount_cents", "budget_consumed_cents"]
 hint = "Record budget consumption for orchestration work using caller-provided cumulative totals."
 
 [[action]]
+name = "IncrementActiveRuns"
+kind = "input"
+from = ["Active"]
+hint = "Increment count of active heartbeat runs."
+effect = [{ type = "increment", var = "active_runs" }]
+
+[[action]]
+name = "DecrementActiveRuns"
+kind = "input"
+from = ["Active"]
+guard = "active_runs > 0"
+hint = "Decrement count of active heartbeat runs."
+effect = [{ type = "decrement", var = "active_runs" }]
+
+[[action]]
 name = "ResetBudgetCycle"
 kind = "input"
 from = ["Active", "Paused"]
-hint = "Mark budget cycle rollover."
+params = ["budget_consumed_cents"]
+hint = "Reset budget consumption for a new billing cycle. Caller passes budget_consumed_cents=0."
 
 [[action]]
 name = "Pause"

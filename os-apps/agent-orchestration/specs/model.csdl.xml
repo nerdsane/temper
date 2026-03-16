@@ -41,8 +41,8 @@
         <Property Name="OrgId" Type="Edm.String"/>
         <Property Name="AgentId" Type="Edm.String"/>
         <Property Name="RunId" Type="Edm.String"/>
-        <Property Name="AmountCents" Type="Edm.String"/>
-        <Property Name="Tokens" Type="Edm.String"/>
+        <Property Name="AmountCents" Type="Edm.Int64"/>
+        <Property Name="Tokens" Type="Edm.Int64"/>
         <Property Name="Category" Type="Edm.String"/>
       </EntityType>
 
@@ -75,6 +75,8 @@
         <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.HeartbeatRun"/>
         <Parameter Name="input_tokens" Type="Edm.Int64" Nullable="false"/>
         <Parameter Name="output_tokens" Type="Edm.Int64" Nullable="false"/>
+        <Parameter Name="turn_cost_cents" Type="Edm.Int64" Nullable="false"/>
+        <Parameter Name="tokens_consumed" Type="Edm.Int64" Nullable="false"/>
         <Parameter Name="cost_cents" Type="Edm.Int64" Nullable="false"/>
         <ReturnType Type="Temper.AgentOrchestration.HeartbeatRun"/>
       </Action>
@@ -135,11 +137,23 @@
       <Action Name="RecordCost" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
         <Parameter Name="amount_cents" Type="Edm.Int64" Nullable="false"/>
+        <Parameter Name="budget_consumed_cents" Type="Edm.Int64" Nullable="false"/>
+        <ReturnType Type="Temper.AgentOrchestration.Organization"/>
+      </Action>
+
+      <Action Name="IncrementActiveRuns" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
+        <ReturnType Type="Temper.AgentOrchestration.Organization"/>
+      </Action>
+
+      <Action Name="DecrementActiveRuns" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
         <ReturnType Type="Temper.AgentOrchestration.Organization"/>
       </Action>
 
       <Action Name="ResetBudgetCycle" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
+        <Parameter Name="budget_consumed_cents" Type="Edm.Int64" Nullable="false"/>
         <ReturnType Type="Temper.AgentOrchestration.Organization"/>
       </Action>
 
@@ -163,8 +177,8 @@
         <Parameter Name="org_id" Type="Edm.String" Nullable="false"/>
         <Parameter Name="agent_id" Type="Edm.String" Nullable="false"/>
         <Parameter Name="run_id" Type="Edm.String" Nullable="false"/>
-        <Parameter Name="amount_cents" Type="Edm.String" Nullable="false"/>
-        <Parameter Name="tokens" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="amount_cents" Type="Edm.Int64" Nullable="false"/>
+        <Parameter Name="tokens" Type="Edm.Int64" Nullable="true"/>
         <Parameter Name="category" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.AgentOrchestration.BudgetLedger"/>
       </Action>

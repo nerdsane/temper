@@ -90,6 +90,7 @@ on_success = "AdapterSucceeded"
 on_failure = "AdapterFailed"
 url = "{url}/execute"
 method = "POST"
+allow_private_urls = "true"
 "#,
         url = mock_server.uri()
     );
@@ -163,6 +164,7 @@ on_success = "AdapterSucceeded"
 on_failure = "AdapterFailed"
 url = "{url}/execute"
 method = "POST"
+allow_private_urls = "true"
 "#,
         url = mock_server.uri()
     );
@@ -251,6 +253,7 @@ on_success = "AdapterSucceeded"
 on_failure = "AdapterFailed"
 url = "{url}/execute"
 method = "POST"
+allow_private_urls = "true"
 "#,
         url = mock_server.uri()
     );

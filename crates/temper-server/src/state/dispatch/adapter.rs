@@ -39,8 +39,7 @@ impl crate::state::ServerState {
         let agent_ctx = input.agent_ctx.clone();
         let action_params = input.action_params.clone();
 
-        tokio::spawn(async move {
-            // determinism-ok: async integration side-effects run outside simulation core
+        tokio::spawn(async move { // determinism-ok: async integration side-effects run outside simulation core
             let req = WasmDispatchRequest {
                 tenant: &tenant,
                 entity_type: &entity_type,
@@ -156,7 +155,18 @@ impl crate::state::ServerState {
         let secrets = self
             .secrets_vault
             .as_ref()
-            .map(|vault| vault.get_tenant_secrets(&tenant))
+            .map(|vault| {
+                let all = vault.get_tenant_secrets(&tenant);
+                // Only expose secrets referenced via {secret:KEY} in integration config.
+                let referenced: std::collections::BTreeMap<String, String> = all
+                    .into_iter()
+                    .filter(|(key, _)| {
+                        let pattern = format!("{{secret:{key}}}");
+                        integration.config.values().any(|v| v.contains(&pattern))
+                    })
+                    .collect();
+                referenced
+            })
             .unwrap_or_default();
 
         let adapter_ctx = AdapterContext {

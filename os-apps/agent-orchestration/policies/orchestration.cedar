@@ -42,6 +42,14 @@ permit(
 
 permit(
   principal,
+  action == Action::"create",
+  resource is Organization
+) when {
+  ["supervisor", "human"].contains(principal.agent_type)
+};
+
+permit(
+  principal,
   action in [Action::"Configure", Action::"Activate", Action::"AddMember", Action::"RemoveMember", Action::"ResetBudgetCycle", Action::"Pause", Action::"Resume", Action::"Archive"],
   resource is Organization
 ) when {
@@ -50,7 +58,7 @@ permit(
 
 permit(
   principal,
-  action == Action::"RecordCost",
+  action in [Action::"RecordCost", Action::"IncrementActiveRuns", Action::"DecrementActiveRuns"],
   resource is Organization
 );
 

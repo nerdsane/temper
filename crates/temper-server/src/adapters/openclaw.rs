@@ -21,7 +21,7 @@ impl AgentAdapter for OpenClawAdapter {
     }
 
     async fn execute(&self, ctx: AdapterContext) -> Result<AdapterResult, AdapterError> {
-        let started = Instant::now();
+        let started = Instant::now(); // determinism-ok: wall-clock timing for adapter duration
 
         let gateway_url = ctx
             .integration_config
@@ -81,6 +81,16 @@ impl AgentAdapter for OpenClawAdapter {
             .send(Message::Text(request.to_string().into()))
             .await
             .map_err(|e| AdapterError::Execution(format!("openclaw send failed: {e}")))?;
+
+        // Signal the gateway that we are waiting for the agent response.
+        let wait_msg = serde_json::json!({
+            "type": "agent.wait",
+            "id": request_id,
+        });
+        socket
+            .send(Message::Text(wait_msg.to_string().into()))
+            .await
+            .map_err(|e| AdapterError::Execution(format!("openclaw agent.wait send failed: {e}")))?;
 
         let mut last_payload = serde_json::json!({});
         let mut terminal_seen = false;

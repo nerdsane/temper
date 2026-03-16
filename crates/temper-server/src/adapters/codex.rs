@@ -18,7 +18,7 @@ impl AgentAdapter for CodexAdapter {
     }
 
     async fn execute(&self, ctx: AdapterContext) -> Result<AdapterResult, AdapterError> {
-        let started = Instant::now();
+        let started = Instant::now(); // determinism-ok: wall-clock timing for adapter duration
 
         let command_name = ctx
             .integration_config
@@ -59,12 +59,6 @@ impl AgentAdapter for CodexAdapter {
                 && !prompt.trim().is_empty()
             {
                 command.arg(prompt);
-            }
-        }
-
-        if let Some(extra_args) = ctx.integration_config.get("args") {
-            for arg in extra_args.split_whitespace() {
-                command.arg(arg);
             }
         }
 
