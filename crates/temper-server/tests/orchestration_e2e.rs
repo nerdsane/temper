@@ -46,7 +46,6 @@ fn supervisor_ctx() -> AgentContext {
         agent_id: Some("haku".to_string()),
         session_id: Some("test-session".to_string()),
         agent_type: Some("supervisor".to_string()),
-        ..Default::default()
     }
 }
 
@@ -55,7 +54,6 @@ fn worker_ctx(agent_id: &str) -> AgentContext {
         agent_id: Some(agent_id.to_string()),
         session_id: Some("worker-session".to_string()),
         agent_type: Some("worker".to_string()),
-        ..Default::default()
     }
 }
 
