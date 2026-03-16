@@ -71,3 +71,24 @@ permit(
 ) when {
   ["supervisor", "human"].contains(principal.agent_type)
 };
+
+// --- Fast-track: supervisor/human can perform role-gated and uncovered actions ---
+// Clears pending decisions for actions currently restricted to planner/assignee only,
+// and for hierarchy actions (SetParent, RemoveParent, AddSubIssue) with no prior policy.
+
+permit(
+  principal,
+  action in [
+    Action::"BeginPlanning",
+    Action::"WritePlan",
+    Action::"StartWork",
+    Action::"UpdateImplementation",
+    Action::"SubmitForReview",
+    Action::"SetParent",
+    Action::"RemoveParent",
+    Action::"AddSubIssue"
+  ],
+  resource is Issue
+) when {
+  ["supervisor", "human"].contains(principal.agent_type)
+};
