@@ -21,7 +21,7 @@ use temper_runtime::scheduler::FaultConfig;
 ///
 /// This is provided by the caller since the actor simulation handler lives
 /// in `temper-server` (which depends on `temper-verify`, not the other way).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActorSimResult {
     /// Whether all invariants held.
     pub all_invariants_held: bool,
@@ -37,7 +37,7 @@ pub struct ActorSimResult {
 pub type ActorSimRunner = Box<dyn Fn(u64) -> ActorSimResult>;
 
 /// The levels available in the verification cascade.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CascadeLevel {
     /// Level 0: Symbolic verification via Z3 SMT solver.
     SymbolicVerification,
@@ -64,7 +64,7 @@ impl std::fmt::Display for CascadeLevel {
 }
 
 /// The result of a single cascade level.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LevelResult {
     /// Which level produced this result.
     pub level: CascadeLevel,
@@ -80,7 +80,7 @@ pub struct LevelResult {
 }
 
 /// The aggregate result of running the full verification cascade.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CascadeResult {
     /// Whether all levels passed.
     pub all_passed: bool,

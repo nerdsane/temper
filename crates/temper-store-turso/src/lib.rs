@@ -69,5 +69,5 @@ pub use router::{TenantRegistryRow, TenantStoreRouter, TenantUserRow};
 pub use store::{
     AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow, TursoEventStore,
     TursoSpecRow, TursoTenantConstraintRow, TursoTrajectoryRow, TursoWasmInvocationRow,
-    TursoWasmModuleRow,
+    TursoWasmModuleRow, UnmetIntentAggRow,
 };

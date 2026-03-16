@@ -263,14 +263,19 @@ pub(crate) async fn handle_sentinel_check(
 }
 
 /// GET /observe/evolution/unmet-intents -- grouped unmet intents from trajectories.
+///
+/// Uses a SQL GROUP BY aggregation instead of loading raw trajectory rows to
+/// avoid the OOM-causing bulk-load anti-pattern (previously 10,000 rows on
+/// every 15-second Observe UI poll).
 #[instrument(skip_all, fields(otel.name = "GET /observe/evolution/unmet-intents"))]
 pub(crate) async fn handle_unmet_intents(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
-    let trajectory_entries = state.load_trajectory_entries(10_000).await;
-    let intents = insight_generator::generate_unmet_intents(&trajectory_entries);
+    let (failure_rows, submitted_specs) = state.load_unmet_intent_rows_aggregated().await;
+    let intents =
+        insight_generator::generate_unmet_intents_from_aggregated(&failure_rows, &submitted_specs);
     let open_count = intents.iter().filter(|i| i.status == "open").count();
     let resolved_count = intents.iter().filter(|i| i.status == "resolved").count();
     if open_count > 0 {

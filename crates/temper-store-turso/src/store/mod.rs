@@ -339,6 +339,26 @@ pub struct AgentSummary {
     pub last_active_at: String,
 }
 
+/// A pre-aggregated row from the unmet-intents SQL GROUP BY query.
+///
+/// Used by the `/observe/evolution/unmet-intents` endpoint to avoid loading
+/// thousands of raw trajectory rows into memory on every poll.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnmetIntentAggRow {
+    /// Entity type that produced failures.
+    pub entity_type: String,
+    /// Most-recent action name that failed (representative sample).
+    pub action: String,
+    /// Raw error string from the trajectory row (may be None).
+    pub error: Option<String>,
+    /// Number of failures in this group.
+    pub count: u64,
+    /// ISO-8601 timestamp of the oldest failure in the group.
+    pub first_seen: String,
+    /// ISO-8601 timestamp of the most-recent failure in the group.
+    pub last_seen: String,
+}
+
 /// Row returned by feature request queries.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FeatureRequestRow {

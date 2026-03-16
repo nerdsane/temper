@@ -4,7 +4,10 @@ use libsql::params;
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
-use super::{ActionStats, AgentSummary, TrajectoryStats, TursoEventStore, TursoTrajectoryRow};
+use super::{
+    ActionStats, AgentSummary, TrajectoryStats, TursoEventStore, TursoTrajectoryRow,
+    UnmetIntentAggRow,
+};
 use crate::TursoTrajectoryInsert;
 use crate::metrics::TursoQueryTimer;
 
@@ -100,6 +103,110 @@ impl TursoEventStore {
             out.push(Self::row_to_trajectory(&row)?);
         }
         tracing::debug!(limit, count = out.len(), "trajectory.store.read");
+        Ok(out)
+    }
+
+    /// Load aggregated unmet-intent failure groups (SQL GROUP BY, ≤100 rows).
+    ///
+    /// Returns one row per (entity_type, error) group with counts and
+    /// timestamps. This replaces the previous pattern of loading up to 10,000
+    /// raw trajectory rows and grouping them in Rust.
+    #[instrument(skip_all, fields(otel.name = "turso.load_unmet_intent_rows"))]
+    pub async fn load_unmet_intent_rows(&self) -> Result<Vec<UnmetIntentAggRow>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_unmet_intent_rows");
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT entity_type, \
+                        MAX(action) AS action, \
+                        error, \
+                        COUNT(*) AS cnt, \
+                        MIN(created_at) AS first_seen, \
+                        MAX(created_at) AS last_seen \
+                 FROM trajectories \
+                 WHERE success = 0 \
+                   AND (authz_denied IS NULL OR authz_denied = 0) \
+                 GROUP BY entity_type, error \
+                 ORDER BY cnt DESC \
+                 LIMIT 100",
+                (),
+            )
+            .await
+            .map_err(|e| {
+                let error = storage_error(e);
+                tracing::warn!(error = %error, "turso.load_unmet_intent_rows");
+                error
+            })?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(UnmetIntentAggRow {
+                entity_type: row.get::<String>(0).map_err(storage_error)?,
+                action: row.get::<String>(1).map_err(storage_error)?,
+                error: row.get::<Option<String>>(2).map_err(storage_error)?,
+                count: row.get::<i64>(3).map_err(storage_error)? as u64,
+                first_seen: row.get::<String>(4).map_err(storage_error)?,
+                last_seen: row.get::<String>(5).map_err(storage_error)?,
+            });
+        }
+        tracing::debug!(count = out.len(), "turso.load_unmet_intent_rows");
+        Ok(out)
+    }
+
+    /// Load the latest SubmitSpec success timestamp per entity_type.
+    ///
+    /// Used alongside [`load_unmet_intent_rows`] to determine which unmet-intent
+    /// groups have been resolved by a subsequent spec submission.
+    #[instrument(skip_all, fields(otel.name = "turso.load_submit_spec_timestamps"))]
+    pub async fn load_submit_spec_timestamps(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_submit_spec_timestamps");
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT entity_type, MAX(created_at) AS latest_at \
+                 FROM trajectories \
+                 WHERE success = 1 AND action = 'SubmitSpec' \
+                 GROUP BY entity_type",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = std::collections::BTreeMap::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let entity_type = row.get::<String>(0).map_err(storage_error)?;
+            let latest_at = row.get::<String>(1).map_err(storage_error)?;
+            out.insert(entity_type, latest_at);
+        }
+        Ok(out)
+    }
+
+    /// Count trajectory rows per tenant (single aggregate query).
+    ///
+    /// Replaces the previous pattern of loading 100,000 raw rows just to
+    /// produce per-tenant counts.
+    #[instrument(skip_all, fields(otel.name = "turso.count_trajectories_by_tenant"))]
+    pub async fn count_trajectories_by_tenant(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, u64>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.count_trajectories_by_tenant");
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, COUNT(*) AS cnt FROM trajectories GROUP BY tenant",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = std::collections::BTreeMap::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let tenant = row.get::<String>(0).map_err(storage_error)?;
+            let count = row.get::<i64>(1).map_err(storage_error)? as u64;
+            out.insert(tenant, count);
+        }
         Ok(out)
     }
 

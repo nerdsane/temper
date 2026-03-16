@@ -8,6 +8,8 @@ use opentelemetry::metrics::Gauge;
 use super::ServerState;
 
 struct RuntimeMetricInstruments {
+    /// Canary: always 1; confirms the metric export pipeline is alive.
+    up: Gauge<u64>,
     process_resident_memory_bytes: Gauge<u64>,
     active_actors: Gauge<u64>,
     active_entities: Gauge<u64>,
@@ -17,6 +19,12 @@ impl RuntimeMetricInstruments {
     fn new() -> Self {
         let meter = global::meter("temper-runtime");
         Self {
+            up: meter
+                .u64_gauge("temper_up")
+                .with_description(
+                    "Always 1 — canary confirming the metric export pipeline is alive.",
+                )
+                .build(),
             process_resident_memory_bytes: meter
                 .u64_gauge("process_resident_memory_bytes")
                 .with_unit("By")
@@ -34,6 +42,7 @@ impl RuntimeMetricInstruments {
     }
 
     fn record(&self, state: &ServerState) {
+        self.up.record(1, &[]);
         if let Some(rss) = read_process_resident_memory_bytes() {
             self.process_resident_memory_bytes.record(rss, &[]);
         }

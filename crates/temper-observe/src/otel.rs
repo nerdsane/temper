@@ -28,11 +28,12 @@ use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::{
     BatchConfigBuilder as LogBatchConfigBuilder, BatchLogProcessor, SdkLoggerProvider,
 };
-use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::{
     BatchConfigBuilder as SpanBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider,
 };
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 
 /// Default OTLP endpoint for Logfire.
@@ -313,8 +314,13 @@ pub fn init_tracing(
             .build()
     })?;
 
+    // Export every 30 s so metrics are visible quickly and canary gauges stay fresh.
+    let metric_reader = PeriodicReader::builder(metric_exporter)
+        .with_interval(Duration::from_secs(30))
+        .build();
+
     let meter_provider = SdkMeterProvider::builder()
-        .with_periodic_exporter(metric_exporter)
+        .with_reader(metric_reader)
         .with_resource(resource.clone())
         .build();
 
@@ -357,7 +363,11 @@ pub fn init_tracing(
     let otel_trace_layer =
         tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("temper"));
 
-    let otel_log_layer = OpenTelemetryTracingBridge::new(&logger_provider);
+    // Restrict the log bridge to WARN+ to avoid flooding Logfire's /v1/logs
+    // endpoint with high-volume info events.  Traces already capture info-level
+    // spans via the otel_trace_layer, so no diagnostic value is lost.
+    let otel_log_layer =
+        OpenTelemetryTracingBridge::new(&logger_provider).with_filter(LevelFilter::WARN);
 
     tracing_subscriber::registry()
         .with(env_filter)
