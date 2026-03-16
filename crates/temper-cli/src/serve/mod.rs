@@ -26,7 +26,6 @@ use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
-use temper_server::runtime_metrics::{init_runtime_metrics, spawn_runtime_metrics_sampler};
 use temper_server::state::DesignTimeEvent;
 use temper_verify::cascade::VerificationCascade;
 
@@ -63,7 +62,6 @@ pub async fn run(
     observe: bool,
 ) -> Result<()> {
     let _otel_guard = init_observability("temper-platform");
-    init_runtime_metrics();
     temper_authz::init_metrics();
     temper_store_turso::init_metrics();
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
@@ -77,7 +75,6 @@ pub async fn run(
 
     // Assemble platform state
     let mut state = PlatformState::with_registry(registry, api_key);
-    spawn_runtime_metrics_sampler(state.server.clone());
     state.api_token = std::env::var("TEMPER_API_KEY").ok();
     if state.api_token.is_some() {
         println!("  API key: configured (Bearer token required)");
