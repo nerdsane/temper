@@ -231,7 +231,7 @@ pub(crate) async fn handle_sentinel_check(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_observe_auth(&state, &headers, "run_sentinel", "Evolution")?;
-    let trajectory_entries = state.load_trajectory_entries(10_000).await;
+    let trajectory_entries = state.load_trajectory_entries(1_000).await;
     tracing::info!(
         trajectory_count = trajectory_entries.len(),
         "evolution.sentinel"
@@ -269,7 +269,7 @@ pub(crate) async fn handle_unmet_intents(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
-    let trajectory_entries = state.load_trajectory_entries(10_000).await;
+    let trajectory_entries = state.load_trajectory_entries(1_000).await;
     let intents = insight_generator::generate_unmet_intents(&trajectory_entries);
     let open_count = intents.iter().filter(|i| i.status == "open").count();
     let resolved_count = intents.iter().filter(|i| i.status == "resolved").count();
@@ -309,7 +309,7 @@ pub(crate) async fn handle_feature_requests(
     let disposition_filter = params.get("disposition").map(|d| d.as_str());
 
     // Load trajectory entries for feature request generation.
-    let trajectory_entries = state.load_trajectory_entries(10_000).await;
+    let trajectory_entries = state.load_trajectory_entries(1_000).await;
 
     // Query Turso directly (single source of truth).
     let system_tenant = TenantId::new("temper-system");

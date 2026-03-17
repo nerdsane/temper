@@ -223,19 +223,19 @@ export default function EvolutionPage() {
 
   const recordsPoll = usePolling<EvolutionRecordsResponse>({
     fetcher: fetchEvolutionRecords,
-    interval: 10000,
+    interval: 30000,
     enabled: !initialLoading && !initialError,
   });
 
   const insightsPoll = usePolling<EvolutionInsightsResponse>({
     fetcher: fetchEvolutionInsights,
-    interval: 10000,
+    interval: 30000,
     enabled: !initialLoading && !initialError,
   });
 
   const unmetPoll = usePolling<UnmetIntentsResponse>({
     fetcher: fetchUnmetIntents,
-    interval: 10000,
+    interval: 30000,
     enabled: !initialLoading && !initialError,
   });
 

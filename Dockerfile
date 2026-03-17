@@ -35,7 +35,7 @@ RUN apt-get update && apt-get install -y \
 
 COPY --from=builder /app/target/release/temper /usr/local/bin/temper
 
-ENV RUST_LOG=info,temper=debug
+ENV RUST_LOG=info,temper=info
 EXPOSE 3000
 
 # No ENTRYPOINT — Railway's startCommand provides the full command.
