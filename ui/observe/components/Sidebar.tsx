@@ -114,7 +114,7 @@ export default function Sidebar() {
       } catch { /* ignore */ }
     };
     poll();
-    const interval = setInterval(poll, 15000);
+    const interval = setInterval(poll, 30000);
     return () => { mounted = false; clearInterval(interval); };
   }, []);
 

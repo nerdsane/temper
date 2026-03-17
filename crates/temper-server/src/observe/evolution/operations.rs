@@ -236,7 +236,7 @@ pub(crate) async fn handle_sentinel_check(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_observe_auth(&state, &headers, "run_sentinel", "Evolution")?;
-    let trajectory_entries = state.load_trajectory_entries(10_000).await;
+    let trajectory_entries = state.load_trajectory_entries(1_000).await;
     tracing::Span::current().record("trajectory_count", trajectory_entries.len());
     tracing::info!(
         trajectory_count = trajectory_entries.len(),
@@ -310,9 +310,9 @@ pub(crate) async fn handle_unmet_intents(
         );
     }
 
-    // Emit one detail span per intent for per-intent Logfire visibility.
+    // Per-intent detail at debug level to avoid OTEL span spam on every poll.
     for intent in &intents {
-        tracing::info!(
+        tracing::debug!(
             entity_type = %intent.entity_type,
             action = %intent.action,
             error_pattern = %intent.error_pattern,
@@ -344,7 +344,7 @@ pub(crate) async fn handle_feature_requests(
     let disposition_filter = params.get("disposition").map(|d| d.as_str());
 
     // Load trajectory entries for feature request generation.
-    let trajectory_entries = state.load_trajectory_entries(10_000).await;
+    let trajectory_entries = state.load_trajectory_entries(1_000).await;
 
     // Query Turso directly (single source of truth).
     let system_tenant = TenantId::new("temper-system");
