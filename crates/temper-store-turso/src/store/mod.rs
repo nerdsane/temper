@@ -20,6 +20,7 @@ mod authz;
 mod constraints;
 mod event_store;
 mod instrumentation;
+mod policy;
 mod specs;
 mod trajectory;
 mod wasm;
@@ -160,6 +161,9 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_TENANT_POLICIES_TABLE, ())
             .await
             .map_err(storage_error)?;
+        conn.execute(schema::CREATE_POLICIES_TABLE, ())
+            .await
+            .map_err(storage_error)?;
         conn.execute(schema::CREATE_TENANT_INSTALLED_APPS_TABLE, ())
             .await
             .map_err(storage_error)?;
@@ -197,6 +201,8 @@ impl TursoEventStore {
             schema::ALTER_TRAJECTORIES_ADD_DENIED_MODULE,
             schema::ALTER_TRAJECTORIES_ADD_SOURCE,
             schema::ALTER_TRAJECTORIES_ADD_SPEC_GOVERNED,
+            schema::ALTER_TRAJECTORIES_ADD_REQUEST_BODY,
+            schema::ALTER_TRAJECTORIES_ADD_INTENT,
         ] {
             let _ = conn.execute(stmt, ()).await; // ignore "duplicate column" errors
         }
@@ -227,6 +233,8 @@ impl TursoEventStore {
 // ---------------------------------------------------------------------------
 // Row / result types
 // ---------------------------------------------------------------------------
+
+pub use policy::PolicyRow;
 
 /// Row returned by [`TursoEventStore::load_specs()`].
 #[derive(Debug, Clone)]
@@ -290,6 +298,10 @@ pub struct TursoTrajectoryRow {
     pub spec_governed: Option<bool>,
     /// ISO-8601 timestamp.
     pub created_at: String,
+    /// JSON-serialized request body (up to 4 KB).
+    pub request_body: Option<String>,
+    /// Explicit intent from X-Intent header.
+    pub intent: Option<String>,
 }
 
 /// Aggregated trajectory statistics.
@@ -337,6 +349,26 @@ pub struct AgentSummary {
     pub success_rate: f64,
     /// Most recent activity timestamp.
     pub last_active_at: String,
+}
+
+/// A pre-aggregated row from the unmet-intents SQL GROUP BY query.
+///
+/// Used by the `/observe/evolution/unmet-intents` endpoint to avoid loading
+/// thousands of raw trajectory rows into memory on every poll.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnmetIntentAggRow {
+    /// Entity type that produced failures.
+    pub entity_type: String,
+    /// Most-recent action name that failed (representative sample).
+    pub action: String,
+    /// Raw error string from the trajectory row (may be None).
+    pub error: Option<String>,
+    /// Number of failures in this group.
+    pub count: u64,
+    /// ISO-8601 timestamp of the oldest failure in the group.
+    pub first_seen: String,
+    /// ISO-8601 timestamp of the most-recent failure in the group.
+    pub last_seen: String,
 }
 
 /// Row returned by feature request queries.

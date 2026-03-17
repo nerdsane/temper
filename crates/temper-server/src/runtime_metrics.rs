@@ -1,4 +1,8 @@
 //! Runtime metrics exported via OpenTelemetry.
+//!
+//! This module provides metric recording helpers called from hot paths
+//! (entity actor replay, entity ops).  The periodic canary loop and
+//! sampler live in `state::runtime_metrics` via `spawn_runtime_metrics_loop`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -6,7 +10,6 @@ use std::time::Duration;
 
 use opentelemetry::metrics::{Gauge, Histogram};
 use opentelemetry::{KeyValue, global};
-use tokio::time::MissedTickBehavior;
 
 use crate::state::ServerState;
 
@@ -40,34 +43,6 @@ fn metrics() -> &'static RuntimeMetrics {
                 .build(),
         }
     })
-}
-
-/// Register runtime metric instruments.
-pub fn init_runtime_metrics() {
-    let _ = metrics();
-}
-
-/// Spawn a periodic sampler that records process RSS and live actor/entity counts.
-pub fn spawn_runtime_metrics_sampler(state: ServerState) {
-    init_runtime_metrics();
-    tokio::spawn(async move {
-        // determinism-ok: runtime observability side-effect for production diagnostics
-        let interval_secs = std::env::var("TEMPER_RUNTIME_METRICS_INTERVAL_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(10)
-            .clamp(1, 86_400);
-        let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-        loop {
-            ticker.tick().await;
-            record_server_state_metrics(&state);
-            if let Some(rss_bytes) = read_process_resident_memory_bytes() {
-                record_process_resident_memory_bytes(rss_bytes);
-            }
-        }
-    });
 }
 
 /// Record actor and entity counts from the current server state snapshot.
@@ -123,7 +98,7 @@ pub fn record_process_resident_memory_bytes(bytes: u64) {
 /// Read process resident memory (RSS) in bytes from Linux procfs.
 #[cfg(target_os = "linux")]
 pub fn read_process_resident_memory_bytes() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let status = std::fs::read_to_string("/proc/self/status").ok()?; // determinism-ok: procfs RSS read for observability only
     let vm_rss_line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
     let mut parts = vm_rss_line.split_whitespace();
     let _label = parts.next()?;

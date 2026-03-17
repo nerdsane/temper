@@ -88,6 +88,7 @@ pub async fn handle_webhook(
         agent_id: Some(format!("webhook:{}", webhook.name)),
         session_id: None,
         agent_type: None,
+        intent: None,
     };
 
     match state

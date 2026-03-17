@@ -23,7 +23,8 @@ pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use temper_authz::AuthzEngine;
 use temper_evolution::PostgresRecordStore;
@@ -191,10 +192,12 @@ pub struct ServerState {
     pub cross_invariant_eventual_enforce: bool,
     /// Broadcast channel for design-time events (spec loading, verification progress).
     pub design_time_tx: Arc<tokio::sync::broadcast::Sender<DesignTimeEvent>>,
-    /// Cache of entity current state, updated on every state change broadcast.
+    /// LRU cache of entity current state, updated on every state change broadcast.
     /// Key: "{tenant}:{entity_type}:{entity_id}", Value: (current_state, last_updated).
+    /// Capped at [`state_cache_budget()`] entries; oldest entry evicted automatically.
     #[allow(clippy::type_complexity)]
-    pub entity_state_cache: Arc<RwLock<BTreeMap<String, (String, chrono::DateTime<chrono::Utc>)>>>,
+    pub entity_state_cache:
+        Arc<Mutex<lru::LruCache<String, (String, chrono::DateTime<chrono::Utc>)>>>,
     /// Configurable timeout for actor ask operations (default: 5s).
     pub action_dispatch_timeout: Duration,
     /// Eventual invariant convergence tracker.
@@ -218,6 +221,12 @@ pub struct ServerState {
     pub single_tenant_mode: bool,
     /// Denial pattern detection engine for Cedar policy suggestions.
     pub suggestion_engine: Arc<RwLock<PolicySuggestionEngine>>,
+    /// When set, spec verification runs in an isolated child process.
+    ///
+    /// Points to the `temper` binary that supports the `verify-ioa` subcommand.
+    /// Each entity's IOA source is written to stdin; the result is read from stdout
+    /// as JSON. A 30-second timeout is applied per entity.
+    pub verify_subprocess_bin: Option<Arc<std::path::PathBuf>>,
 }
 
 #[allow(deprecated)] // ADR-0025 Phase 4: RecordStore used until chain validation replaced
@@ -269,7 +278,9 @@ impl ServerState {
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
-            entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
+            entity_state_cache: Arc::new(Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(state_cache_budget()).expect("cache budget must be > 0"),
+            ))),
             action_dispatch_timeout: env_timeout(),
             eventual_tracker: Arc::new(RwLock::new(
                 crate::eventual_invariants::EventualInvariantTracker::new(),
@@ -282,6 +293,7 @@ impl ServerState {
             listen_port: Arc::new(std::sync::OnceLock::new()),
             single_tenant_mode: true,
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
+            verify_subprocess_bin: None,
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -407,7 +419,9 @@ impl ServerState {
             cross_invariant_enforce: env_bool("TEMPER_XINV_ENFORCE", true),
             cross_invariant_eventual_enforce: env_bool("TEMPER_XINV_EVENTUAL_ENFORCE", true),
             design_time_tx: Arc::new(design_time_tx),
-            entity_state_cache: Arc::new(RwLock::new(BTreeMap::new())),
+            entity_state_cache: Arc::new(Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(state_cache_budget()).expect("cache budget must be > 0"),
+            ))),
             action_dispatch_timeout: env_timeout(),
             eventual_tracker: Arc::new(RwLock::new(
                 crate::eventual_invariants::EventualInvariantTracker::new(),
@@ -420,6 +434,7 @@ impl ServerState {
             listen_port: Arc::new(std::sync::OnceLock::new()),
             single_tenant_mode: false,
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
+            verify_subprocess_bin: None,
         };
         state.register_builtin_wasm_modules();
         state
@@ -474,24 +489,14 @@ impl ServerState {
         self
     }
 
-    /// Insert/update an entity status cache entry with bounded eviction.
+    /// Insert/update an entity status cache entry.
     ///
-    /// When over budget, evicts the oldest timestamped entries first.
+    /// The underlying [`lru::LruCache`] automatically evicts the least-recently-used
+    /// entry when the budget (see [`state_cache_budget`]) is exceeded, so no manual
+    /// eviction loop is needed here.
     pub fn cache_entity_status(&self, cache_key: String, status: String) {
-        if let Ok(mut cache) = self.entity_state_cache.write() {
-            cache.insert(cache_key, (status, sim_now()));
-            let budget = state_cache_budget();
-            while cache.len() > budget {
-                let oldest_key = cache
-                    .iter()
-                    .min_by_key(|(_, (_, ts))| *ts)
-                    .map(|(k, _)| k.clone());
-                if let Some(k) = oldest_key {
-                    cache.remove(&k);
-                } else {
-                    break;
-                }
-            }
+        if let Ok(mut cache) = self.entity_state_cache.lock() {
+            cache.put(cache_key, (status, sim_now()));
         }
     }
 
@@ -530,6 +535,53 @@ impl ServerState {
         None
     }
 
+    /// Load aggregated unmet-intent failure groups from Turso.
+    ///
+    /// Returns at most 100 rows (one per entity_type × error group) instead of
+    /// loading thousands of raw trajectory rows.  Returns an empty vec when
+    /// Turso is not configured.
+    pub async fn load_unmet_intent_rows_aggregated(
+        &self,
+    ) -> (
+        Vec<temper_store_turso::UnmetIntentAggRow>,
+        std::collections::BTreeMap<String, String>,
+    ) {
+        let Some(turso) = self.persistent_store() else {
+            return (Vec::new(), std::collections::BTreeMap::new());
+        };
+        let failures = match turso.load_unmet_intent_rows().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load unmet intent rows from Turso");
+                Vec::new()
+            }
+        };
+        let submitted_specs = match turso.load_submit_spec_timestamps().await {
+            Ok(map) => map,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load submit-spec timestamps from Turso");
+                std::collections::BTreeMap::new()
+            }
+        };
+        (failures, submitted_specs)
+    }
+
+    /// Count trajectory rows per tenant using a single SQL aggregate query.
+    ///
+    /// Returns an empty map when Turso is not configured.
+    pub async fn count_trajectories_by_tenant(&self) -> std::collections::BTreeMap<String, u64> {
+        let Some(turso) = self.persistent_store() else {
+            return std::collections::BTreeMap::new();
+        };
+        match turso.count_trajectories_by_tenant().await {
+            Ok(counts) => counts,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to count trajectories by tenant from Turso");
+                std::collections::BTreeMap::new()
+            }
+        }
+    }
+
     /// Load trajectory entries from Turso, converting to domain TrajectoryEntry.
     pub async fn load_trajectory_entries(&self, limit: i64) -> Vec<TrajectoryEntry> {
         let Some(turso) = self.persistent_store() else {
@@ -561,6 +613,8 @@ impl ServerState {
                     }),
                     spec_governed: r.spec_governed,
                     agent_type: None,
+                    request_body: r.request_body.and_then(|s| serde_json::from_str(&s).ok()),
+                    intent: r.intent,
                 })
                 .collect(),
             Err(e) => {

@@ -155,6 +155,23 @@ CREATE TABLE IF NOT EXISTS tenant_policies (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );";
 
+/// Granular Cedar policy storage with per-policy tracking and hash-based change detection.
+///
+/// Replaces the flat `tenant_policies` table for new write paths.
+/// Multiple policy entries per tenant are supported (e.g. one per approved decision
+/// or one manually-managed "primary" entry).  At boot, all rows for a tenant are
+/// concatenated to reconstruct the effective policy set.
+pub const CREATE_POLICIES_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS policies (
+    tenant TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    cedar_text TEXT NOT NULL,
+    policy_hash TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_by TEXT NOT NULL DEFAULT 'system',
+    PRIMARY KEY(tenant, policy_id)
+);";
+
 /// Tracks which OS apps are installed per tenant (workspace).
 ///
 /// On boot, `restore_registry_from_turso()` reads the `specs` table to reload
@@ -193,6 +210,9 @@ pub const ALTER_TRAJECTORIES_ADD_DENIED_MODULE: &str =
 pub const ALTER_TRAJECTORIES_ADD_SOURCE: &str = "ALTER TABLE trajectories ADD COLUMN source TEXT";
 pub const ALTER_TRAJECTORIES_ADD_SPEC_GOVERNED: &str =
     "ALTER TABLE trajectories ADD COLUMN spec_governed INTEGER";
+pub const ALTER_TRAJECTORIES_ADD_REQUEST_BODY: &str =
+    "ALTER TABLE trajectories ADD COLUMN request_body TEXT";
+pub const ALTER_TRAJECTORIES_ADD_INTENT: &str = "ALTER TABLE trajectories ADD COLUMN intent TEXT";
 
 /// Index on agent_id for agent-scoped trajectory queries.
 pub const CREATE_TRAJECTORIES_AGENT_INDEX: &str = "\

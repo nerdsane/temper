@@ -118,7 +118,7 @@ pub async fn handle_upload_wasm_module(
         ));
     }
 
-    // Compile and cache
+    // Compile and cache (must succeed before persisting)
     let hash = state.wasm_engine.compile_and_cache(&body).map_err(|e| {
         tracing::warn!(error = %e, "WASM compilation failed");
         (
@@ -127,18 +127,24 @@ pub async fn handle_upload_wasm_module(
         )
     })?;
 
-    // Register in module registry
-    {
-        let mut wasm_reg = state.wasm_module_registry.write().unwrap();
-        wasm_reg.register(&tenant, &module_name, &hash);
-    }
-
-    // Persist to store (best-effort)
+    // Persist to Turso FIRST — if durability fails, refuse the upload.
+    // This ensures the module survives restarts before we expose it in memory.
     if let Err(e) = state
         .upsert_wasm_module(tenant.as_str(), &module_name, &body, &hash)
         .await
     {
-        tracing::warn!(error = %e, "failed to persist WASM module (in-memory registration succeeded)");
+        tracing::error!(error = %e, "failed to persist WASM module to durable store");
+        state.wasm_engine.evict(&hash);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to persist WASM module: {e}"),
+        ));
+    }
+
+    // Register in module registry after durability is confirmed.
+    {
+        let mut wasm_reg = state.wasm_module_registry.write().unwrap();
+        wasm_reg.register(&tenant, &module_name, &hash);
     }
 
     let size_bytes = body.len();
@@ -221,13 +227,7 @@ pub async fn handle_delete_wasm_module(
             .map(|s| s.to_string())
     };
 
-    // Remove from registry
-    let removed = {
-        let mut wasm_reg = state.wasm_module_registry.write().unwrap();
-        wasm_reg.remove(&tenant, &module_name)
-    };
-
-    if !removed {
+    if hash.is_none() {
         tracing::warn!("WASM module not found for deletion");
         return Err((
             StatusCode::NOT_FOUND,
@@ -235,17 +235,28 @@ pub async fn handle_delete_wasm_module(
         ));
     }
 
-    // Evict from engine cache
-    if let Some(hash) = hash {
-        state.wasm_engine.evict(&hash);
-    }
-
-    // Delete from persistence (best-effort)
+    // Delete from Turso FIRST — if durability fails, refuse the delete
+    // so memory stays consistent with the durable store.
     if let Err(e) = state
         .delete_wasm_module(tenant.as_str(), &module_name)
         .await
     {
-        tracing::warn!(error = %e, "failed to delete WASM module from persistence");
+        tracing::error!(error = %e, "failed to delete WASM module from durable store");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to delete WASM module from durable store: {e}"),
+        ));
+    }
+
+    // Remove from in-memory registry after durability is confirmed.
+    {
+        let mut wasm_reg = state.wasm_module_registry.write().unwrap();
+        wasm_reg.remove(&tenant, &module_name);
+    }
+
+    // Evict from engine cache last.
+    if let Some(ref hash) = hash {
+        state.wasm_engine.evict(hash);
     }
 
     tracing::info!(

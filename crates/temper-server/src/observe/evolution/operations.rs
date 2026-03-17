@@ -225,13 +225,19 @@ async fn persist_insights(
 /// Evaluates all default sentinel rules against current server state.
 /// Any triggered rules generate O-Records and store them in the RecordStore.
 /// Returns a list of alerts (may be empty if all is healthy).
-#[instrument(skip_all, fields(otel.name = "POST /api/evolution/sentinel/check"))]
+#[instrument(skip_all, fields(
+    otel.name = "POST /api/evolution/sentinel/check",
+    trajectory_count = tracing::field::Empty,
+    alerts_count = tracing::field::Empty,
+    insights_count = tracing::field::Empty,
+))]
 pub(crate) async fn handle_sentinel_check(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_observe_auth(&state, &headers, "run_sentinel", "Evolution")?;
     let trajectory_entries = state.load_trajectory_entries(1_000).await;
+    tracing::Span::current().record("trajectory_count", trajectory_entries.len());
     tracing::info!(
         trajectory_count = trajectory_entries.len(),
         "evolution.sentinel"
@@ -239,6 +245,7 @@ pub(crate) async fn handle_sentinel_check(
 
     let rules = sentinel::default_rules();
     let alerts = sentinel::check_rules(&rules, &state, &trajectory_entries);
+    tracing::Span::current().record("alerts_count", alerts.len());
     if alerts.is_empty() {
         tracing::info!(rule_count = rules.len(), "evolution.sentinel");
     } else {
@@ -251,6 +258,7 @@ pub(crate) async fn handle_sentinel_check(
     let results = persist_alerts(&state, &alerts).await?;
 
     let insights = insight_generator::generate_insights(&trajectory_entries);
+    tracing::Span::current().record("insights_count", insights.len());
     tracing::info!(insights_count = insights.len(), "evolution.insight");
     let insight_results = persist_insights(&state, &insights).await;
 
@@ -263,16 +271,29 @@ pub(crate) async fn handle_sentinel_check(
 }
 
 /// GET /observe/evolution/unmet-intents -- grouped unmet intents from trajectories.
-#[instrument(skip_all, fields(otel.name = "GET /observe/evolution/unmet-intents"))]
+///
+/// Uses a SQL GROUP BY aggregation instead of loading raw trajectory rows to
+/// avoid the OOM-causing bulk-load anti-pattern (previously 10,000 rows on
+/// every 15-second Observe UI poll).
+#[instrument(skip_all, fields(
+    otel.name = "GET /observe/evolution/unmet-intents",
+    open_count = tracing::field::Empty,
+    resolved_count = tracing::field::Empty,
+    total_intents = tracing::field::Empty,
+))]
 pub(crate) async fn handle_unmet_intents(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
-    let trajectory_entries = state.load_trajectory_entries(1_000).await;
-    let intents = insight_generator::generate_unmet_intents(&trajectory_entries);
+    let (failure_rows, submitted_specs) = state.load_unmet_intent_rows_aggregated().await;
+    let intents =
+        insight_generator::generate_unmet_intents_from_aggregated(&failure_rows, &submitted_specs);
     let open_count = intents.iter().filter(|i| i.status == "open").count();
     let resolved_count = intents.iter().filter(|i| i.status == "resolved").count();
+    tracing::Span::current().record("open_count", open_count);
+    tracing::Span::current().record("resolved_count", resolved_count);
+    tracing::Span::current().record("total_intents", intents.len());
     if open_count > 0 {
         tracing::warn!(
             open_count,
@@ -286,6 +307,20 @@ pub(crate) async fn handle_unmet_intents(
             resolved_count,
             total = intents.len(),
             "unmet_intent"
+        );
+    }
+
+    // Per-intent detail at debug level to avoid OTEL span spam on every poll.
+    for intent in &intents {
+        tracing::debug!(
+            entity_type = %intent.entity_type,
+            action = %intent.action,
+            error_pattern = %intent.error_pattern,
+            failure_count = intent.failure_count,
+            first_seen = %intent.first_seen,
+            last_seen = %intent.last_seen,
+            recommendation = %intent.recommendation,
+            "unmet_intent.detail"
         );
     }
 

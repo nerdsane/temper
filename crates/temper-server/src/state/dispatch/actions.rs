@@ -177,7 +177,15 @@ impl crate::state::ServerState {
     /// Core dispatch without reaction cascade (used by ReactionDispatcher to
     /// avoid infinite async recursion).
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_tenant_action_core", tenant = %tenant, entity_type, entity_id, action_name = action))]
+    #[instrument(skip_all, fields(
+        otel.name = "dispatch.dispatch_tenant_action_core",
+        tenant = %tenant,
+        entity_type,
+        entity_id,
+        action_name = action,
+        success = tracing::field::Empty,
+        error_msg = tracing::field::Empty,
+    ))]
     pub(crate) async fn dispatch_tenant_action_core(
         &self,
         tenant: &TenantId,
@@ -255,6 +263,16 @@ impl crate::state::ServerState {
                     source: Some(TrajectorySource::Entity),
                     spec_governed: None,
                     agent_type: agent_ctx.agent_type.clone(),
+                    request_body: Some(action_params.clone()),
+                    intent: agent_ctx.intent.clone(),
+                };
+                let request_body_str = {
+                    let s = action_params.to_string();
+                    if s.len() > 4096 {
+                        format!("{}[truncated]", &s[..4096])
+                    } else {
+                        s
+                    }
                 };
                 tracing::info!(
                     tenant = %entry.tenant,
@@ -267,6 +285,8 @@ impl crate::state::ServerState {
                     error = ?entry.error,
                     source = ?entry.source,
                     authz_denied = ?entry.authz_denied,
+                    spec_governed = ?entry.spec_governed,
+                    request_body = %request_body_str,
                     "trajectory.entry"
                 );
                 if !entry.success {
@@ -280,6 +300,10 @@ impl crate::state::ServerState {
                         source = ?entry.source,
                         "unmet_intent"
                     );
+                }
+                tracing::Span::current().record("success", false);
+                if let Some(ref err) = entry.error {
+                    tracing::Span::current().record("error_msg", err.as_str());
                 }
                 if let Err(persist_err) = self.persist_trajectory_entry(&entry).await {
                     tracing::error!(error = %persist_err, "failed to persist trajectory entry");
@@ -299,6 +323,11 @@ impl crate::state::ServerState {
             await_integration,
         };
         let response = self.run_post_dispatch_effects(&ctx, response).await;
+
+        tracing::Span::current().record("success", response.success);
+        if let Some(ref err) = response.error {
+            tracing::Span::current().record("error_msg", err.as_str());
+        }
 
         Ok(response)
     }

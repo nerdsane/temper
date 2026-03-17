@@ -141,6 +141,8 @@ pub(crate) async fn handle_audit(
         source: Some(TrajectorySource::Entity),
         spec_governed: Some(false),
         agent_type: None,
+        request_body: None,
+        intent: None,
     };
 
     if let Err(e) = state.persist_trajectory_entry(&entry).await {

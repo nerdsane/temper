@@ -8,6 +8,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use tracing::instrument;
 
+use crate::authz::persist_and_activate_policy;
 use crate::state::ServerState;
 
 /// GET /api/tenants/{tenant}/policies — return current Cedar policy text.
@@ -71,11 +72,14 @@ pub(crate) async fn handle_put_policies(
         return resp;
     }
 
-    // Store the tenant policy.
+    // Store the tenant policy in-memory.
     {
         let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-        policies.insert(tenant.clone(), policy_text);
+        policies.insert(tenant.clone(), policy_text.clone());
     }
+
+    // Persist to Turso `policies` table (hash-gated; logs trajectory on change).
+    persist_and_activate_policy(&state, &tenant, "primary", &policy_text, "api").await;
 
     (
         StatusCode::OK,
@@ -134,11 +138,14 @@ pub(crate) async fn handle_add_policy_rule(
         return resp;
     }
 
-    // Persist updated tenant policy.
+    // Persist updated tenant policy in-memory.
     {
         let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-        policies.insert(tenant.clone(), new_tenant_text);
+        policies.insert(tenant.clone(), new_tenant_text.clone());
     }
+
+    // Persist to Turso `policies` table (hash-gated; logs trajectory on change).
+    persist_and_activate_policy(&state, &tenant, "primary", &new_tenant_text, "api").await;
 
     (
         StatusCode::OK,

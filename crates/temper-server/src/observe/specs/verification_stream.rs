@@ -141,16 +141,23 @@ pub(super) fn build_verification_stream_response(
                         + "\n"))
                 .await;
 
-            // Run verification (blocking, sequential per entity)
+            // Run verification: in subprocess (if configured) or in-process.
             let ioa_source = ioa_sources[entity_name].clone();
-            let result = tokio::task::spawn_blocking(move || {
-                // determinism-ok: HTTP handler offloads CPU-intensive verification
-                temper_verify::VerificationCascade::from_ioa(&ioa_source)
-                    .with_sim_seeds(5)
-                    .with_prop_test_cases(100)
-                    .run()
-            })
-            .await;
+            let result: Result<temper_verify::CascadeResult, String> =
+                if let Some(bin) = state_for_task.verify_subprocess_bin.as_deref() {
+                    tracing::debug!(entity = %entity_name, "running verification in subprocess");
+                    crate::observe::subprocess_verify::verify_in_subprocess(bin, &ioa_source).await
+                } else {
+                    tokio::task::spawn_blocking(move || {
+                        // determinism-ok: HTTP handler offloads CPU-intensive verification
+                        temper_verify::VerificationCascade::from_ioa(&ioa_source)
+                            .with_sim_seeds(5)
+                            .with_prop_test_cases(100)
+                            .run()
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+                };
 
             let level_labels = [
                 "L0_symbolic",

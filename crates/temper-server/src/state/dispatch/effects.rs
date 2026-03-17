@@ -60,6 +60,16 @@ impl crate::state::ServerState {
             source: Some(TrajectorySource::Entity),
             spec_governed: None,
             agent_type: ctx.agent_ctx.agent_type.clone(),
+            request_body: if response.success {
+                None
+            } else {
+                Some(ctx.action_params.clone())
+            },
+            intent: if response.success {
+                None
+            } else {
+                ctx.agent_ctx.intent.clone()
+            },
         };
         tracing::info!(
             tenant = %entry.tenant,
@@ -132,6 +142,8 @@ impl crate::state::ServerState {
                 source: Some(TrajectorySource::Entity),
                 spec_governed: None,
                 agent_type: ctx.agent_ctx.agent_type.clone(),
+                request_body: None,
+                intent: None,
             };
             tracing::info!(
                 tenant = %entry.tenant,
@@ -186,8 +198,8 @@ impl crate::state::ServerState {
             let ctx = agent_ctx.clone();
             let delay = std::time::Duration::from_secs(sched.delay_seconds);
             tokio::spawn(
-                // determinism-ok: timer delivery is a background side-effect
                 async move {
+                    // determinism-ok: timer delivery is a background side-effect
                     tokio::time::sleep(delay).await; // determinism-ok: scheduled delay
                     let _ = state
                         .dispatch_tenant_action(

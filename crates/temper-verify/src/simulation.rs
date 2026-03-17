@@ -71,7 +71,7 @@ impl SimConfig {
 }
 
 /// Result of a simulation run.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SimulationResult {
     /// Whether all invariants held throughout the simulation.
     pub all_invariants_held: bool,
@@ -94,7 +94,7 @@ pub struct SimulationResult {
 }
 
 /// A liveness violation found during or after simulation.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LivenessViolation {
     /// Which actor.
     pub actor_id: String,
@@ -107,7 +107,7 @@ pub struct LivenessViolation {
 }
 
 /// An invariant violation found during simulation.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InvariantViolation {
     /// Which actor.
     pub actor_id: String,

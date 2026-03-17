@@ -689,6 +689,10 @@ impl ServerState {
                 if let Ok(mut last_accessed) = self.last_accessed.write() {
                     last_accessed.remove(&actor_key);
                 }
+                // Evict the state cache entry so stale status doesn't linger.
+                if let Ok(mut cache) = self.entity_state_cache.lock() {
+                    cache.pop(&actor_key);
+                }
                 passivated += 1;
             }
         }
@@ -807,9 +811,9 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
     ) -> Option<String> {
-        // Fast path: check cache
+        // Fast path: check cache (LruCache::get requires &mut, so use Mutex).
         let cache_key = format!("{tenant}:{entity_type}:{entity_id}");
-        if let Ok(cache) = self.entity_state_cache.read()
+        if let Ok(mut cache) = self.entity_state_cache.lock()
             && let Some((status, _timestamp)) = cache.get(&cache_key)
         {
             return Some(status.clone());

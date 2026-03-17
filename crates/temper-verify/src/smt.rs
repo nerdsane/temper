@@ -27,7 +27,7 @@ use crate::model::semantics::collect_list_contains_pairs;
 use crate::model::types::{InvariantKind, ModelEffect, ModelGuard, TemperModel};
 
 /// Result of symbolic verification.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SmtResult {
     /// For each action, whether its guard is satisfiable (can ever fire).
     pub guard_satisfiability: Vec<(String, bool)>,

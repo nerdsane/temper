@@ -48,6 +48,8 @@ pub struct TursoTrajectoryInsert<'a> {
     pub source: Option<&'a str>,
     pub spec_governed: Option<bool>,
     pub created_at: &'a str,
+    pub request_body: Option<&'a str>,
+    pub intent: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -67,7 +69,7 @@ pub struct TursoWasmInvocationInsert<'a> {
 pub use metrics::init_metrics;
 pub use router::{TenantRegistryRow, TenantStoreRouter, TenantUserRow};
 pub use store::{
-    AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow, TursoEventStore,
-    TursoSpecRow, TursoTenantConstraintRow, TursoTrajectoryRow, TursoWasmInvocationRow,
-    TursoWasmModuleRow,
+    AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow, PolicyRow,
+    TursoEventStore, TursoSpecRow, TursoTenantConstraintRow, TursoTrajectoryRow,
+    TursoWasmInvocationRow, TursoWasmModuleRow, UnmetIntentAggRow,
 };

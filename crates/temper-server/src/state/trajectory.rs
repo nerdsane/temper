@@ -61,6 +61,12 @@ pub struct TrajectoryEntry {
     /// Agent type classification (e.g. "claude-code", "openclaw").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+    /// The request body captured from the HTTP request (truncated to 4 KB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body: Option<serde_json::Value>,
+    /// Explicit intent string from the `X-Intent` HTTP header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
 }
 
 /// Bounded, append-only trajectory log.

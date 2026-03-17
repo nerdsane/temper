@@ -73,6 +73,8 @@ fn resolve_entity_type_or_record_404(
     tenant: &TenantId,
     set_name: &str,
     agent_ctx: &AgentContext,
+    request_body: Option<serde_json::Value>,
+    intent: Option<String>,
 ) -> Result<String, ODataWriteError> {
     resolve_entity_type(state, tenant, set_name).ok_or_else(|| {
         tracing::warn!(tenant = %tenant, entity_set = %set_name, "entity set not found");
@@ -94,6 +96,8 @@ fn resolve_entity_type_or_record_404(
             source: Some(TrajectorySource::Platform),
             spec_governed: None,
             agent_type: agent_ctx.agent_type.clone(),
+            request_body,
+            intent,
         };
         {
             let state_c = state.clone();
@@ -175,11 +179,18 @@ pub async fn handle_odata_post(
 
     match odata_path {
         ODataPath::EntitySet(name) => {
-            let entity_type =
-                match resolve_entity_type_or_record_404(&state, &tenant, &name, &agent_ctx) {
-                    Ok(t) => t,
-                    Err(resp) => return *resp,
-                };
+            let body_for_trajectory = serde_json::from_slice::<serde_json::Value>(&body).ok();
+            let entity_type = match resolve_entity_type_or_record_404(
+                &state,
+                &tenant,
+                &name,
+                &agent_ctx,
+                body_for_trajectory,
+                agent_ctx.intent.clone(),
+            ) {
+                Ok(t) => t,
+                Err(resp) => return *resp,
+            };
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                 return *resp;
             }
@@ -246,11 +257,17 @@ pub async fn handle_odata_post(
                 }
             };
 
-            let entity_type =
-                match resolve_entity_type_or_record_404(&state, &tenant, &set_name, &agent_ctx) {
-                    Ok(t) => t,
-                    Err(resp) => return *resp,
-                };
+            let entity_type = match resolve_entity_type_or_record_404(
+                &state,
+                &tenant,
+                &set_name,
+                &agent_ctx,
+                Some(body_json.clone()),
+                agent_ctx.intent.clone(),
+            ) {
+                Ok(t) => t,
+                Err(resp) => return *resp,
+            };
 
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                 return *resp;

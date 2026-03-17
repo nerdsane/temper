@@ -17,7 +17,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tracing::instrument;
 
 use super::{empty_decision_list, format_decision_list, require_policy_auth};
-use crate::authz::require_observe_auth;
+use crate::authz::{persist_and_activate_policy, require_observe_auth};
 use crate::state::{DecisionStatus, PendingDecision, ServerState};
 
 /// Query parameters for listing decisions.
@@ -170,8 +170,20 @@ pub(crate) async fn handle_approve_decision(
     // Commit the validated policy to in-memory HashMap.
     {
         let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-        policies.insert(tenant.clone(), new_tenant_text);
+        policies.insert(tenant.clone(), new_tenant_text.clone());
     }
+
+    // Persist to Turso `policies` table: one entry per approved decision for
+    // fine-grained auditing and hash-based change detection.
+    let decided_by_ref = body.decided_by.as_deref().unwrap_or("unknown");
+    persist_and_activate_policy(
+        &state,
+        &tenant,
+        &format!("decision:{id}"),
+        &generated_policy,
+        decided_by_ref,
+    )
+    .await;
 
     // Mark decision approved only after policy reload succeeds.
     decision.status = DecisionStatus::Approved;

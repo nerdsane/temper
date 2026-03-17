@@ -27,7 +27,7 @@ pub(crate) async fn handle_list_entities(
     require_observe_auth(&state, &headers, "read_entities", "Entity")?;
     let tenant_scope = observe_tenant_scope(&state, &headers)?;
     let registry = state.actor_registry.read().unwrap(); // ci-ok: infallible lock
-    let cache = state.entity_state_cache.read().unwrap(); // ci-ok: infallible lock
+    let cache = state.entity_state_cache.lock().unwrap(); // ci-ok: infallible lock
     let mut entities: Vec<EntityInstanceSummary> = registry
         .keys()
         .filter_map(|key| {
@@ -38,8 +38,9 @@ pub(crate) async fn handle_list_entities(
             {
                 return None;
             }
+            // Use peek() to avoid updating LRU order during a bulk listing.
             let (current_state, last_updated) = cache
-                .get(key.as_str())
+                .peek(key.as_str())
                 .map(|(s, t)| (Some(s.clone()), Some(t.to_rfc3339())))
                 .unwrap_or((None, None));
             Some(EntityInstanceSummary {

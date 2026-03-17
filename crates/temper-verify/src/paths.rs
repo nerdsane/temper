@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::model::TemperModel;
 
 /// A single step in a reachable path.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct PathStep {
     /// The status at this step.
     pub state: String,
@@ -19,7 +19,7 @@ pub struct PathStep {
 }
 
 /// A complete path from initial state to a target state.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct ReachablePath {
     /// Steps from initial state to target.
     pub steps: Vec<PathStep>,
@@ -46,7 +46,7 @@ impl Default for PathExtractionConfig {
 }
 
 /// Result of path extraction.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct PathExtractionResult {
     /// Shortest paths grouped by target state.
     pub paths_by_target: BTreeMap<String, Vec<ReachablePath>>,

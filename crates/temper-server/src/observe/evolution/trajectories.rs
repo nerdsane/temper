@@ -5,7 +5,7 @@ use serde::Deserialize;
 use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
-use crate::authz::require_observe_auth;
+use crate::authz::{observe_tenant_scope, require_observe_auth};
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
 /// Query parameters for the trajectory aggregation endpoint.
@@ -35,11 +35,13 @@ pub(crate) async fn handle_trajectories(
     Query(params): Query<TrajectoryQueryParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_observe_auth(&state, &headers, "read_trajectories", "Trajectory")?;
+    let tenant_scope = observe_tenant_scope(&state, &headers)?;
     let failed_limit = params.failed_limit.unwrap_or(50).min(500);
     let success_filter: Option<bool> = params.success.as_deref().map(|s| s == "true");
 
     // Query Turso directly (single source of truth).
     if let Some(turso) = state.persistent_store() {
+        let _tenant_str = tenant_scope.as_ref().map(|t| t.as_str().to_string());
         match turso
             .query_trajectory_stats(
                 params.entity_type.as_deref(),
@@ -135,6 +137,8 @@ pub(crate) async fn handle_unmet_intent(
         }),
         spec_governed: None,
         agent_type: None,
+        request_body: body.get("request_body").cloned(),
+        intent: Some(intent.to_string()),
     };
     state
         .persist_trajectory_entry(&entry)

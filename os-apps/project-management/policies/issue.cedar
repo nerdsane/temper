@@ -71,3 +71,32 @@ permit(
 ) when {
   ["supervisor", "human"].contains(principal.agent_type)
 };
+
+// --- Fast-track: supervisor/human can perform role-gated and uncovered actions ---
+
+permit(
+  principal,
+  action in [
+    Action::"BeginPlanning",
+    Action::"WritePlan",
+    Action::"StartWork",
+    Action::"UpdateImplementation",
+    Action::"SubmitForReview",
+    Action::"SetParent",
+    Action::"RemoveParent",
+    Action::"AddSubIssue"
+  ],
+  resource is Issue
+) when {
+  ["supervisor", "human"].contains(principal.agent_type)
+};
+
+// --- Observe: supervisors and humans can read evolution data ---
+
+permit(
+  principal,
+  action in [Action::"read_evolution", Action::"read_observe", Action::"read_trajectories"],
+  resource
+) when {
+  ["supervisor", "human"].contains(principal.agent_type)
+};

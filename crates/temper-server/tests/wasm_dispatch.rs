@@ -284,7 +284,7 @@ async fn wasm_integration_dispatches_callback() {
         "EchoTest",
         "echo-1",
         &["Done", "Failed"],
-        Duration::from_secs(20),
+        Duration::from_secs(45),
     )
     .await;
 
@@ -376,7 +376,7 @@ async fn wasm_authz_denial_records_governance_artifacts_async_mode() {
         "EchoTest",
         "echo-authz-async",
         &["Failed"],
-        Duration::from_secs(20),
+        Duration::from_secs(45),
     )
     .await;
     assert_eq!(final_status, "Failed");

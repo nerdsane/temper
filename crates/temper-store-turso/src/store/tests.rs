@@ -266,3 +266,47 @@ async fn migrate_is_idempotent() {
     store.migrate().await.unwrap();
     store.migrate().await.unwrap();
 }
+
+/// Regression: append must be durable (readable from a fresh connection)
+/// before the caller receives the new sequence number.
+///
+/// This is the persist-before-return ordering guarantee: the event log must
+/// reflect the written event for any subsequent reader, even one that opens
+/// a new connection to the same database file.
+#[tokio::test]
+async fn append_is_durable_before_return() {
+    let url = sqlite_test_url("persist-before-return");
+    let store1 = TursoEventStore::new(&url, None)
+        .await
+        .expect("create store1");
+
+    let persistence_id = "tenant-x:Widget:w-1";
+    let new_seq = store1
+        .append(
+            persistence_id,
+            0,
+            &[test_envelope("Created", serde_json::json!({"id": "w-1"}))],
+        )
+        .await
+        .expect("append");
+
+    assert_eq!(new_seq, 1, "should return sequence 1 after first append");
+
+    // Open a new independent connection to the same DB — simulates a second
+    // reader or a process restart. The event must already be visible.
+    let store2 = TursoEventStore::new(&url, None)
+        .await
+        .expect("create store2");
+    let events = store2
+        .read_events(persistence_id, 0)
+        .await
+        .expect("read from second connection");
+
+    assert_eq!(
+        events.len(),
+        1,
+        "event must be durable and readable from a fresh connection immediately after append"
+    );
+    assert_eq!(events[0].sequence_nr, 1);
+    assert_eq!(events[0].event_type, "Created");
+}

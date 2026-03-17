@@ -5,7 +5,7 @@
 FROM rust:1-bookworm AS chef
 RUN cargo install cargo-chef --locked
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev python3-dev clang libclang-dev \
+    pkg-config libssl-dev python3-dev clang libclang-dev libjemalloc-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
@@ -30,7 +30,7 @@ RUN cargo build --release --bin temper
 # ── Stage 4: Runtime ────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y \
-    ca-certificates libssl3 python3 libz3-4 \
+    ca-certificates libssl3 python3 libz3-4 libjemalloc2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/temper /usr/local/bin/temper
