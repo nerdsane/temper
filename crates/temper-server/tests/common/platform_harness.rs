@@ -80,7 +80,14 @@ impl SimPlatformHarness {
         tenant: &str,
         app_name: &str,
     ) -> Result<Vec<String>, String> {
-        install_os_app(&self.platform_state, tenant, app_name).await
+        install_os_app(&self.platform_state, tenant, app_name)
+            .await
+            .map(|r| {
+                let mut all = r.added;
+                all.extend(r.updated);
+                all.extend(r.skipped);
+                all
+            })
     }
 
     /// Dispatch an action using PRODUCTION code.
