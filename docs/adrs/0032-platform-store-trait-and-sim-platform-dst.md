@@ -83,12 +83,14 @@ pub trait PlatformStore: Send + Sync {
 
 Create `SimPlatformStore` — an in-memory, deterministic implementation of `PlatformStore` using `BTreeMap`-based storage. Each storage domain (specs, policies, apps, indexes, decisions, WASM) is a separate `BTreeMap` behind a `std::sync::Mutex`.
 
-Per-operation fault injection follows the BUGGIFY pattern from ADR-0017: a seeded `DeterministicRng` probabilistically injects failures at each method call. Fault types include:
+Per-operation fault injection follows the BUGGIFY pattern from ADR-0017: a seeded `DeterministicRng` probabilistically injects failures at each method call. Fault configuration uses `SimPlatformFaultConfig` with per-operation probabilities:
 
-- **Write failure**: `save_*` returns `Err` without persisting (simulates disk/network failure)
-- **Read stale**: `load_*` returns a previous version (simulates replication lag)
-- **Partial delete**: `delete_*` removes from one index but not another (simulates crash mid-operation)
-- **Latency spike**: async yield before completing (simulates slow I/O under contention)
+- **Write failure** (`spec_write_failure_prob`, `policy_write_failure_prob`, `app_write_failure_prob`): `save_*` returns `Err` without persisting (simulates disk/network failure)
+- **Read failure** (`spec_read_failure_prob`, `decision_read_failure_prob`): `load_*` returns `Err` (simulates I/O failure on read)
+- **Cleanup failure** (`cleanup_failure_prob`): `delete_spec` returns `Err` without removing (simulates failed cleanup during partial-write rollback — discovered a real orphan bug, see Consequences)
+- **Decision write failure** (`decision_write_failure_prob`): `save_pending_decision` returns `Err`
+
+`SimPlatformFaultConfig::none()` sets all probabilities to 0.0; `SimPlatformFaultConfig::heavy()` uses elevated rates (0.02–0.05) for stress testing.
 
 ```rust
 pub struct SimPlatformStore {
@@ -146,9 +148,9 @@ Call sites include: `install_os_app`, `bootstrap_tenants`, `recover_cedar_polici
 
 **Why this approach**: The refactor is mechanical — same control flow, same error handling, different method name. No behavioral change for production. But in simulation, these paths now execute against `SimPlatformStore` instead of being skipped.
 
-### Sub-Decision 5: Platform Invariants (P1–P15)
+### Sub-Decision 5: Platform Invariants (P1–P17)
 
-Fifteen formal invariants are checked after every simulated operation. These are the properties that define correct platform behavior:
+Seventeen formal invariants are checked during simulated operations. These are the properties that define correct platform behavior:
 
 | ID  | Name                          | Property                                                                                          |
 |-----|-------------------------------|---------------------------------------------------------------------------------------------------|
@@ -167,8 +169,12 @@ Fifteen formal invariants are checked after every simulated operation. These are
 | P13 | Sequence Monotonicity         | Event sequence numbers in each entity journal are strictly increasing with no gaps                |
 | P14 | Tenant Isolation              | Operations on tenant A never affect specs, policies, indexes, or events for tenant B              |
 | P15 | Initial State Correctness     | A newly created entity's state matches the spec's `initial_state`                                 |
+| P16 | Event Replay Through TransitionTable | For each indexed entity, the stored event sequence represents valid transitions in the TransitionTable (structural check: rule exists with matching action + from/to states, without re-evaluating guards since `EvalContext` isn't stored in events) |
+| P17 | Spec Roundtrip Equivalence    | For each registered spec, rebuilding a `TransitionTable` from stored IOA source produces an equivalent table (matching `initial_state`, sorted `states`, `rules.len()`, and per-rule `name`, `from_states`, `to_state`) |
 
-**Why this approach**: Each invariant corresponds to a real bug class observed in production or testing. P5 catches the resurrecting-entity bug. P11 catches the OS-app-lost-on-restart bug. P12 catches the bootstrap-idempotence bug. P10 catches the field-replay bug. Formal invariants checked under fault injection are far more powerful than point-in-time assertions.
+**Why this approach**: Each invariant corresponds to a real bug class observed in production or testing. P5 catches the resurrecting-entity bug. P11 catches the OS-app-lost-on-restart bug. P12 catches the bootstrap-idempotence bug. P10 catches the field-replay bug. P16 catches event-journal corruption or TransitionTable drift. P17 catches spec serialization/deserialization divergence. Formal invariants checked under fault injection are far more powerful than point-in-time assertions.
+
+**Invariant tiering for mid-operation checks**: P1/P2 can be transiently violated when `install_os_app` fails mid-write AND cleanup `delete_spec` also fails due to fault injection. These orphans are reconciled on the next clean restart by `restore_registry_from_platform_store`. Mid-workload, only invariants immune to transient orphans are checked (P8, P9, P13 via `assert_mid_operation_invariants`). Full P1/P2 are validated after the final clean restart (faults disabled) in each test.
 
 ### Sub-Decision 6: DST Test Suites
 
@@ -200,14 +206,14 @@ Four test suites exercise platform operations under fault injection, each runnin
 ## Rollout Plan
 
 1. **Phase 0 (Immediate)** — `PlatformStore` trait definition, `SimPlatformStore` implementation, wire into `ServerEventStore::Sim`, update call sites from `platform_turso_store()` to `platform_store()`. Boot cycle test suite (Suite 1) with invariants P1–P4, P8, P10–P12, P15.
-2. **Phase 1 (Follow-up)** — Cedar lifecycle suite (Suite 3) with P6, P7. Rollback suite (Suite 2) with P5, P9. Index consistency suite (Suite 4) with P3–P5, P13, P14. All 15 invariants active.
+2. **Phase 1 (Follow-up)** — Cedar lifecycle suite (Suite 3) with P6, P7. Rollback suite (Suite 2) with P5, P9. Index consistency suite (Suite 4) with P3–P5, P13, P14. All 17 invariants active.
 3. **Phase 2 (CI Integration)** — Combined chaos testing: all four suites run with higher fault rates. Nightly CI job runs 1000-seed sweeps. Determinism canary: same seed produces identical final state.
 
 ## Readiness Gates
 
 - All existing 430+ tests pass after trait extraction (Phase 0 gate).
 - Boot cycle suite passes across 100 seeds with 10% fault rate.
-- All 15 invariants pass across 100 seeds in all four suites (Phase 1 gate).
+- All 17 invariants pass across 100 seeds in all four suites (Phase 1 gate).
 - Determinism canary: two runs with the same seed produce byte-identical `SimPlatformStore` state.
 - No new `HashMap`, `Instant::now`, or `thread::spawn` in simulation-visible code.
 - `TursoEventStore` implements `PlatformStore` with no behavioral change (verified by existing integration tests).
@@ -217,7 +223,7 @@ Four test suites exercise platform operations under fault injection, each runnin
 ### Positive
 - Catches an estimated ~80% of past platform bugs (OS app persistence, Cedar recovery, index consistency, field replay, bootstrap idempotence) automatically under simulation.
 - Platform bootstrap code — the most critical and least tested path — now runs under DST with fault injection.
-- Formal invariants (P1–P15) document the platform's correctness contract explicitly, serving as both tests and specification.
+- Formal invariants (P1–P17) document the platform's correctness contract explicitly, serving as both tests and specification.
 - Same production code runs in simulation — bugs found are real bugs, not simulation artifacts.
 - Seed-reproducible failures: every platform bug can be replayed with `TEMPER_DST_SEED=N`.
 
@@ -229,7 +235,7 @@ Four test suites exercise platform operations under fault injection, each runnin
 ### Risks
 - **Trait boundary may not cover all Turso methods**: Some platform operations may use Turso-specific APIs not captured in the trait. Mitigation: audit all `platform_turso_store()` call sites during Phase 0; add missing methods to the trait.
 - **Simulation fidelity**: `SimPlatformStore` uses `BTreeMap` while Turso uses SQLite; failure modes differ. Mitigation: fault injection covers the common failure classes (write failure, stale read, partial operation); Turso-specific edge cases are documented as future work.
-- **Performance of invariant checking**: Checking 15 invariants after every operation may slow test execution. Mitigation: invariants are cheap (in-memory map lookups); if slow, check only after test phases rather than every operation.
+- **Performance of invariant checking**: Checking 17 invariants after every operation may slow test execution. Mitigation: invariants are cheap (in-memory map lookups); if slow, check only after test phases rather than every operation.
 
 ### DST Compliance
 - `SimPlatformStore` uses only `BTreeMap` for all storage (deterministic iteration order).
