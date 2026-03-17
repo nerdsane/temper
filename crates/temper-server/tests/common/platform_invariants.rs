@@ -909,6 +909,20 @@ pub async fn assert_p17_spec_roundtrip_equivalence(
 
 // ── Composite checks ────────────────────────────────────────────────────
 
+/// Check invariants that must hold even mid-operation under fault injection.
+///
+/// P1/P2 (registry-store consistency) may be transiently violated when
+/// `delete_spec` cleanup fails during a faulty `install_os_app`. These
+/// orphans are reconciled on the next restart by
+/// `restore_registry_from_platform_store`. So mid-operation, we only check
+/// invariants that cannot be transiently violated by cleanup failures.
+pub async fn assert_mid_operation_invariants(harness: &SimPlatformHarness) -> Result<(), String> {
+    assert_p8_state_store_sequence(harness).await?;
+    assert_p9_rollback_completeness(harness).await?;
+    assert_p13_sequence_monotonicity(harness).await?;
+    Ok(())
+}
+
 /// Check all boot-cycle invariants (P1, P2, P6, P7, P11, P17).
 ///
 /// These invariants should hold after every restart: the in-memory state

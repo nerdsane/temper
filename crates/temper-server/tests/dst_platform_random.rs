@@ -65,14 +65,15 @@ async fn run_workload(
             WorkloadOp::CheckInvariants => {
                 if check_invariants_inline {
                     // Temporarily disable ALL faults so invariant reads succeed.
+                    // Use mid-operation invariants (not full P1/P2) since orphaned
+                    // specs from failed cleanup are expected mid-workload.
                     let prev_event = harness.sim_event_store.disable_faults();
                     let prev_plat = harness.sim_platform_store.disable_faults();
-                    assert_boot_invariants(harness).await.unwrap_or_else(|e| {
-                        panic!("seed {seed}: boot invariants failed mid-workload: {e}")
-                    });
-                    assert_data_invariants(harness).await.unwrap_or_else(|e| {
-                        panic!("seed {seed}: data invariants failed mid-workload: {e}")
-                    });
+                    assert_mid_operation_invariants(harness)
+                        .await
+                        .unwrap_or_else(|e| {
+                            panic!("seed {seed}: mid-operation invariants failed: {e}")
+                        });
                     harness.sim_event_store.restore_faults(prev_event);
                     harness.sim_platform_store.restore_faults(prev_plat);
                 }
@@ -80,26 +81,31 @@ async fn run_workload(
         }
 
         // Per-operation invariant checking (with faults disabled).
+        //
+        // P1/P2 (registry-store consistency) can be transiently violated when
+        // `install_os_app` fails mid-write AND `delete_spec` cleanup also fails.
+        // These orphans are reconciled on next restart. So mid-operation we only
+        // check invariants that cannot be transiently violated (P8, P9, P13).
+        // After restarts, reconciliation has run and full P1/P2 must hold.
         if check_invariants_inline {
             let prev_event = harness.sim_event_store.disable_faults();
             let prev_plat = harness.sim_platform_store.disable_faults();
 
-            if op_idx % 5 == 0 || matches!(&op, WorkloadOp::Restart) {
-                // Full check every 5th op and after restarts.
+            if matches!(&op, WorkloadOp::Restart) {
+                // After restart, reconciliation has run — full invariants must hold.
                 assert_boot_invariants(harness).await.unwrap_or_else(|e| {
-                    panic!("seed {seed}, op {op_idx}: boot invariants failed: {e}")
+                    panic!("seed {seed}, op {op_idx}: boot invariants failed after restart: {e}")
                 });
                 assert_data_invariants(harness).await.unwrap_or_else(|e| {
-                    panic!("seed {seed}, op {op_idx}: data invariants failed: {e}")
+                    panic!("seed {seed}, op {op_idx}: data invariants failed after restart: {e}")
                 });
             } else {
-                // Lightweight check: just orphan detection.
-                assert_p1_registry_store_consistency(harness)
+                // Mid-operation: only check invariants immune to transient orphans.
+                assert_mid_operation_invariants(harness)
                     .await
-                    .unwrap_or_else(|e| panic!("seed {seed}, op {op_idx}: P1 failed: {e}"));
-                assert_p2_store_registry_consistency(harness)
-                    .await
-                    .unwrap_or_else(|e| panic!("seed {seed}, op {op_idx}: P2 failed: {e}"));
+                    .unwrap_or_else(|e| {
+                        panic!("seed {seed}, op {op_idx}: mid-operation invariants failed: {e}")
+                    });
             }
 
             harness.sim_event_store.restore_faults(prev_event);

@@ -149,18 +149,21 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
                             ));
                         }
                     };
-                    let from_status =
-                        match params.arguments.get("from_status").and_then(Value::as_str) {
-                            Some(s) => s,
-                            None => {
-                                return Some(json_rpc_error(
+                    let from_status = match params
+                        .arguments
+                        .get("from_status")
+                        .and_then(Value::as_str)
+                    {
+                        Some(s) => s,
+                        None => {
+                            return Some(json_rpc_error(
                                     id,
                                     -32602,
                                     "tools/call 'simulate_transition' missing required `arguments.from_status` string"
                                         .to_string(),
                                 ));
-                            }
-                        };
+                        }
+                    };
                     let action = match params.arguments.get("action").and_then(Value::as_str) {
                         Some(s) => s,
                         None => {
@@ -300,12 +303,12 @@ You cannot approve or set policies — only humans can do that.";
         json!({
             "name": "verify_spec",
             "description": "Parse and verify an IOA spec snippet locally (L0 syntax/lint + L1 Stateright model check). \
-No running Temper server required. Use this to iterate on spec design before submitting to a server.\n\
-Returns structured JSON with:\n\
-- passed: bool — true if all levels pass\n\
-- level: which level produced the result\n\
-- lint: array of lint findings (code, severity, message)\n\
-- model_check: model check summary (states_explored, counterexamples, dead_transitions)",
+        No running Temper server required. Use this to iterate on spec design before submitting to a server.\n\
+        Returns structured JSON with:\n\
+        - passed: bool — true if all levels pass\n\
+        - level: which level produced the result\n\
+        - lint: array of lint findings (code, severity, message)\n\
+        - model_check: model check summary (states_explored, counterexamples, dead_transitions)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -321,12 +324,12 @@ Returns structured JSON with:\n\
         json!({
             "name": "simulate_transition",
             "description": "Simulate a single transition locally using TransitionTable::evaluate. \
-No running Temper server required. Authoritative — uses the same evaluation path as production entity actors.\n\
-Returns structured JSON with:\n\
-- success: bool — true if the transition fired\n\
-- from_status, action, to_status: transition details\n\
-- effects: list of effects that would apply\n\
-- error: guard failure reason or unknown action/state message",
+        No running Temper server required. Authoritative — uses the same evaluation path as production entity actors.\n\
+        Returns structured JSON with:\n\
+        - success: bool — true if the transition fired\n\
+        - from_status, action, to_status: transition details\n\
+        - effects: list of effects that would apply\n\
+        - error: guard failure reason or unknown action/state message",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -253,12 +253,12 @@ async fn tool_list_has_three_tools() {
     .await;
 
     let tools = response["result"]["tools"].as_array().expect("tools array");
-    let names: Vec<&str> = tools
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(names.contains(&"execute"), "should have execute tool");
-    assert!(names.contains(&"verify_spec"), "should have verify_spec tool");
+    assert!(
+        names.contains(&"verify_spec"),
+        "should have verify_spec tool"
+    );
     assert!(
         names.contains(&"simulate_transition"),
         "should have simulate_transition tool"
@@ -765,13 +765,14 @@ fn verify_spec_passes_for_valid_spec() {
         "valid order spec should pass: {result:#}"
     );
     assert!(
-        result["model_check"]["states_explored"].as_u64().unwrap_or(0) > 0,
+        result["model_check"]["states_explored"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
         "model check should explore states"
     );
     let lint = result["lint"].as_array().expect("lint should be array");
-    let has_errors = lint
-        .iter()
-        .any(|f| f["severity"].as_str() == Some("Error"));
+    let has_errors = lint.iter().any(|f| f["severity"].as_str() == Some("Error"));
     assert!(!has_errors, "valid spec should have no lint errors");
 }
 
