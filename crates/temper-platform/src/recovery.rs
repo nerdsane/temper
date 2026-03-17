@@ -83,10 +83,17 @@ pub async fn restore_installed_os_apps(state: &PlatformState, ps: &dyn PlatformS
         }
 
         match os_apps::install_os_app(state, &tenant, &app_name).await {
-            Ok(entities) => {
+            Ok(result) => {
+                let all: Vec<String> = result
+                    .added
+                    .iter()
+                    .chain(&result.updated)
+                    .chain(&result.skipped)
+                    .cloned()
+                    .collect();
                 tracing::info!(
                     "Restored OS app '{app_name}' for '{tenant}': {}",
-                    entities.join(", ")
+                    all.join(", ")
                 );
             }
             Err(e) => {
