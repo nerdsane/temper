@@ -121,6 +121,13 @@ async fn dst_cedar_with_platform_faults() {
             Err(_) => {
                 // Install failed — disable faults and verify no partial state.
                 let prev = harness.sim_platform_store.disable_faults();
+                harness.restart().await;
+                assert_p1_registry_store_consistency(&harness)
+                    .await
+                    .unwrap_or_else(|e| panic!("seed {seed}: P1 failed after failed install: {e}"));
+                assert_p2_store_registry_consistency(&harness)
+                    .await
+                    .unwrap_or_else(|e| panic!("seed {seed}: P2 failed after failed install: {e}"));
                 assert_p7_cedar_persistence(&harness)
                     .await
                     .unwrap_or_else(|e| panic!("seed {seed}: P7 failed after failed install: {e}"));

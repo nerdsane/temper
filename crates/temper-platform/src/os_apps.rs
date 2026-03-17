@@ -245,7 +245,12 @@ pub async fn install_os_app(
         if let Some(err) = write_err {
             // Best-effort cleanup: delete new specs that were written.
             for new_type in &written_new {
-                let _ = ps.delete_spec(tenant, new_type).await;
+                if let Err(e) = ps.delete_spec(tenant, new_type).await {
+                    tracing::warn!(
+                        "install_os_app cleanup: failed to delete orphaned spec '{new_type}' \
+                         for tenant '{tenant}': {e}. Will reconcile on next restore."
+                    );
+                }
             }
             return Err(err);
         }

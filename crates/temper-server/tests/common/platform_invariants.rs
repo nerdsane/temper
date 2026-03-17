@@ -1,4 +1,4 @@
-//! Platform invariant checkers (P1–P15) for deterministic simulation testing.
+//! Platform invariant checkers (P1–P17) for deterministic simulation testing.
 //!
 //! Each invariant is a standalone function that inspects the harness state
 //! and returns `Ok(())` on success or `Err(message)` on violation.
@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 
+use temper_jit::table::TransitionTable;
 use temper_runtime::persistence::EventStore;
 use temper_runtime::tenant::{TenantId, parse_persistence_id_parts};
 use temper_server::platform_store::PlatformStore;
@@ -699,9 +700,216 @@ pub async fn assert_p15_initial_state_correctness(
     Ok(())
 }
 
+// ── P16: Event Replay Through TransitionTable ───────────────────────────
+
+/// For each indexed entity, replays its event journal through the
+/// `TransitionTable` and verifies that each event's `to_state` is a valid
+/// transition from the previous state via the named action.
+///
+/// This is a **structural check**: it verifies that the TransitionTable
+/// has a rule where the action name matches, the `from_states` contains
+/// the current state, and the `to_state` matches the recorded `to_state`.
+/// It does NOT re-evaluate guards (since `EvalContext` is not stored in
+/// events) — the guard passed at dispatch time, which is sufficient.
+pub async fn assert_p16_event_replay_fidelity(harness: &SimPlatformHarness) -> Result<(), String> {
+    let index = harness.platform_state.server.entity_index.read().unwrap(); // ci-ok: infallible lock
+
+    let store = match harness.platform_state.server.event_store.as_ref() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let registry = harness.platform_state.registry.read().unwrap(); // ci-ok: infallible lock
+
+    for (index_key, entity_ids) in index.iter() {
+        let parts: Vec<&str> = index_key.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let (tenant, entity_type) = (parts[0], parts[1]);
+        let tid = TenantId::new(tenant);
+
+        let table = match registry.get_table(&tid, entity_type) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        for entity_id in entity_ids {
+            let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+            let events = store
+                .read_events(&persistence_id, 0)
+                .await
+                .map_err(|e| format!("P16: read_events failed for {persistence_id}: {e}"))?;
+
+            if events.is_empty() {
+                continue;
+            }
+
+            let mut current_state = table.initial_state.clone();
+
+            for event in &events {
+                let action = event
+                    .payload
+                    .get("action")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| {
+                        if !event.event_type.is_empty() {
+                            Some(event.event_type.as_str())
+                        } else {
+                            None
+                        }
+                    });
+
+                let to_state = event
+                    .payload
+                    .get("to_state")
+                    .and_then(serde_json::Value::as_str);
+
+                // If event doesn't carry action/to_state, skip (metadata event).
+                let (action, to_state) = match (action, to_state) {
+                    (Some(a), Some(ts)) => (a, ts),
+                    _ => continue,
+                };
+
+                // Verify the TransitionTable has a valid rule for this transition.
+                let valid = table.rules.iter().any(|rule| {
+                    if rule.name != action {
+                        return false;
+                    }
+                    let state_ok = rule.from_states.is_empty()
+                        || rule.from_states.iter().any(|s| s == &current_state);
+                    if !state_ok {
+                        return false;
+                    }
+                    match &rule.to_state {
+                        Some(rule_to) => rule_to == to_state,
+                        None => to_state == current_state, // self-loop
+                    }
+                });
+
+                if !valid {
+                    return Err(format!(
+                        "P16: entity {persistence_id} seq {} has invalid transition: \
+                         action='{action}', from='{current_state}', to='{to_state}' — \
+                         no matching rule in TransitionTable",
+                        event.sequence_nr
+                    ));
+                }
+
+                current_state = to_state.to_string();
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── P17: Spec Roundtrip Equivalence ─────────────────────────────────────
+
+/// For each registered spec, rebuilds a `TransitionTable` from the stored
+/// IOA source and verifies it is structurally equivalent to the in-registry
+/// `TransitionTable`. Catches spec corruption during persistence or restore.
+pub async fn assert_p17_spec_roundtrip_equivalence(
+    harness: &SimPlatformHarness,
+) -> Result<(), String> {
+    let specs = harness
+        .sim_platform_store
+        .load_specs()
+        .await
+        .map_err(|e| format!("P17: failed to load specs: {e}"))?;
+
+    let registry = harness.platform_state.registry.read().unwrap(); // ci-ok: infallible lock
+
+    for row in &specs {
+        let tid = TenantId::new(&row.tenant);
+
+        let registry_table = match registry.get_table(&tid, &row.entity_type) {
+            Some(t) => t,
+            None => continue, // P1 would catch this; skip here.
+        };
+
+        let rebuilt = match TransitionTable::try_from_ioa_source(&row.ioa_source) {
+            Ok(t) => t,
+            Err(e) => {
+                return Err(format!(
+                    "P17: failed to rebuild TransitionTable for ({}, {}): {e}",
+                    row.tenant, row.entity_type
+                ));
+            }
+        };
+
+        // Compare initial state.
+        if rebuilt.initial_state != registry_table.initial_state {
+            return Err(format!(
+                "P17: initial_state mismatch for ({}, {}): \
+                 rebuilt='{}', registry='{}'",
+                row.tenant, row.entity_type, rebuilt.initial_state, registry_table.initial_state
+            ));
+        }
+
+        // Compare state sets.
+        let mut rebuilt_states = rebuilt.states.clone();
+        rebuilt_states.sort();
+        let mut registry_states = registry_table.states.clone();
+        registry_states.sort();
+        if rebuilt_states != registry_states {
+            return Err(format!(
+                "P17: states mismatch for ({}, {}): \
+                 rebuilt={rebuilt_states:?}, registry={registry_states:?}",
+                row.tenant, row.entity_type
+            ));
+        }
+
+        // Compare rule count.
+        if rebuilt.rules.len() != registry_table.rules.len() {
+            return Err(format!(
+                "P17: rule count mismatch for ({}, {}): \
+                 rebuilt={}, registry={}",
+                row.tenant,
+                row.entity_type,
+                rebuilt.rules.len(),
+                registry_table.rules.len()
+            ));
+        }
+
+        // Compare each rule structurally.
+        for (i, (r, reg)) in rebuilt
+            .rules
+            .iter()
+            .zip(registry_table.rules.iter())
+            .enumerate()
+        {
+            if r.name != reg.name {
+                return Err(format!(
+                    "P17: rule {i} name mismatch for ({}, {}): \
+                     rebuilt='{}', registry='{}'",
+                    row.tenant, row.entity_type, r.name, reg.name
+                ));
+            }
+            let mut r_from = r.from_states.clone();
+            r_from.sort();
+            let mut reg_from = reg.from_states.clone();
+            reg_from.sort();
+            if r_from != reg_from {
+                return Err(format!(
+                    "P17: rule '{}'  from_states mismatch for ({}, {})",
+                    r.name, row.tenant, row.entity_type
+                ));
+            }
+            if r.to_state != reg.to_state {
+                return Err(format!(
+                    "P17: rule '{}' to_state mismatch for ({}, {}): \
+                     rebuilt={:?}, registry={:?}",
+                    r.name, row.tenant, row.entity_type, r.to_state, reg.to_state
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 // ── Composite checks ────────────────────────────────────────────────────
 
-/// Check all boot-cycle invariants (P1, P2, P6, P7, P11).
+/// Check all boot-cycle invariants (P1, P2, P6, P7, P11, P17).
 ///
 /// These invariants should hold after every restart: the in-memory state
 /// is consistent with the durable stores.
@@ -711,10 +919,11 @@ pub async fn assert_boot_invariants(harness: &SimPlatformHarness) -> Result<(), 
     assert_p6_cedar_spec_coherence(harness).await?;
     assert_p7_cedar_persistence(harness).await?;
     assert_p11_installed_apps_persistence(harness).await?;
+    assert_p17_spec_roundtrip_equivalence(harness).await?;
     Ok(())
 }
 
-/// Check all data-plane invariants (P3, P4, P5, P8, P9, P10, P13, P14, P15).
+/// Check all data-plane invariants (P3, P4, P5, P8, P9, P10, P13, P14, P15, P16).
 ///
 /// These invariants should hold after dispatching actions.
 pub async fn assert_data_invariants(harness: &SimPlatformHarness) -> Result<(), String> {
@@ -727,5 +936,6 @@ pub async fn assert_data_invariants(harness: &SimPlatformHarness) -> Result<(), 
     assert_p13_sequence_monotonicity(harness).await?;
     assert_p14_tenant_isolation(harness).await?;
     assert_p15_initial_state_correctness(harness).await?;
+    assert_p16_event_replay_fidelity(harness).await?;
     Ok(())
 }

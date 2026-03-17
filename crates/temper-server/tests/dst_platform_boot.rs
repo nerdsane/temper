@@ -92,9 +92,17 @@ async fn dst_boot_cycle_with_store_faults() {
         // Install PM app — no platform faults, so this should succeed.
         let install_result = harness.install_os_app(TENANT, "project-management").await;
         if install_result.is_err() {
-            // Platform store operations pass through event store for some paths;
-            // if install itself fails, skip this seed.
-            continue;
+            // Failed install should leave no orphaned state.
+            let prev_event = harness.sim_event_store.disable_faults();
+            harness.restart().await;
+            assert_boot_invariants(&harness).await.unwrap_or_else(|e| {
+                panic!("seed {seed}: boot invariants failed after failed install: {e}")
+            });
+            assert_data_invariants(&harness).await.unwrap_or_else(|e| {
+                panic!("seed {seed}: data invariants failed after failed install: {e}")
+            });
+            harness.sim_event_store.restore_faults(prev_event);
+            continue; // skip dispatch phase — no app installed
         }
 
         // Attempt to create an Issue. Event-store faults may cause failure.
@@ -148,6 +156,9 @@ async fn dst_boot_cycle_with_platform_faults() {
 
             assert_boot_invariants(&harness).await.unwrap_or_else(|e| {
                 panic!("seed {seed}: boot invariants failed after failed install: {e}")
+            });
+            assert_data_invariants(&harness).await.unwrap_or_else(|e| {
+                panic!("seed {seed}: data invariants failed after failed install: {e}")
             });
             harness.sim_platform_store.restore_faults(prev);
             continue;
@@ -386,6 +397,9 @@ async fn dst_boot_cycle_combined_faults() {
 
             assert_boot_invariants(&harness).await.unwrap_or_else(|e| {
                 panic!("seed {seed}: boot invariants failed after failed install: {e}")
+            });
+            assert_data_invariants(&harness).await.unwrap_or_else(|e| {
+                panic!("seed {seed}: data invariants failed after failed install: {e}")
             });
             harness.sim_event_store.restore_faults(prev_event);
             harness.sim_platform_store.restore_faults(prev_plat);

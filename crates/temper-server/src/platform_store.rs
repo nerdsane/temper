@@ -345,6 +345,10 @@ mod sim_platform_store {
         pub app_list_failure_prob: f64,
         /// Probability of a write failure on pending decision upsert.
         pub decision_write_failure_prob: f64,
+        /// Probability of a read failure on pending decision load.
+        pub decision_read_failure_prob: f64,
+        /// Probability of a failure when deleting a spec (cleanup path).
+        pub cleanup_failure_prob: f64,
         /// Probability of a read failure on WASM module load.
         pub wasm_read_failure_prob: f64,
     }
@@ -360,6 +364,8 @@ mod sim_platform_store {
                 app_record_failure_prob: 0.0,
                 app_list_failure_prob: 0.0,
                 decision_write_failure_prob: 0.0,
+                decision_read_failure_prob: 0.0,
+                cleanup_failure_prob: 0.0,
                 wasm_read_failure_prob: 0.0,
             }
         }
@@ -374,6 +380,8 @@ mod sim_platform_store {
                 app_record_failure_prob: 0.03,
                 app_list_failure_prob: 0.02,
                 decision_write_failure_prob: 0.04,
+                decision_read_failure_prob: 0.02,
+                cleanup_failure_prob: 0.03,
                 wasm_read_failure_prob: 0.02,
             }
         }
@@ -512,7 +520,10 @@ mod sim_platform_store {
 
         async fn delete_spec(&self, tenant: &str, entity_type: &str) -> Result<(), String> {
             let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-            // No fault injection on cleanup — must be reliable for atomicity guarantees.
+            let prob = inner.faults.cleanup_failure_prob;
+            if inner.rng.chance(prob) {
+                return Err("SimPlatformStore: injected cleanup failure".into());
+            }
             inner
                 .specs
                 .remove(&(tenant.to_string(), entity_type.to_string()));
@@ -654,7 +665,7 @@ mod sim_platform_store {
         async fn load_pending_decisions(&self, limit: usize) -> Result<Vec<String>, String> {
             let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
 
-            let prob = inner.faults.decision_write_failure_prob;
+            let prob = inner.faults.decision_read_failure_prob;
             if inner.rng.chance(prob) {
                 return Err("SimPlatformStore: injected decision read failure".into());
             }

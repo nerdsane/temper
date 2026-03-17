@@ -31,7 +31,7 @@ async fn run_workload(
 ) {
     let mut wg = WorkloadGenerator::new(seed);
 
-    for _ in 0..num_ops {
+    for op_idx in 0..num_ops {
         let op = wg.next_op();
         match &op {
             WorkloadOp::InstallApp { tenant, app } => {
@@ -78,6 +78,33 @@ async fn run_workload(
                 }
             }
         }
+
+        // Per-operation invariant checking (with faults disabled).
+        if check_invariants_inline {
+            let prev_event = harness.sim_event_store.disable_faults();
+            let prev_plat = harness.sim_platform_store.disable_faults();
+
+            if op_idx % 5 == 0 || matches!(&op, WorkloadOp::Restart) {
+                // Full check every 5th op and after restarts.
+                assert_boot_invariants(harness).await.unwrap_or_else(|e| {
+                    panic!("seed {seed}, op {op_idx}: boot invariants failed: {e}")
+                });
+                assert_data_invariants(harness).await.unwrap_or_else(|e| {
+                    panic!("seed {seed}, op {op_idx}: data invariants failed: {e}")
+                });
+            } else {
+                // Lightweight check: just orphan detection.
+                assert_p1_registry_store_consistency(harness)
+                    .await
+                    .unwrap_or_else(|e| panic!("seed {seed}, op {op_idx}: P1 failed: {e}"));
+                assert_p2_store_registry_consistency(harness)
+                    .await
+                    .unwrap_or_else(|e| panic!("seed {seed}, op {op_idx}: P2 failed: {e}"));
+            }
+
+            harness.sim_event_store.restore_faults(prev_event);
+            harness.sim_platform_store.restore_faults(prev_plat);
+        }
     }
 }
 
@@ -117,7 +144,7 @@ async fn dst_random_workload_event_faults() {
             SimPlatformFaultConfig::none(),
         );
 
-        run_workload(&mut harness, seed, 30, false).await;
+        run_workload(&mut harness, seed, 30, true).await;
 
         // Disable faults before restart so restore succeeds cleanly.
         let prev_event = harness.sim_event_store.disable_faults();
@@ -147,7 +174,7 @@ async fn dst_random_workload_platform_faults() {
             SimPlatformFaultConfig::heavy(),
         );
 
-        run_workload(&mut harness, seed, 30, false).await;
+        run_workload(&mut harness, seed, 30, true).await;
 
         // Disable faults before restart so restore succeeds cleanly.
         let prev_plat = harness.sim_platform_store.disable_faults();
@@ -177,7 +204,7 @@ async fn dst_random_workload_combined_faults() {
             SimPlatformFaultConfig::heavy(),
         );
 
-        run_workload(&mut harness, seed, 30, false).await;
+        run_workload(&mut harness, seed, 30, true).await;
 
         // Disable ALL faults before restart so restore succeeds cleanly.
         let prev_event = harness.sim_event_store.disable_faults();
