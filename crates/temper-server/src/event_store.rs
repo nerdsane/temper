@@ -9,6 +9,11 @@ use temper_store_postgres::PostgresEventStore;
 use temper_store_redis::RedisEventStore;
 use temper_store_turso::{TenantStoreRouter, TursoEventStore};
 
+use crate::platform_store::PlatformStore;
+#[cfg(feature = "sim")]
+use crate::platform_store::SimPlatformStore;
+#[cfg(feature = "sim")]
+use std::sync::Arc;
 #[cfg(feature = "sim")]
 use temper_store_sim::SimEventStore;
 
@@ -21,8 +26,11 @@ pub enum ServerEventStore {
     /// Database-per-tenant routing via [`TenantStoreRouter`].
     TenantRouted(TenantStoreRouter),
     /// In-memory deterministic event store for simulation testing.
+    ///
+    /// The optional [`SimPlatformStore`] is attached when the simulation needs
+    /// platform-level storage (specs, OS apps, decisions, etc.).
     #[cfg(feature = "sim")]
-    Sim(SimEventStore),
+    Sim(SimEventStore, Option<Arc<SimPlatformStore>>),
 }
 
 impl ServerEventStore {
@@ -34,7 +42,7 @@ impl ServerEventStore {
             Self::Redis(_) => "redis",
             Self::TenantRouted(_) => "turso-routed",
             #[cfg(feature = "sim")]
-            Self::Sim(_) => "sim",
+            Self::Sim(_, _) => "sim",
         }
     }
 
@@ -64,6 +72,21 @@ impl ServerEventStore {
         match self {
             Self::Turso(store) => Some(store),
             Self::TenantRouted(router) => Some(router.platform_store()),
+            _ => None,
+        }
+    }
+
+    /// Return a reference to the platform store abstraction.
+    ///
+    /// Works for Turso (single-DB and tenant-routed), and Sim (when a
+    /// `SimPlatformStore` is attached). Returns `None` for backends without
+    /// platform-level storage (plain Postgres, Redis).
+    pub fn platform_store(&self) -> Option<&dyn PlatformStore> {
+        match self {
+            Self::Turso(store) => Some(store as &dyn PlatformStore),
+            Self::TenantRouted(router) => Some(router.platform_store() as &dyn PlatformStore),
+            #[cfg(feature = "sim")]
+            Self::Sim(_, Some(ps)) => Some(ps.as_ref() as &dyn PlatformStore),
             _ => None,
         }
     }
@@ -126,7 +149,7 @@ impl EventStore for ServerEventStore {
                     .await
             }
             #[cfg(feature = "sim")]
-            Self::Sim(store) => {
+            Self::Sim(store, _) => {
                 store
                     .append(persistence_id, expected_sequence, events)
                     .await
@@ -145,7 +168,7 @@ impl EventStore for ServerEventStore {
             Self::Redis(store) => store.read_events(persistence_id, from_sequence).await,
             Self::TenantRouted(router) => router.read_events(persistence_id, from_sequence).await,
             #[cfg(feature = "sim")]
-            Self::Sim(store) => store.read_events(persistence_id, from_sequence).await,
+            Self::Sim(store, _) => store.read_events(persistence_id, from_sequence).await,
         }
     }
 
@@ -177,7 +200,7 @@ impl EventStore for ServerEventStore {
                     .await
             }
             #[cfg(feature = "sim")]
-            Self::Sim(store) => {
+            Self::Sim(store, _) => {
                 store
                     .save_snapshot(persistence_id, sequence_nr, snapshot)
                     .await
@@ -195,7 +218,7 @@ impl EventStore for ServerEventStore {
             Self::Redis(store) => store.load_snapshot(persistence_id).await,
             Self::TenantRouted(router) => router.load_snapshot(persistence_id).await,
             #[cfg(feature = "sim")]
-            Self::Sim(store) => store.load_snapshot(persistence_id).await,
+            Self::Sim(store, _) => store.load_snapshot(persistence_id).await,
         }
     }
 
@@ -209,7 +232,7 @@ impl EventStore for ServerEventStore {
             Self::Redis(store) => store.list_entity_ids(tenant).await,
             Self::TenantRouted(router) => router.list_entity_ids(tenant).await,
             #[cfg(feature = "sim")]
-            Self::Sim(store) => store.list_entity_ids(tenant).await,
+            Self::Sim(store, _) => store.list_entity_ids(tenant).await,
         }
     }
 }

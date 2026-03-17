@@ -48,6 +48,27 @@ impl TursoEventStore {
         Ok(())
     }
 
+    /// Delete a spec for a given tenant/entity_type.
+    ///
+    /// Used for cleanup when `install_os_app` fails mid-write and for
+    /// reconciliation during registry restore.
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "turso.delete_spec"))]
+    pub async fn delete_spec(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.delete_spec");
+        let conn = self.configured_connection().await?;
+        conn.execute(
+            "DELETE FROM specs WHERE tenant = ?1 AND entity_type = ?2",
+            params![tenant, entity_type],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
     /// Persist verification result for a spec.
     #[instrument(skip_all, fields(tenant, entity_type, otel.name = "turso.persist_spec_verification"))]
     pub async fn persist_spec_verification(

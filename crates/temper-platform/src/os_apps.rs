@@ -190,12 +190,12 @@ pub async fn install_os_app(
         None
     };
 
-    // ── Step 1: Persist to Turso FIRST (if available). ──────────────
-    // If any write fails, bail before touching in-memory state.
+    // ── Step 1: Persist to store FIRST (if available). ──────────────
+    // If any write fails, clean up new specs before bailing (atomicity).
     if let Some(ref store) = state.server.event_store
-        && let Some(turso) = store.platform_turso_store()
+        && let Some(ps) = store.platform_store()
     {
-        let mut spec_sources: BTreeMap<String, String> = turso
+        let existing_specs: BTreeMap<String, String> = ps
             .load_specs()
             .await
             .map_err(|e| format!("Failed to load existing specs for tenant '{tenant}': {e}"))?
@@ -204,37 +204,58 @@ pub async fn install_os_app(
             .map(|row| (row.entity_type, row.ioa_source))
             .collect();
 
+        let existing_types: std::collections::BTreeSet<String> =
+            existing_specs.keys().cloned().collect();
+        let mut spec_sources = existing_specs;
         for (entity_type, ioa_source) in bundle.specs {
             spec_sources.insert((*entity_type).to_string(), (*ioa_source).to_string());
         }
 
-        for (entity_type, ioa_source) in spec_sources {
-            let hash = temper_store_turso::spec_content_hash(&ioa_source);
-            turso
-                .upsert_spec(tenant, &entity_type, &ioa_source, &merged_csdl, &hash)
-                .await
-                .map_err(|e| format!("Failed to persist spec {entity_type}: {e}"))?;
+        // Track new specs written so we can clean up on failure (atomicity).
+        let mut written_new: Vec<String> = Vec::new();
+
+        let write_err = 'writes: {
+            for (entity_type, ioa_source) in &spec_sources {
+                let hash = temper_store_turso::spec_content_hash(ioa_source);
+                match ps
+                    .upsert_spec(tenant, entity_type, ioa_source, &merged_csdl, &hash)
+                    .await
+                {
+                    Ok(()) => {
+                        if !existing_types.contains(entity_type) {
+                            written_new.push(entity_type.clone());
+                        }
+                    }
+                    Err(e) => {
+                        break 'writes Some(format!("Failed to persist spec {entity_type}: {e}"));
+                    }
+                }
+            }
+            if let Some(ref policy_text) = combined_policy
+                && let Err(e) = ps.upsert_tenant_policy(tenant, policy_text).await
+            {
+                break 'writes Some(format!("Failed to persist Cedar policy: {e}"));
+            }
+            if let Err(e) = ps.record_installed_app(tenant, app_name).await {
+                break 'writes Some(format!("Failed to record app installation: {e}"));
+            }
+            None
+        };
+
+        if let Some(err) = write_err {
+            // Best-effort cleanup: delete new specs that were written.
+            for new_type in &written_new {
+                let _ = ps.delete_spec(tenant, new_type).await;
+            }
+            return Err(err);
         }
-        if let Some(ref policy_text) = combined_policy {
-            turso
-                .upsert_tenant_policy(tenant, policy_text)
-                .await
-                .map_err(|e| format!("Failed to persist Cedar policy: {e}"))?;
-        }
-        turso
-            .record_installed_app(tenant, app_name)
-            .await
-            .map_err(|e| format!("Failed to record app installation: {e}"))?;
     }
 
     // ── Step 2: Bootstrap into memory (verification + registry). ────
     let verified_cache = if let Some(ref store) = state.server.event_store
-        && let Some(turso) = store.platform_turso_store()
+        && let Some(ps) = store.platform_store()
     {
-        turso
-            .load_verification_cache(tenant)
-            .await
-            .unwrap_or_default()
+        ps.load_verification_cache(tenant).await.unwrap_or_default()
     } else {
         std::collections::BTreeMap::new()
     };
@@ -277,6 +298,5 @@ pub async fn install_os_app(
     Ok(entity_types)
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests;

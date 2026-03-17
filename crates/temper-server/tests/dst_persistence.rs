@@ -24,7 +24,7 @@ fn order_table() -> Arc<RwLock<TransitionTable>> {
 }
 
 fn sim_store(seed: u64) -> Arc<ServerEventStore> {
-    Arc::new(ServerEventStore::Sim(SimEventStore::no_faults(seed)))
+    Arc::new(ServerEventStore::Sim(SimEventStore::no_faults(seed), None))
 }
 
 async fn dispatch_action(
@@ -126,7 +126,7 @@ async fn dst_sequence_monotonicity() {
     for seed in 0..NUM_SEEDS {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let store_inner = SimEventStore::no_faults(seed);
-        let store = Arc::new(ServerEventStore::Sim(store_inner.clone()));
+        let store = Arc::new(ServerEventStore::Sim(store_inner.clone(), None));
         let table = order_table();
         let system = ActorSystem::new("dst-seq");
 
@@ -234,7 +234,7 @@ async fn dst_determinism_canary() {
         for run in 0..2 {
             let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
             let store_inner = SimEventStore::no_faults(seed);
-            let store = Arc::new(ServerEventStore::Sim(store_inner.clone()));
+            let store = Arc::new(ServerEventStore::Sim(store_inner.clone(), None));
             let table = order_table();
             let system = ActorSystem::new(format!("dst-det-{run}"));
 

@@ -8,10 +8,11 @@
 use std::collections::BTreeMap;
 
 use temper_runtime::tenant::TenantId;
+use temper_server::platform_store::{PlatformStore, SpecVerificationUpdate};
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
-use temper_store_turso::{TursoEventStore, TursoSpecVerificationUpdate, spec_content_hash};
+use temper_store_turso::spec_content_hash;
 use temper_verify::cascade::VerificationCascade;
 
 use crate::state::PlatformState;
@@ -231,7 +232,7 @@ pub fn bootstrap_agent_specs(
 /// the process crashes between them the spec row will have `verified=0`
 /// and the cascade will re-run on next boot — safe, just slower.
 pub(crate) async fn persist_bootstrap_verification(
-    turso: &TursoEventStore,
+    store: &dyn PlatformStore,
     tenant: &str,
     specs: &[(&str, &str)],
     csdl_source: &str,
@@ -246,7 +247,7 @@ pub(crate) async fn persist_bootstrap_verification(
             .expect("hash returned for unknown entity type");
 
         // Upsert the spec row (preserves verification if hash unchanged).
-        if let Err(e) = turso
+        if let Err(e) = store
             .upsert_spec(tenant, entity_type, ioa_source, csdl_source, content_hash)
             .await
         {
@@ -255,11 +256,11 @@ pub(crate) async fn persist_bootstrap_verification(
         }
 
         // Mark as verified (bootstrap panics on failure, so all specs here passed).
-        if let Err(e) = turso
+        if let Err(e) = store
             .persist_spec_verification(
                 tenant,
                 entity_type,
-                TursoSpecVerificationUpdate {
+                SpecVerificationUpdate {
                     status: "completed",
                     verified: true,
                     levels_passed: None,
@@ -274,18 +275,18 @@ pub(crate) async fn persist_bootstrap_verification(
     }
 }
 
-/// Persist system tenant spec verification to Turso.
-pub async fn persist_system_verification(turso: &TursoEventStore, hashes: &[(String, String)]) {
-    persist_bootstrap_verification(turso, SYSTEM_TENANT, SYSTEM_SPECS, SYSTEM_CSDL, hashes).await;
+/// Persist system tenant spec verification to the platform store.
+pub async fn persist_system_verification(store: &dyn PlatformStore, hashes: &[(String, String)]) {
+    persist_bootstrap_verification(store, SYSTEM_TENANT, SYSTEM_SPECS, SYSTEM_CSDL, hashes).await;
 }
 
-/// Persist agent spec verification to Turso.
+/// Persist agent spec verification to the platform store.
 pub async fn persist_agent_verification(
-    turso: &TursoEventStore,
+    store: &dyn PlatformStore,
     tenant: &str,
     hashes: &[(String, String)],
 ) {
-    persist_bootstrap_verification(turso, tenant, AGENT_SPECS, AGENT_CSDL, hashes).await;
+    persist_bootstrap_verification(store, tenant, AGENT_SPECS, AGENT_CSDL, hashes).await;
 }
 
 #[cfg(test)]

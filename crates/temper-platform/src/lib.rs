@@ -20,6 +20,7 @@ pub mod integration;
 pub mod optimization;
 pub mod os_apps;
 pub mod protocol;
+pub mod recovery;
 pub mod router;
 pub mod spec_store;
 pub mod state;
