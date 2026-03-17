@@ -1,5 +1,6 @@
 //! stdio MCP server exposing Temper Code Mode tools.
 
+pub mod code_mode;
 mod protocol;
 mod runtime;
 

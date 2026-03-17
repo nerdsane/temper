@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::code_mode;
 use super::runtime::ClientInfo;
 use super::{MCP_PROTOCOL_VERSION, MCP_SERVER_NAME, RuntimeContext};
 
@@ -106,19 +107,80 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
                 }
             };
 
-            let code = match params.arguments.get("code").and_then(Value::as_str) {
-                Some(code) => code,
-                None => {
-                    return Some(json_rpc_error(
-                        id,
-                        -32602,
-                        "tools/call missing required `arguments.code` string".to_string(),
-                    ));
-                }
-            };
-
             let tool_result = match params.name.as_str() {
-                "execute" => ctx.run_execute(code).await,
+                "execute" => {
+                    let code = match params.arguments.get("code").and_then(Value::as_str) {
+                        Some(code) => code,
+                        None => {
+                            return Some(json_rpc_error(
+                                id,
+                                -32602,
+                                "tools/call 'execute' missing required `arguments.code` string"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    ctx.run_execute(code).await
+                }
+                "verify_spec" => {
+                    let spec = match params.arguments.get("spec").and_then(Value::as_str) {
+                        Some(s) => s,
+                        None => {
+                            return Some(json_rpc_error(
+                                id,
+                                -32602,
+                                "tools/call 'verify_spec' missing required `arguments.spec` string"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    let result = code_mode::verify_spec(spec);
+                    Ok(serde_json::to_string(&result).unwrap_or_else(|e| e.to_string()))
+                }
+                "simulate_transition" => {
+                    let spec = match params.arguments.get("spec").and_then(Value::as_str) {
+                        Some(s) => s,
+                        None => {
+                            return Some(json_rpc_error(
+                                id,
+                                -32602,
+                                "tools/call 'simulate_transition' missing required `arguments.spec` string"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    let from_status =
+                        match params.arguments.get("from_status").and_then(Value::as_str) {
+                            Some(s) => s,
+                            None => {
+                                return Some(json_rpc_error(
+                                    id,
+                                    -32602,
+                                    "tools/call 'simulate_transition' missing required `arguments.from_status` string"
+                                        .to_string(),
+                                ));
+                            }
+                        };
+                    let action = match params.arguments.get("action").and_then(Value::as_str) {
+                        Some(s) => s,
+                        None => {
+                            return Some(json_rpc_error(
+                                id,
+                                -32602,
+                                "tools/call 'simulate_transition' missing required `arguments.action` string"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    let item_count = params
+                        .arguments
+                        .get("item_count")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    let result =
+                        code_mode::simulate_transition(spec, from_status, action, item_count);
+                    Ok(serde_json::to_string(&result).unwrap_or_else(|e| e.to_string()))
+                }
                 other => Err(anyhow!(format!("unknown tool '{other}'"))),
             };
 
@@ -219,19 +281,76 @@ decisions for human approval in the Observe UI or via `temper decide` CLI.\n\
 Use poll_decision(tenant, decision_id) to wait for the human decision.\n\
 You cannot approve or set policies — only humans can do that.";
 
-    vec![json!({
-        "name": "execute",
-        "description": execute_desc,
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "Python snippet. Use async calls like `await temper.list(...)` and `return ...`."
-                }
-            },
-            "required": ["code"],
-            "additionalProperties": false
-        }
-    })]
+    vec![
+        json!({
+            "name": "execute",
+            "description": execute_desc,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python snippet. Use async calls like `await temper.list(...)` and `return ...`."
+                    }
+                },
+                "required": ["code"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "verify_spec",
+            "description": "Parse and verify an IOA spec snippet locally (L0 syntax/lint + L1 Stateright model check). \
+No running Temper server required. Use this to iterate on spec design before submitting to a server.\n\
+Returns structured JSON with:\n\
+- passed: bool — true if all levels pass\n\
+- level: which level produced the result\n\
+- lint: array of lint findings (code, severity, message)\n\
+- model_check: model check summary (states_explored, counterexamples, dead_transitions)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "string",
+                        "description": "Raw IOA TOML string (full spec or snippet with [automaton] header)."
+                    }
+                },
+                "required": ["spec"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "simulate_transition",
+            "description": "Simulate a single transition locally using TransitionTable::evaluate. \
+No running Temper server required. Authoritative — uses the same evaluation path as production entity actors.\n\
+Returns structured JSON with:\n\
+- success: bool — true if the transition fired\n\
+- from_status, action, to_status: transition details\n\
+- effects: list of effects that would apply\n\
+- error: guard failure reason or unknown action/state message",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "string",
+                        "description": "Raw IOA TOML string for the entity."
+                    },
+                    "from_status": {
+                        "type": "string",
+                        "description": "Current entity status (must be a valid state in the spec)."
+                    },
+                    "action": {
+                        "type": "string",
+                        "description": "Action name to simulate (e.g. 'SubmitOrder')."
+                    },
+                    "item_count": {
+                        "type": "integer",
+                        "description": "Optional item count hint for item-count guards (default 0).",
+                        "default": 0
+                    }
+                },
+                "required": ["spec", "from_status", "action"],
+                "additionalProperties": false
+            }
+        }),
+    ]
 }

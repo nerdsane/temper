@@ -8,6 +8,13 @@ description = "MCP stdio server for Temper Code Mode tools"
 
 [dependencies]
 temper-sandbox = { workspace = true }
+# Code Mode tools: server-independent spec verification and transition simulation.
+# temper-verify brings stateright + proptest. This is intentional: temper-mcp is a
+# developer tool (not a production entity-actor binary), so the L1 model-checker
+# must be available in-process. See ADR-0032.
+temper-spec = { workspace = true }
+temper-jit = { workspace = true }
+temper-verify = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -23,5 +30,4 @@ monty = { git = "https://github.com/pydantic/monty.git", package = "monty", rev 
 axum = { workspace = true }
 temper-server = { workspace = true, features = ["observe"] }
 temper-runtime = { workspace = true }
-temper-spec = { workspace = true }
 temper-store-turso = { workspace = true }

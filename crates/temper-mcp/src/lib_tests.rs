@@ -1,6 +1,7 @@
 use super::*;
 use temper_sandbox::helpers::format_authz_denied;
 
+use crate::code_mode;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -238,7 +239,7 @@ async fn mcp_initialize_without_client_info_keeps_defaults() {
 }
 
 #[tokio::test]
-async fn tool_list_has_single_execute_tool() {
+async fn tool_list_has_three_tools() {
     let mut ctx = ctx_for_port(3001);
 
     let response = rpc(
@@ -252,8 +253,17 @@ async fn tool_list_has_single_execute_tool() {
     .await;
 
     let tools = response["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 1, "should have exactly one tool");
-    assert_eq!(tools[0]["name"], "execute");
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(names.contains(&"execute"), "should have execute tool");
+    assert!(names.contains(&"verify_spec"), "should have verify_spec tool");
+    assert!(
+        names.contains(&"simulate_transition"),
+        "should have simulate_transition tool"
+    );
+    assert_eq!(tools.len(), 3, "should have exactly three tools");
 }
 
 #[test]
@@ -738,5 +748,118 @@ async fn get_decision_status_returns_decision() {
         status_result["status"].as_str().unwrap(), // ci-ok: test assertion
         "pending",
         "status should be pending"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Code Mode: verify_spec tests
+// ---------------------------------------------------------------------------
+
+const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+
+#[test]
+fn verify_spec_passes_for_valid_spec() {
+    let result = code_mode::verify_spec(ORDER_IOA);
+    assert_eq!(
+        result["passed"], true,
+        "valid order spec should pass: {result:#}"
+    );
+    assert!(
+        result["model_check"]["states_explored"].as_u64().unwrap_or(0) > 0,
+        "model check should explore states"
+    );
+    let lint = result["lint"].as_array().expect("lint should be array");
+    let has_errors = lint
+        .iter()
+        .any(|f| f["severity"].as_str() == Some("Error"));
+    assert!(!has_errors, "valid spec should have no lint errors");
+}
+
+#[test]
+fn verify_spec_fails_for_invalid_toml() {
+    let bad_spec = "this is not valid toml at all !!!";
+    let result = code_mode::verify_spec(bad_spec);
+    assert_eq!(result["passed"], false, "invalid TOML should fail");
+    assert!(
+        result["error"].as_str().is_some(),
+        "should include error message"
+    );
+    assert_eq!(result["level"], "L0_parse");
+}
+
+#[test]
+fn verify_spec_detects_dead_transition() {
+    // Complete is unreachable because task_count starts at 0 and never increments,
+    // so guard "task_count > 0" can never be satisfied. This validates the acceptance
+    // criterion: "verify_spec returns structured errors for a spec with an unreachable state."
+    let spec_with_dead_transition = r#"
+[automaton]
+name = "Plan"
+states = ["Draft", "Active", "Completed"]
+initial = "Draft"
+
+[[state]]
+name = "task_count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Activate"
+from = ["Draft"]
+to = "Active"
+
+[[action]]
+name = "Complete"
+from = ["Active"]
+to = "Completed"
+guard = "task_count > 0"
+"#;
+    let result = code_mode::verify_spec(spec_with_dead_transition);
+    assert_eq!(
+        result["passed"], false,
+        "spec with dead transition should fail: {result:#}"
+    );
+    let mc = &result["model_check"];
+    let dead = mc["dead_transitions"]
+        .as_array()
+        .expect("dead_transitions should be array");
+    assert!(
+        dead.iter()
+            .any(|t| t.as_str().is_some_and(|s| s.contains("Complete"))),
+        "Complete should be identified as a dead transition: {dead:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Code Mode: simulate_transition tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn simulate_transition_valid_submit_from_draft() {
+    // SubmitOrder from Draft with 2 items should succeed.
+    let result = code_mode::simulate_transition(ORDER_IOA, "Draft", "SubmitOrder", 2);
+    assert_eq!(
+        result["success"], true,
+        "SubmitOrder from Draft should succeed: {result:#}"
+    );
+    assert_eq!(
+        result["to_status"].as_str().unwrap_or(""), // ci-ok: test assertion
+        "Submitted"
+    );
+    assert_eq!(result["from_status"], "Draft");
+    assert_eq!(result["action"], "SubmitOrder");
+}
+
+#[test]
+fn simulate_transition_invalid_action_from_wrong_state() {
+    // ShipOrder is not valid from Draft.
+    let result = code_mode::simulate_transition(ORDER_IOA, "Draft", "ShipOrder", 0);
+    assert_eq!(
+        result["success"], false,
+        "ShipOrder from Draft should fail: {result:#}"
+    );
+    assert!(
+        result["error"].as_str().is_some(),
+        "should include error reason"
     );
 }
