@@ -432,7 +432,7 @@ pub(super) fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseErr
     // Infix forms: "<var> >= <n>", "<var> > <n>", "<var> <= <n>", "<var> < <n>".
     // Check two-char operators before one-char to avoid mis-splitting ">=" on ">".
     let infix_ops: &[(&str, bool)] = &[
-        (">=", true),  // (operator, is_min_guard)
+        (">=", true), // (operator, is_min_guard)
         ("<=", false),
         (">", true),
         ("<", false),
