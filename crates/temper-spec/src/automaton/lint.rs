@@ -287,6 +287,7 @@ fn guard_var(guard: &Guard) -> Option<&str> {
         Guard::MinCount { var, .. } => Some(var.as_str()),
         Guard::MaxCount { var, .. } => Some(var.as_str()),
         Guard::IsTrue { var } => Some(var.as_str()),
+        Guard::IsFalse { var } => Some(var.as_str()),
         Guard::ListContains { var, .. } => Some(var.as_str()),
         Guard::ListLengthMin { var, .. } => Some(var.as_str()),
         Guard::CrossEntityState { .. } => None,
@@ -313,6 +314,7 @@ fn render_guard(guard: &Guard) -> String {
         Guard::MinCount { var, min } => format!("min {var} {min}"),
         Guard::MaxCount { var, max } => format!("max {var} {max}"),
         Guard::IsTrue { var } => format!("is_true {var}"),
+        Guard::IsFalse { var } => format!("is_false {var}"),
         Guard::ListContains { var, value } => format!("list_contains {var} {value}"),
         Guard::ListLengthMin { var, min } => format!("list_length_min {var} {min}"),
         Guard::CrossEntityState {

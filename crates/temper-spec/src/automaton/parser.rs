@@ -113,6 +113,7 @@ fn format_guards(guards: &[Guard]) -> String {
             Guard::MinCount { var, min } => format!("{var} >= {min}"),
             Guard::MaxCount { var, max } => format!("{var} < {max}"),
             Guard::IsTrue { var } => format!("{var} = TRUE"),
+            Guard::IsFalse { var } => format!("{var} = FALSE"),
             Guard::ListContains { var, value } => format!("{value} \\in {var}"),
             Guard::ListLengthMin { var, min } => format!("Len({var}) >= {min}"),
             Guard::CrossEntityState {

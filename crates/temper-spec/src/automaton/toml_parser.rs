@@ -429,41 +429,56 @@ fn flush_all(
 pub(super) fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseError> {
     let trimmed = value.trim();
 
-    // Infix forms: "<var> > <n>" and "<var> < <n>".
-    if let Some((lhs, rhs)) = trimmed.split_once('>') {
-        let var = lhs.trim();
-        let raw = rhs.trim();
-        if var.is_empty() || raw.is_empty() {
-            return Err(AutomatonParseError::Validation(format!(
-                "invalid guard '{trimmed}' (expected '<var> > <n>')"
-            )));
+    // Infix forms: "<var> >= <n>", "<var> > <n>", "<var> <= <n>", "<var> < <n>".
+    // Check two-char operators before one-char to avoid mis-splitting ">=" on ">".
+    let infix_ops: &[(&str, bool)] = &[
+        (">=", true),  // (operator, is_min_guard)
+        ("<=", false),
+        (">", true),
+        ("<", false),
+    ];
+    for &(op_str, is_min) in infix_ops {
+        if let Some(pos) = trimmed.find(op_str) {
+            let var = trimmed[..pos].trim();
+            let raw = trimmed[pos + op_str.len()..].trim();
+            if var.is_empty() || raw.is_empty() {
+                return Err(AutomatonParseError::Validation(format!(
+                    "invalid guard '{trimmed}' (expected '<var> {op_str} <n>')"
+                )));
+            }
+            let n: usize = raw.parse().map_err(|_| {
+                AutomatonParseError::Validation(format!(
+                    "invalid guard '{trimmed}' (right side must be an integer)"
+                ))
+            })?;
+            if is_min {
+                // ">=" → MinCount { min: n }, ">" → MinCount { min: n + 1 }
+                let min = if op_str == ">=" { n } else { n + 1 };
+                return Ok(Guard::MinCount {
+                    var: var.to_string(),
+                    min,
+                });
+            } else {
+                // "<=" → MaxCount { max: n + 1 }, "<" → MaxCount { max: n }
+                let max = if op_str == "<=" { n + 1 } else { n };
+                return Ok(Guard::MaxCount {
+                    var: var.to_string(),
+                    max,
+                });
+            }
         }
-        let n: usize = raw.parse().map_err(|_| {
-            AutomatonParseError::Validation(format!(
-                "invalid guard '{trimmed}' (right side must be an integer)"
-            ))
-        })?;
-        return Ok(Guard::MinCount {
-            var: var.to_string(),
-            min: n + 1,
-        });
     }
-    if let Some((lhs, rhs)) = trimmed.split_once('<') {
-        let var = lhs.trim();
-        let raw = rhs.trim();
-        if var.is_empty() || raw.is_empty() {
+
+    // Negation prefix: "!var" → IsFalse { var }
+    if let Some(rest) = trimmed.strip_prefix('!') {
+        let var = rest.trim();
+        if var.is_empty() || var.contains(' ') {
             return Err(AutomatonParseError::Validation(format!(
-                "invalid guard '{trimmed}' (expected '<var> < <n>')"
+                "invalid guard '{trimmed}' (expected '!<var>')"
             )));
         }
-        let max: usize = raw.parse().map_err(|_| {
-            AutomatonParseError::Validation(format!(
-                "invalid guard '{trimmed}' (right side must be an integer)"
-            ))
-        })?;
-        return Ok(Guard::MaxCount {
+        return Ok(Guard::IsFalse {
             var: var.to_string(),
-            max,
         });
     }
 
@@ -471,6 +486,7 @@ pub(super) fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseErr
     // - "min <var> <n>"
     // - "max <var> <n>"
     // - "is_true <var>"
+    // - "is_false <var>"
     // - "list_contains <var> <value>"
     // - "list_length_min <var> <n>"
     let parts: Vec<&str> = trimmed.split_whitespace().collect();
@@ -523,6 +539,16 @@ pub(super) fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseErr
                 var: parts[1].to_string(),
             })
         }
+        "is_false" => {
+            if parts.len() != 2 {
+                return Err(AutomatonParseError::Validation(format!(
+                    "invalid guard '{trimmed}' (expected 'is_false <var>')"
+                )));
+            }
+            Ok(Guard::IsFalse {
+                var: parts[1].to_string(),
+            })
+        }
         "list_contains" => {
             if parts.len() < 3 {
                 return Err(AutomatonParseError::Validation(format!(
@@ -548,6 +574,12 @@ pub(super) fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseErr
             Ok(Guard::ListLengthMin {
                 var: parts[1].to_string(),
                 min,
+            })
+        }
+        // Bare identifier: single word with no operators → IsTrue { var }
+        _ if parts.len() == 1 && parts[0].chars().all(|c| c.is_alphanumeric() || c == '_') => {
+            Ok(Guard::IsTrue {
+                var: parts[0].to_string(),
             })
         }
         _ => Err(AutomatonParseError::Validation(format!(
@@ -706,6 +738,10 @@ fn parse_guard_array(value: &str, guards: &mut Vec<Guard>) -> Result<(), Automat
             "is_true" => {
                 let var = fields.get("var").cloned().unwrap_or_default();
                 guards.push(Guard::IsTrue { var });
+            }
+            "is_false" => {
+                let var = fields.get("var").cloned().unwrap_or_default();
+                guards.push(Guard::IsFalse { var });
             }
             "list_contains" => {
                 let var = fields.get("var").cloned().unwrap_or_default();
@@ -983,5 +1019,86 @@ mod tests {
         let input = "name = \"Test\"\ninitial = \"Draft\"";
         let result = join_multiline_arrays(input);
         assert_eq!(result.len(), 2);
+    }
+
+    // ── parse_guard_clause ────────────────────────────────────
+
+    #[test]
+    fn guard_gt() {
+        let g = parse_guard_clause("items > 3").unwrap();
+        assert!(matches!(g, Guard::MinCount { ref var, min: 4 } if var == "items"));
+    }
+
+    #[test]
+    fn guard_gte() {
+        let g = parse_guard_clause("items >= 5").unwrap();
+        assert!(matches!(g, Guard::MinCount { ref var, min: 5 } if var == "items"));
+    }
+
+    #[test]
+    fn guard_lt() {
+        let g = parse_guard_clause("items < 10").unwrap();
+        assert!(matches!(g, Guard::MaxCount { ref var, max: 10 } if var == "items"));
+    }
+
+    #[test]
+    fn guard_lte() {
+        let g = parse_guard_clause("items <= 10").unwrap();
+        assert!(matches!(g, Guard::MaxCount { ref var, max: 11 } if var == "items"));
+    }
+
+    #[test]
+    fn guard_prefix_min() {
+        let g = parse_guard_clause("min items 3").unwrap();
+        assert!(matches!(g, Guard::MinCount { ref var, min: 3 } if var == "items"));
+    }
+
+    #[test]
+    fn guard_prefix_max() {
+        let g = parse_guard_clause("max items 10").unwrap();
+        assert!(matches!(g, Guard::MaxCount { ref var, max: 10 } if var == "items"));
+    }
+
+    #[test]
+    fn guard_is_true() {
+        let g = parse_guard_clause("is_true approved").unwrap();
+        assert!(matches!(g, Guard::IsTrue { ref var } if var == "approved"));
+    }
+
+    #[test]
+    fn guard_list_contains() {
+        let g = parse_guard_clause("list_contains tags vip").unwrap();
+        assert!(
+            matches!(g, Guard::ListContains { ref var, ref value } if var == "tags" && value == "vip")
+        );
+    }
+
+    #[test]
+    fn guard_list_length_min() {
+        let g = parse_guard_clause("list_length_min tags 2").unwrap();
+        assert!(matches!(g, Guard::ListLengthMin { ref var, min: 2 } if var == "tags"));
+    }
+
+    #[test]
+    fn guard_bare_boolean() {
+        let g = parse_guard_clause("has_mutation").unwrap();
+        assert!(matches!(g, Guard::IsTrue { ref var } if var == "has_mutation"));
+    }
+
+    #[test]
+    fn guard_negation_prefix() {
+        let g = parse_guard_clause("!needs_approval").unwrap();
+        assert!(matches!(g, Guard::IsFalse { ref var } if var == "needs_approval"));
+    }
+
+    #[test]
+    fn guard_is_false_prefix() {
+        let g = parse_guard_clause("is_false budget_exhausted").unwrap();
+        assert!(matches!(g, Guard::IsFalse { ref var } if var == "budget_exhausted"));
+    }
+
+    #[test]
+    fn guard_unsupported_syntax() {
+        assert!(parse_guard_clause("two words bad").is_err());
     }
 }

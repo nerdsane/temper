@@ -18,6 +18,7 @@ pub fn evaluate_guard(guard: &ModelGuard, state: &TemperModelState) -> bool {
             val < *max
         }
         ModelGuard::BoolTrue(var) => state.booleans.get(var).copied().unwrap_or(false),
+        ModelGuard::BoolFalse(var) => !state.booleans.get(var).copied().unwrap_or(false),
         ModelGuard::ListContains { var, value } => state
             .lists
             .get(var)

@@ -114,6 +114,9 @@ pub enum Guard {
     /// A boolean variable must be true.
     #[serde(rename = "is_true")]
     IsTrue { var: String },
+    /// A boolean variable must be false.
+    #[serde(rename = "is_false")]
+    IsFalse { var: String },
     /// A list variable must contain a specific value.
     #[serde(rename = "list_contains")]
     ListContains { var: String, value: String },

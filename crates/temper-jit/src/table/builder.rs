@@ -89,6 +89,7 @@ fn convert_guard(guard: ResolvedGuard) -> Guard {
         ResolvedGuard::CounterMin { var, min } => Guard::CounterMin { var, min },
         ResolvedGuard::CounterMax { var, max } => Guard::CounterMax { var, max },
         ResolvedGuard::BoolTrue(var) => Guard::BoolTrue(var),
+        ResolvedGuard::BoolFalse(var) => Guard::BoolFalse(var),
         ResolvedGuard::ListContains { var, value } => Guard::ListContains { var, value },
         ResolvedGuard::ListLengthMin { var, min } => Guard::ListLengthMin { var, min },
         ResolvedGuard::CrossEntityState {

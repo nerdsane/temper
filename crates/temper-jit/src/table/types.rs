@@ -88,6 +88,8 @@ pub enum Guard {
     CounterMax { var: String, max: usize },
     /// A named boolean variable must be true.
     BoolTrue(String),
+    /// A named boolean variable must be false.
+    BoolFalse(String),
     /// A named list variable must contain a specific value.
     ListContains { var: String, value: String },
     /// A named list variable must have at least N elements.
@@ -205,6 +207,7 @@ impl Guard {
             Guard::CounterMin { var, min } => ctx.counters.get(var).copied().unwrap_or(0) >= *min,
             Guard::CounterMax { var, max } => ctx.counters.get(var).copied().unwrap_or(0) < *max,
             Guard::BoolTrue(var) => ctx.booleans.get(var).copied().unwrap_or(false),
+            Guard::BoolFalse(var) => !ctx.booleans.get(var).copied().unwrap_or(false),
             Guard::ListContains { var, value } => {
                 ctx.lists.get(var).is_some_and(|list| list.contains(value))
             }

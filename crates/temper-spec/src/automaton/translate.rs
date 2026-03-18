@@ -28,6 +28,8 @@ pub enum ResolvedGuard {
     CounterMax { var: String, max: usize },
     /// A boolean variable must be true.
     BoolTrue(String),
+    /// A boolean variable must be false.
+    BoolFalse(String),
     /// A list variable must contain a specific value.
     ListContains { var: String, value: String },
     /// A list variable must have at least N elements.
@@ -188,6 +190,7 @@ fn translate_single_guard(guard: &Guard) -> ResolvedGuard {
             max: *max,
         },
         Guard::IsTrue { var } => ResolvedGuard::BoolTrue(var.clone()),
+        Guard::IsFalse { var } => ResolvedGuard::BoolFalse(var.clone()),
         Guard::ListContains { var, value } => ResolvedGuard::ListContains {
             var: var.clone(),
             value: value.clone(),

@@ -94,6 +94,8 @@ pub enum ModelGuard {
     CounterMax { var: String, max: usize },
     /// A boolean variable must be true.
     BoolTrue(String),
+    /// A boolean variable must be false.
+    BoolFalse(String),
     /// A list variable must contain a value.
     ListContains { var: String, value: String },
     /// A list variable must have at least N elements.

@@ -602,6 +602,14 @@ fn encode_guard(
                 Bool::from_bool(false)
             }
         }
+        ModelGuard::BoolFalse(var) => {
+            if let Some((_, z3_var)) = bool_vars.iter().find(|(n, _)| n == var) {
+                z3_var.not()
+            } else {
+                // Unknown boolean defaults to false, so !false = true
+                Bool::from_bool(true)
+            }
+        }
         ModelGuard::ListContains { var, value } => encode_list_contains(var, value, list_vars),
         ModelGuard::ListLengthMin { var, min } => {
             if let Some(len_var) = list_vars.len_vars.get(var) {
