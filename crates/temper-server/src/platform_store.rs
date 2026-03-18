@@ -205,7 +205,9 @@ impl PlatformStore for TursoEventStore {
         self.commit_specs(tenant).await.map_err(|e| e.to_string())
     }
     async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
-        self.delete_uncommitted_specs().await.map_err(|e| e.to_string())
+        self.delete_uncommitted_specs()
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn load_verification_cache(
@@ -531,7 +533,12 @@ mod sim_platform_store {
                 return Err("SimPlatformStore: injected spec read failure".into());
             }
 
-            Ok(inner.specs.values().filter(|s| s.committed).cloned().collect())
+            Ok(inner
+                .specs
+                .values()
+                .filter(|s| s.committed)
+                .cloned()
+                .collect())
         }
 
         async fn delete_spec(&self, tenant: &str, entity_type: &str) -> Result<(), String> {

@@ -248,7 +248,11 @@ impl TursoEventStore {
                 verification_result: row.get::<Option<String>>(8).map_err(storage_error)?,
                 content_hash: row.get::<Option<String>>(9).map_err(storage_error)?,
                 updated_at: row.get::<String>(10).map_err(storage_error)?,
-                committed: row.get::<Option<i64>>(11).map_err(storage_error)?.unwrap_or(1) != 0, // ci-ok: default true for pre-migration rows
+                committed: row
+                    .get::<Option<i64>>(11)
+                    .map_err(storage_error)?
+                    .unwrap_or(1)
+                    != 0, // ci-ok: default true for pre-migration rows
             });
         }
         Ok(out)
@@ -279,5 +283,4 @@ impl TursoEventStore {
             .map_err(storage_error)?;
         Ok(affected as usize)
     }
-
 }

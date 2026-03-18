@@ -311,9 +311,7 @@ pub async fn install_os_app(
         } else if let Some(ref store) = state.server.event_store
             && let Some(ps) = store.platform_store()
         {
-            ps.load_verification_cache(tenant)
-                .await
-                .unwrap_or_default()
+            ps.load_verification_cache(tenant).await.unwrap_or_default()
         } else {
             std::collections::BTreeMap::new()
         };
