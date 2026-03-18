@@ -173,6 +173,52 @@ impl Context {
         })
     }
 
+    /// Make a Connect protocol server-streaming RPC call via the host.
+    ///
+    /// Sends a POST request with JSON body using the Connect protocol.
+    /// The host handles binary frame parsing and returns decoded JSON payloads.
+    /// Returns a vec of JSON strings, one per data frame in the response.
+    pub fn connect_call(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+    ) -> Result<Vec<String>, String> {
+        let headers_json = if headers.is_empty() {
+            String::new()
+        } else {
+            serde_json::to_string(headers).unwrap_or_default()
+        };
+
+        let response = unsafe {
+            let ptr = addr_of!(host::HTTP_BUF) as *const u8;
+            let len = host::host_connect_call(
+                url.as_ptr() as i32,
+                url.len() as i32,
+                headers_json.as_ptr() as i32,
+                headers_json.len() as i32,
+                body.as_ptr() as i32,
+                body.len() as i32,
+                ptr as i32,
+                host::HTTP_BUF_LEN as i32,
+            );
+            if len == -1 {
+                return Err(format!("Connect call failed: {url}"));
+            }
+            if len == -2 {
+                return Err("Connect response too large for buffer".to_string());
+            }
+            if len <= 0 {
+                return Ok(Vec::new());
+            }
+            let slice = core::slice::from_raw_parts(ptr, len as usize);
+            String::from_utf8_lossy(slice).to_string()
+        };
+
+        serde_json::from_str(&response)
+            .map_err(|e| format!("failed to parse Connect response frames: {e}"))
+    }
+
     /// Read a secret value by key from the host.
     pub fn get_secret(&self, key: &str) -> Result<String, String> {
         unsafe {

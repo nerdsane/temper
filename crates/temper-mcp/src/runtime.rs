@@ -14,6 +14,16 @@ pub(crate) struct ClientInfo {
     pub(crate) version: Option<String>,
 }
 
+/// Response from `POST /api/identity/resolve`.
+///
+/// Only the fields needed by the MCP runtime are declared; extra fields
+/// from the server response are silently ignored by serde.
+#[derive(serde::Deserialize)]
+struct ResolvedIdentityResponse {
+    agent_instance_id: String,
+    agent_type_name: String,
+}
+
 /// Thin-client runtime context for the MCP server.
 ///
 /// Connects to an already-running Temper server via `--port` (local) or
@@ -29,6 +39,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) agent_type: Option<String>,
     pub(crate) session_id: Option<String>,
     pub(crate) api_key: Option<String>,
+    pub(crate) identity_tenant: String,
     /// Identity from the MCP client's `initialize` request.
     pub(crate) client_info: ClientInfo,
     /// Timestamp when this MCP session started (used for agent ID derivation).
@@ -56,6 +67,10 @@ impl RuntimeContext {
                 .api_key
                 .clone()
                 .or_else(|| std::env::var("TEMPER_API_KEY").ok()), // determinism-ok: startup config
+            identity_tenant: std::env::var("TEMPER_TENANT")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "default".to_string()), // determinism-ok: startup config
             client_info: ClientInfo::default(),
             started_at: std::time::Instant::now(), // determinism-ok: startup config, used only for agent ID derivation
             sandbox: temper_sandbox::runner::PersistentSandbox::new(&[("temper", "Temper", 1)]),
@@ -64,16 +79,29 @@ impl RuntimeContext {
 
     /// Apply MCP `clientInfo` from the `initialize` handshake.
     ///
-    /// Derives `agent_type` from the client name and `agent_id` from a hash
-    /// of `clientInfo.name`, `clientInfo.version`, hostname, and connection
-    /// timestamp — unless an explicit `agent_id` was already set via CLI.
-    pub(crate) fn apply_client_info(&mut self, info: ClientInfo) {
-        // Always set agent_type from the client name (e.g. "claude-code", "codex-cli").
+    /// If `api_key` is set, resolves the credential against the platform's
+    /// identity registry to get a platform-assigned agent ID and verified
+    /// agent type. Falls back to SHA-256 derivation if resolution fails.
+    ///
+    /// See ADR-0033: Platform-Assigned Agent Identity.
+    pub(crate) async fn apply_client_info(&mut self, info: ClientInfo) {
+        // Try credential-based identity resolution first (ADR-0033).
+        if let Some(ref api_key) = self.api_key {
+            if let Some(resolved) = self.resolve_credential(api_key).await {
+                self.agent_id = Some(resolved.agent_instance_id);
+                self.agent_type = Some(resolved.agent_type_name);
+                self.client_info = info;
+                return;
+            }
+            // Resolution failed — fall back to legacy derivation.
+            tracing::warn!("Credential resolution failed; falling back to SHA-256 ID derivation");
+        }
+
+        // Legacy fallback: derive agent_type from client name, agent_id from hash.
         if let Some(ref name) = info.name {
             self.agent_type = Some(name.clone());
         }
 
-        // Derive agent_id only if not explicitly set via --agent-id CLI flag.
         if self.agent_id.is_none() || self.agent_id.as_deref() == Some("mcp-agent") {
             let client_name = info.name.as_deref().unwrap_or("unknown");
             let client_version = info.version.as_deref().unwrap_or("0");
@@ -88,7 +116,6 @@ impl RuntimeContext {
             let hash_bytes = hasher.finalize();
             let hash: String = hash_bytes.iter().map(|b| format!("{b:02x}")).collect();
 
-            // Prefix with a short client identifier for readability.
             let prefix = match client_name {
                 "claude-code" => "cc",
                 "codex-cli" => "cx",
@@ -98,6 +125,28 @@ impl RuntimeContext {
         }
 
         self.client_info = info;
+    }
+
+    /// Resolve a bearer token against the platform's identity endpoint.
+    async fn resolve_credential(&self, token: &str) -> Option<ResolvedIdentityResponse> {
+        let url = format!("{}/api/identity/resolve", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header("X-Tenant-Id", &self.identity_tenant)
+            .json(&serde_json::json!({
+                "bearer_token": token,
+                "tenant": self.identity_tenant,
+            }))
+            .send()
+            .await
+            .ok()?;
+
+        if !resp.status().is_success() {
+            return None;
+        }
+
+        resp.json::<ResolvedIdentityResponse>().await.ok()
     }
 
     pub(crate) async fn run_execute(&mut self, code: &str) -> Result<String> {

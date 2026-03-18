@@ -106,6 +106,7 @@ async fn create_tenant(
             crate::bootstrap_agent_specs(
                 &state,
                 &req.tenant_id,
+                false,
                 &std::collections::BTreeMap::new(),
             );
             (

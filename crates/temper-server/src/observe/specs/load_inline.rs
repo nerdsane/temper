@@ -101,8 +101,8 @@ pub(crate) async fn handle_load_inline(
             }),
         };
         let o_id = o_record.header.id.clone();
-        // Persist observation to Turso.
-        if let Some(turso) = state.persistent_store() {
+        // Persist observation to Turso (evolution records stay on platform).
+        if let Some(turso) = state.platform_persistent_store() {
             let data_json = serde_json::to_string(&o_record).unwrap_or_default();
             let _ = turso
                 .insert_evolution_record(
@@ -140,8 +140,8 @@ pub(crate) async fn handle_load_inline(
             recommendation: Some(0),
         };
         let a_record_id = a_record.header.id.clone();
-        // Persist analysis to Turso.
-        if let Some(turso) = state.persistent_store() {
+        // Persist analysis to Turso (evolution records stay on platform).
+        if let Some(turso) = state.platform_persistent_store() {
             let data_json = serde_json::to_string(&a_record).unwrap_or_default();
             let _ = turso
                 .insert_evolution_record(
@@ -156,9 +156,9 @@ pub(crate) async fn handle_load_inline(
         }
 
         // Link the PendingDecision to the A-Record for O-A-D chain tracing.
-        // Decisions are persisted to Turso; the evolution_record_id link will be
-        // available when the decision is read back from Turso.
-        if let Some(turso) = state.persistent_store() {
+        // Decisions are persisted to the tenant store; the evolution_record_id
+        // link will be available when the decision is read back from Turso.
+        if let Some(turso) = state.persistent_store_for_tenant(&tenant).await {
             for decision_id in &decision_ids {
                 if let Ok(Some(data_str)) = turso.get_pending_decision(decision_id).await
                     && let Ok(mut pd) =
@@ -268,21 +268,22 @@ pub(crate) async fn handle_load_inline(
         if let Err(e) = cedar_text.parse::<cedar_policy::PolicySet>() {
             tracing::warn!(error = %e, "bundled Cedar policies failed to parse, skipping");
         } else {
-            let Ok(mut policies) = state.tenant_policies.write() else {
-                tracing::error!("tenant_policies lock poisoned, skipping Cedar merge");
-                return result;
-            };
-            let entry = policies.entry(tenant.clone()).or_default();
-            if !entry.is_empty() {
-                entry.push('\n');
+            // Update the in-memory text cache.
+            if let Ok(mut policies) = state.tenant_policies.write() {
+                let entry = policies.entry(tenant.clone()).or_default();
+                if !entry.is_empty() {
+                    entry.push('\n');
+                }
+                entry.push_str(cedar_text);
             }
-            entry.push_str(cedar_text);
-            let mut combined = String::new();
-            for text in policies.values() {
-                combined.push_str(text);
-                combined.push('\n');
-            }
-            if let Err(e) = state.authz.reload_policies(&combined) {
+            // Reload the per-tenant Cedar policy set.
+            let full_text = state
+                .tenant_policies
+                .read()
+                .ok()
+                .and_then(|p| p.get(&tenant).cloned())
+                .unwrap_or_default();
+            if let Err(e) = state.authz.reload_tenant_policies(&tenant, &full_text) {
                 tracing::error!(error = %e, "failed to reload policies with bundled Cedar");
             } else {
                 tracing::info!(tenant = %tenant, "bundled Cedar policies loaded successfully");

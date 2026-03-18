@@ -15,6 +15,8 @@ use temper_runtime::ActorSystem;
 use temper_server::ServerState;
 use temper_server::registry::SpecRegistry;
 
+use temper_server::identity::IdentityResolver;
+
 use crate::protocol::PlatformEvent;
 use crate::spec_store::SpecStore;
 
@@ -41,6 +43,8 @@ pub struct PlatformState {
     pub api_token: Option<String>,
     /// In-memory spec storage for pending tenant deployments.
     pub spec_store: Arc<RwLock<SpecStore>>,
+    /// Agent identity resolver — maps bearer tokens to verified identities.
+    pub identity_resolver: Arc<IdentityResolver>,
 }
 
 /// Default broadcast channel capacity.
@@ -63,6 +67,7 @@ impl PlatformState {
             api_key,
             api_token: None,
             spec_store: Arc::new(RwLock::new(SpecStore::new())),
+            identity_resolver: Arc::new(IdentityResolver::new()),
         }
     }
 
@@ -81,6 +86,7 @@ impl PlatformState {
             api_key,
             api_token: None,
             spec_store: Arc::new(RwLock::new(SpecStore::new())),
+            identity_resolver: Arc::new(IdentityResolver::new()),
         }
     }
 

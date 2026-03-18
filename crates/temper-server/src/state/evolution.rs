@@ -17,7 +17,7 @@ impl ServerState {
         status: Option<&str>,
     ) -> Result<Vec<EvolutionRecordRow>, String> {
         // Prefer Turso when available.
-        if let Some(turso) = self.persistent_store() {
+        if let Some(turso) = self.platform_persistent_store() {
             let rows = turso
                 .list_evolution_records(record_type, status)
                 .await
@@ -77,7 +77,7 @@ impl ServerState {
         &self,
         id: &str,
     ) -> Result<Option<EvolutionRecordRow>, String> {
-        if let Some(turso) = self.persistent_store() {
+        if let Some(turso) = self.platform_persistent_store() {
             let row = turso
                 .get_evolution_record(id)
                 .await
@@ -116,7 +116,7 @@ impl ServerState {
     /// List ranked insights (I-Records) from the first available backend.
     #[instrument(skip_all, fields(otel.name = "evolution.list_ranked_insights"))]
     pub async fn list_ranked_insights(&self) -> Result<Vec<EvolutionRecordRow>, String> {
-        if let Some(turso) = self.persistent_store() {
+        if let Some(turso) = self.platform_persistent_store() {
             let rows = turso.list_ranked_insights().await.map_err(|e| {
                 tracing::warn!(backend = "turso", error = %e, "evolution.store.read");
                 e.to_string()
@@ -154,7 +154,7 @@ impl ServerState {
         derived_from: Option<&str>,
         data_json: &str,
     ) -> Result<(), String> {
-        if let Some(turso) = self.persistent_store() {
+        if let Some(turso) = self.platform_persistent_store() {
             turso
                 .insert_evolution_record(
                     id,

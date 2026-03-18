@@ -18,7 +18,7 @@ impl AgentAdapter for CodexAdapter {
     }
 
     async fn execute(&self, ctx: AdapterContext) -> Result<AdapterResult, AdapterError> {
-        let started = Instant::now();
+        let started = Instant::now(); // determinism-ok: wall-clock timing for external process
 
         let command_name = ctx
             .integration_config
@@ -41,11 +41,11 @@ impl AgentAdapter for CodexAdapter {
             command.env("CODEX_HOME", codex_home);
         }
 
+        // Pass platform-minted credential for identity resolution (ADR-0033).
+        if let Some(ref api_key) = ctx.agent_ctx.agent_api_key {
+            command.env("TEMPER_API_KEY", api_key);
+        }
         command
-            .env(
-                "TEMPER_AGENT_ID",
-                ctx.agent_ctx.agent_id.clone().unwrap_or_default(),
-            )
             .env("TEMPER_RUN_ID", ctx.entity_id.clone())
             .env("TEMPER_TASK_ID", ctx.entity_id.clone())
             .env("TEMPER_WAKE_REASON", ctx.trigger_action.clone());

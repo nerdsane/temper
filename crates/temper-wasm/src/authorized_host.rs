@@ -139,6 +139,24 @@ impl WasmHost for AuthorizedWasmHost {
         }
     }
 
+    async fn connect_call(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+    ) -> Result<Vec<String>, String> {
+        let domain = extract_domain(url);
+        match self
+            .gate
+            .authorize_http_call(domain, "POST", url, &self.ctx)
+        {
+            WasmAuthzDecision::Allow => self.inner.connect_call(url, headers, body).await,
+            WasmAuthzDecision::Deny(reason) => Err(format!(
+                "authorization denied for connect_call to {domain}: {reason}"
+            )),
+        }
+    }
+
     fn get_secret(&self, key: &str) -> Result<String, String> {
         match self.gate.authorize_secret_access(key, &self.ctx) {
             WasmAuthzDecision::Allow => self.inner.get_secret(key),

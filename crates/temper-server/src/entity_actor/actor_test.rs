@@ -282,6 +282,7 @@ async fn replay_skips_schema_mismatched_events() {
 
     let store = Arc::new(crate::event_store::ServerEventStore::Sim(
         SimEventStore::no_faults(42),
+        None,
     ));
     let pid = "default:Order:schema-evo-1";
 

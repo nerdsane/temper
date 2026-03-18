@@ -29,37 +29,52 @@ pub struct InstallResult {
 
 // ── Project Management OS App ──────────────────────────────────────
 
-const PM_ISSUE_IOA: &str = include_str!("../../../os-apps/project-management/issue.ioa.toml");
-const PM_PROJECT_IOA: &str = include_str!("../../../os-apps/project-management/project.ioa.toml");
-const PM_CYCLE_IOA: &str = include_str!("../../../os-apps/project-management/cycle.ioa.toml");
-const PM_COMMENT_IOA: &str = include_str!("../../../os-apps/project-management/comment.ioa.toml");
-const PM_LABEL_IOA: &str = include_str!("../../../os-apps/project-management/label.ioa.toml");
-const PM_CSDL: &str = include_str!("../../../os-apps/project-management/model.csdl.xml");
+const PM_ISSUE_IOA: &str = include_str!("../../../../os-apps/project-management/issue.ioa.toml");
+const PM_PROJECT_IOA: &str =
+    include_str!("../../../../os-apps/project-management/project.ioa.toml");
+const PM_CYCLE_IOA: &str = include_str!("../../../../os-apps/project-management/cycle.ioa.toml");
+const PM_COMMENT_IOA: &str =
+    include_str!("../../../../os-apps/project-management/comment.ioa.toml");
+const PM_LABEL_IOA: &str = include_str!("../../../../os-apps/project-management/label.ioa.toml");
+const PM_CSDL: &str = include_str!("../../../../os-apps/project-management/model.csdl.xml");
 const PM_CEDAR_ISSUE: &str =
-    include_str!("../../../os-apps/project-management/policies/issue.cedar");
+    include_str!("../../../../os-apps/project-management/policies/issue.cedar");
 
 // ── Temper FS OS App ───────────────────────────────────────────────
 
-const FS_FILE_IOA: &str = include_str!("../../../os-apps/temper-fs/specs/file.ioa.toml");
-const FS_DIR_IOA: &str = include_str!("../../../os-apps/temper-fs/specs/directory.ioa.toml");
-const FS_VERSION_IOA: &str = include_str!("../../../os-apps/temper-fs/specs/file_version.ioa.toml");
-const FS_WORKSPACE_IOA: &str = include_str!("../../../os-apps/temper-fs/specs/workspace.ioa.toml");
-const FS_CSDL: &str = include_str!("../../../os-apps/temper-fs/specs/model.csdl.xml");
-const FS_CEDAR_FILE: &str = include_str!("../../../os-apps/temper-fs/policies/file.cedar");
+const FS_FILE_IOA: &str = include_str!("../../../../os-apps/temper-fs/specs/file.ioa.toml");
+const FS_DIR_IOA: &str = include_str!("../../../../os-apps/temper-fs/specs/directory.ioa.toml");
+const FS_VERSION_IOA: &str =
+    include_str!("../../../../os-apps/temper-fs/specs/file_version.ioa.toml");
+const FS_WORKSPACE_IOA: &str =
+    include_str!("../../../../os-apps/temper-fs/specs/workspace.ioa.toml");
+const FS_CSDL: &str = include_str!("../../../../os-apps/temper-fs/specs/model.csdl.xml");
+const FS_CEDAR_FILE: &str = include_str!("../../../../os-apps/temper-fs/policies/file.cedar");
 const FS_CEDAR_WORKSPACE: &str =
-    include_str!("../../../os-apps/temper-fs/policies/workspace.cedar");
+    include_str!("../../../../os-apps/temper-fs/policies/workspace.cedar");
+const FS_CEDAR_WASM: &str = include_str!("../../../../os-apps/temper-fs/policies/wasm.cedar");
 
 // ── Agent Orchestration OS App ────────────────────────────────────
 
 const AO_HEARTBEAT_IOA: &str =
-    include_str!("../../../os-apps/agent-orchestration/specs/heartbeat_run.ioa.toml");
+    include_str!("../../../../os-apps/agent-orchestration/specs/heartbeat_run.ioa.toml");
 const AO_ORG_IOA: &str =
-    include_str!("../../../os-apps/agent-orchestration/specs/organization.ioa.toml");
+    include_str!("../../../../os-apps/agent-orchestration/specs/organization.ioa.toml");
 const AO_BUDGET_IOA: &str =
-    include_str!("../../../os-apps/agent-orchestration/specs/budget_ledger.ioa.toml");
-const AO_CSDL: &str = include_str!("../../../os-apps/agent-orchestration/specs/model.csdl.xml");
+    include_str!("../../../../os-apps/agent-orchestration/specs/budget_ledger.ioa.toml");
+const AO_CSDL: &str = include_str!("../../../../os-apps/agent-orchestration/specs/model.csdl.xml");
 const AO_CEDAR: &str =
-    include_str!("../../../os-apps/agent-orchestration/policies/orchestration.cedar");
+    include_str!("../../../../os-apps/agent-orchestration/policies/orchestration.cedar");
+
+// ── Temper Agent OS App ──────────────────────────────────────────────
+
+const TEMPER_AGENT_IOA: &str =
+    include_str!("../../../../os-apps/temper-agent/specs/temper_agent.ioa.toml");
+const TEMPER_AGENT_CSDL: &str =
+    include_str!("../../../../os-apps/temper-agent/specs/model.csdl.xml");
+const TEMPER_AGENT_CEDAR: &str =
+    include_str!("../../../../os-apps/temper-agent/policies/agent.cedar");
+
 /// Metadata for an OS app in the catalog.
 #[derive(Debug, Clone, Serialize)]
 pub struct OsAppEntry {
@@ -107,6 +122,9 @@ const AO_SPECS: &[(&str, &str)] = &[
     ("BudgetLedger", AO_BUDGET_IOA),
 ];
 
+/// Temper Agent app specs.
+const TEMPER_AGENT_SPECS: &[(&str, &str)] = &[("TemperAgent", TEMPER_AGENT_IOA)];
+
 /// All available OS apps.
 static OS_APP_CATALOG: &[OsAppEntry] = &[
     OsAppEntry {
@@ -127,6 +145,12 @@ static OS_APP_CATALOG: &[OsAppEntry] = &[
         entity_types: &["HeartbeatRun", "Organization", "BudgetLedger"],
         version: "0.1.0",
     },
+    OsAppEntry {
+        name: "temper-agent",
+        description: "Spec-driven agent with LLM loop, sandbox tools, and TemperFS conversation storage",
+        entity_types: &["TemperAgent"],
+        version: "0.1.0",
+    },
 ];
 
 /// List all available OS apps.
@@ -145,12 +169,17 @@ pub fn get_os_app(name: &str) -> Option<OsAppBundle> {
         "temper-fs" => Some(OsAppBundle {
             specs: FS_SPECS,
             csdl: FS_CSDL,
-            cedar_policies: &[FS_CEDAR_FILE, FS_CEDAR_WORKSPACE],
+            cedar_policies: &[FS_CEDAR_FILE, FS_CEDAR_WORKSPACE, FS_CEDAR_WASM],
         }),
         "agent-orchestration" => Some(OsAppBundle {
             specs: AO_SPECS,
             csdl: AO_CSDL,
             cedar_policies: &[AO_CEDAR],
+        }),
+        "temper-agent" => Some(OsAppBundle {
+            specs: TEMPER_AGENT_SPECS,
+            csdl: TEMPER_AGENT_CSDL,
+            cedar_policies: &[TEMPER_AGENT_CEDAR],
         }),
         _ => None,
     }
@@ -262,6 +291,32 @@ pub async fn install_os_app(
             .record_installed_app(tenant, app_name)
             .await
             .map_err(|e| format!("Failed to record app installation: {e}"))?;
+        // Commit all specs atomically after all writes succeed.
+        turso
+            .commit_specs(tenant)
+            .await
+            .map_err(|e| format!("Failed to commit specs: {e}"))?;
+    } else if let Some(ref store) = state.server.event_store
+        && let Some(ps) = store.platform_store()
+    {
+        for (entity_type, ioa_source) in bundle.specs {
+            let hash = temper_store_turso::spec_content_hash(ioa_source);
+            ps.upsert_spec(tenant, entity_type, ioa_source, &merged_csdl, &hash)
+                .await
+                .map_err(|e| format!("Failed to persist spec {entity_type}: {e}"))?;
+        }
+        if let Some(ref policy_text) = combined_policy {
+            ps.upsert_tenant_policy(tenant, policy_text)
+                .await
+                .map_err(|e| format!("Failed to persist Cedar policy: {e}"))?;
+        }
+        ps.record_installed_app(tenant, app_name)
+            .await
+            .map_err(|e| format!("Failed to record app installation: {e}"))?;
+        // Commit all specs atomically after all writes succeed.
+        ps.commit_specs(tenant)
+            .await
+            .map_err(|e| format!("Failed to commit specs: {e}"))?;
     }
 
     // ── Step 2: Bootstrap into memory (verification + registry). ────
@@ -282,6 +337,10 @@ pub async fn install_os_app(
                 .load_verification_cache(tenant)
                 .await
                 .unwrap_or_default()
+        } else if let Some(ref store) = state.server.event_store
+            && let Some(ps) = store.platform_store()
+        {
+            ps.load_verification_cache(tenant).await.unwrap_or_default()
         } else {
             std::collections::BTreeMap::new()
         };
@@ -326,6 +385,5 @@ pub async fn install_os_app(
     })
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests;

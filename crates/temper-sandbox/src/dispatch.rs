@@ -38,8 +38,6 @@ impl<'a> DispatchContext<'a> {
     /// Build the agent identity triple for HTTP requests.
     fn identity(&self) -> AgentIdentity<'a> {
         AgentIdentity {
-            agent_id: self.agent_id,
-            agent_type: self.agent_type,
             session_id: self.session_id,
         }
     }
@@ -389,8 +387,6 @@ async fn dispatch_governance(
             let http = ctx.http.clone();
             let base_url = ctx.base_url.to_string();
             let tenant_str = ctx.tenant.to_string();
-            let agent_id_owned = ctx.agent_id.map(|s| s.to_string());
-            let agent_type_owned = ctx.agent_type.map(|s| s.to_string());
             let session_id_owned = ctx.session_id.map(|s| s.to_string());
             let api_key = ctx.api_key.map(|s| s.to_string());
             let (decision, _outcome) =
@@ -398,14 +394,10 @@ async fn dispatch_governance(
                     let http = http.clone();
                     let base_url = base_url.clone();
                     let tenant_str = tenant_str.clone();
-                    let agent_id_owned = agent_id_owned.clone();
-                    let agent_type_owned = agent_type_owned.clone();
                     let session_id_owned = session_id_owned.clone();
                     let api_key = api_key.clone();
                     async move {
                         let identity = AgentIdentity {
-                            agent_id: agent_id_owned.as_deref(),
-                            agent_type: agent_type_owned.as_deref(),
                             session_id: session_id_owned.as_deref(),
                         };
                         temper_governance_request(

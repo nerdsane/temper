@@ -244,6 +244,12 @@ pub async fn restore_registry_from_turso(
     registry: &mut SpecRegistry,
     turso: &TursoEventStore,
 ) -> Result<usize, String> {
+    // GC uncommitted specs left behind by interrupted install_os_app writes.
+    match turso.delete_uncommitted_specs().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("deleted {n} uncommitted specs during startup recovery"),
+        Err(e) => tracing::warn!("failed to delete uncommitted specs: {e}"),
+    }
     let rows = turso
         .load_specs()
         .await
@@ -278,6 +284,109 @@ pub async fn restore_registry_from_turso(
         },
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
     )
+}
+
+/// Restore a [`SpecRegistry`] from a [`PlatformStore`] (trait-based).
+///
+/// This is the production code path for restoring specs from any platform
+/// store backend (Turso, Sim, etc.). Used by both the CLI bootstrap and
+/// the DST harness — ensuring simulation runs identical code.
+///
+/// Unlike [`restore_registry_from_turso`], this does not restore verification
+/// status or cross-entity constraints (the `PlatformStore` trait returns simpler
+/// `SpecRow` types). Specs are registered with `Pending` verification status.
+pub async fn restore_registry_from_platform_store(
+    registry: &mut SpecRegistry,
+    store: &dyn crate::platform_store::PlatformStore,
+) -> Result<usize, String> {
+    match store.delete_uncommitted_specs().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("deleted {n} uncommitted specs during startup recovery"),
+        Err(e) => tracing::warn!("failed to delete uncommitted specs: {e}"),
+    }
+    let rows = store
+        .load_specs()
+        .await
+        .map_err(|e| format!("Failed to read specs from platform store: {e}"))?;
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    // Group by tenant.
+    let mut grouped: BTreeMap<String, Vec<crate::platform_store::SpecRow>> = BTreeMap::new();
+    for row in rows {
+        grouped.entry(row.tenant.clone()).or_default().push(row);
+    }
+
+    let mut restored_specs = 0usize;
+    // Track specs that failed to register — these are orphans to reconcile.
+    let mut orphaned_specs: Vec<(String, String)> = Vec::new();
+
+    for (tenant, tenant_rows) in &grouped {
+        let csdl_xml = tenant_rows
+            .iter()
+            .find_map(|r| r.csdl_xml.clone())
+            .unwrap_or_default();
+
+        if csdl_xml.trim().is_empty() {
+            tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant with missing CSDL");
+            for row in tenant_rows {
+                orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
+            }
+            continue;
+        }
+
+        let csdl = match parse_csdl(&csdl_xml) {
+            Ok(csdl) => csdl,
+            Err(e) => {
+                tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant with invalid CSDL: {e}");
+                for row in tenant_rows {
+                    orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
+                }
+                continue;
+            }
+        };
+
+        let ioa_pairs: Vec<(&str, &str)> = tenant_rows
+            .iter()
+            .map(|r| (r.entity_type.as_str(), r.ioa_source.as_str()))
+            .collect();
+
+        match registry.try_register_tenant_with_reactions_and_constraints(
+            tenant.as_str(),
+            csdl,
+            csdl_xml,
+            &ioa_pairs,
+            Vec::new(),
+            None,
+            false,
+        ) {
+            Ok(()) => {
+                restored_specs += tenant_rows.len();
+            }
+            Err(e) => {
+                tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant that failed registration: {e}");
+                for row in tenant_rows {
+                    orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
+                }
+            }
+        }
+    }
+
+    // Reconciliation: delete orphaned specs from the store so P1 holds
+    // (every spec in store has a matching registry entry).
+    for (tenant, entity_type) in &orphaned_specs {
+        if let Err(e) = store.delete_spec(tenant, entity_type).await {
+            tracing::warn!(
+                tenant = %tenant,
+                entity_type = %entity_type,
+                "best-effort orphan cleanup failed: {e}"
+            );
+        }
+    }
+
+    Ok(restored_specs)
 }
 
 #[cfg(test)]

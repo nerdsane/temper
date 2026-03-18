@@ -866,10 +866,17 @@ async fn handle_stream_get(
         }
     };
 
-    // 4. Check if entity has content
+    // 4. Check if entity has content (boolean may be in top-level `booleans` map or `fields`)
     let has_content = entity_state
-        .get("has_content")
+        .get("booleans")
+        .and_then(|b| b.get("has_content"))
         .and_then(|v| v.as_bool())
+        .or_else(|| {
+            entity_state
+                .get("fields")
+                .and_then(|f| f.get("has_content"))
+                .and_then(|v| v.as_bool())
+        })
         .unwrap_or(false);
     if !has_content {
         return odata_error(
@@ -933,13 +940,14 @@ async fn handle_stream_get(
         s.take_stream(&response_stream_id).unwrap_or_default()
     };
 
-    // Extract content_type and etag from WASM result or entity state
-    let content_type = entity_state
+    // Extract content_type and etag from entity state fields
+    let fields = entity_state.get("fields").cloned().unwrap_or_default();
+    let content_type = fields
         .get("mime_type")
         .and_then(|v| v.as_str())
         .unwrap_or("application/octet-stream")
         .to_string();
-    let etag = entity_state
+    let etag = fields
         .get("content_hash")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());

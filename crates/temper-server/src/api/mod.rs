@@ -14,7 +14,7 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post, put};
+use axum::routing::{get, patch, post, put};
 use temper_authz::PrincipalKind;
 
 use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
@@ -65,7 +65,7 @@ pub fn build_api_router() -> Router<ServerState> {
             "/tenants/{tenant}/secrets",
             get(secrets::handle_list_secrets),
         )
-        // Policy CRUD (Phase 3)
+        // Policy CRUD
         .route(
             "/tenants/{tenant}/policies",
             get(policies::handle_get_policies).put(policies::handle_put_policies),
@@ -75,9 +75,23 @@ pub fn build_api_router() -> Router<ServerState> {
             post(policies::handle_add_policy_rule),
         )
         .route(
+            "/tenants/{tenant}/policies/list",
+            get(policies::handle_list_policies),
+        )
+        .route(
+            "/tenants/{tenant}/policies/create",
+            post(policies::handle_create_policy),
+        )
+        .route(
+            "/tenants/{tenant}/policies/entry/{policy_id}",
+            patch(policies::handle_patch_policy).delete(policies::handle_delete_policy_entry),
+        )
+        .route(
             "/tenants/{tenant}/policies/suggestions",
             get(handle_policy_suggestions),
         )
+        // Cross-tenant policy listing
+        .route("/policies", get(policies::handle_list_all_policies))
         // Decision approve/deny (Phase 4)
         .route(
             "/tenants/{tenant}/decisions",
@@ -200,20 +214,8 @@ pub(crate) fn validate_and_reload_policies(
     tenant: &str,
     new_tenant_text: &str,
 ) -> Result<(), axum::response::Response> {
-    let combined = {
-        let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
-        let mut all = String::new();
-        for (t, text) in policies.iter() {
-            if *t != tenant {
-                all.push_str(text);
-                all.push('\n');
-            }
-        }
-        all.push_str(new_tenant_text);
-        all
-    };
-
-    if let Err(e) = state.authz.reload_policies(&combined) {
+    // Validate and reload only this tenant's policy set (per-tenant isolation).
+    if let Err(e) = state.authz.reload_tenant_policies(tenant, new_tenant_text) {
         tracing::warn!(error = %e, "policy validation failed");
         return Err((
             StatusCode::BAD_REQUEST,

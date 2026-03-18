@@ -19,16 +19,15 @@ use crate::schema;
 mod authz;
 mod constraints;
 mod event_store;
+mod evolution;
 mod instrumentation;
 mod policy;
+mod secrets;
 mod specs;
-mod trajectory;
-mod wasm;
-
-mod evolution;
-
 #[cfg(test)]
 mod tests;
+mod trajectory;
+mod wasm;
 
 use instrumentation::InstrumentedConnection;
 
@@ -164,6 +163,8 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_POLICIES_TABLE, ())
             .await
             .map_err(storage_error)?;
+        // Migration: add `enabled` column to existing `policies` tables.
+        let _ = conn.execute(schema::ALTER_POLICIES_ADD_ENABLED, ()).await;
         conn.execute(schema::CREATE_TENANT_INSTALLED_APPS_TABLE, ())
             .await
             .map_err(storage_error)?;
@@ -187,9 +188,17 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX, ())
             .await
             .map_err(storage_error)?;
+        conn.execute(schema::CREATE_TENANT_SECRETS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+
+        conn.execute(schema::CREATE_TENANT_SECRETS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
 
         // Specs table extensions — add content_hash column for verification caching.
         let _ = conn.execute(schema::ALTER_SPECS_ADD_CONTENT_HASH, ()).await;
+        let _ = conn.execute(schema::ALTER_SPECS_ADD_COMMITTED, ()).await;
 
         // Trajectory table extensions — ALTER TABLE to add missing columns.
         // SQLite returns an error for duplicate columns, so we ignore failures.
@@ -261,6 +270,8 @@ pub struct TursoSpecRow {
     pub content_hash: Option<String>,
     /// ISO-8601 updated_at timestamp.
     pub updated_at: String,
+    /// Whether this spec has been committed (WAL-style commit flag).
+    pub committed: bool,
 }
 
 /// Row returned by trajectory queries.

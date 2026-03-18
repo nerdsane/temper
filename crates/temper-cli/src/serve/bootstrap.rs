@@ -342,28 +342,27 @@ pub(super) async fn recover_cedar_policies(state: &PlatformState) {
         }
     }
 
-    // Legacy pass: populate from old `tenant_policies` table.
+    // Legacy pass: populate from old `tenant_policies` table (per-tenant reload).
     if !all_policy_rows.is_empty() {
-        let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
         let mut loaded_count = 0usize;
         for (tenant, policy_text) in &all_policy_rows {
             // Validate each tenant's policies individually so one bad tenant
             // doesn't prevent all others from loading.
-            if temper_authz::AuthzEngine::new(policy_text).is_err() {
-                eprintln!("  Warning: skipping invalid Cedar policies for tenant '{tenant}'");
+            if let Err(e) = state
+                .server
+                .authz
+                .reload_tenant_policies(tenant, policy_text)
+            {
+                eprintln!("  Warning: skipping invalid Cedar policies for tenant '{tenant}': {e}");
                 continue;
             }
-            policies.insert(tenant.clone(), policy_text.clone());
+            // Update in-memory text cache.
+            if let Ok(mut policies) = state.server.tenant_policies.write() {
+                policies.insert(tenant.clone(), policy_text.clone());
+            }
             loaded_count += 1;
         }
-        let mut combined = String::new();
-        for text in policies.values() {
-            combined.push_str(text);
-            combined.push('\n');
-        }
-        if let Err(e) = state.server.authz.reload_policies(&combined) {
-            eprintln!("  Warning: failed to reload Cedar policies: {e}");
-        } else if loaded_count > 0 {
+        if loaded_count > 0 {
             println!("  Restored Cedar policies for {loaded_count} tenants.");
         }
     }
@@ -413,15 +412,45 @@ pub(super) async fn recover_wasm_modules(state: &PlatformState) {
     }
 }
 
+/// Phase 7b: Recover encrypted secrets from persistent backend into in-memory cache.
+pub(super) async fn recover_secrets(state: &PlatformState) {
+    if state.server.secrets_vault.is_none() || state.server.event_store.is_none() {
+        return;
+    }
+
+    // Collect known tenants from the registry.
+    let tenants: Vec<String> = {
+        let reg = state.registry.read().unwrap(); // ci-ok: infallible lock
+        reg.tenant_ids()
+            .into_iter()
+            .map(|t| t.as_str().to_string())
+            .collect()
+    };
+
+    let mut total = 0usize;
+    for tenant in &tenants {
+        match state.server.load_tenant_secrets(tenant).await {
+            Ok(count) => total += count,
+            Err(e) => {
+                eprintln!("  Warning: failed to load secrets for tenant '{tenant}': {e}");
+            }
+        }
+    }
+    if total > 0 {
+        println!("  Recovered {total} secrets from database.");
+    }
+}
+
 /// Load the verification cache from Turso for a tenant (hash + verified status).
 ///
+/// Routes to the per-tenant store in TenantRouted mode.
 /// Returns an empty map if no Turso store is available.
 async fn load_verified_cache(
     state: &PlatformState,
     tenant: &str,
 ) -> std::collections::BTreeMap<String, (String, bool)> {
     if let Some(ref store) = state.server.event_store
-        && let Some(turso) = store.platform_turso_store()
+        && let Some(turso) = store.turso_for_tenant(tenant).await
     {
         match turso.load_verification_cache(tenant).await {
             Ok(cache) => cache,
@@ -438,32 +467,35 @@ async fn load_verified_cache(
 /// Phase 8: Bootstrap system tenant and agent specs.
 ///
 /// After verifying (or skipping via cache), persists spec hashes and
-/// verification status to Turso so subsequent boots skip the cascade.
+/// verification status to the per-tenant Turso store so subsequent boots
+/// skip the cascade.
 pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, String)]) {
-    // Resolve the Turso store once for persisting verification results.
-    let turso = state
-        .server
-        .event_store
-        .as_ref()
-        .and_then(|s| s.platform_turso_store());
-
     let sys_cache = load_verified_cache(state, "temper-system").await;
     let sys_hashes = temper_platform::bootstrap_system_tenant(state, &sys_cache);
-    if let Some(turso) = turso {
-        temper_platform::persist_system_verification(turso, &sys_hashes).await;
+    if let Some(ref store) = state.server.event_store
+        && let Some(turso) = store.turso_for_tenant("temper-system").await
+    {
+        temper_platform::persist_system_verification(&turso, &sys_hashes).await;
     }
 
     let default_cache = load_verified_cache(state, "default").await;
-    let default_hashes = temper_platform::bootstrap_agent_specs(state, "default", &default_cache);
-    if let Some(turso) = turso {
-        temper_platform::persist_agent_verification(turso, "default", &default_hashes).await;
+    let default_hashes =
+        temper_platform::bootstrap_agent_specs(state, "default", false, &default_cache);
+    if let Some(ref store) = state.server.event_store
+        && let Some(turso) = store.turso_for_tenant("default").await
+    {
+        temper_platform::persist_agent_verification(&turso, "default", &default_hashes).await;
     }
 
     for (tenant, _dir) in apps {
         let cache = load_verified_cache(state, tenant).await;
-        let hashes = temper_platform::bootstrap_agent_specs(state, tenant, &cache);
-        if let Some(turso) = turso {
-            temper_platform::persist_agent_verification(turso, tenant, &hashes).await;
+        // App tenants already have user specs loaded in Phase 2; merge the
+        // built-in agent OS entities so we do not replace their entity-set map.
+        let hashes = temper_platform::bootstrap_agent_specs(state, tenant, true, &cache);
+        if let Some(ref store) = state.server.event_store
+            && let Some(turso) = store.turso_for_tenant(tenant).await
+        {
+            temper_platform::persist_agent_verification(&turso, tenant, &hashes).await;
         }
     }
     // In TenantRouted mode, bootstrap agent specs for all registered tenants.
@@ -475,9 +507,9 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
     {
         for tenant in tenant_router.connected_tenants().await {
             let cache = load_verified_cache(state, &tenant).await;
-            let hashes = temper_platform::bootstrap_agent_specs(state, &tenant, &cache);
-            if let Some(turso) = turso {
-                temper_platform::persist_agent_verification(turso, &tenant, &hashes).await;
+            let hashes = temper_platform::bootstrap_agent_specs(state, &tenant, true, &cache);
+            if let Some(turso) = store.turso_for_tenant(&tenant).await {
+                temper_platform::persist_agent_verification(&turso, &tenant, &hashes).await;
             }
         }
     }

@@ -19,7 +19,8 @@ permit(
   action in [Action::"MoveToTriage", Action::"MoveToTodo", Action::"SetPriority", Action::"Assign", Action::"AssignPlanner", Action::"Unassign", Action::"Cancel"],
   resource is Issue
 ) when {
-  ["supervisor", "human"].contains(principal.agent_type)
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
 };
 
 // --- Planning: the assigned planner ---
@@ -39,7 +40,8 @@ permit(
   action in [Action::"ApprovePlan", Action::"RejectPlan", Action::"RevisePlan"],
   resource is Issue
 ) when {
-  ["supervisor", "human"].contains(principal.agent_type)
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
 };
 
 // --- Implementation: the assigned implementer ---
@@ -59,7 +61,8 @@ permit(
   action in [Action::"ApproveReview", Action::"RequestChanges"],
   resource is Issue
 ) when {
-  ["supervisor", "human"].contains(principal.agent_type)
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
 };
 
 // --- Reopen & Archive: supervisors and humans ---
@@ -69,7 +72,8 @@ permit(
   action in [Action::"Reopen", Action::"Archive"],
   resource is Issue
 ) when {
-  ["supervisor", "human"].contains(principal.agent_type)
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
 };
 
 // --- Fast-track: supervisor/human can perform role-gated and uncovered actions ---
@@ -88,7 +92,8 @@ permit(
   ],
   resource is Issue
 ) when {
-  ["supervisor", "human"].contains(principal.agent_type)
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
 };
 
 // --- Observe: supervisors and humans can read evolution data ---
@@ -98,5 +103,6 @@ permit(
   action in [Action::"read_evolution", Action::"read_observe", Action::"read_trajectories"],
   resource
 ) when {
-  ["supervisor", "human"].contains(principal.agent_type)
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
 };

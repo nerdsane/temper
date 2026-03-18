@@ -30,7 +30,7 @@ use crate::state::ServerState;
 /// Returns `true` if the policy was written (content changed or new entry),
 /// `false` when the hash matched and no write was needed.
 /// Returns `false` silently (with a `tracing::debug` log) when no Turso store
-/// is configured — callers that need to know should check `state.persistent_store()`.
+/// is configured — callers that need to know should check `state.platform_persistent_store()`.
 #[instrument(skip_all, fields(tenant, policy_id, otel.name = "authz.persist_and_activate_policy"))]
 pub async fn persist_and_activate_policy(
     state: &ServerState,
@@ -39,7 +39,7 @@ pub async fn persist_and_activate_policy(
     cedar_text: &str,
     created_by: &str,
 ) -> bool {
-    let Some(turso) = state.persistent_store() else {
+    let Some(turso) = state.persistent_store_for_tenant(tenant).await else {
         tracing::debug!(
             tenant,
             policy_id,
@@ -134,43 +134,42 @@ pub async fn load_and_activate_tenant_policies(
         return;
     }
 
-    // Concatenate all policy texts for this tenant (oldest first).
-    let mut combined_for_tenant = String::new();
-    for row in &rows {
-        if !combined_for_tenant.is_empty() {
-            combined_for_tenant.push('\n');
-        }
-        combined_for_tenant.push_str(&row.cedar_text);
-    }
+    // Build named policy entries for per-policy PolicyId assignment.
+    let enabled_count = rows.iter().filter(|r| r.enabled).count();
+    let named_policies: Vec<(String, String)> = rows
+        .iter()
+        .filter(|r| r.enabled)
+        .map(|r| (r.policy_id.clone(), r.cedar_text.clone()))
+        .collect();
 
-    // Update in-memory map and rebuild combined Cedar policy set.
-    let Ok(mut policies) = state.tenant_policies.write() else {
-        tracing::error!(
-            tenant,
-            "tenant_policies lock poisoned during policy activation"
-        );
-        return;
-    };
-
-    policies.insert(tenant.to_string(), combined_for_tenant);
-
-    let mut all_combined = String::new();
-    for text in policies.values() {
-        all_combined.push_str(text);
-        all_combined.push('\n');
-    }
-
-    if let Err(e) = state.authz.reload_policies(&all_combined) {
+    // Load into the per-tenant Cedar engine with meaningful PolicyIds
+    // (e.g., "default:os-app:project-management:2" instead of "policy0").
+    if let Err(e) = state
+        .authz
+        .reload_tenant_policies_named(tenant, &named_policies)
+    {
         tracing::warn!(
             error = %e,
             tenant,
             "failed to reload Cedar engine after loading policies from Turso"
         );
-    } else {
-        tracing::info!(
-            tenant,
-            count = rows.len(),
-            "Cedar policies activated from Turso `policies` table"
-        );
+        return;
     }
+
+    // Also update the in-memory text cache for backward compat (GET endpoint,
+    // prospective text building).
+    let combined_for_tenant = state
+        .authz
+        .get_tenant_policy_text(tenant)
+        .unwrap_or_default();
+    if let Ok(mut policies) = state.tenant_policies.write() {
+        policies.insert(tenant.to_string(), combined_for_tenant);
+    }
+
+    tracing::info!(
+        tenant,
+        total = rows.len(),
+        enabled = enabled_count,
+        "Cedar policies activated from Turso `policies` table"
+    );
 }

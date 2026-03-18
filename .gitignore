@@ -67,5 +67,4 @@ scripts/generate-graph-json.js
 .vercel
 .desloppify/
 scorecard.png
-.claude/hooks/session-start-temper.sh
-.claude/worktrees/
+temper-e2e-test.db

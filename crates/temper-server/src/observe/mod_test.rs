@@ -282,7 +282,7 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     // Verify decision status unchanged in Turso.
-    let turso = state.persistent_store().expect("turso configured");
+    let turso = state.platform_persistent_store().expect("turso configured");
     let data_str = turso
         .get_pending_decision(&decision_id)
         .await
@@ -820,7 +820,7 @@ async fn test_evolution_decide_creates_d_record() {
     };
     let data_json = serde_json::to_string(&obs).unwrap();
     state
-        .persistent_store()
+        .platform_persistent_store()
         .expect("turso configured")
         .insert_evolution_record(
             &obs.header.id,
@@ -1139,7 +1139,7 @@ async fn test_load_dir_emits_design_time_events() {
         .unwrap();
 
     // Check that design-time events were persisted to Turso.
-    let turso = state.persistent_store().expect("turso configured");
+    let turso = state.platform_persistent_store().expect("turso configured");
     let events = turso
         .list_design_time_events(None, 1000)
         .await

@@ -38,7 +38,7 @@ pub fn build_single_tenant_state_with_store(
     tenant: &str,
     entities: &[(&str, &str)],
 ) -> ServerState {
-    let store = ServerEventStore::Sim(sim_store);
+    let store = ServerEventStore::Sim(sim_store, None);
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
     registry.register_tenant(tenant, csdl, CSDL_XML.to_string(), entities);
@@ -62,7 +62,7 @@ pub fn build_single_tenant_state(
     entities: &[(&str, &str)],
 ) -> (ServerState, SimEventStore) {
     let sim_store = SimEventStore::no_faults(seed);
-    let store = ServerEventStore::Sim(sim_store.clone());
+    let store = ServerEventStore::Sim(sim_store.clone(), None);
 
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
@@ -84,7 +84,7 @@ pub fn build_two_tenant_state(
     entities_b: &[(&str, &str)],
 ) -> ServerState {
     let sim_store = SimEventStore::no_faults(seed);
-    let store = ServerEventStore::Sim(sim_store);
+    let store = ServerEventStore::Sim(sim_store, None);
 
     let mut registry = SpecRegistry::new();
     let csdl_a = parse_csdl(CSDL_XML).expect("CSDL parse");
@@ -98,6 +98,10 @@ pub fn build_two_tenant_state(
     state.event_store = Some(Arc::new(store));
     state
 }
+
+pub mod platform_harness;
+pub mod platform_invariants;
+pub mod workload_gen;
 
 // ── Dispatch helpers ────────────────────────────────────────────────────
 

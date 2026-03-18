@@ -25,6 +25,8 @@ import type {
   FeatureRequest,
   FeatureRequestDisposition,
   OsAppsResponse,
+  PoliciesResponse,
+  AllPoliciesResponse,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -346,6 +348,72 @@ export function subscribeAllPendingDecisions(onEvent: (decision: PendingDecision
       try { onEvent(JSON.parse(raw) as PendingDecision); } catch { /* ignore parse errors */ }
     },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Policy management endpoints
+// ---------------------------------------------------------------------------
+
+/** List individual policies for a tenant */
+export async function fetchPoliciesList(tenant: string): Promise<PoliciesResponse> {
+  const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/policies/list`;
+  const res = await fetchWithRetry(url, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to list policies: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** List policies across all tenants (admin) */
+export async function fetchAllPolicies(): Promise<AllPoliciesResponse> {
+  const url = `${API_BASE}/api/policies`;
+  const res = await fetchWithRetry(url, { cache: "no-store" });
+  if (!res.ok) throw new ApiError(`Failed to list all policies: ${res.status}`, res.status);
+  return res.json();
+}
+
+/** Toggle a policy's enabled state */
+export async function togglePolicy(tenant: string, policyId: string, enabled: boolean): Promise<void> {
+  const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/policies/entry/${encodeURIComponent(policyId)}`;
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw new ApiError(`Failed to toggle policy: ${res.status}`, res.status);
+}
+
+/** Update a policy's Cedar text */
+export async function updatePolicyText(tenant: string, policyId: string, cedarText: string): Promise<void> {
+  const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/policies/entry/${encodeURIComponent(policyId)}`;
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cedar_text: cedarText }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new ApiError(text || `Failed to update policy: ${res.status}`, res.status);
+  }
+}
+
+/** Delete a policy entry */
+export async function deletePolicy(tenant: string, policyId: string): Promise<void> {
+  const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/policies/entry/${encodeURIComponent(policyId)}`;
+  const res = await fetch(url, { method: "DELETE" });
+  if (!res.ok) throw new ApiError(`Failed to delete policy: ${res.status}`, res.status);
+}
+
+/** Create a new policy entry */
+export async function createPolicy(tenant: string, policyId: string, cedarText: string): Promise<void> {
+  const url = `${API_BASE}/api/tenants/${encodeURIComponent(tenant)}/policies/create`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ policy_id: policyId, cedar_text: cedarText }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new ApiError(text || `Failed to create policy: ${res.status}`, res.status);
+  }
 }
 
 /** Fetch agent list with stats */

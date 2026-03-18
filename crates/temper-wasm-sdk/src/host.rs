@@ -3,11 +3,14 @@
 //! These match the host functions linked by `temper-wasm::engine::link_host_functions`.
 //! SDK users should use the typed wrappers in `context.rs` instead.
 
-/// Buffer size for reading invocation context (8 KB).
-pub const CTX_BUF_LEN: usize = 8192;
+/// Buffer size for reading invocation context (256 KB).
+///
+/// Agent conversation state can grow large (10K+ per turn), so this
+/// needs to accommodate multi-turn entities.
+pub const CTX_BUF_LEN: usize = 262144;
 
-/// Buffer size for HTTP response data (64 KB).
-pub const HTTP_BUF_LEN: usize = 65536;
+/// Buffer size for HTTP response data (512 KB).
+pub const HTTP_BUF_LEN: usize = 524288;
 
 /// Buffer size for secret values (4 KB).
 pub const SECRET_BUF_LEN: usize = 4096;
@@ -42,6 +45,20 @@ unsafe extern "C" {
     pub fn host_http_call(
         method_ptr: i32,
         method_len: i32,
+        url_ptr: i32,
+        url_len: i32,
+        headers_ptr: i32,
+        headers_len: i32,
+        body_ptr: i32,
+        body_len: i32,
+        result_buf_ptr: i32,
+        result_buf_len: i32,
+    ) -> i32;
+
+    /// Make a Connect protocol server-streaming RPC call via the host.
+    /// Returns bytes written to result_buf (JSON array of frame payloads),
+    /// -1 on error, -2 if buffer too small.
+    pub fn host_connect_call(
         url_ptr: i32,
         url_len: i32,
         headers_ptr: i32,

@@ -5,11 +5,13 @@
 //! - Level 2: Deterministic simulation with fault injection
 //! - Level 3: Property-based testing with random action sequences
 
+use temper_spec::csdl::parse_csdl;
 use temper_verify::cascade::{CascadeLevel, VerificationCascade};
 
 const ORDER_IOA: &str = include_str!("../specs/order.ioa.toml");
 const PAYMENT_IOA: &str = include_str!("../specs/payment.ioa.toml");
 const SHIPMENT_IOA: &str = include_str!("../specs/shipment.ioa.toml");
+const MODEL_CSDL: &str = include_str!("../specs/model.csdl.xml");
 
 #[test]
 fn cascade_order_all_levels_pass() {
@@ -132,4 +134,23 @@ fn cascade_shipment_all_levels_pass() {
         "L3 Property Tests should pass"
     );
     assert!(result.all_passed, "Shipment cascade should pass all levels");
+}
+
+#[test]
+fn shipment_bound_action_name_matches_runtime_action() {
+    let csdl = parse_csdl(MODEL_CSDL).expect("ecommerce CSDL should parse");
+    let schema = csdl
+        .schemas
+        .iter()
+        .find(|schema| schema.namespace == "Temper.Example")
+        .expect("Temper.Example schema should exist");
+
+    let action = schema
+        .action("ShipOrder")
+        .expect("shipment bound action should use the runtime action name");
+    assert!(action.is_bound, "shipment action should remain bound");
+    assert!(
+        schema.action("ShipOrderShipment").is_none(),
+        "legacy shipment action name should not reappear"
+    );
 }

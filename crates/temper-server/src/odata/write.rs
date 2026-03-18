@@ -12,6 +12,8 @@ use temper_runtime::tenant::TenantId;
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
 
+use axum::Extension;
+
 use super::bindings::dispatch_bound_action;
 use super::common::{
     check_has_stream_or_400, constraint_violation_response, extract_key, extract_tenant,
@@ -20,6 +22,7 @@ use super::common::{
 };
 use super::constraints::pre_delete_relation_checks;
 use super::response::annotate_entity;
+use crate::identity::ResolvedIdentity;
 use crate::request_context::{AgentContext, extract_agent_context};
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
@@ -153,6 +156,7 @@ fn ensure_entity_exists_or_404(
 #[instrument(skip_all, fields(otel.name = "POST /odata/{path}"))]
 pub async fn handle_odata_post(
     State(state): State<ServerState>,
+    resolved_id: Option<Extension<ResolvedIdentity>>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
     Query(query_params): Query<std::collections::BTreeMap<String, String>>,
@@ -163,6 +167,7 @@ pub async fn handle_odata_post(
         Err(e) => return e.into_response(),
     };
     let agent_ctx = extract_agent_context(&headers);
+    let resolved_identity = resolved_id.map(|Extension(id)| id);
     let await_integration = query_params
         .get("await_integration")
         .map(|v| v == "true")
@@ -284,6 +289,7 @@ pub async fn handle_odata_post(
                 &headers,
                 await_integration,
                 idempotency_key.clone(),
+                resolved_identity.as_ref(),
             )
             .await
         }

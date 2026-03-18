@@ -16,6 +16,8 @@
 //! | `OTLP_ENDPOINT` | OTEL collector base URL (e.g. `http://localhost:4318`) |
 //! | `LOGFIRE_TOKEN` | Logfire write token — auto-sets endpoint + auth header |
 //! | `RUST_LOG` | Log level filter (default: `info`) |
+//! | `TEMPER_TRACE_QUEUE_SIZE` | Max buffered spans before drop (default: 2048, range: 128–32768) |
+//! | `TEMPER_LOG_QUEUE_SIZE` | Max buffered log records before drop (default: 2048, range: 128–32768) |
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -40,12 +42,23 @@ use tracing_subscriber::prelude::*;
 const LOGFIRE_ENDPOINT: &str = "https://logfire-us.pydantic.dev";
 const OTEL_EXPORTER_BUILD_RETRY_ATTEMPTS: usize = 3;
 const OTEL_EXPORTER_RETRY_BASE_DELAY_MS: u64 = 250;
-const TRACE_BATCH_MAX_QUEUE_SIZE: usize = 16_384;
-const TRACE_BATCH_MAX_EXPORT_BATCH_SIZE: usize = 1_024;
+const TRACE_BATCH_MAX_QUEUE_SIZE: usize = 2_048;
+const TRACE_BATCH_MAX_EXPORT_BATCH_SIZE: usize = 512;
 const TRACE_BATCH_SCHEDULE_DELAY_MS: u64 = 1_000;
-const LOG_BATCH_MAX_QUEUE_SIZE: usize = 16_384;
-const LOG_BATCH_MAX_EXPORT_BATCH_SIZE: usize = 1_024;
+const LOG_BATCH_MAX_QUEUE_SIZE: usize = 2_048;
+const LOG_BATCH_MAX_EXPORT_BATCH_SIZE: usize = 512;
 const LOG_BATCH_SCHEDULE_DELAY_MS: u64 = 1_000;
+
+/// Read an OTEL queue-size override from the environment, falling back to the
+/// compiled-in default.  Called once at startup so the `std::env::var` is
+/// acceptable (determinism-ok: read once at init).
+fn queue_size_from_env(var: &str, default: usize) -> usize {
+    std::env::var(var) // determinism-ok: startup config
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+        .clamp(128, 32_768)
+}
 
 #[derive(Clone, Copy, Debug)]
 enum EndpointSource {
@@ -289,8 +302,9 @@ pub fn init_tracing(
             .build()
     })?;
 
+    let trace_queue = queue_size_from_env("TEMPER_TRACE_QUEUE_SIZE", TRACE_BATCH_MAX_QUEUE_SIZE);
     let trace_batch_config = SpanBatchConfigBuilder::default()
-        .with_max_queue_size(TRACE_BATCH_MAX_QUEUE_SIZE)
+        .with_max_queue_size(trace_queue)
         .with_max_export_batch_size(TRACE_BATCH_MAX_EXPORT_BATCH_SIZE)
         .with_scheduled_delay(Duration::from_millis(TRACE_BATCH_SCHEDULE_DELAY_MS))
         .build();
@@ -334,8 +348,9 @@ pub fn init_tracing(
             .build()
     })?;
 
+    let log_queue = queue_size_from_env("TEMPER_LOG_QUEUE_SIZE", LOG_BATCH_MAX_QUEUE_SIZE);
     let log_batch_config = LogBatchConfigBuilder::default()
-        .with_max_queue_size(LOG_BATCH_MAX_QUEUE_SIZE)
+        .with_max_queue_size(log_queue)
         .with_max_export_batch_size(LOG_BATCH_MAX_EXPORT_BATCH_SIZE)
         .with_scheduled_delay(Duration::from_millis(LOG_BATCH_SCHEDULE_DELAY_MS))
         .build();
@@ -382,9 +397,9 @@ pub fn init_tracing(
     tracing::info!(
         endpoint,
         service_name,
-        trace_queue = TRACE_BATCH_MAX_QUEUE_SIZE,
+        trace_queue,
         trace_batch = TRACE_BATCH_MAX_EXPORT_BATCH_SIZE,
-        log_queue = LOG_BATCH_MAX_QUEUE_SIZE,
+        log_queue,
         log_batch = LOG_BATCH_MAX_EXPORT_BATCH_SIZE,
         "OTEL initialised (traces + metrics + logs)"
     );

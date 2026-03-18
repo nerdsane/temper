@@ -69,7 +69,7 @@ pub struct TursoWasmInvocationInsert<'a> {
 pub use metrics::init_metrics;
 pub use router::{TenantRegistryRow, TenantStoreRouter, TenantUserRow};
 pub use store::{
-    AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow, PolicyRow,
-    TursoEventStore, TursoSpecRow, TursoTenantConstraintRow, TursoTrajectoryRow,
+    ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
+    PolicyRow, TursoEventStore, TursoSpecRow, TursoTenantConstraintRow, TursoTrajectoryRow,
     TursoWasmInvocationRow, TursoWasmModuleRow, UnmetIntentAggRow,
 };

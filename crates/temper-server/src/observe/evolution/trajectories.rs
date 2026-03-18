@@ -39,33 +39,77 @@ pub(crate) async fn handle_trajectories(
     let failed_limit = params.failed_limit.unwrap_or(50).min(500);
     let success_filter: Option<bool> = params.success.as_deref().map(|s| s == "true");
 
-    // Query Turso directly (single source of truth).
-    if let Some(turso) = state.persistent_store() {
-        let _tenant_str = tenant_scope.as_ref().map(|t| t.as_str().to_string());
-        match turso
-            .query_trajectory_stats(
-                params.entity_type.as_deref(),
-                params.action.as_deref(),
-                success_filter,
-                failed_limit as i64,
-            )
-            .await
-        {
-            Ok(stats) => {
-                return Ok(Json(serde_json::json!({
-                    "total": stats.total,
-                    "success_count": stats.success_count,
-                    "error_count": stats.error_count,
-                    "success_rate": stats.success_rate,
-                    "by_action": stats.by_action,
-                    "failed_intents": stats.failed_intents,
-                })));
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to query trajectories from Turso");
-                return Err(StatusCode::SERVICE_UNAVAILABLE);
+    // Determine which stores to query: tenant-scoped or fan-out.
+    let stores = if let Some(ref scope) = tenant_scope {
+        match state.persistent_store_for_tenant(scope.as_str()).await {
+            Some(turso) => vec![turso],
+            None => Vec::new(),
+        }
+    } else {
+        state.collect_all_turso_stores().await
+    };
+
+    if !stores.is_empty() {
+        // Aggregate stats across all queried stores.
+        let mut total: u64 = 0;
+        let mut success_count: u64 = 0;
+        let mut error_count: u64 = 0;
+        let mut by_action: std::collections::BTreeMap<String, temper_store_turso::ActionStats> =
+            std::collections::BTreeMap::new();
+        let mut failed_intents = Vec::new();
+
+        for turso in &stores {
+            match turso
+                .query_trajectory_stats(
+                    params.entity_type.as_deref(),
+                    params.action.as_deref(),
+                    success_filter,
+                    failed_limit as i64,
+                )
+                .await
+            {
+                Ok(stats) => {
+                    total += stats.total;
+                    success_count += stats.success_count;
+                    error_count += stats.error_count;
+                    for (action, action_stats) in stats.by_action {
+                        let entry =
+                            by_action
+                                .entry(action)
+                                .or_insert(temper_store_turso::ActionStats {
+                                    total: 0,
+                                    success: 0,
+                                    error: 0,
+                                });
+                        entry.total += action_stats.total;
+                        entry.success += action_stats.success;
+                        entry.error += action_stats.error;
+                    }
+                    failed_intents.extend(stats.failed_intents);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to query trajectories from Turso");
+                }
             }
         }
+
+        let success_rate = if total > 0 {
+            success_count as f64 / total as f64
+        } else {
+            0.0
+        };
+        // Sort and limit failed intents
+        failed_intents.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        failed_intents.truncate(failed_limit);
+
+        return Ok(Json(serde_json::json!({
+            "total": total,
+            "success_count": success_count,
+            "error_count": error_count,
+            "success_rate": success_rate,
+            "by_action": by_action,
+            "failed_intents": failed_intents,
+        })));
     }
 
     // Fallback: empty response when no Turso configured.

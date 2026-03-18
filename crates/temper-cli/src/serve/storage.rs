@@ -132,7 +132,7 @@ pub(super) async fn upsert_loaded_specs_to_turso(
     }
     if let Some(policy_text) = loaded.cedar_policy_text.as_deref() {
         turso
-            .upsert_tenant_policy(tenant, policy_text)
+            .save_policy(tenant, "primary", policy_text, "system")
             .await
             .with_context(|| format!("Failed to persist Cedar policy for {tenant} in Turso"))?;
     }

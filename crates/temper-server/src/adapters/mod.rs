@@ -28,6 +28,13 @@ pub struct AdapterAgentContext {
     pub session_id: Option<String>,
     /// Calling agent type classification.
     pub agent_type: Option<String>,
+    /// Platform-minted API key for credential-based identity resolution.
+    ///
+    /// Set by the adapter dispatch flow when the entity has an `agent_type_id`.
+    /// The adapter passes this to the spawned process via `TEMPER_API_KEY`.
+    /// Never persisted — exists only for the lifetime of the adapter invocation.
+    #[serde(skip)]
+    pub agent_api_key: Option<String>,
 }
 
 /// Full adapter invocation context built from dispatch state.

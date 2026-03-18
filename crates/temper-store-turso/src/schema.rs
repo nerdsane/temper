@@ -159,8 +159,8 @@ CREATE TABLE IF NOT EXISTS tenant_policies (
 ///
 /// Replaces the flat `tenant_policies` table for new write paths.
 /// Multiple policy entries per tenant are supported (e.g. one per approved decision
-/// or one manually-managed "primary" entry).  At boot, all rows for a tenant are
-/// concatenated to reconstruct the effective policy set.
+/// or one manually-managed "primary" entry).  At boot, all enabled rows for a tenant
+/// are concatenated to reconstruct the effective policy set.
 pub const CREATE_POLICIES_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS policies (
     tenant TEXT NOT NULL,
@@ -169,8 +169,14 @@ CREATE TABLE IF NOT EXISTS policies (
     policy_hash TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     created_by TEXT NOT NULL DEFAULT 'system',
+    enabled INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY(tenant, policy_id)
 );";
+
+/// Migration: add `enabled` column to existing `policies` tables.
+/// SQLite returns an error if the column already exists — callers should ignore failures.
+pub const ALTER_POLICIES_ADD_ENABLED: &str =
+    "ALTER TABLE policies ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1";
 
 /// Tracks which OS apps are installed per tenant (workspace).
 ///
@@ -191,6 +197,10 @@ CREATE TABLE IF NOT EXISTS tenant_installed_apps (
 
 /// ALTER TABLE migration: add content_hash to specs table.
 pub const ALTER_SPECS_ADD_CONTENT_HASH: &str = "ALTER TABLE specs ADD COLUMN content_hash TEXT";
+
+/// ALTER TABLE migration: add committed flag to specs table (WAL-style commit pattern).
+pub const ALTER_SPECS_ADD_COMMITTED: &str =
+    "ALTER TABLE specs ADD COLUMN committed INTEGER NOT NULL DEFAULT 1";
 
 /// ALTER TABLE migrations for the `trajectories` table.
 ///
@@ -301,6 +311,22 @@ pub const CREATE_TENANT_USERS_USER_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_tenant_users_user
     ON tenant_users(user_id);";
 
+/// Per-tenant encrypted secret storage.
+///
+/// Mirrors the Postgres `tenant_secrets` table. Ciphertext and nonce are stored
+/// as BLOBs (AES-256-GCM encrypted by [`SecretsVault`]).  Secrets are always
+/// stored in the per-tenant database for proper isolation.
+pub const CREATE_TENANT_SECRETS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS tenant_secrets (
+    tenant TEXT NOT NULL,
+    key_name TEXT NOT NULL,
+    ciphertext BLOB NOT NULL,
+    nonce BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(tenant, key_name)
+);";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +356,7 @@ mod tests {
         assert!(CREATE_EVOLUTION_RECORDS_STATUS_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_DESIGN_TIME_EVENTS_TABLE.contains("IF NOT EXISTS"));
         assert!(CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_TENANT_SECRETS_TABLE.contains("IF NOT EXISTS"));
     }
 
     #[test]

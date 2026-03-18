@@ -114,6 +114,22 @@
         </NavigationProperty>
       </EntityType>
 
+      <EntityType Name="AgentCredential">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="agent_type_id" Type="Edm.String"/>
+        <Property Name="agent_instance_id" Type="Edm.String"/>
+        <Property Name="key_hash" Type="Edm.String"/>
+        <Property Name="key_prefix" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="created_by" Type="Edm.String"/>
+        <Property Name="expires_at" Type="Edm.String"/>
+        <NavigationProperty Name="AgentType" Type="Temper.AgentType" Nullable="true">
+          <ReferentialConstraint Property="agent_type_id" ReferencedProperty="id"/>
+        </NavigationProperty>
+      </EntityType>
+
       <EntityType Name="Policy">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
@@ -124,6 +140,31 @@
         <Property Name="proposed_by" Type="Edm.String"/>
         <Property Name="reason" Type="Edm.String"/>
       </EntityType>
+
+      <Action Name="Issue" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentCredential"/>
+        <Parameter Name="agent_type_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="agent_instance_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="key_hash" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="key_prefix" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="created_by" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="expires_at" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.AgentCredential"/>
+      </Action>
+
+      <Action Name="Rotate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentCredential"/>
+        <Parameter Name="key_hash" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="key_prefix" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.AgentCredential"/>
+      </Action>
+
+      <Action Name="Revoke" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentCredential"/>
+        <ReturnType Type="Temper.AgentCredential"/>
+      </Action>
 
       <EntityContainer Name="Service">
         <EntitySet Name="AgentTypes" EntityType="Temper.AgentType"/>
@@ -147,6 +188,9 @@
           <NavigationPropertyBinding Path="Agent" Target="Agents"/>
         </EntitySet>
         <EntitySet Name="Policies" EntityType="Temper.Policy"/>
+        <EntitySet Name="AgentCredentials" EntityType="Temper.AgentCredential">
+          <NavigationPropertyBinding Path="AgentType" Target="AgentTypes"/>
+        </EntitySet>
       </EntityContainer>
 
     </Schema>

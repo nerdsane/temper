@@ -385,6 +385,34 @@ export interface DecisionsResponse {
   denied_count: number;
 }
 
+// --- Policy types ---
+export type PolicySource = "manual" | "decision" | "os-app" | "migrated-legacy";
+
+export interface PolicyEntry {
+  policy_id: string;
+  tenant: string;
+  cedar_text: string;
+  enabled: boolean;
+  policy_hash: string;
+  created_at: string;
+  created_by: string;
+  source: PolicySource;
+}
+
+export interface PoliciesResponse {
+  tenant: string;
+  policies: PolicyEntry[];
+  total: number;
+  enabled_count: number;
+  disabled_count: number;
+}
+
+export interface AllPoliciesResponse {
+  policies: PolicyEntry[];
+  total: number;
+  by_tenant: Record<string, number>;
+}
+
 // --- Agent types ---
 export interface AgentSummary {
   agent_id: string;

@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Agent" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <EntityType Name="TemperAgent">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Model" Type="Edm.String"/>
+        <Property Name="Provider" Type="Edm.String"/>
+        <Property Name="ConversationFileId" Type="Edm.String"/>
+        <Property Name="WorkspaceId" Type="Edm.String"/>
+        <Property Name="PendingToolCalls" Type="Edm.String"/>
+        <Property Name="TurnCount" Type="Edm.Int64"/>
+        <Property Name="MaxTurns" Type="Edm.String"/>
+        <Property Name="InputTokens" Type="Edm.Int64"/>
+        <Property Name="OutputTokens" Type="Edm.Int64"/>
+        <Property Name="CostCents" Type="Edm.String"/>
+        <Property Name="Result" Type="Edm.String"/>
+        <Property Name="HasResult" Type="Edm.Boolean"/>
+        <Property Name="ErrorMessage" Type="Edm.String"/>
+        <Property Name="SandboxUrl" Type="Edm.String"/>
+        <Property Name="SandboxId" Type="Edm.String"/>
+        <Property Name="FileManifestId" Type="Edm.String"/>
+        <Property Name="Workdir" Type="Edm.String"/>
+        <Property Name="ToolsEnabled" Type="Edm.String"/>
+        <Property Name="SystemPrompt" Type="Edm.String"/>
+        <Property Name="UserMessage" Type="Edm.String"/>
+        <Property Name="Conversation" Type="Edm.String"/>
+      </EntityType>
+
+      <Action Name="Configure" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="system_prompt" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="user_message" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="model" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="provider" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="max_turns" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="tools_enabled" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="workdir" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="sandbox_url" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="Provision" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="SandboxReady" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="sandbox_url" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="sandbox_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="workspace_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="conversation_file_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="file_manifest_id" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="ProcessToolCalls" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="pending_tool_calls" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="conversation" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="input_tokens" Type="Edm.Int64" Nullable="true"/>
+        <Parameter Name="output_tokens" Type="Edm.Int64" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="HandleToolResults" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="pending_tool_calls" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="conversation" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="RecordResult" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="result" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="conversation" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="input_tokens" Type="Edm.Int64" Nullable="true"/>
+        <Parameter Name="output_tokens" Type="Edm.Int64" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="Resume" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="sandbox_url" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="sandbox_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="workspace_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="conversation_file_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="file_manifest_id" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="Fail" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="Cancel" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <EntityContainer Name="Service">
+        <EntitySet Name="TemperAgents" EntityType="Temper.Agent.TemperAgent"/>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

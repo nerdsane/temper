@@ -3,34 +3,26 @@
 //! Free async functions that take explicit parameters instead of being
 //! methods on a context struct. This allows both MCP and agent-runtime
 //! to use them with different context shapes.
+//!
+//! Identity is conveyed exclusively via `Authorization: Bearer` token.
+//! The platform resolves the token to a verified agent identity (ADR-0033).
+//! Self-declared identity headers (`X-Temper-Agent-Type`,
+//! `X-Temper-Principal-Id`) are not sent.
 
 use reqwest::Method;
 use serde_json::Value;
 
 use crate::helpers::{format_authz_denied, format_http_error};
 
-/// Agent identity triple attached to every Temper request.
+/// Agent identity context attached to every Temper request.
 ///
-/// Sent as HTTP headers:
-/// - `X-Temper-Principal-Id` — unique agent instance ID
-/// - `X-Temper-Agent-Type` — agent software classification (e.g. `claude-code`)
-/// - `X-Session-Id` — session grouping
+/// Identity is conveyed via `Authorization: Bearer` token. The platform
+/// resolves the token to a verified agent identity. Session grouping
+/// is sent via `X-Session-Id`.
 #[derive(Debug, Clone, Default)]
 pub struct AgentIdentity<'a> {
-    /// Agent instance ID (becomes `X-Temper-Principal-Id`).
-    pub agent_id: Option<&'a str>,
-    /// Agent software type (becomes `X-Temper-Agent-Type`).
-    pub agent_type: Option<&'a str>,
     /// Session ID (becomes `X-Session-Id`).
     pub session_id: Option<&'a str>,
-}
-
-/// Principal kind to attach to a Temper request.
-enum PrincipalKind {
-    /// Agent principal — standard API caller.
-    Agent,
-    /// Admin/governance principal — elevated privileges.
-    Admin,
 }
 
 /// Process a Temper HTTP response into a `Result<Value, String>`.
@@ -60,7 +52,7 @@ async fn process_response(response: reqwest::Response, url: &str) -> Result<Valu
     Err(format_http_error(status, &text))
 }
 
-/// Send an HTTP request to the Temper server with agent principal headers.
+/// Send an HTTP request to the Temper server.
 #[allow(clippy::too_many_arguments)]
 pub async fn temper_request(
     http: &reqwest::Client,
@@ -73,20 +65,15 @@ pub async fn temper_request(
     body: Option<&Value>,
 ) -> Result<Value, String> {
     send_json(
-        http,
-        base_url,
-        tenant,
-        PrincipalKind::Agent,
-        identity,
-        api_key,
-        method,
-        path,
-        body,
+        http, base_url, tenant, identity, api_key, method, path, body,
     )
     .await
 }
 
-/// Send a governance request (admin principal) to the Temper server.
+/// Send a governance request (admin) to the Temper server.
+///
+/// Uses the same Bearer token authentication. The platform determines
+/// admin privileges from the credential, not from headers.
 #[allow(clippy::too_many_arguments)]
 pub async fn temper_governance_request(
     http: &reqwest::Client,
@@ -99,15 +86,7 @@ pub async fn temper_governance_request(
     body: Option<&Value>,
 ) -> Result<Value, String> {
     send_json(
-        http,
-        base_url,
-        tenant,
-        PrincipalKind::Admin,
-        identity,
-        api_key,
-        method,
-        path,
-        body,
+        http, base_url, tenant, identity, api_key, method, path, body,
     )
     .await
 }
@@ -118,7 +97,6 @@ async fn send_json(
     http: &reqwest::Client,
     base_url: &str,
     tenant: &str,
-    kind: PrincipalKind,
     identity: &AgentIdentity<'_>,
     api_key: Option<&str>,
     method: Method,
@@ -131,27 +109,6 @@ async fn send_json(
         .header("X-Tenant-Id", tenant)
         .header("Accept", "application/json");
 
-    match kind {
-        PrincipalKind::Agent => {
-            if let Some(pid) = identity.agent_id {
-                request = request
-                    .header("X-Temper-Principal-Kind", "agent")
-                    .header("X-Temper-Principal-Id", pid);
-            }
-            // No explicit principal — omit headers entirely so the server
-            // applies its own default (Customer) rather than granting admin.
-        }
-        PrincipalKind::Admin => {
-            let admin_id = identity.agent_id.unwrap_or("governance-admin");
-            request = request
-                .header("X-Temper-Principal-Kind", "admin")
-                .header("X-Temper-Principal-Id", admin_id);
-        }
-    }
-
-    if let Some(at) = identity.agent_type {
-        request = request.header("X-Temper-Agent-Type", at);
-    }
     if let Some(sid) = identity.session_id {
         request = request.header("X-Session-Id", sid);
     }
@@ -194,17 +151,6 @@ pub async fn temper_request_bytes(
         request = request.header("Authorization", format!("Bearer {key}"));
     }
 
-    if let Some(pid) = identity.agent_id {
-        request = request
-            .header("X-Temper-Principal-Kind", "agent")
-            .header("X-Temper-Principal-Id", pid);
-    }
-    // No explicit principal — omit headers entirely so the server
-    // applies its own default (Customer) rather than granting admin.
-
-    if let Some(at) = identity.agent_type {
-        request = request.header("X-Temper-Agent-Type", at);
-    }
     if let Some(sid) = identity.session_id {
         request = request.header("X-Session-Id", sid);
     }

@@ -500,22 +500,41 @@ impl ServerState {
         }
     }
 
-    /// Get a reference to the Turso event store.
+    /// Get a reference to the platform Turso event store.
     ///
     /// Panics if the event store is not configured or is not a Turso backend.
     pub fn turso(&self) -> &temper_store_turso::TursoEventStore {
-        self.persistent_store()
+        self.platform_persistent_store()
             .expect("Turso event store is not configured")
     }
 
-    /// Get an optional reference to the persistent Turso event store.
+    /// Get an optional reference to the **platform** Turso event store.
+    ///
+    /// Only use for system-wide data that stays in the platform DB
+    /// (evolution records, feature requests, tenant registry).
+    /// For tenant-scoped data, use [`persistent_store_for_tenant`].
     ///
     /// Returns `None` when the server is running without Turso (e.g. in-memory
     /// mode or tests). Callers should degrade gracefully to empty results.
-    pub fn persistent_store(&self) -> Option<&temper_store_turso::TursoEventStore> {
+    pub fn platform_persistent_store(&self) -> Option<&temper_store_turso::TursoEventStore> {
         self.event_store
             .as_ref()
             .and_then(|store| store.platform_turso_store())
+    }
+
+    /// Get a Turso store for a specific tenant.
+    ///
+    /// In TenantRouted mode, routes to the per-tenant database.
+    /// In single-DB Turso mode, returns the shared store.
+    /// `temper-system` and `default` tenants route to the platform store.
+    ///
+    /// Returns `None` when the server is running without Turso.
+    pub async fn persistent_store_for_tenant(
+        &self,
+        tenant: &str,
+    ) -> Option<temper_store_turso::TursoEventStore> {
+        let store = self.event_store.as_ref()?;
+        store.turso_for_tenant(tenant).await
     }
 
     /// Find an entity spec by name across all tenants.
@@ -537,90 +556,139 @@ impl ServerState {
 
     /// Load aggregated unmet-intent failure groups from Turso.
     ///
-    /// Returns at most 100 rows (one per entity_type × error group) instead of
-    /// loading thousands of raw trajectory rows.  Returns an empty vec when
-    /// Turso is not configured.
+    /// Uses fan-out across all tenant stores in TenantRouted mode.
+    /// Returns an empty vec when Turso is not configured.
     pub async fn load_unmet_intent_rows_aggregated(
         &self,
     ) -> (
         Vec<temper_store_turso::UnmetIntentAggRow>,
         std::collections::BTreeMap<String, String>,
     ) {
-        let Some(turso) = self.persistent_store() else {
+        let stores = self.collect_all_turso_stores().await;
+        if stores.is_empty() {
             return (Vec::new(), std::collections::BTreeMap::new());
-        };
-        let failures = match turso.load_unmet_intent_rows().await {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to load unmet intent rows from Turso");
-                Vec::new()
+        }
+
+        let mut failures = Vec::new();
+        let mut submitted_specs = std::collections::BTreeMap::new();
+
+        for turso in &stores {
+            match turso.load_unmet_intent_rows().await {
+                Ok(rows) => failures.extend(rows),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load unmet intent rows from Turso");
+                }
             }
-        };
-        let submitted_specs = match turso.load_submit_spec_timestamps().await {
-            Ok(map) => map,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to load submit-spec timestamps from Turso");
-                std::collections::BTreeMap::new()
+            match turso.load_submit_spec_timestamps().await {
+                Ok(map) => submitted_specs.extend(map),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load submit-spec timestamps from Turso");
+                }
             }
-        };
+        }
         (failures, submitted_specs)
     }
 
-    /// Count trajectory rows per tenant using a single SQL aggregate query.
+    /// Count trajectory rows per tenant using fan-out across all stores.
     ///
     /// Returns an empty map when Turso is not configured.
     pub async fn count_trajectories_by_tenant(&self) -> std::collections::BTreeMap<String, u64> {
-        let Some(turso) = self.persistent_store() else {
+        let stores = self.collect_all_turso_stores().await;
+        if stores.is_empty() {
             return std::collections::BTreeMap::new();
-        };
-        match turso.count_trajectories_by_tenant().await {
-            Ok(counts) => counts,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to count trajectories by tenant from Turso");
-                std::collections::BTreeMap::new()
+        }
+
+        let mut counts = std::collections::BTreeMap::new();
+        for turso in &stores {
+            match turso.count_trajectories_by_tenant().await {
+                Ok(c) => {
+                    for (tenant, count) in c {
+                        *counts.entry(tenant).or_insert(0) += count;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to count trajectories by tenant from Turso");
+                }
             }
         }
+        counts
     }
 
     /// Load trajectory entries from Turso, converting to domain TrajectoryEntry.
+    ///
+    /// Uses fan-out across all tenant stores in TenantRouted mode.
     pub async fn load_trajectory_entries(&self, limit: i64) -> Vec<TrajectoryEntry> {
-        let Some(turso) = self.persistent_store() else {
+        let stores = self.collect_all_turso_stores().await;
+        if stores.is_empty() {
             return Vec::new();
-        };
-        match turso.load_recent_trajectories(limit).await {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|r| TrajectoryEntry {
-                    timestamp: r.created_at,
-                    tenant: r.tenant,
-                    entity_type: r.entity_type,
-                    entity_id: r.entity_id,
-                    action: r.action,
-                    success: r.success,
-                    from_status: r.from_status,
-                    to_status: r.to_status,
-                    error: r.error,
-                    agent_id: r.agent_id,
-                    session_id: r.session_id,
-                    authz_denied: r.authz_denied,
-                    denied_resource: r.denied_resource,
-                    denied_module: r.denied_module,
-                    source: r.source.as_deref().and_then(|s| match s {
-                        "Entity" => Some(TrajectorySource::Entity),
-                        "Platform" => Some(TrajectorySource::Platform),
-                        "Authz" => Some(TrajectorySource::Authz),
-                        _ => None,
-                    }),
-                    spec_governed: r.spec_governed,
-                    agent_type: None,
-                    request_body: r.request_body.and_then(|s| serde_json::from_str(&s).ok()),
-                    intent: r.intent,
-                })
-                .collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to load trajectories from Turso");
-                Vec::new()
+        }
+
+        let mut all_entries = Vec::new();
+        for turso in &stores {
+            match turso.load_recent_trajectories(limit).await {
+                Ok(rows) => {
+                    all_entries.extend(rows.into_iter().map(|r| TrajectoryEntry {
+                        timestamp: r.created_at,
+                        tenant: r.tenant,
+                        entity_type: r.entity_type,
+                        entity_id: r.entity_id,
+                        action: r.action,
+                        success: r.success,
+                        from_status: r.from_status,
+                        to_status: r.to_status,
+                        error: r.error,
+                        agent_id: r.agent_id,
+                        session_id: r.session_id,
+                        authz_denied: r.authz_denied,
+                        denied_resource: r.denied_resource,
+                        denied_module: r.denied_module,
+                        source: r.source.as_deref().and_then(|s| match s {
+                            "Entity" => Some(TrajectorySource::Entity),
+                            "Platform" => Some(TrajectorySource::Platform),
+                            "Authz" => Some(TrajectorySource::Authz),
+                            _ => None,
+                        }),
+                        spec_governed: r.spec_governed,
+                        agent_type: None,
+                        request_body: r.request_body.and_then(|s| serde_json::from_str(&s).ok()),
+                        intent: r.intent,
+                    }));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load trajectories from Turso");
+                }
             }
         }
+        // Sort by timestamp descending and limit
+        all_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all_entries.truncate(limit as usize);
+        all_entries
+    }
+
+    /// Collect all Turso stores for fan-out reads.
+    ///
+    /// In single-DB mode, returns just the shared store.
+    /// In TenantRouted mode, returns the platform store + all connected tenant stores.
+    /// Returns an empty vec when Turso is not configured.
+    pub async fn collect_all_turso_stores(&self) -> Vec<temper_store_turso::TursoEventStore> {
+        let Some(store) = self.event_store.as_ref() else {
+            return Vec::new();
+        };
+
+        if let Some(turso) = store.turso_store() {
+            return vec![turso.clone()];
+        }
+
+        if let Some(router) = store.tenant_router() {
+            let mut stores = vec![router.platform_store().clone()];
+            for tid in router.connected_tenants().await {
+                if let Ok(s) = router.store_for_tenant(&tid).await {
+                    stores.push(s);
+                }
+            }
+            return stores;
+        }
+
+        Vec::new()
     }
 }

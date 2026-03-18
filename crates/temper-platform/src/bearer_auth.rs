@@ -1,39 +1,49 @@
 //! Bearer token authentication middleware.
 //!
-//! When `TEMPER_API_KEY` is configured, all HTTP requests must include
-//! `Authorization: Bearer <key>`. When not configured, all requests
-//! pass through (backward compatibility for local development).
+//! Every non-health-check request must include `Authorization: Bearer <key>`.
+//! The middleware resolves agent credentials first, then falls back to the
+//! global `TEMPER_API_KEY` for admin/operator access.
+//!
+//! See ADR-0033: Platform-Assigned Agent Identity.
 
+use crate::state::PlatformState;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
+use temper_runtime::tenant::TenantId;
 
-use crate::state::PlatformState;
-
-/// Axum middleware that validates Bearer token authentication.
+/// Axum middleware that validates Bearer token authentication and resolves
+/// agent identity from credentials.
 ///
-/// Behavior:
-/// - No `api_token` configured → passthrough (local dev backward compat)
-/// - Health check paths `/healthz` and `/tdata` exact → passthrough
-/// - Valid `Authorization: Bearer <token>` → passthrough
-/// - Missing or invalid token → 401 Unauthorized
+/// Resolution order:
+/// 1. Health check paths → passthrough (no auth needed)
+/// 2. No `api_token` configured → passthrough (local dev mode)
+/// 3. Try agent credential resolution → if match, set `ResolvedIdentity` extension
+/// 4. Try global `TEMPER_API_KEY` match → admin/operator access
+/// 5. No match → 401 Unauthorized
 pub async fn bearer_auth_check(
     State(state): State<PlatformState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let Some(ref expected) = state.api_token else {
-        // No API key configured — passthrough.
-        return Ok(next.run(req).await);
-    };
-
     // Allow health checks without auth (Railway probes these paths).
     if req.method() == axum::http::Method::GET
         && (req.uri().path() == "/tdata" || req.uri().path() == "/healthz")
     {
         return Ok(next.run(req).await);
     }
+
+    // Allow identity resolution endpoint without auth — the token in the
+    // request body IS the credential being resolved (self-resolving).
+    if req.method() == axum::http::Method::POST && req.uri().path() == "/api/identity/resolve" {
+        return Ok(next.run(req).await);
+    }
+
+    let Some(ref _expected) = state.api_token else {
+        // No API key configured — passthrough (local dev mode).
+        return Ok(next.run(req).await);
+    };
 
     let Some(auth_header) = req.headers().get("authorization") else {
         return Err(StatusCode::UNAUTHORIZED);
@@ -45,17 +55,36 @@ pub async fn bearer_auth_check(
         return Err(StatusCode::UNAUTHORIZED);
     };
 
-    // Constant-time comparison to prevent timing attacks.
-    if constant_time_eq(token.as_bytes(), expected.as_bytes()) {
-        // Valid API key → authenticated. Do NOT override principal kind —
-        // the caller's identity headers (X-Temper-Principal-Kind etc.) are
-        // authoritative. Overriding to "admin" caused Cedar policy mismatches
-        // where generated approval policies targeted Agent::"id" but the
-        // retried request arrived as Admin::"id".
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    // Step 1: Try to resolve as an agent credential.
+    let tenant = extract_tenant(&req);
+    if let Some(identity) = state
+        .identity_resolver
+        .resolve(&state.server, &tenant, token)
+        .await
+    {
+        // Agent credential resolved — inject into request extensions.
+        req.extensions_mut().insert(identity);
+        return Ok(next.run(req).await);
     }
+
+    // Step 2: Fall back to global API key (admin/operator access).
+    if let Some(ref expected) = state.api_token
+        && constant_time_eq(token.as_bytes(), expected.as_bytes())
+    {
+        return Ok(next.run(req).await);
+    }
+
+    // No match — reject.
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Extract tenant ID from request headers, defaulting to "default".
+fn extract_tenant(req: &Request) -> TenantId {
+    req.headers()
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .map(TenantId::new)
+        .unwrap_or_default()
 }
 
 /// Constant-time byte comparison.

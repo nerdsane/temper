@@ -198,6 +198,8 @@ pub fn generate_cedar_from_matrix(
         PrincipalScope::AgentsOfType => {
             if let Some(ref agent_type) = matrix.agent_type_value {
                 conditions.push(format!("context.agentType == \"{}\"", agent_type));
+                // Require credential-verified identity (ADR-0033).
+                conditions.push("context.agentTypeVerified == true".to_string());
             }
         }
         _ => {}
@@ -293,6 +295,7 @@ mod tests {
             generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m);
         assert!(policy.contains("principal is Agent"));
         assert!(policy.contains("context.agentType == \"claude-code\""));
+        assert!(policy.contains("context.agentTypeVerified == true"));
     }
 
     #[test]

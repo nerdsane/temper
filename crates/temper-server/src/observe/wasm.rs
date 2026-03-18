@@ -282,26 +282,25 @@ pub async fn handle_list_wasm_modules(
     require_observe_auth(&state, &headers, "read_wasm", "WasmModule")?;
     let tenant_scope = observe_tenant_scope(&state, &headers)?;
 
-    // Collect invocation stats — Turso is single source of truth but we
-    // aggregate from load_recent_wasm_invocations; for module list we
-    // just use an empty stats map if Turso is unavailable.
+    // Collect invocation stats via fan-out across all tenant stores.
     let invocation_stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> = {
         let mut stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> =
             std::collections::BTreeMap::new();
-        if let Some(turso) = state.persistent_store()
-            && let Ok(rows) = turso.load_recent_wasm_invocations(10_000).await
-        {
-            for row in rows {
-                let module = row.module_name.clone();
-                let success = row.success;
-                let ts = Some(row.created_at.clone());
-                let (total, s_count, last_ts) = stats.entry(module).or_insert((0, 0, None));
-                *total += 1;
-                if success {
-                    *s_count += 1;
-                }
-                if ts.is_some() {
-                    *last_ts = ts;
+        let stores = state.collect_all_turso_stores().await;
+        for turso in &stores {
+            if let Ok(rows) = turso.load_recent_wasm_invocations(10_000).await {
+                for row in rows {
+                    let module = row.module_name.clone();
+                    let success = row.success;
+                    let ts = Some(row.created_at.clone());
+                    let (total, s_count, last_ts) = stats.entry(module).or_insert((0, 0, None));
+                    *total += 1;
+                    if success {
+                        *s_count += 1;
+                    }
+                    if ts.is_some() {
+                        *last_ts = ts;
+                    }
                 }
             }
         }
@@ -368,8 +367,10 @@ pub async fn handle_list_wasm_invocations(
     require_observe_auth(&state, &headers, "read_wasm", "WasmModule")?;
     let limit = params.limit.unwrap_or(100).min(10_000);
 
-    // Query Turso directly (single source of truth).
-    if let Some(turso) = state.persistent_store() {
+    // Fan-out across all tenant stores.
+    let stores = state.collect_all_turso_stores().await;
+    let mut all_filtered: Vec<serde_json::Value> = Vec::new();
+    for turso in &stores {
         match turso.load_recent_wasm_invocations(limit as i64).await {
             Ok(rows) => {
                 let filtered: Vec<serde_json::Value> = rows
@@ -389,11 +390,7 @@ pub async fn handle_list_wasm_invocations(
                     })
                     .map(|e| serde_json::to_value(&e).unwrap_or_default())
                     .collect();
-                let total = filtered.len();
-                return Ok(Json(WasmInvocationResponse {
-                    invocations: filtered,
-                    total,
-                }));
+                all_filtered.extend(filtered);
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to query WASM invocations from Turso");
@@ -401,9 +398,9 @@ pub async fn handle_list_wasm_invocations(
         }
     }
 
-    // Fallback: empty response when no Turso configured.
+    let total = all_filtered.len();
     Ok(Json(WasmInvocationResponse {
-        invocations: Vec::new(),
-        total: 0,
+        invocations: all_filtered,
+        total,
     }))
 }

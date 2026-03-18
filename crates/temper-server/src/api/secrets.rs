@@ -80,18 +80,17 @@ pub(crate) async fn handle_put_secret(
         }
     };
 
-    // Persist first.
+    // Persist the encrypted secret.
     if let Err(e) = state
         .upsert_secret(&tenant, &key_name, &ciphertext, &nonce)
         .await
     {
-        let status = if is_backend_not_supported_error(&e) {
-            StatusCode::NOT_IMPLEMENTED
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
         tracing::error!(error = %e, "secret persistence failed");
-        return (status, format!("Persistence failed: {e}")).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Persistence failed: {e}"),
+        )
+            .into_response();
     }
 
     // Cache in memory after successful persistence.

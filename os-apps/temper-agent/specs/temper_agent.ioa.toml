@@ -1,0 +1,286 @@
+# TemperAgent Entity — Spec-driven agent loop via IOA state machine.
+#
+# The agent turn cycle is expressed as state transitions with WASM integration
+# triggers. No Rust while loop — the platform's dispatch pipeline drives
+# iteration through callback chaining:
+#   Thinking → (call_llm) → ProcessToolCalls → Executing → (run_tools) →
+#   HandleToolResults → Thinking → ...
+#
+# Conversation history stored in TemperFS (conversation_file_id FK).
+# Budget enforced via turn_count guard. Tools governed by Cedar.
+
+[automaton]
+name = "TemperAgent"
+states = ["Created", "Provisioning", "Thinking", "Executing", "Completed", "Failed", "Cancelled"]
+initial = "Created"
+
+# --- State Variables ---
+
+[[state]]
+name = "model"
+type = "string"
+initial = "claude-sonnet-4-20250514"
+
+[[state]]
+name = "provider"
+type = "string"
+initial = "anthropic"
+
+[[state]]
+name = "conversation_file_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "workspace_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "pending_tool_calls"
+type = "string"
+initial = ""
+
+[[state]]
+name = "turn_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "max_turns"
+type = "string"
+initial = "20"
+
+[[state]]
+name = "input_tokens"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "output_tokens"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "cost_cents"
+type = "string"
+initial = "0"
+
+[[state]]
+name = "result"
+type = "string"
+initial = ""
+
+[[state]]
+name = "has_result"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "error_message"
+type = "string"
+initial = ""
+
+[[state]]
+name = "sandbox_url"
+type = "string"
+initial = ""
+
+[[state]]
+name = "sandbox_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "file_manifest_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "workdir"
+type = "string"
+initial = "/workspace"
+
+[[state]]
+name = "tools_enabled"
+type = "string"
+initial = "read,write,edit,bash"
+
+[[state]]
+name = "system_prompt"
+type = "string"
+initial = ""
+
+[[state]]
+name = "user_message"
+type = "string"
+initial = ""
+
+[[state]]
+name = "conversation"
+type = "string"
+initial = ""
+
+# --- Actions ---
+
+[[action]]
+name = "Configure"
+kind = "input"
+from = ["Created"]
+params = ["system_prompt", "user_message", "model", "provider", "max_turns", "tools_enabled", "workdir", "sandbox_url"]
+hint = "Configure agent with system prompt, user message (task), model, tool settings, and optional sandbox URL."
+
+[[action]]
+name = "Provision"
+kind = "input"
+from = ["Created"]
+to = "Provisioning"
+hint = "Start sandbox provisioning. Triggers provision_sandbox WASM integration."
+effect = [{ type = "trigger", name = "provision_sandbox" }]
+
+[[action]]
+name = "SandboxReady"
+kind = "input"
+from = ["Provisioning"]
+to = "Thinking"
+params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id"]
+hint = "Callback from sandbox provisioner. Sets sandbox connection, TemperFS workspace/file/manifest, and starts think loop."
+effect = [{ type = "trigger", name = "call_llm" }]
+
+[[action]]
+name = "ProcessToolCalls"
+kind = "input"
+from = ["Thinking"]
+to = "Executing"
+params = ["pending_tool_calls", "conversation", "input_tokens", "output_tokens"]
+hint = "LLM returned tool_use blocks. Record token usage, transition to Executing, and run tools."
+effect = [
+  { type = "increment", var = "input_tokens" },
+  { type = "increment", var = "output_tokens" },
+  { type = "trigger", name = "run_tools" }
+]
+
+[[action]]
+name = "HandleToolResults"
+kind = "input"
+from = ["Executing"]
+to = "Thinking"
+params = ["pending_tool_calls", "conversation"]
+guard = "turn_count < 100"
+hint = "Tool results received. Increment turn, transition to Thinking, and call LLM again. Static safety ceiling at 100 turns; dynamic max_turns enforced by llm_caller at runtime."
+effect = [
+  { type = "increment", var = "turn_count" },
+  { type = "trigger", name = "call_llm" }
+]
+
+[[action]]
+name = "RecordResult"
+kind = "input"
+from = ["Thinking"]
+to = "Completed"
+params = ["result", "conversation", "input_tokens", "output_tokens"]
+hint = "LLM returned end_turn. Record token usage, set result, and complete."
+effect = [
+  { type = "increment", var = "input_tokens" },
+  { type = "increment", var = "output_tokens" },
+  { type = "set_bool", var = "has_result", value = "true" }
+]
+
+[[action]]
+name = "Fail"
+kind = "input"
+from = ["Created", "Provisioning", "Thinking", "Executing"]
+to = "Failed"
+params = ["error_message"]
+hint = "Mark agent run as failed."
+
+[[action]]
+name = "Cancel"
+kind = "input"
+from = ["Created", "Provisioning", "Thinking", "Executing"]
+to = "Cancelled"
+hint = "Cancel agent execution."
+
+[[action]]
+name = "Resume"
+kind = "input"
+from = ["Created"]
+to = "Provisioning"
+params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id"]
+hint = "Resume agent from saved state. Transitions to Provisioning for workspace restore."
+effect = [{ type = "trigger", name = "restore_workspace" }]
+
+# --- Invariants ---
+
+[[invariant]]
+name = "CompletedHasResult"
+when = ["Completed"]
+assert = "has_result"
+
+[[invariant]]
+name = "CompletedIsFinal"
+when = ["Completed"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "FailedIsFinal"
+when = ["Failed"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "CancelledIsFinal"
+when = ["Cancelled"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "TurnCountNonNegative"
+when = ["Created", "Provisioning", "Thinking", "Executing", "Completed", "Failed", "Cancelled"]
+assert = "turn_count >= 0"
+
+# --- Integrations ---
+
+[[integration]]
+name = "provision_sandbox"
+trigger = "provision_sandbox"
+type = "wasm"
+module = "sandbox_provisioner"
+on_failure = "Fail"
+
+[integration.config]
+temper_api_url = "http://localhost:3000"
+e2b_api_key = "{secret:e2b_api_key}"
+
+[[integration]]
+name = "call_llm"
+trigger = "call_llm"
+type = "wasm"
+module = "llm_caller"
+on_failure = "Fail"
+
+[integration.config]
+api_key = "{secret:anthropic_api_key}"
+temper_api_url = "http://localhost:3000"
+timeout_secs = "120"
+max_response_bytes = "4194304"
+
+[[integration]]
+name = "run_tools"
+trigger = "run_tools"
+type = "wasm"
+module = "tool_runner"
+on_failure = "Fail"
+
+[integration.config]
+temper_api_url = "http://localhost:3000"
+max_sync_file_bytes = "61440"
+sync_exclude = "__pycache__,node_modules,.git"
+
+[[integration]]
+name = "restore_workspace"
+trigger = "restore_workspace"
+type = "wasm"
+module = "workspace_restorer"
+on_failure = "Fail"
+
+[integration.config]
+temper_api_url = "http://localhost:3000"

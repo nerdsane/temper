@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-exclude = ["wasm-modules/http-fetch", "crates/temper-wasm/tests/fixtures/echo-integration-src"]
+exclude = [
+    "wasm-modules/http-fetch",
+    "crates/temper-wasm/tests/fixtures/echo-integration-src",
+    "os-apps/temper-agent/wasm/llm_caller",
+    "os-apps/temper-agent/wasm/tool_runner",
+    "os-apps/temper-agent/wasm/sandbox_provisioner",
+    "os-apps/temper-fs/wasm/blob_adapter",
+]
 members = [
     "crates/temper-macros",
     "crates/temper-runtime",

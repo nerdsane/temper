@@ -14,6 +14,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "rt", "macros"] }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
+tracing = { workspace = true }
 hostname = { workspace = true }
 
 # pydantic/monty Rust sandbox crate

@@ -71,7 +71,7 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
                     .get("version")
                     .and_then(Value::as_str)
                     .map(String::from);
-                ctx.apply_client_info(ClientInfo { name, version });
+                ctx.apply_client_info(ClientInfo { name, version }).await;
             }
 
             Ok(json!({

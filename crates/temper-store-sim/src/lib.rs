@@ -153,6 +153,31 @@ impl SimEventStore {
         inner.journals.len()
     }
 
+    /// List all persistence IDs that have at least one event.
+    ///
+    /// Used by DST invariant checkers to iterate all entities in the store.
+    pub fn list_all_persistence_ids(&self) -> Vec<String> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner.journals.keys().cloned().collect()
+    }
+
+    /// Temporarily disable all fault injection.
+    ///
+    /// Returns the previous config so it can be restored. Useful for
+    /// restart phases where reads must succeed reliably.
+    pub fn disable_faults(&self) -> SimFaultConfig {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let prev = inner.faults.clone();
+        inner.faults = SimFaultConfig::none();
+        prev
+    }
+
+    /// Restore a previously saved fault config.
+    pub fn restore_faults(&self, faults: SimFaultConfig) {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner.faults = faults;
+    }
+
     /// Dump all events for a persistence_id (for test assertions).
     pub fn dump_journal(&self, persistence_id: &str) -> Vec<PersistenceEnvelope> {
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock

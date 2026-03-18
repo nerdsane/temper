@@ -177,8 +177,22 @@ fn handle_upload(ctx_json: &str) -> i32 {
 fn handle_download(ctx_json: &str) -> i32 {
     let response_stream_id = extract_json_str(ctx_json, "stream_id");
 
-    // Read content_hash from entity_state
-    let content_hash = extract_nested_json_str(ctx_json, "entity_state", "content_hash");
+    // Read content_hash from entity_state.fields.content_hash
+    // entity_state is nested: {"fields":{"content_hash":"sha256:..."},...}
+    let content_hash = {
+        let es = extract_json_object(ctx_json, "entity_state");
+        if es.is_empty() {
+            String::new()
+        } else {
+            let fields = extract_json_object(&es, "fields");
+            if fields.is_empty() {
+                // Fallback: try direct extraction from entity_state
+                extract_json_str(&es, "content_hash")
+            } else {
+                extract_json_str(&fields, "content_hash")
+            }
+        }
+    };
     if content_hash.is_empty() {
         set_error_result("entity has no content_hash");
         return 1;
@@ -365,6 +379,41 @@ fn extract_json_str(json: &str, key: &str) -> String {
             .find(|c: char| c == ',' || c == '}' || c == ' ')
             .unwrap_or(rest.len());
         return rest[..end].to_string();
+    }
+    String::new()
+}
+
+/// Extract a JSON object value as a string (brace-matched).
+fn extract_json_object(json: &str, key: &str) -> String {
+    let search = format!(r#""{key}":"#);
+    if let Some(start) = json.find(&search) {
+        let rest = &json[start + search.len()..];
+        // Skip whitespace
+        let rest = rest.trim_start();
+        if rest.starts_with('{') {
+            // Brace-match to find the end
+            let mut depth = 0;
+            let mut in_string = false;
+            let mut escape_next = false;
+            for (i, c) in rest.char_indices() {
+                if escape_next {
+                    escape_next = false;
+                    continue;
+                }
+                match c {
+                    '\\' if in_string => escape_next = true,
+                    '"' => in_string = !in_string,
+                    '{' if !in_string => depth += 1,
+                    '}' if !in_string => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return rest[..=i].to_string();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
     String::new()
 }

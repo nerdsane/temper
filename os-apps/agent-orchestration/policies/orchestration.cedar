@@ -13,7 +13,8 @@ permit(
   action in [Action::"Schedule", Action::"ApproveBudget"],
   resource is HeartbeatRun
 ) when {
-  ["supervisor", "human"].contains(principal.agent_type)
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
 };
 
 permit(
@@ -29,7 +30,7 @@ permit(
   action in [Action::"Fail", Action::"Cancel"],
   resource is HeartbeatRun
 ) when {
-  resource.AgentId == principal.id || ["supervisor", "human"].contains(principal.agent_type)
+  resource.AgentId == principal.id || (["supervisor", "human"].contains(principal.agent_type) && context.agentTypeVerified == true)
 };
 
 // --- Organization ---
@@ -45,7 +46,8 @@ permit(
   action in [Action::"Configure", Action::"Activate", Action::"AddMember", Action::"RemoveMember", Action::"ResetBudgetCycle", Action::"Pause", Action::"Resume", Action::"Archive"],
   resource is Organization
 ) when {
-  ["supervisor", "human"].contains(principal.agent_type)
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
 };
 
 permit(

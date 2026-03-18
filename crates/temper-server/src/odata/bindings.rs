@@ -7,9 +7,12 @@ use opentelemetry::trace::{Span, Status, Tracer};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
+use temper_authz::SecurityContext;
+
 use super::common::run_write_prechecks;
 use super::response::annotate_entity;
 use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::identity::ResolvedIdentity;
 use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::{DispatchError, DispatchExtOptions, ServerState};
@@ -27,6 +30,7 @@ pub(super) async fn dispatch_bound_action(
     headers: &HeaderMap,
     await_integration: bool,
     idempotency_key: Option<String>,
+    resolved_identity: Option<&ResolvedIdentity>,
 ) -> axum::response::Response {
     let http_start = sim_now();
     let tracer = opentelemetry::global::tracer("temper");
@@ -51,13 +55,30 @@ pub(super) async fn dispatch_bound_action(
         http_span.set_attribute(OtelKeyValue::new("session.id", sid.clone()));
     }
 
-    // Build SecurityContext from X-Temper-* headers, enriched with agent identity.
-    let security_ctx = security_context_from_headers(
-        headers,
-        agent_ctx.agent_id.as_deref(),
-        agent_ctx.session_id.as_deref(),
-        agent_ctx.agent_type.as_deref(),
-    );
+    // Build SecurityContext — prefer credential-resolved identity (ADR-0033).
+    let security_ctx = if let Some(identity) = resolved_identity {
+        http_span.set_attribute(OtelKeyValue::new(
+            "agent.id",
+            identity.agent_instance_id.clone(),
+        ));
+        http_span.set_attribute(OtelKeyValue::new(
+            "agent.type",
+            identity.agent_type_name.clone(),
+        ));
+        SecurityContext::from_resolved_identity(
+            &identity.agent_instance_id,
+            &identity.agent_type_name,
+            agent_ctx.session_id.as_deref(),
+        )
+    } else {
+        // Fallback for global API key (admin/operator) — uses self-declared headers.
+        security_context_from_headers(
+            headers,
+            agent_ctx.agent_id.as_deref(),
+            agent_ctx.session_id.as_deref(),
+            agent_ctx.agent_type.as_deref(),
+        )
+    };
 
     // Default-deny: reject actions on entity types with no registered spec.
     let is_governed = match state.is_entity_type_governed(tenant, entity_type) {

@@ -53,7 +53,7 @@ async fn run_claude(
     ctx: &AdapterContext,
     resume: Option<&str>,
 ) -> Result<AdapterResult, AdapterError> {
-    let started = Instant::now();
+    let started = Instant::now(); // determinism-ok: wall-clock timing for external process
 
     let command_name = ctx
         .integration_config
@@ -91,11 +91,13 @@ async fn run_claude(
         command.current_dir(workdir);
     }
 
+    // Pass platform-minted credential for identity resolution (ADR-0033).
+    // The spawned agent uses this token to authenticate back to Temper,
+    // and the platform resolves it to a verified identity.
+    if let Some(ref api_key) = ctx.agent_ctx.agent_api_key {
+        command.env("TEMPER_API_KEY", api_key);
+    }
     command
-        .env(
-            "TEMPER_AGENT_ID",
-            ctx.agent_ctx.agent_id.clone().unwrap_or_default(),
-        )
         .env("TEMPER_RUN_ID", ctx.entity_id.clone())
         .env("TEMPER_TASK_ID", ctx.entity_id.clone())
         .env("TEMPER_WAKE_REASON", ctx.trigger_action.clone());

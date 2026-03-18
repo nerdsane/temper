@@ -461,7 +461,7 @@
       </Action>
 
       <!-- Shipment Actions -->
-      <Action Name="ShipOrderShipment" IsBound="true">
+      <Action Name="ShipOrder" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Example.Shipment"/>
         <Parameter Name="Carrier" Type="Edm.String" Nullable="false"/>
         <Parameter Name="TrackingNumber" Type="Edm.String" Nullable="false"/>

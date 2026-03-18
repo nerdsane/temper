@@ -7,9 +7,13 @@ use temper_store_turso::{TursoEventStore, TursoWasmInvocationInsert};
 use super::ServerState;
 use super::wasm_invocation_log::WasmInvocationEntry;
 
-enum MetadataBackend<'a> {
-    Postgres(&'a PgPool),
-    Turso(&'a TursoEventStore),
+/// Owned metadata backend for tenant-scoped operations.
+///
+/// `turso_for_tenant()` returns an owned `TursoEventStore` (Arc-based,
+/// clone is cheap), so tenant-scoped operations use this owned variant.
+pub(crate) enum TenantMetadataBackend {
+    Postgres(PgPool),
+    Turso(TursoEventStore),
     Redis,
 }
 
@@ -23,16 +27,24 @@ impl ServerState {
         )
     }
 
-    fn metadata_backend(&self) -> Option<MetadataBackend<'_>> {
+    /// Return a tenant-scoped metadata backend.
+    ///
+    /// In TenantRouted mode, routes to the per-tenant database.
+    /// In single-DB Turso mode, returns the shared store.
+    /// In Postgres mode, returns the shared pool (RLS handles isolation).
+    pub(crate) async fn metadata_backend_for_tenant(
+        &self,
+        tenant: &str,
+    ) -> Option<TenantMetadataBackend> {
         let store = self.event_store.as_ref()?;
         if let Some(pool) = store.postgres_pool() {
-            return Some(MetadataBackend::Postgres(pool));
+            return Some(TenantMetadataBackend::Postgres(pool.clone()));
         }
-        if let Some(turso) = store.platform_turso_store() {
-            return Some(MetadataBackend::Turso(turso));
+        if let Some(turso) = store.turso_for_tenant(tenant).await {
+            return Some(TenantMetadataBackend::Turso(turso));
         }
         if store.redis_store().is_some() {
-            Some(MetadataBackend::Redis)
+            Some(TenantMetadataBackend::Redis)
         } else {
             None
         }
@@ -46,12 +58,12 @@ impl ServerState {
         wasm_bytes: &[u8],
         sha256_hash: &str,
     ) -> Result<(), String> {
-        let Some(backend) = self.metadata_backend() else {
+        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
             return Ok(());
         };
 
         match backend {
-            MetadataBackend::Postgres(pool) => {
+            TenantMetadataBackend::Postgres(pool) => {
                 sqlx::query(
                     "INSERT INTO wasm_modules (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at) \
                      VALUES ($1, $2, $3, $4, 1, $5, now()) \
@@ -67,18 +79,18 @@ impl ServerState {
                 .bind(wasm_bytes)
                 .bind(sha256_hash)
                 .bind(wasm_bytes.len() as i32)
-                .execute(pool)
+                .execute(&pool)
                 .await
                 .map(|_| ())
                 .map_err(|e| format!("failed to upsert WASM module {tenant}/{module_name}: {e}"))
             }
-            MetadataBackend::Turso(turso) => turso
+            TenantMetadataBackend::Turso(turso) => turso
                 .upsert_wasm_module(tenant, module_name, wasm_bytes, sha256_hash)
                 .await
                 .map_err(|e| {
                     format!("failed to upsert WASM module {tenant}/{module_name} in turso: {e}")
                 }),
-            MetadataBackend::Redis => Err(Self::redis_ephemeral_error("WASM module persistence")),
+            TenantMetadataBackend::Redis => Err(Self::redis_ephemeral_error("WASM module persistence")),
         }
     }
 
@@ -88,30 +100,32 @@ impl ServerState {
         tenant: &str,
         module_name: &str,
     ) -> Result<bool, String> {
-        let Some(backend) = self.metadata_backend() else {
+        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
             return Ok(false);
         };
 
         match backend {
-            MetadataBackend::Postgres(pool) => {
+            TenantMetadataBackend::Postgres(pool) => {
                 let result =
                     sqlx::query("DELETE FROM wasm_modules WHERE tenant = $1 AND module_name = $2")
                         .bind(tenant)
                         .bind(module_name)
-                        .execute(pool)
+                        .execute(&pool)
                         .await
                         .map_err(|e| {
                             format!("failed to delete WASM module {tenant}/{module_name}: {e}")
                         })?;
                 Ok(result.rows_affected() > 0)
             }
-            MetadataBackend::Turso(turso) => turso
+            TenantMetadataBackend::Turso(turso) => turso
                 .delete_wasm_module(tenant, module_name)
                 .await
                 .map_err(|e| {
                     format!("failed to delete WASM module {tenant}/{module_name} in turso: {e}")
                 }),
-            MetadataBackend::Redis => Err(Self::redis_ephemeral_error("WASM module deletion")),
+            TenantMetadataBackend::Redis => {
+                Err(Self::redis_ephemeral_error("WASM module deletion"))
+            }
         }
     }
 
@@ -154,8 +168,8 @@ impl ServerState {
             return Ok(());
         }
 
-        // Turso path.
-        if let Some(turso) = store.platform_turso_store() {
+        // Turso path (tenant-routed).
+        if let Some(turso) = store.turso_for_tenant(&entry.tenant).await {
             turso
                 .persist_wasm_invocation(&TursoWasmInvocationInsert {
                     tenant: &entry.tenant,

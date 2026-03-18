@@ -128,11 +128,62 @@ impl SecurityContext {
         }
     }
 
-    /// Enrich security context with agent identity headers.
+    /// Construct security context from a platform-resolved agent identity.
     ///
-    /// If the principal is anonymous and an agent_id is present, promotes
-    /// the principal kind to `Agent` with role `"wasm_module"`.
-    /// Merges agent_id and session_id into `context_attrs` for Cedar evaluation.
+    /// All identity fields come from the credential registry — never from
+    /// self-declared headers. Sets `agentTypeVerified = true`.
+    ///
+    /// See ADR-0033: Platform-Assigned Agent Identity.
+    pub fn from_resolved_identity(
+        agent_instance_id: &str,
+        agent_type_name: &str,
+        session_id: Option<&str>,
+    ) -> Self {
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "agentTypeVerified".to_string(),
+            serde_json::Value::Bool(true),
+        );
+
+        let mut context_attrs = HashMap::new();
+        context_attrs.insert(
+            "agentId".to_string(),
+            serde_json::Value::String(agent_instance_id.to_string()),
+        );
+        context_attrs.insert(
+            "agentType".to_string(),
+            serde_json::Value::String(agent_type_name.to_string()),
+        );
+        context_attrs.insert(
+            "agentTypeVerified".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        if let Some(sid) = session_id {
+            context_attrs.insert(
+                "sessionId".to_string(),
+                serde_json::Value::String(sid.to_string()),
+            );
+        }
+
+        SecurityContext {
+            principal: Principal {
+                id: agent_instance_id.to_string(),
+                kind: PrincipalKind::Agent,
+                role: None,
+                acting_for: None,
+                agent_type: Some(agent_type_name.to_string()),
+                attributes,
+            },
+            context_attrs,
+            correlation_id: uuid::Uuid::now_v7().to_string(),
+        }
+    }
+
+    /// Enrich security context with agent identity from self-declared headers.
+    ///
+    /// **Deprecated**: Use `from_resolved_identity()` for credential-based identity.
+    /// This method is retained only for the global API key path (admin/operator access)
+    /// where no agent credential exists.
     pub fn with_agent_context(
         mut self,
         agent_id: Option<&str>,
@@ -166,6 +217,15 @@ impl SecurityContext {
             );
             self.principal.agent_type = Some(at.to_string());
         }
+        // Mark as unverified — identity is self-declared, not credential-resolved.
+        self.principal.attributes.insert(
+            "agentTypeVerified".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        self.context_attrs.insert(
+            "agentTypeVerified".to_string(),
+            serde_json::Value::Bool(false),
+        );
         self
     }
 }

@@ -2,7 +2,7 @@ use sqlx::types::Json;
 use temper_store_turso::TursoSpecVerificationUpdate;
 
 use super::super::ServerState;
-use super::MetadataBackend;
+use super::TenantMetadataBackend;
 use crate::registry::EntityVerificationResult;
 
 impl ServerState {
@@ -14,12 +14,12 @@ impl ServerState {
         ioa_source: &str,
         csdl_xml: &str,
     ) -> Result<(), String> {
-        let Some(backend) = self.metadata_backend() else {
+        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
             return Ok(());
         };
 
         match backend {
-            MetadataBackend::Postgres(pool) => {
+            TenantMetadataBackend::Postgres(pool) => {
                 sqlx::query(
                     "INSERT INTO specs \
                      (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, updated_at) \
@@ -39,19 +39,19 @@ impl ServerState {
                 .bind(entity_type)
                 .bind(ioa_source)
                 .bind(csdl_xml)
-                .execute(pool)
+                .execute(&pool)
                 .await
                 .map(|_| ())
                 .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in postgres: {e}"))
             }
-            MetadataBackend::Turso(turso) => {
+            TenantMetadataBackend::Turso(turso) => {
                 let hash = temper_store_turso::spec_content_hash(ioa_source);
                 turso
                     .upsert_spec(tenant, entity_type, ioa_source, csdl_xml, &hash)
                     .await
                     .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in turso: {e}"))
             }
-            MetadataBackend::Redis => Err(Self::redis_ephemeral_error("Spec source persistence")),
+            TenantMetadataBackend::Redis => Err(Self::redis_ephemeral_error("Spec source persistence")),
         }
     }
 
@@ -61,12 +61,12 @@ impl ServerState {
         tenant: &str,
         cross_invariants_toml: Option<&str>,
     ) -> Result<(), String> {
-        let Some(backend) = self.metadata_backend() else {
+        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
             return Ok(());
         };
 
         match backend {
-            MetadataBackend::Postgres(pool) => {
+            TenantMetadataBackend::Postgres(pool) => {
                 if let Some(source) = cross_invariants_toml {
                     sqlx::query(
                         "INSERT INTO tenant_constraints (tenant, cross_invariants_toml, version, updated_at) \
@@ -78,13 +78,13 @@ impl ServerState {
                     )
                     .bind(tenant)
                     .bind(source)
-                    .execute(pool)
+                    .execute(&pool)
                     .await
                     .map_err(|e| format!("failed to upsert tenant constraints for {tenant}: {e}"))?;
                 } else {
                     sqlx::query("DELETE FROM tenant_constraints WHERE tenant = $1")
                         .bind(tenant)
-                        .execute(pool)
+                        .execute(&pool)
                         .await
                         .map_err(|e| {
                             format!("failed to clear tenant constraints for {tenant}: {e}")
@@ -92,7 +92,7 @@ impl ServerState {
                 }
                 Ok(())
             }
-            MetadataBackend::Turso(turso) => {
+            TenantMetadataBackend::Turso(turso) => {
                 if let Some(source) = cross_invariants_toml {
                     turso
                         .upsert_tenant_constraints(tenant, source)
@@ -109,7 +109,7 @@ impl ServerState {
                 }
                 Ok(())
             }
-            MetadataBackend::Redis => {
+            TenantMetadataBackend::Redis => {
                 Err(Self::redis_ephemeral_error("Tenant constraint persistence"))
             }
         }
@@ -123,7 +123,7 @@ impl ServerState {
         status: &str,
         result: Option<&EntityVerificationResult>,
     ) -> Result<(), String> {
-        let Some(backend) = self.metadata_backend() else {
+        let Some(backend) = self.metadata_backend_for_tenant(tenant).await else {
             return Ok(());
         };
 
@@ -138,7 +138,7 @@ impl ServerState {
         };
 
         match backend {
-            MetadataBackend::Postgres(pool) => {
+            TenantMetadataBackend::Postgres(pool) => {
                 sqlx::query(
                     "UPDATE specs SET \
                          verified = $3, \
@@ -156,7 +156,7 @@ impl ServerState {
                 .bind(levels_passed)
                 .bind(levels_total)
                 .bind(verification_result.map(Json))
-                .execute(pool)
+                .execute(&pool)
                 .await
                 .map(|_| ())
                 .map_err(|e| {
@@ -165,7 +165,7 @@ impl ServerState {
                     )
                 })
             }
-            MetadataBackend::Turso(turso) => {
+            TenantMetadataBackend::Turso(turso) => {
                 let result_json = verification_result
                     .as_ref()
                     .and_then(|v| serde_json::to_string(v).ok());
@@ -188,7 +188,7 @@ impl ServerState {
                         )
                     })
             }
-            MetadataBackend::Redis => Err(Self::redis_ephemeral_error("Spec verification persistence")),
+            TenantMetadataBackend::Redis => Err(Self::redis_ephemeral_error("Spec verification persistence")),
         }
     }
 }
