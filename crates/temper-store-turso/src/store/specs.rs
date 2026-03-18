@@ -28,12 +28,13 @@ impl TursoEventStore {
         // When content_hash matches the existing row, keep verification intact.
         // Otherwise reset to pending so the cascade re-runs.
         conn.execute(
-            "INSERT INTO specs (tenant, entity_type, ioa_source, csdl_xml, content_hash, version, verified, verification_status, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, 'pending', datetime('now'))
+            "INSERT INTO specs (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, 0, 'pending', datetime('now'))
              ON CONFLICT (tenant, entity_type) DO UPDATE SET
                  ioa_source = excluded.ioa_source,
                  csdl_xml = excluded.csdl_xml,
                  content_hash = excluded.content_hash,
+                 committed = 0,
                  version = specs.version + 1,
                  verified = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.verified ELSE 0 END,
                  verification_status = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.verification_status ELSE 'pending' END,
@@ -218,8 +219,9 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
-                        levels_passed, levels_total, verification_result, content_hash, updated_at \
+                        levels_passed, levels_total, verification_result, content_hash, updated_at, committed \
                  FROM specs \
+                 WHERE committed = 1 \
                  ORDER BY tenant, entity_type",
                 (),
             )
@@ -246,8 +248,36 @@ impl TursoEventStore {
                 verification_result: row.get::<Option<String>>(8).map_err(storage_error)?,
                 content_hash: row.get::<Option<String>>(9).map_err(storage_error)?,
                 updated_at: row.get::<String>(10).map_err(storage_error)?,
+                committed: row.get::<Option<i64>>(11).map_err(storage_error)?.unwrap_or(1) != 0, // ci-ok: default true for pre-migration rows
             });
         }
         Ok(out)
     }
+
+    /// Mark all uncommitted specs for a tenant as committed.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.commit_specs"))]
+    pub async fn commit_specs(&self, tenant: &str) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.commit_specs");
+        let conn = self.configured_connection().await?;
+        conn.execute(
+            "UPDATE specs SET committed = 1, updated_at = datetime('now') WHERE tenant = ?1",
+            params![tenant],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Delete all uncommitted specs across all tenants.
+    #[instrument(skip_all, fields(otel.name = "turso.delete_uncommitted_specs"))]
+    pub async fn delete_uncommitted_specs(&self) -> Result<usize, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.delete_uncommitted_specs");
+        let conn = self.configured_connection().await?;
+        let affected = conn
+            .execute("DELETE FROM specs WHERE committed = 0", ())
+            .await
+            .map_err(storage_error)?;
+        Ok(affected as usize)
+    }
+
 }

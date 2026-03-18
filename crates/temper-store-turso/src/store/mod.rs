@@ -190,6 +190,7 @@ impl TursoEventStore {
 
         // Specs table extensions — add content_hash column for verification caching.
         let _ = conn.execute(schema::ALTER_SPECS_ADD_CONTENT_HASH, ()).await;
+        let _ = conn.execute(schema::ALTER_SPECS_ADD_COMMITTED, ()).await;
 
         // Trajectory table extensions — ALTER TABLE to add missing columns.
         // SQLite returns an error for duplicate columns, so we ignore failures.
@@ -261,6 +262,8 @@ pub struct TursoSpecRow {
     pub content_hash: Option<String>,
     /// ISO-8601 updated_at timestamp.
     pub updated_at: String,
+    /// Whether this spec has been committed (WAL-style commit flag).
+    pub committed: bool,
 }
 
 /// Row returned by trajectory queries.

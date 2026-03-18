@@ -25,6 +25,8 @@ pub struct SpecRow {
     pub csdl_xml: Option<String>,
     /// SHA-256 hex digest of the IOA source content.
     pub content_hash: String,
+    /// Whether this spec has been committed (WAL-style commit flag).
+    pub committed: bool,
 }
 
 /// Update payload for [`PlatformStore::persist_spec_verification()`].
@@ -86,6 +88,11 @@ pub trait PlatformStore: Send + Sync {
     /// Used for cleanup when `install_os_app` fails mid-write (atomicity)
     /// and for reconciliation during `restore_registry_from_platform_store`.
     async fn delete_spec(&self, tenant: &str, entity_type: &str) -> Result<(), String>;
+
+    /// Mark all uncommitted specs for a tenant as committed.
+    async fn commit_specs(&self, tenant: &str) -> Result<(), String>;
+    /// Delete all uncommitted specs across all tenants.
+    async fn delete_uncommitted_specs(&self) -> Result<usize, String>;
 
     /// Load verification cache: (entity_type -> (content_hash, verified)) for a tenant.
     async fn load_verification_cache(
@@ -183,6 +190,7 @@ impl PlatformStore for TursoEventStore {
                 ioa_source: r.ioa_source,
                 csdl_xml: r.csdl_xml,
                 content_hash: r.content_hash.unwrap_or_default(),
+                committed: r.committed,
             })
             .collect())
     }
@@ -191,6 +199,13 @@ impl PlatformStore for TursoEventStore {
         self.delete_spec(tenant, entity_type)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
+        self.commit_specs(tenant).await.map_err(|e| e.to_string())
+    }
+    async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
+        self.delete_uncommitted_specs().await.map_err(|e| e.to_string())
     }
 
     async fn load_verification_cache(
@@ -502,6 +517,7 @@ mod sim_platform_store {
                     ioa_source: ioa_source.to_string(),
                     csdl_xml: Some(csdl_xml.to_string()),
                     content_hash: content_hash.to_string(),
+                    committed: false,
                 },
             );
             Ok(())
@@ -515,7 +531,7 @@ mod sim_platform_store {
                 return Err("SimPlatformStore: injected spec read failure".into());
             }
 
-            Ok(inner.specs.values().cloned().collect())
+            Ok(inner.specs.values().filter(|s| s.committed).cloned().collect())
         }
 
         async fn delete_spec(&self, tenant: &str, entity_type: &str) -> Result<(), String> {
@@ -528,6 +544,23 @@ mod sim_platform_store {
                 .specs
                 .remove(&(tenant.to_string(), entity_type.to_string()));
             Ok(())
+        }
+
+        async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            for spec in inner.specs.values_mut() {
+                if spec.tenant == tenant {
+                    spec.committed = true;
+                }
+            }
+            Ok(())
+        }
+
+        async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            let before = inner.specs.len();
+            inner.specs.retain(|_, s| s.committed);
+            Ok(before - inner.specs.len())
         }
 
         async fn load_verification_cache(

@@ -262,6 +262,32 @@ pub async fn install_os_app(
             .record_installed_app(tenant, app_name)
             .await
             .map_err(|e| format!("Failed to record app installation: {e}"))?;
+        // Commit all specs atomically after all writes succeed.
+        turso
+            .commit_specs(tenant)
+            .await
+            .map_err(|e| format!("Failed to commit specs: {e}"))?;
+    } else if let Some(ref store) = state.server.event_store
+        && let Some(ps) = store.platform_store()
+    {
+        for (entity_type, ioa_source) in bundle.specs {
+            let hash = temper_store_turso::spec_content_hash(ioa_source);
+            ps.upsert_spec(tenant, entity_type, ioa_source, &merged_csdl, &hash)
+                .await
+                .map_err(|e| format!("Failed to persist spec {entity_type}: {e}"))?;
+        }
+        if let Some(ref policy_text) = combined_policy {
+            ps.upsert_tenant_policy(tenant, policy_text)
+                .await
+                .map_err(|e| format!("Failed to persist Cedar policy: {e}"))?;
+        }
+        ps.record_installed_app(tenant, app_name)
+            .await
+            .map_err(|e| format!("Failed to record app installation: {e}"))?;
+        // Commit all specs atomically after all writes succeed.
+        ps.commit_specs(tenant)
+            .await
+            .map_err(|e| format!("Failed to commit specs: {e}"))?;
     }
 
     // ── Step 2: Bootstrap into memory (verification + registry). ────
@@ -280,6 +306,12 @@ pub async fn install_os_app(
         {
             turso
                 .load_verification_cache(tenant)
+                .await
+                .unwrap_or_default()
+        } else if let Some(ref store) = state.server.event_store
+            && let Some(ps) = store.platform_store()
+        {
+            ps.load_verification_cache(tenant)
                 .await
                 .unwrap_or_default()
         } else {

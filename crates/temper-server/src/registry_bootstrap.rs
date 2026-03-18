@@ -293,6 +293,11 @@ pub async fn restore_registry_from_platform_store(
     registry: &mut SpecRegistry,
     store: &dyn crate::platform_store::PlatformStore,
 ) -> Result<usize, String> {
+    match store.delete_uncommitted_specs().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("deleted {n} uncommitted specs during startup recovery"),
+        Err(e) => tracing::warn!("failed to delete uncommitted specs: {e}"),
+    }
     let rows = store
         .load_specs()
         .await

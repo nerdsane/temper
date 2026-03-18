@@ -192,6 +192,10 @@ CREATE TABLE IF NOT EXISTS tenant_installed_apps (
 /// ALTER TABLE migration: add content_hash to specs table.
 pub const ALTER_SPECS_ADD_CONTENT_HASH: &str = "ALTER TABLE specs ADD COLUMN content_hash TEXT";
 
+/// ALTER TABLE migration: add committed flag to specs table (WAL-style commit pattern).
+pub const ALTER_SPECS_ADD_COMMITTED: &str =
+    "ALTER TABLE specs ADD COLUMN committed INTEGER NOT NULL DEFAULT 1";
+
 /// ALTER TABLE migrations for the `trajectories` table.
 ///
 /// These add columns that were previously only tracked in-memory
