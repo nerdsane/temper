@@ -17,9 +17,11 @@ import type {
   AllPoliciesResponse,
   PolicySource,
 } from "@/lib/types";
+import type { SpecSummary } from "@/lib/types";
 import ErrorDisplay from "@/components/ErrorDisplay";
 import StatCard from "@/components/StatCard";
 import PolicyCard from "@/components/PolicyCard";
+import VisualPolicyCreator from "@/components/VisualPolicyCreator";
 
 const ALL_TENANTS = "__all__";
 const SOURCE_FILTERS: { value: PolicySource | "all"; label: string }[] = [
@@ -41,16 +43,16 @@ export default function PoliciesPage() {
   const [sourceFilter, setSourceFilter] = useState<PolicySource | "all">("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "enabled" | "disabled">("all");
   const [showCreate, setShowCreate] = useState(false);
-  const [newPolicyId, setNewPolicyId] = useState("");
-  const [newCedarText, setNewCedarText] = useState("");
+  const [specs, setSpecs] = useState<SpecSummary[]>([]);
 
   const loadInitial = useCallback(async () => {
     setInitialLoading(true);
     setInitialError(null);
     try {
-      const specs = await fetchSpecs();
+      const loadedSpecs = await fetchSpecs();
+      setSpecs(loadedSpecs);
       const tenantSet = new Set<string>();
-      for (const s of specs) {
+      for (const s of loadedSpecs) {
         if (s.tenant && s.tenant !== "temper-system") tenantSet.add(s.tenant);
       }
       setTenants(Array.from(tenantSet).sort());
@@ -204,24 +206,14 @@ export default function PoliciesPage() {
     [allPolicies, policiesPoll],
   );
 
-  const handleCreate = useCallback(
-    async () => {
-      if (!newPolicyId.trim() || !newCedarText.trim()) return;
-      const targetTenant = tenant === ALL_TENANTS ? (tenants[0] || "default") : tenant;
+  const handleVisualCreate = useCallback(
+    async (targetTenant: string, policyId: string, cedarText: string) => {
       setActionError(null);
-      try {
-        await createPolicy(targetTenant, newPolicyId.trim(), newCedarText.trim());
-        setNewPolicyId("");
-        setNewCedarText("");
-        setShowCreate(false);
-        await policiesPoll.refresh();
-      } catch (err) {
-        setActionError(
-          err instanceof Error ? err.message : "Failed to create policy",
-        );
-      }
+      await createPolicy(targetTenant, policyId, cedarText);
+      setShowCreate(false);
+      await policiesPoll.refresh();
     },
-    [tenant, tenants, newPolicyId, newCedarText, policiesPoll],
+    [policiesPoll],
   );
 
   if (initialLoading) {
@@ -356,75 +348,14 @@ export default function PoliciesPage() {
         </div>
       )}
 
-      {/* Create new policy form */}
+      {/* Visual policy creator */}
       {showCreate && (
-        <div className="glass rounded p-4 mb-6 animate-fade-in">
-          <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-3">
-            Create New Policy
-          </h3>
-          <div className="space-y-3">
-            <div className="flex gap-3">
-              <div className="flex-1">
-                <label className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider block mb-1">
-                  Policy ID
-                </label>
-                <input
-                  type="text"
-                  value={newPolicyId}
-                  onChange={(e) => setNewPolicyId(e.target.value)}
-                  placeholder="e.g., custom:my-agent-rules"
-                  className="w-full bg-[var(--color-bg-surface)] text-[var(--color-text-primary)] text-xs rounded-sm px-2.5 py-1.5 font-mono focus:outline-none focus:ring-1 focus:ring-[var(--color-accent-teal)] placeholder:text-[var(--color-text-muted)]"
-                />
-              </div>
-              {tenant === ALL_TENANTS && (
-                <div>
-                  <label className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider block mb-1">
-                    Tenant
-                  </label>
-                  <select
-                    className="bg-[var(--color-bg-surface)] text-[var(--color-text-secondary)] text-xs rounded-sm px-2 py-1.5 focus:outline-none"
-                    defaultValue={tenants[0]}
-                  >
-                    {tenants.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-            </div>
-            <div>
-              <label className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider block mb-1">
-                Cedar Policy Text
-              </label>
-              <textarea
-                value={newCedarText}
-                onChange={(e) => setNewCedarText(e.target.value)}
-                placeholder={'permit(\n  principal is Agent,\n  action == Action::"myAction",\n  resource is MyType\n);'}
-                className="w-full min-h-[120px] p-2.5 bg-black/30 rounded text-[11px] font-mono text-[var(--color-text-primary)] border border-[var(--color-border)] focus:outline-none focus:border-[var(--color-accent-teal)] resize-y placeholder:text-[var(--color-text-muted)]"
-                spellCheck={false}
-              />
-            </div>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                disabled={!newPolicyId.trim() || !newCedarText.trim()}
-                onClick={handleCreate}
-                className="px-3 py-1.5 text-xs bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] rounded hover:bg-[var(--color-accent-teal-dim)] disabled:opacity-50 transition-colors"
-              >
-                Create Policy
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowCreate(false)}
-                className="px-3 py-1.5 text-xs bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] rounded hover:bg-[var(--color-border)] transition-colors"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
+        <VisualPolicyCreator
+          specs={specs}
+          tenants={tenants}
+          onCreated={handleVisualCreate}
+          onCancel={() => setShowCreate(false)}
+        />
       )}
 
       {/* Policy list */}

@@ -148,6 +148,8 @@ export default function AgentsPage() {
                 <th className="text-right px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-xs uppercase tracking-wider">
                   Last Active
                 </th>
+                <th className="text-right px-3.5 py-2.5 text-[var(--color-text-muted)] font-medium text-xs uppercase tracking-wider">
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -200,6 +202,18 @@ export default function AgentsPage() {
                     </td>
                     <td className="px-3.5 py-2.5 text-right font-mono text-[var(--color-text-muted)] text-[11px]">
                       {lastActive}
+                    </td>
+                    <td className="px-3.5 py-2.5 text-right">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          router.push(`/agents/${encodeURIComponent(agent.agent_id)}?tab=policies`);
+                        }}
+                        className="text-[10px] px-2 py-1 bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] rounded-sm hover:bg-[var(--color-accent-teal-dim)] transition-colors"
+                      >
+                        Permissions
+                      </button>
                     </td>
                   </tr>
                 );

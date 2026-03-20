@@ -20,10 +20,13 @@ import type {
 import ErrorDisplay from "@/components/ErrorDisplay";
 import StatCard from "@/components/StatCard";
 import PolicyBuilder from "@/components/PolicyBuilder";
+import DecisionGroup from "@/components/DecisionGroup";
+import BatchApproveBar from "@/components/BatchApproveBar";
 import {
   redactSensitiveFields,
   groupByDate,
 } from "@/lib/utils";
+import { groupDecisions, type GroupingStrategy } from "@/lib/decision-grouping";
 
 
 const ALL_TENANTS = "__all__";
@@ -240,6 +243,9 @@ export default function DecisionsPage() {
   const [actingIds, setActingIds] = useState<Set<string>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
   const [liveDecisions, setLiveDecisions] = useState<PendingDecision[]>([]);
+  const [batchMode, setBatchMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [groupingStrategy, setGroupingStrategy] = useState<GroupingStrategy>("action_resource");
 
   const loadInitial = useCallback(async () => {
     setInitialLoading(true);
@@ -349,6 +355,71 @@ export default function DecisionsPage() {
     return data.decisions.filter((d) => d.status !== "pending");
   }, [data]);
 
+  const pendingGroups = useMemo(
+    () => groupDecisions(pendingDecisions, groupingStrategy),
+    [pendingDecisions, groupingStrategy],
+  );
+
+  const selectedDecisions = useMemo(
+    () => pendingDecisions.filter((d) => selectedIds.has(d.id)),
+    [pendingDecisions, selectedIds],
+  );
+
+  const handleToggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const handleToggleGroup = useCallback((ids: string[]) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      const allSelected = ids.every((id) => next.has(id));
+      if (allSelected) {
+        for (const id of ids) next.delete(id);
+      } else {
+        for (const id of ids) next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleBatchApprove = useCallback(
+    async (ids: string[], matrix: PolicyScopeMatrix) => {
+      setActionError(null);
+      for (const id of ids) {
+        setActingIds((prev) => new Set(prev).add(id));
+      }
+      const allDecisions = data?.decisions || [];
+      const results = await Promise.allSettled(
+        ids.map((id) => {
+          const decision = allDecisions.find((d) => d.id === id);
+          return approveDecision(decision?.tenant || "", id, matrix);
+        }),
+      );
+      const succeeded = results.filter((r) => r.status === "fulfilled").length;
+      const failed = results.filter((r) => r.status === "rejected").length;
+      if (failed > 0) {
+        const firstError = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+        setActionError(`${failed} approval(s) failed: ${firstError.reason}`);
+      }
+      setSelectedIds(new Set());
+      for (const id of ids) {
+        setActingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
+      await decisionsPoll.refresh();
+      return { succeeded, failed };
+    },
+    [decisionsPoll, data],
+  );
+
   const groupedHistory = useMemo(
     () => groupByDate(resolvedDecisions, (d) => d.decided_at),
     [resolvedDecisions],
@@ -425,6 +496,34 @@ export default function DecisionsPage() {
             <option value="denied">Denied</option>
             <option value="expired">Expired</option>
           </select>
+          {pendingDecisions.length > 1 && (
+            <>
+              <button
+                onClick={() => {
+                  setBatchMode(!batchMode);
+                  setSelectedIds(new Set());
+                }}
+                className={`px-2.5 py-1.5 text-xs rounded-sm transition-colors ${
+                  batchMode
+                    ? "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] ring-1 ring-[var(--color-accent-teal)]"
+                    : "bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] hover:bg-[var(--color-border-hover)]"
+                }`}
+              >
+                Batch
+              </button>
+              {batchMode && (
+                <select
+                  value={groupingStrategy}
+                  onChange={(e) => setGroupingStrategy(e.target.value as GroupingStrategy)}
+                  className="bg-[var(--color-bg-surface)] text-[var(--color-text-secondary)] text-xs rounded-sm px-2 py-1.5 focus:outline-none"
+                >
+                  <option value="action_resource">By action + type</option>
+                  <option value="agent_action">By agent + action</option>
+                  <option value="agent_type_action">By agent type + action</option>
+                </select>
+              )}
+            </>
+          )}
           {resolvedDecisions.length > 0 && (
             <button
               onClick={() => exportDecisions(data?.decisions ?? [])}
@@ -481,7 +580,7 @@ export default function DecisionsPage() {
 
       {/* Pending Decisions */}
       {pendingDecisions.length > 0 && (
-        <div className="mb-6">
+        <div className={`mb-6 ${batchMode && selectedDecisions.length > 0 ? "pb-24" : ""}`}>
           <div className="flex items-center gap-2 mb-3">
             <div className="w-1.5 h-1.5 bg-[var(--color-accent-pink)] rounded-full animate-pulse" />
             <h2 className="text-base font-semibold text-[var(--color-text-primary)] tracking-tight">
@@ -491,18 +590,35 @@ export default function DecisionsPage() {
               {pendingDecisions.length}
             </span>
           </div>
-          <div className="grid gap-3">
-            {pendingDecisions.map((d) => (
-              <DecisionCard
-                key={d.id}
-                decision={d}
-                onApprove={handleApprove}
-                onDeny={handleDeny}
-                acting={actingIds.has(d.id)}
-                showTenant={showTenantBadge}
-              />
-            ))}
-          </div>
+
+          {batchMode ? (
+            <div className="grid gap-3">
+              {Array.from(pendingGroups.entries()).map(([key, decisions]) => (
+                <DecisionGroup
+                  key={key}
+                  groupKey={key}
+                  strategy={groupingStrategy}
+                  decisions={decisions}
+                  selectedIds={selectedIds}
+                  onToggleSelect={handleToggleSelect}
+                  onToggleGroup={handleToggleGroup}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="grid gap-3">
+              {pendingDecisions.map((d) => (
+                <DecisionCard
+                  key={d.id}
+                  decision={d}
+                  onApprove={handleApprove}
+                  onDeny={handleDeny}
+                  acting={actingIds.has(d.id)}
+                  showTenant={showTenantBadge}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -512,6 +628,15 @@ export default function DecisionsPage() {
             No pending decisions. All clear.
           </p>
         </div>
+      )}
+
+      {/* Batch approve bar */}
+      {batchMode && (
+        <BatchApproveBar
+          selectedDecisions={selectedDecisions}
+          onApprove={handleBatchApprove}
+          onClear={() => setSelectedIds(new Set())}
+        />
       )}
 
       {/* History Table — grouped by date */}

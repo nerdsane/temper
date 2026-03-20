@@ -10,115 +10,106 @@ import type {
   DurationScope,
 } from "@/lib/types";
 import { generatePolicyPreview } from "@/lib/utils";
+import RadioGroup from "./RadioGroup";
+import {
+  PRINCIPAL_OPTIONS,
+  ACTION_OPTIONS,
+  RESOURCE_OPTIONS,
+  DURATION_OPTIONS,
+} from "@/lib/policy-options";
 
-interface PolicyBuilderProps {
+/** Context derived from a decision or provided explicitly for standalone mode. */
+export interface PolicyBuilderContext {
+  agentId?: string;
+  agentType?: string;
+  action?: string;
+  resourceType?: string;
+  resourceId?: string;
+  sessionId?: string;
+}
+
+interface DecisionModeProps {
   decision: PendingDecision;
+  context?: never;
   onApprove: (matrix: PolicyScopeMatrix) => void;
   onDeny: () => void;
+  onCancel?: never;
   disabled?: boolean;
 }
 
-const PRINCIPAL_OPTIONS: { value: PrincipalScope; label: string; description: string }[] = [
-  { value: "this_agent", label: "This agent", description: "Only the requesting agent" },
-  { value: "agents_of_type", label: "Agents of type", description: "All agents of the same type" },
-  { value: "agents_with_role", label: "Agents with role", description: "All agents sharing a role" },
-  { value: "any_agent", label: "Any agent", description: "Any authenticated agent" },
-];
-
-const ACTION_OPTIONS: { value: ActionScopeOption; label: string; description: string }[] = [
-  { value: "this_action", label: "This action only", description: "Only the denied action" },
-  { value: "all_actions_on_type", label: "All actions on type", description: "Any action on this resource type" },
-  { value: "all_actions", label: "All actions", description: "Any action on any resource" },
-];
-
-const RESOURCE_OPTIONS: { value: ResourceScopeOption; label: string; description: string }[] = [
-  { value: "this_resource", label: "This resource", description: "Only the exact resource" },
-  { value: "any_of_type", label: "Any of type", description: "Any resource of this type" },
-  { value: "any_resource", label: "Any resource", description: "Any resource" },
-];
-
-const DURATION_OPTIONS: { value: DurationScope; label: string; description: string }[] = [
-  { value: "always", label: "Always", description: "Permanent policy" },
-  { value: "session", label: "This session", description: "Only the current session" },
-];
-
-function RadioGroup<T extends string>({
-  label,
-  options,
-  value,
-  onChange,
-}: {
-  label: string;
-  options: { value: T; label: string; description: string }[];
-  value: T;
-  onChange: (v: T) => void;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <div className="text-[10px] text-[var(--color-text-secondary)] uppercase tracking-wider font-medium">{label}</div>
-      <div className="flex flex-wrap gap-1.5">
-        {options.map((opt) => (
-          <button
-            key={opt.value}
-            type="button"
-            onClick={() => onChange(opt.value)}
-            title={opt.description}
-            className={`px-2.5 py-1 text-[11px] rounded-sm transition-colors ${
-              value === opt.value
-                ? "bg-[var(--color-accent-teal-dim)] text-[var(--color-accent-teal)] ring-1 ring-[var(--color-accent-teal)]"
-                : "bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-secondary)]"
-            }`}
-          >
-            {opt.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
+interface StandaloneModeProps {
+  decision?: never;
+  context: PolicyBuilderContext;
+  onApprove: (matrix: PolicyScopeMatrix) => void;
+  onDeny?: never;
+  onCancel: () => void;
+  disabled?: boolean;
 }
 
-export default function PolicyBuilder({ decision, onApprove, onDeny, disabled }: PolicyBuilderProps) {
-  const [principal, setPrincipal] = useState<PrincipalScope>("this_agent");
-  const [action, setAction] = useState<ActionScopeOption>("this_action");
-  const [resource, setResource] = useState<ResourceScopeOption>("any_of_type");
+type PolicyBuilderProps = DecisionModeProps | StandaloneModeProps;
+
+export default function PolicyBuilder(props: PolicyBuilderProps) {
+  const { onApprove, disabled } = props;
+
+  // Normalize context from either decision or explicit context
+  const ctx: PolicyBuilderContext = useMemo(() => {
+    if (props.decision) {
+      return {
+        agentId: props.decision.agent_id,
+        agentType: props.decision.agent_type,
+        action: props.decision.action,
+        resourceType: props.decision.resource_type,
+        resourceId: props.decision.resource_id,
+        sessionId: props.decision.session_id,
+      };
+    }
+    return props.context;
+  }, [props.decision, props.context]);
+
+  // Default to broader scopes in standalone mode when fields are missing
+  const defaultPrincipal: PrincipalScope = ctx.agentId ? "this_agent" : "any_agent";
+  const defaultAction: ActionScopeOption = ctx.action ? "this_action" : "all_actions";
+  const defaultResource: ResourceScopeOption = ctx.resourceType ? "any_of_type" : "any_resource";
+
+  const [principal, setPrincipal] = useState<PrincipalScope>(defaultPrincipal);
+  const [action, setAction] = useState<ActionScopeOption>(defaultAction);
+  const [resource, setResource] = useState<ResourceScopeOption>(defaultResource);
   const [duration, setDuration] = useState<DurationScope>("always");
   const [showPreview, setShowPreview] = useState(false);
 
-  // Filter principal options: only show "agents_of_type" when decision has agent_type
   const principalOptions = useMemo(() => {
     return PRINCIPAL_OPTIONS.filter((opt) => {
-      if (opt.value === "agents_of_type" && !decision.agent_type) return false;
+      if (opt.value === "agents_of_type" && !ctx.agentType) return false;
       return true;
     });
-  }, [decision.agent_type]);
+  }, [ctx.agentType]);
 
-  // Filter duration options: only show "session" when session_id is available
   const durationOptions = useMemo(() => {
     return DURATION_OPTIONS.filter((opt) => {
-      if (opt.value === "session" && !decision.session_id) return false;
+      if (opt.value === "session" && !ctx.sessionId) return false;
       return true;
     });
-  }, [decision.session_id]);
+  }, [ctx.sessionId]);
 
   const matrix: PolicyScopeMatrix = useMemo(() => ({
     principal,
     action,
     resource,
     duration,
-    agent_type_value: principal === "agents_of_type" ? decision.agent_type : undefined,
-    session_id: duration === "session" ? decision.session_id : undefined,
-  }), [principal, action, resource, duration, decision.agent_type, decision.session_id]);
+    agent_type_value: principal === "agents_of_type" ? ctx.agentType : undefined,
+    session_id: duration === "session" ? ctx.sessionId : undefined,
+  }), [principal, action, resource, duration, ctx.agentType, ctx.sessionId]);
 
   const preview = useMemo(
     () =>
       generatePolicyPreview(
-        decision.agent_id,
-        decision.action,
-        decision.resource_type,
-        decision.resource_id,
+        ctx.agentId || "agent",
+        ctx.action || "*",
+        ctx.resourceType || "Resource",
+        ctx.resourceId || "*",
         matrix,
       ),
-    [decision, matrix],
+    [ctx, matrix],
   );
 
   return (
@@ -154,14 +145,25 @@ export default function PolicyBuilder({ decision, onApprove, onDeny, disabled }:
         >
           Approve
         </button>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={onDeny}
-          className="px-3 py-1.5 text-xs bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)] rounded hover:bg-[var(--color-accent-pink-dim)] disabled:opacity-50 transition-colors"
-        >
-          Deny
-        </button>
+        {props.decision ? (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={props.onDeny}
+            className="px-3 py-1.5 text-xs bg-[var(--color-accent-pink-dim)] text-[var(--color-accent-pink)] rounded hover:bg-[var(--color-accent-pink-dim)] disabled:opacity-50 transition-colors"
+          >
+            Deny
+          </button>
+        ) : (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={props.onCancel}
+            className="px-3 py-1.5 text-xs bg-[var(--color-bg-elevated)] text-[var(--color-text-secondary)] rounded hover:bg-[var(--color-border)] disabled:opacity-50 transition-colors"
+          >
+            Cancel
+          </button>
+        )}
       </div>
     </div>
   );
