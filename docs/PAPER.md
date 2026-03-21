@@ -1,108 +1,113 @@
-# Temper: What If Agents Could Converse Their Way to a Verified Backend?
+# Temper: Descriptions All the Way Down
 
-*A framework and platform research for agent-built, agent-operated API backends*
+*An operating layer where agents write verified specifications, and specifications evolve through use*
 
 **Seshendra Nalla**
 
-*Draft -- February 2026*
+*Draft -- February 2026, revised March 2026*
 
 ---
 
 ## Abstract
 
-Most enterprise SaaS applications follow a remarkably similar pattern: entities
-move through state machines, guards prevent invalid transitions, integrations
-notify external systems, and authorization policies control who can do what.
-An e-commerce order, a support ticket, a subscription, an approval workflow --
-the business logic in each case is a set of states, transitions, and invariants.
-The rest is infrastructure.
+In 1949, Von Neumann designed a self-replicating machine with three parts: a
+description encoding a blueprint, a universal constructor that reads any description
+and builds the machine it encodes, and a copy mechanism that duplicates and mutates
+descriptions over time <sup>[21, 22]</sup>.  The machine grows in complexity by changing its
+descriptions.  The constructor stays the same.  Von Neumann arrived at this
+architecture before Watson and Crick discovered DNA.  Biology uses the same
+separation.
 
-This observation suggests that if the state machine is the essential artifact,
-then much of the surrounding code -- controllers, service layers, ORM mappings,
-webhook plumbing, instrumentation -- might be derivable rather than written.
-And if specifications can be generated from conversation rather than hand-coded,
-the feedback loop between what a user needs and what the system provides
-tightens considerably.
+Temper follows this pattern for autonomous agents.  The kernel is the constructor:
+it reads specifications -- I/O Automaton state machines, CSDL data models, Cedar
+authorization policies, WASM integration declarations -- and builds a running
+system from them.  Skills are the descriptions: each one bundles a verified state
+machine, data model, policies, and integrations into a deployable capability.
+Agents create new skills and operate through existing ones.  The GEPA (Guided
+Evolution of Pareto-optimal Artifacts) observes how skills are used, clusters
+failure patterns, and proposes specification changes.  The descriptions evolve.
+The constructor stays stable.
 
-We explore this idea through Temper, an actor-based framework where I/O Automaton
-specifications define behavioral state machines, a four-level verification cascade
-(SMT symbolic checking, exhaustive model checking, deterministic simulation, and
-property-based testing) establishes correctness before deployment, and an evolution
-engine captures unmet user intents from production to propose specification changes
-back to the developer.  The state machine stays pure and deterministically verifiable;
-external integrations follow an outbox pattern, dispatched asynchronously from the
-event journal.  A self-describing HTTP API is derived automatically from the data
-model, giving agents a structured interface they can navigate without documentation.
-A pre-built rule index yields sub-30ns action evaluation, while end-to-end benchmarks
-through the full HTTP stack with PostgreSQL persistence show ~18ms per action and
-~2,200 persisted actions per second under concurrent load.
+Every description passes a four-level verification cascade before deployment:
+Z3 SMT symbolic checking, exhaustive model checking, deterministic simulation
+with fault injection, and property-based testing.  Every action flows through
+Cedar authorization with a default-deny posture.  Denied actions surface to the
+human for approval.  Policies accumulate as agents work.  Every transition is
+recorded with agent identity, before/after state, and the authorization decision.
 
-Beyond serving as a framework for building applications, the same architecture
-positions Temper as an operating layer for autonomous agents.  When every
-state-changing action flows through a governed, verified state machine -- with
-Cedar authorization enforcing default-deny policies, a pending decision flow
-surfacing denied actions for human approval, and trajectory logging recording
-every transition with agent identity -- the result is an auditable, secure
-execution environment where agents operate within formally verified boundaries.
+The system is implemented as a 25-crate Rust workspace with 950+ tests.  Three
+pre-built skills ship with the platform (project management, filesystem, agent
+orchestration).  A reference e-commerce application demonstrates the full
+development flow across three verified entity types.  A pre-built rule index
+yields sub-30ns action evaluation; end-to-end benchmarks through the full HTTP
+stack with PostgreSQL persistence show ~18ms per action and ~2,200 persisted
+actions per second under concurrent load.
 
-The framework is implemented as a 16-crate Rust workspace with 440+ tests and a
-reference e-commerce application (three entity types, seven verified specifications
-across different SaaS domains).  We do not claim this approach generalizes to all
-backend systems -- but for the substantial class of applications whose core logic
-is state machine shaped, the results suggest that specification-first, conversation-
-driven development is a practical path worth investigating further.
+We do not claim this approach generalizes to all backend systems.  For the
+substantial class of applications whose core logic is state machine shaped --
+and for agents that need governed, verified, evolving capabilities -- the
+results suggest this is a practical path worth investigating further.
 
 ---
 
 ## 1. Introduction
 
-The emergence of autonomous LLM agents as first-class API consumers
-fundamentally changes the contract between a backend system and its callers.
-Traditional web frameworks--Rails, Django, Spring Boot--are designed around a
-request/response model where a human user clicks a button, the framework
-routes the request to a controller, and a response is rendered.  The developer
-writes imperative handler code; correctness is established, if at all, by unit
-tests and code review.
+Agents build tools at runtime.  They generate MCP servers, synthesize helpers,
+create workflow automation.  At the same time, the infrastructure for making
+this safe is developing: policy-based authorization on tool invocations,
+behavioral contracts, state-machine-constrained agents, formal verification
+becoming practical.
 
-Agentic backends face three compounding challenges that this model does not
-address:
+The tools agents build have a recurring shape.  A project tracker, a knowledge
+base, a deployment pipeline, a notification system -- the core logic in each case
+is a state machine: states, transitions, guards, invariants.  The surrounding
+infrastructure -- persistence, API endpoints, authorization, webhooks,
+observability -- follows mechanically from the state machine definition.
+
+This observation leads to a structural question: if the state machine is the
+essential artifact, and agents are already building these artifacts at runtime,
+what happens when you formalize the pattern?
+
+Temper's answer draws from Von Neumann's 1949 architecture for self-replicating
+machines <sup>[21, 22]</sup>.  Von Neumann separated the *description* (a blueprint
+encoded on a tape) from the *constructor* (a universal machine that reads any
+description and builds what it encodes).  Evolution happens by mutating
+descriptions, not the constructor.  The constructor stays stable.
+
+In Temper, the kernel is the constructor.  It reads specifications and builds
+running systems from them.  Skills are the descriptions.  Each skill bundles
+a verified state machine, a data model, authorization policies, and integration
+declarations.  Agents create skills by describing what they need.  The GEPA
+(Guided Evolution of Pareto-optimal Artifacts) observes how skills are used and
+proposes specification changes.  Agents also create new skills when they encounter
+gaps.  Both paths -- mutation and creation -- go through a four-level verification
+cascade and require human approval.
+
+Four challenges motivate this architecture:
 
 1. **Correctness under autonomy.**  An agent may issue hundreds of API calls
-   per minute, exploring state spaces that no human tester would traverse.  A
-   subtle invariant violation--shipping an order without captured payment, for
-   instance--can propagate silently because the agent has no intuition to catch
-   it.
+   per minute, exploring state spaces no human tester would traverse.  A
+   subtle invariant violation -- shipping an order without captured payment --
+   can propagate silently because the agent has no intuition to catch it.
 
-2. **Evolvability without code archaeology.**  When an agent's trajectory
-   analysis reveals that users want to split an order into multiple shipments,
-   the system must evolve.  In a code-first framework, this means modifying
-   controllers, models, migrations, and tests.  If an agent is performing the
-   modification, it must understand the full codebase.
+2. **Evolvability without code archaeology.**  When trajectory analysis reveals
+   that users want to split an order into multiple shipments, the system must
+   evolve.  In a code-first framework, this means modifying controllers,
+   models, migrations, and tests.  If the capability is a description, you
+   modify the description and re-verify.
 
-3. **Optimizability under production load.**  Agents generate access patterns
-   that differ from human browsing.  N+1 query patterns, suboptimal cache TTLs,
-   and shard hotspots manifest at runtime.  The system should be able to
-   detect and correct these autonomously.
-
-4. **Governance under autonomy.**  An agent acting as an enterprise employee
+3. **Governance under autonomy.**  An agent acting as an enterprise employee
    or personal assistant must operate within boundaries: which APIs it can
    call, which data it can modify, which external systems it can reach.
    These boundaries must be enforceable (not advisory), auditable (every
    action recorded with agent identity), and evolvable (new permissions
    granted as needs arise, not anticipated upfront).
 
-Temper's key insight is that **specifications, not code, should be the durable
-artifact** — and that **specifications themselves should be generated from
-conversation**.  A developer describes their domain through a conversational
-interview; the system generates I/O Automaton behavioral specifications, OData
-CSDL data models, and Cedar authorization policies from that conversation.
-Code is generated from these specifications and can be regenerated whenever the
-specifications change.
-When end users encounter capabilities the system lacks, their unmet intents
-flow through an Evolution Engine that proposes specification changes for
-developer approval.  The system continuously evolves from both developer
-intent and production feedback, with a four-level verification cascade
-gating every change.
+4. **Interpretability under evolution.**  When skills evolve through use,
+   a human must be able to read the specification and understand what the
+   system does, trace why any change was made, and verify that the change
+   is sound.  The specification is the system's behavior, complete and
+   inspectable.
 
 The remainder of this paper is organized as follows.  Section 2 presents the
 overall architecture.  Sections 3--5 describe the specification layer, the actor
@@ -181,8 +186,8 @@ surface as structured proposals for specification changes.  Approved changes
 run through the verification cascade and deploy via hot-swap, closing the
 loop between production behavior and system evolution.
 
-The framework is implemented in Rust (edition 2024) as 16 crates plus a
-reference application, totaling 440+ tests.
+The framework is implemented in Rust (edition 2024) as 25 crates plus a
+reference application, totaling 950+ tests.
 
 ---
 
@@ -888,6 +893,26 @@ for agent consumption.
 standard.  Google Zanzibar <sup>[16]</sup> provides relationship-based authorization
 at scale.  Temper uses Amazon Cedar <sup>[2]</sup>; Section 3.3 discusses the rationale.
 
+**Agent operating systems.**  AgentOS <sup>[23]</sup> proposes a skill-based architecture
+where agents discover, compose, and execute modular capabilities rather than
+monolithic applications.  Their skills are natural language contracts parsed
+into intent specifications and capability constraints.  Temper's skills share
+the modularity and composability but differ in the contract representation:
+Temper skills are formally verified state machines with mathematical proofs
+of correctness, not natural language intent specifications.  AgentOS's
+semantic firewall for intent verification, trajectory mining for pattern
+learning, and state rollback mechanisms have parallels in Temper's Cedar
+authorization, GEPA trajectory analysis, and event-sourced state recovery.
+
+**Self-replicating machines.**  Von Neumann's universal constructor <sup>[21, 22]</sup>
+established the separation between description (blueprint) and constructor
+(universal builder) as a prerequisite for open-ended evolution.  Temper's
+kernel/skill architecture follows this separation: the kernel is the
+constructor that interprets any specification, and skills are the
+descriptions that agents create, mutate, and evolve.  The GEPA serves
+as the copy-and-mutate mechanism, proposing description changes based on
+observed usage patterns.
+
 **Self-optimizing systems.**  CockroachDB <sup>[17]</sup> performs automatic range
 splitting and rebalancing.  Neon <sup>[18]</sup> adjusts compute and storage resources
 based on workload.  Temper's optimizer actors operate at the application layer,
@@ -900,7 +925,7 @@ observability data, with a safety checker ensuring correctness.
 
 ### 11.1 Test Coverage
 
-The Temper workspace contains 450 tests across 16 crates and one reference
+The Temper workspace contains 950+ tests across 25 crates and one reference
 application. Key categories:
 
 | Category                       | Count | Crates                                     |
@@ -1184,51 +1209,61 @@ As described in Section 9.3, the write path is backend-agnostic via
 
 Temper makes the following contributions:
 
-1. A conversation-first architecture where specifications are generated from
-   developer interviews, code is derived from specifications, and the system
-   self-evolves from production trajectory intelligence.
+1. A constructor/description architecture where the kernel (constructor) interprets
+   any specification fed to it, and skills (descriptions) are the evolving artifacts
+   that agents create, operate through, and improve.  The kernel stays stable.  The
+   descriptions evolve.
 
 2. A four-level verification cascade combining Z3 SMT symbolic verification,
    exhaustive model checking with multi-variable state and liveness properties,
    deterministic simulation with fault injection, and property-based testing.
+   Every description passes this cascade before deployment.
 
-3. An Evolution Engine with Lamport-style problem formalization, human approval
-   gates, and portable SQL evidence.
+3. A skill system where each skill bundles a verified state machine, data model,
+   authorization policies, and integration declarations into a deployable
+   capability.  Three pre-built skills ship with the platform; agents create
+   new ones at runtime.
 
-4. Trajectory intelligence that extracts product signal (unmet intents, friction,
+4. GEPA (Guided Evolution of Pareto-optimal Artifacts): a trajectory-driven
+   evolution engine that observes how skills are used, clusters failure patterns,
+   and proposes specification changes.  Combined with agent-initiated skill
+   creation, this provides two paths for capability evolution -- mutation
+   of existing descriptions and creation of new ones -- both gated by
+   verification and human approval.
+
+5. An Evolution Engine with Lamport-style problem formalization, human approval
+   gates, the O-P-A-D-I record chain, and portable SQL evidence.
+
+6. Trajectory intelligence that extracts product signal (unmet intents, friction,
    workarounds) from agent execution traces.
 
-5. A three-tier JIT execution model with atomic hot-swap and shadow testing for
-   zero-downtime state machine evolution.
+7. A three-tier JIT execution model with atomic hot-swap and shadow testing for
+   zero-downtime skill evolution.
 
-6. A DST-first development methodology where actor-level simulation tests
+8. A DST-first development methodology where actor-level simulation tests
    validate state machine behavior before HTTP wiring, catching guard
    resolution bugs that would be invisible to integration tests.
 
-7. End-to-end functional validation: the same `TransitionTable` verified by
+9. End-to-end functional validation: the same `TransitionTable` verified by
    Stateright, deterministic simulation, and property tests runs inside
    HTTP-serving entity actors, establishing a provable chain from formal
    specification to production behavior.
 
-8. Adoption of TigerStyle <sup>[19]</sup> as a cross-cutting engineering methodology:
-   assertion density at the state machine level, bounded execution throughout
-   the actor runtime, static resource budgets, and DST-first development
-   where simulation testing is the primary--not supplementary--testing
-   strategy.
+10. Adoption of TigerStyle <sup>[19]</sup> as a cross-cutting engineering methodology:
+    assertion density at the state machine level, bounded execution throughout
+    the actor runtime, static resource budgets, and DST-first development
+    where simulation testing is the primary testing strategy.
 
-9. A reference e-commerce application that demonstrates the full self-hosted
-   development flow: three verified entity state machines (Order, Payment,
-   Shipment), 22 DST tests with determinism proofs, three cascade tests,
-   infrastructure as code, and a complete O-P-A-D-I evolution chain showing
-   how production observations lead to spec improvements.
+11. An interpretability guarantee at every layer: specifications are readable,
+    verification produces counterexamples (not just pass/fail), evolution is
+    auditable through the O-P-A-D-I chain, and the human retains approval
+    authority over every mutation.
 
-10. An agent governance layer where autonomous agents operate within formally
+12. An agent governance layer where autonomous agents operate within formally
     verified state machines, Cedar authorization enforces default-deny policies
     with reactive human approval, every action is recorded with agent identity
     in an auditable trajectory log, and agents can generate and submit their
-    own specifications through a programmatic API -- positioning Temper as the
-    operating layer for autonomous agents acting as enterprise employees or
-    personal assistants.
+    own specifications through a programmatic API.
 
 ### 12.2 Conversational Development Vision
 
@@ -1513,3 +1548,13 @@ https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md
 
 [20] OpenTelemetry. *OpenTelemetry Specification.*
 https://opentelemetry.io/docs/specs/otel/
+
+[21] J. von Neumann. *Theory of Self-Reproducing Automata.* Edited and
+completed by A. W. Burks. University of Illinois Press, 1966.
+
+[22] J. von Neumann. *The General and Logical Theory of Automata.*
+In L. A. Jeffress (ed.), Cerebral Mechanisms in Behavior: The Hixon
+Symposium, pp. 1-31. Wiley, 1951.
+
+[23] T. Li et al. *AgentOS: A Natural Language-Driven Data Ecosystem for
+Autonomous Agents.* arXiv:2603.08938, 2026.
