@@ -203,23 +203,28 @@ async fn apply_entity_query_options(
     query_options: &QueryOptions,
     select_before_expand: bool,
 ) -> serde_json::Value {
-    if select_before_expand {
-        if let Some(ref select) = query_options.select {
-            body = select_fields(vec![body], select).pop().unwrap_or_default();
-        }
+    if select_before_expand && let Some(ref select) = query_options.select {
+        body = select_fields(vec![body], select).pop().unwrap_or_default();
     }
 
     if let Some(ref expand_items) = query_options.expand {
         expand_entity(&mut body, expand_items, entity_type, state, tenant).await;
     }
 
-    if !select_before_expand {
-        if let Some(ref select) = query_options.select {
-            body = select_fields(vec![body], select).pop().unwrap_or_default();
-        }
+    if !select_before_expand && let Some(ref select) = query_options.select {
+        body = select_fields(vec![body], select).pop().unwrap_or_default();
     }
 
     body
+}
+
+struct EntityBodyOptions<'a> {
+    context: String,
+    odata_id: Option<String>,
+    query_options: &'a QueryOptions,
+    enrich: bool,
+    function: Option<&'a str>,
+    select_before_expand: bool,
 }
 
 async fn build_entity_body(
@@ -228,25 +233,20 @@ async fn build_entity_body(
     entity_type: &str,
     set_name: &str,
     key: &str,
-    context: String,
-    odata_id: Option<String>,
-    query_options: &QueryOptions,
-    enrich: bool,
-    function: Option<&str>,
-    select_before_expand: bool,
+    options: EntityBodyOptions<'_>,
 ) -> Result<serde_json::Value, Response> {
     let response = load_existing_entity_response(state, tenant, entity_type, set_name, key).await?;
     let mut body = annotate_entity(
         serde_json::to_value(&response.state).unwrap_or_default(),
-        context,
-        odata_id,
+        options.context,
+        options.odata_id,
     );
 
-    if enrich {
+    if options.enrich {
         enrich_entity_response(&mut body, entity_type, set_name, key, state, tenant);
     }
 
-    if let Some(name) = function
+    if let Some(name) = options.function
         && let Some(obj) = body.as_object_mut()
     {
         obj.insert("@odata.function".to_string(), serde_json::json!(name));
@@ -257,8 +257,8 @@ async fn build_entity_body(
         entity_type,
         state,
         tenant,
-        query_options,
-        select_before_expand,
+        options.query_options,
+        options.select_before_expand,
     )
     .await)
 }
@@ -508,12 +508,14 @@ async fn handle_entity(
         &entity_type,
         set_name,
         &key_str,
-        format!("$metadata#{set_name}/$entity"),
-        Some(format!("{set_name}('{key_str}')")),
-        query_options,
-        true,
-        None,
-        false,
+        EntityBodyOptions {
+            context: format!("$metadata#{set_name}/$entity"),
+            odata_id: Some(format!("{set_name}('{key_str}')")),
+            query_options,
+            enrich: true,
+            function: None,
+            select_before_expand: false,
+        },
     )
     .await
     {
@@ -656,12 +658,14 @@ async fn handle_navigation_entity(
         &target_type,
         &target_set,
         &key_str,
-        format!("$metadata#{target_set}/$entity"),
-        Some(format!("{target_set}('{key_str}')")),
-        query_options,
-        true,
-        None,
-        false,
+        EntityBodyOptions {
+            context: format!("$metadata#{target_set}/$entity"),
+            odata_id: Some(format!("{target_set}('{key_str}')")),
+            query_options,
+            enrich: true,
+            function: None,
+            select_before_expand: false,
+        },
     )
     .await
     {
@@ -712,12 +716,14 @@ async fn handle_bound_function(
         &entity_type,
         &parent_set,
         &parent_key,
-        format!("$metadata#{entity_type}"),
-        None,
-        query_options,
-        false,
-        Some(function),
-        true,
+        EntityBodyOptions {
+            context: format!("$metadata#{entity_type}"),
+            odata_id: None,
+            query_options,
+            enrich: false,
+            function: Some(function),
+            select_before_expand: true,
+        },
     )
     .await
     {
