@@ -1,3 +1,4 @@
+use super::inline::{parse_inline_fields, split_inline_tables};
 use super::*;
 
 // ── parse_kv ──────────────────────────────────────────────
@@ -64,6 +65,18 @@ fn parse_inline_fields_simple() {
     let map = parse_inline_fields("type = \"schedule\", action = \"Refresh\"");
     assert_eq!(map.get("type").unwrap(), "schedule");
     assert_eq!(map.get("action").unwrap(), "Refresh");
+}
+
+#[test]
+fn parse_inline_fields_keeps_nested_arrays_together() {
+    let map = parse_inline_fields(
+        "type = \"cross_entity_state\", required_status = [\"Draft\", \"Ready\"]",
+    );
+    assert_eq!(map.get("type").unwrap(), "cross_entity_state");
+    assert_eq!(
+        map.get("required_status").unwrap(),
+        "[\"Draft\", \"Ready\"]"
+    );
 }
 
 #[test]

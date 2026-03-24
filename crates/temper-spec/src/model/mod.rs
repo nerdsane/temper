@@ -28,11 +28,14 @@ pub struct SpecModel {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ValidationResult {
+    /// Validation failures that should block downstream codegen or linking.
     pub errors: Vec<String>,
+    /// Non-blocking mismatches or gaps detected during spec linking.
     pub warnings: Vec<String>,
 }
 
 impl ValidationResult {
+    /// Returns true when the linked specification contains no validation errors.
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
     }
@@ -63,92 +66,140 @@ pub fn build_spec_model_mixed(
     csdl: csdl::CsdlDocument,
     sources: HashMap<String, SpecSource>,
 ) -> SpecModel {
-    let mut state_machines = HashMap::new();
     let mut validation = ValidationResult::default();
-
-    // Parse each specification source
-    for (entity_name, source) in &sources {
-        match source {
-            SpecSource::Tla(tla_text) => match tlaplus::extract_state_machine(tla_text) {
-                Ok(sm) => {
-                    state_machines.insert(entity_name.clone(), sm);
-                }
-                Err(e) => {
-                    validation.errors.push(format!(
-                        "Failed to extract state machine for {entity_name} (TLA+): {e}"
-                    ));
-                }
-            },
-            SpecSource::Ioa(ioa_text) => match automaton::parse_automaton(ioa_text) {
-                Ok(aut) => {
-                    let sm = automaton::to_state_machine(&aut);
-                    state_machines.insert(entity_name.clone(), sm);
-                }
-                Err(e) => {
-                    validation.errors.push(format!(
-                        "Failed to parse IOA automaton for {entity_name}: {e}"
-                    ));
-                }
-            },
-        }
-    }
-
-    // Cross-validate CSDL annotations against specification state machines
-    for schema in &csdl.schemas {
-        for entity_type in &schema.entity_types {
-            if let Some(csdl_states) = entity_type.state_machine_states() {
-                if let Some(sm) = state_machines.get(&entity_type.name) {
-                    // Verify all CSDL-declared states exist in spec
-                    for state in &csdl_states {
-                        if !sm.states.contains(state) {
-                            validation.errors.push(format!(
-                                "{}: CSDL declares state '{}' but specification does not contain it",
-                                entity_type.name, state
-                            ));
-                        }
-                    }
-                    // Verify all spec states are in CSDL
-                    for state in &sm.states {
-                        if !csdl_states.contains(state) {
-                            validation.warnings.push(format!(
-                                "{}: specification has state '{}' not declared in CSDL annotations",
-                                entity_type.name, state
-                            ));
-                        }
-                    }
-                } else if entity_type.tla_spec_path().is_some() {
-                    validation.warnings.push(format!(
-                        "{}: has TlaSpec annotation but no specification source was provided",
-                        entity_type.name
-                    ));
-                }
-            }
-        }
-
-        // Validate action valid-from states against specification transitions
-        for action in &schema.actions {
-            if let Some(from_states) = action.valid_from_states()
-                && let Some(binding_type) = action.binding_type()
-            {
-                let entity_name = binding_type.rsplit('.').next().unwrap_or(binding_type);
-                if let Some(sm) = state_machines.get(entity_name) {
-                    for state in &from_states {
-                        if !sm.states.contains(state) {
-                            validation.errors.push(format!(
-                                    "Action {}: ValidFromStates contains '{}' which is not in {}'s specification states",
-                                    action.name, state, entity_name
-                                ));
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let state_machines = parse_state_machines(&sources, &mut validation);
+    validate_csdl_links(&csdl, &state_machines, &mut validation);
 
     SpecModel {
         csdl,
         state_machines,
         validation,
+    }
+}
+
+fn parse_state_machines(
+    sources: &HashMap<String, SpecSource>,
+    validation: &mut ValidationResult,
+) -> HashMap<String, tlaplus::StateMachine> {
+    let mut state_machines = HashMap::new();
+
+    for (entity_name, source) in sources {
+        match parse_source_state_machine(entity_name, source) {
+            Ok(state_machine) => {
+                state_machines.insert(entity_name.clone(), state_machine);
+            }
+            Err(message) => validation.errors.push(message),
+        }
+    }
+
+    state_machines
+}
+
+fn parse_source_state_machine(
+    entity_name: &str,
+    source: &SpecSource,
+) -> Result<tlaplus::StateMachine, String> {
+    match source {
+        SpecSource::Tla(tla_text) => tlaplus::extract_state_machine(tla_text).map_err(|error| {
+            format!("Failed to extract state machine for {entity_name} (TLA+): {error}")
+        }),
+        SpecSource::Ioa(ioa_text) => automaton::parse_automaton(ioa_text)
+            .map(|automaton| automaton::to_state_machine(&automaton))
+            .map_err(|error| format!("Failed to parse IOA automaton for {entity_name}: {error}")),
+    }
+}
+
+fn validate_csdl_links(
+    csdl: &csdl::CsdlDocument,
+    state_machines: &HashMap<String, tlaplus::StateMachine>,
+    validation: &mut ValidationResult,
+) {
+    for schema in &csdl.schemas {
+        validate_entity_states(schema, state_machines, validation);
+        validate_action_bindings(schema, state_machines, validation);
+    }
+}
+
+fn validate_entity_states(
+    schema: &csdl::Schema,
+    state_machines: &HashMap<String, tlaplus::StateMachine>,
+    validation: &mut ValidationResult,
+) {
+    for entity_type in &schema.entity_types {
+        let Some(csdl_states) = entity_type.state_machine_states() else {
+            continue;
+        };
+
+        if let Some(state_machine) = state_machines.get(&entity_type.name) {
+            record_missing_csdl_states(entity_type, &csdl_states, state_machine, validation);
+            record_missing_spec_states(entity_type, &csdl_states, state_machine, validation);
+        } else if entity_type.tla_spec_path().is_some() {
+            validation.warnings.push(format!(
+                "{}: has TlaSpec annotation but no specification source was provided",
+                entity_type.name
+            ));
+        }
+    }
+}
+
+fn record_missing_csdl_states(
+    entity_type: &csdl::EntityType,
+    csdl_states: &[String],
+    state_machine: &tlaplus::StateMachine,
+    validation: &mut ValidationResult,
+) {
+    for state in csdl_states {
+        if !state_machine.states.contains(state) {
+            validation.errors.push(format!(
+                "{}: CSDL declares state '{}' but specification does not contain it",
+                entity_type.name, state
+            ));
+        }
+    }
+}
+
+fn record_missing_spec_states(
+    entity_type: &csdl::EntityType,
+    csdl_states: &[String],
+    state_machine: &tlaplus::StateMachine,
+    validation: &mut ValidationResult,
+) {
+    for state in &state_machine.states {
+        if !csdl_states.contains(state) {
+            validation.warnings.push(format!(
+                "{}: specification has state '{}' not declared in CSDL annotations",
+                entity_type.name, state
+            ));
+        }
+    }
+}
+
+fn validate_action_bindings(
+    schema: &csdl::Schema,
+    state_machines: &HashMap<String, tlaplus::StateMachine>,
+    validation: &mut ValidationResult,
+) {
+    for action in &schema.actions {
+        let Some(from_states) = action.valid_from_states() else {
+            continue;
+        };
+        let Some(binding_type) = action.binding_type() else {
+            continue;
+        };
+
+        let entity_name = binding_type.rsplit('.').next().unwrap_or(binding_type);
+        let Some(state_machine) = state_machines.get(entity_name) else {
+            continue;
+        };
+
+        for state in &from_states {
+            if !state_machine.states.contains(state) {
+                validation.errors.push(format!(
+                    "Action {}: ValidFromStates contains '{}' which is not in {}'s specification states",
+                    action.name, state, entity_name
+                ));
+            }
+        }
     }
 }
 

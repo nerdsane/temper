@@ -150,102 +150,167 @@ pub fn lint_automata_bundle(automata: &BTreeMap<String, Automaton>) -> Vec<Bundl
         let parent_snake = to_snake_case(entity_name);
         for action in &automaton.actions {
             for effect in &action.effect {
-                let Effect::Spawn {
-                    entity_type,
-                    initial_action,
-                    ..
-                } = effect
-                else {
-                    continue;
-                };
-
-                let Some(target_automaton) = automata.get(entity_type) else {
-                    findings.push(BundleLintFinding::error(
-                        entity_name.clone(),
-                        "spawn_target_missing",
-                        format!(
-                            "action '{}' spawns unknown entity type '{}'",
-                            action.name, entity_type
-                        ),
-                    ));
-                    continue;
-                };
-
-                let Some(initial_action_name) = initial_action.as_deref() else {
-                    continue;
-                };
-
-                let Some(target_action) = target_automaton
-                    .actions
-                    .iter()
-                    .find(|candidate| candidate.name == initial_action_name)
-                else {
-                    findings.push(BundleLintFinding::error(
-                        entity_name.clone(),
-                        "spawn_initial_action_missing",
-                        format!(
-                            "action '{}' spawns '{}' with missing initial_action '{}'",
-                            action.name, entity_type, initial_action_name
-                        ),
-                    ));
-                    continue;
-                };
-
-                if !target_action.from.is_empty()
-                    && !target_action
-                        .from
-                        .iter()
-                        .any(|from| from == &target_automaton.automaton.initial)
-                {
-                    findings.push(BundleLintFinding::error(
-                        entity_name.clone(),
-                        "spawn_initial_action_not_from_initial_state",
-                        format!(
-                            "action '{}' spawns '{}' with initial_action '{}' not enabled from target initial state '{}'",
-                            action.name,
-                            entity_type,
-                            initial_action_name,
-                            target_automaton.automaton.initial
-                        ),
-                    ));
-                }
-
-                if target_action.params.is_empty() {
-                    continue;
-                }
-
-                let mut available_params: BTreeSet<String> =
-                    action.params.iter().cloned().collect();
-                available_params.insert("parent_id".to_string());
-                available_params.insert("parent_type".to_string());
-                available_params.insert(format!("{parent_snake}_id"));
-
-                let missing_params: Vec<String> = target_action
-                    .params
-                    .iter()
-                    .filter(|param| !available_params.contains(*param))
-                    .cloned()
-                    .collect();
-
-                if !missing_params.is_empty() {
-                    let available: Vec<String> = available_params.into_iter().collect();
-                    findings.push(BundleLintFinding::error(
-                        entity_name.clone(),
-                        "spawn_initial_action_params_unmapped",
-                        format!(
-                            "action '{}' spawns '{}' -> '{}'; missing params {:?}, available params {:?}",
-                            action.name,
-                            entity_type,
-                            initial_action_name,
-                            missing_params,
-                            available
-                        ),
-                    ));
-                }
+                lint_spawn_effect(
+                    automata,
+                    entity_name,
+                    &parent_snake,
+                    action,
+                    effect,
+                    &mut findings,
+                );
             }
         }
     }
 
+    sort_bundle_findings(&mut findings);
+    findings
+}
+
+fn lint_spawn_effect(
+    automata: &BTreeMap<String, Automaton>,
+    entity_name: &str,
+    parent_snake: &str,
+    action: &super::Action,
+    effect: &Effect,
+    findings: &mut Vec<BundleLintFinding>,
+) {
+    let Effect::Spawn {
+        entity_type,
+        initial_action,
+        ..
+    } = effect
+    else {
+        return;
+    };
+
+    let Some(target_automaton) = automata.get(entity_type) else {
+        findings.push(BundleLintFinding::error(
+            entity_name.to_string(),
+            "spawn_target_missing",
+            format!(
+                "action '{}' spawns unknown entity type '{}'",
+                action.name, entity_type
+            ),
+        ));
+        return;
+    };
+
+    let Some(initial_action_name) = initial_action.as_deref() else {
+        return;
+    };
+
+    let Some(target_action) = target_action(target_automaton, initial_action_name) else {
+        findings.push(BundleLintFinding::error(
+            entity_name.to_string(),
+            "spawn_initial_action_missing",
+            format!(
+                "action '{}' spawns '{}' with missing initial_action '{}'",
+                action.name, entity_type, initial_action_name
+            ),
+        ));
+        return;
+    };
+
+    lint_spawn_initial_state(
+        entity_name,
+        action,
+        entity_type,
+        initial_action_name,
+        target_automaton,
+        target_action,
+        findings,
+    );
+    lint_spawn_param_mapping(
+        entity_name,
+        parent_snake,
+        action,
+        entity_type,
+        initial_action_name,
+        target_action,
+        findings,
+    );
+}
+
+fn target_action<'a>(automaton: &'a Automaton, action_name: &str) -> Option<&'a super::Action> {
+    automaton
+        .actions
+        .iter()
+        .find(|candidate| candidate.name == action_name)
+}
+
+fn lint_spawn_initial_state(
+    entity_name: &str,
+    action: &super::Action,
+    entity_type: &str,
+    initial_action_name: &str,
+    target_automaton: &Automaton,
+    target_action: &super::Action,
+    findings: &mut Vec<BundleLintFinding>,
+) {
+    if target_action.from.is_empty()
+        || target_action
+            .from
+            .iter()
+            .any(|from| from == &target_automaton.automaton.initial)
+    {
+        return;
+    }
+
+    findings.push(BundleLintFinding::error(
+        entity_name.to_string(),
+        "spawn_initial_action_not_from_initial_state",
+        format!(
+            "action '{}' spawns '{}' with initial_action '{}' not enabled from target initial state '{}'",
+            action.name, entity_type, initial_action_name, target_automaton.automaton.initial
+        ),
+    ));
+}
+
+fn lint_spawn_param_mapping(
+    entity_name: &str,
+    parent_snake: &str,
+    action: &super::Action,
+    entity_type: &str,
+    initial_action_name: &str,
+    target_action: &super::Action,
+    findings: &mut Vec<BundleLintFinding>,
+) {
+    if target_action.params.is_empty() {
+        return;
+    }
+
+    let available_params = available_spawn_params(action, parent_snake);
+    let missing_params: Vec<String> = target_action
+        .params
+        .iter()
+        .filter(|param| !available_params.contains(*param))
+        .cloned()
+        .collect();
+
+    if missing_params.is_empty() {
+        return;
+    }
+
+    let available: Vec<String> = available_params.into_iter().collect();
+    findings.push(BundleLintFinding::error(
+        entity_name.to_string(),
+        "spawn_initial_action_params_unmapped",
+        format!(
+            "action '{}' spawns '{}' -> '{}'; missing params {:?}, available params {:?}",
+            action.name, entity_type, initial_action_name, missing_params, available
+        ),
+    ));
+}
+
+fn available_spawn_params(action: &super::Action, parent_snake: &str) -> BTreeSet<String> {
+    let mut available_params: BTreeSet<String> = action.params.iter().cloned().collect();
+    available_params.insert("parent_id".to_string());
+    available_params.insert("parent_type".to_string());
+    available_params.insert(format!("{parent_snake}_id"));
+    available_params
+}
+
+fn sort_bundle_findings(findings: &mut [BundleLintFinding]) {
     findings.sort_by(|a, b| {
         let key_a = (
             &a.entity,
@@ -261,8 +326,6 @@ pub fn lint_automata_bundle(automata: &BTreeMap<String, Automaton>) -> Vec<Bundl
         );
         key_a.cmp(&key_b)
     });
-
-    findings
 }
 
 fn is_supported_state_var_type(var_type: &str) -> bool {
@@ -371,291 +434,5 @@ fn to_snake_case(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::automaton::parse_automaton;
-    use std::collections::BTreeMap;
-
-    #[test]
-    fn lint_rejects_unknown_state_var_type() {
-        let src = r#"
-[automaton]
-name = "Task"
-states = ["Draft", "Done"]
-initial = "Draft"
-
-[[state]]
-name = "mystery"
-type = "mystery_type"
-initial = "0"
-
-[[action]]
-name = "Complete"
-from = ["Draft"]
-to = "Done"
-"#;
-        let automaton = parse_automaton(src).expect("parse");
-        let findings = lint_automaton(&automaton);
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.code == "unknown_state_var_type" && f.severity == LintSeverity::Error)
-        );
-    }
-
-    #[test]
-    fn lint_rejects_unknown_guard_and_effect_variables() {
-        let src = r#"
-[automaton]
-name = "Task"
-states = ["Draft", "Done"]
-initial = "Draft"
-
-[[state]]
-name = "approved"
-type = "bool"
-initial = "false"
-
-[[action]]
-name = "Complete"
-from = ["Draft"]
-to = "Done"
-guard = "is_true phantom"
-effect = "set ghost true"
-"#;
-        let automaton = parse_automaton(src).expect("parse");
-        let findings = lint_automaton(&automaton);
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.code == "guard_unknown_var" && f.severity == LintSeverity::Error)
-        );
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.code == "effect_unknown_var" && f.severity == LintSeverity::Error)
-        );
-    }
-
-    #[test]
-    fn lint_warns_for_missing_to_on_internal_action() {
-        let src = r#"
-[automaton]
-name = "Task"
-states = ["Draft", "Done"]
-initial = "Draft"
-
-[[action]]
-name = "Nop"
-kind = "internal"
-from = ["Draft"]
-"#;
-        let automaton = parse_automaton(src).expect("parse");
-        let findings = lint_automaton(&automaton);
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.code == "action_missing_to" && f.severity == LintSeverity::Warning)
-        );
-    }
-
-    #[test]
-    fn lint_allows_missing_to_for_output_action() {
-        let src = r#"
-[automaton]
-name = "Task"
-states = ["Draft", "Done"]
-initial = "Draft"
-
-[[action]]
-name = "EmitAudit"
-kind = "output"
-from = ["Draft"]
-effect = "emit audit"
-"#;
-        let automaton = parse_automaton(src).expect("parse");
-        let findings = lint_automaton(&automaton);
-        assert!(!findings.iter().any(|f| f.code == "action_missing_to"));
-    }
-
-    fn parse(src: &str) -> Automaton {
-        parse_automaton(src).expect("parse")
-    }
-
-    #[test]
-    fn bundle_lint_rejects_missing_spawn_target() {
-        let parent = parse(
-            r#"
-[automaton]
-name = "Plan"
-states = ["Draft"]
-initial = "Draft"
-
-[[action]]
-name = "AddTask"
-from = ["Draft"]
-effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
-"#,
-        );
-
-        let bundle = BTreeMap::from([("Plan".to_string(), parent)]);
-        let findings = lint_automata_bundle(&bundle);
-        assert!(findings.iter().any(|f| {
-            f.code == "spawn_target_missing"
-                && f.entity == "Plan"
-                && f.severity == LintSeverity::Error
-        }));
-    }
-
-    #[test]
-    fn bundle_lint_rejects_missing_spawn_initial_action() {
-        let parent = parse(
-            r#"
-[automaton]
-name = "Plan"
-states = ["Draft"]
-initial = "Draft"
-
-[[action]]
-name = "AddTask"
-from = ["Draft"]
-effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
-"#,
-        );
-        let child = parse(
-            r#"
-[automaton]
-name = "Task"
-states = ["Open", "Done"]
-initial = "Open"
-
-[[action]]
-name = "Complete"
-from = ["Open"]
-to = "Done"
-"#,
-        );
-
-        let bundle = BTreeMap::from([("Plan".to_string(), parent), ("Task".to_string(), child)]);
-        let findings = lint_automata_bundle(&bundle);
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.code == "spawn_initial_action_missing" && f.entity == "Plan")
-        );
-    }
-
-    #[test]
-    fn bundle_lint_rejects_spawn_initial_action_not_enabled_from_initial() {
-        let parent = parse(
-            r#"
-[automaton]
-name = "Plan"
-states = ["Draft"]
-initial = "Draft"
-
-[[action]]
-name = "AddTask"
-from = ["Draft"]
-effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
-"#,
-        );
-        let child = parse(
-            r#"
-[automaton]
-name = "Task"
-states = ["Open", "InProgress"]
-initial = "Open"
-
-[[action]]
-name = "Create"
-from = ["InProgress"]
-"#,
-        );
-
-        let bundle = BTreeMap::from([("Plan".to_string(), parent), ("Task".to_string(), child)]);
-        let findings = lint_automata_bundle(&bundle);
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.code == "spawn_initial_action_not_from_initial_state")
-        );
-    }
-
-    #[test]
-    fn bundle_lint_rejects_unmapped_spawn_params() {
-        let parent = parse(
-            r#"
-[automaton]
-name = "Plan"
-states = ["Draft"]
-initial = "Draft"
-
-[[action]]
-name = "AddTask"
-from = ["Draft"]
-params = ["title"]
-effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
-"#,
-        );
-        let child = parse(
-            r#"
-[automaton]
-name = "Task"
-states = ["Open"]
-initial = "Open"
-
-[[action]]
-name = "Create"
-from = ["Open"]
-params = ["title", "description", "plan_id"]
-"#,
-        );
-
-        let bundle = BTreeMap::from([("Plan".to_string(), parent), ("Task".to_string(), child)]);
-        let findings = lint_automata_bundle(&bundle);
-        assert!(findings.iter().any(|f| {
-            f.code == "spawn_initial_action_params_unmapped"
-                && f.entity == "Plan"
-                && f.message.contains("description")
-        }));
-    }
-
-    #[test]
-    fn bundle_lint_accepts_valid_spawn_contract() {
-        let parent = parse(
-            r#"
-[automaton]
-name = "Plan"
-states = ["Active"]
-initial = "Active"
-
-[[action]]
-name = "AddTask"
-from = ["Active"]
-params = ["title", "description"]
-effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
-"#,
-        );
-        let child = parse(
-            r#"
-[automaton]
-name = "Task"
-states = ["Open"]
-initial = "Open"
-
-[[action]]
-name = "Create"
-from = ["Open"]
-params = ["title", "description", "plan_id"]
-"#,
-        );
-
-        let bundle = BTreeMap::from([("Plan".to_string(), parent), ("Task".to_string(), child)]);
-        let findings = lint_automata_bundle(&bundle);
-        assert!(
-            findings.is_empty(),
-            "expected no bundle lint findings, got: {findings:?}"
-        );
-    }
-}
+#[path = "lint_test.rs"]
+mod tests;
