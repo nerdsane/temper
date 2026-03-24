@@ -1,0 +1,60 @@
+# ToolHook — Before/after hooks for tool execution.
+#
+# Hooks are evaluated by tool_runner before/after executing tools.
+# Supports block, log, and modify actions with regex tool matching.
+
+[automaton]
+name = "ToolHook"
+states = ["Active", "Disabled"]
+initial = "Active"
+
+[[state]]
+name = "name"
+type = "string"
+initial = ""
+
+[[state]]
+name = "hook_type"
+type = "string"
+initial = "before"
+
+[[state]]
+name = "tool_pattern"
+type = "string"
+initial = ".*"
+
+[[state]]
+name = "hook_action"
+type = "string"
+initial = "log"
+
+[[state]]
+name = "soul_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "priority"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Register"
+kind = "input"
+from = ["Active"]
+params = ["name", "hook_type", "tool_pattern", "hook_action", "soul_id", "priority"]
+hint = "Register a tool hook with pattern and action."
+
+[[action]]
+name = "Disable"
+kind = "input"
+from = ["Active"]
+to = "Disabled"
+hint = "Disable the hook."
+
+[[action]]
+name = "Enable"
+kind = "input"
+from = ["Disabled"]
+to = "Active"
+hint = "Re-enable the hook."

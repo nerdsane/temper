@@ -589,6 +589,7 @@ async fn test_sse_events_endpoint_delivers_state_changes() {
 
     // Send a state change event on the broadcast channel.
     let _ = event_tx.send(EntityStateChange {
+        seq: 1,
         entity_type: "Order".into(),
         entity_id: "o-sse-1".into(),
         action: "SubmitOrder".into(),
@@ -620,6 +621,7 @@ async fn test_sse_events_lagged_receiver_continues() {
     // Flood it before any subscriber — then subscribe and send one more event.
     for i in 0..300 {
         let _ = event_tx.send(EntityStateChange {
+            seq: (i + 1) as u64,
             entity_type: "Order".into(),
             entity_id: format!("flood-{i}"),
             action: "Flood".into(),
@@ -645,6 +647,7 @@ async fn test_sse_events_lagged_receiver_continues() {
 
     // Send a fresh event that should be delivered.
     let _ = event_tx.send(EntityStateChange {
+        seq: 301,
         entity_type: "Order".into(),
         entity_id: "after-flood".into(),
         action: "Fresh".into(),

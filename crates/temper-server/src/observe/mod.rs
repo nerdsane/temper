@@ -160,6 +160,10 @@ pub fn build_observe_router() -> Router<ServerState> {
             "/entities/{entity_type}/{entity_id}/wait",
             get(entities::handle_wait_for_entity_state),
         )
+        .route(
+            "/entities/{entity_type}/{entity_id}/events",
+            get(entities::handle_entity_event_stream),
+        )
         .route("/events/stream", get(entities::handle_event_stream))
         .route(
             "/verification-status",

@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-for module in llm_caller tool_runner sandbox_provisioner; do
+for module in llm_caller tool_runner sandbox_provisioner context_compactor steering_checker coding_agent_runner heartbeat_scan heartbeat_scheduler cron_trigger cron_scheduler_check cron_scheduler_heartbeat workspace_restorer; do
     echo "Building $module..."
     (cd "$SCRIPT_DIR/$module" && cargo build --target wasm32-unknown-unknown --release)
     echo "  -> $module built successfully"
@@ -13,7 +13,7 @@ done
 
 echo ""
 echo "All WASM modules built. Binaries at:"
-for module in llm_caller tool_runner sandbox_provisioner; do
+for module in llm_caller tool_runner sandbox_provisioner context_compactor steering_checker coding_agent_runner heartbeat_scan heartbeat_scheduler cron_trigger cron_scheduler_check cron_scheduler_heartbeat workspace_restorer; do
     wasm_file="$SCRIPT_DIR/$module/target/wasm32-unknown-unknown/release/${module/-/_}.wasm"
     if [ -f "$wasm_file" ]; then
         size=$(wc -c < "$wasm_file" | tr -d ' ')

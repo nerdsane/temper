@@ -182,6 +182,10 @@ impl WasmHost for AuthorizedWasmHost {
         self.inner
             .evaluate_spec(ioa_source, current_state, action, params_json)
     }
+
+    fn emit_progress(&self, event_json: &str) -> Result<(), String> {
+        self.inner.emit_progress(event_json)
+    }
 }
 
 #[cfg(test)]

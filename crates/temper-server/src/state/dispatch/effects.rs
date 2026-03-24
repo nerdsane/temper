@@ -107,7 +107,10 @@ impl crate::state::ServerState {
         ctx: &PostDispatchContext<'_>,
         response: &EntityResponse,
     ) {
-        let _ = self.event_tx.send(EntityStateChange {
+        let seq =
+            self.next_entity_event_sequence(ctx.tenant.as_str(), ctx.entity_type, ctx.entity_id);
+        let change = EntityStateChange {
+            seq,
             entity_type: ctx.entity_type.to_string(),
             entity_id: ctx.entity_id.to_string(),
             action: ctx.action.to_string(),
@@ -115,7 +118,55 @@ impl crate::state::ServerState {
             tenant: ctx.tenant.to_string(),
             agent_id: ctx.agent_ctx.agent_id.clone(),
             session_id: ctx.agent_ctx.session_id.clone(),
-        });
+        };
+        self.record_entity_observe_event_with_seq(
+            ctx.tenant.as_str(),
+            ctx.entity_type,
+            ctx.entity_id,
+            seq,
+            "state_change",
+            serde_json::to_value(&change).unwrap_or_default(),
+        );
+        let _ = self.event_tx.send(change);
+        if matches!(
+            response.state.status.as_str(),
+            "Completed" | "Failed" | "Cancelled"
+        ) {
+            let terminal_seq = self.next_entity_event_sequence(
+                ctx.tenant.as_str(),
+                ctx.entity_type,
+                ctx.entity_id,
+            );
+            let result = response
+                .state
+                .fields
+                .get("result")
+                .or_else(|| response.state.fields.get("Result"))
+                .and_then(serde_json::Value::as_str);
+            let error_message = response
+                .state
+                .fields
+                .get("error_message")
+                .or_else(|| response.state.fields.get("ErrorMessage"))
+                .and_then(serde_json::Value::as_str)
+                .or(response.error.as_deref());
+            self.record_entity_observe_event_with_seq(
+                ctx.tenant.as_str(),
+                ctx.entity_type,
+                ctx.entity_id,
+                terminal_seq,
+                "agent_complete",
+                serde_json::json!({
+                    "seq": terminal_seq,
+                    "status": response.state.status,
+                    "action": ctx.action,
+                    "result": result,
+                    "error_message": error_message,
+                    "agent_id": ctx.agent_ctx.agent_id,
+                    "session_id": ctx.agent_ctx.session_id,
+                }),
+            );
+        }
         let cache_key = format!("{}:{}:{}", ctx.tenant, ctx.entity_type, ctx.entity_id);
         self.cache_entity_status(cache_key, response.state.status.clone());
         let _ = self

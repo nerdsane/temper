@@ -79,6 +79,11 @@ pub trait WasmHost: Send + Sync {
     ) -> Result<String, String> {
         Err("evaluate_spec not supported by this host".to_string())
     }
+
+    /// Emit a replayable progress event from the guest module.
+    fn emit_progress(&self, _event_json: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Callback for evaluating IOA spec transitions.
@@ -88,6 +93,9 @@ pub trait WasmHost: Send + Sync {
 pub type SpecEvaluatorFn =
     Arc<dyn Fn(&str, &str, &str, &str) -> Result<String, String> + Send + Sync>;
 
+/// Callback for replayable progress events emitted by guest WASM modules.
+pub type ProgressEmitterFn = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
 /// Production host: real HTTP calls via reqwest, real secrets.
 pub struct ProductionWasmHost {
     /// HTTP client for making real requests.
@@ -96,6 +104,8 @@ pub struct ProductionWasmHost {
     secrets: BTreeMap<String, String>,
     /// Optional spec evaluator (provided by temper-server at construction).
     spec_evaluator: Option<SpecEvaluatorFn>,
+    /// Optional progress emitter (provided by temper-server at construction).
+    progress_emitter: Option<ProgressEmitterFn>,
 }
 
 impl ProductionWasmHost {
@@ -114,12 +124,19 @@ impl ProductionWasmHost {
                 .unwrap_or_default(),
             secrets,
             spec_evaluator: None,
+            progress_emitter: None,
         }
     }
 
     /// Create with a spec evaluator for `host_evaluate_spec` support.
     pub fn with_spec_evaluator(mut self, evaluator: SpecEvaluatorFn) -> Self {
         self.spec_evaluator = Some(evaluator);
+        self
+    }
+
+    /// Create with a progress emitter for `host_emit_progress` support.
+    pub fn with_progress_emitter(mut self, emitter: ProgressEmitterFn) -> Self {
+        self.progress_emitter = Some(emitter);
         self
     }
 }
@@ -264,6 +281,13 @@ impl WasmHost for ProductionWasmHost {
         match &self.spec_evaluator {
             Some(evaluator) => evaluator(ioa_source, current_state, action, params_json),
             None => Err("evaluate_spec not supported by this host".to_string()),
+        }
+    }
+
+    fn emit_progress(&self, event_json: &str) -> Result<(), String> {
+        match &self.progress_emitter {
+            Some(emitter) => emitter(event_json),
+            None => Ok(()),
         }
     }
 }
@@ -475,6 +499,10 @@ impl WasmHost for SimWasmHost {
             .get(&(hash, action.to_string()))
             .cloned()
             .ok_or_else(|| format!("sim: no canned response for action '{action}'"))
+    }
+
+    fn emit_progress(&self, _event_json: &str) -> Result<(), String> {
+        Ok(())
     }
 }
 

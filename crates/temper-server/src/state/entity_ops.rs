@@ -449,7 +449,9 @@ impl ServerState {
             .map_err(|e| format!("Actor query failed: {e}"))?;
 
         // Broadcast entity creation event for SSE subscribers
-        let _ = self.event_tx.send(EntityStateChange {
+        let seq = self.next_entity_event_sequence(tenant.as_str(), entity_type, entity_id);
+        let change = EntityStateChange {
+            seq,
             entity_type: entity_type.to_string(),
             entity_id: entity_id.to_string(),
             action: "Created".to_string(),
@@ -457,7 +459,16 @@ impl ServerState {
             tenant: tenant.to_string(),
             agent_id: None,
             session_id: None,
-        });
+        };
+        self.record_entity_observe_event_with_seq(
+            tenant.as_str(),
+            entity_type,
+            entity_id,
+            seq,
+            "state_change",
+            serde_json::to_value(&change).unwrap_or_default(),
+        );
+        let _ = self.event_tx.send(change);
 
         Ok(response)
     }

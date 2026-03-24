@@ -1,0 +1,14 @@
+[package]
+name = "steering-checker"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+
+[dependencies]
+temper-wasm-sdk = { path = "../../../../crates/temper-wasm-sdk" }
+session-tree-lib = { path = "../session-tree-lib" }
+wasm-helpers = { path = "../wasm-helpers" }

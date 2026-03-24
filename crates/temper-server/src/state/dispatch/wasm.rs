@@ -13,8 +13,8 @@ use temper_observe::wide_event;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{
-    AuthorizedWasmHost, ProductionWasmHost, StreamRegistry, WasmAuthzContext, WasmAuthzGate,
-    WasmHost, WasmInvocationContext, WasmResourceLimits,
+    AuthorizedWasmHost, ProductionWasmHost, ProgressEmitterFn, StreamRegistry, WasmAuthzContext,
+    WasmAuthzGate, WasmHost, WasmInvocationContext, WasmResourceLimits,
 };
 
 use super::{
@@ -163,9 +163,17 @@ impl crate::state::ServerState {
             .and_then(|s| s.parse::<u64>().ok())
             .map(std::time::Duration::from_secs)
             .unwrap_or(std::time::Duration::from_secs(30));
+        let progress_emitter = progress_emitter_fn(
+            self.clone(),
+            ctx.entity_ref.tenant.to_string(),
+            ctx.entity_ref.entity_type.to_string(),
+            ctx.entity_ref.entity_id.to_string(),
+            module_name.clone(),
+        );
         let inner: Arc<dyn WasmHost> = Arc::new(
             ProductionWasmHost::with_timeout(tenant_secrets, http_timeout)
-                .with_spec_evaluator(spec_evaluator_fn()),
+                .with_spec_evaluator(spec_evaluator_fn())
+                .with_progress_emitter(progress_emitter),
         );
         let host: Arc<dyn WasmHost> = Arc::new(AuthorizedWasmHost::new(inner, gate, authz_ctx));
         let max_response_bytes = integration
@@ -187,6 +195,24 @@ impl crate::state::ServerState {
             module = %module_name,
             hash = %hash,
             "invoking WASM integration module"
+        );
+        let start_seq = self.next_entity_event_sequence(
+            ctx.entity_ref.tenant.as_str(),
+            ctx.entity_ref.entity_type,
+            ctx.entity_ref.entity_id,
+        );
+        self.record_entity_observe_event_with_seq(
+            ctx.entity_ref.tenant.as_str(),
+            ctx.entity_ref.entity_type,
+            ctx.entity_ref.entity_id,
+            start_seq,
+            "integration_start",
+            serde_json::json!({
+                "seq": start_seq,
+                "integration": integration.name,
+                "module": module_name,
+                "trigger_action": ctx.action,
+            }),
         );
 
         // --- Invoke and handle result ---
@@ -388,6 +414,27 @@ impl crate::state::ServerState {
             .await
         {
             Ok(result) if result.success => {
+                let complete_seq = self.next_entity_event_sequence(
+                    ctx.entity_ref.tenant.as_str(),
+                    ctx.entity_ref.entity_type,
+                    ctx.entity_ref.entity_id,
+                );
+                self.record_entity_observe_event_with_seq(
+                    ctx.entity_ref.tenant.as_str(),
+                    ctx.entity_ref.entity_type,
+                    ctx.entity_ref.entity_id,
+                    complete_seq,
+                    "integration_complete",
+                    serde_json::json!({
+                        "seq": complete_seq,
+                        "integration": integration.name,
+                        "module": module_name,
+                        "trigger_action": ctx.action,
+                        "result": "success",
+                        "callback_action": result.callback_action.clone(),
+                        "duration_ms": result.duration_ms,
+                    }),
+                );
                 if let Some(reason) = denial_tracker.take_denial() {
                     let error_str = format!("authorization denied for http_call: {reason}");
                     return self
@@ -437,6 +484,28 @@ impl crate::state::ServerState {
                 Ok(None)
             }
             Ok(result) => {
+                let complete_seq = self.next_entity_event_sequence(
+                    ctx.entity_ref.tenant.as_str(),
+                    ctx.entity_ref.entity_type,
+                    ctx.entity_ref.entity_id,
+                );
+                self.record_entity_observe_event_with_seq(
+                    ctx.entity_ref.tenant.as_str(),
+                    ctx.entity_ref.entity_type,
+                    ctx.entity_ref.entity_id,
+                    complete_seq,
+                    "integration_complete",
+                    serde_json::json!({
+                        "seq": complete_seq,
+                        "integration": integration.name,
+                        "module": module_name,
+                        "trigger_action": ctx.action,
+                        "result": "failure",
+                        "callback_action": result.callback_action.clone(),
+                        "duration_ms": result.duration_ms,
+                        "error": result.error.clone(),
+                    }),
+                );
                 let mut error_str = result.error.unwrap_or_else(|| {
                     format!(
                         "WASM integration '{}' returned unsuccessful result",
@@ -457,6 +526,27 @@ impl crate::state::ServerState {
                 .await
             }
             Err(e) => {
+                let complete_seq = self.next_entity_event_sequence(
+                    ctx.entity_ref.tenant.as_str(),
+                    ctx.entity_ref.entity_type,
+                    ctx.entity_ref.entity_id,
+                );
+                self.record_entity_observe_event_with_seq(
+                    ctx.entity_ref.tenant.as_str(),
+                    ctx.entity_ref.entity_type,
+                    ctx.entity_ref.entity_id,
+                    complete_seq,
+                    "integration_complete",
+                    serde_json::json!({
+                        "seq": complete_seq,
+                        "integration": integration.name,
+                        "module": module_name,
+                        "trigger_action": ctx.action,
+                        "result": "error",
+                        "duration_ms": 0,
+                        "error": e.to_string(),
+                    }),
+                );
                 let mut error_str = e.to_string();
                 if let Some(reason) = denial_tracker.take_denial()
                     && !error_str.contains("authorization denied for http_call")
@@ -760,8 +850,17 @@ impl crate::state::ServerState {
             trigger_action: context.trigger_action.clone(),
         };
         let tenant_secrets = self.get_authorized_wasm_secrets(tenant, &*base_gate, &authz_ctx);
+        let progress_emitter = progress_emitter_fn(
+            self.clone(),
+            tenant.to_string(),
+            context.entity_type.clone(),
+            context.entity_id.clone(),
+            module_name.to_string(),
+        );
         let inner: Arc<dyn WasmHost> = Arc::new(
-            ProductionWasmHost::new(tenant_secrets).with_spec_evaluator(spec_evaluator_fn()),
+            ProductionWasmHost::new(tenant_secrets)
+                .with_spec_evaluator(spec_evaluator_fn())
+                .with_progress_emitter(progress_emitter),
         );
         let host: Arc<dyn WasmHost> =
             Arc::new(AuthorizedWasmHost::new(inner, base_gate, authz_ctx));
@@ -817,6 +916,58 @@ fn spec_evaluator_fn() -> temper_wasm::SpecEvaluatorFn {
             }
         },
     )
+}
+
+fn progress_emitter_fn(
+    state: crate::state::ServerState,
+    tenant: String,
+    entity_type: String,
+    entity_id: String,
+    module_name: String,
+) -> ProgressEmitterFn {
+    std::sync::Arc::new(move |event_json: &str| {
+        let parsed = serde_json::from_str::<Value>(event_json).unwrap_or_else(|_| {
+            serde_json::json!({
+                "kind": "integration_progress",
+                "message": event_json,
+            })
+        });
+        let kind = parsed
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("integration_progress")
+            .to_string();
+        let seq = state.next_entity_event_sequence(&tenant, &entity_type, &entity_id);
+        let event = crate::state::AgentProgressEvent {
+            tenant: tenant.clone(),
+            entity_type: entity_type.clone(),
+            entity_id: entity_id.clone(),
+            seq,
+            kind,
+            agent_id: entity_id.clone(),
+            tool_call_id: parsed
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            tool_name: parsed
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| Some(module_name.clone())),
+            task_id: parsed
+                .get("task_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            message: parsed
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            timestamp: sim_now().to_rfc3339(),
+            data: Some(parsed),
+        };
+        state.broadcast_agent_progress(event);
+        Ok(())
+    })
 }
 
 fn has_replay_trajectory_input(params: &Value) -> bool {

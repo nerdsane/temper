@@ -61,7 +61,9 @@ ui/observe/components/Graph3D.tsx
 scripts/discord-clean-view.js
 scripts/generate-graph-json.js
 
-.proof/
+.proof/*
+!.proof/
+!.proof/*.md
 .code-review-pass
 .dst-review-pass
 .vercel

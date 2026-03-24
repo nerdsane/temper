@@ -42,6 +42,10 @@ unsafe extern "C" {
     /// Set the result JSON for this invocation.
     pub fn host_set_result(ptr: i32, len: i32);
 
+    /// Emit a replayable progress event for the current entity.
+    /// Returns 0 on success, -1 on error.
+    pub fn host_emit_progress(ptr: i32, len: i32) -> i32;
+
     /// Read a secret value by key.
     /// Returns bytes written, needed size if too small, or -1 on error.
     pub fn host_get_secret(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_len: i32) -> i32;

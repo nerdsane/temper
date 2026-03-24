@@ -156,6 +156,11 @@ pub(crate) struct WaitForEntityStateParams {
     pub poll_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct EntityEventStreamParams {
+    pub since: Option<u64>,
+}
+
 /// GET /observe/entities/{entity_type}/{entity_id}/wait -- wait for an entity to reach a target status.
 #[instrument(skip_all, fields(otel.name = "GET /observe/entities/{entity_type}/{entity_id}/wait", entity_type, entity_id))]
 pub(crate) async fn handle_wait_for_entity_state(
@@ -182,7 +187,7 @@ pub(crate) async fn handle_wait_for_entity_state(
 
     let timeout_ms = params.timeout_ms.unwrap_or(120_000).clamp(1, 300_000);
     let poll_ms = params.poll_ms.unwrap_or(250).clamp(10, 5_000);
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms); // determinism-ok: HTTP handler, not actor code
 
     loop {
         let entity = state
@@ -190,7 +195,7 @@ pub(crate) async fn handle_wait_for_entity_state(
             .await
             .map_err(|_| StatusCode::NOT_FOUND)?;
         let status = entity.state.status.clone();
-        let timed_out = tokio::time::Instant::now() >= deadline;
+        let timed_out = tokio::time::Instant::now() >= deadline; // determinism-ok: HTTP handler, not actor code
 
         if target_statuses.contains(&status) || timed_out {
             let mut json = serde_json::to_value(&entity.state)
@@ -201,8 +206,50 @@ pub(crate) async fn handle_wait_for_entity_state(
             return Ok(Json(json));
         }
 
-        tokio::time::sleep(Duration::from_millis(poll_ms)).await;
+        tokio::time::sleep(Duration::from_millis(poll_ms)).await; // determinism-ok: HTTP handler, not actor code
     }
+}
+
+/// GET /observe/entities/{entity_type}/{entity_id}/events -- replayable SSE stream for one entity.
+pub(crate) async fn handle_entity_event_stream(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Path((entity_type, entity_id)): Path<(String, String)>,
+    Query(params): Query<EntityEventStreamParams>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_events", "Entity")?;
+    let tenant = extract_tenant(&headers, &state).map_err(|(code, _)| code)?;
+    let since = params.since.unwrap_or(0);
+    let rx = state.entity_observe_tx.subscribe();
+    let replay_events = state
+        .replay_entity_observe_events(tenant.as_str(), &entity_type, &entity_id, since)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let replay_high_water = replay_events.last().map(|event| event.seq).unwrap_or(since);
+    let replay = replay_events.into_iter().map(|event| {
+        let data = serde_json::to_string(&event.data).unwrap_or_default();
+        Ok::<Event, Infallible>(Event::default().event(&event.event_name).data(data))
+    });
+    let replay_stream = tokio_stream::iter(replay);
+
+    let live_tenant = tenant.clone();
+    let live_entity_type = entity_type.clone();
+    let live_entity_id = entity_id.clone();
+    let live_stream = BroadcastStream::new(rx).filter_map(move |result| match result {
+        Ok(event)
+            if event.tenant == live_tenant.as_str()
+                && event.entity_type == live_entity_type
+                && event.entity_id == live_entity_id
+                && event.seq > replay_high_water =>
+        {
+            let data = serde_json::to_string(&event.data).unwrap_or_default();
+            Some(Ok(Event::default().event(&event.event_name).data(data)))
+        }
+        Ok(_) => None,
+        Err(_) => None,
+    });
+
+    Ok(Sse::new(replay_stream.chain(live_stream)).keep_alive(KeepAlive::default()))
 }
 
 /// Format entity events into the history API response shape.

@@ -1,0 +1,67 @@
+# AgentRoute — Binding-tier routing rules for channel messages.
+#
+# Routes incoming channel messages to agent configurations based on
+# binding tier priority: peer > guild_roles > guild > team > channel.
+
+[automaton]
+name = "AgentRoute"
+states = ["Active", "Disabled"]
+initial = "Active"
+
+[[state]]
+name = "binding_tier"
+type = "string"
+initial = "channel"
+
+[[state]]
+name = "channel_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "guild_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "match_pattern"
+type = "string"
+initial = ""
+
+[[state]]
+name = "agent_config"
+type = "string"
+initial = ""
+
+[[state]]
+name = "soul_id"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Register"
+kind = "input"
+from = ["Active"]
+params = ["binding_tier", "channel_id", "guild_id", "match_pattern", "agent_config", "soul_id"]
+hint = "Register a routing rule."
+
+[[action]]
+name = "Update"
+kind = "input"
+from = ["Active"]
+params = ["agent_config", "match_pattern", "soul_id"]
+hint = "Update routing configuration."
+
+[[action]]
+name = "Disable"
+kind = "input"
+from = ["Active"]
+to = "Disabled"
+hint = "Disable this route."
+
+[[action]]
+name = "Enable"
+kind = "input"
+from = ["Disabled"]
+to = "Active"
+hint = "Re-enable this route."

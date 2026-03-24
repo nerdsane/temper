@@ -237,6 +237,18 @@ impl Context {
         }
     }
 
+    /// Emit a replayable progress event for the current entity.
+    pub fn emit_progress(&self, event: &Value) -> Result<(), String> {
+        let json =
+            serde_json::to_string(event).map_err(|e| format!("progress JSON serialize: {e}"))?;
+        let rc = unsafe { host::host_emit_progress(json.as_ptr() as i32, json.len() as i32) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err("host_emit_progress failed".to_string())
+        }
+    }
+
     /// Evaluate a single transition against an IOA spec via the host.
     ///
     /// The host builds a `TransitionTable` from the IOA source and evaluates

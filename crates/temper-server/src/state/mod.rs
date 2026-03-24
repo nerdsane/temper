@@ -56,6 +56,14 @@ use temper_wasm::WasmEngine;
 /// track agent activity in real time without polling.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentProgressEvent {
+    /// Tenant that owns the related entity.
+    pub tenant: String,
+    /// Entity type that emitted the event.
+    pub entity_type: String,
+    /// Entity ID that emitted the event.
+    pub entity_id: String,
+    /// Monotonic per-entity event sequence.
+    pub seq: u64,
     /// Event kind: "tool_call_started", "tool_call_completed",
     /// "task_started", "task_completed", "agent_completed".
     pub kind: String,
@@ -71,6 +79,26 @@ pub struct AgentProgressEvent {
     pub message: Option<String>,
     /// ISO-8601 timestamp when the event was created.
     pub timestamp: String,
+    /// Optional structured payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+/// Unified replayable event stream for a single entity.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EntityObserveEvent {
+    /// Tenant that owns the entity.
+    pub tenant: String,
+    /// Entity type for this event.
+    pub entity_type: String,
+    /// Entity instance ID.
+    pub entity_id: String,
+    /// Monotonic per-entity event sequence.
+    pub seq: u64,
+    /// SSE event name.
+    pub event_name: String,
+    /// Structured event payload.
+    pub data: serde_json::Value,
 }
 
 /// Lightweight hint broadcast for the Observe UI SSE refresh stream.
@@ -186,6 +214,8 @@ pub struct ServerState {
     pub entity_index: Arc<RwLock<BTreeMap<String, BTreeSet<String>>>>,
     /// Broadcast channel for entity state change events (SSE subscriptions).
     pub event_tx: Arc<tokio::sync::broadcast::Sender<EntityStateChange>>,
+    /// Broadcast channel for replayable per-entity lifecycle and progress events.
+    pub entity_observe_tx: Arc<tokio::sync::broadcast::Sender<EntityObserveEvent>>,
     /// Server start time (DST-safe: uses sim_now()).
     pub start_time: chrono::DateTime<chrono::Utc>,
     /// Metrics collector for the /observe endpoints.
@@ -234,6 +264,10 @@ pub struct ServerState {
     /// Broadcast channel for agent progress events (SSE subscriptions).
     /// // determinism-ok: broadcast channel for external observation only
     pub agent_progress_tx: Arc<tokio::sync::broadcast::Sender<AgentProgressEvent>>,
+    /// Monotonic per-entity observe-event sequence counters.
+    pub entity_event_sequences: Arc<Mutex<BTreeMap<String, u64>>>,
+    /// Replay buffer for recent per-entity observe events.
+    pub entity_observe_log: Arc<Mutex<BTreeMap<String, Vec<EntityObserveEvent>>>>,
     /// Broadcast channel for observe UI refresh hints (SSE push).
     /// // determinism-ok: broadcast channel for external observation only
     pub observe_refresh_tx: Arc<tokio::sync::broadcast::Sender<ObserveRefreshHint>>,
@@ -272,6 +306,7 @@ impl ServerState {
         }
 
         let (event_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
+        let (entity_observe_tx, _) = tokio::sync::broadcast::channel(512); // determinism-ok: broadcast for external observation
         let (design_time_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let (agent_progress_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
@@ -291,6 +326,7 @@ impl ServerState {
             registry: Arc::new(RwLock::new(SpecRegistry::new())),
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             event_tx: Arc::new(event_tx),
+            entity_observe_tx: Arc::new(entity_observe_tx),
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
             record_store: Arc::new(RecordStore::new()),
@@ -315,6 +351,8 @@ impl ServerState {
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
+            entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
+            entity_observe_log: Arc::new(Mutex::new(BTreeMap::new())),
             observe_refresh_tx: Arc::new(observe_refresh_tx), // determinism-ok: broadcast for external observation
             listen_port: Arc::new(std::sync::OnceLock::new()),
             single_tenant_mode: true,
@@ -344,6 +382,87 @@ impl ServerState {
                 tracing::warn!(error = %e, "failed to compile built-in http_fetch WASM module");
             }
         }
+    }
+
+    fn push_entity_observe_event(&self, event: EntityObserveEvent) {
+        let key = format!("{}:{}:{}", event.tenant, event.entity_type, event.entity_id);
+        {
+            let mut log = self.entity_observe_log.lock().unwrap(); // ci-ok: infallible lock
+            let entries = log.entry(key).or_default();
+            entries.push(event.clone());
+            if entries.len() > 512 {
+                let overflow = entries.len().saturating_sub(512);
+                entries.drain(0..overflow);
+            }
+        }
+        let _ = self.entity_observe_tx.send(event);
+    }
+
+    pub(crate) fn next_entity_event_sequence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> u64 {
+        let key = format!("{tenant}:{entity_type}:{entity_id}");
+        let mut sequences = self.entity_event_sequences.lock().unwrap(); // ci-ok: infallible lock
+        let next = sequences.get(&key).copied().unwrap_or(0) + 1;
+        sequences.insert(key, next);
+        next
+    }
+
+    pub(crate) fn record_entity_observe_event_with_seq(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        seq: u64,
+        event_name: &str,
+        data: serde_json::Value,
+    ) {
+        let event = EntityObserveEvent {
+            tenant: tenant.to_string(),
+            entity_type: entity_type.to_string(),
+            entity_id: entity_id.to_string(),
+            seq,
+            event_name: event_name.to_string(),
+            data,
+        };
+        self.push_entity_observe_event(event);
+    }
+
+    #[cfg(feature = "observe")]
+    pub(crate) fn replay_entity_observe_events(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        since: u64,
+    ) -> Vec<EntityObserveEvent> {
+        let key = format!("{tenant}:{entity_type}:{entity_id}");
+        let log = self.entity_observe_log.lock().unwrap(); // ci-ok: infallible lock
+        log.get(&key)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|event| event.seq > since)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn broadcast_agent_progress(&self, event: AgentProgressEvent) {
+        let _ = self.agent_progress_tx.send(event.clone());
+        let observe_event = EntityObserveEvent {
+            tenant: event.tenant.clone(),
+            entity_type: event.entity_type.clone(),
+            entity_id: event.entity_id.clone(),
+            seq: event.seq,
+            event_name: event.kind.clone(),
+            data: serde_json::to_value(&event).unwrap_or_default(),
+        };
+        self.push_entity_observe_event(observe_event);
     }
 
     /// Create ServerState with I/O Automaton TOML specs for transition table resolution.
@@ -412,6 +531,7 @@ impl ServerState {
     /// (e.g. `PlatformState`) so that writes are visible to dispatch.
     pub fn from_registry_shared(system: ActorSystem, registry: Arc<RwLock<SpecRegistry>>) -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
+        let (entity_observe_tx, _) = tokio::sync::broadcast::channel(512); // determinism-ok: broadcast for external observation
         let (design_time_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let (pending_decision_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let (agent_progress_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
@@ -434,6 +554,7 @@ impl ServerState {
             registry,
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             event_tx: Arc::new(event_tx),
+            entity_observe_tx: Arc::new(entity_observe_tx),
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
             record_store: Arc::new(RecordStore::new()),
@@ -458,6 +579,8 @@ impl ServerState {
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
+            entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
+            entity_observe_log: Arc::new(Mutex::new(BTreeMap::new())),
             observe_refresh_tx: Arc::new(observe_refresh_tx), // determinism-ok: broadcast for external observation
             listen_port: Arc::new(std::sync::OnceLock::new()),
             single_tenant_mode: false,

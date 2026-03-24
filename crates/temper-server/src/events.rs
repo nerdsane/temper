@@ -19,6 +19,9 @@ use crate::state::ServerState;
 /// A notification emitted when an entity transitions to a new state.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EntityStateChange {
+    /// Monotonic per-entity event sequence.
+    #[serde(default)]
+    pub seq: u64,
     /// The entity type (e.g., "Order").
     pub entity_type: String,
     /// The entity ID.
@@ -77,6 +80,7 @@ mod tests {
     #[test]
     fn entity_state_change_serializes() {
         let change = EntityStateChange {
+            seq: 1,
             entity_type: "Order".into(),
             entity_id: "o-1".into(),
             action: "SubmitOrder".into(),

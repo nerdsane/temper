@@ -75,6 +75,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "session-tree-lib"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -96,6 +103,7 @@ dependencies = [
 name = "tool-runner"
 version = "0.1.0"
 dependencies = [
+ "session-tree-lib",
  "temper-wasm-sdk",
 ]
 

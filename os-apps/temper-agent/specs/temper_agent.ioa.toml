@@ -1,4 +1,4 @@
-# TemperAgent Entity — Spec-driven agent loop via IOA state machine.
+# TemperAgent Entity — Pi-compatible governed agent loop via IOA state machine.
 #
 # The agent turn cycle is expressed as state transitions with WASM integration
 # triggers. No Rust while loop — the platform's dispatch pipeline drives
@@ -6,15 +6,23 @@
 #   Thinking → (call_llm) → ProcessToolCalls → Executing → (run_tools) →
 #   HandleToolResults → Thinking → ...
 #
-# Conversation history stored in TemperFS (conversation_file_id FK).
+# Pi architecture additions:
+#   - Session tree: JSONL append-only tree with branching (session_file_id)
+#   - Compaction: Thinking → Compacting → Thinking (context_compactor WASM)
+#   - Steering: Thinking → Steering → Thinking or Completed (two-loop model)
+#   - Soul/Skills/Memory: entity references for identity, capabilities, knowledge
+#   - Subagents: parent/child entity relationships via parent_agent_id
+#   - Heartbeat: liveness monitoring via last_heartbeat_at
+#
+# Conversation history stored in TemperFS as JSONL session tree.
 # Budget enforced via turn_count guard. Tools governed by Cedar.
 
 [automaton]
 name = "TemperAgent"
-states = ["Created", "Provisioning", "Thinking", "Executing", "Completed", "Failed", "Cancelled"]
+states = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Completed", "Failed", "Cancelled"]
 initial = "Created"
 
-# --- State Variables ---
+# --- State Variables: Core ---
 
 [[state]]
 name = "model"
@@ -92,6 +100,11 @@ type = "string"
 initial = ""
 
 [[state]]
+name = "temper_api_url"
+type = "string"
+initial = "http://127.0.0.1:3000"
+
+[[state]]
 name = "file_manifest_id"
 type = "string"
 initial = ""
@@ -121,14 +134,113 @@ name = "conversation"
 type = "string"
 initial = ""
 
-# --- Actions ---
+# --- State Variables: Session Tree (Phase 2) ---
+
+[[state]]
+name = "session_file_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "session_leaf_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "context_tokens"
+type = "counter"
+initial = "0"
+
+# --- State Variables: Compaction (Phase 3) ---
+
+[[state]]
+name = "reserve_tokens"
+type = "string"
+initial = "20000"
+
+[[state]]
+name = "keep_recent_tokens"
+type = "string"
+initial = "10000"
+
+[[state]]
+name = "compaction_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "compaction_model"
+type = "string"
+initial = ""
+
+# --- State Variables: Steering (Phase 4) ---
+
+[[state]]
+name = "steering_messages"
+type = "string"
+initial = "[]"
+
+[[state]]
+name = "follow_up_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "max_follow_ups"
+type = "string"
+initial = "5"
+
+# --- State Variables: Soul / Skills / Memory (Phase 5) ---
+
+[[state]]
+name = "soul_id"
+type = "string"
+initial = ""
+
+# --- State Variables: Tool Hooks (Phase 6) ---
+
+[[state]]
+name = "hook_policy"
+type = "string"
+initial = "none"
+
+# --- State Variables: Subagents (Phase 7) ---
+
+[[state]]
+name = "parent_agent_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "child_agent_ids"
+type = "string"
+initial = "[]"
+
+[[state]]
+name = "agent_depth"
+type = "counter"
+initial = "0"
+
+# --- State Variables: Heartbeat (Phase 8) ---
+
+[[state]]
+name = "last_heartbeat_at"
+type = "string"
+initial = ""
+
+[[state]]
+name = "heartbeat_timeout_seconds"
+type = "string"
+initial = "300"
+
+# --- Actions: Core Agent Loop ---
 
 [[action]]
 name = "Configure"
 kind = "input"
 from = ["Created"]
-params = ["system_prompt", "user_message", "model", "provider", "max_turns", "tools_enabled", "workdir", "sandbox_url"]
-hint = "Configure agent with system prompt, user message (task), model, tool settings, and optional sandbox URL."
+params = ["system_prompt", "user_message", "model", "provider", "max_turns", "tools_enabled", "workdir", "sandbox_url", "temper_api_url", "soul_id", "parent_agent_id", "agent_depth", "max_follow_ups", "hook_policy", "reserve_tokens", "keep_recent_tokens", "compaction_model", "heartbeat_timeout_seconds"]
+hint = "Configure agent with system prompt, user message, model, tools, soul, and optional overrides."
 
 [[action]]
 name = "Provision"
@@ -143,8 +255,8 @@ name = "SandboxReady"
 kind = "input"
 from = ["Provisioning"]
 to = "Thinking"
-params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id"]
-hint = "Callback from sandbox provisioner. Sets sandbox connection, TemperFS workspace/file/manifest, and starts think loop."
+params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id"]
+hint = "Callback from sandbox provisioner. Sets sandbox connection, TemperFS workspace/file/manifest/session, and starts think loop."
 effect = [{ type = "trigger", name = "call_llm" }]
 
 [[action]]
@@ -152,11 +264,12 @@ name = "ProcessToolCalls"
 kind = "input"
 from = ["Thinking"]
 to = "Executing"
-params = ["pending_tool_calls", "conversation", "input_tokens", "output_tokens"]
+params = ["pending_tool_calls", "conversation", "input_tokens", "output_tokens", "session_leaf_id", "context_tokens"]
 hint = "LLM returned tool_use blocks. Record token usage, transition to Executing, and run tools."
 effect = [
   { type = "increment", var = "input_tokens" },
   { type = "increment", var = "output_tokens" },
+  { type = "increment", var = "context_tokens" },
   { type = "trigger", name = "run_tools" }
 ]
 
@@ -165,7 +278,7 @@ name = "HandleToolResults"
 kind = "input"
 from = ["Executing"]
 to = "Thinking"
-params = ["pending_tool_calls", "conversation"]
+params = ["pending_tool_calls", "conversation", "session_leaf_id"]
 guard = "turn_count < 100"
 hint = "Tool results received. Increment turn, transition to Thinking, and call LLM again. Static safety ceiling at 100 turns; dynamic max_turns enforced by llm_caller at runtime."
 effect = [
@@ -173,23 +286,119 @@ effect = [
   { type = "trigger", name = "call_llm" }
 ]
 
+# --- Actions: Compaction (Phase 3) ---
+
+[[action]]
+name = "NeedsCompaction"
+kind = "input"
+from = ["Thinking"]
+to = "Compacting"
+params = ["input_tokens", "output_tokens"]
+hint = "LLM caller detected context tokens exceeds window minus reserve. Trigger compaction."
+effect = [
+  { type = "increment", var = "input_tokens" },
+  { type = "increment", var = "output_tokens" },
+  { type = "trigger", name = "compact_context" }
+]
+
+[[action]]
+name = "CompactionComplete"
+kind = "input"
+from = ["Compacting"]
+to = "Thinking"
+params = ["session_leaf_id", "context_tokens"]
+hint = "Compaction finished. Resume LLM call with compacted context."
+effect = [
+  { type = "increment", var = "compaction_count" },
+  { type = "trigger", name = "call_llm" }
+]
+
+# --- Actions: Steering (Phase 4) ---
+
+[[action]]
+name = "CheckSteering"
+kind = "input"
+from = ["Thinking"]
+to = "Steering"
+params = ["input_tokens", "output_tokens", "session_leaf_id", "context_tokens"]
+hint = "LLM returned end_turn. Check for queued steering messages before completing."
+effect = [
+  { type = "increment", var = "input_tokens" },
+  { type = "increment", var = "output_tokens" },
+  { type = "increment", var = "context_tokens" },
+  { type = "trigger", name = "check_steering" }
+]
+
+[[action]]
+name = "ContinueWithSteering"
+kind = "input"
+from = ["Steering"]
+to = "Thinking"
+params = ["session_leaf_id", "steering_messages", "conversation"]
+guard = "follow_up_count < 100"
+hint = "Steering message found. Inject into conversation and continue. Dynamic max_follow_ups enforced by steering_checker."
+effect = [
+  { type = "increment", var = "turn_count" },
+  { type = "increment", var = "follow_up_count" },
+  { type = "trigger", name = "call_llm" }
+]
+
+[[action]]
+name = "FinalizeResult"
+kind = "input"
+from = ["Steering"]
+to = "Completed"
+params = ["result", "conversation", "session_leaf_id"]
+hint = "No steering messages queued. Set result and complete."
+effect = [
+  { type = "set_bool", var = "has_result", value = "true" }
+]
+
+[[action]]
+name = "Steer"
+kind = "input"
+from = ["Thinking", "Executing", "Steering", "Compacting"]
+params = ["steering_messages"]
+hint = "Queue a steering message for mid-run injection. External callers append messages while agent runs. Self-loop — does not change state."
+
+# --- Actions: Legacy direct completion (backward compat for max_follow_ups=0) ---
+
 [[action]]
 name = "RecordResult"
 kind = "input"
 from = ["Thinking"]
 to = "Completed"
-params = ["result", "conversation", "input_tokens", "output_tokens"]
-hint = "LLM returned end_turn. Record token usage, set result, and complete."
+params = ["result", "conversation", "input_tokens", "output_tokens", "session_leaf_id"]
+hint = "LLM returned end_turn in non-steering mode (max_follow_ups=0). Record token usage, set result, and complete."
 effect = [
   { type = "increment", var = "input_tokens" },
   { type = "increment", var = "output_tokens" },
   { type = "set_bool", var = "has_result", value = "true" }
 ]
 
+# --- Actions: Heartbeat (Phase 8) ---
+
+[[action]]
+name = "Heartbeat"
+kind = "input"
+from = ["Thinking", "Executing", "Steering", "Compacting"]
+params = ["last_heartbeat_at"]
+hint = "Record agent liveness. Called by WASM modules during long operations. Self-loop."
+
+[[action]]
+name = "TimeoutFail"
+kind = "input"
+from = ["Thinking", "Executing", "Steering", "Compacting"]
+to = "Failed"
+params = ["error_message"]
+hint = "Agent timed out — no heartbeat within timeout period."
+
+# --- Actions: Failure, Cancellation, Resume ---
+
 [[action]]
 name = "Fail"
 kind = "input"
-from = ["Created", "Provisioning", "Thinking", "Executing"]
+from = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering"]
 to = "Failed"
 params = ["error_message"]
 hint = "Mark agent run as failed."
@@ -197,7 +406,7 @@ hint = "Mark agent run as failed."
 [[action]]
 name = "Cancel"
 kind = "input"
-from = ["Created", "Provisioning", "Thinking", "Executing"]
+from = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering"]
 to = "Cancelled"
 hint = "Cancel agent execution."
 
@@ -206,7 +415,7 @@ name = "Resume"
 kind = "input"
 from = ["Created"]
 to = "Provisioning"
-params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id"]
+params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id"]
 hint = "Resume agent from saved state. Transitions to Provisioning for workspace restore."
 effect = [{ type = "trigger", name = "restore_workspace" }]
 
@@ -234,7 +443,7 @@ assert = "no_further_transitions"
 
 [[invariant]]
 name = "TurnCountNonNegative"
-when = ["Created", "Provisioning", "Thinking", "Executing", "Completed", "Failed", "Cancelled"]
+when = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Completed", "Failed", "Cancelled"]
 assert = "turn_count >= 0"
 
 # --- Integrations ---
@@ -283,6 +492,28 @@ max_sync_file_bytes = "61440"
 sync_exclude = "__pycache__,node_modules,.git"
 logfire_read_token = "{secret:logfire_read_token}"
 logfire_api_base = "https://logfire-us.pydantic.dev"
+
+[[integration]]
+name = "compact_context"
+trigger = "compact_context"
+type = "wasm"
+module = "context_compactor"
+on_failure = "Fail"
+
+[integration.config]
+api_key = "{secret:anthropic_api_key}"
+temper_api_url = "{secret:temper_api_url}"
+timeout_secs = "120"
+
+[[integration]]
+name = "check_steering"
+trigger = "check_steering"
+type = "wasm"
+module = "steering_checker"
+on_failure = "Fail"
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"
 
 [[integration]]
 name = "restore_workspace"

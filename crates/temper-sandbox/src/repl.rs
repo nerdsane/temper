@@ -15,7 +15,7 @@ use crate::runner::run_sandbox;
 pub struct ReplConfig {
     /// Port of the running Temper HTTP server.
     pub server_port: u16,
-    /// Agent ID for `X-Temper-Principal-Id` header.
+    /// Optional local label for the REPL session.
     pub agent_id: Option<String>,
 }
 

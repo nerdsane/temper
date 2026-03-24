@@ -16,6 +16,7 @@
 //! Build: `cargo build --target wasm32-unknown-unknown --release`
 
 use temper_wasm_sdk::prelude::*;
+use session_tree_lib::SessionTree;
 
 /// Entry point — NOT using `temper_module!` because we need dynamic callback actions.
 #[unsafe(no_mangle)]
@@ -132,6 +133,32 @@ anthropic_api_key (or api_key) for anthropic, openrouter_api_key (or api_key) fo
         let temper_api_url = temper_api_url(&ctx);
         let tenant = &ctx.tenant;
 
+        // Session tree fields (Pi architecture)
+        let session_file_id = fields
+            .get("session_file_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let session_leaf_id = fields
+            .get("session_leaf_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // Soul and steering fields
+        let soul_id = fields
+            .get("soul_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let max_follow_ups: i64 = fields
+            .get("max_follow_ups")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        let reserve_tokens: usize = fields
+            .get("reserve_tokens")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20000);
+
         // Read conversation — from TemperFS if file_id set, else inline state.
         // First turn uses `user_message` (the actual user task from Provision).
         // `system_prompt` is always sent as the Anthropic system parameter, never as a message.
@@ -139,40 +166,107 @@ anthropic_api_key (or api_key) for anthropic, openrouter_api_key (or api_key) fo
             return Err("user_message is empty — nothing to send to the LLM".to_string());
         }
         let first_turn_content = user_message;
-        let mut messages: Vec<Value> = if !conversation_file_id.is_empty() {
-            read_conversation_from_temperfs(
-                &ctx,
-                &temper_api_url,
-                tenant,
-                conversation_file_id,
-                first_turn_content,
-            )?
-        } else {
-            let conversation_json = fields
-                .get("conversation")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if conversation_json.is_empty() {
-                vec![json!({ "role": "user", "content": first_turn_content })]
+
+        // Determine which session storage to use
+        let use_session_tree = !session_file_id.is_empty() && !session_leaf_id.is_empty();
+
+        let (mut messages, mut session_tree) = if use_session_tree {
+            let session_jsonl = read_session_from_temperfs(&ctx, &temper_api_url, tenant, session_file_id)?;
+            if session_jsonl.is_empty() {
+                // First turn — tree was just created by sandbox_provisioner but empty
+                let tree = SessionTree::from_jsonl(&session_jsonl);
+                let msgs = vec![json!({ "role": "user", "content": first_turn_content })];
+                (msgs, Some(tree))
             } else {
-                serde_json::from_str(conversation_json).unwrap_or_else(|_| {
+                let tree = SessionTree::from_jsonl(&session_jsonl);
+                let msgs = tree.build_context(session_leaf_id);
+                if msgs.is_empty() {
+                    (vec![json!({ "role": "user", "content": first_turn_content })], Some(tree))
+                } else {
+                    (msgs, Some(tree))
+                }
+            }
+        } else if !conversation_file_id.is_empty() {
+            // Legacy flat JSON mode
+            let msgs = read_conversation_from_temperfs(
+                &ctx, &temper_api_url, tenant, conversation_file_id, first_turn_content,
+            )?;
+            (msgs, None)
+        } else {
+            // Inline state
+            let conversation_json = fields.get("conversation").and_then(|v| v.as_str()).unwrap_or("");
+            if conversation_json.is_empty() {
+                (vec![json!({ "role": "user", "content": first_turn_content })], None)
+            } else {
+                (serde_json::from_str(conversation_json).unwrap_or_else(|_| {
                     vec![json!({ "role": "user", "content": first_turn_content })]
-                })
+                }), None)
             }
         };
 
         // Build tool definitions based on tools_enabled
         let tools = build_tool_definitions(tools_enabled, sandbox_url, workdir);
 
+        // Check compaction threshold (Pi architecture)
+        if use_session_tree {
+            if let Some(ref tree) = session_tree {
+                let context_tokens = tree.estimate_tokens(session_leaf_id);
+                // Model context windows (approximate)
+                let context_window: usize = if model.contains("opus") { 200000 }
+                    else if model.contains("haiku") { 200000 }
+                    else { 200000 }; // sonnet default
+                if context_tokens > context_window.saturating_sub(reserve_tokens) {
+                    ctx.log("info", &format!(
+                        "llm_caller: context_tokens ({}) exceeds threshold ({}), triggering compaction",
+                        context_tokens, context_window.saturating_sub(reserve_tokens)
+                    ));
+                    set_success_result("NeedsCompaction", &json!({
+                        "context_tokens": context_tokens,
+                        "session_leaf_id": session_leaf_id,
+                    }));
+                    return Ok(());
+                }
+            }
+        }
+
+        // System prompt assembly (Pi architecture):
+        // 1. Soul content (from AgentSoul entity via TemperFS)
+        // 2. system_prompt override (from Configure action)
+        // 3. Available skills XML block
+        // 4. Memory context
+        let assembled_system_prompt = assemble_system_prompt(
+            &ctx, &temper_api_url, tenant, soul_id, system_prompt,
+        )?;
+
+        emit_progress_ignore(
+            &ctx,
+            json!({
+                "kind": "prompt_assembled",
+                "message": "system prompt assembled",
+                "system_prompt": assembled_system_prompt,
+            }),
+        );
+        let mock_hang = provider == "mock" && mock_plan_requests_hang(&messages);
+        if !mock_hang {
+            let _ = send_heartbeat(&ctx, &temper_api_url, tenant);
+        }
+        emit_progress_ignore(
+            &ctx,
+            json!({
+                "kind": "llm_request_started",
+                "message": format!("calling provider={provider} model={model}"),
+            }),
+        );
+
         // Call LLM API
         let response = match provider.as_str() {
-            "mock" => call_mock(&ctx, &messages)?,
+            "mock" => call_mock(&ctx, &messages, &assembled_system_prompt, &tools)?,
             "anthropic" => call_anthropic(
                 &ctx,
                 &api_key,
                 &anthropic_api_url,
                 model,
-                system_prompt,
+                &assembled_system_prompt,
                 &messages,
                 &tools,
                 &anthropic_auth_mode,
@@ -182,7 +276,7 @@ anthropic_api_key (or api_key) for anthropic, openrouter_api_key (or api_key) fo
                 &api_key,
                 &openrouter_api_url,
                 model,
-                system_prompt,
+                &assembled_system_prompt,
                 &messages,
                 &tools,
                 &openrouter_site_url,
@@ -197,6 +291,14 @@ anthropic_api_key (or api_key) for anthropic, openrouter_api_key (or api_key) fo
                 "llm_caller: got response, stop_reason={}",
                 response.stop_reason
             ),
+        );
+        emit_progress_ignore(
+            &ctx,
+            json!({
+                "kind": "llm_response",
+                "message": format!("provider returned stop_reason={}", response.stop_reason),
+                "stop_reason": response.stop_reason.clone(),
+            }),
         );
 
         // Append assistant response to conversation
@@ -238,19 +340,36 @@ anthropic_api_key (or api_key) for anthropic, openrouter_api_key (or api_key) fo
                     .cloned()
                     .collect();
 
+                // Update session tree if in tree mode
+                let new_leaf = if use_session_tree {
+                    if let Some(ref mut tree) = session_tree {
+                        let parent = session_leaf_id;
+                        let (leaf, _) = tree.append_assistant_message(
+                            parent,
+                            &response.content,
+                            response.output_tokens as usize,
+                        );
+                        let updated_jsonl = tree.to_jsonl();
+                        write_session_to_temperfs(&ctx, &temper_api_url, tenant, session_file_id, &updated_jsonl)?;
+                        Some(leaf)
+                    } else { None }
+                } else { None };
+
                 let tool_calls_json = serde_json::to_string(&tool_calls).unwrap_or_default();
                 let mut params = json!({
                     "pending_tool_calls": tool_calls_json,
                     "input_tokens": response.input_tokens,
                     "output_tokens": response.output_tokens,
                 });
+                if let Some(leaf) = new_leaf {
+                    params["session_leaf_id"] = json!(leaf);
+                }
                 if let Some(ref conv) = conv_param {
                     params["conversation"] = json!(conv);
                 }
                 set_success_result("ProcessToolCalls", &params);
             }
             "end_turn" | "stop" => {
-                // Extract text result
                 let result_text = response
                     .content
                     .as_array()
@@ -266,15 +385,48 @@ anthropic_api_key (or api_key) for anthropic, openrouter_api_key (or api_key) fo
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                let mut params = json!({
-                    "result": result_text,
-                    "input_tokens": response.input_tokens,
-                    "output_tokens": response.output_tokens,
-                });
-                if let Some(ref conv) = conv_param {
-                    params["conversation"] = json!(conv);
+                // Update session tree if in tree mode
+                if use_session_tree {
+                    if let Some(ref mut tree) = session_tree {
+                        let parent = session_leaf_id;
+                        let (new_leaf, _) = tree.append_assistant_message(
+                            parent,
+                            &response.content,
+                            response.output_tokens as usize,
+                        );
+                        let updated_jsonl = tree.to_jsonl();
+                        write_session_to_temperfs(&ctx, &temper_api_url, tenant, session_file_id, &updated_jsonl)?;
+
+                        // Route through steering check if follow-ups are enabled
+                        if max_follow_ups > 0 {
+                            set_success_result("CheckSteering", &json!({
+                                "result": result_text,
+                                "session_leaf_id": new_leaf,
+                                "input_tokens": response.input_tokens,
+                                "output_tokens": response.output_tokens,
+                            }));
+                        } else {
+                            let params = json!({
+                                "result": result_text,
+                                "session_leaf_id": new_leaf,
+                                "input_tokens": response.input_tokens,
+                                "output_tokens": response.output_tokens,
+                            });
+                            set_success_result("RecordResult", &params);
+                        }
+                    }
+                } else {
+                    // Legacy mode — direct to RecordResult
+                    let mut params = json!({
+                        "result": result_text,
+                        "input_tokens": response.input_tokens,
+                        "output_tokens": response.output_tokens,
+                    });
+                    if let Some(ref conv) = conv_param {
+                        params["conversation"] = json!(conv);
+                    }
+                    set_success_result("RecordResult", &params);
                 }
-                set_success_result("RecordResult", &params);
             }
             other => {
                 set_success_result(
@@ -345,31 +497,39 @@ fn resolve_provider_api_key(ctx: &Context, provider: &str) -> Result<String, Str
     Ok(key)
 }
 
-fn call_mock(ctx: &Context, messages: &[Value]) -> Result<LlmResponse, String> {
+fn call_mock(
+    ctx: &Context,
+    messages: &[Value],
+    assembled_system_prompt: &str,
+    _tools: &[Value],
+) -> Result<LlmResponse, String> {
     ctx.log("info", "llm_caller: using deterministic mock provider");
-    let signal_summary = extract_mock_signal_summary(messages)?;
-    let analysis = build_mock_analysis(&signal_summary);
-    let analysis_text = serde_json::to_string_pretty(&analysis)
-        .map_err(|e| format!("failed to serialize mock analysis: {e}"))?;
+    if mock_plan_requests_hang(messages) {
+        simulate_mock_hang(ctx)?;
+        return Err("mock hang scenario finished without heartbeat".to_string());
+    }
 
-    Ok(LlmResponse {
-        content: json!([{
-            "type": "text",
-            "text": analysis_text,
-        }]),
-        stop_reason: "end_turn".to_string(),
-        input_tokens: messages
-            .iter()
-            .map(|message| {
-                message
-                    .get("content")
-                    .map(stringify_content)
-                    .unwrap_or_default()
-                    .len() as i64
-            })
-            .sum::<i64>(),
-        output_tokens: analysis_text.len() as i64,
-    })
+    let assistant_turns = messages
+        .iter()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+        .count();
+
+    if let Some(step) = extract_mock_plan(messages)
+        .and_then(|steps| steps.get(assistant_turns).cloned())
+    {
+        return build_mock_step_response(messages, assembled_system_prompt, assistant_turns, &step);
+    }
+
+    let latest_user = latest_user_text(messages);
+    let text = resolve_mock_template(
+        latest_user
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("mock provider completed"),
+        assembled_system_prompt,
+        latest_user.as_deref().unwrap_or(""),
+    );
+    Ok(mock_text_response(messages, text))
 }
 
 fn extract_mock_signal_summary(messages: &[Value]) -> Result<Value, String> {
@@ -1153,6 +1313,217 @@ fn stringify_content(value: &Value) -> String {
     }
 }
 
+fn emit_progress_ignore(ctx: &Context, payload: Value) {
+    let _ = ctx.emit_progress(&payload);
+}
+
+fn send_heartbeat(ctx: &Context, temper_api_url: &str, tenant: &str) -> Result<(), String> {
+    let url = format!(
+        "{temper_api_url}/tdata/TemperAgents('{}')/Temper.Agent.TemperAgent.Heartbeat",
+        ctx.entity_id
+    );
+    let body = json!({ "last_heartbeat_at": "alive" });
+    let headers = vec![
+        ("content-type".to_string(), "application/json".to_string()),
+        ("x-tenant-id".to_string(), tenant.to_string()),
+        ("x-temper-principal-kind".to_string(), "admin".to_string()),
+    ];
+    let _ = ctx.http_call("POST", &url, &headers, &body.to_string())?;
+    Ok(())
+}
+
+fn mock_plan_requests_hang(messages: &[Value]) -> bool {
+    if let Some(steps) = extract_mock_plan(messages)
+        && steps
+            .iter()
+            .any(|step| step.get("mode").and_then(Value::as_str) == Some("hang"))
+    {
+        return true;
+    }
+    latest_user_text(messages)
+        .map(|text| text.contains("[mock-hang]"))
+        .unwrap_or(false)
+}
+
+fn simulate_mock_hang(ctx: &Context) -> Result<(), String> {
+    let base_url = temper_api_url(ctx);
+    let url = format!(
+        "{base_url}/observe/entities/{}/{}/wait?statuses=__never__&timeout_ms=10000&poll_ms=250",
+        ctx.entity_type, ctx.entity_id
+    );
+    let headers = vec![
+        ("x-tenant-id".to_string(), ctx.tenant.clone()),
+        ("x-temper-principal-kind".to_string(), "admin".to_string()),
+        ("accept".to_string(), "application/json".to_string()),
+    ];
+    let _ = ctx.http_call("GET", &url, &headers, "")?;
+    Ok(())
+}
+
+fn extract_mock_plan(messages: &[Value]) -> Option<Vec<Value>> {
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let raw = stringify_content(message.get("content").unwrap_or(&Value::Null));
+        let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if let Some(steps) = parsed.get("steps").and_then(Value::as_array) {
+            return Some(steps.clone());
+        }
+        if let Some(steps) = parsed
+            .get("mock_plan")
+            .and_then(|value| value.get("steps"))
+            .and_then(Value::as_array)
+        {
+            return Some(steps.clone());
+        }
+    }
+    None
+}
+
+fn build_mock_step_response(
+    messages: &[Value],
+    assembled_system_prompt: &str,
+    assistant_turns: usize,
+    step: &Value,
+) -> Result<LlmResponse, String> {
+    if step.get("mode").and_then(Value::as_str) == Some("hang") {
+        return Ok(mock_text_response(messages, "mock hang placeholder".to_string()));
+    }
+
+    let mut content = Vec::<Value>::new();
+    if let Some(text) = step.get("text").and_then(Value::as_str) {
+        let resolved = resolve_mock_template(
+            text,
+            assembled_system_prompt,
+            latest_user_text(messages).as_deref().unwrap_or(""),
+        );
+        if !resolved.is_empty() {
+            content.push(json!({ "type": "text", "text": resolved }));
+        }
+    }
+
+    if let Some(tool_calls) = step.get("tool_calls").and_then(Value::as_array) {
+        for (index, tool_call) in tool_calls.iter().enumerate() {
+            let name = tool_call
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown_tool");
+            let input = tool_call.get("input").cloned().unwrap_or_else(|| json!({}));
+            let id = tool_call
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("mock-tool-{assistant_turns}-{index}"));
+            content.push(json!({
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                "input": input,
+            }));
+        }
+    }
+
+    if content
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+    {
+        let output_len = serde_json::to_string(&content).unwrap_or_default().len() as i64;
+        return Ok(LlmResponse {
+            content: Value::Array(content),
+            stop_reason: "tool_use".to_string(),
+            input_tokens: estimate_message_tokens(messages),
+            output_tokens: output_len,
+        });
+    }
+
+    let final_text = step
+        .get("final_text")
+        .or_else(|| step.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("mock provider completed");
+    Ok(mock_text_response(
+        messages,
+        resolve_mock_template(
+            final_text,
+            assembled_system_prompt,
+            latest_user_text(messages).as_deref().unwrap_or(""),
+        ),
+    ))
+}
+
+fn mock_text_response(messages: &[Value], text: String) -> LlmResponse {
+    LlmResponse {
+        content: json!([{ "type": "text", "text": text.clone() }]),
+        stop_reason: "end_turn".to_string(),
+        input_tokens: estimate_message_tokens(messages),
+        output_tokens: text.len() as i64,
+    }
+}
+
+fn estimate_message_tokens(messages: &[Value]) -> i64 {
+    messages
+        .iter()
+        .map(|message| {
+            message
+                .get("content")
+                .map(stringify_content)
+                .unwrap_or_default()
+                .len() as i64
+        })
+        .sum::<i64>()
+}
+
+fn latest_user_text(messages: &[Value]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .map(|message| stringify_content(message.get("content").unwrap_or(&Value::Null)))
+}
+
+fn resolve_mock_template(template: &str, assembled_system_prompt: &str, latest_user: &str) -> String {
+    let mut text = template.to_string();
+    text = text.replace("{{latest_user}}", latest_user);
+    text = text.replace("{{memory_block}}", &extract_tag_block(assembled_system_prompt, "agent_memory"));
+    text = text.replace(
+        "{{memory_keys}}",
+        &extract_memory_keys(assembled_system_prompt).join(", "),
+    );
+    text = text.replace(
+        "{{memory_count}}",
+        &extract_memory_keys(assembled_system_prompt).len().to_string(),
+    );
+    text = text.replace("{{skills_block}}", &extract_tag_block(assembled_system_prompt, "available_skills"));
+    text
+}
+
+fn extract_tag_block(text: &str, tag: &str) -> String {
+    let start_tag = format!("<{tag}>");
+    let end_tag = format!("</{tag}>");
+    let Some(start) = text.find(&start_tag) else {
+        return String::new();
+    };
+    let Some(end) = text[start..].find(&end_tag) else {
+        return String::new();
+    };
+    text[start..start + end + end_tag.len()].to_string()
+}
+
+fn extract_memory_keys(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let marker = "key=\"";
+            let start = line.find(marker)? + marker.len();
+            let rest = &line[start..];
+            let end = rest.find('"')?;
+            Some(rest[..end].to_string())
+        })
+        .collect()
+}
+
 fn convert_messages_to_openrouter(messages: &[Value]) -> Vec<Value> {
     let mut out = Vec::<Value>::new();
     for msg in messages {
@@ -1349,6 +1720,120 @@ fn build_tool_definitions(tools_enabled: &str, sandbox_url: &str, workdir: &str)
         }));
     }
 
+    if enabled.contains(&"read_entity") {
+        tools.push(json!({
+            "name": "read_entity",
+            "description": "Read a TemperFS-backed entity content file by file_id.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "file_id": { "type": "string", "description": "TemperFS File entity ID" }
+                },
+                "required": ["file_id"]
+            }
+        }));
+    }
+
+    if enabled.contains(&"save_memory") {
+        tools.push(json!({
+            "name": "save_memory",
+            "description": "Persist a memory entry scoped to the agent soul.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string" },
+                    "content": { "type": "string" },
+                    "memory_type": { "type": "string" }
+                },
+                "required": ["key", "content"]
+            }
+        }));
+    }
+
+    if enabled.contains(&"recall_memory") {
+        tools.push(json!({
+            "name": "recall_memory",
+            "description": "Recall memories matching a key or content substring.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                },
+                "required": ["query"]
+            }
+        }));
+    }
+
+    if enabled.contains(&"spawn_agent") {
+        tools.push(json!({
+            "name": "spawn_agent",
+            "description": "Create, configure, and provision a child TemperAgent.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string" },
+                    "task": { "type": "string" },
+                    "model": { "type": "string" },
+                    "provider": { "type": "string" },
+                    "max_turns": { "type": "integer" },
+                    "tools": { "type": "string" },
+                    "soul_id": { "type": "string" },
+                    "background": { "type": "boolean" }
+                },
+                "required": ["task"]
+            }
+        }));
+        tools.push(json!({
+            "name": "list_agents",
+            "description": "List child agents spawned by this agent.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }));
+        tools.push(json!({
+            "name": "abort_agent",
+            "description": "Cancel a child agent by ID.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string" }
+                },
+                "required": ["agent_id"]
+            }
+        }));
+        tools.push(json!({
+            "name": "steer_agent",
+            "description": "Queue a steering message for a child agent.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string" },
+                    "message": { "type": "string" }
+                },
+                "required": ["agent_id", "message"]
+            }
+        }));
+    }
+
+    if enabled.contains(&"run_coding_agent") {
+        tools.push(json!({
+            "name": "run_coding_agent",
+            "description": "Run a coding agent CLI command inside the sandbox.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "agent_type": { "type": "string" },
+                    "task": { "type": "string" },
+                    "workdir": { "type": "string" },
+                    "background": { "type": "boolean" }
+                },
+                "required": ["agent_type", "task"]
+            }
+        }));
+    }
+
     if enabled.contains(&"logfire_query") {
         tools.push(json!({
             "name": "logfire_query",
@@ -1375,6 +1860,129 @@ fn build_tool_definitions(tools_enabled: &str, sandbox_url: &str, workdir: &str)
         }));
     }
 
+    if enabled.contains(&"save_memory") {
+        tools.push(json!({
+            "name": "save_memory",
+            "description": "Save a memory for future agent sessions. Memories persist across runs.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "Unique key for this memory" },
+                    "content": { "type": "string", "description": "Memory content (markdown)" },
+                    "memory_type": { "type": "string", "enum": ["user", "feedback", "project", "reference"], "description": "Type of memory" }
+                },
+                "required": ["key", "content", "memory_type"]
+            }
+        }));
+    }
+
+    if enabled.contains(&"recall_memory") {
+        tools.push(json!({
+            "name": "recall_memory",
+            "description": "Search and recall memories from previous sessions.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search query to find relevant memories" }
+                },
+                "required": ["query"]
+            }
+        }));
+    }
+
+    if enabled.contains(&"spawn_agent") {
+        tools.push(json!({
+            "name": "spawn_agent",
+            "description": "Spawn a child TemperAgent to handle a subtask. The child runs autonomously and returns its result.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Optional deterministic child agent ID" },
+                    "task": { "type": "string", "description": "The task for the child agent" },
+                    "model": { "type": "string", "description": "LLM model to use (optional, defaults to parent's model)" },
+                    "provider": { "type": "string", "description": "LLM provider to use (optional, defaults to parent's provider)" },
+                    "max_turns": { "type": "integer", "description": "Maximum turns for the child (optional, default 20)" },
+                    "tools": { "type": "string", "description": "Comma-separated tools to enable (optional, defaults to parent's tools)" },
+                    "soul_id": { "type": "string", "description": "Soul ID to use (optional, defaults to parent's soul)" },
+                    "background": { "type": "boolean", "description": "If true, return after provisioning without waiting for completion" }
+                },
+                "required": ["task"]
+            }
+        }));
+    }
+
+    if enabled.contains(&"list_agents") {
+        tools.push(json!({
+            "name": "list_agents",
+            "description": "List child agents spawned by this agent and their status.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }));
+    }
+
+    if enabled.contains(&"steer_agent") {
+        tools.push(json!({
+            "name": "steer_agent",
+            "description": "Send a follow-up message to a child agent mid-run.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "The child agent entity ID" },
+                    "message": { "type": "string", "description": "The steering message to inject" }
+                },
+                "required": ["agent_id", "message"]
+            }
+        }));
+    }
+
+    if enabled.contains(&"abort_agent") {
+        tools.push(json!({
+            "name": "abort_agent",
+            "description": "Cancel a running child agent.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "The child agent entity ID to cancel" }
+                },
+                "required": ["agent_id"]
+            }
+        }));
+    }
+
+    if enabled.contains(&"read_entity") {
+        tools.push(json!({
+            "name": "read_entity",
+            "description": "Read a TemperFS file by ID. Use this to load skill content, soul documents, or any other entity-backed file.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "file_id": { "type": "string", "description": "The TemperFS File entity ID to read" }
+                },
+                "required": ["file_id"]
+            }
+        }));
+    }
+
+    if enabled.contains(&"run_coding_agent") {
+        tools.push(json!({
+            "name": "run_coding_agent",
+            "description": "Spawn a coding agent CLI process (Claude Code, Codex, Pi, OpenCode) in the sandbox.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "agent_type": { "type": "string", "enum": ["claude-code", "codex", "pi", "opencode"], "description": "Which coding agent CLI to use" },
+                    "task": { "type": "string", "description": "The task for the coding agent" },
+                    "workdir": { "type": "string", "description": "Working directory in the sandbox (optional)" },
+                    "background": { "type": "boolean", "description": "Run in background (default: false)" }
+                },
+                "required": ["agent_type", "task"]
+            }
+        }));
+    }
+
     tools
 }
 
@@ -1389,7 +1997,7 @@ fn read_conversation_from_temperfs(
     let url = format!("{temper_api_url}/tdata/Files('{file_id}')/$value");
     let headers = vec![
         ("x-tenant-id".to_string(), tenant.to_string()),
-        ("x-temper-principal-kind".to_string(), "system".to_string()),
+        ("x-temper-principal-kind".to_string(), "admin".to_string()),
         ("accept".to_string(), "application/json".to_string()),
     ];
 
@@ -1448,7 +2056,7 @@ fn write_conversation_to_temperfs(
     let headers = vec![
         ("content-type".to_string(), "application/json".to_string()),
         ("x-tenant-id".to_string(), tenant.to_string()),
-        ("x-temper-principal-kind".to_string(), "system".to_string()),
+        ("x-temper-principal-kind".to_string(), "admin".to_string()),
     ];
 
     // Wrap messages array in the TemperFS conversation format
@@ -1471,4 +2079,206 @@ fn write_conversation_to_temperfs(
             &resp.body[..resp.body.len().min(200)]
         ))
     }
+}
+
+/// Read session JSONL from TemperFS.
+fn read_session_from_temperfs(
+    ctx: &Context,
+    temper_api_url: &str,
+    tenant: &str,
+    file_id: &str,
+) -> Result<String, String> {
+    let url = format!("{temper_api_url}/tdata/Files('{file_id}')/$value");
+    let headers = vec![
+        ("x-tenant-id".to_string(), tenant.to_string()),
+        ("x-temper-principal-kind".to_string(), "admin".to_string()),
+    ];
+    let resp = ctx.http_call("GET", &url, &headers, "")?;
+    if resp.status == 200 {
+        Ok(resp.body)
+    } else if resp.status == 404 {
+        Ok(String::new())
+    } else {
+        Err(format!("TemperFS session read failed (HTTP {})", resp.status))
+    }
+}
+
+/// Write session JSONL to TemperFS.
+fn write_session_to_temperfs(
+    ctx: &Context,
+    temper_api_url: &str,
+    tenant: &str,
+    file_id: &str,
+    jsonl: &str,
+) -> Result<(), String> {
+    let url = format!("{temper_api_url}/tdata/Files('{file_id}')/$value");
+    let headers = vec![
+        ("content-type".to_string(), "text/plain".to_string()),
+        ("x-tenant-id".to_string(), tenant.to_string()),
+        ("x-temper-principal-kind".to_string(), "admin".to_string()),
+    ];
+    let resp = ctx.http_call("PUT", &url, &headers, jsonl)?;
+    if resp.status >= 200 && resp.status < 300 {
+        Ok(())
+    } else {
+        Err(format!("TemperFS session write failed (HTTP {})", resp.status))
+    }
+}
+
+/// Assemble the full system prompt from soul + override + skills + memory.
+fn assemble_system_prompt(
+    ctx: &Context,
+    temper_api_url: &str,
+    tenant: &str,
+    soul_id: &str,
+    system_prompt_override: &str,
+) -> Result<String, String> {
+    let mut parts: Vec<String> = Vec::new();
+
+    // 1. Soul content
+    if !soul_id.is_empty() {
+        match load_soul_content(ctx, temper_api_url, tenant, soul_id) {
+            Ok(content) if !content.is_empty() => parts.push(content),
+            Ok(_) => ctx.log("warn", "assemble_system_prompt: soul content is empty"),
+            Err(e) => ctx.log("warn", &format!("assemble_system_prompt: failed to load soul: {e}")),
+        }
+    }
+
+    // 2. System prompt override
+    if !system_prompt_override.is_empty() {
+        parts.push(system_prompt_override.to_string());
+    }
+
+    // 3. Available skills
+    if !soul_id.is_empty() {
+        match load_skills_block(ctx, temper_api_url, tenant) {
+            Ok(block) if !block.is_empty() => parts.push(block),
+            Ok(_) => {}
+            Err(e) => ctx.log("warn", &format!("assemble_system_prompt: failed to load skills: {e}")),
+        }
+    }
+
+    // 4. Memory context
+    if !soul_id.is_empty() {
+        match load_memory_block(ctx, temper_api_url, tenant, soul_id) {
+            Ok(block) if !block.is_empty() => parts.push(block),
+            Ok(_) => {}
+            Err(e) => ctx.log("warn", &format!("assemble_system_prompt: failed to load memory: {e}")),
+        }
+    }
+
+    // Fall back to bare system_prompt if nothing loaded
+    if parts.is_empty() {
+        return Ok(system_prompt_override.to_string());
+    }
+
+    Ok(parts.join("\n\n"))
+}
+
+/// Load soul content from AgentSoul entity.
+fn load_soul_content(
+    ctx: &Context,
+    temper_api_url: &str,
+    tenant: &str,
+    soul_id: &str,
+) -> Result<String, String> {
+    let url = format!("{temper_api_url}/tdata/AgentSouls('{soul_id}')");
+    let headers = vec![
+        ("x-tenant-id".to_string(), tenant.to_string()),
+        ("x-temper-principal-kind".to_string(), "admin".to_string()),
+        ("accept".to_string(), "application/json".to_string()),
+    ];
+    let resp = ctx.http_call("GET", &url, &headers, "")?;
+    if resp.status != 200 {
+        return Err(format!("soul read failed (HTTP {})", resp.status));
+    }
+    let parsed: Value = serde_json::from_str(&resp.body).unwrap_or(json!({}));
+    let content_file_id = entity_field_str(&parsed, &["ContentFileId"]).unwrap_or("");
+    if content_file_id.is_empty() {
+        return Ok(String::new());
+    }
+    // Read from TemperFS
+    let file_url = format!("{temper_api_url}/tdata/Files('{content_file_id}')/$value");
+    let resp2 = ctx.http_call("GET", &file_url, &headers, "")?;
+    if resp2.status == 200 { Ok(resp2.body) } else { Ok(String::new()) }
+}
+
+/// Load active skills as an XML block for the system prompt.
+fn load_skills_block(
+    ctx: &Context,
+    temper_api_url: &str,
+    tenant: &str,
+) -> Result<String, String> {
+    let url = format!("{temper_api_url}/tdata/AgentSkills?$filter=Status eq 'Active'");
+    let headers = vec![
+        ("x-tenant-id".to_string(), tenant.to_string()),
+        ("x-temper-principal-kind".to_string(), "admin".to_string()),
+        ("accept".to_string(), "application/json".to_string()),
+    ];
+    let resp = ctx.http_call("GET", &url, &headers, "")?;
+    if resp.status != 200 {
+        return Ok(String::new());
+    }
+    let parsed: Value = serde_json::from_str(&resp.body).unwrap_or(json!({}));
+    let skills = parsed.get("value").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if skills.is_empty() {
+        return Ok(String::new());
+    }
+    let mut xml = String::from("<available_skills>\n");
+    for skill in &skills {
+        let name = entity_field_str(skill, &["Name"]).unwrap_or("unknown");
+        let desc = entity_field_str(skill, &["Description"]).unwrap_or("");
+        let file_id = entity_field_str(skill, &["ContentFileId"]).unwrap_or("");
+        xml.push_str(&format!("  <skill name=\"{name}\" description=\"{desc}\" file_id=\"{file_id}\" />\n"));
+    }
+    xml.push_str("</available_skills>");
+    Ok(xml)
+}
+
+/// Load agent memories as a context block for the system prompt.
+fn load_memory_block(
+    ctx: &Context,
+    temper_api_url: &str,
+    tenant: &str,
+    soul_id: &str,
+) -> Result<String, String> {
+    let url = format!(
+        "{temper_api_url}/tdata/AgentMemorys?$filter=SoulId eq '{}' and Status eq 'Active'",
+        soul_id
+    );
+    let headers = vec![
+        ("x-tenant-id".to_string(), tenant.to_string()),
+        ("x-temper-principal-kind".to_string(), "admin".to_string()),
+        ("accept".to_string(), "application/json".to_string()),
+    ];
+    let resp = ctx.http_call("GET", &url, &headers, "")?;
+    if resp.status != 200 {
+        return Ok(String::new());
+    }
+    let parsed: Value = serde_json::from_str(&resp.body).unwrap_or(json!({}));
+    let memories = parsed.get("value").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if memories.is_empty() {
+        return Ok(String::new());
+    }
+    let mut block = String::from("<agent_memory>\n");
+    for mem in &memories {
+        let key = entity_field_str(mem, &["Key"]).unwrap_or("unknown");
+        let content = entity_field_str(mem, &["Content"]).unwrap_or("");
+        let mem_type = entity_field_str(mem, &["MemoryType"]).unwrap_or("reference");
+        block.push_str(&format!("  <memory key=\"{key}\" type=\"{mem_type}\">\n    {content}\n  </memory>\n"));
+    }
+    block.push_str("</agent_memory>");
+    Ok(block)
+}
+
+fn direct_field_str<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+}
+
+fn entity_field_str<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    direct_field_str(value, keys).or_else(|| {
+        value.get("fields")
+            .and_then(|fields| direct_field_str(fields, keys))
+    })
 }

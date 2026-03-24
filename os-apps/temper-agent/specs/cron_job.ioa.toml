@@ -1,0 +1,161 @@
+# CronJob — Scheduled agent runs.
+#
+# Creates and tracks TemperAgent entities on a schedule.
+# Template substitution supports {{now}}, {{run_count}}, {{last_result}}.
+
+[automaton]
+name = "CronJob"
+states = ["Created", "Active", "Paused", "Expired"]
+initial = "Created"
+
+[[state]]
+name = "name"
+type = "string"
+initial = ""
+
+[[state]]
+name = "schedule"
+type = "string"
+initial = ""
+
+[[state]]
+name = "soul_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "system_prompt"
+type = "string"
+initial = ""
+
+[[state]]
+name = "user_message_template"
+type = "string"
+initial = ""
+
+[[state]]
+name = "model"
+type = "string"
+initial = "claude-sonnet-4-20250514"
+
+[[state]]
+name = "provider"
+type = "string"
+initial = "anthropic"
+
+[[state]]
+name = "tools_enabled"
+type = "string"
+initial = "read,write,edit,bash"
+
+[[state]]
+name = "sandbox_url"
+type = "string"
+initial = ""
+
+[[state]]
+name = "max_turns"
+type = "string"
+initial = "20"
+
+[[state]]
+name = "last_run_at"
+type = "string"
+initial = ""
+
+[[state]]
+name = "next_run_at"
+type = "string"
+initial = ""
+
+[[state]]
+name = "run_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "max_runs"
+type = "string"
+initial = "0"
+
+[[state]]
+name = "last_agent_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "last_result"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Configure"
+kind = "input"
+from = ["Created"]
+params = ["name", "schedule", "soul_id", "system_prompt", "user_message_template", "model", "provider", "tools_enabled", "sandbox_url", "max_turns", "max_runs"]
+hint = "Configure the cron job with schedule and agent parameters."
+
+[[action]]
+name = "Activate"
+kind = "input"
+from = ["Created"]
+to = "Active"
+hint = "Start the cron schedule."
+
+[[action]]
+name = "Pause"
+kind = "input"
+from = ["Active"]
+to = "Paused"
+hint = "Pause the cron schedule."
+
+[[action]]
+name = "Resume"
+kind = "input"
+from = ["Paused"]
+to = "Active"
+hint = "Resume the cron schedule."
+
+[[action]]
+name = "Trigger"
+kind = "input"
+from = ["Active"]
+params = ["last_run_at"]
+hint = "Fire the cron job — creates and provisions a TemperAgent."
+effect = [{ type = "increment", var = "run_count" }, { type = "trigger", name = "cron_trigger" }]
+
+[[action]]
+name = "TriggerComplete"
+kind = "input"
+from = ["Active"]
+params = ["last_agent_id", "last_result"]
+hint = "Callback after agent creation. Updates tracking fields."
+
+[[action]]
+name = "TriggerFailed"
+kind = "input"
+from = ["Active"]
+params = ["error_message"]
+hint = "Trigger WASM failed. Stays Active for next scheduled run."
+
+[[action]]
+name = "Expire"
+kind = "input"
+from = ["Active"]
+to = "Expired"
+hint = "Max runs reached or manually expired."
+
+[[invariant]]
+name = "ExpiredIsFinal"
+when = ["Expired"]
+assert = "no_further_transitions"
+
+[[integration]]
+name = "cron_trigger"
+trigger = "cron_trigger"
+type = "wasm"
+module = "cron_trigger"
+on_failure = "TriggerFailed"
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"

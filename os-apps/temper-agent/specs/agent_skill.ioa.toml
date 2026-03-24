@@ -1,0 +1,62 @@
+# AgentSkill — Lazy-loaded capability descriptions (SKILL.md equivalent).
+#
+# Skills define WHAT the agent can do. Only descriptions are injected into
+# the system prompt; full content loaded on demand via TemperFS read.
+
+[automaton]
+name = "AgentSkill"
+states = ["Active", "Disabled"]
+initial = "Active"
+
+[[state]]
+name = "name"
+type = "string"
+initial = ""
+
+[[state]]
+name = "description"
+type = "string"
+initial = ""
+
+[[state]]
+name = "content_file_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "scope"
+type = "string"
+initial = "global"
+
+[[state]]
+name = "agent_filter"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Register"
+kind = "input"
+from = ["Active"]
+params = ["name", "description", "content_file_id", "scope", "agent_filter"]
+hint = "Register a new skill with name, description, content file, and scope."
+
+[[action]]
+name = "Disable"
+kind = "input"
+from = ["Active"]
+to = "Disabled"
+hint = "Disable the skill. It will no longer appear in agent prompts."
+
+[[action]]
+name = "Enable"
+kind = "input"
+from = ["Disabled"]
+to = "Active"
+hint = "Re-enable a disabled skill."
+
+[[action]]
+name = "Update"
+kind = "input"
+from = ["Active"]
+params = ["description", "content_file_id"]
+hint = "Update skill description or content."

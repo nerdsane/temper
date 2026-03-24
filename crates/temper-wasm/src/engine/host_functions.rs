@@ -73,6 +73,31 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
         )
         .map_err(|e| WasmError::Compilation(format!("failed to link host_set_result: {e}")))?;
 
+    // host_emit_progress(ptr, len) -> i32
+    linker
+        .func_wrap(
+            "env",
+            "host_emit_progress",
+            |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else {
+                    return -1;
+                };
+                let mut buf = vec![0u8; len as usize];
+                if memory.read(&caller, ptr as usize, &mut buf).is_err() {
+                    return -1;
+                }
+                let Ok(payload) = String::from_utf8(buf) else {
+                    return -1;
+                };
+                match caller.data().host.emit_progress(&payload) {
+                    Ok(()) => 0,
+                    Err(_) => -1,
+                }
+            },
+        )
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_emit_progress: {e}")))?;
+
     // host_get_secret(key_ptr, key_len, buf_ptr, buf_len) -> actual_len (-1 on error)
     linker
         .func_wrap(

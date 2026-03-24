@@ -270,7 +270,7 @@ fn test_get_skill_temper_agent() {
     let bundle = get_skill("temper-agent");
     assert!(bundle.is_some());
     let bundle = bundle.unwrap();
-    assert_eq!(bundle.specs.len(), 1);
+    assert_eq!(bundle.specs.len(), 8); // TemperAgent + AgentSoul + AgentSkill + AgentMemory + ToolHook + HeartbeatMonitor + CronJob + CronScheduler
     assert!(!bundle.csdl.is_empty());
     assert!(!bundle.cedar_policies.is_empty());
 }

@@ -1,0 +1,67 @@
+# AgentMemory — Cross-session persistent knowledge.
+#
+# Memories persist ACROSS agent runs, scoped to a soul_id.
+# Types: user, feedback, project, reference (matching Claude Code taxonomy).
+# Content stored inline (memories are small).
+
+[automaton]
+name = "AgentMemory"
+states = ["Active", "Archived"]
+initial = "Active"
+
+[[state]]
+name = "key"
+type = "string"
+initial = ""
+
+[[state]]
+name = "content"
+type = "string"
+initial = ""
+
+[[state]]
+name = "memory_type"
+type = "string"
+initial = "project"
+
+[[state]]
+name = "soul_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "author_agent_id"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Save"
+kind = "input"
+from = ["Active"]
+params = ["key", "content", "memory_type", "soul_id", "author_agent_id"]
+hint = "Save or initialize a memory entry."
+
+[[action]]
+name = "Update"
+kind = "input"
+from = ["Active"]
+params = ["content"]
+hint = "Update the memory content."
+
+[[action]]
+name = "Archive"
+kind = "input"
+from = ["Active"]
+to = "Archived"
+hint = "Archive the memory. It will no longer appear in agent prompts."
+
+[[action]]
+name = "Recall"
+kind = "input"
+from = ["Active"]
+hint = "Read-only recall action for audit trail. No state mutation."
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"

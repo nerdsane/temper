@@ -22,12 +22,14 @@ pub struct McpConfig {
     /// Full URL of a remote Temper server (e.g. `https://api.temper.build`).
     /// Mutually exclusive with `temper_port`.
     pub temper_url: Option<String>,
-    /// Agent instance ID. Resolved from the credential registry via
-    /// `TEMPER_API_KEY` at startup (ADR-0033). Only used as an override
-    /// when credential resolution is not available.
+    /// Optional local agent label. When `TEMPER_API_KEY` resolves through
+    /// the credential registry (ADR-0033), the verified platform-assigned
+    /// agent ID replaces this value. This field does not grant HTTP identity.
     pub agent_id: Option<String>,
-    /// Agent software classification (e.g. `claude-code`). Resolved from
-    /// the credential registry's `AgentType` entity at startup (ADR-0033).
+    /// Optional local agent type label (e.g. `claude-code`). When
+    /// `TEMPER_API_KEY` resolves through the credential registry, the
+    /// verified platform-assigned type replaces this value. This field does
+    /// not grant HTTP identity.
     pub agent_type: Option<String>,
     /// Session ID (`X-Session-Id`). Auto-derived from `CLAUDE_SESSION_ID`.
     pub session_id: Option<String>,
