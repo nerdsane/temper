@@ -364,5 +364,5 @@ fn extract_agent_triggers(source: &str) -> Vec<super::types::AgentTrigger> {
 }
 
 #[cfg(test)]
-#[path = "test.rs"]
+#[path = "tests.rs"]
 mod tests;

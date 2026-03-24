@@ -1,13 +1,11 @@
 use super::inline::{parse_inline_fields, split_inline_tables};
 use super::*;
 
-// ── parse_kv ──────────────────────────────────────────────
-
 #[test]
 fn parse_kv_simple() {
-    let (key, val) = parse_kv("name = \"Order\"").unwrap();
+    let (key, value) = parse_kv("name = \"Order\"").unwrap();
     assert_eq!(key, "name");
-    assert_eq!(val, "Order");
+    assert_eq!(value, "Order");
 }
 
 #[test]
@@ -17,12 +15,10 @@ fn parse_kv_no_equals() {
 
 #[test]
 fn parse_kv_trims_whitespace() {
-    let (key, val) = parse_kv("  key  =  \"value\"  ").unwrap();
+    let (key, value) = parse_kv("  key  =  \"value\"  ").unwrap();
     assert_eq!(key, "key");
-    assert_eq!(val, "value");
+    assert_eq!(value, "value");
 }
-
-// ── parse_string_array ────────────────────────────────────
 
 #[test]
 fn parse_string_array_simple() {
@@ -42,8 +38,6 @@ fn parse_string_array_empty_brackets() {
     assert!(arr.is_empty());
 }
 
-// ── split_inline_tables ───────────────────────────────────
-
 #[test]
 fn split_inline_tables_two_items() {
     let result = split_inline_tables("{a = 1}, {b = 2}");
@@ -57,8 +51,6 @@ fn split_inline_tables_empty() {
     let result = split_inline_tables("");
     assert!(result.is_empty());
 }
-
-// ── parse_inline_fields ───────────────────────────────────
 
 #[test]
 fn parse_inline_fields_simple() {
@@ -85,8 +77,6 @@ fn parse_inline_fields_empty() {
     assert!(map.is_empty());
 }
 
-// ── join_multiline_arrays ─────────────────────────────────
-
 #[test]
 fn join_multiline_single_line() {
     let result = join_multiline_arrays("key = [\"a\", \"b\"]");
@@ -100,7 +90,7 @@ fn join_multiline_continuation() {
     let result = join_multiline_arrays(input);
     assert_eq!(result.len(), 1);
     assert!(result[0].contains("effect = ["));
-    assert!(result[0].contains("]"));
+    assert!(result[0].contains(']'));
 }
 
 #[test]
@@ -109,8 +99,6 @@ fn join_multiline_no_brackets() {
     let result = join_multiline_arrays(input);
     assert_eq!(result.len(), 2);
 }
-
-// ── parse_guard_clause ────────────────────────────────────
 
 #[test]
 fn guard_gt() {

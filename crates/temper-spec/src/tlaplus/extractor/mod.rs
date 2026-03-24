@@ -6,7 +6,8 @@ mod states;
 mod transitions;
 
 #[cfg(test)]
-mod test;
+#[path = "tests.rs"]
+mod tests;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TlaExtractError {

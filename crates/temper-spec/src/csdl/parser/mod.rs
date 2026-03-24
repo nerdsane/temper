@@ -52,5 +52,5 @@ pub fn parse_csdl(xml: &str) -> Result<CsdlDocument, CsdlParseError> {
 }
 
 #[cfg(test)]
-#[path = "test.rs"]
+#[path = "tests.rs"]
 mod tests;
