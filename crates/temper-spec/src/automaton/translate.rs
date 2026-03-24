@@ -172,7 +172,7 @@ fn translate_guards(from_states: &[String], guards: &[Guard]) -> ResolvedGuard {
 
     match resolved.len() {
         0 => ResolvedGuard::Always,
-        1 => resolved.into_iter().next().unwrap(), // ci-ok: len() == 1
+        1 => resolved.remove(0),
         _ => ResolvedGuard::And(resolved),
     }
 }
