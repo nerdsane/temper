@@ -53,7 +53,8 @@ struct PendingReply {
 
 /// Per-user conversation session. Saved after the first agent completes so
 /// follow-up messages can Resume with the same session tree.
-#[derive(Debug, Clone)]
+/// Serializable for persistence to TemperFS across server restarts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct UserSession {
     /// TemperFS conversation file entity ID (legacy, passed for backward compat).
     conversation_file_id: String,
@@ -94,6 +95,8 @@ pub struct DiscordTransport {
     session_id: Arc<RwLock<Option<String>>>,
     /// Resume gateway URL (populated after READY event).
     resume_url: Arc<RwLock<Option<String>>>,
+    /// TemperFS File entity ID for the sessions manifest (populated on first save).
+    sessions_file_id: Arc<RwLock<Option<String>>>,
 }
 
 impl DiscordTransport {
@@ -110,12 +113,103 @@ impl DiscordTransport {
             sequence: Arc::new(AtomicU64::new(0)),
             session_id: Arc::new(RwLock::new(None)),
             resume_url: Arc::new(RwLock::new(None)),
+            sessions_file_id: Arc::new(RwLock::new(None)),
         }
     }
 
+    /// Well-known name for the sessions manifest file in TemperFS.
+    const SESSIONS_FILE_NAME: &str = "discord-sessions.json";
+
+    /// Load persisted user sessions from TemperFS on startup.
+    ///
+    /// Looks for a File entity named "discord-sessions.json" in the tenant.
+    /// If found, reads the JSON manifest and populates `user_sessions`.
+    async fn load_persisted_sessions(&self) {
+        let base_url = self.temper_api_url();
+        let tenant = &self.config.tenant;
+
+        // Query for the sessions manifest file by name.
+        let query_url = format!(
+            "{base_url}/tdata/Files?$filter=name eq '{}'",
+            Self::SESSIONS_FILE_NAME
+        );
+        let resp = match self
+            .http
+            .get(&query_url)
+            .header("x-tenant-id", tenant)
+            .header("x-temper-principal-kind", INTERNAL_PRINCIPAL_KIND)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  [discord] Failed to query sessions file: {e}");
+                return;
+            }
+        };
+
+        if !resp.status().is_success() {
+            // TemperFS not available yet — sessions will be fresh.
+            return;
+        }
+
+        let body = resp.text().await.unwrap_or_default();
+        let data: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        // Extract the first matching file entity.
+        let file_id = data
+            .get("value")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|item| item.get("Id").or_else(|| item.get("entity_id")))
+            .and_then(|v| v.as_str());
+
+        let Some(file_id) = file_id else {
+            println!("  [discord] No persisted sessions found (first run)");
+            return;
+        };
+
+        // Store the file ID for future saves.
+        *self.sessions_file_id.write().await = Some(file_id.to_string());
+
+        // Read the file content.
+        let content_url = format!("{base_url}/tdata/Files('{file_id}')/$value");
+        let content_resp = match self
+            .http
+            .get(&content_url)
+            .header("x-tenant-id", tenant)
+            .header("x-temper-principal-kind", INTERNAL_PRINCIPAL_KIND)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => return,
+        };
+
+        let content = content_resp.text().await.unwrap_or_default();
+        let sessions: BTreeMap<String, UserSession> = match serde_json::from_str(&content) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("  [discord] Failed to parse sessions manifest: {e}");
+                return;
+            }
+        };
+
+        let count = sessions.len();
+        *self.user_sessions.write().await = sessions;
+        println!("  [discord] Restored {count} user session(s) from TemperFS");
+    }
+
+    /// Persist the current user sessions to TemperFS.
     /// Run the transport. Connects to Discord Gateway, handles events, and
     /// reconnects on failure. This method runs indefinitely.
     pub async fn run(&self) -> Result<(), String> {
+        // Load persisted sessions from TemperFS before connecting.
+        self.load_persisted_sessions().await;
+
         // Fetch gateway URL.
         let gateway_url = self.fetch_gateway_url().await?;
         println!("  [discord] Gateway URL: {gateway_url}");
@@ -900,6 +994,7 @@ impl DiscordTransport {
         let bot_token = self.config.bot_token.clone();
         let tenant = self.config.tenant.clone();
         let temper_api_url = self.temper_api_url();
+        let sessions_file_id = self.sessions_file_id.clone();
         let state = self.state.clone();
 
         let reply_task = async move {
@@ -1039,6 +1134,16 @@ impl DiscordTransport {
                             session.session_file_id, session.session_leaf_id
                         );
                         user_sessions.write().await.insert(user_id.clone(), session);
+
+                        // Persist sessions to TemperFS for restart resilience.
+                        persist_sessions_to_temperfs(
+                            &http,
+                            &temper_api_url,
+                            &tenant,
+                            &sessions_file_id,
+                            &user_sessions,
+                        )
+                        .await;
                     }
 
                     // Deliver the reply. Guard against empty result.
@@ -1152,6 +1257,87 @@ impl DiscordTransport {
 }
 
 /// Truncate a string for display.
+/// Persist user sessions to TemperFS. Called from the reply watcher after
+/// session updates. Creates the sessions file on first call.
+async fn persist_sessions_to_temperfs(
+    http: &reqwest::Client,
+    temper_api_url: &str,
+    tenant: &str,
+    sessions_file_id: &Arc<RwLock<Option<String>>>,
+    user_sessions: &Arc<RwLock<BTreeMap<String, UserSession>>>,
+) {
+    let sessions = user_sessions.read().await.clone();
+    let content = serde_json::to_string_pretty(&sessions).unwrap_or_else(|_| "{}".to_string());
+
+    // Ensure sessions file exists.
+    let file_id = {
+        let existing = sessions_file_id.read().await.clone();
+        if let Some(id) = existing {
+            id
+        } else {
+            let create_body = serde_json::json!({
+                "name": "discord-sessions.json",
+                "mime_type": "application/json",
+                "path": "/discord-sessions.json",
+            });
+            let resp = match http
+                .post(format!("{temper_api_url}/tdata/Files"))
+                .header("x-tenant-id", tenant)
+                .header("x-temper-principal-kind", INTERNAL_PRINCIPAL_KIND)
+                .header("content-type", "application/json")
+                .body(serde_json::to_string(&create_body).unwrap_or_default())
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => r,
+                Ok(r) => {
+                    eprintln!("  [discord] Failed to create sessions file: {}", r.status());
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("  [discord] Failed to create sessions file: {e}");
+                    return;
+                }
+            };
+
+            let data: serde_json::Value = resp.json().await.unwrap_or_default();
+            let new_id = data
+                .get("entity_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if new_id.is_empty() {
+                eprintln!("  [discord] Sessions file created but no entity_id returned");
+                return;
+            }
+
+            *sessions_file_id.write().await = Some(new_id.clone());
+            new_id
+        }
+    };
+
+    // Write sessions JSON to TemperFS.
+    let put_url = format!("{temper_api_url}/tdata/Files('{file_id}')/$value");
+    match http
+        .put(&put_url)
+        .header("x-tenant-id", tenant)
+        .header("x-temper-principal-kind", INTERNAL_PRINCIPAL_KIND)
+        .header("content-type", "application/json")
+        .body(content)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => {
+            eprintln!("  [discord] Failed to persist sessions: {}", r.status());
+        }
+        Err(e) => {
+            eprintln!("  [discord] Failed to persist sessions: {e}");
+        }
+    }
+}
+
 /// Create a session tree JSONL file in TemperFS from an existing conversation.
 ///
 /// Reads the legacy conversation file, converts messages to session tree entries,
