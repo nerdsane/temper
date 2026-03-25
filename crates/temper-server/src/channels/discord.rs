@@ -694,41 +694,22 @@ impl DiscordTransport {
             }
         };
 
-        // Append the new user message to the session tree (preferred) or
-        // legacy conversation file (fallback when session tree not available).
-        let new_leaf_id = if !session.session_file_id.is_empty() {
-            match self
-                .append_to_session_tree(
-                    &session.session_file_id,
-                    &session.session_leaf_id,
-                    &msg.content,
-                )
-                .await
-            {
-                Ok(leaf_id) => Some(leaf_id),
-                Err(e) => {
-                    eprintln!("  [discord] Failed to append to session tree: {e}");
-                    self.user_sessions.write().await.remove(user_id);
-                    self.handle_first_message(msg).await;
-                    return;
-                }
-            }
-        } else if !session.conversation_file_id.is_empty() {
-            if let Err(e) = self
-                .append_to_legacy_conversation(&session.conversation_file_id, &msg.content)
-                .await
-            {
-                eprintln!("  [discord] Failed to append to conversation: {e}");
-                self.user_sessions.write().await.remove(user_id);
-                self.handle_first_message(msg).await;
-                return;
-            }
-            None
-        } else {
+        // Append user message to the legacy conversation file.
+        // The llm_caller reads from this file for context on follow-ups.
+        if session.conversation_file_id.is_empty() {
             self.user_sessions.write().await.remove(user_id);
             self.handle_first_message(msg).await;
             return;
-        };
+        }
+        if let Err(e) = self
+            .append_to_legacy_conversation(&session.conversation_file_id, &msg.content)
+            .await
+        {
+            eprintln!("  [discord] Failed to append to conversation: {e}");
+            self.user_sessions.write().await.remove(user_id);
+            self.handle_first_message(msg).await;
+            return;
+        }
 
         // Track pending reply.
         self.pending_replies.write().await.insert(
@@ -786,18 +767,15 @@ impl DiscordTransport {
             return;
         }
 
-        // Resume with session state. Pass session tree fields if available.
-        let mut resume_params = serde_json::json!({
+        // Resume with legacy conversation file. The llm_caller reads
+        // the conversation from this file for context.
+        let resume_params = serde_json::json!({
             "sandbox_url": session.sandbox_url,
             "sandbox_id": session.sandbox_id,
             "workspace_id": session.workspace_id,
             "conversation_file_id": session.conversation_file_id,
             "file_manifest_id": session.file_manifest_id,
         });
-        if let Some(ref leaf_id) = new_leaf_id {
-            resume_params["session_file_id"] = serde_json::json!(session.session_file_id);
-            resume_params["session_leaf_id"] = serde_json::json!(leaf_id);
-        }
 
         match self
             .state
@@ -838,6 +816,7 @@ impl DiscordTransport {
     ///
     /// Reads the current JSONL, appends a new user message entry with the
     /// correct `parentId`, and writes it back. Returns the new leaf entry ID.
+    #[allow(dead_code)] // Will be used when WASM session tree integration is complete
     async fn append_to_session_tree(
         &self,
         session_file_id: &str,
