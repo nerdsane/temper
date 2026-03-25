@@ -53,6 +53,7 @@ struct LoadedTenantSpecs {
 /// 1. Storage init  2. Registry build  3. Auto-reload  4. Webhooks
 /// 5. Persistence wiring  6. Entity hydration  7. Policy/WASM recovery
 /// 8. Tenant bootstrap  9. Server start
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     port: u16,
     apps: Vec<(String, String)>,
