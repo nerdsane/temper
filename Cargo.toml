@@ -39,6 +39,7 @@ members = [
     "crates/temper-sdk",
     "crates/temper-sandbox",
     "crates/temper-ots",
+    "crates/temper-transport",
     "reference-apps/ecommerce",
     "reference-apps/oncall",
 ]
@@ -144,6 +145,7 @@ temper-wasm-sdk = { path = "crates/temper-wasm-sdk" }
 temper-sdk = { path = "crates/temper-sdk" }
 temper-sandbox = { path = "crates/temper-sandbox" }
 temper-ots = { path = "crates/temper-ots" }
+temper-transport = { path = "crates/temper-transport" }
 
 # WASM runtime
 wasmtime = { version = "29", features = ["component-model"] }
