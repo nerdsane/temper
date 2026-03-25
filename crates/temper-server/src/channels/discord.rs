@@ -907,40 +907,40 @@ impl DiscordTransport {
                 if let Some(queued_msgs) = queued
                     && !queued_msgs.is_empty()
                 {
-                        // Combine queued messages and process as a follow-up.
-                        let combined = queued_msgs.join("\n");
-                        println!(
-                            "  [discord] Processing {} queued message(s) for {user_id}",
-                            queued_msgs.len()
-                        );
+                    // Combine queued messages and process as a follow-up.
+                    let combined = queued_msgs.join("\n");
+                    println!(
+                        "  [discord] Processing {} queued message(s) for {user_id}",
+                        queued_msgs.len()
+                    );
 
-                        // Synthesize a MessageCreateData for the queued messages.
-                        // We reuse the channel_id from the reply info.
-                        let queued_msg = MessageCreateData {
-                            id: format!("queued-{}", event.entity_id),
-                            channel_id: reply_info.discord_channel_id.clone(),
-                            content: combined,
-                            author: DiscordUser {
-                                id: user_id.clone(),
-                                username: String::new(), // Not needed for follow-up.
-                                bot: false,
-                                discriminator: None,
-                            },
-                            guild_id: None,
-                        };
+                    // Synthesize a MessageCreateData for the queued messages.
+                    // We reuse the channel_id from the reply info.
+                    let queued_msg = MessageCreateData {
+                        id: format!("queued-{}", event.entity_id),
+                        channel_id: reply_info.discord_channel_id.clone(),
+                        content: combined,
+                        author: DiscordUser {
+                            id: user_id.clone(),
+                            username: String::new(), // Not needed for follow-up.
+                            bot: false,
+                            discriminator: None,
+                        },
+                        guild_id: None,
+                    };
 
-                        // Re-insert active marker before processing.
-                        active_users
-                            .write()
-                            .await
-                            .insert(user_id.clone(), Vec::new());
+                    // Re-insert active marker before processing.
+                    active_users
+                        .write()
+                        .await
+                        .insert(user_id.clone(), Vec::new());
 
-                        // Queued messages will be picked up on the user's
-                        // next interaction. Clear the active lock so the next
-                        // message triggers the follow-up flow normally.
-                        println!("  [discord] Queued messages deferred to next interaction");
-                        active_users.write().await.remove(user_id);
-                        let _ = queued_msg;
+                    // Queued messages will be picked up on the user's
+                    // next interaction. Clear the active lock so the next
+                    // message triggers the follow-up flow normally.
+                    println!("  [discord] Queued messages deferred to next interaction");
+                    active_users.write().await.remove(user_id);
+                    let _ = queued_msg;
                 }
             }
         };
