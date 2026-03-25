@@ -904,8 +904,9 @@ impl DiscordTransport {
 
                 // Clear active state and check for queued messages.
                 let queued = active_users.write().await.remove(user_id);
-                if let Some(queued_msgs) = queued {
-                    if !queued_msgs.is_empty() {
+                if let Some(queued_msgs) = queued
+                    && !queued_msgs.is_empty()
+                {
                         // Combine queued messages and process as a follow-up.
                         let combined = queued_msgs.join("\n");
                         println!(
@@ -940,7 +941,6 @@ impl DiscordTransport {
                         println!("  [discord] Queued messages deferred to next interaction");
                         active_users.write().await.remove(user_id);
                         let _ = queued_msg;
-                    }
                 }
             }
         };
