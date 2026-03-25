@@ -5547,6 +5547,7 @@ dependencies = [
  "temper-store-postgres",
  "temper-store-redis",
  "temper-store-turso",
+ "temper-transport",
  "temper-verify",
  "tempfile",
  "termimad",

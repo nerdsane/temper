@@ -294,7 +294,9 @@ pub async fn run(
                 let _ = vault.cache_secret(&tenant, "discord_bot_token", token.clone());
             }
         }
-        spawn_channel_transport_discord(&state, token.clone(), &tenant);
+        // Use the embedded transport (temper-server internal) until the
+        // temper-transport crate's reply watcher is complete.
+        spawn_channel_transport_discord_legacy(&state, token.clone(), &tenant);
     } else {
         println!("  Discord transport: not configured");
         println!("    Set DISCORD_BOT_TOKEN env var or store 'discord_bot_token' in vault");
@@ -519,7 +521,10 @@ fn spawn_observe_ui(api_port: u16) {
 ///
 /// Connects to Discord Gateway via WebSocket, routes inbound messages to
 /// Channel entities, and delivers outbound replies via Discord REST API.
-fn spawn_channel_transport_discord(state: &PlatformState, bot_token: String, tenant: &str) {
+/// Legacy embedded transport (uses temper-server internals directly).
+/// Will be replaced by spawn_channel_transport_discord once the
+/// temper-transport crate's reply watcher is complete.
+fn spawn_channel_transport_discord_legacy(state: &PlatformState, bot_token: String, tenant: &str) {
     use temper_server::channels::discord::{DiscordTransport, DiscordTransportConfig};
     use temper_server::channels::discord_types::intents;
 
@@ -534,6 +539,42 @@ fn spawn_channel_transport_discord(state: &PlatformState, bot_token: String, ten
             intents: intents::DEFAULT,
         };
         let transport = DiscordTransport::new(config, server);
+        if let Err(e) = transport.run().await {
+            eprintln!("  [discord] Transport fatal error: {e}");
+        }
+    });
+}
+
+/// New transport using temper-transport crate (OData API client).
+/// Bootstraps Channel + AgentRoute entities and dispatches via Claw specs.
+/// Pending: reply watcher needs SSE/polling from observe endpoint.
+#[allow(dead_code)]
+fn spawn_channel_transport_discord(
+    _state: &PlatformState,
+    bot_token: String,
+    tenant: &str,
+    port: u16,
+    api_key: Option<String>,
+) {
+    use temper_transport::TemperApiConfig;
+    use temper_transport::discord::types::intents;
+    use temper_transport::discord::{DiscordConfig, DiscordTransport};
+
+    let tenant = tenant.to_string();
+    let api_url = format!("http://127.0.0.1:{port}");
+    println!("  Discord channel transport (v2): connecting (tenant={tenant})...");
+    tokio::spawn(async move {
+        // determinism-ok: WebSocket for channel transport
+        let api = temper_transport::TemperApiClient::new(TemperApiConfig {
+            base_url: api_url,
+            tenant,
+            api_key,
+        });
+        let config = DiscordConfig {
+            bot_token,
+            intents: intents::DEFAULT,
+        };
+        let transport = DiscordTransport::new(config, api);
         if let Err(e) = transport.run().await {
             eprintln!("  [discord] Transport fatal error: {e}");
         }
