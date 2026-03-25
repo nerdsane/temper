@@ -278,8 +278,26 @@ pub async fn run(
     state.server.spawn_runtime_metrics_loop();
 
     // Channel transports: spawn persistent connections to external messaging platforms.
-    if let Some(token) = discord_bot_token {
-        spawn_channel_transport_discord(&state, token, &tenant);
+    // Resolve Discord bot token: CLI/env → vault fallback.
+    let discord_token_resolved = discord_bot_token.or_else(|| {
+        state
+            .server
+            .secrets_vault
+            .as_ref()
+            .and_then(|v| v.get_secret(&tenant, "discord_bot_token"))
+    });
+    if let Some(ref token) = discord_token_resolved {
+        // Seed into vault so WASM modules can also access it.
+        if let Some(ref vault) = state.server.secrets_vault {
+            let _ = vault.cache_secret("default", "discord_bot_token", token.clone());
+            if tenant != "default" {
+                let _ = vault.cache_secret(&tenant, "discord_bot_token", token.clone());
+            }
+        }
+        spawn_channel_transport_discord(&state, token.clone(), &tenant);
+    } else {
+        println!("  Discord transport: not configured");
+        println!("    Set DISCORD_BOT_TOKEN env var or store 'discord_bot_token' in vault");
     }
 
     println!("Listening on http://0.0.0.0:{actual_port}");

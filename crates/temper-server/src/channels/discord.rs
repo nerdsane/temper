@@ -25,6 +25,12 @@ use super::discord_types::*;
 
 use temper_runtime::tenant::TenantId;
 
+/// Discord REST API v10 base URL.
+const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+
+/// Principal kind for internal (server-to-server) TemperFS calls.
+const INTERNAL_PRINCIPAL_KIND: &str = "admin";
+
 /// Configuration for a Discord channel transport.
 #[derive(Debug, Clone)]
 pub struct DiscordTransportConfig {
@@ -46,10 +52,10 @@ struct PendingReply {
 }
 
 /// Per-user conversation session. Saved after the first agent completes so
-/// follow-up messages can Resume with the same TemperFS conversation file.
+/// follow-up messages can Resume with the same session tree.
 #[derive(Debug, Clone)]
 struct UserSession {
-    /// TemperFS conversation file entity ID.
+    /// TemperFS conversation file entity ID (legacy, passed for backward compat).
     conversation_file_id: String,
     /// TemperFS workspace entity ID.
     workspace_id: String,
@@ -59,6 +65,10 @@ struct UserSession {
     sandbox_id: String,
     /// TemperFS file manifest entity ID.
     file_manifest_id: String,
+    /// TemperFS session tree file ID (JSONL format).
+    session_file_id: String,
+    /// Current leaf entry ID in the session tree.
+    session_leaf_id: String,
 }
 
 /// Discord channel transport.
@@ -142,7 +152,7 @@ impl DiscordTransport {
     async fn fetch_gateway_url(&self) -> Result<String, String> {
         let resp = self
             .http
-            .get("https://discord.com/api/v10/gateway/bot")
+            .get(format!("{DISCORD_API_BASE}/gateway/bot"))
             .header("Authorization", format!("Bot {}", self.config.bot_token))
             .send()
             .await
@@ -193,6 +203,20 @@ impl DiscordTransport {
         } else {
             self.send_identify(&mut write).await?;
         }
+
+        // Send presence update (opcode 3) immediately after identify/resume.
+        // Minimal payload: just set status to "online".
+        let presence = serde_json::json!({
+            "op": 3,
+            "d": {
+                "since": null,
+                "activities": [],
+                "status": "online",
+                "afk": false
+            }
+        });
+        let presence_json = serde_json::to_string(&presence).unwrap_or_default();
+        let _ = write.send(Message::Text(presence_json.into())).await;
 
         // Heartbeat ticker: sends ticks via mpsc so the main loop can
         // multiplex heartbeats with WebSocket reads on a single write half.
@@ -260,6 +284,12 @@ impl DiscordTransport {
                     browser: "temper".to_string(),
                     device: "temper".to_string(),
                 },
+                presence: Some(PresenceUpdateData {
+                    since: None,
+                    activities: vec![],
+                    status: "online".to_string(),
+                    afk: false,
+                }),
             },
         };
         let json = serde_json::to_string(&identify)
@@ -555,7 +585,7 @@ impl DiscordTransport {
         }
     }
 
-    /// Handle a follow-up message: append to TemperFS conversation, Configure + Resume.
+    /// Handle a follow-up message: append to session tree, Configure + Resume.
     async fn handle_followup_message(&self, msg: &MessageCreateData) {
         let entity_id = format!("discord-{}", msg.id);
         let tenant = TenantId::new(&self.config.tenant);
@@ -570,17 +600,41 @@ impl DiscordTransport {
             }
         };
 
-        // Append the new user message to the TemperFS conversation file.
-        if let Err(e) = self
-            .append_user_message(&session.conversation_file_id, &msg.content)
-            .await
-        {
-            eprintln!("  [discord] Failed to append to conversation: {e}");
-            // Fall back to first message flow (new conversation).
+        // Append the new user message to the session tree (preferred) or
+        // legacy conversation file (fallback when session tree not available).
+        let new_leaf_id = if !session.session_file_id.is_empty() {
+            match self
+                .append_to_session_tree(
+                    &session.session_file_id,
+                    &session.session_leaf_id,
+                    &msg.content,
+                )
+                .await
+            {
+                Ok(leaf_id) => Some(leaf_id),
+                Err(e) => {
+                    eprintln!("  [discord] Failed to append to session tree: {e}");
+                    self.user_sessions.write().await.remove(user_id);
+                    self.handle_first_message(msg).await;
+                    return;
+                }
+            }
+        } else if !session.conversation_file_id.is_empty() {
+            if let Err(e) = self
+                .append_to_legacy_conversation(&session.conversation_file_id, &msg.content)
+                .await
+            {
+                eprintln!("  [discord] Failed to append to conversation: {e}");
+                self.user_sessions.write().await.remove(user_id);
+                self.handle_first_message(msg).await;
+                return;
+            }
+            None
+        } else {
             self.user_sessions.write().await.remove(user_id);
             self.handle_first_message(msg).await;
             return;
-        }
+        };
 
         // Track pending reply.
         self.pending_replies.write().await.insert(
@@ -638,15 +692,18 @@ impl DiscordTransport {
             return;
         }
 
-        // Resume with the existing session state (same conversation file,
-        // workspace, sandbox). workspace_restorer syncs files to sandbox.
-        let resume_params = serde_json::json!({
+        // Resume with session state. Pass session tree fields if available.
+        let mut resume_params = serde_json::json!({
             "sandbox_url": session.sandbox_url,
             "sandbox_id": session.sandbox_id,
             "workspace_id": session.workspace_id,
             "conversation_file_id": session.conversation_file_id,
             "file_manifest_id": session.file_manifest_id,
         });
+        if let Some(ref leaf_id) = new_leaf_id {
+            resume_params["session_file_id"] = serde_json::json!(session.session_file_id);
+            resume_params["session_leaf_id"] = serde_json::json!(leaf_id);
+        }
 
         match self
             .state
@@ -683,11 +740,90 @@ impl DiscordTransport {
         }
     }
 
-    /// Append a user message to an existing TemperFS conversation file.
+    /// Append a user message to the session tree JSONL file in TemperFS.
     ///
-    /// Reads the current conversation JSON, appends the new message, and writes
-    /// it back. Uses the local server's OData API with admin principal.
-    async fn append_user_message(
+    /// Reads the current JSONL, appends a new user message entry with the
+    /// correct `parentId`, and writes it back. Returns the new leaf entry ID.
+    async fn append_to_session_tree(
+        &self,
+        session_file_id: &str,
+        session_leaf_id: &str,
+        content: &str,
+    ) -> Result<String, String> {
+        let base_url = self.temper_api_url();
+        let tenant = &self.config.tenant;
+
+        // Read current session tree JSONL from TemperFS.
+        let get_url = format!("{base_url}/tdata/Files('{session_file_id}')/$value");
+        let resp = self
+            .http
+            .get(&get_url)
+            .header("x-tenant-id", tenant)
+            .header("x-temper-principal-kind", INTERNAL_PRINCIPAL_KIND)
+            .send()
+            .await
+            .map_err(|e| format!("GET session tree failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("GET session tree returned {status}: {body}"));
+        }
+
+        let mut body = resp
+            .text()
+            .await
+            .map_err(|e| format!("read session tree body: {e}"))?;
+
+        // Count existing entries to generate a unique ID.
+        let entry_count = body.lines().filter(|l| !l.trim().is_empty()).count();
+        let new_id = format!("u-discord-{entry_count}");
+        let tokens = content.len() / 4; // rough estimate matching session_tree_lib
+
+        // Append new user message entry as JSONL line.
+        let entry = serde_json::json!({
+            "id": new_id,
+            "parentId": session_leaf_id,
+            "type": "message",
+            "role": "user",
+            "content": content,
+            "tokens": tokens,
+        });
+
+        if !body.ends_with('\n') && !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(&entry.to_string());
+        body.push('\n');
+
+        // Write updated JSONL back to TemperFS.
+        let put_url = format!("{base_url}/tdata/Files('{session_file_id}')/$value");
+        let put_resp = self
+            .http
+            .put(&put_url)
+            .header("x-tenant-id", tenant)
+            .header("x-temper-principal-kind", INTERNAL_PRINCIPAL_KIND)
+            .header("content-type", "application/octet-stream")
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| format!("PUT session tree failed: {e}"))?;
+
+        if !put_resp.status().is_success() {
+            let status = put_resp.status();
+            let body = put_resp.text().await.unwrap_or_default();
+            return Err(format!("PUT session tree returned {status}: {body}"));
+        }
+
+        println!(
+            "  [discord] Appended user message to session tree {session_file_id} (new leaf={new_id})",
+        );
+
+        Ok(new_id)
+    }
+
+    /// Append a user message to the legacy flat JSON conversation file.
+    async fn append_to_legacy_conversation(
         &self,
         conversation_file_id: &str,
         content: &str,
@@ -695,13 +831,12 @@ impl DiscordTransport {
         let base_url = self.temper_api_url();
         let tenant = &self.config.tenant;
 
-        // Read current conversation from TemperFS.
         let get_url = format!("{base_url}/tdata/Files('{conversation_file_id}')/$value");
         let resp = self
             .http
             .get(&get_url)
             .header("x-tenant-id", tenant)
-            .header("x-temper-principal-kind", "admin")
+            .header("x-temper-principal-kind", INTERNAL_PRINCIPAL_KIND)
             .send()
             .await
             .map_err(|e| format!("GET conversation failed: {e}"))?;
@@ -720,27 +855,21 @@ impl DiscordTransport {
         let mut conv: serde_json::Value =
             serde_json::from_str(&body).map_err(|e| format!("parse conversation JSON: {e}"))?;
 
-        // Append the new user message.
         let msg_count = {
             let messages = conv
                 .get_mut("messages")
                 .and_then(|v| v.as_array_mut())
                 .ok_or("conversation missing messages array")?;
-
-            messages.push(serde_json::json!({
-                "role": "user",
-                "content": content,
-            }));
+            messages.push(serde_json::json!({ "role": "user", "content": content }));
             messages.len()
         };
 
-        // Write updated conversation back.
         let put_url = format!("{base_url}/tdata/Files('{conversation_file_id}')/$value");
         let put_resp = self
             .http
             .put(&put_url)
             .header("x-tenant-id", tenant)
-            .header("x-temper-principal-kind", "admin")
+            .header("x-temper-principal-kind", INTERNAL_PRINCIPAL_KIND)
             .header("content-type", "application/json")
             .body(conv.to_string())
             .send()
@@ -756,7 +885,6 @@ impl DiscordTransport {
         println!(
             "  [discord] Appended user message to conversation {conversation_file_id} ({msg_count} messages)",
         );
-
         Ok(())
     }
 
@@ -839,7 +967,13 @@ impl DiscordTransport {
                         .unwrap_or("")
                         .to_string();
 
-                    if !conv_file_id.is_empty() {
+                    let sess_file_id = fields
+                        .get("session_file_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    if !sess_file_id.is_empty() || !conv_file_id.is_empty() {
                         let session = UserSession {
                             conversation_file_id: conv_file_id,
                             workspace_id: fields
@@ -862,10 +996,16 @@ impl DiscordTransport {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string(),
+                            session_file_id: sess_file_id,
+                            session_leaf_id: fields
+                                .get("session_leaf_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
                         };
                         println!(
-                            "  [discord] Saved session for user {user_id} (conv={})",
-                            session.conversation_file_id
+                            "  [discord] Saved session for user {user_id} (session_file={}, leaf={})",
+                            session.session_file_id, session.session_leaf_id
                         );
                         user_sessions.write().await.insert(user_id.clone(), session);
                     }
@@ -951,9 +1091,7 @@ impl DiscordTransport {
     async fn send_typing(&self, channel_id: &str) {
         let _ = self
             .http
-            .post(format!(
-                "https://discord.com/api/v10/channels/{channel_id}/typing"
-            ))
+            .post(format!("{DISCORD_API_BASE}/channels/{channel_id}/typing"))
             .header("Authorization", format!("Bot {}", self.config.bot_token))
             .send()
             .await;
@@ -1006,9 +1144,7 @@ pub async fn send_discord_message(
         };
 
         let resp = http
-            .post(format!(
-                "https://discord.com/api/v10/channels/{channel_id}/messages"
-            ))
+            .post(format!("{DISCORD_API_BASE}/channels/{channel_id}/messages"))
             .header("Authorization", format!("Bot {bot_token}"))
             .header("Content-Type", "application/json")
             .json(&body)

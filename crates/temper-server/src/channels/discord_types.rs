@@ -17,6 +17,8 @@ pub enum GatewayOpcode {
     Heartbeat = 1,
     /// Client → Server: identify payload with token + intents.
     Identify = 2,
+    /// Client → Server: update bot presence/status.
+    PresenceUpdate = 3,
     /// Client → Server: resume a dropped session.
     Resume = 6,
     /// Server → Client: reconnect request.
@@ -35,6 +37,7 @@ impl GatewayOpcode {
             0 => Some(Self::Dispatch),
             1 => Some(Self::Heartbeat),
             2 => Some(Self::Identify),
+            3 => Some(Self::PresenceUpdate),
             6 => Some(Self::Resume),
             7 => Some(Self::Reconnect),
             9 => Some(Self::InvalidSession),
@@ -121,6 +124,31 @@ pub struct IdentifyData {
     pub token: String,
     pub intents: u32,
     pub properties: ConnectionProperties,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence: Option<PresenceUpdateData>,
+}
+
+/// Presence update data (used in IDENTIFY and opcode 3).
+#[derive(Debug, Serialize)]
+pub struct PresenceUpdateData {
+    /// Unix time (ms) when the client went idle, or null if not idle.
+    pub since: Option<u64>,
+    /// Bot activities (status text).
+    pub activities: Vec<PresenceActivity>,
+    /// Status: "online", "dnd", "idle", "invisible", "offline".
+    pub status: String,
+    /// Whether the client is AFK.
+    pub afk: bool,
+}
+
+/// A single presence activity entry.
+#[derive(Debug, Serialize)]
+pub struct PresenceActivity {
+    /// Activity name displayed in Discord.
+    pub name: String,
+    /// Activity type: 0=Playing, 1=Streaming, 2=Listening, 3=Watching, 5=Competing.
+    #[serde(rename = "type")]
+    pub activity_type: u8,
 }
 
 #[derive(Debug, Serialize)]
