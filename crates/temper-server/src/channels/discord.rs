@@ -1385,7 +1385,21 @@ async fn create_session_tree_from_conversation(
 
     for (i, msg) in messages.iter().enumerate() {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-        let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        // Content may be a plain string or Anthropic's content block array:
+        // [{"type": "text", "text": "..."}]
+        let content = match msg.get("content") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Array(blocks)) => blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join(""),
+            _ => String::new(),
+        };
+        // Skip empty messages (e.g., assistant with no content blocks).
+        if content.is_empty() {
+            continue;
+        }
         let prefix = if role == "assistant" { "a" } else { "u" };
         let entry_id = format!("{prefix}-{agent_id}-{i}");
         let tokens = content.len() / 4;
