@@ -347,6 +347,23 @@ CREATE TABLE IF NOT EXISTS tenant_secrets (
 );";
 
 // ---------------------------------------------------------------------------
+// Blob storage (content-addressed binary objects for TemperFS)
+// ---------------------------------------------------------------------------
+
+/// Content-addressed blob storage for TemperFS `$value` endpoints.
+///
+/// Blobs are keyed by `{bucket}/{content_hash}` (e.g. `temper-fs/sha256:abc...`).
+/// This provides persistent local blob storage so the blob_adapter WASM module
+/// can upload/download via HTTP without requiring external S3/R2 in development.
+pub const CREATE_BLOBS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS blobs (
+    blob_key TEXT PRIMARY KEY,
+    data BLOB NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);";
+
+// ---------------------------------------------------------------------------
 // OTS trajectory storage (full agent execution traces)
 // ---------------------------------------------------------------------------
 

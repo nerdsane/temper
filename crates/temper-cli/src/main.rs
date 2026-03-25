@@ -98,6 +98,10 @@ enum Commands {
         /// per entity. Exit 0 = pass; non-zero or timeout = failure.
         #[arg(long)]
         verify_subprocess: bool,
+        /// Discord bot token for channel transport (enables Discord Gateway).
+        /// Falls back to DISCORD_BOT_TOKEN env var if not provided.
+        #[arg(long)]
+        discord_bot_token: Option<String>,
     },
     /// Run the verification cascade on IOA TOML source read from stdin.
     ///
@@ -149,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
             tenant,
             skill,
             verify_subprocess,
+            discord_bot_token,
         } => {
             let storage_explicit =
                 std::env::args().any(|arg| arg == "--storage" || arg.starts_with("--storage="));
@@ -166,6 +171,8 @@ async fn main() -> anyhow::Result<()> {
             {
                 apps.push((tenant.clone(), dir.clone()));
             }
+            let discord_token = discord_bot_token
+                .or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok()); // determinism-ok: read once at startup
             serve::run(
                 port,
                 apps,
@@ -174,6 +181,8 @@ async fn main() -> anyhow::Result<()> {
                 storage_explicit,
                 !no_observe,
                 verify_subprocess,
+                discord_token,
+                tenant,
             )
             .await?
         }

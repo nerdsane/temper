@@ -457,6 +457,7 @@ on_failure = "Fail"
 
 [integration.config]
 temper_api_url = "{secret:temper_api_url}"
+sandbox_url = "{secret:sandbox_url}"
 e2b_api_key = "{secret:e2b_api_key}"
 
 [[integration]]

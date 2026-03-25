@@ -17,6 +17,7 @@ use tracing::instrument;
 use crate::schema;
 
 mod authz;
+mod blobs;
 mod constraints;
 mod event_store;
 mod evolution;
@@ -237,6 +238,11 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_OTS_TRAJECTORIES_OUTCOME_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+
+        // Blob storage — content-addressed binary objects for TemperFS.
+        conn.execute(schema::CREATE_BLOBS_TABLE, ())
             .await
             .map_err(storage_error)?;
 

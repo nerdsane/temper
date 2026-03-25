@@ -61,6 +61,8 @@ pub async fn run(
     storage_explicit: bool,
     observe: bool,
     verify_subprocess: bool,
+    discord_bot_token: Option<String>,
+    tenant: String,
 ) -> Result<()> {
     let _otel_guard = init_observability("temper-platform");
     temper_authz::init_metrics();
@@ -115,16 +117,24 @@ pub async fn run(
     }
 
     // Phase 5b: Secrets vault
-    if let Ok(key_b64) = std::env::var("TEMPER_VAULT_KEY") {
-        // determinism-ok: read once at startup
+    {
         use base64::Engine as _;
-        let key_bytes = base64::engine::general_purpose::STANDARD
-            .decode(&key_b64)
-            .expect("TEMPER_VAULT_KEY must be valid base64");
-        assert_eq!(key_bytes.len(), 32, "TEMPER_VAULT_KEY must be 32 bytes");
-        let vault = temper_server::secrets::vault::SecretsVault::new(
-            key_bytes.as_slice().try_into().unwrap(), // ci-ok: length asserted == 32 above
-        );
+        let key_bytes: [u8; 32] = if let Ok(key_b64) = std::env::var("TEMPER_VAULT_KEY") {
+            // determinism-ok: read once at startup
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(&key_b64)
+                .expect("TEMPER_VAULT_KEY must be valid base64");
+            assert_eq!(decoded.len(), 32, "TEMPER_VAULT_KEY must be 32 bytes");
+            decoded.try_into().unwrap() // ci-ok: length asserted == 32 above
+        } else {
+            // No explicit key — generate an ephemeral one for in-memory secret caching.
+            // determinism-ok: OsRng used once at startup for vault key generation
+            use rand::RngCore as _;
+            let mut key = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut key);
+            key
+        };
+        let vault = temper_server::secrets::vault::SecretsVault::new(&key_bytes);
         state.server.secrets_vault = Some(std::sync::Arc::new(vault));
         println!("  Secrets vault: configured");
     }
@@ -136,6 +146,90 @@ pub async fn run(
     bootstrap::recover_cedar_policies(&state).await;
     bootstrap::recover_wasm_modules(&state).await;
     bootstrap::recover_secrets(&state).await;
+
+    // Seed secrets from env into the vault for all tenants.
+    if let Some(ref vault) = state.server.secrets_vault {
+        // ANTHROPIC_API_KEY — makes {secret:anthropic_api_key} resolve in LLM integrations.
+        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+            // determinism-ok: env var read at startup for configuration
+            let _ = vault.cache_secret("default", "anthropic_api_key", key.clone());
+            if tenant != "default" {
+                let _ = vault.cache_secret(&tenant, "anthropic_api_key", key);
+            }
+        }
+
+        // blob_endpoint — points blob_adapter at the server's internal blob storage
+        // when no external blob endpoint (R2/S3) is configured.
+        // determinism-ok: env var read at startup for configuration
+        if std::env::var("BLOB_ENDPOINT").is_err() {
+            let blob_url = format!("http://127.0.0.1:{port}/_internal/blobs");
+            let _ = vault.cache_secret("default", "blob_endpoint", blob_url.clone());
+            if tenant != "default" {
+                let _ = vault.cache_secret(&tenant, "blob_endpoint", blob_url);
+            }
+        }
+
+        // temper_api_url — points WASM modules at this server for TemperFS calls.
+        {
+            let api_url = format!("http://127.0.0.1:{port}");
+            let _ = vault.cache_secret("default", "temper_api_url", api_url.clone());
+            if tenant != "default" {
+                let _ = vault.cache_secret(&tenant, "temper_api_url", api_url);
+            }
+        }
+
+        // sandbox_url — local sandbox for tool execution.
+        // Uses SANDBOX_URL env var if set, otherwise auto-starts local_sandbox.py.
+        // determinism-ok: env var read at startup for configuration
+        {
+            let sandbox_url = if let Ok(url) = std::env::var("SANDBOX_URL") {
+                println!("  Sandbox: {url} (from SANDBOX_URL)");
+                url
+            } else {
+                let sandbox_port = port + 10; // e.g., 3000 → 3010
+                let sandbox_url = format!("http://127.0.0.1:{sandbox_port}");
+
+                // Find the local sandbox script relative to the binary or os-apps.
+                let sandbox_script = std::path::Path::new("os-apps/temper-agent/sandbox/local_sandbox.py");
+                if sandbox_script.exists() {
+                    // Use /tmp/temper-sandbox as the base; create /workspace for tool_runner
+                    // which sends cwd="/workspace" by default (matching E2B's layout).
+                    let _ = std::fs::create_dir_all("/tmp/temper-sandbox");
+                    let _ = std::fs::create_dir_all("/workspace");
+
+                    // determinism-ok: subprocess spawn at startup for local dev sandbox
+                    match std::process::Command::new("python3")
+                        .arg(sandbox_script)
+                        .arg("--port")
+                        .arg(sandbox_port.to_string())
+                        .arg("--workdir")
+                        .arg("/tmp/temper-sandbox")
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                    {
+                        Ok(_child) => {
+                            println!("  Local sandbox: {sandbox_url} (auto-started)");
+                        }
+                        Err(e) => {
+                            eprintln!("  Warning: failed to start local sandbox: {e}");
+                            eprintln!("  Run manually: python3 {sandbox_script:?} --port {sandbox_port}");
+                        }
+                    }
+                } else {
+                    eprintln!("  Warning: local sandbox script not found at {sandbox_script:?}");
+                    eprintln!("  Set SANDBOX_URL env var or ensure os-apps/temper-agent/sandbox/local_sandbox.py exists");
+                }
+
+                sandbox_url
+            };
+
+            let _ = vault.cache_secret("default", "sandbox_url", sandbox_url.clone());
+            if tenant != "default" {
+                let _ = vault.cache_secret(&tenant, "sandbox_url", sandbox_url);
+            }
+        }
+    }
 
     // Startup banner
     println!("Starting Temper platform server...");
@@ -176,6 +270,11 @@ pub async fn run(
     spawn_optimization_loop(&state);
     spawn_actor_passivation_loop(&state);
     state.server.spawn_runtime_metrics_loop();
+
+    // Channel transports: spawn persistent connections to external messaging platforms.
+    if let Some(token) = discord_bot_token {
+        spawn_channel_transport_discord(&state, token, &tenant);
+    }
 
     println!("Listening on http://0.0.0.0:{actual_port}");
     axum::serve(listener, router)
@@ -388,6 +487,31 @@ fn spawn_observe_ui(api_port: u16) {
             Err(e) => {
                 eprintln!("  Warning: failed to start Observe UI: {e}");
             }
+        }
+    });
+}
+
+/// Spawn the Discord channel transport as a background task.
+///
+/// Connects to Discord Gateway via WebSocket, routes inbound messages to
+/// Channel entities, and delivers outbound replies via Discord REST API.
+fn spawn_channel_transport_discord(state: &PlatformState, bot_token: String, tenant: &str) {
+    use temper_server::channels::discord::{DiscordTransport, DiscordTransportConfig};
+    use temper_server::channels::discord_types::intents;
+
+    let server = state.server.clone();
+    let tenant = tenant.to_string();
+    println!("  Discord channel transport: connecting (tenant={tenant})...");
+    tokio::spawn(async move {
+        // determinism-ok: WebSocket for channel transport
+        let config = DiscordTransportConfig {
+            bot_token,
+            tenant,
+            intents: intents::DEFAULT,
+        };
+        let transport = DiscordTransport::new(config, server);
+        if let Err(e) = transport.run().await {
+            eprintln!("  [discord] Transport fatal error: {e}");
         }
     });
 }

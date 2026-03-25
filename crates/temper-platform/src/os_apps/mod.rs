@@ -31,6 +31,9 @@ pub struct InstallResult {
     pub updated: Vec<String>,
     /// Entity types whose IOA source was byte-for-byte identical — skipped.
     pub skipped: Vec<String>,
+    /// WASM modules compiled and registered.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub wasm_modules: Vec<String>,
 }
 
 /// Metadata for a skill in the catalog.
@@ -57,6 +60,8 @@ pub struct SkillBundle {
     pub csdl: String,
     /// Cedar policy sources (may be empty).
     pub cedar_policies: Vec<String>,
+    /// WASM module binaries as `(module_name, wasm_bytes)` pairs.
+    pub wasm_modules: BTreeMap<String, Vec<u8>>,
 }
 
 // Backward-compatible type aliases.
@@ -357,6 +362,60 @@ fn find_cedar_policies(skill_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Find compiled WASM module binaries in a skill directory.
+///
+/// Scans `wasm/*/target/wasm32-unknown-unknown/release/{module_name}.wasm`
+/// where `{module_name}` matches the directory name under `wasm/`.
+fn find_wasm_modules(skill_dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut modules = BTreeMap::new();
+    let wasm_dir = skill_dir.join("wasm");
+    if !wasm_dir.is_dir() {
+        return modules;
+    }
+    let Ok(entries) = std::fs::read_dir(&wasm_dir) else {
+        return modules;
+    };
+    let mut dirs: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .collect();
+    dirs.sort_by_key(|e| e.file_name());
+
+    for entry in dirs {
+        let module_name = entry.file_name().to_string_lossy().to_string();
+        // Skip target directories that cargo creates.
+        if module_name == "target" {
+            continue;
+        }
+        let wasm_path = entry
+            .path()
+            .join("target")
+            .join("wasm32-unknown-unknown")
+            .join("release")
+            .join(format!("{module_name}.wasm"));
+        if wasm_path.exists() {
+            match std::fs::read(&wasm_path) {
+                Ok(bytes) => {
+                    tracing::debug!(
+                        module = %module_name,
+                        size = bytes.len(),
+                        "Found WASM module in OS app"
+                    );
+                    modules.insert(module_name, bytes);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        module = %module_name,
+                        error = %e,
+                        "Failed to read WASM module binary"
+                    );
+                }
+            }
+        }
+    }
+    modules
+}
+
 /// Read the skill guide markdown (skill.md or SKILL.md).
 fn read_skill_guide(skill_dir: &Path) -> Option<String> {
     for name in &["skill.md", "SKILL.md"] {
@@ -463,10 +522,14 @@ fn load_skill_bundle(skill_dir: &Path) -> Option<SkillBundle> {
         .filter_map(|p| std::fs::read_to_string(&p).ok())
         .collect();
 
+    // Read WASM module binaries from wasm/*/target/wasm32-unknown-unknown/release/*.wasm.
+    let wasm_modules = find_wasm_modules(skill_dir);
+
     Some(SkillBundle {
         specs,
         csdl,
         cedar_policies,
+        wasm_modules,
     })
 }
 
@@ -658,18 +721,63 @@ pub async fn install_os_app(
         }
     }
 
+    // ── Step 4: Compile and register WASM modules. ──────────────────
+    let mut wasm_registered = Vec::new();
+    for (module_name, wasm_bytes) in &bundle.wasm_modules {
+        match state.server.wasm_engine.compile_and_cache(wasm_bytes) {
+            Ok(hash) => {
+                // Persist to Turso FIRST for durability.
+                if let Err(e) = state
+                    .server
+                    .upsert_wasm_module(tenant, module_name, wasm_bytes, &hash)
+                    .await
+                {
+                    tracing::warn!(
+                        tenant,
+                        module = %module_name,
+                        error = %e,
+                        "Failed to persist WASM module to durable store (continuing in-memory only)"
+                    );
+                }
+                // Register in module registry.
+                {
+                    let mut wasm_reg = state.server.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
+                    wasm_reg.register(&tenant_id, module_name, &hash);
+                }
+                tracing::info!(
+                    tenant,
+                    module = %module_name,
+                    hash = %hash,
+                    size = wasm_bytes.len(),
+                    "WASM module loaded from OS app"
+                );
+                wasm_registered.push(module_name.clone());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    tenant,
+                    module = %module_name,
+                    error = %e,
+                    "Failed to compile WASM module from OS app"
+                );
+            }
+        }
+    }
+
     tracing::info!(
         "Installed os-app '{app_name}' for tenant '{tenant}': \
-         added={:?} updated={:?} skipped={:?}",
+         added={:?} updated={:?} skipped={:?} wasm={:?}",
         added,
         updated,
         skipped,
+        wasm_registered,
     );
 
     Ok(InstallResult {
         added,
         updated,
         skipped,
+        wasm_modules: wasm_registered,
     })
 }
 

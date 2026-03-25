@@ -3,10 +3,11 @@
 use axum::Router;
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderName};
 use axum::http::{Method, StatusCode};
-use axum::routing::get;
+use axum::routing::{get, put};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
+use crate::blobs;
 use crate::events;
 use crate::odata;
 use crate::state::ServerState;
@@ -64,6 +65,10 @@ pub fn build_router(state: ServerState) -> Router {
         .route(
             "/webhooks/{tenant}/{*path}",
             get(webhook_receiver::handle_webhook).post(webhook_receiver::handle_webhook),
+        )
+        .route(
+            "/_internal/blobs/{*path}",
+            put(blobs::put_blob).get(blobs::get_blob),
         );
 
     #[cfg(feature = "observe")]
