@@ -73,11 +73,7 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
             return Ok(());
         }
 
-        let temper_api_url = ctx
-            .config
-            .get("temper_api_url")
-            .cloned()
-            .unwrap_or_else(|| "http://127.0.0.1:3000".to_string());
+        let temper_api_url = resolve_temper_api_url(&ctx, &fields);
 
         let tenant = &ctx.tenant;
         let e2b = sandbox_url.contains("e2b.app") || sandbox_url.contains("e2b.dev");
@@ -254,4 +250,19 @@ fn url_encode(s: &str) -> String {
         }
     }
     out
+}
+
+fn resolve_temper_api_url(ctx: &Context, fields: &Value) -> String {
+    fields
+        .get("temper_api_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            ctx.config
+                .get("temper_api_url")
+                .filter(|s| !s.is_empty())
+                .cloned()
+        })
+        .unwrap_or_else(|| "http://127.0.0.1:3000".to_string())
 }

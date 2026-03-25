@@ -75,7 +75,7 @@ name = "RecordMutation"
 kind = "input"
 from = ["Proposing"]
 to = "Verifying"
-effect = "increment mutation_attempts"
+effect = [{ type = "increment", var = "mutation_attempts" }, { type = "trigger", name = "verify_candidate" }]
 params = ["MutatedSpecSource", "MutationSummary"]
 hint = "Record the LLM-proposed spec mutation."
 
@@ -126,6 +126,7 @@ name = "RecordFrontierAutoApprove"
 kind = "input"
 from = ["Updating"]
 to = "Deploying"
+effect = "trigger deploy_candidate"
 params = ["FrontierUpdateJson"]
 hint = "Frontier updated, auto-approved for deployment."
 
@@ -142,6 +143,7 @@ name = "Approve"
 kind = "input"
 from = ["AwaitingApproval"]
 to = "Deploying"
+effect = "trigger deploy_candidate"
 params = ["ApproverId"]
 hint = "Human or verified agent approves the evolution candidate."
 
@@ -165,7 +167,7 @@ hint = "Spec hot-deployed via SpecRegistry::swap_table()."
 [[action]]
 name = "Fail"
 kind = "input"
-from = ["Created", "Selecting", "Evaluating", "Reflecting", "Proposing", "Scoring", "Updating", "Deploying"]
+from = ["Created", "Selecting", "Evaluating", "Reflecting", "Proposing", "Verifying", "Scoring", "Updating", "Deploying"]
 to = "Failed"
 params = ["FailureReason"]
 hint = "Unrecoverable error — evolution run failed."
@@ -199,6 +201,8 @@ prompt = "You are the GEPA evolution agent. Read trigger_params.DatasetJson with
 
 [integration.config]
 temper_api_url = "http://127.0.0.1:4455"
+temper_api_key = "{secret:temper_api_key}"
+temper_api_key = "{secret:temper_api_key}"
 sandbox_url = "http://127.0.0.1:9999"
 model = "claude-sonnet-4-20250514"
 provider = "anthropic"
@@ -209,6 +213,16 @@ max_agent_retries = "2"
 tools_enabled = ""
 workdir = "/tmp/workspace"
 timeout_secs = "420"
+
+[[integration]]
+name = "verify_candidate"
+trigger = "verify_candidate"
+type = "wasm"
+module = "gepa-verify"
+on_failure = "Fail"
+
+[integration.config]
+temper_api_url = "http://127.0.0.1:4455"
 
 [[integration]]
 name = "score_candidate"
@@ -224,4 +238,11 @@ trigger = "update_frontier"
 type = "wasm"
 module = "gepa-pareto"
 on_success = "RecordFrontier"
+on_failure = "Fail"
+
+[[integration]]
+name = "deploy_candidate"
+trigger = "deploy_candidate"
+type = "wasm"
+module = "gepa-deploy"
 on_failure = "Fail"

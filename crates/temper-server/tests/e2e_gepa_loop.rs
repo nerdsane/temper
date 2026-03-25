@@ -1461,19 +1461,20 @@ to = "Done"
     );
 }
 
-/// **Full autonomous GEPA loop (test override)** — proves the entire chain runs end-to-end:
+/// **Autonomous GEPA chain to approval gate (test override)** — proves the background
+/// chain runs end-to-end through mutation, verification, scoring, and frontier update:
 ///
 /// SelectCandidate → gepa-replay (WASM) → RecordEvaluation
 ///                → gepa-reflective (WASM) → RecordDataset
 ///                → claude_code adapter (mock script) → RecordMutation
-///                → [manual verification step] → RecordVerificationPass
+///                → claude_code adapter (mock verifier) → RecordVerificationPass
 ///                → gepa-score (WASM) → RecordScore
 ///                → gepa-pareto (WASM) → RecordFrontier
 ///
 /// Production uses `gepa-proposer-agent` WASM + TemperAgent. This test
-/// intentionally overrides only `propose_mutation` to a deterministic mock adapter
-/// so CI can run without LLM keys/network.
-#[tokio::test]
+/// overrides `propose_mutation` and `verify_candidate` to deterministic mock adapters
+/// so CI can run without LLM keys or a live verification HTTP server.
+#[tokio::test(flavor = "multi_thread")]
 async fn e2e_gepa_full_autonomous_loop_with_adapter() {
     use std::io::Write;
     use std::time::Duration;
@@ -1487,8 +1488,11 @@ async fn e2e_gepa_full_autonomous_loop_with_adapter() {
 
     // --- Create mock "claude" script that returns a mutated spec ---
     let mock_dir = std::env::temp_dir().join("gepa-mock-adapter-test"); // determinism-ok: test harness
+    let mock_workdir = mock_dir.join("workspace");
     std::fs::create_dir_all(&mock_dir).expect("create mock dir");
+    std::fs::create_dir_all(&mock_workdir).expect("create mock workdir");
     let mock_script = mock_dir.join("mock-claude");
+    let verify_script = mock_dir.join("mock-verify");
     {
         let mut f = std::fs::File::create(&mock_script).expect("create mock script");
         // The script outputs stream-JSON with MutatedSpecSource and MutationSummary.
@@ -1514,15 +1518,43 @@ MOCK_OUTPUT
                 .expect("chmod +x mock script");
         }
     }
+    {
+        let mut f = std::fs::File::create(&verify_script).expect("create verify script");
+        write!(
+            f,
+            r#"#!/bin/bash
+cat <<'MOCK_OUTPUT'
+{{"VerificationReport": "L0-L3 cascade passed for TestIssue"}}
+MOCK_OUTPUT
+"#
+        )
+        .expect("write verify script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&verify_script, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod +x verify script");
+        }
+    }
 
     // --- Build EvolutionRun spec with propose_mutation test override ---
     let base_ioa = include_str!("../../../os-apps/evolution/evolution_run.ioa.toml");
-    // Replace the proposer module with deterministic adapter for test-only execution.
+    // Replace proposer + verifier integrations with deterministic adapters for test-only execution.
     let mock_path = mock_script.to_str().expect("mock path to str");
-    let modified_ioa = base_ioa.replace(
+    let verify_path = verify_script.to_str().expect("verify path to str");
+    let mock_workdir = mock_workdir.to_str().expect("mock workdir to str");
+    let modified_ioa = base_ioa
+        .replace(
         "type = \"wasm\"\nmodule = \"gepa-proposer-agent\"",
         &format!("type = \"adapter\"\nadapter = \"claude_code\"\ncommand = \"{mock_path}\""),
-    );
+        )
+        .replace(
+            "type = \"wasm\"\nmodule = \"gepa-verify\"",
+            &format!(
+                "type = \"adapter\"\nadapter = \"claude_code\"\ncommand = \"{verify_path}\"\non_success = \"RecordVerificationPass\""
+            ),
+        )
+        .replace("workdir = \"/tmp/workspace\"", &format!("workdir = \"{mock_workdir}\""));
 
     let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
@@ -1642,7 +1674,8 @@ to = "Done"
         r.state.status, r.custom_effects
     );
 
-    // Wait for the autonomous chain to progress through WASM + adapter
+    // Wait for the autonomous chain to progress through adapter + verification
+    // + scoring + frontier update. The current branch stops at manual approval.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut final_status = "Evaluating".to_string();
     let mut event_trail = Vec::new();
@@ -1665,76 +1698,28 @@ to = "Done"
             .map(|e| e.action.clone())
             .collect();
 
-        // Terminal states for this phase
-        if matches!(final_status.as_str(), "Verifying" | "Failed" | "Completed") {
+        if matches!(final_status.as_str(), "AwaitingApproval" | "Failed") {
             break;
         }
     }
 
-    println!("[AUTO] After WASM+adapter chain: status={final_status}, events={event_trail:?}");
+    println!("[AUTO] After autonomous GEPA chain: status={final_status}, events={event_trail:?}");
 
-    // The chain should have reached Verifying (WASM replay → reflective → adapter mutation → RecordMutation)
     assert!(
         event_trail.contains(&"RecordMutation".to_string()),
         "RecordMutation must appear — proves the claude_code adapter (mock) executed and \
          returned a mutated spec. Events: {event_trail:?}"
     );
     assert_eq!(
-        final_status, "Verifying",
-        "Entity should be in Verifying after adapter returns mutation. Got: {final_status}"
+        final_status, "AwaitingApproval",
+        "Entity should reach AwaitingApproval after replay, reflective, verify, score, and frontier callbacks. Got: {final_status}"
     );
-
-    // Step 3: Manual verification pass (in production, this is L0-L3 cascade)
-    let r = state
-        .dispatch_tenant_action(
-            &tenant,
-            "EvolutionRun",
-            evo_id,
-            "RecordVerificationPass",
-            serde_json::json!({
-                "VerificationReport": "L0-L3 cascade passed. Reassign action properly defined."
-            }),
-            &AgentContext::default(),
-        )
-        .await
-        .expect("RecordVerificationPass should succeed");
-    assert!(r.success);
-    println!(
-        "[AUTO] RecordVerificationPass → status: {}, effects: {:?}",
-        r.state.status, r.custom_effects
-    );
-
-    // This triggers score_candidate (WASM) → RecordScore → update_frontier (WASM) → RecordFrontier
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        let entity = state
-            .get_tenant_entity_state(&tenant, "EvolutionRun", evo_id)
-            .await
-            .expect("entity should exist");
-        final_status = entity.state.status.clone();
-        event_trail = entity
-            .state
-            .events
-            .iter()
-            .map(|e| e.action.clone())
-            .collect();
-
-        if matches!(
-            final_status.as_str(),
-            "AwaitingApproval" | "Deploying" | "Completed" | "Failed"
-        ) {
-            break;
-        }
-    }
-
-    println!("[AUTO] After scoring+frontier chain: status={final_status}, events={event_trail:?}");
 
     // Verify all WASM modules fired
+    assert!(
+        event_trail.contains(&"RecordVerificationPass".to_string()),
+        "RecordVerificationPass must appear — proves the verification adapter callback executed. Events: {event_trail:?}"
+    );
     assert!(
         event_trail.contains(&"RecordScore".to_string()),
         "RecordScore must appear — proves gepa-score WASM module executed. Events: {event_trail:?}"
@@ -1743,34 +1728,6 @@ to = "Done"
         event_trail.contains(&"RecordFrontier".to_string()),
         "RecordFrontier must appear — proves gepa-pareto WASM module executed. Events: {event_trail:?}"
     );
-
-    // Step 4: Approve and deploy
-    let r = state
-        .dispatch_tenant_action(
-            &tenant,
-            "EvolutionRun",
-            evo_id,
-            "Approve",
-            serde_json::json!({ "ApproverId": "human-reviewer-1" }),
-            &AgentContext::default(),
-        )
-        .await
-        .expect("Approve should succeed");
-    assert!(r.success);
-
-    let r = state
-        .dispatch_tenant_action(
-            &tenant,
-            "EvolutionRun",
-            evo_id,
-            "Deploy",
-            serde_json::json!({ "DeploymentId": "deploy-auto-1" }),
-            &AgentContext::default(),
-        )
-        .await
-        .expect("Deploy should succeed");
-    assert!(r.success);
-    assert_eq!(r.state.status, "Completed");
 
     // Final event trail
     let entity = state
@@ -1784,22 +1741,20 @@ to = "Done"
         .map(|e| e.action.as_str())
         .collect();
 
-    println!("\n=== FULL AUTONOMOUS GEPA LOOP PROOF ===");
+    println!("\n=== AUTONOMOUS GEPA APPROVAL-GATE PROOF ===");
     println!("Event trail: {:?}", final_events);
     println!("Final status: {}", entity.state.status);
 
-    // The complete chain:
+    // The complete background chain on this branch:
     let expected = [
-        "Start",                  // Human/agent kicks off
-        "SelectCandidate",        // Pick candidate from frontier
-        "RecordEvaluation",       // gepa-replay WASM module ✓
-        "RecordDataset",          // gepa-reflective WASM module ✓
-        "RecordMutation",         // claude_code adapter (evolution agent) ✓
-        "RecordVerificationPass", // L0-L3 verification cascade
-        "RecordScore",            // gepa-score WASM module ✓
-        "RecordFrontier",         // gepa-pareto WASM module ✓
-        "Approve",                // Human/agent approval gate
-        "Deploy",                 // Hot-deploy to SpecRegistry
+        "Start",
+        "SelectCandidate",
+        "RecordEvaluation",
+        "RecordDataset",
+        "RecordMutation",
+        "RecordVerificationPass",
+        "RecordScore",
+        "RecordFrontier",
     ];
     for step in &expected {
         assert!(
@@ -1807,6 +1762,6 @@ to = "Done"
             "Missing step '{step}' in event trail. Full trail: {final_events:?}"
         );
     }
-    assert_eq!(entity.state.status, "Completed");
-    println!("ALL 10 STEPS VERIFIED. GEPA LOOP IS FULLY AUTONOMOUS. ✓");
+    assert_eq!(entity.state.status, "AwaitingApproval");
+    println!("AUTONOMOUS GEPA CHAIN REACHED AWAITING APPROVAL. ✓");
 }

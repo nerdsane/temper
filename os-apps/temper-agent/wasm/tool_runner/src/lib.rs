@@ -1844,3 +1844,18 @@ fn write_session_to_temperfs(
     if resp.status >= 200 && resp.status < 300 { Ok(()) }
     else { Err(format!("TemperFS session write failed (HTTP {})", resp.status)) }
 }
+
+fn resolve_temper_api_url(ctx: &Context, fields: &Value) -> String {
+    fields
+        .get("temper_api_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            ctx.config
+                .get("temper_api_url")
+                .filter(|s| !s.is_empty())
+                .cloned()
+        })
+        .unwrap_or_else(|| "http://127.0.0.1:3000".to_string())
+}

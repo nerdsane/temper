@@ -101,7 +101,7 @@ temper_module! {
             .unwrap_or(3)
             .max(1);
 
-        let headers = vec![
+        let mut headers = vec![
             ("Content-Type".to_string(), "application/json".to_string()),
             ("X-Tenant-Id".to_string(), ctx.tenant.clone()),
             // Drive TemperAgent via Cedar-governed agent identity.
@@ -112,6 +112,21 @@ temper_module! {
             ),
             ("x-temper-agent-type".to_string(), "supervisor".to_string()),
         ];
+        let api_key = ctx
+            .config
+            .get("temper_api_key")
+            .cloned()
+            .or_else(|| ctx.config.get("api_key").cloned())
+            .or_else(|| ctx.config.get("bearer_token").cloned())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| ctx.get_secret("temper_api_key").ok())
+            .filter(|s| !s.trim().is_empty());
+        if let Some(api_key) = api_key {
+            headers.push((
+                "Authorization".to_string(),
+                format!("Bearer {}", api_key.trim()),
+            ));
+        }
 
         let system_prompt = ctx
             .config
@@ -212,6 +227,11 @@ Return valid compact JSON in one line with non-empty MutatedSpecSource and Mutat
                                     spec_source,
                                     &payload.mutated_spec_source,
                                 );
+                                let unmet_handoff = collect_unmet_intent_handoff(
+                                    &dataset_missing_capabilities,
+                                    &payload.unmet_intent_suggestions,
+                                    &gate,
+                                );
                                 if gate.allowed {
                                     let mut out = json!({
                                         "MutatedSpecSource": payload.mutated_spec_source,
@@ -219,23 +239,40 @@ Return valid compact JSON in one line with non-empty MutatedSpecSource and Mutat
                                         "ProposerType": "temper_agent",
                                         "ProposerAgentId": created_agent_id,
                                     });
-                                    if !payload.unmet_intent_suggestions.is_empty() {
+                                    if !unmet_handoff.is_empty() {
+                                        let report_reason =
+                                            "GEPA detected unmet capabilities during optimizer mutation";
+                                        let report_outcomes = report_unmet_intents(
+                                            &ctx,
+                                            &base_url,
+                                            &headers,
+                                            skill_name,
+                                            entity_type,
+                                            &unmet_handoff,
+                                            report_reason,
+                                        );
                                         out["UnmetIntentSuggestions"] = Value::Array(
-                                            payload
-                                                .unmet_intent_suggestions
+                                            unmet_handoff
                                                 .iter()
                                                 .map(|s| Value::String(s.clone()))
                                                 .collect(),
                                         );
+                                        out["UnmetIntentHandoff"] = Value::Array(
+                                            unmet_handoff
+                                                .iter()
+                                                .map(|s| Value::String(s.clone()))
+                                                .collect(),
+                                        );
+                                        out["UnmetIntentReport"] = report_outcomes;
+                                        out["HasUnmetIntentHandoff"] = Value::Bool(true);
                                     }
                                     return Ok(out);
                                 }
 
                                 let gate_reasons = gate.reasons();
-                                let handoff = collect_unmet_intent_handoff(
-                                    &dataset_missing_capabilities,
-                                    &payload.unmet_intent_suggestions,
-                                    &gate,
+                                let report_reason = format!(
+                                    "GEPA optimizer-only gate blocked structural mutation: {}",
+                                    gate_reasons.join("; ")
                                 );
                                 let report_outcomes = report_unmet_intents(
                                     &ctx,
@@ -243,15 +280,15 @@ Return valid compact JSON in one line with non-empty MutatedSpecSource and Mutat
                                     &headers,
                                     skill_name,
                                     entity_type,
-                                    &handoff,
-                                    &gate_reasons,
+                                    &unmet_handoff,
+                                    &report_reason,
                                 );
 
                                 let summary = format!(
                                     "Optimizer-only GEPA gate rejected structural mutation ({}). \
 Forwarded {} unmet-intent handoff items; returning no-op mutation for GEPA.",
                                     gate_reasons.join("; "),
-                                    handoff.len()
+                                    unmet_handoff.len()
                                 );
                                 ctx.log("warn", &summary);
                                 return Ok(json!({
@@ -260,7 +297,7 @@ Forwarded {} unmet-intent handoff items; returning no-op mutation for GEPA.",
                                     "ProposerType": "temper_agent",
                                     "ProposerAgentId": created_agent_id,
                                     "RequiresUnmetIntentLoop": true,
-                                    "UnmetIntentHandoff": handoff,
+                                    "UnmetIntentHandoff": unmet_handoff,
                                     "UnmetIntentReport": report_outcomes,
                                     "OptimizerOnlyGate": {
                                         "blocked": true,
@@ -799,7 +836,7 @@ fn report_unmet_intents(
     skill_name: &str,
     entity_type: &str,
     intents: &[String],
-    gate_reasons: &[String],
+    reason: &str,
 ) -> Value {
     if intents.is_empty() {
         return json!({
@@ -814,10 +851,6 @@ fn report_unmet_intents(
     let mut reported = 0usize;
     let mut failed = 0usize;
     let mut details = Vec::new();
-    let reason = format!(
-        "GEPA optimizer-only gate blocked structural mutation: {}",
-        gate_reasons.join("; ")
-    );
 
     for intent in intents {
         let payload = json!({

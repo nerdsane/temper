@@ -62,7 +62,8 @@ impl WasmAuthzGate for CedarWasmAuthzGate {
 
         // Convert BTreeMap to HashMap at Cedar boundary (determinism-ok)
         let hash_attrs: std::collections::HashMap<_, _> = resource_attrs.into_iter().collect(); // determinism-ok: Cedar API requires HashMap
-        let decision = self.engine.authorize_or_bypass(
+        let decision = self.engine.authorize_for_tenant_or_bypass(
+            &ctx.tenant,
             &enriched_ctx,
             "http_call",
             "HttpEndpoint",
@@ -90,9 +91,13 @@ impl WasmAuthzGate for CedarWasmAuthzGate {
 
         // Convert BTreeMap to HashMap at Cedar boundary (determinism-ok)
         let hash_attrs: std::collections::HashMap<_, _> = resource_attrs.into_iter().collect(); // determinism-ok: Cedar API requires HashMap
-        let decision =
-            self.engine
-                .authorize_or_bypass(&security_ctx, "access_secret", "Secret", &hash_attrs);
+        let decision = self.engine.authorize_for_tenant_or_bypass(
+            &ctx.tenant,
+            &security_ctx,
+            "access_secret",
+            "Secret",
+            &hash_attrs,
+        );
 
         match decision {
             AuthzDecision::Allow => WasmAuthzDecision::Allow,
@@ -277,6 +282,34 @@ mod tests {
             &ctx,
         );
         assert!(matches!(result, WasmAuthzDecision::Deny(_)));
+    }
+
+    #[test]
+    fn cedar_gate_uses_tenant_scoped_policies() {
+        let engine = Arc::new(AuthzEngine::empty());
+        let policy = r#"
+            permit(
+                principal is Agent,
+                action == Action::"http_call",
+                resource is HttpEndpoint
+            ) when {
+                context.module == "stripe_charge" &&
+                context.domain == "api.stripe.com"
+            };
+        "#;
+        engine
+            .reload_tenant_policies("test-tenant", policy)
+            .expect("tenant policy should load");
+
+        let gate = CedarWasmAuthzGate::new(engine);
+        let ctx = test_ctx(); // tenant = test-tenant, module_name = stripe_charge
+        let result = gate.authorize_http_call(
+            "api.stripe.com",
+            "POST",
+            "https://api.stripe.com/v1/charges",
+            &ctx,
+        );
+        assert_eq!(result, WasmAuthzDecision::Allow);
     }
 
     #[test]

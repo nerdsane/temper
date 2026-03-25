@@ -130,7 +130,7 @@ anthropic_api_key (or api_key) for anthropic, openrouter_api_key (or api_key) fo
             .get("conversation_file_id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let temper_api_url = temper_api_url(&ctx);
+        let temper_api_url = resolve_temper_api_url(&ctx, &fields);
         let tenant = &ctx.tenant;
 
         // Session tree fields (Pi architecture)
@@ -459,13 +459,6 @@ fn normalize_provider(provider: &str) -> String {
         "openrouter".to_string()
     } else {
         norm
-    }
-}
-
-fn temper_api_url(ctx: &Context) -> String {
-    match ctx.config.get("temper_api_url").map(String::as_str) {
-        Some(value) if !value.trim().is_empty() && !value.contains("{secret:") => value.to_string(),
-        _ => "http://127.0.0.1:3000".to_string(),
     }
 }
 
@@ -2281,4 +2274,19 @@ fn entity_field_str<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
         value.get("fields")
             .and_then(|fields| direct_field_str(fields, keys))
     })
+}
+
+fn resolve_temper_api_url(ctx: &Context, fields: &Value) -> String {
+    fields
+        .get("temper_api_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| match ctx.config.get("temper_api_url").map(String::as_str) {
+            Some(value) if !value.trim().is_empty() && !value.contains("{secret:") => {
+                Some(value.to_string())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| "http://127.0.0.1:3000".to_string())
 }

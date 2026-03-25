@@ -41,8 +41,9 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
             ),
         );
 
-        // Create TemperFS Workspace + File for conversation storage
-        let temper_api_url = temper_api_url(&ctx);
+        // Create TemperFS Workspace + File for conversation storage.
+        // Prefer per-run override from Configure state, then integration config.
+        let temper_api_url = resolve_temper_api_url(&ctx, &fields);
 
         let entity_id = ctx
             .entity_state
@@ -64,7 +65,7 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
                 ctx.log(
                     "warn",
                     &format!(
-                        "sandbox_provisioner: TemperFS setup failed: {e}, falling back to inline"
+                        "sandbox_provisioner: TemperFS bootstrap failed at {temper_api_url}/tdata (tenant={tenant}, agent={entity_id}): {e}. Ensure os-app 'temper-fs' is installed for this tenant and temper_api_url is correct. Falling back to inline."
                     ),
                 );
                 (
@@ -105,11 +106,19 @@ struct SandboxResult {
     sandbox_id: String,
 }
 
-fn temper_api_url(ctx: &Context) -> String {
-    match ctx.config.get("temper_api_url").map(String::as_str) {
-        Some(value) if !value.trim().is_empty() && !value.contains("{secret:") => value.to_string(),
-        _ => "http://127.0.0.1:3000".to_string(),
-    }
+fn resolve_temper_api_url(ctx: &Context, fields: &Value) -> String {
+    fields
+        .get("temper_api_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| match ctx.config.get("temper_api_url").map(String::as_str) {
+            Some(value) if !value.trim().is_empty() && !value.contains("{secret:") => {
+                Some(value.to_string())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| "http://127.0.0.1:3000".to_string())
 }
 
 /// Provision a sandbox. Priority order:

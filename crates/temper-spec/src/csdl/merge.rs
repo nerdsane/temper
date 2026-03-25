@@ -1,6 +1,6 @@
 //! Merge two [`CsdlDocument`]s by combining their schemas.
 
-use super::types::CsdlDocument;
+use super::types::{CsdlDocument, EntityContainer, Schema};
 
 /// Merge two CSDL documents by combining their schemas.
 ///
@@ -11,112 +11,102 @@ pub fn merge_csdl(existing: &CsdlDocument, incoming: &CsdlDocument) -> CsdlDocum
     let mut result = existing.clone();
 
     for incoming_schema in &incoming.schemas {
-        if let Some(result_schema) = result
-            .schemas
-            .iter_mut()
-            .find(|s| s.namespace == incoming_schema.namespace)
-        {
-            // Merge entity types by name.
-            for et in &incoming_schema.entity_types {
-                if let Some(pos) = result_schema
-                    .entity_types
-                    .iter()
-                    .position(|e| e.name == et.name)
-                {
-                    result_schema.entity_types[pos] = et.clone();
-                } else {
-                    result_schema.entity_types.push(et.clone());
-                }
-            }
-            // Merge enum types by name.
-            for et in &incoming_schema.enum_types {
-                if let Some(pos) = result_schema
-                    .enum_types
-                    .iter()
-                    .position(|e| e.name == et.name)
-                {
-                    result_schema.enum_types[pos] = et.clone();
-                } else {
-                    result_schema.enum_types.push(et.clone());
-                }
-            }
-            // Merge actions by name.
-            for action in &incoming_schema.actions {
-                if let Some(pos) = result_schema
-                    .actions
-                    .iter()
-                    .position(|a| a.name == action.name)
-                {
-                    result_schema.actions[pos] = action.clone();
-                } else {
-                    result_schema.actions.push(action.clone());
-                }
-            }
-            // Merge functions by name.
-            for func in &incoming_schema.functions {
-                if let Some(pos) = result_schema
-                    .functions
-                    .iter()
-                    .position(|f| f.name == func.name)
-                {
-                    result_schema.functions[pos] = func.clone();
-                } else {
-                    result_schema.functions.push(func.clone());
-                }
-            }
-            // Merge entity containers by name, merging entity sets within.
-            for container in &incoming_schema.entity_containers {
-                if let Some(existing_container) = result_schema
-                    .entity_containers
-                    .iter_mut()
-                    .find(|c| c.name == container.name)
-                {
-                    for es in &container.entity_sets {
-                        if let Some(pos) = existing_container
-                            .entity_sets
-                            .iter()
-                            .position(|e| e.name == es.name)
-                        {
-                            existing_container.entity_sets[pos] = es.clone();
-                        } else {
-                            existing_container.entity_sets.push(es.clone());
-                        }
-                    }
-                    for ai in &container.action_imports {
-                        if !existing_container
-                            .action_imports
-                            .iter()
-                            .any(|a| a.name == ai.name)
-                        {
-                            existing_container.action_imports.push(ai.clone());
-                        }
-                    }
-                    for fi in &container.function_imports {
-                        if !existing_container
-                            .function_imports
-                            .iter()
-                            .any(|f| f.name == fi.name)
-                        {
-                            existing_container.function_imports.push(fi.clone());
-                        }
-                    }
-                } else {
-                    result_schema.entity_containers.push(container.clone());
-                }
-            }
-            // Merge terms by name.
-            for term in &incoming_schema.terms {
-                if !result_schema.terms.iter().any(|t| t.name == term.name) {
-                    result_schema.terms.push(term.clone());
-                }
-            }
-        } else {
-            // New namespace — append entire schema.
-            result.schemas.push(incoming_schema.clone());
-        }
+        merge_schema(&mut result.schemas, incoming_schema);
     }
 
     result
+}
+
+fn merge_schema(schemas: &mut Vec<Schema>, incoming_schema: &Schema) {
+    let Some(result_schema) = schemas
+        .iter_mut()
+        .find(|schema| schema.namespace == incoming_schema.namespace)
+    else {
+        schemas.push(incoming_schema.clone());
+        return;
+    };
+
+    merge_replace_by_name(
+        &mut result_schema.entity_types,
+        &incoming_schema.entity_types,
+        |item| item.name.as_str(),
+    );
+    merge_replace_by_name(
+        &mut result_schema.enum_types,
+        &incoming_schema.enum_types,
+        |item| item.name.as_str(),
+    );
+    merge_replace_by_name(
+        &mut result_schema.actions,
+        &incoming_schema.actions,
+        |item| item.name.as_str(),
+    );
+    merge_replace_by_name(
+        &mut result_schema.functions,
+        &incoming_schema.functions,
+        |item| item.name.as_str(),
+    );
+
+    for container in &incoming_schema.entity_containers {
+        merge_entity_container(&mut result_schema.entity_containers, container);
+    }
+
+    merge_append_missing_by_name(&mut result_schema.terms, &incoming_schema.terms, |item| {
+        item.name.as_str()
+    });
+}
+
+fn merge_entity_container(containers: &mut Vec<EntityContainer>, incoming: &EntityContainer) {
+    let Some(existing) = containers
+        .iter_mut()
+        .find(|container| container.name == incoming.name)
+    else {
+        containers.push(incoming.clone());
+        return;
+    };
+
+    merge_replace_by_name(&mut existing.entity_sets, &incoming.entity_sets, |item| {
+        item.name.as_str()
+    });
+    merge_append_missing_by_name(
+        &mut existing.action_imports,
+        &incoming.action_imports,
+        |item| item.name.as_str(),
+    );
+    merge_append_missing_by_name(
+        &mut existing.function_imports,
+        &incoming.function_imports,
+        |item| item.name.as_str(),
+    );
+}
+
+fn merge_replace_by_name<T, F>(target: &mut Vec<T>, incoming: &[T], name: F)
+where
+    T: Clone,
+    F: Fn(&T) -> &str + Copy,
+{
+    for item in incoming {
+        if let Some(position) = target
+            .iter()
+            .position(|existing| name(existing) == name(item))
+        {
+            target[position] = item.clone();
+        } else {
+            target.push(item.clone());
+        }
+    }
+}
+
+fn merge_append_missing_by_name<T, F>(target: &mut Vec<T>, incoming: &[T], name: F)
+where
+    T: Clone,
+    F: Fn(&T) -> &str + Copy,
+{
+    for item in incoming {
+        if !target.iter().any(|existing| name(existing) == name(item)) {
+            target.push(item.clone());
+        }
+    }
 }
 
 #[cfg(test)]

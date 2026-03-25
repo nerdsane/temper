@@ -21,6 +21,7 @@
         <Property Name="HasResult" Type="Edm.Boolean"/>
         <Property Name="ErrorMessage" Type="Edm.String"/>
         <Property Name="SandboxUrl" Type="Edm.String"/>
+        <Property Name="TemperApiUrl" Type="Edm.String"/>
         <Property Name="SandboxId" Type="Edm.String"/>
         <Property Name="TemperApiUrl" Type="Edm.String"/>
         <Property Name="FileManifestId" Type="Edm.String"/>

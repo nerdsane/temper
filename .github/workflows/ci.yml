@@ -208,6 +208,15 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
 
+      - name: Install wasm target for GEPA test modules
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Build GEPA test WASM modules
+        run: |
+          for module in gepa-replay gepa-reflective gepa-score gepa-pareto gepa-verify; do
+            (cd "wasm-modules/$module" && cargo build --target wasm32-unknown-unknown --release)
+          done
+
       - name: cargo test --workspace
         run: cargo test --workspace
 

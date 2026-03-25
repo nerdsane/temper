@@ -24,6 +24,7 @@ permit(principal, action == Action::"Fail", resource is EvolutionRun);
 // Read/list/create are open.
 permit(principal, action in [Action::"create", Action::"read", Action::"list"], resource is EvolutionRun);
 permit(principal, action in [Action::"create", Action::"read", Action::"list"], resource is SentinelMonitor);
+permit(principal == Agent::"gepa-proposer-agent", action == Action::"write_trajectories", resource is Trajectory);
 
 // Only humans can approve in full-human mode (default).
 permit(principal, action == Action::"Approve", resource is EvolutionRun)
@@ -56,6 +57,14 @@ permit(
   action == Action::"http_call",
   resource is HttpEndpoint
 ) when {
-  context.module == "gepa-proposer-agent" &&
-  ["127.0.0.1", "localhost"].contains(resource.domain)
+  ["gepa-proposer-agent", "gepa-verify"].contains(context.module) &&
+  ["127.0.0.1", "localhost"].contains(context.domain)
+};
+
+permit(
+  principal is Agent,
+  action == Action::"access_secret",
+  resource is Secret
+) when {
+  ["gepa-proposer-agent", "gepa-verify"].contains(context.module)
 };

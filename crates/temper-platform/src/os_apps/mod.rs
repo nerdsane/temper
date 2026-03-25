@@ -533,6 +533,14 @@ fn load_skill_bundle(skill_dir: &Path) -> Option<SkillBundle> {
     })
 }
 
+fn os_app_dependencies(name: &str) -> &'static [&'static str] {
+    match name {
+        // TemperAgent persists conversation/files in TemperFS entities.
+        "temper-agent" => &["temper-fs"],
+        _ => &[],
+    }
+}
+
 /// Install an OS app into a tenant (workspace).
 ///
 /// Reads skill files from disk, runs the verification cascade, registers
@@ -543,6 +551,17 @@ fn load_skill_bundle(skill_dir: &Path) -> Option<SkillBundle> {
 /// the operation returns an error *before* touching in-memory state, so the
 /// registry and Cedar engine stay consistent with the durable store.
 pub async fn install_os_app(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+) -> Result<InstallResult, String> {
+    for dependency in os_app_dependencies(app_name) {
+        install_os_app_without_dependencies(state, tenant, dependency).await?;
+    }
+    install_os_app_without_dependencies(state, tenant, app_name).await
+}
+
+async fn install_os_app_without_dependencies(
     state: &PlatformState,
     tenant: &str,
     app_name: &str,

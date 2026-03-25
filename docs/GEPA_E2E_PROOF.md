@@ -1,6 +1,6 @@
 # GEPA End-to-End Proof (TemperAgent + OTS + Workflow Replay)
 
-**Date**: 2026-03-19  
+**Date**: 2026-03-23  
 **Workspace**: `/Users/seshendranalla/Development/temper-gepa-tarjan`  
 **Server**: `temper serve --port 4455 --storage turso --no-observe`  
 **Primary tenant**: `gepa-live-fresh-20260319`  
@@ -24,19 +24,147 @@
 - GEPA returns a no-op mutation (`MutatedSpecSource = original`) when the structural gate blocks mutation.
 - `patterns.missing_capabilities` remains available in reflective data, but is routed to unmet-intent handoff rather than direct structural edits by GEPA.
 
+## 2026-03-23 Full-Loop Re-Proof (Latest)
+- **Tenant**: `gepa-live-20260323-121726`
+- **Primary terminal run**: `EvolutionRun('evo-live-20260323-121726-v3')`
+- **Artifacts dir**: `/tmp/gepa_run_20260323-121726`
+
+### What was proven in this latest run
+1. **Automatic verify/deploy path now works end-to-end** (no manual steering):
+   - Terminal action chain:
+     `Created -> Start -> SelectCandidate -> RecordEvaluation -> RecordDataset -> RecordMutation -> RecordVerificationPass -> RecordScore -> RecordFrontierAutoApprove -> Deploy`
+   - Run status reached `Completed` with:
+     - `VerificationReport = "verification passed: 4 levels passed"`
+     - `DeploymentId = "gepa-deploy-evo-live-20260323-121726-v3-m1"`
+2. **Unmet-intent handoff persists even when optimizer mutation path is allowed/continues**:
+   - `UnmetIntentReport` present in run fields with `reported = 3, failed = 0`.
+   - Reported intents included:
+     - `Add action 'Reassign'`
+     - `PromoteToCritical`
+     - `Reassign`
+   - These were also persisted into trajectory telemetry as `source=Platform` unmet records (visible in `/observe/trajectories`).
+3. **Workflow-level GEPA path remained active**:
+   - OTS was seeded by real `temper mcp` sessions (success/partial/failure).
+   - `SelectCandidate` still omitted `TrajectoryActions`/`Trajectories`; replay consumed OTS auto-injected server-side.
+
+### What was fixed during this cycle
+- `EvolutionRun` automation:
+  - Added `gepa-verify` module + `verify_candidate` trigger from `RecordMutation`.
+  - Added `gepa-deploy` module + `deploy_candidate` trigger from auto-approve and manual approve paths.
+  - `gepa-pareto` now emits dynamic callback action based on `AutonomyLevel` (`RecordFrontierAutoApprove` vs `RecordFrontier`).
+- SDK-callback pitfall addressed:
+  - `gepa-verify`, `gepa-deploy`, and `gepa-pareto` were moved to explicit callback action emission (not macro-default `callback`) so action dispatch works.
+- Proposer unmet-intent behavior:
+  - `gepa-proposer-agent` now reports unmet intents even when mutation proceeds.
+
+### Still open (not yet fully proven fixed)
+1. **OTS ID consistency issue remains**:
+   - `flush_trajectory()` returned IDs still did not match IDs listed by `/api/ots/trajectories`.
+   - This means row ID alignment between MCP flush/finalize and listed OTS rows is still not proven fixed in live evidence.
+2. This is tracked as an active blocker for the “single stable OTS ID per session” guarantee.
+
+## 2026-03-23 Bounded Re-Proof (Current)
+- **Tenant**: `gepa-live-20260323-125726`
+- **Primary run**: `EvolutionRun('evo-live-20260323-125726')`
+- **Artifacts dir**: `/tmp/gepa_run_20260323-125726`
+
+### What was proven in this run
+1. **WASM + secret setup path worked**:
+   - 12/12 module uploads succeeded (`wasm_upload_results.json`).
+   - Tenant secret `anthropic_api_key` stored successfully (`put_secret_anthropic_code.txt = 204`).
+2. **Real OTS generation path worked**:
+   - Real `temper mcp` sessions produced success/partial/failed trajectories.
+   - `flush_trajectory()` returned concrete trajectory IDs for each session.
+3. **OTS row-vs-payload ID mismatch is fixed in this isolated DB run**:
+   - `ots_id_consistency_summary.json`:
+     - `total_rows = 3`
+     - `matching_rows = 3`
+     - `mismatching_rows = 0`
+   - This shows persisted row `trajectory_id` now matches payload `$.trajectory_id`.
+
+### What failed in this run
+1. The GEPA run reached `Proposing` and then failed:
+   - Event trail:
+     - `Created -> Start -> SelectCandidate -> RecordEvaluation -> RecordDataset -> Fail`
+   - Failure payload:
+     - `error = "authorization denied for http_call: no matching permit policy"`
+     - `integration = "propose_mutation"`
+     - `authz_denied = true`
+2. Because proposer failed at `Proposing`, this run did not reach:
+   - `RecordMutation`
+   - `RecordVerificationPass`
+   - `RecordFrontierAutoApprove`
+   - `Deploy`
+3. This run therefore cannot be used to re-prove auto verify/deploy or unmet-intent persistence; those remain proven by the prior successful run (`evo-live-20260323-121726-v3`).
+
+## 2026-03-23 Consolidated Full-Loop Re-Proof (All Three Aspects)
+- **Tenant**: `gepa-live-20260323-134346`
+- **Run**: `EvolutionRun('evo-live-20260323-134346')`
+- **Artifacts dir**: `/tmp/gepa_run_20260323-134346`
+- **Terminal status**: `Completed`
+
+### End-to-end path proven in this run
+- `Created -> Start -> SelectCandidate -> RecordEvaluation -> RecordDataset -> RecordMutation -> RecordVerificationPass -> RecordScore -> RecordFrontierAutoApprove -> Deploy`
+- Final run fields include:
+  - `VerificationReport = "verification passed: 4 levels passed"`
+  - `DeploymentId = "gepa-deploy-evo-live-20260323-134346-m1"`
+  - `UnmetIntentReport.attempted = 4`, `reported = 4`, `failed = 0`
+
+### The three requested aspects are now proven together
+1. **Unmet-intent storage during optimizer flow**
+   - Missing-capability suggestions were surfaced by reflective/proposer and persisted via `/api/evolution/trajectories/unmet`.
+   - Evidence:
+     - `UnmetIntentReport` in final `EvolutionRun` fields with all reports successful.
+     - DB rows (`trajectories`) with `source = Platform`, `intent != null` for this tenant (`4` rows).
+   - This confirms unmet-intent handoff is not dropped when GEPA continues optimizer flow.
+
+2. **OTS trajectory ID consistency (flush vs stored rows)**
+   - `ots_id_consistency_summary.json` reports:
+     - `total_rows = 3`
+     - `matching_rows = 3`
+     - `mismatching_rows = 0`
+   - Flush IDs now match persisted OTS row payload IDs in this live run.
+
+3. **No manual verification/deploy steering**
+   - Verifier and deploy steps fired from integrations automatically and reached `Completed`.
+   - No manual `RecordVerificationPass`, `Approve`, or `Deploy` action calls were needed.
+
+### Root causes fixed to get this full loop green
+1. **WASM Cedar authz tenant scope**
+   - `CedarWasmAuthzGate` now uses tenant-scoped authorization (`authorize_for_tenant_or_bypass`) for `http_call` and `access_secret`.
+2. **WASM HTTP policy context mismatch**
+   - Evolution policy switched from `resource.domain` to `context.domain` for HTTP-call host checks.
+3. **Internal API auth for proposer/verifier**
+   - `gepa-proposer-agent` and `gepa-verify` now attach `Authorization: Bearer ...` using:
+     - integration config (`temper_api_key = {secret:temper_api_key}`), plus
+     - fallback `get_secret("temper_api_key")`.
+4. **Policy permissions for proposer/verifier ops**
+   - Added Cedar permits for:
+     - `http_call` from `gepa-proposer-agent` and `gepa-verify` to localhost
+     - `access_secret` for those modules
+     - `write_trajectories` for proposer (`Agent::"gepa-proposer-agent"`) so unmet intents persist.
+5. **State-machine terminal handling on verifier faults**
+   - `EvolutionRun.Fail` now allows `from = "Verifying"` so verifier integration failures terminate cleanly instead of stalling.
+
+### Remaining caveat observed (non-blocking for this proof)
+- `sandbox_provisioner` logs `TemperFS setup failed: Workspace creation failed (HTTP 404)` during TemperAgent provisioning in this environment.
+- Despite that warning, the GEPA run still completed end-to-end (proposer response returned, verifier passed, deploy completed).
+
 ## Executive Result
 1. Real OTS trajectories were generated by real `temper mcp` sessions (no fabricated JSON).
 2. `SelectCandidate` was executed without `TrajectoryActions` and without `Trajectories`; replay still consumed OTS from server-side auto-injection.
 3. `gepa-replay` produced workflow-level results (`workflows[]`, `workflow_completion_rate`, `partial_adjusted_rate`) and action-level aggregates.
 4. `gepa-reflective` produced workflow-level triplets and cross-trajectory patterns (missing capabilities, common failure points, successful patterns).
-5. The run failed in proposer (`Proposing -> Failed`) because Anthropic returned `401 invalid x-api-key`.
-6. Because proposer failed, mutation/verify/score/frontier/deploy were not reached in this run.
+5. Latest consolidated run (`evo-live-20260323-134346`) completed end-to-end through verify, score, frontier update, and deploy.
+6. Unmet-intent handoff now persists successfully during optimizer flow (`attempted=4`, `reported=4`, `failed=0`) while GEPA remains optimizer-only.
+7. OTS row ID and payload trajectory ID matched for all seeded trajectories in the latest run (`3/3`).
+8. Historical failures (proposer authz/401, verifier authz, `Fail` not valid from `Verifying`) are documented in prior sections and were resolved for the latest run.
 
 ## What "the run" means in this report
 A "run" here means one full `EvolutionRun` entity state-machine attempt from `Start` through terminal state (`Completed` or `Failed`).
 
-For `evo-live-fresh-20260319-v4`, the terminal path was:
-- `Evaluating -> Reflecting -> Proposing -> Failed`
+For the latest consolidated proof run `evo-live-20260323-134346`, the terminal path was:
+- `Created -> Start -> SelectCandidate -> RecordEvaluation -> RecordDataset -> RecordMutation -> RecordVerificationPass -> RecordScore -> RecordFrontierAutoApprove -> Deploy -> Completed`
 
 No manual trajectory payload was provided to `SelectCandidate`; OTS data came from tenant OTS storage.
 
