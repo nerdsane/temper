@@ -899,6 +899,7 @@ impl DiscordTransport {
         let http = self.http.clone();
         let bot_token = self.config.bot_token.clone();
         let tenant = self.config.tenant.clone();
+        let temper_api_url = self.temper_api_url();
         let state = self.state.clone();
 
         let reply_task = async move {
@@ -974,6 +975,40 @@ impl DiscordTransport {
                         .to_string();
 
                     if !sess_file_id.is_empty() || !conv_file_id.is_empty() {
+                        // If no session tree exists, bootstrap one from the
+                        // conversation. This enables compaction on follow-ups.
+                        let (sess_file_id, sess_leaf_id) = if sess_file_id.is_empty()
+                            && !conv_file_id.is_empty()
+                        {
+                            match create_session_tree_from_conversation(
+                                &http,
+                                &temper_api_url,
+                                &tenant,
+                                &conv_file_id,
+                                &event.entity_id,
+                            )
+                            .await
+                            {
+                                Ok((fid, lid)) => {
+                                    println!(
+                                        "  [discord] Created session tree for user {user_id} (file={fid}, leaf={lid})"
+                                    );
+                                    (fid, lid)
+                                }
+                                Err(e) => {
+                                    eprintln!("  [discord] Failed to create session tree: {e}");
+                                    (String::new(), String::new())
+                                }
+                            }
+                        } else {
+                            let leaf = fields
+                                .get("session_leaf_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            (sess_file_id, leaf)
+                        };
+
                         let session = UserSession {
                             conversation_file_id: conv_file_id,
                             workspace_id: fields
@@ -997,11 +1032,7 @@ impl DiscordTransport {
                                 .unwrap_or("")
                                 .to_string(),
                             session_file_id: sess_file_id,
-                            session_leaf_id: fields
-                                .get("session_leaf_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string(),
+                            session_leaf_id: sess_leaf_id,
                         };
                         println!(
                             "  [discord] Saved session for user {user_id} (session_file={}, leaf={})",
@@ -1010,11 +1041,12 @@ impl DiscordTransport {
                         user_sessions.write().await.insert(user_id.clone(), session);
                     }
 
-                    // Deliver the reply.
+                    // Deliver the reply. Guard against empty result.
                     let result_text = fields
                         .get("result")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("(no result)")
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or("(I processed your message but had no response to give.)")
                         .to_string();
 
                     println!(
@@ -1120,6 +1152,121 @@ impl DiscordTransport {
 }
 
 /// Truncate a string for display.
+/// Create a session tree JSONL file in TemperFS from an existing conversation.
+///
+/// Reads the legacy conversation file, converts messages to session tree entries,
+/// and creates a new JSONL File in TemperFS. Returns (session_file_id, session_leaf_id).
+async fn create_session_tree_from_conversation(
+    http: &reqwest::Client,
+    temper_api_url: &str,
+    tenant: &str,
+    conversation_file_id: &str,
+    agent_id: &str,
+) -> Result<(String, String), String> {
+    // Read the existing conversation from TemperFS.
+    let get_url = format!("{temper_api_url}/tdata/Files('{conversation_file_id}')/$value");
+    let resp = http
+        .get(&get_url)
+        .header("x-tenant-id", tenant)
+        .header("x-temper-principal-kind", INTERNAL_PRINCIPAL_KIND)
+        .send()
+        .await
+        .map_err(|e| format!("GET conversation failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GET conversation returned {}", resp.status()));
+    }
+
+    let body = resp.text().await.map_err(|e| format!("read body: {e}"))?;
+    let conv: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("parse JSON: {e}"))?;
+    let messages = conv
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .ok_or("missing messages array")?;
+
+    // Build JSONL session tree from the messages.
+    let header_id = format!("h-{agent_id}");
+    let header = serde_json::json!({
+        "id": header_id,
+        "parentId": null,
+        "type": "header",
+        "version": 1,
+        "tokens": 0
+    });
+    let mut lines = vec![serde_json::to_string(&header).unwrap_or_default()];
+    let mut parent_id = header_id;
+
+    for (i, msg) in messages.iter().enumerate() {
+        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+        let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let prefix = if role == "assistant" { "a" } else { "u" };
+        let entry_id = format!("{prefix}-{agent_id}-{i}");
+        let tokens = content.len() / 4;
+        let entry = serde_json::json!({
+            "id": entry_id,
+            "parentId": parent_id,
+            "type": "message",
+            "role": role,
+            "content": content,
+            "tokens": tokens,
+        });
+        lines.push(serde_json::to_string(&entry).unwrap_or_default());
+        parent_id = entry_id;
+    }
+
+    let jsonl = lines.join("\n");
+    let leaf_id = parent_id;
+
+    // Create session File entity in TemperFS.
+    let create_body = serde_json::json!({
+        "name": "session.jsonl",
+        "mime_type": "text/plain",
+        "path": "/session.jsonl"
+    });
+    let create_resp = http
+        .post(format!("{temper_api_url}/tdata/Files"))
+        .header("x-tenant-id", tenant)
+        .header("x-temper-principal-kind", INTERNAL_PRINCIPAL_KIND)
+        .header("content-type", "application/json")
+        .body(serde_json::to_string(&create_body).unwrap_or_default())
+        .send()
+        .await
+        .map_err(|e| format!("POST Files failed: {e}"))?;
+
+    if !create_resp.status().is_success() {
+        return Err(format!("POST Files returned {}", create_resp.status()));
+    }
+
+    let create_data: serde_json::Value = create_resp
+        .json()
+        .await
+        .map_err(|e| format!("parse create resp: {e}"))?;
+    let session_file_id = create_data
+        .get("entity_id")
+        .and_then(|v| v.as_str())
+        .ok_or("missing entity_id in create response")?
+        .to_string();
+
+    // Write JSONL content.
+    let put_url = format!("{temper_api_url}/tdata/Files('{session_file_id}')/$value");
+    let put_resp = http
+        .put(&put_url)
+        .header("x-tenant-id", tenant)
+        .header("x-temper-principal-kind", INTERNAL_PRINCIPAL_KIND)
+        .header("content-type", "application/octet-stream")
+        .body(jsonl)
+        .send()
+        .await
+        .map_err(|e| format!("PUT session $value failed: {e}"))?;
+
+    if !put_resp.status().is_success() {
+        return Err(format!("PUT session $value returned {}", put_resp.status()));
+    }
+
+    Ok((session_file_id, leaf_id))
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
