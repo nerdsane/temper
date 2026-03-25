@@ -986,7 +986,8 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let end = s.floor_char_boundary(max);
+        format!("{}...", &s[..end])
     }
 }
 
@@ -1040,8 +1041,9 @@ fn split_message(content: &str, max_len: usize) -> Vec<&str> {
             break;
         }
 
-        // Try to split at a newline within the limit.
-        let split_at = remaining[..max_len].rfind('\n').unwrap_or(max_len);
+        // Find char-safe boundary, then try to split at a newline within it.
+        let boundary = remaining.floor_char_boundary(max_len);
+        let split_at = remaining[..boundary].rfind('\n').unwrap_or(boundary);
 
         let (chunk, rest) = remaining.split_at(split_at);
         chunks.push(chunk);
@@ -1130,5 +1132,25 @@ mod tests {
     #[test]
     fn truncate_long() {
         assert_eq!(truncate("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn truncate_emoji_boundary() {
+        // "😀" is 4 bytes — truncating at byte 2 must not panic.
+        let s = "😀hello";
+        let result = truncate(s, 2);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn split_message_emoji_boundary() {
+        let emoji_chunk = "🎉".repeat(600); // 2400 bytes, each emoji 4 bytes
+        let chunks = split_message(&emoji_chunk, 2000);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 2000);
+            // Verify each chunk is valid UTF-8 (would panic on &str if not).
+            assert!(!chunk.is_empty());
+        }
     }
 }
