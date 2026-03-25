@@ -190,7 +190,8 @@ pub async fn run(
                 let sandbox_url = format!("http://127.0.0.1:{sandbox_port}");
 
                 // Find the local sandbox script relative to the binary or os-apps.
-                let sandbox_script = std::path::Path::new("os-apps/temper-agent/sandbox/local_sandbox.py");
+                let sandbox_script =
+                    std::path::Path::new("os-apps/temper-agent/sandbox/local_sandbox.py");
                 if sandbox_script.exists() {
                     // Use /tmp/temper-sandbox as the base; create /workspace for tool_runner
                     // which sends cwd="/workspace" by default (matching E2B's layout).
@@ -213,12 +214,16 @@ pub async fn run(
                         }
                         Err(e) => {
                             eprintln!("  Warning: failed to start local sandbox: {e}");
-                            eprintln!("  Run manually: python3 {sandbox_script:?} --port {sandbox_port}");
+                            eprintln!(
+                                "  Run manually: python3 {sandbox_script:?} --port {sandbox_port}"
+                            );
                         }
                     }
                 } else {
                     eprintln!("  Warning: local sandbox script not found at {sandbox_script:?}");
-                    eprintln!("  Set SANDBOX_URL env var or ensure os-apps/temper-agent/sandbox/local_sandbox.py exists");
+                    eprintln!(
+                        "  Set SANDBOX_URL env var or ensure os-apps/temper-agent/sandbox/local_sandbox.py exists"
+                    );
                 }
 
                 sandbox_url

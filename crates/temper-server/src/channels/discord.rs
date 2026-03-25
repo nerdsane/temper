@@ -717,8 +717,8 @@ impl DiscordTransport {
             .await
             .map_err(|e| format!("read conversation body: {e}"))?;
 
-        let mut conv: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|e| format!("parse conversation JSON: {e}"))?;
+        let mut conv: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| format!("parse conversation JSON: {e}"))?;
 
         // Append the new user message.
         let msg_count = {
@@ -867,10 +867,7 @@ impl DiscordTransport {
                             "  [discord] Saved session for user {user_id} (conv={})",
                             session.conversation_file_id
                         );
-                        user_sessions
-                            .write()
-                            .await
-                            .insert(user_id.clone(), session);
+                        user_sessions.write().await.insert(user_id.clone(), session);
                     }
 
                     // Deliver the reply.
@@ -940,9 +937,7 @@ impl DiscordTransport {
                         // Queued messages will be picked up on the user's
                         // next interaction. Clear the active lock so the next
                         // message triggers the follow-up flow normally.
-                        println!(
-                            "  [discord] Queued messages deferred to next interaction"
-                        );
+                        println!("  [discord] Queued messages deferred to next interaction");
                         active_users.write().await.remove(user_id);
                         let _ = queued_msg;
                     }

@@ -50,10 +50,7 @@ pub async fn get_blob(
     match store.get_blob(&path).await {
         Ok(Some(data)) => (
             StatusCode::OK,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "application/octet-stream",
-            )],
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
             data,
         )
             .into_response(),

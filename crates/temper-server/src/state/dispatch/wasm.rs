@@ -679,7 +679,6 @@ fn spec_evaluator_fn() -> temper_wasm::SpecEvaluatorFn {
     )
 }
 
-
 fn progress_emitter_fn(
     state: crate::state::ServerState,
     tenant: String,
