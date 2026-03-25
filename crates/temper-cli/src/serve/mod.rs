@@ -573,6 +573,7 @@ fn spawn_channel_transport_discord(
         let config = DiscordConfig {
             bot_token,
             intents: intents::DEFAULT,
+            webhook_port: 0, // Auto-assign
         };
         let transport = DiscordTransport::new(config, api);
         if let Err(e) = transport.run().await {

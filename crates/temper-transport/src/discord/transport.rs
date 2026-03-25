@@ -24,6 +24,9 @@ pub struct DiscordConfig {
     pub bot_token: String,
     /// Gateway intents bitmask.
     pub intents: u32,
+    /// Port for the webhook listener (receives replies from send_reply WASM).
+    /// Defaults to 0 (auto-assign).
+    pub webhook_port: u16,
 }
 
 /// Discord channel transport.
@@ -56,15 +59,17 @@ impl DiscordTransport {
 
     /// Run the transport indefinitely.
     pub async fn run(&self) -> Result<(), String> {
-        // Phase 1: Bootstrap Channel + AgentRoute entities.
-        self.bootstrap_channel().await?;
+        // Phase 1: Start webhook listener for reply delivery.
+        let webhook_port = self.spawn_webhook_listener().await?;
+        let webhook_url = format!("http://127.0.0.1:{webhook_port}/reply");
+        println!("  [discord] Webhook listener on port {webhook_port}");
 
-        // Phase 2: Connect to Discord Gateway.
+        // Phase 2: Bootstrap Channel + AgentRoute entities.
+        self.bootstrap_channel(&webhook_url).await?;
+
+        // Phase 3: Connect to Discord Gateway.
         let gateway_url = fetch_gateway_url(&self.http, &self.config.bot_token).await?;
         println!("  [discord] Gateway URL: {gateway_url}");
-
-        // Phase 3: Spawn reply watcher.
-        self.spawn_reply_watcher();
 
         // Phase 4: Event loop with reconnection.
         let mut backoff = Duration::from_secs(1);
@@ -89,7 +94,7 @@ impl DiscordTransport {
     }
 
     /// Bootstrap the Channel entity and default AgentRoute.
-    async fn bootstrap_channel(&self) -> Result<(), String> {
+    async fn bootstrap_channel(&self, webhook_url: &str) -> Result<(), String> {
         // Check for existing discord Channel entity.
         let existing = self
             .api
@@ -124,7 +129,7 @@ impl DiscordTransport {
                 .to_string();
             println!("  [discord] Created Channel entity: {id}");
 
-            // Configure the channel.
+            // Configure the channel with webhook for reply delivery.
             let _ = self
                 .api
                 .dispatch_action(
@@ -134,6 +139,7 @@ impl DiscordTransport {
                     serde_json::json!({
                         "channel_type": "discord",
                         "channel_id": "discord-gateway",
+                        "webhook_url": webhook_url,
                     }),
                 )
                 .await;
@@ -391,36 +397,82 @@ impl DiscordTransport {
         }
     }
 
-    /// Spawn a task that watches for Channel.SendReply events and delivers replies.
-    fn spawn_reply_watcher(&self) {
-        let api = self.api.clone();
-        let http = self.http.clone();
-        let bot_token = self.config.bot_token.clone();
-        let dm_channels = self.dm_channels.clone();
-        let channel_entity_id = self.channel_entity_id.clone();
+    /// Start a webhook HTTP listener that receives reply callbacks from
+    /// the `send_reply` WASM module. Returns the bound port.
+    ///
+    /// When `send_reply` WASM POSTs to `{webhook_url}/reply`, this listener
+    /// extracts `thread_id` + `content`, maps thread_id to a Discord DM
+    /// channel, and delivers the reply via Discord REST API.
+    async fn spawn_webhook_listener(&self) -> Result<u16, String> {
+        use axum::{Router, extract::State, routing::post};
+
+        #[derive(Clone)]
+        struct WebhookState {
+            http: reqwest::Client,
+            bot_token: String,
+            dm_channels: Arc<RwLock<BTreeMap<String, String>>>,
+        }
+
+        async fn handle_reply(
+            State(state): State<WebhookState>,
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> axum::http::StatusCode {
+            let thread_id = body.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
+            let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+            if thread_id.is_empty() || content.is_empty() {
+                eprintln!("  [discord] Webhook received empty reply (thread={thread_id})");
+                return axum::http::StatusCode::BAD_REQUEST;
+            }
+
+            // thread_id is the Discord user ID (for DMs). Look up their DM channel.
+            let channel_id = state.dm_channels.read().await.get(thread_id).cloned();
+            let Some(channel_id) = channel_id else {
+                eprintln!("  [discord] No DM channel found for thread_id={thread_id}");
+                return axum::http::StatusCode::NOT_FOUND;
+            };
+
+            println!(
+                "  [discord] Delivering reply via webhook ({} chars to {})",
+                content.len(),
+                thread_id
+            );
+
+            match send_discord_message(&state.http, &state.bot_token, &channel_id, content).await {
+                Ok(()) => axum::http::StatusCode::OK,
+                Err(e) => {
+                    eprintln!("  [discord] Reply delivery failed: {e}");
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }
+        }
+
+        let webhook_state = WebhookState {
+            http: self.http.clone(),
+            bot_token: self.config.bot_token.clone(),
+            dm_channels: self.dm_channels.clone(),
+        };
+
+        let app = Router::new()
+            .route("/reply", post(handle_reply))
+            .with_state(webhook_state);
+
+        let port = self.config.webhook_port;
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+            .await
+            .map_err(|e| format!("Failed to bind webhook listener: {e}"))?;
+        let actual_port = listener
+            .local_addr()
+            .map_err(|e| format!("Failed to get listener address: {e}"))?
+            .port();
 
         tokio::spawn(async move {
-            // Poll for SendReply events on the Channel entity.
-            // In the future this can use SSE/WebSocket subscription.
-            loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-
-                let Some(ref _channel_id) = *channel_entity_id.read().await else {
-                    continue;
-                };
-
-                // For now, watch for TemperAgent completion events via the
-                // observe API. The route_message WASM dispatches SendReply
-                // which triggers send_reply WASM. The transport watches for
-                // the reply content on the Channel entity.
-                //
-                // This is a placeholder — the proper implementation uses
-                // event_tx subscription or SSE from the observe endpoint.
-                // For the initial migration, we'll use the same pattern as
-                // the current transport but via OData API calls.
-                let _ = (&api, &http, &bot_token, &dm_channels);
+            if let Err(e) = axum::serve(listener, app).await {
+                eprintln!("  [discord] Webhook listener error: {e}");
             }
         });
+
+        Ok(actual_port)
     }
 }
 
