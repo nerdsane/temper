@@ -4,8 +4,13 @@
 //! MESSAGE_CREATE events, and dispatches them as Channel.ReceiveMessage
 //! actions via the Temper OData API. Watches for Channel.SendReply events
 //! and delivers replies via Discord's REST API.
+//!
+//! This is a Temper OData API client — no dependency on temper-server internals.
 
 pub mod types;
 
-// Transport implementation will be migrated here from
-// temper-server/src/channels/discord.rs in the next phase.
+mod gateway;
+mod transport;
+
+pub use gateway::send_discord_message;
+pub use transport::{DiscordConfig, DiscordTransport};
