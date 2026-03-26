@@ -38,34 +38,61 @@ impl TemperApiClient {
         }
     }
 
-    /// Dispatch an action on an entity via OData.
+    /// Access the API configuration.
+    pub fn config(&self) -> &TemperApiConfig {
+        &self.config
+    }
+
+    /// POST to an arbitrary URL with tenant/auth headers.
+    pub async fn raw_post(
+        &self,
+        url: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let resp = self
+            .build_request(reqwest::Method::POST, url)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("POST {url} failed: {e}"))?;
+
+        resp.json()
+            .await
+            .map_err(|e| format!("parse response: {e}"))
+    }
+
+    /// Dispatch a bound action on an entity via OData.
+    ///
+    /// `action_path` should be the full OData action path including namespace,
+    /// e.g. `"Temper.Claw.Channel.ReceiveMessage"`.
     pub async fn dispatch_action(
         &self,
         entity_set: &str,
         entity_id: &str,
-        action: &str,
+        action_path: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         let url = format!(
             "{}/tdata/{}('{}')/{}",
-            self.config.base_url, entity_set, entity_id, action
+            self.config.base_url, entity_set, entity_id, action_path
         );
         let resp = self
             .build_request(reqwest::Method::POST, &url)
             .json(&params)
             .send()
             .await
-            .map_err(|e| format!("dispatch {action} failed: {e}"))?;
+            .map_err(|e| format!("dispatch {action_path} failed: {e}"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("{action} returned {status}: {body}"));
+            return Err(format!("{action_path} returned {status}: {body}"));
         }
 
         resp.json()
             .await
-            .map_err(|e| format!("parse {action} response: {e}"))
+            .map_err(|e| format!("parse {action_path} response: {e}"))
     }
 
     /// Create an entity via OData POST.

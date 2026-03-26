@@ -5887,6 +5887,7 @@ dependencies = [
 name = "temper-transport"
 version = "0.1.0"
 dependencies = [
+ "axum 0.8.8",
  "futures-util",
  "reqwest",
  "serde",

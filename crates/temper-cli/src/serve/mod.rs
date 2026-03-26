@@ -294,9 +294,13 @@ pub async fn run(
                 let _ = vault.cache_secret(&tenant, "discord_bot_token", token.clone());
             }
         }
-        // Use the embedded transport (temper-server internal) until the
-        // temper-transport crate's reply watcher is complete.
-        spawn_channel_transport_discord_legacy(&state, token.clone(), &tenant);
+        spawn_channel_transport_discord(
+            &state,
+            token.clone(),
+            &tenant,
+            actual_port,
+            state.api_token.clone(),
+        );
     } else {
         println!("  Discord transport: not configured");
         println!("    Set DISCORD_BOT_TOKEN env var or store 'discord_bot_token' in vault");
@@ -517,38 +521,11 @@ fn spawn_observe_ui(api_port: u16) {
     });
 }
 
-/// Spawn the Discord channel transport as a background task.
+/// Spawn the Discord channel transport using the temper-transport crate.
 ///
-/// Connects to Discord Gateway via WebSocket, routes inbound messages to
-/// Channel entities, and delivers outbound replies via Discord REST API.
-/// Legacy embedded transport (uses temper-server internals directly).
-/// Will be replaced by spawn_channel_transport_discord once the
-/// temper-transport crate's reply watcher is complete.
-fn spawn_channel_transport_discord_legacy(state: &PlatformState, bot_token: String, tenant: &str) {
-    use temper_server::channels::discord::{DiscordTransport, DiscordTransportConfig};
-    use temper_server::channels::discord_types::intents;
-
-    let server = state.server.clone();
-    let tenant = tenant.to_string();
-    println!("  Discord channel transport: connecting (tenant={tenant})...");
-    tokio::spawn(async move {
-        // determinism-ok: WebSocket for channel transport
-        let config = DiscordTransportConfig {
-            bot_token,
-            tenant,
-            intents: intents::DEFAULT,
-        };
-        let transport = DiscordTransport::new(config, server);
-        if let Err(e) = transport.run().await {
-            eprintln!("  [discord] Transport fatal error: {e}");
-        }
-    });
-}
-
-/// New transport using temper-transport crate (OData API client).
-/// Bootstraps Channel + AgentRoute entities and dispatches via Claw specs.
-/// Pending: reply watcher needs SSE/polling from observe endpoint.
-#[allow(dead_code)]
+/// The transport is an OData API client — it bootstraps Channel + AgentRoute
+/// entities on startup, dispatches Channel.ReceiveMessage for inbound messages,
+/// and receives replies via a webhook listener that send_reply WASM calls.
 fn spawn_channel_transport_discord(
     _state: &PlatformState,
     bot_token: String,
