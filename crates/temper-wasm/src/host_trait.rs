@@ -223,9 +223,10 @@ impl WasmHost for ProductionWasmHost {
     ) -> Result<Vec<String>, String> {
         let mut builder = self.client.post(url);
 
-        // Set Connect protocol headers
+        // Set Connect protocol headers.
+        // Use application/connect+json for envd-compatible services (E2B, etc.)
         builder = builder
-            .header("content-type", "application/json")
+            .header("content-type", "application/connect+json")
             .header("connect-protocol-version", "1");
 
         for (k, v) in headers {
