@@ -108,70 +108,36 @@ impl DiscordTransport {
             )
             .await;
 
-        // Check for existing discord Channel entity.
-        let existing = self
+        // Archive any stale Channel entities from previous runs.
+        // The transport creates a fresh Channel each startup so the
+        // webhook_url always matches the current listener port.
+        let stale = self
             .api
-            .query_entities("Channels", "ChannelType eq 'discord' and Status ne 'Archived'")
+            .query_entities(
+                "Channels",
+                "ChannelType eq 'discord' and Status ne 'Archived'",
+            )
             .await
             .unwrap_or_default();
-
-        let channel_id = if let Some(first) = existing.first() {
-            let id = first
+        for old in &stale {
+            if let Some(old_id) = old
                 .get("Id")
-                .or_else(|| first.get("entity_id"))
+                .or_else(|| old.get("entity_id"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let status = first
-                .get("Status")
-                .or_else(|| first.get("status"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            println!("  [discord] Found existing Channel entity: {id} (status={status})");
-
-            // Update webhook URL on existing channel.
-            let _ = self
-                .api
-                .dispatch_action(
-                    "Channels",
-                    &id,
-                    "Temper.Claw.Channel.Configure",
-                    serde_json::json!({
-                        "channel_type": "discord",
-                        "channel_id": "discord-gateway",
-                        "webhook_url": webhook_url,
-                    }),
-                )
-                .await;
-
-            // Ensure channel reaches Connected state.
-            match status {
-                "Disconnected" => {
-                    let _ = self
-                        .api
-                        .dispatch_action(
-                            "Channels",
-                            &id,
-                            "Temper.Claw.Channel.Reconnect",
-                            serde_json::json!({}),
-                        )
-                        .await;
-                }
-                "Created" => {
-                    let _ = self
-                        .api
-                        .dispatch_action(
-                            "Channels",
-                            &id,
-                            "Temper.Claw.Channel.Connect",
-                            serde_json::json!({}),
-                        )
-                        .await;
-                }
-                _ => {} // Already Connected or Connecting
+            {
+                let _ = self
+                    .api
+                    .dispatch_action(
+                        "Channels",
+                        old_id,
+                        "Temper.Claw.Channel.Archive",
+                        serde_json::json!({}),
+                    )
+                    .await;
             }
-            id
-        } else {
+        }
+
+        let channel_id = {
             // Create new Channel entity.
             let resp = self
                 .api
@@ -224,10 +190,10 @@ impl DiscordTransport {
 
         *self.channel_entity_id.write().await = Some(channel_id.clone());
 
-        // Ensure at least one AgentRoute exists.
+        // Ensure at least one active AgentRoute exists.
         let routes = self
             .api
-            .query_entities("AgentRoutes", &format!("ChannelId eq '{channel_id}'"))
+            .query_entities("AgentRoutes", "Status eq 'Active'")
             .await
             .unwrap_or_default();
 
@@ -254,6 +220,7 @@ impl DiscordTransport {
                             "agent_config": serde_json::json!({
                                 "system_prompt": "You are a helpful AI assistant. Be concise and conversational.",
                                 "model": "claude-sonnet-4-20250514",
+                                "provider": "anthropic",
                             }).to_string(),
                         }),
                     )
