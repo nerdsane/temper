@@ -258,9 +258,7 @@ impl DiscordTransport {
         let heartbeat_interval = Duration::from_millis(hello_data.heartbeat_interval);
 
         // Send Identify or Resume.
-        let can_resume = self.gateway.session_id.read().await.is_some();
-        if can_resume {
-            let sid = self.gateway.session_id.read().await.clone().unwrap();
+        if let Some(sid) = self.gateway.session_id.read().await.clone() {
             let seq = self.gateway.sequence.load(Ordering::Relaxed);
             send_resume(&mut write, &self.config.bot_token, &sid, seq).await?;
         } else {
