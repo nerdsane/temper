@@ -164,7 +164,7 @@ impl WasmHost for ProductionWasmHost {
         }
 
         if !body.is_empty() {
-            builder = builder.body(encode_connect_json_frame(body));
+            builder = builder.body(body.to_string());
         }
 
         let resp = builder
@@ -234,7 +234,7 @@ impl WasmHost for ProductionWasmHost {
         }
 
         if !body.is_empty() {
-            builder = builder.body(body.to_string());
+            builder = builder.body(encode_connect_json_frame(body));
         }
 
         let resp = builder
