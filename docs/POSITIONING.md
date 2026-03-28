@@ -1,143 +1,116 @@
-# Temper: An Observation About Enterprise SaaS
+# Temper: From Agent-Built Tools to Verified Skills 
 
-## 1. The Pattern
+## 1. Agents Are Starting to Build Their Own Tools
 
-Spend enough time looking at enterprise SaaS backends and a pattern starts to emerge. An e-commerce order moves through Draft, Submitted, Confirmed, Shipped, Delivered. A support ticket goes from Open to InProgress to Resolved to Closed. A subscription cycles between Active, PastDue, Suspended, Cancelled.
+Agent scaffolding shrinks as models get smarter. Prompt templates, tool wrappers, output parsers: the model absorbs what used to require code around it. Two things remain. Agents need infrastructure to run on: filesystems, sandboxes, persistence, authorization. And agents need tools to do their work: trackers, pipelines, coordinators.
 
-The business logic in each case is a state machine: states, transitions between them, guards that prevent invalid transitions ("you can't submit an empty order"), and invariants that must always hold ("cancelled is final"). The entities are different, but the shape of the problem is the same.
+Agents are starting to build the second category for themselves. A coding agent generates an MCP server mid-session because the tool it needs does not exist. A planning agent synthesizes a workflow tracker to coordinate subtasks. An operations agent creates a notification pipeline to monitor deployments. These are not pre-built tools the agent was given. The agent decided it needed them and made them.
 
-What surrounds this core? Persistence, API endpoints, authorization, webhooks, observability. These layers are important -- critical, even -- but they follow mechanically from the state machine definition. If I know the states, transitions, and invariants, I can derive the rest.
+Most agents still operate with a fixed set of tools handed to them by a developer. As models get more capable, agents will build more of their own tools. The question is what happens to them.
 
-This is not a new observation. State machines are a well-studied formalism. What's interesting is asking: *how far can you push this?* If the state machine is the essential artifact, what becomes possible?
+## 2. Most Tools Are State Machines
 
-## 2. What Falls Out
+Consider what agents tend to build. A project tracker with statuses: backlog, in progress, in review, done. A deployment pipeline: pending, building, testing, deployed, rolled back. A notification system: draft, scheduled, sent, failed, retried.
 
-If you accept the premise that the state machine is the core, each layer of a traditional SaaS backend maps to a declarative primitive:
+The same shape runs through enterprise SaaS. An e-commerce order moves through draft, submitted, confirmed, shipped, delivered. A support ticket goes from open to in progress to resolved to closed. A subscription cycles between active, past due, suspended, cancelled.
 
-| What you'd normally write | What it maps to |
-|---|---|
-| ORM models, migrations | A CSDL data model |
-| Controllers, service layers | IOA TOML specifications |
-| if/else workflow logic | TransitionTable guards and effects |
-| Auth middleware | Cedar ABAC policies |
-| Webhook integrations | Integration declarations (outbox pattern) |
-| Manual instrumentation | Automatic telemetry from transitions |
+The core logic in each case is a state machine. Statuses, transitions between them, rules about which transitions are allowed ("you can't ship without confirming payment"), constraints that must hold ("cancelled is final"). The entities are different. The shape of the problem is the same.
 
-The question is whether this mapping is a useful simplification or an over-reduction that loses expressiveness. Temper is an attempt to find out.
+This is the hypothesis Temper operates on. A large class of the tools agents build, and a large class of the applications developers build, share this structure. If the state machine is the essential artifact, two things follow.
 
-## 3. Five Patterns
+First, verification becomes tractable. You can prove, before anything runs, that every rule is satisfiable, every constraint holds across all reachable statuses, and no failure scenario violates the contract. You cannot do this for arbitrary code in general. You can do it for state machines.
 
-To test how far the IOA approach stretches, we wrote specifications for five different SaaS patterns. All five parse, verify through a four-level cascade (SMT symbolic checking, exhaustive model checking, deterministic simulation, and property-based testing), and run in the same actor runtime.
+Second, the tools agents build are not code. They are *descriptions* of behavior: statuses, transitions, rules. This distinction matters for everything that comes next.
 
-### E-Commerce Order (`reference-apps/ecommerce/specs/order.ioa.toml`)
+## 3. Descriptions Need a Constructor
 
-The most complex spec: 10 states, 12 transition actions. Multi-state cancellation (from Draft, Submitted, or Confirmed). A counter guard (`items > 0`) prevents empty orders from reaching Submitted. Terminal states (Cancelled, Refunded) have no outbound transitions. Integration hooks fire on SubmitOrder, ConfirmOrder, and ShipOrder.
+A description sitting in a file does nothing. Someone has to read it and build the running system it encodes: the persistence layer, the API endpoints, the authorization checks, the event journal. If you build all of that by hand for each description, you have not gained much.
 
-```
-Draft --> Submitted --> Confirmed --> Processing --> Shipped --> Delivered
-  |          |             |                                       |
-  +----+-----+             |                              ReturnRequested
-       |                   |                                       |
-   Cancelled          Cancelled                               Returned
-                                                                   |
-                                                               Refunded
-```
+In 1949, Von Neumann asked what threshold of complexity a machine must cross before it can evolve. His answer was a machine with three parts: a *description* that encodes a blueprint, a *universal constructor* that reads any description and builds whatever it encodes, and a copy mechanism that duplicates descriptions. The constructor is generic. It does not know what it is building. It interprets whatever you feed it. Evolution happens by changing descriptions, not the constructor.
 
-### Support Ticket (`test-fixtures/specs/ticket.ioa.toml`)
+Temper follows this separation. The kernel is the constructor. It reads specifications and builds a running system from them: verification cascade, actor runtime, event sourcing, authorization engine, API generation. The kernel does not know whether you are building a project tracker or a deployment pipeline. It interprets whatever you feed it.
 
-A back-and-forth workflow: agents reply, customers respond, the ticket bounces between InProgress and WaitingOnCustomer. The `replies` counter prevents resolution without engagement. Closed is terminal; Resolved can be reopened.
+An agent that needs a project tracker writes a description of a project tracker. The kernel verifies the description, deploys it, and the agent operates through it. An agent that needs sprint planning writes a description of sprint planning. Same kernel, different description.
 
-### Approval Workflow (`test-fixtures/specs/approval.ioa.toml`)
+We call a verified, deployed description a *skill*. A skill bundles:
 
-Boolean guards (`is_true has_reviewer`) prevent submission without a reviewer. Revise resets the boolean, forcing reassignment. The `approvals` counter proves approval happened.
+- A natural language description of the capability ("issue tracking with projects, cycles, labels, and comments") for discovery and indexing
+- Guidance for agents on how to use the skill: patterns, examples, constraints
+- One or more state machine specifications defining statuses, transitions, guards, and invariants
+- A data model defining the entity schema
+- Authorization policies defining who can do what
+- Integration declarations for external systems (sandboxed)
 
-### Subscription Management (`test-fixtures/specs/subscription.ioa.toml`)
+The natural language description and guidance are what agents and humans read. The specifications are what the kernel verifies and executes.
 
-Payment failure escalation: Active → PastDue → Suspended → Expired. Self-transitions (EnableAutoRenew, DisableAutoRenew) modify booleans without changing status, demonstrating that state variables and status are orthogonal. Integration hooks fire on PaymentFailed and SuspendSubscription.
+## 4. Verified Skills Still Need Governance
 
-### Issue Tracker (`test-fixtures/specs/issue.ioa.toml`)
+A verified skill is correct: its state machine does what the description says. But the agent operating through it can still do things it should not. It can reassign every issue to itself. It can access another agent's project. It can call an external API through an integration without anyone approving that access.
 
-Assignee tracking via boolean, review cycle counting. StartWork requires an assignee. Both RequestChanges and ApproveReview increment the review counter, giving a built-in velocity metric.
+Verification handles correctness. It does not handle who can use the skill, or how.
 
-Each of these took minutes to write and passed the full verification cascade on the first or second attempt. The harder question -- whether this pattern library covers enough of the real-world design space to be useful -- remains open.
+Temper uses a default-deny authorization posture. When an agent attempts an action that no policy permits, the denial surfaces to the human: "Your agent tried to reassign issues in Project X. Allow?" The human approves with a scope: narrow (this agent, this action, this resource), medium (this agent, this action, any resource of this type), or broad (this agent, any action on this resource type). Temper generates the authorization policy and hot-loads it.
 
-## 4. What Works
+The human does not write policies from scratch or anticipate what the agent will need. The human responds as needs arise. Over time, the policy set converges on what the agent requires.
 
-Everything below maps to working code. 441 tests pass across 16 crates.
+## 5. Skills Must Evolve
 
-- **IOA TOML parser** with six section types: automaton, state, action, invariant, liveness, integration
-- **4-level verification cascade**: L0 SMT symbolic, L1 Stateright exhaustive, L2 deterministic simulation with fault injection, L3 proptest
-- **Actor runtime** with Postgres event sourcing, hot-swap via SwapController, multi-tenant SpecRegistry
-- **OData API** auto-generated from CSDL entity types
-- **Conversational platform** that interviews developers, generates specs, and deploys through the cascade
-- **Integration engine** (outbox pattern): webhooks dispatched asynchronously from the event journal
-- **Automatic telemetry**: two-layer OTEL spans (HTTP + actor) with real durations verified in ClickHouse
-- **Cedar ABAC** authorization evaluated per action
-- **Evolution engine** that captures unmet user intents from production
+An agent described a project tracker last week. This week the team needs sprint planning. The tracker's state machine does not cover it. Someone has to write a new description, re-verify, redeploy. Next month the team wants labels and priorities. Another description. The skills the agent built are frozen at the moment of creation.
 
-Performance through the full OData HTTP stack with Postgres: ~28ns for rule evaluation, ~18ms per persisted action end-to-end, ~591ms for 100 concurrent checkouts (2,200 actions/sec).
+Two paths address this.
 
-## 5. What Doesn't Work (Yet)
+**Agents create new skills.** When an agent encounters a problem the current skill set does not cover, it writes a new description. The kernel verifies and deploys it. An agent that needs sprint planning describes sprint planning.
 
-| Gap | Why it matters | Current workaround |
-|---|---|---|
-| No floating-point state variables | Can't track prices as state | Use Postgres event payload fields |
-| No cross-entity invariants | Can't express "Shipped implies Payment captured" | Integration engine orchestrates |
-| No conditional effects | Can't do "if items > 5 then bulk discount" | Decompose into actions with guards |
-| Single-node only | No horizontal scaling | Redis traits designed but not wired |
-| No temporal guards | Can't do "if idle > 30 days" | Integration engine cron triggers |
-| No UI layer | API only | OData is a standard; any frontend works |
-| Spec gen needs an LLM | Interview agent requires Claude/GPT | Specs are hand-writable IOA TOML |
-| No string state variables | Status + counters + booleans only | Finite automaton by design; strings in payload |
+**Existing skills evolve through use.** The kernel records every agent action as an entity transition. Separately, the MCP bridge captures each agent's full execution trace: what the agent tried to do, what succeeded, what failed, what it gave up on. The GEPA (Guided Evolution of Pareto-optimal Artifacts) replays these execution traces against the current specs, clusters failure patterns, and proposes changes to existing descriptions. Agents keep trying to assign issues to teams, but the tracker only supports individual assignees? The GEPA produces a spec diff that adds team assignment. The change goes through the verification cascade before it takes effect.
 
-Some of these are fundamental to the approach (finite automaton = no strings in state). Others are engineering work (Redis wiring, temporal guards). Being clear about which is which matters.
+Both paths are evolution in Von Neumann's sense: changes to the descriptions, not the constructor. The kernel stays stable. The skills change.
 
-## 6. The Agent Operating Layer
+## 6. Evolution Needs a Trust Gradient
 
-There's a stronger claim than "agents can generate specs" or "agents can consume the API." It's this: **Temper is the operating layer for autonomous agents.**
+If a human must approve every description change, the system cannot scale. If the system evolves autonomously, you lose control.
 
-Agents today run with whatever tools they're given. They call APIs directly, write to databases, execute code in sandboxes. There is no shared governance model. There is no formal verification of what an agent is about to do. There is no audit trail that connects an agent's intent to its effects. When something goes wrong, you grep through logs.
+The answer is a spectrum. On one end, the human approves every significant decision. On the other end, the system operates within pre-approved boundaries. You move along this spectrum as trust builds, as the policy set matures and the execution traces give you confidence. The scope of autonomy expands within specific boundaries, backed by data.
 
-The thesis: every state-changing action an agent takes should flow through a governed, verified, auditable layer. Not optionally. By design.
+That is the chain: **unverified → verified → governed → evolving → trust-calibrated**. Each step solves a problem the previous step could not. Each step depends on the one before it. Governance assumes verification. Evolution assumes governance. Trust calibration assumes evolution data.
 
-### The agent is both developer and operator
+## 7. Interpretability
 
-In the personal assistant and enterprise employee use cases, the agent builds its own specifications. When an agent needs to execute a multi-step plan -- process an expense report, coordinate a deployment, manage a customer interaction -- it generates an IOA specification describing the states, transitions, guards, and integrations of that plan. Temper verifies the spec through the four-level cascade before the agent can execute through it. The agent's plan itself is a verified state machine.
+A system that evolves its own descriptions raises a concern: changes humans cannot understand or control. Temper tries to address this at several points, from the spec format down to individual agent actions.
 
-The agent then operates through the verified spec: calling actions, transitioning state, triggering integrations. The spec is the contract. The verification cascade is the proof. The runtime enforces the contract on every action.
+**The spec is the documentation.** In a traditional system, the code is the source of truth and documentation trails behind it. In Temper, the description is both. You can open a spec file and read the statuses, transitions, guards, and invariants. That file is what the kernel verifies and what the runtime executes. There is no separate implementation that could diverge from the spec.
 
-### The human is the policy setter
+**Verification produces counterexamples, not just pass/fail.** When the cascade finds a property violation, it returns a concrete trace: the exact sequence of actions that leads to the broken state. "If an agent calls Assign, then StartWork, then SubmitForReview, then ApproveReview without a reviewer assigned, the invariant 'reviewed implies reviewer exists' is violated." You debug at the domain level, not the code level.
 
-Cedar policies define what agents can and cannot do. The default posture is deny-all. When an agent attempts something not yet permitted, the denial surfaces to the human: "Your agent tried to call the Stripe API and was blocked. Allow?" The human approves with a scope -- narrow, medium, or broad -- and Temper generates the Cedar policy and hot-loads it. Over time, the policy set converges on what the agent actually needs. The human doesn't anticipate permissions upfront; they respond as needs arise.
+**Every action is an event.** The kernel persists every entity transition as an immutable event: the action name, the agent that performed it, the before and after state, and the authorization decision that allowed it. You can reconstruct the full history of any entity from its event journal. You can answer "who moved this issue to Done, when, and which policy permitted it?"
 
-### Everything is recorded
+**Every authorization decision is recorded.** Each allow or deny captures the policy that applied, the principal (which agent), the action, and the resource. Denied actions create pending decisions for the human. The authorization history shows how the policy set developed over time and why each permission exists.
 
-Every action an agent takes through Temper is a state transition. Every transition is persisted with the agent's identity, the before/after state, whether authorization succeeded or was denied, and the Cedar policy that governed the decision. This gives you an audit trail, agent self-awareness (the agent can query its own state), and cross-agent visibility (multiple agents sharing a Temper instance see each other's state changes).
+**Agent trajectories are captured.** The MCP bridge records the agent's session trajectory: every tool call, every decision, every success and failure. The Temper-native agent captures even richer trajectories, since every agent action is itself a governed entity transition. These trajectories are stored separately from entity events. The GEPA replays them against current specs to find gaps. A human can inspect any agent session to understand what the agent attempted and where it got stuck.
 
-### External access is governed
+**Evolution changes are traceable.** The O-P-A-D-I record chain (Observation, Problem, Analysis, Decision, Impact) connects every spec change back to the observation that motivated it. You can ask "why does this state exist?" and trace the answer: an observation from agent execution traces, the problem the GEPA identified, the analysis it performed, the decision a human approved, and the measured impact after deployment.
 
-When agents need to call outside systems, they do so through integrations declared in the IOA spec. Cedar policies govern which external calls are permitted. WASM modules for integrations run in a sandbox. In the vision, these modules can be reviewed by a security agent or formally verified -- the same way state machine specs are verified today.
+**The Temper-native agent takes this further.** When agents run as entities inside Temper, their state machines, budgets, and lifecycle are governed by the same kernel. Every agent action is an event. You can pause an agent, resume it from any point in its history, or replay its entire execution. The agent becomes as inspectable as the skills it operates through.
 
-### The interface is a REPL
+## 8. Where This Stands
 
-The vision for how agents interact with Temper is a sandboxed code execution environment -- in the style of Symbolica's Agentica or Cloudflare's Code Mode. Agents write code against a typed API surface; the sandbox mediates all external access through Temper. The REPL is the only tool the agent is given for state-changing operations.
+Temper is version 0.1.0. The constructor works. The description format is stabilizing. The evolution loop runs end-to-end in testing. 950+ tests pass across 25 crates.
 
-### What this means
+**The constructor can do this today.** Parse a description (I/O Automaton spec + data model + authorization policies). Run a four-level verification cascade. Deploy it as a live actor with event sourcing, a generated API, and authorization enforcement. Hot-reload when the description changes. Record every entity transition. Capture full agent execution traces through the MCP bridge. Run the GEPA against those traces to propose description changes. Enforce cross-entity invariants (both hard constraints and eventual consistency with bounded convergence). Surface denied actions to the human for approval.
 
-Agents generating specifications is already possible -- the spec submission API and verification cascade exist today. Cedar default-deny governance, pending decision approval flows, per-agent audit trails, and the observe dashboard for agent activity -- these are built and working. The REPL interface and security review agents are the vision, not yet implemented.
+**Three pre-built skills ship with the platform:** project management (5 entity types), filesystem (4 entity types), agent orchestration (3 entity types). Agents can install them, operate through them, and propose changes. Agents can also submit new descriptions.
 
-The question is not whether agents need governance. The question is whether governance can be formal, verified, and transparent rather than ad hoc. That is what Temper is for.
+**The constructor cannot do this yet.** No floating-point state variables (prices live in payload fields, not state). No conditional effects ("if items > 5 then discount" requires decomposing into separate guarded actions). Single-node only (Redis traits are designed but not wired). No temporal guards ("if idle > 30 days" requires scheduled actions or integration engine cron triggers). Some of these are fundamental to finite automata. Others are engineering work.
 
-## 7. The Evolution Loop
+**Temper is being built bottom-up.** Each layer enables the next.
 
-The most interesting part might be what happens after deployment.
+| Layer | What it does | Status |
+|-------|-------------|--------|
+| **6. Agent Execution** | Agents as entities with their own state machines, budgets, and lifecycle. | In Progress |
+| **5. Pure Temper Agent** | Agent's only tool is Temper. Every action mediated. | In Progress |
+| **4. Harness Composition** | Agents describe harnesses as specs. | In Progress |
+| **3. Integration Framework** | External APIs as sandboxed WASM modules, governed by authorization. | In Progress |
+| **2. Temper as Filesystem** | Entity persistence replaces markdown files and JSON blobs. | In Progress |
+| **1. Skills** | Agents write descriptions. The kernel verifies and deploys them. Others consume them through the generated API. | Done |
+| **Foundation: Kernel** | Spec interpreter, verification cascade, actor runtime, authorization, event sourcing, evolution engine. | Done |
 
-Production usage generates trajectory data. When a user tries an action the current spec doesn't support, the system captures it as an observation record. These observations surface to the developer as structured proposals: "users are trying to split orders into multiple shipments; here's a spec diff that would enable it." The developer approves or rejects. Approved changes run through the verification cascade and deploy via hot-swap.
-
-This creates a feedback loop between production behavior and system evolution. The developer stays in the approval seat, but the system does the discovery work. Over time, the specs converge toward what users actually need rather than what someone imagined at design time.
-
-The O-P-A-D-I record chain (Observation, Proposal, Approval, Deployment, Impact) provides a complete audit trail for every behavioral change. It's early, but the loop is operational in the current implementation.
-
----
-
-*This document describes the current state of the project. The five verified specs, the benchmark numbers, and the test counts reflect what exists today. The agent operating layer -- Cedar governance, pending decisions, audit trails -- is built and working. The REPL interface and security review agents are the next things to build. Whether this pattern holds across a broader set of real-world agent deployments is the next thing to find out.*
+Today, agents interact with Temper through an MCP bridge. The next layers close that gap: agents as first-class entities inside the constructor, then agents that compose harnesses as descriptions, then agents whose only tool is Temper itself. Whether this pattern holds across a broader set of real-world agent deployments is the next thing to find out.
