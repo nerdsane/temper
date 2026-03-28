@@ -1,6 +1,6 @@
 # Agent Ecosystem Research & Temper Vision Exploration
 
-**Date**: March 25, 2026
+**Date**: March 25-26, 2026
 **Context**: Deep exploration of where Temper fits in the emerging agent ecosystem, conducted from first principles with deliberate detachment from Temper's current architectural decisions.
 
 ---
@@ -442,6 +442,82 @@ The agent ecosystem is building execution (Cloudflare), tools (MCP/Executor), di
 Nobody is building the **trust layer** — the thing that sits between discovery and use and answers: "should you trust this?" based on observed behavior, not self-reported claims. And nobody is combining trust with **verified evolution** — capabilities that improve through use AND can prove their improvements are correct.
 
 That's the gap. Whether it's a gap the market is ready to pay for today is the validation question from the beginning of this conversation.
+
+---
+
+### 7. Alita (Princeton — CharlesQ9/Alita)
+
+**URL**: https://github.com/CharlesQ9/Alita (882 stars)
+**Paper**: [arXiv:2505.20286](https://arxiv.org/abs/2505.20286) (May 2025)
+**What**: Generalist agent that autonomously creates MCP servers when it encounters tasks it can't handle. #1 on GAIA benchmark (75.15% pass@1), beating OpenAI Deep Research and Manus.
+
+**How it works**:
+1. Agent encounters a task requiring a capability it doesn't have
+2. Manager Agent brainstorms what tool is needed, searches GitHub for relevant code
+3. ScriptGeneratingTool creates a Python implementation with environment setup
+4. CodeRunningTool tests in isolated environment with iterative refinement
+5. Working tool is packaged as an MCP server and stored in "MCP Box"
+6. Future tasks reuse existing MCP servers; library grows over time
+
+**Key results**:
+- 75.15% pass@1 on GAIA validation (87.27% pass@3)
+- MCP creation contributed ~15% increase in pass@1 on GAIA test
+- When Alita's MCPs given to GPT-4o-mini agents: hardest-task accuracy tripled (3.85% → 11.54%)
+- Follow-up Alita-G achieved 83.03% pass@1 while reducing tokens by 15%
+
+**What it validates**: Running MCP servers as the reusable unit. Behavior-first tool creation (encounter problem → build solution → solution becomes reusable). Agent distillation via tool sharing.
+**What it lacks**: No verification of generated tools. No governance. No trust scoring. No feedback from consumers. "Ugly codes" by their own admission. One-directional sharing (creator → consumer), no collective improvement.
+
+### 8. ClawTeam (HKUDS/ClawTeam)
+
+**URL**: https://github.com/HKUDS/ClawTeam (3,721 stars in 9 days, created Mar 17, 2026)
+**What**: Multi-agent swarm orchestrator. Leader agent spawns worker agents, each with own git worktree and tmux window. Agents coordinate via CLI commands auto-injected into prompts.
+
+**How it works**:
+- All state is JSON files in `~/.clawteam/`. No database, no server.
+- Leader calls `clawteam spawn` to create workers with dedicated git branches
+- Workers check tasks, update status, and message each other via CLI commands
+- Agent-agnostic: Claude Code, Codex, OpenClaw, any CLI agent
+- Task dependencies with auto-unblocking on completion
+- TOML templates for team archetypes (hedge fund, research team, etc.)
+
+**Key demo**: 8 agents across 8 H100 GPUs, 2,430 autonomous ML experiments, 6.4% val_bpb improvement, zero human intervention.
+
+**Same lab as OpenSpace** (HKUDS). Building the full stack: nanobot (agent) + OpenSpace (skill evolution) + ClawTeam (swarm orchestration).
+
+**What it validates**: Emergent coordination works. Agents self-organize effectively with minimal structure. Massive developer interest (3,700 stars in days).
+**What it lacks**: Zero governance. Default `skip_permissions: true`. No audit trail, no event sourcing, no trust model. Auth/permissions/audit listed as v1.0 (last phase of roadmap).
+
+### 520 Tool Misuse Incidents
+
+**Source**: 2026 agentic AI security threat reports (Stellar Cyber, Lasso Security, OWASP)
+**What**: 520 reported incidents of tool misuse and privilege escalation — the most common category of agent security incidents in 2026.
+
+**Pattern**: The confused deputy problem. Agents have broad legitimate permissions (CRMs, code repos, cloud infra, financial systems). Attackers craft inputs that trick agents into using those permissions for unauthorized purposes.
+
+**Real example**: Financial reconciliation agent tricked into exporting "all customer records matching pattern X" where X was a regex matching every record. 45,000 customer records exfiltrated. Agent had legitimate export permissions.
+
+**OWASP Top 10 for Agentic Applications (2026)** lists Tool Misuse and Exploitation (ASI02) as a top risk.
+
+**Relevance**: This is the measured cost of building execution and capability without governance. ClawTeam spawns with `skip_permissions: true`. Alita auto-generates MCP servers unverified. OpenSpace shares skills without trust scoring. The 520 incidents are what happens.
+
+---
+
+## Updated Reusable Unit Comparison
+
+| Project | Reusable Unit | Format | Verified? | Governed? | Evolves? |
+|---------|--------------|--------|-----------|-----------|----------|
+| GitHub/npm | Code packages | Source + manifest | No | No | Manual |
+| Temper | Verified specs | IOA TOML + CSDL + Cedar | Yes (4 levels) | Yes (Cedar) | Yes (GEPA) |
+| OpenSpace | Skills | SKILL.md (markdown) | No | No | Yes (LLM-driven) |
+| Pydantic AI | Capabilities | Python classes | No | No | No |
+| Alita | MCP servers | Python + MCP wrapper | Tested only | No | Accumulates |
+| ClawTeam | Team templates | TOML | No | No | No |
+| MCP ecosystem | Tool servers | Protocol endpoints | No | No | No |
+
+**Alita's answer is the strongest signal yet**: the reusable unit for agents is a running, callable capability with a standardized interface (MCP server). Not text, not specs, not code — a living tool. And it demonstrably works (tripled weak agents' performance on hard tasks).
+
+**But the governance gap is measured**: 520 incidents. The tools work. They're just not verified, governed, or trusted. That's the opening.
 
 ---
 
