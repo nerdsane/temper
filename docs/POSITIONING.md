@@ -1,4 +1,4 @@
-# Temper: From Agent-Built Tools to Verified Skills 
+# Temper: From Agent-Built Tools to Verified Capabilities
 
 ## 1. Agents Are Starting to Build Their Own Tools
 
@@ -32,10 +32,10 @@ Temper follows this separation. The kernel is the constructor. It reads specific
 
 An agent that needs a project tracker writes a description of a project tracker. The kernel verifies the description, deploys it, and the agent operates through it. An agent that needs sprint planning writes a description of sprint planning. Same kernel, different description.
 
-We call a verified, deployed description a *skill*. A skill bundles:
+We call a verified, deployed description a *capability*. A capability bundles:
 
 - A natural language description of the capability ("issue tracking with projects, cycles, labels, and comments") for discovery and indexing
-- Guidance for agents on how to use the skill: patterns, examples, constraints
+- Guidance for agents on how to use the capability: patterns, examples, constraints
 - One or more state machine specifications defining statuses, transitions, guards, and invariants
 - A data model defining the entity schema
 - Authorization policies defining who can do what
@@ -43,27 +43,27 @@ We call a verified, deployed description a *skill*. A skill bundles:
 
 The natural language description and guidance are what agents and humans read. The specifications are what the kernel verifies and executes.
 
-## 4. Verified Skills Still Need Governance
+## 4. Verified Capabilities Still Need Governance
 
-A verified skill is correct: its state machine does what the description says. But the agent operating through it can still do things it should not. It can reassign every issue to itself. It can access another agent's project. It can call an external API through an integration without anyone approving that access.
+A verified capability is correct: its state machine does what the description says. But the agent operating through it can still do things it should not. It can reassign every issue to itself. It can access another agent's project. It can call an external API through an integration without anyone approving that access.
 
-Verification handles correctness. It does not handle who can use the skill, or how.
+Verification handles correctness. It does not handle who can use the capability, or how.
 
 Temper uses a default-deny authorization posture. When an agent attempts an action that no policy permits, the denial surfaces to the human: "Your agent tried to reassign issues in Project X. Allow?" The human approves with a scope: narrow (this agent, this action, this resource), medium (this agent, this action, any resource of this type), or broad (this agent, any action on this resource type). Temper generates the authorization policy and hot-loads it.
 
 The human does not write policies from scratch or anticipate what the agent will need. The human responds as needs arise. Over time, the policy set converges on what the agent requires.
 
-## 5. Skills Must Evolve
+## 5. Capabilities Must Evolve
 
-An agent described a project tracker last week. This week the team needs sprint planning. The tracker's state machine does not cover it. Someone has to write a new description, re-verify, redeploy. Next month the team wants labels and priorities. Another description. The skills the agent built are frozen at the moment of creation.
+An agent described a project tracker last week. This week the team needs sprint planning. The tracker's state machine does not cover it. Someone has to write a new description, re-verify, redeploy. Next month the team wants labels and priorities. Another description. The capabilities the agent built are frozen at the moment of creation.
 
 Two paths address this.
 
-**Agents create new skills.** When an agent encounters a problem the current skill set does not cover, it writes a new description. The kernel verifies and deploys it. An agent that needs sprint planning describes sprint planning.
+**Agents create new capabilities.** When an agent encounters a problem the current capability set does not cover, it writes a new description. The kernel verifies and deploys it. An agent that needs sprint planning describes sprint planning.
 
-**Existing skills evolve through use.** The kernel records every agent action as an entity transition. Separately, the MCP bridge captures each agent's full execution trace: what the agent tried to do, what succeeded, what failed, what it gave up on. The GEPA (Guided Evolution of Pareto-optimal Artifacts) replays these execution traces against the current specs, clusters failure patterns, and proposes changes to existing descriptions. Agents keep trying to assign issues to teams, but the tracker only supports individual assignees? The GEPA produces a spec diff that adds team assignment. The change goes through the verification cascade before it takes effect.
+**Existing capabilities evolve through use.** The kernel records every agent action as an entity transition. Separately, the MCP bridge captures each agent's full execution trace: what the agent tried to do, what succeeded, what failed, what it gave up on. The GEPA (Guided Evolution of Pareto-optimal Artifacts) replays these execution traces against the current specs, clusters failure patterns, and proposes changes to existing descriptions. Agents keep trying to assign issues to teams, but the tracker only supports individual assignees? The GEPA produces a spec diff that adds team assignment. The change goes through the verification cascade before it takes effect.
 
-Both paths are evolution in Von Neumann's sense: changes to the descriptions, not the constructor. The kernel stays stable. The skills change.
+Both paths are evolution in Von Neumann's sense: changes to the descriptions, not the constructor. The kernel stays stable. The capabilities change.
 
 ## 6. Evolution Needs a Trust Gradient
 
@@ -89,7 +89,7 @@ A system that evolves its own descriptions raises a concern: changes humans cann
 
 **Evolution changes are traceable.** The O-P-A-D-I record chain (Observation, Problem, Analysis, Decision, Impact) connects every spec change back to the observation that motivated it. You can ask "why does this state exist?" and trace the answer: an observation from agent execution traces, the problem the GEPA identified, the analysis it performed, the decision a human approved, and the measured impact after deployment.
 
-**The Temper-native agent takes this further.** When agents run as entities inside Temper, their state machines, budgets, and lifecycle are governed by the same kernel. Every agent action is an event. You can pause an agent, resume it from any point in its history, or replay its entire execution. The agent becomes as inspectable as the skills it operates through.
+**The Temper-native agent takes this further.** When agents run as entities inside Temper, their state machines, budgets, and lifecycle are governed by the same kernel. Every agent action is an event. You can pause an agent, resume it from any point in its history, or replay its entire execution. The agent becomes as inspectable as the capabilities it operates through.
 
 ## 8. Where This Stands
 
@@ -97,7 +97,7 @@ Temper is version 0.1.0. The constructor works. The description format is stabil
 
 **The constructor can do this today.** Parse a description (I/O Automaton spec + data model + authorization policies). Run a four-level verification cascade. Deploy it as a live actor with event sourcing, a generated API, and authorization enforcement. Hot-reload when the description changes. Record every entity transition. Capture full agent execution traces through the MCP bridge. Run the GEPA against those traces to propose description changes. Enforce cross-entity invariants (both hard constraints and eventual consistency with bounded convergence). Surface denied actions to the human for approval.
 
-**Three pre-built skills ship with the platform:** project management (5 entity types), filesystem (4 entity types), agent orchestration (3 entity types). Agents can install them, operate through them, and propose changes. Agents can also submit new descriptions.
+**Three pre-built capabilities ship with the platform:** project management (5 entity types), filesystem (4 entity types), agent orchestration (3 entity types). Agents can install them, operate through them, and propose changes. Agents can also submit new descriptions.
 
 **The constructor cannot do this yet.** No floating-point state variables (prices live in payload fields, not state). No conditional effects ("if items > 5 then discount" requires decomposing into separate guarded actions). Single-node only (Redis traits are designed but not wired). No temporal guards ("if idle > 30 days" requires scheduled actions or integration engine cron triggers). Some of these are fundamental to finite automata. Others are engineering work.
 
@@ -110,7 +110,7 @@ Temper is version 0.1.0. The constructor works. The description format is stabil
 | **4. Harness Composition** | Agents describe harnesses as specs. | In Progress |
 | **3. Integration Framework** | External APIs as sandboxed WASM modules, governed by authorization. | In Progress |
 | **2. Temper as Filesystem** | Entity persistence replaces markdown files and JSON blobs. | In Progress |
-| **1. Skills** | Agents write descriptions. The kernel verifies and deploys them. Others consume them through the generated API. | Done |
+| **1. Capabilities** | Agents write descriptions. The kernel verifies and deploys them. Others consume them through the generated API. | Done |
 | **Foundation: Kernel** | Spec interpreter, verification cascade, actor runtime, authorization, event sourcing, evolution engine. | Done |
 
 Today, agents interact with Temper through an MCP bridge. The next layers close that gap: agents as first-class entities inside the constructor, then agents that compose harnesses as descriptions, then agents whose only tool is Temper itself. Whether this pattern holds across a broader set of real-world agent deployments is the next thing to find out.

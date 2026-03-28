@@ -21,10 +21,10 @@ separation.
 Temper follows this pattern for autonomous agents.  The kernel is the constructor:
 it reads specifications -- I/O Automaton state machines, CSDL data models, Cedar
 authorization policies, WASM integration declarations -- and builds a running
-system from them.  Skills are the descriptions: each one bundles a verified state
-machine, data model, policies, and integrations into a deployable capability.
-Agents create new skills and operate through existing ones.  The GEPA (Guided
-Evolution of Pareto-optimal Artifacts) observes how skills are used, clusters
+system from them.  Capabilities are the descriptions: each one bundles a verified state
+machine, data model, policies, and integrations into a deployable unit.
+Agents create new capabilities and operate through existing ones.  The GEPA (Guided
+Evolution of Pareto-optimal Artifacts) observes how capabilities are used, clusters
 failure patterns, and proposes specification changes.  The descriptions evolve.
 The constructor stays stable.
 
@@ -36,7 +36,7 @@ human for approval.  Policies accumulate as agents work.  Every transition is
 recorded with agent identity, before/after state, and the authorization decision.
 
 The system is implemented as a 25-crate Rust workspace with 950+ tests.  Three
-pre-built skills ship with the platform (project management, filesystem, agent
+pre-built capabilities ship with the platform (project management, filesystem, agent
 orchestration).  A reference e-commerce application demonstrates the full
 development flow across three verified entity types.  A pre-built rule index
 yields sub-30ns action evaluation; end-to-end benchmarks through the full HTTP
@@ -75,11 +75,11 @@ description and builds what it encodes).  Evolution happens by mutating
 descriptions, not the constructor.  The constructor stays stable.
 
 In Temper, the kernel is the constructor.  It reads specifications and builds
-running systems from them.  Skills are the descriptions.  Each skill bundles
+running systems from them.  Capabilities are the descriptions.  Each capability bundles
 a verified state machine, a data model, authorization policies, and integration
-declarations.  Agents create skills by describing what they need.  The GEPA
-(Guided Evolution of Pareto-optimal Artifacts) observes how skills are used and
-proposes specification changes.  Agents also create new skills when they encounter
+declarations.  Agents create capabilities by describing what they need.  The GEPA
+(Guided Evolution of Pareto-optimal Artifacts) observes how capabilities are used and
+proposes specification changes.  Agents also create new capabilities when they encounter
 gaps.  Both paths -- mutation and creation -- go through a four-level verification
 cascade and require human approval.
 
@@ -103,7 +103,7 @@ Four challenges motivate this architecture:
    action recorded with agent identity), and evolvable (new permissions
    granted as needs arise, not anticipated upfront).
 
-4. **Interpretability under evolution.**  When skills evolve through use,
+4. **Interpretability under evolution.**  When capabilities evolve through use,
    a human must be able to read the specification and understand what the
    system does, trace why any change was made, and verify that the change
    is sound.  The specification is the system's behavior, complete and
@@ -896,9 +896,9 @@ at scale.  Temper uses Amazon Cedar <sup>[2]</sup>; Section 3.3 discusses the ra
 **Agent operating systems.**  AgentOS <sup>[23]</sup> proposes a skill-based architecture
 where agents discover, compose, and execute modular capabilities rather than
 monolithic applications.  Their skills are natural language contracts parsed
-into intent specifications and capability constraints.  Temper's skills share
+into intent specifications and capability constraints.  Temper's capabilities share
 the modularity and composability but differ in the contract representation:
-Temper skills are formally verified state machines with mathematical proofs
+Temper capabilities are formally verified state machines with mathematical proofs
 of correctness, not natural language intent specifications.  AgentOS's
 semantic firewall for intent verification, trajectory mining for pattern
 learning, and state rollback mechanisms have parallels in Temper's Cedar
@@ -907,8 +907,8 @@ authorization, GEPA trajectory analysis, and event-sourced state recovery.
 **Self-replicating machines.**  Von Neumann's universal constructor <sup>[21, 22]</sup>
 established the separation between description (blueprint) and constructor
 (universal builder) as a prerequisite for open-ended evolution.  Temper's
-kernel/skill architecture follows this separation: the kernel is the
-constructor that interprets any specification, and skills are the
+kernel/capability architecture follows this separation: the kernel is the
+constructor that interprets any specification, and capabilities are the
 descriptions that agents create, mutate, and evolve.  The GEPA serves
 as the copy-and-mutate mechanism, proposing description changes based on
 observed usage patterns.
@@ -1210,7 +1210,7 @@ As described in Section 9.3, the write path is backend-agnostic via
 Temper makes the following contributions:
 
 1. A constructor/description architecture where the kernel (constructor) interprets
-   any specification fed to it, and skills (descriptions) are the evolving artifacts
+   any specification fed to it, and capabilities (descriptions) are the evolving artifacts
    that agents create, operate through, and improve.  The kernel stays stable.  The
    descriptions evolve.
 
@@ -1219,14 +1219,14 @@ Temper makes the following contributions:
    deterministic simulation with fault injection, and property-based testing.
    Every description passes this cascade before deployment.
 
-3. A skill system where each skill bundles a verified state machine, data model,
+3. A capability system where each capability bundles a verified state machine, data model,
    authorization policies, and integration declarations into a deployable
-   capability.  Three pre-built skills ship with the platform; agents create
+   unit.  Three pre-built capabilities ship with the platform; agents create
    new ones at runtime.
 
 4. GEPA (Guided Evolution of Pareto-optimal Artifacts): a trajectory-driven
-   evolution engine that observes how skills are used, clusters failure patterns,
-   and proposes specification changes.  Combined with agent-initiated skill
+   evolution engine that observes how capabilities are used, clusters failure patterns,
+   and proposes specification changes.  Combined with agent-initiated capability
    creation, this provides two paths for capability evolution -- mutation
    of existing descriptions and creation of new ones -- both gated by
    verification and human approval.
@@ -1238,7 +1238,7 @@ Temper makes the following contributions:
    workarounds) from agent execution traces.
 
 7. A three-tier JIT execution model with atomic hot-swap and shadow testing for
-   zero-downtime skill evolution.
+   zero-downtime capability evolution.
 
 8. A DST-first development methodology where actor-level simulation tests
    validate state machine behavior before HTTP wiring, catching guard
