@@ -164,7 +164,7 @@ impl WasmHost for ProductionWasmHost {
         }
 
         if !body.is_empty() {
-            builder = builder.body(body.to_string());
+            builder = builder.body(encode_connect_json_frame(body));
         }
 
         let resp = builder
@@ -340,6 +340,19 @@ pub fn parse_connect_frames(data: &[u8]) -> Result<Vec<String>, String> {
     }
 
     Ok(frames)
+}
+
+/// Encode a JSON payload as a Connect protocol envelope.
+///
+/// Connect JSON still uses the 5-byte envelope framing: 1 flag byte followed by
+/// a 4-byte big-endian payload length.
+pub fn encode_connect_json_frame(body: &str) -> Vec<u8> {
+    let payload = body.as_bytes();
+    let mut framed = Vec::with_capacity(5 + payload.len());
+    framed.push(0x00);
+    framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    framed.extend_from_slice(payload);
+    framed
 }
 
 /// Simulation host: canned responses, captured logs.
@@ -543,6 +556,18 @@ mod tests {
     fn parse_empty_input() {
         let frames = parse_connect_frames(&[]).unwrap();
         assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn encode_connect_json_frame_wraps_payload() {
+        let payload = "{\"hello\":\"world\"}";
+        let framed = encode_connect_json_frame(payload);
+        assert_eq!(framed[0], 0x00);
+        assert_eq!(
+            u32::from_be_bytes([framed[1], framed[2], framed[3], framed[4]]) as usize,
+            payload.len()
+        );
+        assert_eq!(&framed[5..], payload.as_bytes());
     }
 
     #[test]
