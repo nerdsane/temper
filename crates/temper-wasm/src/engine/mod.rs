@@ -12,6 +12,8 @@ use std::sync::{Arc, RwLock};
 
 use sha2::{Digest, Sha256};
 use wasmtime::{Config, Engine, Linker, Module, ResourceLimiter, Store};
+use wasmtime_wasi::preview1::WasiP1Ctx;
+use wasmtime_wasi::{WasiCtxBuilder, preview1};
 
 use crate::host_trait::WasmHost;
 use crate::stream::StreamRegistry;
@@ -110,6 +112,10 @@ pub(crate) struct HostState {
     /// Stream registry for binary data transfer between host and WASM guest.
     /// Bytes never enter WASM memory — WASM references them by stream ID.
     pub(crate) streams: Arc<RwLock<StreamRegistry>>,
+    /// WASI context for modules compiled with wasm32-wasi target.
+    /// None for wasm32-unknown-unknown modules. When present, WASI
+    /// syscalls (clock_time_get, random_get, etc.) are available.
+    pub(crate) wasi_ctx: Option<WasiP1Ctx>,
 }
 
 /// WASM engine: compile, cache, invoke modules.
@@ -215,6 +221,20 @@ impl WasmEngine {
             .map_err(|e| WasmError::Invocation(format!("failed to serialize context: {e}")))?;
 
         // Create a fresh store with fuel budget and memory limiter
+        // Check if the module imports wasi_snapshot_preview1 (wasm32-wasi target).
+        let needs_wasi = cached
+            .module
+            .imports()
+            .any(|imp| imp.module() == "wasi_snapshot_preview1");
+
+        let wasi_ctx = if needs_wasi {
+            // Minimal WASI context: clock + random, no filesystem or network.
+            let wasi = WasiCtxBuilder::new().build_p1();
+            Some(wasi)
+        } else {
+            None
+        };
+
         let host_state = HostState {
             context_json: context_json.clone(),
             result_json: None,
@@ -223,6 +243,7 @@ impl WasmEngine {
                 max_memory: limits.max_memory,
             },
             streams,
+            wasi_ctx,
         };
         let mut store = Store::new(&self.engine, host_state);
         store
@@ -260,6 +281,19 @@ impl WasmEngine {
         // Link host functions
         let mut linker = Linker::new(&self.engine);
         host_functions::link_host_functions(&mut linker)?;
+
+        // Link WASI imports for wasm32-wasi modules (clock, random, etc.).
+        // Non-WASI modules skip this — their imports are fully satisfied by
+        // the custom host functions above.
+        if needs_wasi {
+            preview1::add_to_linker_sync(&mut linker, |state: &mut HostState| {
+                state
+                    .wasi_ctx
+                    .as_mut()
+                    .expect("wasi_ctx must be Some when needs_wasi is true")
+            })
+            .map_err(|e| WasmError::Compilation(format!("failed to link WASI: {e}")))?;
+        }
 
         // Instantiate
         let instance = linker
