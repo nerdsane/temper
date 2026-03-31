@@ -867,6 +867,7 @@ async fn handle_stream_get(
         agent_id: None,
         session_id: None,
         integration_config: std::collections::BTreeMap::new(),
+        trace_id: String::new(),
     };
 
     let wasm_result = match state

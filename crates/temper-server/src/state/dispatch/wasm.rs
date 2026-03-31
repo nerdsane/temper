@@ -177,6 +177,7 @@ impl crate::state::ServerState {
                 ),
                 None => integration.config.clone(),
             },
+            trace_id: ctx.agent_ctx.trace_id.clone().unwrap_or_default(),
         };
         let denial_tracker = HttpCallAuthzDenialTracker::default();
         let gate: Arc<dyn WasmAuthzGate> = Arc::new(TrackingWasmAuthzGate::new(
@@ -202,7 +203,8 @@ impl crate::state::ServerState {
         let inner: Arc<dyn WasmHost> = Arc::new(
             ProductionWasmHost::with_timeout(tenant_secrets, http_timeout)
                 .with_spec_evaluator(spec_evaluator_fn())
-                .with_progress_emitter(progress_emitter),
+                .with_progress_emitter(progress_emitter)
+                .with_trace_id(ctx.agent_ctx.trace_id.clone()),
         );
         let host: Arc<dyn WasmHost> = Arc::new(AuthorizedWasmHost::new(inner, gate, authz_ctx));
         let max_response_bytes = integration

@@ -23,6 +23,7 @@ fn build_context() -> WasmInvocationContext {
         agent_id: None,
         session_id: None,
         integration_config: std::collections::BTreeMap::new(),
+        trace_id: String::new(),
     }
 }
 

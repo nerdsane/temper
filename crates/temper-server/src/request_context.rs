@@ -31,6 +31,11 @@ pub struct AgentContext {
     /// Captured on failed requests so the Evolution Engine can surface
     /// exactly what the agent was trying to accomplish.
     pub intent: Option<String>,
+    /// W3C trace ID extracted from the `traceparent` header.
+    /// Propagated through WASM HTTP calls to unify agent lifecycle traces.
+    pub trace_id: Option<String>,
+    /// Parent span ID from the `traceparent` header.
+    pub parent_span_id: Option<String>,
 }
 
 impl AgentContext {
@@ -45,6 +50,8 @@ impl AgentContext {
             session_id: None,
             agent_type: None,
             intent: None,
+            trace_id: None,
+            parent_span_id: None,
         }
     }
 }
@@ -66,11 +73,28 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(String::from);
+    // Extract W3C traceparent: "00-{trace_id}-{parent_span_id}-{flags}"
+    let (trace_id, parent_span_id) = headers
+        .get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|tp| {
+            let parts: Vec<&str> = tp.split('-').collect();
+            if parts.len() >= 4 && parts[1].len() == 32 && parts[2].len() == 16 {
+                Some((parts[1].to_string(), parts[2].to_string()))
+            } else {
+                None
+            }
+        })
+        .map(|(t, s)| (Some(t), Some(s)))
+        .unwrap_or((None, None));
+
     AgentContext {
         agent_id: None,
         session_id,
         agent_type: None,
         intent,
+        trace_id,
+        parent_span_id,
     }
 }
 

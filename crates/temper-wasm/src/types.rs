@@ -26,6 +26,9 @@ pub struct WasmInvocationContext {
     /// Configuration from the [[integration]] section (url, method, headers, etc.).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub integration_config: std::collections::BTreeMap<String, String>,
+    /// W3C trace ID for cross-request trace correlation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub trace_id: String,
 }
 
 /// Result returned from a WASM module invocation.
@@ -121,6 +124,7 @@ mod tests {
             agent_id: Some("agent-1".into()),
             session_id: None,
             integration_config: std::collections::BTreeMap::new(),
+            trace_id: String::new(),
         };
         let json = serde_json::to_string(&ctx).unwrap();
         let back: WasmInvocationContext = serde_json::from_str(&json).unwrap();
@@ -142,6 +146,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             integration_config: std::collections::BTreeMap::new(),
+            trace_id: String::new(),
         };
         let json = serde_json::to_string(&ctx).unwrap();
         assert!(!json.contains("agent_id"));

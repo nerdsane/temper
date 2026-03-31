@@ -663,6 +663,7 @@ async fn handle_stream_put(
         agent_id: agent_ctx.agent_id.clone(),
         session_id: agent_ctx.session_id.clone(),
         integration_config: std::collections::BTreeMap::new(),
+        trace_id: agent_ctx.trace_id.clone().unwrap_or_default(),
     };
 
     let wasm_result = match state

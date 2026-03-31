@@ -94,6 +94,8 @@ pub async fn handle_webhook(
         session_id: None,
         agent_type: None,
         intent: None,
+        trace_id: None,
+        parent_span_id: None,
     };
 
     match state

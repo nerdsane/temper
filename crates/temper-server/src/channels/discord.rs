@@ -607,6 +607,8 @@ impl DiscordTransport {
             session_id: None,
             agent_type: Some("system".to_string()),
             intent: None,
+            trace_id: None,
+            parent_span_id: None,
         };
 
         // Create the TemperAgent entity.
@@ -725,6 +727,8 @@ impl DiscordTransport {
             session_id: None,
             agent_type: Some("system".to_string()),
             intent: None,
+            trace_id: None,
+            parent_span_id: None,
         };
 
         // Create a new TemperAgent entity for this turn.

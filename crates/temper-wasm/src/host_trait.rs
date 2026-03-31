@@ -106,6 +106,8 @@ pub struct ProductionWasmHost {
     spec_evaluator: Option<SpecEvaluatorFn>,
     /// Optional progress emitter (provided by temper-server at construction).
     progress_emitter: Option<ProgressEmitterFn>,
+    /// W3C trace ID for auto-injecting traceparent headers in HTTP calls.
+    trace_id: Option<String>,
 }
 
 impl ProductionWasmHost {
@@ -125,6 +127,7 @@ impl ProductionWasmHost {
             secrets,
             spec_evaluator: None,
             progress_emitter: None,
+            trace_id: None,
         }
     }
 
@@ -137,6 +140,12 @@ impl ProductionWasmHost {
     /// Create with a progress emitter for `host_emit_progress` support.
     pub fn with_progress_emitter(mut self, emitter: ProgressEmitterFn) -> Self {
         self.progress_emitter = Some(emitter);
+        self
+    }
+
+    /// Set the W3C trace ID for auto-injecting `traceparent` in HTTP calls.
+    pub fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
+        self.trace_id = trace_id.filter(|s| !s.is_empty());
         self
     }
 }
@@ -161,6 +170,20 @@ impl WasmHost for ProductionWasmHost {
 
         for (k, v) in headers {
             builder = builder.header(k.as_str(), v.as_str());
+        }
+
+        // Auto-inject traceparent for cross-request trace correlation.
+        if let Some(ref trace_id) = self.trace_id
+            && !headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
+        {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let span_id = format!("{nanos:016x}");
+            builder = builder.header("traceparent", format!("00-{trace_id}-{span_id}-01"));
         }
 
         if !body.is_empty() {
