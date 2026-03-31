@@ -5916,6 +5916,7 @@ name = "temper-wasm"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "reqwest",
  "serde",
  "serde_json",

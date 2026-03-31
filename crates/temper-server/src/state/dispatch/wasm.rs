@@ -444,10 +444,18 @@ impl crate::state::ServerState {
         {
             Ok(result) if result.success => {
                 // Record GenAI token usage from callback params (if present)
-                if let Some(input) = result.callback_params.get("input_tokens").and_then(|v| v.as_i64()) {
+                if let Some(input) = result
+                    .callback_params
+                    .get("input_tokens")
+                    .and_then(|v| v.as_i64())
+                {
                     tracing::Span::current().record("gen_ai.usage.input_tokens", input);
                 }
-                if let Some(output) = result.callback_params.get("output_tokens").and_then(|v| v.as_i64()) {
+                if let Some(output) = result
+                    .callback_params
+                    .get("output_tokens")
+                    .and_then(|v| v.as_i64())
+                {
                     tracing::Span::current().record("gen_ai.usage.output_tokens", output);
                 }
 

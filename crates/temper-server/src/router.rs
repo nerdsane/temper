@@ -109,14 +109,18 @@ pub fn build_router(state: ServerState) -> Router {
                         otel.kind = "server",
                     )
                 })
-                .on_response(|response: &axum::http::Response<_>, latency: std::time::Duration, span: &tracing::Span| {
-                    span.record("http.status_code", response.status().as_u16());
-                    tracing::info!(
-                        latency_ms = latency.as_millis() as u64,
-                        status = response.status().as_u16(),
-                        "response"
-                    );
-                }),
+                .on_response(
+                    |response: &axum::http::Response<_>,
+                     latency: std::time::Duration,
+                     span: &tracing::Span| {
+                        span.record("http.status_code", response.status().as_u16());
+                        tracing::info!(
+                            latency_ms = latency.as_millis() as u64,
+                            status = response.status().as_u16(),
+                            "response"
+                        );
+                    },
+                ),
         )
         .layer(cors)
         .with_state(state)
