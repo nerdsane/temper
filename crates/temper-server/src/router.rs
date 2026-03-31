@@ -97,7 +97,27 @@ pub fn build_router(state: ServerState) -> Router {
         ]);
 
     router
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &axum::http::Request<_>| {
+                    tracing::info_span!(
+                        "http.request",
+                        otel.name = %format!("{} {}", request.method(), request.uri().path()),
+                        http.method = %request.method(),
+                        http.route = %request.uri().path(),
+                        http.status_code = tracing::field::Empty,
+                        otel.kind = "server",
+                    )
+                })
+                .on_response(|response: &axum::http::Response<_>, latency: std::time::Duration, span: &tracing::Span| {
+                    span.record("http.status_code", response.status().as_u16());
+                    tracing::info!(
+                        latency_ms = latency.as_millis() as u64,
+                        status = response.status().as_u16(),
+                        "response"
+                    );
+                }),
+        )
         .layer(cors)
         .with_state(state)
 }

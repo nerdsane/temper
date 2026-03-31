@@ -44,7 +44,7 @@ fn is_http_call_authz_denial(error: &str) -> bool {
 }
 
 impl crate::state::ServerState {
-    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_wasm_integrations_internal", tenant = %req.tenant, entity_type = req.entity_type, entity_id = req.entity_id, action_name = req.action))]
+    #[instrument(skip_all, fields(otel.name = %format_args!("{}.{}.integrations", req.entity_type, req.action), tenant = %req.tenant, entity_type = req.entity_type, entity_id = req.entity_id, action_name = req.action))]
     pub(crate) async fn dispatch_wasm_integrations_internal(
         &self,
         req: &WasmDispatchRequest<'_>,
@@ -96,7 +96,15 @@ impl crate::state::ServerState {
     }
 
     /// Dispatch a single WASM integration: resolve module, invoke, handle result.
-    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_single_integration", integration = %integration.name))]
+    #[instrument(skip_all, fields(
+        otel.name = tracing::field::Empty,
+        integration = %integration.name,
+        wasm.module = tracing::field::Empty,
+        gen_ai.system = tracing::field::Empty,
+        gen_ai.request.model = tracing::field::Empty,
+        gen_ai.usage.input_tokens = tracing::field::Empty,
+        gen_ai.usage.output_tokens = tracing::field::Empty,
+    ))]
     async fn dispatch_single_integration(
         &self,
         ctx: &WasmDispatchCtx<'_>,
@@ -115,6 +123,17 @@ impl crate::state::ServerState {
             );
             return Ok(None);
         };
+
+        // Set dynamic span name and GenAI attributes
+        let span = tracing::Span::current();
+        span.record("otel.name", format!("wasm:{module_name}").as_str());
+        span.record("wasm.module", module_name.as_str());
+        if module_name == "llm_caller" {
+            span.record("gen_ai.system", "anthropic");
+            if let Some(model) = entity_state.fields.get("model").and_then(|v| v.as_str()) {
+                span.record("gen_ai.request.model", model);
+            }
+        }
 
         let module_hash = {
             let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
@@ -424,6 +443,14 @@ impl crate::state::ServerState {
             .await
         {
             Ok(result) if result.success => {
+                // Record GenAI token usage from callback params (if present)
+                if let Some(input) = result.callback_params.get("input_tokens").and_then(|v| v.as_i64()) {
+                    tracing::Span::current().record("gen_ai.usage.input_tokens", input);
+                }
+                if let Some(output) = result.callback_params.get("output_tokens").and_then(|v| v.as_i64()) {
+                    tracing::Span::current().record("gen_ai.usage.output_tokens", output);
+                }
+
                 let complete_seq = self.next_entity_event_sequence(
                     ctx.entity_ref.tenant.as_str(),
                     ctx.entity_ref.entity_type,

@@ -25,7 +25,12 @@ use temper_spec::automaton::Webhook;
 /// The handler looks up the webhook configuration from the tenant's spec
 /// registry, validates the HTTP method, extracts the entity ID and action
 /// parameters, then dispatches the configured action to the target entity.
-#[instrument(skip_all, fields(tenant, webhook_path, otel.name = "GET|POST /webhooks/{tenant}/{*path}"))]
+#[instrument(skip_all, fields(
+    otel.name = %format_args!("{} /webhooks/{}/{}", method, tenant_str, webhook_path),
+    tenant = %tenant_str,
+    webhook_path = %webhook_path,
+    http.method = %method,
+))]
 pub async fn handle_webhook(
     method: Method,
     State(state): State<ServerState>,

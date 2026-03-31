@@ -16,7 +16,7 @@ impl crate::state::ServerState {
     /// parameters explicit (especially tenant) and avoids the previous
     /// three-layer wrapper chain.
     #[instrument(skip_all, fields(
-        otel.name = "dispatch.dispatch",
+        otel.name = %format_args!("{}.{}", cmd.entity_type, cmd.action),
         tenant = %cmd.tenant,
         entity_type = cmd.entity_type,
         entity_id = cmd.entity_id,
@@ -51,7 +51,7 @@ impl crate::state::ServerState {
     ///
     /// Callers that need integration await or other options should use
     /// `dispatch(DispatchCommand { .. })` directly.
-    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_tenant_action", tenant = %tenant, entity_type, entity_id, action_name = action))]
+    #[instrument(skip_all, fields(otel.name = %format_args!("{}.{}", entity_type, action), tenant = %tenant, entity_type, entity_id, action_name = action))]
     pub async fn dispatch_tenant_action(
         &self,
         tenant: &TenantId,
@@ -74,7 +74,7 @@ impl crate::state::ServerState {
     }
 
     /// Convenience wrapper around [`dispatch`](Self::dispatch) with full options.
-    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_tenant_action_ext", tenant = %tenant, entity_type, entity_id, action_name = action))]
+    #[instrument(skip_all, fields(otel.name = %format_args!("{}.{}", entity_type, action), tenant = %tenant, entity_type, entity_id, action_name = action))]
     pub async fn dispatch_tenant_action_ext(
         &self,
         tenant: &TenantId,
@@ -97,7 +97,7 @@ impl crate::state::ServerState {
     }
 
     /// Typed variant of [`dispatch_tenant_action_ext`](Self::dispatch_tenant_action_ext).
-    #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_tenant_action_ext_typed", tenant = %tenant, entity_type, entity_id, action_name = action))]
+    #[instrument(skip_all, fields(otel.name = %format_args!("{}.{}", entity_type, action), tenant = %tenant, entity_type, entity_id, action_name = action))]
     pub async fn dispatch_tenant_action_ext_typed(
         &self,
         tenant: &TenantId,
