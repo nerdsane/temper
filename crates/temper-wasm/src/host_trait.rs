@@ -117,13 +117,33 @@ impl ProductionWasmHost {
     }
 
     /// Create with pre-loaded secrets and a custom HTTP request timeout.
+    ///
+    /// Secrets whose key starts with `ca_cert:` are treated as PEM-encoded
+    /// CA certificates and added as trusted roots to the HTTP client. This
+    /// lets operators provision private CA trust via the same secret store
+    /// that WASM modules already use, with no filesystem or env var coupling.
     pub fn with_timeout(secrets: BTreeMap<String, String>, timeout: std::time::Duration) -> Self {
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(timeout);
+
+        for (key, pem) in &secrets {
+            if !key.starts_with("ca_cert:") {
+                continue;
+            }
+            match reqwest::Certificate::from_pem(pem.as_bytes()) {
+                Ok(cert) => {
+                    tracing::info!(key, "loaded CA certificate from secret store");
+                    builder = builder.add_root_certificate(cert);
+                }
+                Err(e) => {
+                    tracing::warn!(key, error = %e, "failed to parse CA certificate from secret");
+                }
+            }
+        }
+
         Self {
-            client: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(timeout)
-                .build()
-                .unwrap_or_default(),
+            client: builder.build().unwrap_or_default(),
             secrets,
             spec_evaluator: None,
             progress_emitter: None,
