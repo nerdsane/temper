@@ -80,6 +80,10 @@ unsafe extern "C" {
         result_buf_len: i32,
     ) -> i32;
 
+    /// Get current UTC time as milliseconds since Unix epoch.
+    /// Used for elapsed-time tracking in WASM modules (e.g., resource limiters).
+    pub fn host_get_time_millis() -> i64;
+
     /// Evaluate a single transition against an IOA spec on the host.
     /// Returns bytes written to result_buf (JSON), -1 on error, -2 if buf too small.
     pub fn host_evaluate_spec(

@@ -105,6 +105,14 @@ impl Context {
         })
     }
 
+    /// Get current UTC time as milliseconds since Unix epoch.
+    ///
+    /// Useful for elapsed-time tracking in WASM modules where
+    /// `std::time::Instant` is not available.
+    pub fn get_time_millis() -> i64 {
+        unsafe { host::host_get_time_millis() }
+    }
+
     /// Make an HTTP GET request via the host.
     pub fn http_get(&self, url: &str) -> Result<HttpResponse, String> {
         self.http_call("GET", url, &[], "")

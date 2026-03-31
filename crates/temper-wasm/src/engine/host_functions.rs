@@ -575,6 +575,17 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
         )
         .map_err(|e| WasmError::Compilation(format!("failed to link host_get_time: {e}")))?;
 
+    // host_get_time_millis() -> i64
+    // Returns current UTC time as milliseconds since Unix epoch.
+    // Used by WASM modules that need elapsed-time tracking (e.g., resource limiters).
+    linker
+        .func_wrap(
+            "env",
+            "host_get_time_millis",
+            |_caller: Caller<'_, HostState>| -> i64 { chrono::Utc::now().timestamp_millis() },
+        )
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_get_time_millis: {e}")))?;
+
     // host_evaluate_spec(ioa_ptr, ioa_len, state_ptr, state_len,
     //                    action_ptr, action_len, params_ptr, params_len,
     //                    result_buf_ptr, result_buf_len) -> i32
