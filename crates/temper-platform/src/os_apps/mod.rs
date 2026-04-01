@@ -103,6 +103,26 @@ pub fn set_os_apps_dir(dir: PathBuf) {
     }
 }
 
+/// Add an additional directory of apps to the catalog.
+///
+/// Scans the directory and merges discovered apps into the existing catalog.
+/// Apps in the new directory do NOT replace existing apps with the same name.
+/// Use this to register reference apps or project-specific apps alongside
+/// the main os-apps directory.
+pub fn add_os_apps_dir(dir: PathBuf) {
+    let additional = SkillCatalog::from_dir(dir);
+    let cat = catalog();
+    let mut lock = cat.write().unwrap(); // ci-ok: infallible lock
+    for (name, path) in additional.paths {
+        lock.paths.entry(name.clone()).or_insert(path);
+    }
+    for entry in additional.entries {
+        if !lock.entries.iter().any(|e| e.name == entry.name) {
+            lock.entries.push(entry);
+        }
+    }
+}
+
 /// Re-scan the OS apps directory and refresh the catalog.
 ///
 /// Call this after modifying app files on disk to pick up changes
