@@ -18,20 +18,20 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "^3",
-    "@tailwindcss/postcss": "^4.0.0",
+    "@eslint/eslintrc": "^3.3.5",
+    "@tailwindcss/postcss": "^4.2.2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
-    "@types/dagre": "^0.7.53",
-    "@types/node": "^22.0.0",
+    "@types/dagre": "^0.7.54",
+    "@types/node": "^22.19.15",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^5.1.4",
-    "eslint": "^9",
+    "@vitejs/plugin-react": "^5.2.0",
+    "eslint": "^9.39.4",
     "eslint-config-next": "^15.1.0",
-    "jsdom": "^28.0.0",
-    "tailwindcss": "^4.0.0",
+    "jsdom": "^28.1.0",
+    "tailwindcss": "^4.2.2",
     "typescript": "^5.7.0",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.2"
   }
 }
