@@ -142,7 +142,7 @@ async fn dispatch_entity(
     match method {
         "list" => {
             let entity = expect_string_arg(args, 0, "entity_type", method)?;
-            let filter = optional_string_arg(args, 1);
+            let filter = optional_string_arg(args, 1).map(|f| normalize_odata_filter(&f));
             let set = ctx.resolve_set(&entity);
             let path = match filter {
                 Some(f) => {
@@ -287,6 +287,14 @@ async fn dispatch_entity(
         }
         _ => unreachable!("dispatch_entity called with non-entity method"),
     }
+}
+
+fn normalize_odata_filter(filter: &str) -> String {
+    filter
+        .trim()
+        .strip_prefix("$filter=")
+        .unwrap_or(filter.trim())
+        .to_string()
 }
 
 /// Dispatch spec management methods.
