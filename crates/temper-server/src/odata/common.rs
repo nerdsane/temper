@@ -71,12 +71,12 @@ pub(super) fn resolve_entity_type(
     let reg_result = state
         .registry
         .read()
-        .unwrap()
+        .unwrap() // ci-ok: RwLock read — poisoned lock = prior panic, fail-fast correct
         .resolve_entity_type(tenant, entity_set);
     let legacy_result = state.entity_set_map.get(entity_set).cloned();
     let result = reg_result.or(legacy_result);
     if result.is_none() {
-        let reg = state.registry.read().unwrap();
+        let reg = state.registry.read().unwrap(); // ci-ok: RwLock read — poisoned lock = prior panic, fail-fast correct
         let tenant_exists = reg.get_tenant(tenant).is_some();
         let map_size = reg
             .get_tenant(tenant)
