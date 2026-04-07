@@ -401,10 +401,25 @@ impl WasmHost for ProductionWasmHost {
                     }
                 }
             }
-            // If we found a response.completed event, return just its data.
-            // Otherwise fall back to the full remaining buffer.
+            // If we found a response.completed event, extract only the essential
+            // fields (output, usage, status) — NOT the full event which echoes back
+            // the entire request (instructions, input) and can exceed the WASM buffer.
             if !last_complete_data.is_empty() {
-                last_complete_data
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&last_complete_data) {
+                    let response = event.get("response").unwrap_or(&event);
+                    let minimal = serde_json::json!({
+                        "type": "response.completed",
+                        "response": {
+                            "output": response.get("output"),
+                            "usage": response.get("usage"),
+                            "status": response.get("status"),
+                            "model": response.get("model"),
+                        }
+                    });
+                    serde_json::to_string(&minimal).unwrap_or(last_complete_data)
+                } else {
+                    last_complete_data
+                }
             } else {
                 raw_buffer
             }
