@@ -338,40 +338,71 @@ impl WasmHost for ProductionWasmHost {
             .is_some_and(|ct| ct.contains("text/event-stream"));
 
         let resp_body = if is_sse {
-            let mut accumulated = String::new();
+            // For SSE streaming (LLM APIs), we only need the final complete
+            // response — not every intermediate token delta. Read chunks,
+            // track the last "data:" line that looks like a complete JSON object,
+            // and return only that. This keeps the response small enough for
+            // the WASM guest's fixed-size buffer.
+            let mut raw_buffer = String::new();
+            let mut last_complete_data = String::new();
             let mut stream = resp.bytes_stream();
             let chunk_stall = std::time::Duration::from_secs(120);
+            let mut chunk_count: u64 = 0;
             loop {
                 match tokio::time::timeout(chunk_stall, futures_util::StreamExt::next(&mut stream))
                     .await
                 {
                     Ok(Some(Ok(chunk))) => {
                         if let Ok(text) = std::str::from_utf8(&chunk) {
-                            accumulated.push_str(text);
+                            raw_buffer.push_str(text);
                         }
-                        // Emit progress to keep heartbeats alive
-                        if let Some(ref emitter) = self.progress_emitter {
-                            let _ = emitter(&format!(
-                                "{{\"kind\":\"streaming_progress\",\"bytes\":{}}}",
-                                accumulated.len()
-                            ));
+                        chunk_count += 1;
+                        // Extract data lines as they arrive — keep only the last
+                        // "response.completed" or "response.done" event data
+                        for line in raw_buffer.lines() {
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                // Check for completion events (OpenAI Responses API)
+                                if data.contains("\"response.completed\"")
+                                    || data.contains("\"response.done\"")
+                                {
+                                    last_complete_data = data.to_string();
+                                }
+                            }
+                        }
+                        // Keep only the last 8KB of raw buffer for line parsing
+                        if raw_buffer.len() > 8192 {
+                            let trim_at = raw_buffer.len() - 4096;
+                            raw_buffer = raw_buffer[trim_at..].to_string();
+                        }
+                        // Emit progress
+                        if chunk_count.is_multiple_of(10) {
+                            if let Some(ref emitter) = self.progress_emitter {
+                                let _ = emitter(&format!(
+                                    "{{\"kind\":\"streaming_progress\",\"chunks\":{chunk_count}}}",
+                                ));
+                            }
                         }
                     }
                     Ok(Some(Err(e))) => {
-                        tracing::warn!(error = %e, bytes = accumulated.len(), "SSE chunk read error");
+                        tracing::warn!(error = %e, chunks = chunk_count, "SSE chunk read error");
                         break;
                     }
                     Ok(None) => break, // stream ended
                     Err(_) => {
                         return Err(format!(
-                            "SSE streaming stall: no data for {}s ({} bytes received)",
+                            "SSE streaming stall: no data for {}s after {chunk_count} chunks",
                             chunk_stall.as_secs(),
-                            accumulated.len()
                         ));
                     }
                 }
             }
-            accumulated
+            // If we found a response.completed event, return just its data.
+            // Otherwise fall back to the full remaining buffer.
+            if !last_complete_data.is_empty() {
+                last_complete_data
+            } else {
+                raw_buffer
+            }
         } else {
             resp.text().await.map_err(|e| {
                 tracing::warn!(
