@@ -10,8 +10,11 @@
 /// to handle entities with accumulated adapter/WASM callback fields.
 pub const CTX_BUF_LEN: usize = 524288;
 
-/// Buffer size for HTTP response data (512 KB).
-pub const HTTP_BUF_LEN: usize = 524288;
+/// Buffer size for HTTP response data (4 MB).
+///
+/// LLM streaming responses (SSE deframed data payloads) can be large,
+/// especially when the response includes tool calls with substantial output.
+pub const HTTP_BUF_LEN: usize = 4 * 1024 * 1024;
 
 /// Buffer size for secret values (4 KB).
 pub const SECRET_BUF_LEN: usize = 4096;

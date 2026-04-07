@@ -128,29 +128,6 @@ impl WasmHost for AuthorizedWasmHost {
         }
     }
 
-    async fn http_call_streaming(
-        &self,
-        method: &str,
-        url: &str,
-        headers: &[(String, String)],
-        body: &str,
-    ) -> Result<(u16, String), String> {
-        let domain = extract_domain(url);
-        match self
-            .gate
-            .authorize_http_call(domain, method, url, &self.ctx)
-        {
-            WasmAuthzDecision::Allow => {
-                self.inner
-                    .http_call_streaming(method, url, headers, body)
-                    .await
-            }
-            WasmAuthzDecision::Deny(reason) => Err(format!(
-                "authorization denied for http_call_streaming to {domain}: {reason}"
-            )),
-        }
-    }
-
     async fn http_call_binary(
         &self,
         method: &str,

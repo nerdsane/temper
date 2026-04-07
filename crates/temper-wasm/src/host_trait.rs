@@ -343,13 +343,12 @@ impl WasmHost for ProductionWasmHost {
         let is_sse = ct_is_sse || (request_asked_for_stream && status >= 200 && status < 300);
 
         let resp_body = if is_sse {
-            // For SSE streaming (LLM APIs), we only need the final complete
-            // response — not every intermediate token delta. Read chunks,
-            // track the last "data:" line that looks like a complete JSON object,
-            // and return only that. This keeps the response small enough for
-            // the WASM guest's fixed-size buffer.
-            let mut raw_buffer = String::new();
-            let mut last_complete_data = String::new();
+            // SSE streaming: read chunks with per-chunk stall timeout, strip SSE
+            // framing, return concatenated `data:` payloads separated by newlines.
+            // This is format-agnostic — the WASM guest (llm_caller) handles
+            // provider-specific parsing (OpenAI events, Anthropic events, etc.).
+            let mut accumulated_data = String::new();
+            let mut partial_line = String::new();
             let mut stream = resp.bytes_stream();
             let chunk_stall = std::time::Duration::from_secs(120);
             let mut chunk_count: u64 = 0;
@@ -358,32 +357,27 @@ impl WasmHost for ProductionWasmHost {
                     .await
                 {
                     Ok(Some(Ok(chunk))) => {
-                        if let Ok(text) = std::str::from_utf8(&chunk) {
-                            raw_buffer.push_str(text);
-                        }
                         chunk_count += 1;
-                        // Extract data lines as they arrive — keep only the last
-                        // "response.completed" or "response.done" event data
-                        for line in raw_buffer.lines() {
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                // Check for completion events (OpenAI Responses API)
-                                if data.contains("\"response.completed\"")
-                                    || data.contains("\"response.done\"")
-                                {
-                                    last_complete_data = data.to_string();
+                        if let Ok(text) = std::str::from_utf8(&chunk) {
+                            partial_line.push_str(text);
+                            // Process complete lines, keep partial for next chunk
+                            while let Some(nl) = partial_line.find('\n') {
+                                let line = partial_line[..nl].trim_end_matches('\r');
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    if !accumulated_data.is_empty() {
+                                        accumulated_data.push('\n');
+                                    }
+                                    accumulated_data.push_str(data);
                                 }
+                                partial_line = partial_line[nl + 1..].to_string();
                             }
                         }
-                        // Keep only the last 8KB of raw buffer for line parsing
-                        if raw_buffer.len() > 8192 {
-                            let trim_at = raw_buffer.len() - 4096;
-                            raw_buffer = raw_buffer[trim_at..].to_string();
-                        }
-                        // Emit progress
-                        if chunk_count.is_multiple_of(10) {
+                        // Emit progress to keep heartbeats alive
+                        if chunk_count.is_multiple_of(20) {
                             if let Some(ref emitter) = self.progress_emitter {
                                 let _ = emitter(&format!(
-                                    "{{\"kind\":\"streaming_progress\",\"chunks\":{chunk_count}}}",
+                                    "{{\"kind\":\"streaming_progress\",\"chunks\":{chunk_count},\"data_bytes\":{}}}",
+                                    accumulated_data.len()
                                 ));
                             }
                         }
@@ -392,7 +386,7 @@ impl WasmHost for ProductionWasmHost {
                         tracing::warn!(error = %e, chunks = chunk_count, "SSE chunk read error");
                         break;
                     }
-                    Ok(None) => break, // stream ended
+                    Ok(None) => break,
                     Err(_) => {
                         return Err(format!(
                             "SSE streaming stall: no data for {}s after {chunk_count} chunks",
@@ -401,28 +395,15 @@ impl WasmHost for ProductionWasmHost {
                     }
                 }
             }
-            // If we found a response.completed event, extract only the essential
-            // fields (output, usage, status) — NOT the full event which echoes back
-            // the entire request (instructions, input) and can exceed the WASM buffer.
-            if !last_complete_data.is_empty() {
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&last_complete_data) {
-                    let response = event.get("response").unwrap_or(&event);
-                    let minimal = serde_json::json!({
-                        "type": "response.completed",
-                        "response": {
-                            "output": response.get("output"),
-                            "usage": response.get("usage"),
-                            "status": response.get("status"),
-                            "model": response.get("model"),
-                        }
-                    });
-                    serde_json::to_string(&minimal).unwrap_or(last_complete_data)
-                } else {
-                    last_complete_data
+            // Process any remaining partial line
+            let remaining = partial_line.trim();
+            if let Some(data) = remaining.strip_prefix("data: ") {
+                if !accumulated_data.is_empty() {
+                    accumulated_data.push('\n');
                 }
-            } else {
-                raw_buffer
+                accumulated_data.push_str(data);
             }
+            accumulated_data
         } else {
             resp.text().await.map_err(|e| {
                 tracing::warn!(
@@ -447,158 +428,6 @@ impl WasmHost for ProductionWasmHost {
             duration_ms as f64,
         );
         Ok((status, resp_body))
-    }
-
-    async fn http_call_streaming(
-        &self,
-        method: &str,
-        url: &str,
-        headers: &[(String, String)],
-        body: &str,
-    ) -> Result<(u16, String), String> {
-        let started = Instant::now();
-        let span = tracing::info_span!(
-            "wasm.host.http_call_streaming",
-            otel.name = "wasm.host.http_call_streaming",
-            http.method = %method,
-            http.url = %telemetry_url(url),
-            request_bytes = body.len() as u64,
-            status_code = tracing::field::Empty,
-            response_bytes = tracing::field::Empty,
-            duration_ms = tracing::field::Empty,
-            chunks = tracing::field::Empty,
-        );
-        let _guard = span.enter();
-
-        // Build a separate client with no total-response timeout (only connect timeout).
-        // Streaming responses stay open for the duration of generation.
-        let streaming_client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            // No .timeout() — chunks flow for as long as the server sends them.
-            // Per-chunk stall detection below handles hung connections.
-            .build()
-            .unwrap_or_default();
-
-        let mut builder = match method.to_uppercase().as_str() {
-            "GET" => streaming_client.get(url),
-            "POST" => streaming_client.post(url),
-            "PUT" => streaming_client.put(url),
-            "DELETE" => streaming_client.delete(url),
-            "PATCH" => streaming_client.patch(url),
-            other => return Err(format!("unsupported HTTP method: {other}")),
-        };
-
-        for (k, v) in headers {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-
-        if let Some(ref trace_id) = self.trace_id
-            && !headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
-        {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            let span_id = format!("{nanos:016x}");
-            builder = builder.header("traceparent", format!("00-{trace_id}-{span_id}-01"));
-        }
-
-        if !body.is_empty() {
-            builder = builder.body(body.to_string());
-        }
-
-        let resp = builder.send().await.map_err(|e| {
-            tracing::warn!(
-                error = %e,
-                duration_ms = started.elapsed().as_millis() as u64,
-                "WASM host streaming HTTP request failed"
-            );
-            format!("HTTP request failed: {e}")
-        })?;
-        let status = resp.status().as_u16();
-
-        // Read response body in chunks with per-chunk stall timeout.
-        let mut accumulated = String::new();
-        let mut chunk_count: u64 = 0;
-        let chunk_stall_timeout = std::time::Duration::from_secs(120);
-        let mut stream = resp.bytes_stream();
-
-        loop {
-            match tokio::time::timeout(
-                chunk_stall_timeout,
-                futures_util::StreamExt::next(&mut stream),
-            )
-            .await
-            {
-                Ok(Some(Ok(chunk))) => {
-                    if let Ok(text) = std::str::from_utf8(&chunk) {
-                        accumulated.push_str(text);
-                    }
-                    chunk_count += 1;
-                    // Emit progress every 10 chunks to keep heartbeats alive
-                    if chunk_count.is_multiple_of(10)
-                        && let Some(ref emitter) = self.progress_emitter
-                    {
-                        let _ = emitter(&format!(
-                            "{{\"kind\":\"streaming_progress\",\"chunks\":{chunk_count},\"bytes\":{}}}",
-                            accumulated.len()
-                        ));
-                    }
-                }
-                Ok(Some(Err(e))) => {
-                    tracing::warn!(
-                        error = %e,
-                        chunks = chunk_count,
-                        bytes = accumulated.len(),
-                        "WASM host streaming chunk read error"
-                    );
-                    // Return what we have so far — partial response may still be useful
-                    break;
-                }
-                Ok(None) => {
-                    // Stream ended normally
-                    break;
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        chunks = chunk_count,
-                        bytes = accumulated.len(),
-                        stall_secs = chunk_stall_timeout.as_secs(),
-                        "WASM host streaming stall timeout — no data received"
-                    );
-                    return Err(format!(
-                        "streaming stall: no data received for {}s after {chunk_count} chunks ({} bytes)",
-                        chunk_stall_timeout.as_secs(),
-                        accumulated.len()
-                    ));
-                }
-            }
-        }
-
-        let duration_ms = started.elapsed().as_millis() as u64;
-        tracing::Span::current().record("status_code", status);
-        tracing::Span::current().record("response_bytes", accumulated.len() as u64);
-        tracing::Span::current().record("duration_ms", duration_ms);
-        tracing::Span::current().record("chunks", chunk_count);
-        metrics::record_host_http_call(
-            method,
-            "streaming",
-            status,
-            body.len() as u64,
-            accumulated.len() as u64,
-            duration_ms as f64,
-        );
-
-        tracing::info!(
-            chunks = chunk_count,
-            bytes = accumulated.len(),
-            duration_ms = duration_ms,
-            "WASM host streaming HTTP call complete"
-        );
-
-        Ok((status, accumulated))
     }
 
     async fn http_call_binary(
