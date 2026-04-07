@@ -64,6 +64,28 @@ pub trait WasmHost: Send + Sync {
         Err("connect_call not supported by this host".to_string())
     }
 
+    /// Make a streaming HTTP request. Returns (status_code, accumulated_body).
+    ///
+    /// Same as `http_call` but reads the response in chunks instead of buffering
+    /// the entire body at once. This is critical for SSE/streaming APIs (OpenAI,
+    /// Anthropic) where the server keeps the connection open while generating.
+    ///
+    /// Benefits over `http_call`:
+    /// - Emits progress on each chunk (keeps heartbeats alive)
+    /// - Per-chunk timeout instead of total-response timeout
+    /// - No memory spike from buffering large streaming responses
+    ///
+    /// Default implementation falls back to `http_call`.
+    async fn http_call_streaming(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+    ) -> Result<(u16, String), String> {
+        self.http_call(method, url, headers, body).await
+    }
+
     /// Log a message at the given level.
     fn log(&self, level: &str, message: &str);
 
@@ -306,15 +328,61 @@ impl WasmHost for ProductionWasmHost {
             format!("HTTP request failed: {e}")
         })?;
         let status = resp.status().as_u16();
-        let resp_body = resp.text().await.map_err(|e| {
-            tracing::warn!(
-                status_code = status,
-                error = %e,
-                duration_ms = started.elapsed().as_millis() as u64,
-                "WASM host HTTP response read failed"
-            );
-            format!("failed to read response body: {e}")
-        })?;
+
+        // Auto-detect SSE streaming responses and use chunked reading.
+        // This avoids the total-response timeout killing long-running LLM generations.
+        let is_sse = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/event-stream"));
+
+        let resp_body = if is_sse {
+            let mut accumulated = String::new();
+            let mut stream = resp.bytes_stream();
+            let chunk_stall = std::time::Duration::from_secs(120);
+            loop {
+                match tokio::time::timeout(chunk_stall, futures_util::StreamExt::next(&mut stream))
+                    .await
+                {
+                    Ok(Some(Ok(chunk))) => {
+                        if let Ok(text) = std::str::from_utf8(&chunk) {
+                            accumulated.push_str(text);
+                        }
+                        // Emit progress to keep heartbeats alive
+                        if let Some(ref emitter) = self.progress_emitter {
+                            let _ = emitter(&format!(
+                                "{{\"kind\":\"streaming_progress\",\"bytes\":{}}}",
+                                accumulated.len()
+                            ));
+                        }
+                    }
+                    Ok(Some(Err(e))) => {
+                        tracing::warn!(error = %e, bytes = accumulated.len(), "SSE chunk read error");
+                        break;
+                    }
+                    Ok(None) => break, // stream ended
+                    Err(_) => {
+                        return Err(format!(
+                            "SSE streaming stall: no data for {}s ({} bytes received)",
+                            chunk_stall.as_secs(),
+                            accumulated.len()
+                        ));
+                    }
+                }
+            }
+            accumulated
+        } else {
+            resp.text().await.map_err(|e| {
+                tracing::warn!(
+                    status_code = status,
+                    error = %e,
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "WASM host HTTP response read failed"
+                );
+                format!("failed to read response body: {e}")
+            })?
+        };
         let duration_ms = started.elapsed().as_millis() as u64;
         tracing::Span::current().record("status_code", status);
         tracing::Span::current().record("response_bytes", resp_body.len() as u64);
@@ -328,6 +396,158 @@ impl WasmHost for ProductionWasmHost {
             duration_ms as f64,
         );
         Ok((status, resp_body))
+    }
+
+    async fn http_call_streaming(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+    ) -> Result<(u16, String), String> {
+        let started = Instant::now();
+        let span = tracing::info_span!(
+            "wasm.host.http_call_streaming",
+            otel.name = "wasm.host.http_call_streaming",
+            http.method = %method,
+            http.url = %telemetry_url(url),
+            request_bytes = body.len() as u64,
+            status_code = tracing::field::Empty,
+            response_bytes = tracing::field::Empty,
+            duration_ms = tracing::field::Empty,
+            chunks = tracing::field::Empty,
+        );
+        let _guard = span.enter();
+
+        // Build a separate client with no total-response timeout (only connect timeout).
+        // Streaming responses stay open for the duration of generation.
+        let streaming_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            // No .timeout() — chunks flow for as long as the server sends them.
+            // Per-chunk stall detection below handles hung connections.
+            .build()
+            .unwrap_or_default();
+
+        let mut builder = match method.to_uppercase().as_str() {
+            "GET" => streaming_client.get(url),
+            "POST" => streaming_client.post(url),
+            "PUT" => streaming_client.put(url),
+            "DELETE" => streaming_client.delete(url),
+            "PATCH" => streaming_client.patch(url),
+            other => return Err(format!("unsupported HTTP method: {other}")),
+        };
+
+        for (k, v) in headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+
+        if let Some(ref trace_id) = self.trace_id
+            && !headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
+        {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let span_id = format!("{nanos:016x}");
+            builder = builder.header("traceparent", format!("00-{trace_id}-{span_id}-01"));
+        }
+
+        if !body.is_empty() {
+            builder = builder.body(body.to_string());
+        }
+
+        let resp = builder.send().await.map_err(|e| {
+            tracing::warn!(
+                error = %e,
+                duration_ms = started.elapsed().as_millis() as u64,
+                "WASM host streaming HTTP request failed"
+            );
+            format!("HTTP request failed: {e}")
+        })?;
+        let status = resp.status().as_u16();
+
+        // Read response body in chunks with per-chunk stall timeout.
+        let mut accumulated = String::new();
+        let mut chunk_count: u64 = 0;
+        let chunk_stall_timeout = std::time::Duration::from_secs(120);
+        let mut stream = resp.bytes_stream();
+
+        loop {
+            match tokio::time::timeout(
+                chunk_stall_timeout,
+                futures_util::StreamExt::next(&mut stream),
+            )
+            .await
+            {
+                Ok(Some(Ok(chunk))) => {
+                    if let Ok(text) = std::str::from_utf8(&chunk) {
+                        accumulated.push_str(text);
+                    }
+                    chunk_count += 1;
+                    // Emit progress every 10 chunks to keep heartbeats alive
+                    if chunk_count.is_multiple_of(10)
+                        && let Some(ref emitter) = self.progress_emitter
+                    {
+                        let _ = emitter(&format!(
+                            "{{\"kind\":\"streaming_progress\",\"chunks\":{chunk_count},\"bytes\":{}}}",
+                            accumulated.len()
+                        ));
+                    }
+                }
+                Ok(Some(Err(e))) => {
+                    tracing::warn!(
+                        error = %e,
+                        chunks = chunk_count,
+                        bytes = accumulated.len(),
+                        "WASM host streaming chunk read error"
+                    );
+                    // Return what we have so far — partial response may still be useful
+                    break;
+                }
+                Ok(None) => {
+                    // Stream ended normally
+                    break;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        chunks = chunk_count,
+                        bytes = accumulated.len(),
+                        stall_secs = chunk_stall_timeout.as_secs(),
+                        "WASM host streaming stall timeout — no data received"
+                    );
+                    return Err(format!(
+                        "streaming stall: no data received for {}s after {chunk_count} chunks ({} bytes)",
+                        chunk_stall_timeout.as_secs(),
+                        accumulated.len()
+                    ));
+                }
+            }
+        }
+
+        let duration_ms = started.elapsed().as_millis() as u64;
+        tracing::Span::current().record("status_code", status);
+        tracing::Span::current().record("response_bytes", accumulated.len() as u64);
+        tracing::Span::current().record("duration_ms", duration_ms);
+        tracing::Span::current().record("chunks", chunk_count);
+        metrics::record_host_http_call(
+            method,
+            "streaming",
+            status,
+            body.len() as u64,
+            accumulated.len() as u64,
+            duration_ms as f64,
+        );
+
+        tracing::info!(
+            chunks = chunk_count,
+            bytes = accumulated.len(),
+            duration_ms = duration_ms,
+            "WASM host streaming HTTP call complete"
+        );
+
+        Ok((status, accumulated))
     }
 
     async fn http_call_binary(
