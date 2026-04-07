@@ -331,11 +331,16 @@ impl WasmHost for ProductionWasmHost {
 
         // Auto-detect SSE streaming responses and use chunked reading.
         // This avoids the total-response timeout killing long-running LLM generations.
-        let is_sse = resp
+        // Detection: Content-Type text/event-stream OR request body contained "stream":true
+        // (some endpoints like OpenAI Codex return application/json CT even for SSE).
+        let ct_is_sse = resp
             .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.contains("text/event-stream"));
+        let request_asked_for_stream =
+            body.contains("\"stream\":true") || body.contains("\"stream\": true");
+        let is_sse = ct_is_sse || (request_asked_for_stream && status >= 200 && status < 300);
 
         let resp_body = if is_sse {
             // For SSE streaming (LLM APIs), we only need the final complete
