@@ -1131,12 +1131,7 @@ async fn install_os_app_without_dependencies(
                 .map(|(et, ioa, csdl, h)| (et.as_str(), ioa.as_str(), csdl.as_str(), h.as_str()))
                 .collect();
             turso
-                .upsert_specs_and_commit(
-                    tenant,
-                    &refs,
-                    combined_policy.as_deref(),
-                    app_name,
-                )
+                .upsert_specs_and_commit(tenant, &refs, combined_policy.as_deref(), app_name)
                 .await
                 .map_err(|e| format!("Failed to persist and commit specs: {e}"))?;
         }
