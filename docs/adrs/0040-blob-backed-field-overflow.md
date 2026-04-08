@@ -43,15 +43,17 @@ Resolution should happen in the same places clients already read entity state, i
 
 - Large agent results and other oversized state survive platform round-trips.
 - OData and Observe callers continue to see complete values.
-- App authors do not need to special-case large output fields.
+- App authors get a safety net when a field unexpectedly grows past the platform limit.
 
 ### Negative
 
 - Entity reads for overflowed fields now depend on blob availability.
 - The read path gains extra complexity and an additional fetch step.
+- The feature can tempt app authors to treat entity state as a document store if guidance is unclear.
 
 ## Rollout Notes
 
 - The write path should remain deterministic by deriving blob keys from content.
 - Missing blobs should degrade safely by returning the stored reference object and logging the loss.
 - OpenPaw's delivery hardening can stay in place as a defense-in-depth measure even after this lands.
+- App authors should still use `Files` plus `*FileId` fields for document-sized artifacts. Blob-backed overflow preserves accidental large fields; it is not the preferred storage model for pages, reports, transcripts, or other durable documents.

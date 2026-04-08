@@ -56,6 +56,38 @@ If missing: `cargo install --git https://github.com/nerdsane/temper temper-cli`.
 
 Run `temper init <project-name>` in the **user's working directory** (not the temper repo). Then generate specs directly in `specs/` — flat layout, no subdirectories (the CLI does not recurse).
 
+### Document storage rule
+
+If your app produces a document-sized artifact, do **not** store the full artifact inline in entity fields.
+
+Use inline string fields for:
+
+- titles
+- descriptions
+- comments
+- bounded notes
+- short prompts or summaries
+
+Use `Files` plus `content_file_id` or another `*FileId` field for:
+
+- markdown pages
+- reports
+- transcripts
+- fetched documents
+- compiled analyses
+- HTML or rendered output
+- large JSON artifacts
+- long LLM outputs that must be read back in full
+
+Pattern:
+
+1. create or update a `Files` entity
+2. upload bytes through `Files('{id}')/$value`
+3. persist only the file id on the entity
+4. keep entity fields focused on metadata and lifecycle state
+
+Temper's blob-backed overflow behavior is a survivability safety net. It is **not** the preferred app design for document storage.
+
 ### Write IOA Specs
 
 Use the Write tool to create `specs/<entity>.ioa.toml` for each entity. Use this template:
