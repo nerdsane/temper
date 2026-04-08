@@ -1,6 +1,6 @@
 //! Spec persistence: upsert, verification updates, and startup loading.
 
-use libsql::params;
+use libsql::{TransactionBehavior, params};
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
@@ -46,6 +46,78 @@ impl TursoEventStore {
         )
         .await
         .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Atomically upsert multiple specs, record the app installation, optionally
+    /// write a Cedar policy, and mark all tenant specs as committed — all within
+    /// a single libsql transaction.
+    ///
+    /// This eliminates the crash-vulnerability window where individual upserts
+    /// leave specs with `committed=0` that get garbage-collected on restart.
+    #[instrument(skip_all, fields(tenant, app_name, otel.name = "turso.upsert_specs_and_commit"))]
+    pub async fn upsert_specs_and_commit(
+        &self,
+        tenant: &str,
+        specs: &[(&str, &str, &str, &str)], // (entity_type, ioa_source, csdl_xml, content_hash)
+        policy: Option<&str>,
+        app_name: &str,
+    ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.upsert_specs_and_commit");
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+
+        for (entity_type, ioa_source, csdl_xml, content_hash) in specs {
+            tx.execute(
+                "INSERT INTO specs (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, 0, 'pending', datetime('now'))
+                 ON CONFLICT (tenant, entity_type) DO UPDATE SET
+                     ioa_source = excluded.ioa_source,
+                     csdl_xml = excluded.csdl_xml,
+                     content_hash = excluded.content_hash,
+                     committed = 0,
+                     version = specs.version + 1,
+                     verified = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.verified ELSE 0 END,
+                     verification_status = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.verification_status ELSE 'pending' END,
+                     levels_passed = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.levels_passed ELSE NULL END,
+                     levels_total = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.levels_total ELSE NULL END,
+                     verification_result = CASE WHEN specs.content_hash = excluded.content_hash THEN specs.verification_result ELSE NULL END,
+                     updated_at = datetime('now')",
+                params![tenant, entity_type, ioa_source, csdl_xml, content_hash],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
+
+        if let Some(policy_text) = policy {
+            tx.execute(
+                "INSERT INTO tenant_policies (tenant, policy_text, updated_at) \
+                 VALUES (?1, ?2, datetime('now')) \
+                 ON CONFLICT(tenant) DO UPDATE SET policy_text = ?2, updated_at = datetime('now')",
+                params![tenant, policy_text],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
+
+        tx.execute(
+            "INSERT OR IGNORE INTO tenant_installed_apps (tenant_id, app_name) VALUES (?1, ?2)",
+            params![tenant, app_name],
+        )
+        .await
+        .map_err(storage_error)?;
+
+        tx.execute(
+            "UPDATE specs SET committed = 1, updated_at = datetime('now') WHERE tenant = ?1",
+            params![tenant],
+        )
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
