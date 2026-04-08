@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::HashMap;
+use std::fs;
 
 use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
@@ -614,4 +615,100 @@ fn test_reload_picks_up_disk_changes() {
         !skills.is_empty(),
         "catalog should not be empty after reload"
     );
+}
+
+#[test]
+fn test_find_adrs_discovers_markdown_in_sorted_order() {
+    let temp_dir = std::env::temp_dir().join(format!("temper-adrs-test-{}", uuid::Uuid::new_v4()));
+    let adrs_dir = temp_dir.join("adrs");
+    fs::create_dir_all(&adrs_dir).unwrap();
+    fs::write(adrs_dir.join("002-second.md"), "# second").unwrap();
+    fs::write(adrs_dir.join("001-first.md"), "# first").unwrap();
+    fs::write(adrs_dir.join("notes.txt"), "ignore").unwrap();
+
+    let adrs = find_adrs(&temp_dir);
+    assert_eq!(adrs.len(), 2);
+    assert_eq!(adrs[0].file_name, "001-first.md");
+    assert_eq!(adrs[1].file_name, "002-second.md");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_install_app_bootstraps_adrs_into_temper_fs() {
+    use std::sync::Arc;
+    use temper_server::event_store::ServerEventStore;
+    use temper_store_turso::TursoEventStore;
+
+    let app_root = std::env::temp_dir().join(format!("temper-os-apps-{}", uuid::Uuid::new_v4()));
+    let app_dir = app_root.join("doc-app");
+    fs::create_dir_all(app_dir.join("adrs")).unwrap();
+    fs::write(
+        app_dir.join("app.toml"),
+        "name = \"doc-app\"\ndescription = \"Temporary ADR test app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("APP.md"),
+        "# Doc App\n\nTemporary ADR test app.\n",
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("adrs/001-initial-design.md"),
+        "# ADR-001\n\nBootstrap ADR test.\n",
+    )
+    .unwrap();
+    add_os_apps_dir(app_root.clone());
+
+    let db_path = format!("/tmp/temper-adr-test-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let mut state = PlatformState::new(None);
+    state.server.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
+
+    install_os_app(&state, "test-adr-app", "temper-fs")
+        .await
+        .expect("install temper-fs");
+    let result = install_os_app(&state, "test-adr-app", "doc-app")
+        .await
+        .expect("install doc-app");
+
+    assert_eq!(
+        result.adrs_bootstrapped,
+        vec!["/apps/doc-app/adrs/001-initial-design.md".to_string()]
+    );
+
+    let tenant = TenantId::new("test-adr-app");
+    let mut found = false;
+    for file_id in state.server.list_entity_ids(&tenant, "File") {
+        let resp = state
+            .server
+            .get_tenant_entity_state(&tenant, "File", &file_id)
+            .await
+            .unwrap();
+        let path = resp
+            .state
+            .fields
+            .get("path")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if path == "/apps/doc-app/adrs/001-initial-design.md" {
+            found = true;
+            assert_eq!(resp.state.status, "Ready");
+            assert_eq!(resp.state.booleans.get("has_content"), Some(&true));
+            assert!(
+                resp.state
+                    .fields
+                    .get("content_hash")
+                    .and_then(|value| value.as_str())
+                    .is_some()
+            );
+        }
+    }
+    assert!(found, "expected ADR file entity to exist in TemperFS");
+
+    let _ = fs::remove_dir_all(&app_root);
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_file(format!("{db_path}-wal"));
+    let _ = fs::remove_file(format!("{db_path}-shm"));
 }
