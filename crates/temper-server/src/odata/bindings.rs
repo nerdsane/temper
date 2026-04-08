@@ -12,6 +12,7 @@ use temper_authz::SecurityContext;
 use super::common::run_write_prechecks;
 use super::response::annotate_entity;
 use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_error};
@@ -305,11 +306,10 @@ pub(super) async fn dispatch_bound_action(
                 http_span.set_status(Status::Ok);
                 http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
 
-                let body = annotate_entity(
-                    serde_json::to_value(&response.state).unwrap_or_default(),
-                    format!("$metadata#{set_name}/$entity"),
-                    None,
-                );
+                let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
+                hydrate_blob_refs_for_tenant(state, tenant, &mut state_json).await;
+                let body =
+                    annotate_entity(state_json, format!("$metadata#{set_name}/$entity"), None);
                 ODataResponse {
                     status: StatusCode::OK,
                     body,

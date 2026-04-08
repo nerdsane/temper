@@ -19,6 +19,9 @@ pub(crate) struct LoadDirRequest {
 pub(crate) struct LoadInlineRequest {
     /// Tenant name to register specs under.
     pub(crate) tenant: String,
+    /// Optional app slug for ADR lookup, e.g. `llm-wiki`.
+    #[serde(default)]
+    pub(crate) app_name: Option<String>,
     /// Map of filename -> content. Must include `model.csdl.xml` and at least one `*.ioa.toml`.
     pub(crate) specs: std::collections::BTreeMap<String, String>,
     /// Optional inline `cross-invariants.toml` source.

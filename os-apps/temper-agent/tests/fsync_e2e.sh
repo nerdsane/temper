@@ -37,7 +37,7 @@ echo ""
 echo "Cleaning sandbox workspace..."
 curl -sf -X POST "$SANDBOX/v1/processes/run" \
   -H "content-type: application/json" \
-  -d '{"command": "rm -rf /tmp/workspace/* 2>/dev/null; echo ok", "workdir": "/tmp/workspace"}' > /dev/null
+  -d '{"command": "rm -rf /workspace/* 2>/dev/null; echo ok", "workdir": "/workspace"}' > /dev/null
 
 # 1. Create and configure agent
 echo "Step 1: Creating agent..."
@@ -56,10 +56,10 @@ curl -sf -X POST "$SERVER/tdata/TemperAgents('${AGENT_ID}')/Temper.Agent.TemperA
   -H "x-temper-principal-kind: admin" \
   -d "{
     \"system_prompt\": \"You are a concise assistant. Create files as requested. No explanations, just create files and say done.\",
-    \"user_message\": \"Create these files: 1) Use the write tool to create hello.py containing: print('hello'). 2) Use bash to run: echo 'bash-created' > /tmp/workspace/notes.txt. 3) Use write to create config.json containing: {\\\"v\\\": 1}. Then respond with just 'done'.\",
+    \"user_message\": \"Create these files: 1) Use the write tool to create hello.py containing: print('hello'). 2) Use bash to run: echo 'bash-created' > /workspace/notes.txt. 3) Use write to create config.json containing: {\\\"v\\\": 1}. Then respond with just 'done'.\",
     \"tools_enabled\": \"write,bash,read\",
     \"sandbox_url\": \"http://127.0.0.1:9999\",
-    \"workdir\": \"/tmp/workspace\",
+    \"workdir\": \"/workspace\",
     \"max_turns\": \"5\"
   }" > /dev/null
 

@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton;
 use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
@@ -40,6 +41,9 @@ pub struct InstallResult {
     /// Skill definitions bootstrapped.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
+    /// ADR markdown files bootstrapped into TemperFS.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub adrs_bootstrapped: Vec<String>,
     /// Seed data instances created.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub seed_instances: Vec<String>,
@@ -103,6 +107,8 @@ pub struct AppBundle {
     pub agents: Vec<AgentDefinition>,
     /// Skill definitions discovered from `skills/` subdirectories.
     pub skills: Vec<AppSkillDefinition>,
+    /// ADR markdown files discovered from `adrs/`.
+    pub adrs: Vec<AdrEntry>,
     /// Seed data instances discovered from `seed-data/` TOML files.
     pub seed_instances: Vec<SeedInstance>,
 }
@@ -145,6 +151,17 @@ pub struct AppSkillDefinition {
     /// Companion files in the skill directory (everything except SKILL.md).
     #[serde(skip)]
     pub companion_files: Vec<CompanionFile>,
+}
+
+/// An architecture decision record discovered from `adrs/*.md`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AdrEntry {
+    /// Filename stem, e.g. `001-initial-design`.
+    pub name: String,
+    /// File name including extension, e.g. `001-initial-design.md`.
+    pub file_name: String,
+    /// Full markdown content.
+    pub content: String,
 }
 
 /// A companion file bundled with a skill.
@@ -430,7 +447,11 @@ impl AppCatalog {
             let version = manifest.version.clone();
             let dependencies = manifest.dependencies.clone();
 
-            paths.insert(dir_name, app_dir);
+            let app_path = app_dir.clone();
+            paths.insert(app_name.clone(), app_path.clone());
+            if dir_name != app_name {
+                paths.entry(dir_name).or_insert(app_path);
+            }
             entries.push(AppEntry {
                 name: app_name,
                 description,
@@ -550,8 +571,9 @@ fn find_cedar_policies(app_dir: &Path) -> Vec<PathBuf> {
 
 /// Find compiled WASM module binaries in an app directory.
 ///
-/// Scans `wasm/*/target/wasm32-unknown-unknown/release/{module_name}.wasm`
-/// where `{module_name}` matches the directory name under `wasm/`.
+/// Scans both `wasm32-unknown-unknown` and `wasm32-wasip1` release outputs
+/// because some OS apps mix pure WASM modules with WASI modules such as
+/// sandboxed tool runners.
 fn find_wasm_modules(app_dir: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut modules = BTreeMap::new();
     let wasm_dir = app_dir.join("wasm");
@@ -573,25 +595,40 @@ fn find_wasm_modules(app_dir: &Path) -> BTreeMap<String, Vec<u8>> {
         if module_name == "target" {
             continue;
         }
-        let wasm_path = entry
-            .path()
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join("release")
-            .join(format!("{module_name}.wasm"));
-        if wasm_path.exists() {
+        let candidates = [
+            entry
+                .path()
+                .join("target")
+                .join("wasm32-unknown-unknown")
+                .join("release")
+                .join(format!("{module_name}.wasm")),
+            entry
+                .path()
+                .join("target")
+                .join("wasm32-wasip1")
+                .join("release")
+                .join(format!("{module_name}.wasm")),
+        ];
+
+        for wasm_path in candidates {
+            if !wasm_path.exists() {
+                continue;
+            }
             match std::fs::read(&wasm_path) {
                 Ok(bytes) => {
                     tracing::debug!(
                         module = %module_name,
+                        path = %wasm_path.display(),
                         size = bytes.len(),
                         "Found WASM module in OS app"
                     );
-                    modules.insert(module_name, bytes);
+                    modules.insert(module_name.clone(), bytes);
+                    break;
                 }
                 Err(e) => {
                     tracing::warn!(
                         module = %module_name,
+                        path = %wasm_path.display(),
                         error = %e,
                         "Failed to read WASM module binary"
                     );
@@ -722,6 +759,51 @@ fn find_app_skills(app_dir: &Path) -> Vec<AppSkillDefinition> {
             description,
             scope,
             companion_files,
+        });
+    }
+    results
+}
+
+/// Discover app-local ADR markdown files from `adrs/*.md`.
+fn find_adrs(app_dir: &Path) -> Vec<AdrEntry> {
+    let adrs_dir = app_dir.join("adrs");
+    if !adrs_dir.is_dir() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(&adrs_dir) else {
+        return Vec::new();
+    };
+
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        })
+        .collect();
+    files.sort();
+
+    let mut results = Vec::new();
+    for path in files {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(file_name)
+            .to_string();
+        results.push(AdrEntry {
+            name,
+            file_name: file_name.to_string(),
+            content,
         });
     }
     results
@@ -959,6 +1041,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     // Discover agents, skills, and seed data.
     let agents = find_agents(app_dir);
     let skills = find_app_skills(app_dir);
+    let adrs = find_adrs(app_dir);
     let seed_instances = find_seed_data(app_dir);
 
     // Read app guide to check if there's anything at all.
@@ -970,6 +1053,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         && wasm_modules.is_empty()
         && agents.is_empty()
         && skills.is_empty()
+        && adrs.is_empty()
         && seed_instances.is_empty()
         && app_guide.is_none()
         && csdl.is_none()
@@ -984,6 +1068,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         wasm_modules,
         agents,
         skills,
+        adrs,
         seed_instances,
     })
 }
@@ -1029,9 +1114,28 @@ async fn install_os_app_without_dependencies(
     tenant: &str,
     app_name: &str,
 ) -> Result<InstallResult, String> {
-    let bundle =
-        get_os_app(app_name).ok_or_else(|| format!("OS app '{app_name}' not found in catalog"))?;
+    let app_dir = {
+        let cat = catalog().read().unwrap(); // ci-ok: infallible lock
+        cat.paths.get(app_name).cloned().ok_or_else(|| {
+            let known: Vec<String> = cat.paths.keys().cloned().collect();
+            format!("OS app '{app_name}' not found in catalog (known path keys: {known:?})")
+        })?
+    };
+    let bundle = load_app_bundle(&app_dir).ok_or_else(|| {
+        format!(
+            "OS app '{app_name}' is registered at '{}' but its bundle failed to load",
+            app_dir.display()
+        )
+    })?;
     let tenant_id = TenantId::new(tenant);
+
+    if bundle.adrs.is_empty() {
+        tracing::warn!(
+            tenant,
+            app = %app_name,
+            "App installed with no ADRs; add adrs/*.md to record design decisions"
+        );
+    }
 
     // Classify each bundle spec as added / updated / skipped, and compute the
     // merged CSDL — both require the registry read lock, so we do them together.
@@ -1277,7 +1381,10 @@ async fn install_os_app_without_dependencies(
     // ── Step 6: Bootstrap skills. ────────────────────────────────────
     let skills_bootstrapped = bootstrap_skills(state, &tenant_id, tenant, &bundle.skills).await;
 
-    // ── Step 7: Create seed instances. ───────────────────────────────
+    // ── Step 7: Bootstrap ADRs into TemperFS. ────────────────────────
+    let adrs_bootstrapped = bootstrap_adrs(state, &tenant_id, tenant, app_name, &bundle.adrs).await;
+
+    // ── Step 8: Create seed instances. ───────────────────────────────
     let seed_created = bootstrap_seed_data(state, &tenant_id, tenant, &bundle.seed_instances).await;
 
     Ok(InstallResult {
@@ -1287,6 +1394,7 @@ async fn install_os_app_without_dependencies(
         wasm_modules: wasm_registered,
         agents: agents_bootstrapped,
         skills: skills_bootstrapped,
+        adrs_bootstrapped,
         seed_instances: seed_created,
     })
 }
@@ -1365,6 +1473,30 @@ async fn bootstrap_agents(
                 && let Some(name) = resp.state.fields.get("Name").and_then(|v| v.as_str())
                 && name.eq_ignore_ascii_case(&agent.name)
             {
+                if let Some(file_id) = resp
+                    .state
+                    .fields
+                    .get("ContentFileId")
+                    .or_else(|| resp.state.fields.get("content_file_id"))
+                    .and_then(|v| v.as_str())
+                    && let Err(error) = ensure_inline_file_uploaded(
+                        state,
+                        tenant_id,
+                        &agent_ctx,
+                        file_id,
+                        &format!("{}.soul.md", agent.name.to_lowercase().replace(' ', "-")),
+                        agent.content.as_bytes(),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        tenant,
+                        agent = %agent.name,
+                        file_id = %file_id,
+                        error = %error,
+                        "Failed to refresh existing agent soul content"
+                    );
+                }
                 tracing::debug!(tenant, agent = %agent.name, "Soul already exists — skipping");
                 already_exists = true;
                 bootstrapped.push(agent.name.clone());
@@ -1381,30 +1513,23 @@ async fn bootstrap_agents(
             "app-soul-file-{}",
             agent.name.to_lowercase().replace(' ', "-")
         );
-        match state
-            .server
-            .get_or_create_tenant_entity(
-                tenant_id,
-                "File",
-                &file_id,
-                serde_json::json!({
-                    "Name": file_name,
-                    "MimeType": "text/markdown",
-                    "Content": agent.content,
-                }),
-            )
-            .await
+        if let Err(error) = ensure_inline_file_uploaded(
+            state,
+            tenant_id,
+            &agent_ctx,
+            &file_id,
+            &file_name,
+            agent.content.as_bytes(),
+        )
+        .await
         {
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(
-                    tenant,
-                    agent = %agent.name,
-                    error = %e,
-                    "Failed to create TemperFS File for agent"
-                );
-                continue;
-            }
+            tracing::warn!(
+                tenant,
+                agent = %agent.name,
+                error = %error,
+                "Failed to create TemperFS File for agent"
+            );
+            continue;
         }
 
         // Create Soul entity.
@@ -1531,6 +1656,30 @@ async fn bootstrap_skills(
                 && let Some(name) = resp.state.fields.get("Name").and_then(|v| v.as_str())
                 && name.eq_ignore_ascii_case(&skill.name)
             {
+                if let Some(file_id) = resp
+                    .state
+                    .fields
+                    .get("ContentFileId")
+                    .or_else(|| resp.state.fields.get("content_file_id"))
+                    .and_then(|v| v.as_str())
+                    && let Err(error) = ensure_inline_file_uploaded(
+                        state,
+                        tenant_id,
+                        &agent_ctx,
+                        file_id,
+                        &format!("{}.skill.md", skill.name.to_lowercase().replace(' ', "-")),
+                        skill.content.as_bytes(),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        tenant,
+                        skill = %skill.name,
+                        file_id = %file_id,
+                        error = %error,
+                        "Failed to refresh existing skill content"
+                    );
+                }
                 tracing::debug!(tenant, skill = %skill.name, "Skill already exists — skipping");
                 already_exists = true;
                 bootstrapped.push(skill.name.clone());
@@ -1547,30 +1696,23 @@ async fn bootstrap_skills(
             skill.name.to_lowercase().replace(' ', "-")
         );
         let file_name = format!("{}.skill.md", skill.name.to_lowercase().replace(' ', "-"));
-        match state
-            .server
-            .get_or_create_tenant_entity(
-                tenant_id,
-                "File",
-                &file_id,
-                serde_json::json!({
-                    "Name": file_name,
-                    "MimeType": "text/markdown",
-                    "Content": skill.content,
-                }),
-            )
-            .await
+        if let Err(error) = ensure_inline_file_uploaded(
+            state,
+            tenant_id,
+            &agent_ctx,
+            &file_id,
+            &file_name,
+            skill.content.as_bytes(),
+        )
+        .await
         {
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(
-                    tenant,
-                    skill = %skill.name,
-                    error = %e,
-                    "Failed to create TemperFS File for skill"
-                );
-                continue;
-            }
+            tracing::warn!(
+                tenant,
+                skill = %skill.name,
+                error = %error,
+                "Failed to create TemperFS File for skill"
+            );
+            continue;
         }
 
         // Create Skill entity.
@@ -1616,6 +1758,474 @@ async fn bootstrap_skills(
         }
     }
     bootstrapped
+}
+
+async fn ensure_inline_file_uploaded(
+    state: &PlatformState,
+    tenant_id: &TenantId,
+    agent_ctx: &temper_server::request_context::AgentContext,
+    file_id: &str,
+    file_name: &str,
+    content: &[u8],
+) -> Result<(), String> {
+    let response = state
+        .server
+        .get_or_create_tenant_entity(tenant_id, "File", file_id, serde_json::json!({}))
+        .await
+        .map_err(|e| format!("failed to create File('{file_id}') actor: {e}"))?;
+
+    if response.state.status == "Created" {
+        state
+            .server
+            .dispatch(temper_server::state::DispatchCommand {
+                tenant: tenant_id,
+                entity_type: "File",
+                entity_id: file_id,
+                action: "Create",
+                params: serde_json::json!({
+                    "name": file_name,
+                    "path": "",
+                    "directory_id": "",
+                    "workspace_id": "",
+                    "mime_type": "text/markdown",
+                }),
+                agent_ctx,
+                await_integration: false,
+            })
+            .await
+            .map_err(|e| format!("failed to initialize File('{file_id}'): {e}"))?;
+    }
+
+    state
+        .server
+        .put_file_stream_content(tenant_id, file_id, content, "text/markdown", agent_ctx)
+        .await
+        .map_err(|e| format!("failed to upload File('{file_id}') content: {e}"))?;
+
+    Ok(())
+}
+
+const APP_DOCS_WORKSPACE_ID: &str = "os-app-docs";
+const APP_DOCS_WORKSPACE_NAME: &str = "apps";
+const APP_DOCS_ROOT_DIR_ID: &str = "os-app-docs-root";
+const APP_DOCS_ROOT_PATH: &str = "/apps";
+const APP_DOCS_QUOTA_BYTES: i64 = 1_099_511_627_776;
+
+/// Bootstrap app-local ADRs into TemperFS under `/apps/{app-name}/adrs/`.
+async fn bootstrap_adrs(
+    state: &PlatformState,
+    tenant_id: &TenantId,
+    tenant: &str,
+    app_name: &str,
+    adrs: &[AdrEntry],
+) -> Vec<String> {
+    if adrs.is_empty() {
+        return Vec::new();
+    }
+
+    let has_workspace = {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        registry.get_spec(tenant_id, "Workspace").is_some()
+    };
+    let has_directory = {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        registry.get_spec(tenant_id, "Directory").is_some()
+    };
+    let has_file = {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        registry.get_spec(tenant_id, "File").is_some()
+    };
+    if !(has_workspace && has_directory && has_file) {
+        tracing::info!(
+            tenant,
+            app = %app_name,
+            count = adrs.len(),
+            "Skipping ADR bootstrap — TemperFS types not registered (install temper-fs first)"
+        );
+        return Vec::new();
+    }
+
+    let agent_ctx = temper_server::request_context::AgentContext::system();
+    if let Err(error) = ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
+        tracing::warn!(
+            tenant,
+            app = %app_name,
+            error = %error,
+            "Failed to ensure app docs workspace for ADR bootstrap"
+        );
+        return Vec::new();
+    }
+
+    let app_slug = slug_fragment(app_name);
+    let app_dir_id = format!("os-app-docs-dir-{app_slug}");
+    let app_dir_path = format!("{APP_DOCS_ROOT_PATH}/{app_name}");
+    if let Err(error) = ensure_directory(
+        state,
+        tenant_id,
+        &agent_ctx,
+        DirectoryBootstrapTarget {
+            directory_id: &app_dir_id,
+            name: app_name,
+            path: &app_dir_path,
+            parent_id: Some(APP_DOCS_ROOT_DIR_ID),
+            workspace_id: APP_DOCS_WORKSPACE_ID,
+        },
+    )
+    .await
+    {
+        tracing::warn!(
+            tenant,
+            app = %app_name,
+            error = %error,
+            "Failed to ensure app ADR directory"
+        );
+        return Vec::new();
+    }
+
+    let adrs_dir_id = format!("os-app-docs-dir-{app_slug}-adrs");
+    let adrs_dir_path = format!("{app_dir_path}/adrs");
+    if let Err(error) = ensure_directory(
+        state,
+        tenant_id,
+        &agent_ctx,
+        DirectoryBootstrapTarget {
+            directory_id: &adrs_dir_id,
+            name: "adrs",
+            path: &adrs_dir_path,
+            parent_id: Some(app_dir_id.as_str()),
+            workspace_id: APP_DOCS_WORKSPACE_ID,
+        },
+    )
+    .await
+    {
+        tracing::warn!(
+            tenant,
+            app = %app_name,
+            error = %error,
+            "Failed to ensure app ADR subdirectory"
+        );
+        return Vec::new();
+    }
+
+    let mut bootstrapped = Vec::new();
+    for adr in adrs {
+        let file_slug = slug_fragment(&adr.name);
+        let file_id = format!("os-app-adr-{app_slug}-{file_slug}");
+        let file_path = format!("{adrs_dir_path}/{}", adr.file_name);
+        match ensure_markdown_file(
+            state,
+            tenant_id,
+            &agent_ctx,
+            MarkdownFileBootstrapTarget {
+                file_id: &file_id,
+                name: &adr.file_name,
+                path: &file_path,
+                directory_id: &adrs_dir_id,
+                workspace_id: APP_DOCS_WORKSPACE_ID,
+            },
+            adr.content.as_bytes(),
+        )
+        .await
+        {
+            Ok(()) => bootstrapped.push(file_path),
+            Err(error) => {
+                tracing::warn!(
+                    tenant,
+                    app = %app_name,
+                    adr = %adr.file_name,
+                    error = %error,
+                    "Failed to bootstrap ADR into TemperFS"
+                );
+            }
+        }
+    }
+
+    bootstrapped
+}
+
+async fn ensure_app_docs_workspace(
+    state: &PlatformState,
+    tenant_id: &TenantId,
+    agent_ctx: &temper_server::request_context::AgentContext,
+) -> Result<(), String> {
+    if !state
+        .server
+        .entity_exists(tenant_id, "Workspace", APP_DOCS_WORKSPACE_ID)
+    {
+        state
+            .server
+            .get_or_create_tenant_entity(
+                tenant_id,
+                "Workspace",
+                APP_DOCS_WORKSPACE_ID,
+                serde_json::json!({}),
+            )
+            .await
+            .map_err(|e| format!("failed to create app docs workspace entity: {e}"))?;
+        state
+            .server
+            .dispatch(temper_server::state::DispatchCommand {
+                tenant: tenant_id,
+                entity_type: "Workspace",
+                entity_id: APP_DOCS_WORKSPACE_ID,
+                action: "Create",
+                params: serde_json::json!({
+                    "name": APP_DOCS_WORKSPACE_NAME,
+                    "quota_limit": APP_DOCS_QUOTA_BYTES,
+                }),
+                agent_ctx,
+                await_integration: false,
+            })
+            .await
+            .map_err(|e| format!("failed to initialize app docs workspace: {e}"))?;
+    }
+
+    ensure_directory(
+        state,
+        tenant_id,
+        agent_ctx,
+        DirectoryBootstrapTarget {
+            directory_id: APP_DOCS_ROOT_DIR_ID,
+            name: APP_DOCS_WORKSPACE_NAME,
+            path: APP_DOCS_ROOT_PATH,
+            parent_id: None,
+            workspace_id: APP_DOCS_WORKSPACE_ID,
+        },
+    )
+    .await
+}
+
+struct DirectoryBootstrapTarget<'a> {
+    directory_id: &'a str,
+    name: &'a str,
+    path: &'a str,
+    parent_id: Option<&'a str>,
+    workspace_id: &'a str,
+}
+
+async fn ensure_directory(
+    state: &PlatformState,
+    tenant_id: &TenantId,
+    agent_ctx: &temper_server::request_context::AgentContext,
+    target: DirectoryBootstrapTarget<'_>,
+) -> Result<(), String> {
+    if state
+        .server
+        .entity_exists(tenant_id, "Directory", target.directory_id)
+    {
+        return Ok(());
+    }
+
+    state
+        .server
+        .get_or_create_tenant_entity(
+            tenant_id,
+            "Directory",
+            target.directory_id,
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| {
+            format!(
+                "failed to create Directory('{}') actor: {e}",
+                target.directory_id
+            )
+        })?;
+    state
+        .server
+        .dispatch(temper_server::state::DispatchCommand {
+            tenant: tenant_id,
+            entity_type: "Directory",
+            entity_id: target.directory_id,
+            action: "Create",
+            params: serde_json::json!({
+                "name": target.name,
+                "path": target.path,
+                "parent_id": target.parent_id,
+                "workspace_id": target.workspace_id,
+            }),
+            agent_ctx,
+            await_integration: false,
+        })
+        .await
+        .map_err(|e| {
+            format!(
+                "failed to initialize Directory('{}'): {e}",
+                target.directory_id
+            )
+        })?;
+
+    if let Some(parent_id) = target.parent_id {
+        state
+            .server
+            .dispatch(temper_server::state::DispatchCommand {
+                tenant: tenant_id,
+                entity_type: "Directory",
+                entity_id: parent_id,
+                action: "AddChild",
+                params: serde_json::json!({}),
+                agent_ctx,
+                await_integration: false,
+            })
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to register child directory '{}': {e}",
+                    target.directory_id
+                )
+            })?;
+    }
+
+    Ok(())
+}
+
+struct MarkdownFileBootstrapTarget<'a> {
+    file_id: &'a str,
+    name: &'a str,
+    path: &'a str,
+    directory_id: &'a str,
+    workspace_id: &'a str,
+}
+
+async fn ensure_markdown_file(
+    state: &PlatformState,
+    tenant_id: &TenantId,
+    agent_ctx: &temper_server::request_context::AgentContext,
+    target: MarkdownFileBootstrapTarget<'_>,
+    content: &[u8],
+) -> Result<(), String> {
+    let existed = state
+        .server
+        .entity_exists(tenant_id, "File", target.file_id);
+    if !existed {
+        state
+            .server
+            .get_or_create_tenant_entity(tenant_id, "File", target.file_id, serde_json::json!({}))
+            .await
+            .map_err(|e| format!("failed to create File('{}') actor: {e}", target.file_id))?;
+        state
+            .server
+            .dispatch(temper_server::state::DispatchCommand {
+                tenant: tenant_id,
+                entity_type: "File",
+                entity_id: target.file_id,
+                action: "Create",
+                params: serde_json::json!({
+                    "name": target.name,
+                    "path": target.path,
+                    "directory_id": target.directory_id,
+                    "workspace_id": target.workspace_id,
+                    "mime_type": "text/markdown",
+                }),
+                agent_ctx,
+                await_integration: false,
+            })
+            .await
+            .map_err(|e| format!("failed to initialize File('{}'): {e}", target.file_id))?;
+        state
+            .server
+            .dispatch(temper_server::state::DispatchCommand {
+                tenant: tenant_id,
+                entity_type: "Directory",
+                entity_id: target.directory_id,
+                action: "AddChild",
+                params: serde_json::json!({}),
+                agent_ctx,
+                await_integration: false,
+            })
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to register file '{}' with parent directory: {e}",
+                    target.file_id
+                )
+            })?;
+        state
+            .server
+            .dispatch(temper_server::state::DispatchCommand {
+                tenant: tenant_id,
+                entity_type: "Workspace",
+                entity_id: target.workspace_id,
+                action: "IncrementFileCount",
+                params: serde_json::json!({}),
+                agent_ctx,
+                await_integration: false,
+            })
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to increment file count for workspace '{}': {e}",
+                    target.workspace_id
+                )
+            })?;
+    }
+
+    let desired_hash = content_sha256(content);
+    if file_already_contains(state, tenant_id, target.file_id, &desired_hash).await? {
+        return Ok(());
+    }
+
+    state
+        .server
+        .put_file_stream_content(
+            tenant_id,
+            target.file_id,
+            content,
+            "text/markdown",
+            agent_ctx,
+        )
+        .await
+        .map_err(|e| format!("failed to upload File('{}') content: {e}", target.file_id))?;
+
+    Ok(())
+}
+
+async fn file_already_contains(
+    state: &PlatformState,
+    tenant_id: &TenantId,
+    file_id: &str,
+    desired_hash: &str,
+) -> Result<bool, String> {
+    let response = state
+        .server
+        .get_tenant_entity_state(tenant_id, "File", file_id)
+        .await
+        .map_err(|e| format!("failed to inspect File('{file_id}'): {e}"))?;
+
+    let has_content = response
+        .state
+        .booleans
+        .get("has_content")
+        .copied()
+        .unwrap_or(false);
+    let current_hash = response
+        .state
+        .fields
+        .get("content_hash")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    Ok(has_content && current_hash == desired_hash)
+}
+
+fn content_sha256(content: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn slug_fragment(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_sep = true;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_was_sep = false;
+        } else if !last_was_sep {
+            slug.push('-');
+            last_was_sep = true;
+        }
+    }
+    slug.trim_matches('-').to_string()
 }
 
 /// Bootstrap seed data instances into the tenant.

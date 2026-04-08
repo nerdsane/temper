@@ -91,11 +91,23 @@ impl SecretsVault {
     }
 
     /// Get a single secret value for a tenant.
+    ///
+    /// Falls back to the `default` tenant so platform bootstrap secrets remain
+    /// available to newly created tenants until they override them.
     pub fn get_secret(&self, tenant: &str, key: &str) -> Option<String> {
         let cache = self.cache.read().unwrap(); // ci-ok: infallible lock
         cache
             .get(tenant)
             .and_then(|secrets| secrets.get(key).cloned())
+            .or_else(|| {
+                if tenant == "default" {
+                    None
+                } else {
+                    cache
+                        .get("default")
+                        .and_then(|secrets| secrets.get(key).cloned())
+                }
+            })
     }
 
     /// Remove a secret from the in-memory cache.
@@ -117,9 +129,20 @@ impl SecretsVault {
     }
 
     /// Get all decrypted secrets for a tenant (for WASM host injection).
+    ///
+    /// `default` secrets act as a baseline and tenant-local secrets override
+    /// them when present.
     pub fn get_tenant_secrets(&self, tenant: &str) -> BTreeMap<String, String> {
         let cache = self.cache.read().unwrap(); // ci-ok: infallible lock
-        cache.get(tenant).cloned().unwrap_or_default()
+        if tenant == "default" {
+            return cache.get("default").cloned().unwrap_or_default();
+        }
+
+        let mut merged = cache.get("default").cloned().unwrap_or_default();
+        if let Some(tenant_secrets) = cache.get(tenant) {
+            merged.extend(tenant_secrets.clone());
+        }
+        merged
     }
 }
 
@@ -163,6 +186,19 @@ mod tests {
     }
 
     #[test]
+    fn get_secret_falls_back_to_default() {
+        let vault = SecretsVault::new(&test_key());
+        vault
+            .cache_secret("default", "API_KEY", "sk-default".into())
+            .unwrap();
+
+        assert_eq!(
+            vault.get_secret("tenant-b", "API_KEY"),
+            Some("sk-default".into())
+        );
+    }
+
+    #[test]
     fn budget_enforcement() {
         let vault = SecretsVault::new(&test_key());
         for i in 0..MAX_SECRETS_PER_TENANT {
@@ -200,10 +236,17 @@ mod tests {
     #[test]
     fn get_tenant_secrets_for_wasm() {
         let vault = SecretsVault::new(&test_key());
+        vault
+            .cache_secret("default", "GLOBAL", "base".into())
+            .unwrap();
         vault.cache_secret("t", "K1", "V1".into()).unwrap();
         vault.cache_secret("t", "K2", "V2".into()).unwrap();
+        vault
+            .cache_secret("t", "GLOBAL", "override".into())
+            .unwrap();
         let secrets = vault.get_tenant_secrets("t");
-        assert_eq!(secrets.len(), 2);
+        assert_eq!(secrets.len(), 3);
+        assert_eq!(secrets["GLOBAL"], "override");
         assert_eq!(secrets["K1"], "V1");
         assert_eq!(secrets["K2"], "V2");
     }

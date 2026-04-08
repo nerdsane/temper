@@ -46,7 +46,7 @@ initial = "anthropic"
 [[state]]
 name = "tools_enabled"
 type = "string"
-initial = "read,write,edit,bash"
+initial = "read,write,edit,bash,read_entity,save_memory,recall_memory,spawn_agent,list_agents,abort_agent,steer_agent,run_coding_agent,logfire_query"
 
 [[state]]
 name = "sandbox_url"

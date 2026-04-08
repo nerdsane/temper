@@ -138,7 +138,7 @@ max_turns = "10"
 agent_wait_timeout_ms = "300000"
 agent_wait_poll_ms = "250"
 tools_enabled = "logfire_query"
-workdir = "/tmp/workspace"
+workdir = "/workspace"
 
 [[integration]]
 name = "create_proposals"
