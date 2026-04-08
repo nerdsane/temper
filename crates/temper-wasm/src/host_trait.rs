@@ -340,7 +340,7 @@ impl WasmHost for ProductionWasmHost {
             .is_some_and(|ct| ct.contains("text/event-stream"));
         let request_asked_for_stream =
             body.contains("\"stream\":true") || body.contains("\"stream\": true");
-        let is_sse = ct_is_sse || (request_asked_for_stream && status >= 200 && status < 300);
+        let is_sse = ct_is_sse || (request_asked_for_stream && (200..300).contains(&status));
 
         let resp_body = if is_sse {
             // SSE streaming: read chunks with per-chunk stall timeout, strip SSE
@@ -373,13 +373,13 @@ impl WasmHost for ProductionWasmHost {
                             }
                         }
                         // Emit progress to keep heartbeats alive
-                        if chunk_count.is_multiple_of(20) {
-                            if let Some(ref emitter) = self.progress_emitter {
-                                let _ = emitter(&format!(
-                                    "{{\"kind\":\"streaming_progress\",\"chunks\":{chunk_count},\"data_bytes\":{}}}",
-                                    accumulated_data.len()
-                                ));
-                            }
+                        if chunk_count.is_multiple_of(20)
+                            && let Some(ref emitter) = self.progress_emitter
+                        {
+                            let _ = emitter(&format!(
+                                "{{\"kind\":\"streaming_progress\",\"chunks\":{chunk_count},\"data_bytes\":{}}}",
+                                accumulated_data.len()
+                            ));
                         }
                     }
                     Ok(Some(Err(e))) => {

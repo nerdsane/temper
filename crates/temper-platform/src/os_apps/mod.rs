@@ -369,7 +369,7 @@ impl AppCatalog {
 
         let mut app_dirs: Vec<_> = read_dir
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+            .filter(|e| e.path().is_dir())
             .collect();
         // Deterministic ordering.
         app_dirs.sort_by_key(|e| e.file_name());
@@ -563,7 +563,7 @@ fn find_wasm_modules(app_dir: &Path) -> BTreeMap<String, Vec<u8>> {
     };
     let mut dirs: Vec<_> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .filter(|e| e.path().is_dir())
         .collect();
     dirs.sort_by_key(|e| e.file_name());
 
@@ -620,7 +620,7 @@ fn find_agents(app_dir: &Path) -> Vec<AgentDefinition> {
 
     let mut dirs: Vec<_> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .filter(|e| e.path().is_dir())
         .collect();
     dirs.sort_by_key(|e| e.file_name());
 
@@ -691,7 +691,7 @@ fn find_app_skills(app_dir: &Path) -> Vec<AppSkillDefinition> {
 
     let mut dirs: Vec<_> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .filter(|e| e.path().is_dir())
         .collect();
     dirs.sort_by_key(|e| e.file_name());
 
@@ -1045,7 +1045,11 @@ async fn install_os_app_without_dependencies(
             match registry.get_spec(&tenant_id, entity_type) {
                 Some(existing) => {
                     let existing_hash = temper_store_turso::spec_content_hash(&existing.ioa_source);
-                    if incoming_hash == existing_hash {
+                    let verified = registry
+                        .get_verification_status(&tenant_id, entity_type)
+                        .map(|s| s.is_passed())
+                        .unwrap_or(false);
+                    if incoming_hash == existing_hash && verified {
                         skipped.push(entity_type.to_string());
                     } else {
                         updated.push(entity_type.to_string());
@@ -1112,29 +1116,25 @@ async fn install_os_app_without_dependencies(
         }
 
         if let Some(ref merged) = merged_csdl {
-            for (entity_type, ioa_source) in spec_sources {
-                let hash = temper_store_turso::spec_content_hash(&ioa_source);
-                turso
-                    .upsert_spec(tenant, &entity_type, &ioa_source, merged, &hash)
-                    .await
-                    .map_err(|e| format!("Failed to persist spec {entity_type}: {e}"))?;
-            }
-        }
-        if let Some(ref policy_text) = combined_policy {
+            // Collect all specs with their content hashes for a single
+            // transactional write — eliminates the crash window between
+            // individual upserts (committed=0) and the commit step.
+            let owned: Vec<(String, String, String, String)> = spec_sources
+                .into_iter()
+                .map(|(et, ioa)| {
+                    let hash = temper_store_turso::spec_content_hash(&ioa);
+                    (et, ioa, merged.clone(), hash)
+                })
+                .collect();
+            let refs: Vec<(&str, &str, &str, &str)> = owned
+                .iter()
+                .map(|(et, ioa, csdl, h)| (et.as_str(), ioa.as_str(), csdl.as_str(), h.as_str()))
+                .collect();
             turso
-                .upsert_tenant_policy(tenant, policy_text)
+                .upsert_specs_and_commit(tenant, &refs, combined_policy.as_deref(), app_name)
                 .await
-                .map_err(|e| format!("Failed to persist Cedar policy: {e}"))?;
+                .map_err(|e| format!("Failed to persist and commit specs: {e}"))?;
         }
-        turso
-            .record_installed_app(tenant, app_name)
-            .await
-            .map_err(|e| format!("Failed to record os-app installation: {e}"))?;
-        // Commit all specs atomically after all writes succeed.
-        turso
-            .commit_specs(tenant)
-            .await
-            .map_err(|e| format!("Failed to commit specs: {e}"))?;
     } else if let Some(ref store) = state.server.event_store
         && let Some(ps) = store.platform_store()
     {
