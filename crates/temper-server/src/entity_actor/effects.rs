@@ -11,8 +11,11 @@
 //! guarantees that simulation tests exercise the real production logic.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use temper_jit::table::{Effect, EvalContext, TransitionTable};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
+
+use crate::blobs::{FIELD_OVERFLOW_BLOB_PREFIX, OverflowBlobWrite, blob_ref_value};
 
 use super::types::{EntityEvent, EntityState, MAX_EVENTS_PER_ENTITY};
 
@@ -107,8 +110,16 @@ pub struct ProcessResult {
     pub scheduled_actions: Vec<ScheduledAction>,
     /// Spawn requests for child entities.
     pub spawn_requests: Vec<SpawnRequest>,
+    /// Deferred blob writes for oversized projected field values.
+    pub overflow_blobs: Vec<OverflowBlobWrite>,
     /// Error message (if action failed).
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldSyncMode {
+    InlineTruncate,
+    BlobRefs,
 }
 
 /// Process an action through the transition table.
@@ -125,12 +136,13 @@ pub fn process_action(
     action: &str,
     params: &serde_json::Value,
 ) -> ProcessResult {
-    process_action_with_xref(
+    process_action_with_xref_and_field_mode(
         state,
         table,
         action,
         params,
         &std::collections::BTreeMap::new(),
+        FieldSyncMode::InlineTruncate,
     )
 }
 
@@ -145,6 +157,24 @@ pub fn process_action_with_xref(
     params: &serde_json::Value,
     cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
 ) -> ProcessResult {
+    process_action_with_xref_and_field_mode(
+        state,
+        table,
+        action,
+        params,
+        cross_entity_booleans,
+        FieldSyncMode::InlineTruncate,
+    )
+}
+
+pub fn process_action_with_xref_and_field_mode(
+    state: &mut EntityState,
+    table: &TransitionTable,
+    action: &str,
+    params: &serde_json::Value,
+    cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
+    field_sync_mode: FieldSyncMode,
+) -> ProcessResult {
     if state.total_event_count >= MAX_EVENTS_PER_ENTITY {
         return ProcessResult {
             success: false,
@@ -152,6 +182,7 @@ pub fn process_action_with_xref(
             custom_effects: vec![],
             scheduled_actions: vec![],
             spawn_requests: vec![],
+            overflow_blobs: vec![],
             error: Some(format!(
                 "Event budget exhausted ({MAX_EVENTS_PER_ENTITY} max)"
             )),
@@ -169,7 +200,7 @@ pub fn process_action_with_xref(
             let (custom_effects, scheduled_actions, spawn_requests, schedule_at_requests) =
                 apply_effects(state, &transition_result.effects, params);
             apply_new_state_fallback(state, &from_status, &to_status);
-            sync_fields(state, params);
+            let overflow_blobs = sync_fields(state, params, field_sync_mode);
 
             // Resolve deferred schedule_at requests now that fields are synced
             let mut all_scheduled = scheduled_actions;
@@ -189,6 +220,7 @@ pub fn process_action_with_xref(
                 custom_effects,
                 scheduled_actions: all_scheduled,
                 spawn_requests,
+                overflow_blobs,
                 error: None,
             }
         }
@@ -198,6 +230,7 @@ pub fn process_action_with_xref(
             custom_effects: vec![],
             scheduled_actions: vec![],
             spawn_requests: vec![],
+            overflow_blobs: vec![],
             error: Some(format!(
                 "Action '{}' not valid from state '{}'",
                 action, state.status
@@ -209,6 +242,7 @@ pub fn process_action_with_xref(
             custom_effects: vec![],
             scheduled_actions: vec![],
             spawn_requests: vec![],
+            overflow_blobs: vec![],
             error: Some(format!("Unknown action: {}", action)),
         },
     }
@@ -470,9 +504,14 @@ const MAX_FIELD_VALUE_BYTES: usize = 32_768; // 32 KB
 ///
 /// This projects status, counters, booleans, lists, and action params
 /// into the entity's fields for OData queries. Fields whose serialized
-/// value exceeds `MAX_FIELD_VALUE_BYTES` are truncated to prevent entity
-/// state bloat from adapter outputs.
-pub fn sync_fields(state: &mut EntityState, params: &serde_json::Value) {
+/// value exceeds `MAX_FIELD_VALUE_BYTES` are either truncated or projected
+/// through blob refs, depending on `mode`.
+pub fn sync_fields(
+    state: &mut EntityState,
+    params: &serde_json::Value,
+    mode: FieldSyncMode,
+) -> Vec<OverflowBlobWrite> {
+    let mut overflow_blobs = Vec::new();
     if let Some(obj) = state.fields.as_object_mut() {
         obj.insert(
             "Status".to_string(),
@@ -481,19 +520,7 @@ pub fn sync_fields(state: &mut EntityState, params: &serde_json::Value) {
         // Project action params into fields (skip oversized values)
         if let Some(p) = params.as_object() {
             for (k, v) in p {
-                let serialized_len = v.to_string().len();
-                if serialized_len <= MAX_FIELD_VALUE_BYTES {
-                    obj.insert(k.clone(), v.clone());
-                } else {
-                    // Store a truncation marker so the field is visible but not bloated
-                    obj.insert(
-                        k.clone(),
-                        serde_json::Value::String(format!(
-                            "[truncated: {} bytes exceeds {} limit]",
-                            serialized_len, MAX_FIELD_VALUE_BYTES
-                        )),
-                    );
-                }
+                obj.insert(k.clone(), project_field_value(v, mode, &mut overflow_blobs));
             }
         }
         // Sync counters into fields
@@ -510,7 +537,41 @@ pub fn sync_fields(state: &mut EntityState, params: &serde_json::Value) {
                 .iter()
                 .map(|s| serde_json::Value::String(s.clone()))
                 .collect();
-            obj.insert(k.clone(), serde_json::Value::Array(arr));
+            obj.insert(
+                k.clone(),
+                project_field_value(&serde_json::Value::Array(arr), mode, &mut overflow_blobs),
+            );
+        }
+    }
+    overflow_blobs
+}
+
+fn project_field_value(
+    value: &serde_json::Value,
+    mode: FieldSyncMode,
+    overflow_blobs: &mut Vec<OverflowBlobWrite>,
+) -> serde_json::Value {
+    let serialized = serde_json::to_vec(value).unwrap_or_else(|_| value.to_string().into_bytes());
+    let serialized_len = serialized.len();
+    if serialized_len <= MAX_FIELD_VALUE_BYTES {
+        return value.clone();
+    }
+
+    match mode {
+        FieldSyncMode::InlineTruncate => serde_json::Value::String(format!(
+            "[truncated: {} bytes exceeds {} limit]",
+            serialized_len, MAX_FIELD_VALUE_BYTES
+        )),
+        FieldSyncMode::BlobRefs => {
+            let digest = Sha256::digest(&serialized);
+            let blob_key = format!("{FIELD_OVERFLOW_BLOB_PREFIX}{digest:x}.json");
+            if !overflow_blobs.iter().any(|blob| blob.key == blob_key) {
+                overflow_blobs.push(OverflowBlobWrite {
+                    key: blob_key.clone(),
+                    body: serialized,
+                });
+            }
+            blob_ref_value(&blob_key, serialized_len)
         }
     }
 }

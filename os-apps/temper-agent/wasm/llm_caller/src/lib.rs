@@ -60,7 +60,7 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
         let tools_enabled = fields
             .get("tools_enabled")
             .and_then(|v| v.as_str())
-            .unwrap_or("read,write,edit,bash");
+            .unwrap_or("read,write,edit,bash,read_entity,save_memory,recall_memory,spawn_agent,list_agents,abort_agent,steer_agent,run_coding_agent,logfire_query");
         // `system_prompt` is the Anthropic API system parameter (agent persona/behavior).
         // `user_message` is the actual user task from the Provision action.
         let system_prompt = fields

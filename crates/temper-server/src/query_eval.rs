@@ -7,6 +7,8 @@ use temper_odata::query::types::{
     BinaryOperator, FilterExpr, ODataValue, OrderByClause, OrderDirection, QueryOptions,
 };
 
+use crate::blobs::hydrate_blob_refs_for_tenant;
+
 /// Maximum nesting depth for recursive $expand (prevents infinite loops).
 const MAX_EXPAND_DEPTH: u8 = 3;
 
@@ -385,7 +387,8 @@ async fn expand_entity_recursive(
                             .get_tenant_entity_state(tenant, &info.target_type, fk)
                             .await
                     {
-                        let json = serde_json::to_value(&response.state).unwrap_or_default();
+                        let mut json = serde_json::to_value(&response.state).unwrap_or_default();
+                        hydrate_blob_refs_for_tenant(state, tenant, &mut json).await;
                         related_entities.push(json);
                     }
                 }
@@ -398,7 +401,9 @@ async fn expand_entity_recursive(
                             .get_tenant_entity_state(tenant, &info.target_type, related_id)
                             .await
                         {
-                            let json = serde_json::to_value(&response.state).unwrap_or_default();
+                            let mut json =
+                                serde_json::to_value(&response.state).unwrap_or_default();
+                            hydrate_blob_refs_for_tenant(state, tenant, &mut json).await;
                             let matches = json
                                 .get("fields")
                                 .and_then(|f| f.get(target_fk_field.as_str()))
@@ -418,7 +423,9 @@ async fn expand_entity_recursive(
                             .get_tenant_entity_state(tenant, &info.target_type, related_id)
                             .await
                         {
-                            let json = serde_json::to_value(&response.state).unwrap_or_default();
+                            let mut json =
+                                serde_json::to_value(&response.state).unwrap_or_default();
+                            hydrate_blob_refs_for_tenant(state, tenant, &mut json).await;
                             let matches = json
                                 .get("fields")
                                 .and_then(|f| f.as_object())

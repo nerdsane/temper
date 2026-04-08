@@ -21,6 +21,7 @@ use super::read_support::{
     resolve_entity_set_name, select_entity_ids_for_materialization,
 };
 use super::response::annotate_entity;
+use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::query_eval::{apply_query_options, expand_entity, select_fields};
 use crate::response::{ODataResponse, ODataStreamResponse, ODataXmlResponse, odata_error};
 use crate::state::ServerState;
@@ -62,6 +63,7 @@ async fn resolve_parent_entity(
                 })?;
 
             let mut parent_body = serde_json::to_value(&response.state).unwrap_or_default();
+            hydrate_blob_refs_for_tenant(state, tenant, &mut parent_body).await;
             let expand_item = ExpandItem {
                 property: property.clone(),
                 options: None,
@@ -236,11 +238,9 @@ async fn build_entity_body(
     options: EntityBodyOptions<'_>,
 ) -> Result<serde_json::Value, Response> {
     let response = load_existing_entity_response(state, tenant, entity_type, set_name, key).await?;
-    let mut body = annotate_entity(
-        serde_json::to_value(&response.state).unwrap_or_default(),
-        options.context,
-        options.odata_id,
-    );
+    let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
+    hydrate_blob_refs_for_tenant(state, tenant, &mut state_json).await;
+    let mut body = annotate_entity(state_json, options.context, options.odata_id);
 
     if options.enrich {
         enrich_entity_response(&mut body, entity_type, set_name, key, state, tenant);
@@ -454,6 +454,7 @@ async fn handle_entity_set(
             .await
         {
             let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
+            hydrate_blob_refs_for_tenant(state, tenant, &mut entity).await;
             if let Some(obj) = entity.as_object_mut() {
                 obj.insert(
                     "@odata.id".into(),
@@ -554,6 +555,7 @@ async fn handle_navigation_property(
         };
 
     let mut parent_body = serde_json::to_value(&response.state).unwrap_or_default();
+    hydrate_blob_refs_for_tenant(state, tenant, &mut parent_body).await;
     let nav_opts = ExpandOptions {
         select: query_options.select.clone(),
         filter: query_options.filter.clone(),

@@ -1556,7 +1556,7 @@ MOCK_OUTPUT
                 "type = \"adapter\"\nadapter = \"claude_code\"\ncommand = \"{verify_path}\"\non_success = \"RecordVerificationPass\""
             ),
         )
-        .replace("workdir = \"/tmp/workspace\"", &format!("workdir = \"{mock_workdir}\""));
+        .replace("workdir = \"/workspace\"", &format!("workdir = \"{mock_workdir}\""));
 
     let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">

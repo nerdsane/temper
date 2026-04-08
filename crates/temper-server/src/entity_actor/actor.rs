@@ -35,6 +35,7 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::event_store::ServerEventStore;
 
+use super::effects::{FieldSyncMode, process_action_with_xref_and_field_mode};
 use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_PER_ENTITY,
     MAX_ITEMS_PER_ENTITY,
@@ -330,7 +331,14 @@ impl EntityActor {
                             // Sync action params into fields — mirrors the live
                             // process_action() path (effects.rs:155) so data fields
                             // like Title, Description, Priority survive replay.
-                            super::effects::sync_fields(state, &event.params);
+                            let field_sync_mode = match store {
+                                ServerEventStore::Turso(_) | ServerEventStore::TenantRouted(_) => {
+                                    FieldSyncMode::BlobRefs
+                                }
+                                _ => FieldSyncMode::InlineTruncate,
+                            };
+                            let _ =
+                                super::effects::sync_fields(state, &event.params, field_sync_mode);
 
                             state.push_event_bounded(event);
                         }
@@ -519,12 +527,20 @@ impl Actor for EntityActor {
 
                 let event_count_before = state.total_event_count;
                 let state_before = state.clone();
-                let result = super::effects::process_action_with_xref(
+                let field_sync_mode = match self.event_store.as_ref().map(Arc::as_ref) {
+                    Some(ServerEventStore::Turso(_) | ServerEventStore::TenantRouted(_)) => {
+                        FieldSyncMode::BlobRefs
+                    }
+                    _ => FieldSyncMode::InlineTruncate,
+                };
+
+                let result = process_action_with_xref_and_field_mode(
                     state,
                     &table,
                     &name,
                     &params,
                     &cross_entity_booleans,
+                    field_sync_mode,
                 );
 
                 if result.success {
@@ -532,6 +548,57 @@ impl Actor for EntityActor {
                     let event = result
                         .event
                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
+
+                    if !result.overflow_blobs.is_empty() {
+                        let Some(ref store) = self.event_store else {
+                            *state = state_before;
+                            ctx.reply(EntityResponse {
+                                success: false,
+                                state: state.clone(),
+                                error: Some(
+                                    "field-overflow blobs require a Turso-backed store".to_string(),
+                                ),
+                                custom_effects: vec![],
+                                scheduled_actions: vec![],
+                                spawn_requests: vec![],
+                                spec_governed: true,
+                            });
+                            return Ok(());
+                        };
+
+                        let Some(blob_store) = store.turso_for_tenant(&self.tenant).await else {
+                            *state = state_before;
+                            ctx.reply(EntityResponse {
+                                success: false,
+                                state: state.clone(),
+                                error: Some(
+                                    "field-overflow blobs require a Turso-backed store".to_string(),
+                                ),
+                                custom_effects: vec![],
+                                scheduled_actions: vec![],
+                                spawn_requests: vec![],
+                                spec_governed: true,
+                            });
+                            return Ok(());
+                        };
+
+                        if let Err(e) =
+                            crate::blobs::put_overflow_blobs(&blob_store, &result.overflow_blobs)
+                                .await
+                        {
+                            *state = state_before;
+                            ctx.reply(EntityResponse {
+                                success: false,
+                                state: state.clone(),
+                                error: Some(format!("field-overflow blob persistence failed: {e}")),
+                                custom_effects: vec![],
+                                scheduled_actions: vec![],
+                                spawn_requests: vec![],
+                                spec_governed: true,
+                            });
+                            return Ok(());
+                        }
+                    }
 
                     // Persist to Postgres (if configured)
                     if let Some(ref store) = self.event_store

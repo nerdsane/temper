@@ -227,9 +227,9 @@ fn create_agent_from_route(
         "user_message": user_message,
         "model": config.get("model").and_then(Value::as_str).unwrap_or("claude-sonnet-4-20250514"),
         "provider": config.get("provider").and_then(Value::as_str).unwrap_or("anthropic"),
-        "tools_enabled": config.get("tools_enabled").and_then(Value::as_str).unwrap_or("read_entity"),
+        "tools_enabled": config.get("tools_enabled").and_then(Value::as_str).unwrap_or("read,write,edit,bash,read_entity,save_memory,recall_memory,spawn_agent,list_agents,abort_agent,steer_agent,run_coding_agent,logfire_query"),
         "max_turns": config.get("max_turns").and_then(Value::as_str).unwrap_or("6"),
-        "workdir": config.get("workdir").and_then(Value::as_str).unwrap_or("/tmp/workspace"),
+        "workdir": config.get("workdir").and_then(Value::as_str).unwrap_or("/workspace"),
         "soul_id": if route_soul_id.is_empty() {
             config.get("soul_id").and_then(Value::as_str).unwrap_or("")
         } else {

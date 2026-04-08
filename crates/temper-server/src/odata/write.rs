@@ -22,6 +22,7 @@ use super::common::{
 };
 use super::constraints::pre_delete_relation_checks;
 use super::response::annotate_entity;
+use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::{AgentContext, extract_agent_context};
 use crate::response::{ODataResponse, odata_error};
@@ -237,8 +238,10 @@ pub async fn handle_odata_post(
                 .await
             {
                 Ok(response) => {
+                    let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
+                    hydrate_blob_refs_for_tenant(&state, &tenant, &mut state_json).await;
                     let body = annotate_entity(
-                        serde_json::to_value(&response.state).unwrap_or_default(),
+                        state_json,
                         format!("$metadata#{name}/$entity"),
                         Some(format!("{name}('{entity_id}')")),
                     );
@@ -390,8 +393,10 @@ pub async fn handle_odata_patch(
                 .await
             {
                 Ok(response) => {
+                    let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
+                    hydrate_blob_refs_for_tenant(&state, &tenant, &mut state_json).await;
                     let body = annotate_entity(
-                        serde_json::to_value(&response.state).unwrap_or_default(),
+                        state_json,
                         format!("$metadata#{set_name}/$entity"),
                         Some(format!("{set_name}('{key_str}')")),
                     );
@@ -472,8 +477,10 @@ pub async fn handle_odata_put(
                 .await
             {
                 Ok(response) => {
+                    let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
+                    hydrate_blob_refs_for_tenant(&state, &tenant, &mut state_json).await;
                     let body = annotate_entity(
-                        serde_json::to_value(&response.state).unwrap_or_default(),
+                        state_json,
                         format!("$metadata#{set_name}/$entity"),
                         Some(format!("{set_name}('{key_str}')")),
                     );
@@ -626,7 +633,11 @@ async fn handle_stream_put(
         .get_tenant_entity_state(tenant, &entity_type, &key)
         .await
     {
-        Ok(resp) => serde_json::to_value(&resp.state).unwrap_or_default(),
+        Ok(resp) => {
+            let mut entity_state = serde_json::to_value(&resp.state).unwrap_or_default();
+            hydrate_blob_refs_for_tenant(state, tenant, &mut entity_state).await;
+            entity_state
+        }
         Err(e) => {
             return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "StateError", &e)
                 .into_response();
