@@ -83,9 +83,8 @@ pub async fn dispatch_temper_method(
             dispatch_evolution(ctx, method, args).await
         }
         // --- App Catalog ---
-        "list_apps" | "install_app" | "get_app" | "list_skills" | "install_skill" | "get_skill" => {
-            dispatch_apps(ctx, method, args).await
-        }
+        "list_apps" | "install_app" | "get_app" | "list_skills" | "install_skill" | "get_skill"
+        | "load_skill" | "create_skill" => dispatch_apps(ctx, method, args).await,
         // --- Discovery ---
         "specs" => {
             temper_request(
@@ -128,6 +127,7 @@ pub async fn dispatch_temper_method(
              get_decisions, get_decision_status, poll_decision, \
              get_trajectories, get_insights, get_evolution_records, check_sentinel, \
              list_apps, get_app, install_app, list_skills, get_skill, install_skill, \
+             load_skill, create_skill, \
              specs, spec_detail"
         )),
     }
@@ -606,6 +606,128 @@ async fn dispatch_apps(
                 Method::POST,
                 &format!("/api/os-apps/{app_name}/install"),
                 Some(&payload),
+            )
+            .await
+        }
+        // --- Skill files (ADR-002: skills as TemperFS files) ---
+        "load_skill" => {
+            let skill_name = expect_string_arg(args, 0, "skill_name", method)?;
+            // Query TemperFS for SKILL.md at the skill's path.
+            let filter = format!(
+                "name%20eq%20'SKILL.md'%20and%20contains(path,'/{skill_name}/')"
+            );
+            let resp = temper_request(
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                &ctx.identity(),
+                ctx.api_key,
+                Method::GET,
+                &format!("/tdata/Files?$filter={filter}"),
+                None,
+            )
+            .await?;
+            // Find the matching file and read its content.
+            let files = resp
+                .get("value")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if files.is_empty() {
+                return Err(format!("temper.load_skill: skill '{skill_name}' not found"));
+            }
+            let file = &files[0];
+            let file_id = file
+                .get("entity_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            // Read the file content via $value.
+            let key = escape_odata_key(file_id);
+            temper_request(
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                &ctx.identity(),
+                ctx.api_key,
+                Method::GET,
+                &format!("/tdata/Files('{key}')/$value"),
+                None,
+            )
+            .await
+        }
+        "create_skill" => {
+            let skill_name = expect_string_arg(args, 0, "skill_name", method)?;
+            let content = expect_string_arg(args, 1, "content", method)?;
+            let scope = optional_string_arg(args, 2).unwrap_or_else(|| "global".to_string());
+            // Validate skill name (alphanumeric + hyphens).
+            if !skill_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            {
+                return Err(format!(
+                    "temper.create_skill: invalid skill name '{skill_name}'. \
+                     Use alphanumeric characters and hyphens only."
+                ));
+            }
+            // Determine path based on scope.
+            let dir_path = match scope.as_str() {
+                "global" | "tenant" | "" => format!("/skills/{skill_name}"),
+                s if s.starts_with("project:") => {
+                    let pid = &s["project:".len()..];
+                    format!("/projects/{pid}/skills/{skill_name}")
+                }
+                s if s.starts_with("agent:") => {
+                    let aid = &s["agent:".len()..];
+                    format!("/agents/{aid}/skills/{skill_name}")
+                }
+                other => {
+                    return Err(format!(
+                        "temper.create_skill: invalid scope '{other}'. \
+                         Use 'global', 'tenant', 'project:{{id}}', or 'agent:{{id}}'."
+                    ));
+                }
+            };
+            let file_path = format!("{dir_path}/SKILL.md");
+            // Ensure the skill content has frontmatter.
+            let final_content = if content.starts_with("---") {
+                content
+            } else {
+                format!(
+                    "---\nname: {skill_name}\ndescription: \nscope: {scope}\n---\n\n{content}"
+                )
+            };
+            // Create the directory via TemperFS.
+            let dir_payload = serde_json::json!({
+                "name": skill_name,
+                "path": dir_path,
+            });
+            let _ = temper_request(
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                &ctx.identity(),
+                ctx.api_key,
+                Method::POST,
+                "/tdata/Directories",
+                Some(&dir_payload),
+            )
+            .await;
+            // Create the SKILL.md file.
+            let file_payload = serde_json::json!({
+                "name": "SKILL.md",
+                "path": file_path,
+                "content": final_content,
+                "mime_type": "text/markdown",
+            });
+            temper_request(
+                ctx.http,
+                ctx.base_url,
+                ctx.tenant,
+                &ctx.identity(),
+                ctx.api_key,
+                Method::POST,
+                "/tdata/Files",
+                Some(&file_payload),
             )
             .await
         }
