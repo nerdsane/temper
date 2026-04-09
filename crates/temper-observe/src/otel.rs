@@ -90,6 +90,14 @@ fn read_non_empty_env(var_name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn parse_otlp_headers(raw: &str) -> HashMap<String, String> {
+    raw.split(',')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+        .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+        .collect()
+}
+
 fn resolve_deployment_environment() -> Option<String> {
     if let Some(environment) = read_non_empty_env("DD_ENV") {
         return Some(environment);
@@ -267,7 +275,9 @@ pub fn init_tracing(
     service_name: &str,
 ) -> Result<OtelGuard, Box<dyn std::error::Error>> {
     // Build auth headers (Logfire or custom).
-    let mut headers = HashMap::new();
+    let mut headers = read_non_empty_env("OTEL_EXPORTER_OTLP_HEADERS")
+        .map(|raw| parse_otlp_headers(&raw))
+        .unwrap_or_default();
     if let Some(token) = read_non_empty_env("LOGFIRE_TOKEN") {
         headers.insert("Authorization".to_string(), format!("Bearer {token}"));
     }
