@@ -861,21 +861,28 @@ fn extract_frontmatter(content: &str) -> SkillFrontmatter {
         && let Some(end) = rest.find("+++")
     {
         let fm = &rest[..end];
+        let mut name = None;
+        let mut description = None;
         let mut scope = None;
         for line in fm.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("scope")
-                && let Some(val) = trimmed.split('=').nth(1)
-            {
+            if let Some((key, val)) = trimmed.split_once('=') {
+                let key = key.trim();
                 let val = val.trim().trim_matches('"');
-                if !val.is_empty() {
-                    scope = Some(val.to_string());
+                if val.is_empty() {
+                    continue;
+                }
+                match key {
+                    "name" => name = Some(val.to_string()),
+                    "description" => description = Some(val.to_string()),
+                    "scope" => scope = Some(val.to_string()),
+                    _ => {}
                 }
             }
         }
         return SkillFrontmatter {
-            name: None,
-            description: None,
+            name,
+            description,
             scope,
         };
     }
@@ -1686,19 +1693,11 @@ async fn bootstrap_agents(
     bootstrapped
 }
 
-/// Bootstrap skill definitions into the tenant by creating Skill entities.
-///
-/// For each skill definition in the app's `skills/` directory:
-/// 1. Check if the Skill entity type is registered
-/// 2. Check if a Skill with this name already exists (idempotent)
-/// 3. Create a TemperFS File entity with the skill content
-/// 4. Create a Skill entity pointing to that file
-///
-/// Returns the names of successfully bootstrapped skills.
 /// Bootstrap skills as TemperFS files at conventional paths (ADR-002).
 ///
 /// Skills are written to `/skills/{slug}/SKILL.md` in the `os-app-docs` workspace.
 /// No Skill entities are created — the file IS the skill.
+/// Returns the names of successfully bootstrapped skills.
 async fn bootstrap_skills(
     state: &PlatformState,
     tenant_id: &TenantId,
