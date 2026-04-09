@@ -1801,11 +1801,7 @@ async fn bootstrap_skills(
                 .to_lowercase();
             let comp_file_id = format!("os-skill-file-{slug}-{comp_slug}");
             let comp_file_path = format!("/skills/{slug}/{}", companion.name);
-            let comp_file_name = companion
-                .name
-                .rsplit('/')
-                .next()
-                .unwrap_or(&companion.name);
+            let comp_file_name = companion.name.rsplit('/').next().unwrap_or(&companion.name);
             if let Err(e) = ensure_markdown_file(
                 state,
                 tenant_id,

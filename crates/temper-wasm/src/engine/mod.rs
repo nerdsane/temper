@@ -283,14 +283,7 @@ impl WasmEngine {
 
         tokio::task::spawn_blocking(move || {
             let _entered = span.enter();
-            Self::invoke_blocking(
-                engine,
-                cached,
-                context_owned,
-                host,
-                limits_owned,
-                streams,
-            )
+            Self::invoke_blocking(engine, cached, context_owned, host, limits_owned, streams)
         })
         .await
         .map_err(|e| WasmError::Invocation(format!("blocking wasm task failed: {e}")))?
@@ -404,7 +397,9 @@ impl WasmEngine {
 
         let result_ptr = run_fn
             .call(&mut store, (ctx_ptr as i32, ctx_bytes.len() as i32))
-            .map_err(|e| telemetry::map_invoke_error(e, &context, needs_wasi, max_duration, start))?;
+            .map_err(|e| {
+                telemetry::map_invoke_error(e, &context, needs_wasi, max_duration, start)
+            })?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         tracing::Span::current().record("duration_ms", duration_ms);
@@ -446,8 +441,7 @@ impl WasmEngine {
             return Ok(telemetry::empty_result(&context, needs_wasi, duration_ms));
         }
 
-        let parsed =
-            telemetry::parse_result_json(&result_json, &context, needs_wasi, duration_ms)?;
+        let parsed = telemetry::parse_result_json(&result_json, &context, needs_wasi, duration_ms)?;
 
         Ok(telemetry::finalize_result(
             &store,
