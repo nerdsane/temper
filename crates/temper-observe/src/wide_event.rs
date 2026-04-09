@@ -549,8 +549,11 @@ pub fn emit_span(event: &WideEvent) {
     for (k, v) in &event.measurements {
         attrs.push(KeyValue::new(k.clone(), *v));
     }
-    if event.event_kind == EventKind::LlmCall {
+    let llm_apm_only = event.event_kind == EventKind::LlmCall;
+    if llm_apm_only {
         // Dispatch spans are the canonical LLMObs view; wide-event LLM spans stay in APM.
+        // Datadog applies dd_llmobs_enabled=false at the trace level, so these spans must
+        // be emitted onto their own trace or they suppress the real llm_caller span too.
         attrs.push(KeyValue::new("dd_llmobs_enabled", false));
     }
     attrs.push(KeyValue::new("temper.trace_id", event.trace_id.clone()));
@@ -570,8 +573,11 @@ pub fn emit_span(event: &WideEvent) {
     let start_time: SystemTime = event.timestamp.into();
     let end_time = start_time + std::time::Duration::from_nanos(event.duration_ns);
 
-    let parent_cx =
-        remote_parent_context(event).unwrap_or_else(|| tracing::Span::current().context());
+    let parent_cx = if llm_apm_only {
+        remote_parent_context(event).unwrap_or_else(opentelemetry::Context::new)
+    } else {
+        remote_parent_context(event).unwrap_or_else(|| tracing::Span::current().context())
+    };
     let mut span = tracer
         .span_builder(span_name)
         .with_start_time(start_time)
