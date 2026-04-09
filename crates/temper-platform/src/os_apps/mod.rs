@@ -10,7 +10,7 @@
 //! Install reuses [`crate::bootstrap::bootstrap_tenant_specs`] so every app
 //! goes through the same verification cascade as system specs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
@@ -744,11 +744,14 @@ fn find_app_skills(app_dir: &Path) -> Vec<AppSkillDefinition> {
             Err(_) => continue, // Skip directories without SKILL.md
         };
 
-        let description =
-            extract_description(&content).unwrap_or_else(|| format!("Skill: {skill_name}"));
+        // Extract frontmatter (YAML or TOML).
+        let frontmatter = extract_frontmatter(&content);
+        let scope = frontmatter.scope.unwrap_or_else(|| "global".to_string());
 
-        // Extract scope from TOML frontmatter if present.
-        let scope = extract_scope(&content).unwrap_or_else(|| "global".to_string());
+        let description = frontmatter
+            .description
+            .or_else(|| extract_description(&content))
+            .unwrap_or_else(|| format!("Skill: {skill_name}"));
 
         // Collect companion files (everything except SKILL.md).
         let companion_files = collect_companion_files(&skill_dir);
@@ -809,23 +812,79 @@ fn find_adrs(app_dir: &Path) -> Vec<AdrEntry> {
     results
 }
 
-/// Extract a `scope` value from TOML frontmatter (`+++...+++`).
-fn extract_scope(content: &str) -> Option<String> {
-    let rest = content.strip_prefix("+++")?;
-    let end = rest.find("+++")?;
-    let frontmatter = &rest[..end];
-    for line in frontmatter.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("scope")
-            && let Some(val) = trimmed.split('=').nth(1)
-        {
-            let val = val.trim().trim_matches('"');
-            if !val.is_empty() {
-                return Some(val.to_string());
+/// Parsed frontmatter from a SKILL.md file.
+struct SkillFrontmatter {
+    #[allow(dead_code)]
+    name: Option<String>,
+    description: Option<String>,
+    scope: Option<String>,
+}
+
+/// Extract frontmatter from SKILL.md content. Supports YAML (`---`) and TOML (`+++`).
+fn extract_frontmatter(content: &str) -> SkillFrontmatter {
+    // Try YAML frontmatter (---)
+    if let Some(rest) = content.strip_prefix("---") {
+        if let Some(end) = rest.find("\n---") {
+            let fm = &rest[..end];
+            let mut name = None;
+            let mut description = None;
+            let mut scope = None;
+            for line in fm.lines() {
+                let trimmed = line.trim();
+                if let Some(val) = trimmed.strip_prefix("name:") {
+                    let val = val.trim().trim_matches('"').trim_matches('\'');
+                    if !val.is_empty() {
+                        name = Some(val.to_string());
+                    }
+                } else if let Some(val) = trimmed.strip_prefix("description:") {
+                    let val = val.trim().trim_matches('"').trim_matches('\'');
+                    if !val.is_empty() {
+                        description = Some(val.to_string());
+                    }
+                } else if let Some(val) = trimmed.strip_prefix("scope:") {
+                    let val = val.trim().trim_matches('"').trim_matches('\'');
+                    if !val.is_empty() {
+                        scope = Some(val.to_string());
+                    }
+                }
             }
+            return SkillFrontmatter {
+                name,
+                description,
+                scope,
+            };
         }
     }
-    None
+
+    // Fall back to TOML frontmatter (+++)
+    if let Some(rest) = content.strip_prefix("+++") {
+        if let Some(end) = rest.find("+++") {
+            let fm = &rest[..end];
+            let mut scope = None;
+            for line in fm.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("scope")
+                    && let Some(val) = trimmed.split('=').nth(1)
+                {
+                    let val = val.trim().trim_matches('"');
+                    if !val.is_empty() {
+                        scope = Some(val.to_string());
+                    }
+                }
+            }
+            return SkillFrontmatter {
+                name: None,
+                description: None,
+                scope,
+            };
+        }
+    }
+
+    SkillFrontmatter {
+        name: None,
+        description: None,
+        scope: None,
+    }
 }
 
 /// Recursively collect companion files from a skill directory (excluding SKILL.md).
@@ -1089,6 +1148,27 @@ fn os_app_dependencies(name: &str) -> Vec<String> {
     }
 }
 
+fn collect_install_order(
+    app_name: &str,
+    visiting: &mut HashSet<String>,
+    visited: &mut HashSet<String>,
+    order: &mut Vec<String>,
+) -> Result<(), String> {
+    if visited.contains(app_name) {
+        return Ok(());
+    }
+    if !visiting.insert(app_name.to_string()) {
+        return Err(format!("Cyclic OS app dependency detected at '{app_name}'"));
+    }
+    for dependency in os_app_dependencies(app_name) {
+        collect_install_order(&dependency, visiting, visited, order)?;
+    }
+    visiting.remove(app_name);
+    visited.insert(app_name.to_string());
+    order.push(app_name.to_string());
+    Ok(())
+}
+
 /// Install an OS app into a tenant (workspace).
 ///
 /// Reads app files from disk, runs the verification cascade, registers
@@ -1103,10 +1183,19 @@ pub async fn install_os_app(
     tenant: &str,
     app_name: &str,
 ) -> Result<InstallResult, String> {
-    for dependency in os_app_dependencies(app_name) {
-        install_os_app_without_dependencies(state, tenant, &dependency).await?;
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut order = Vec::new();
+    collect_install_order(app_name, &mut visiting, &mut visited, &mut order)?;
+
+    let mut final_result = None;
+    for app in order {
+        let result = install_os_app_without_dependencies(state, tenant, &app).await?;
+        if app == app_name {
+            final_result = Some(result);
+        }
     }
-    install_os_app_without_dependencies(state, tenant, app_name).await
+    final_result.ok_or_else(|| format!("OS app '{app_name}' produced no install result"))
 }
 
 async fn install_os_app_without_dependencies(
@@ -1606,6 +1695,10 @@ async fn bootstrap_agents(
 /// 4. Create a Skill entity pointing to that file
 ///
 /// Returns the names of successfully bootstrapped skills.
+/// Bootstrap skills as TemperFS files at conventional paths (ADR-002).
+///
+/// Skills are written to `/skills/{slug}/SKILL.md` in the `os-app-docs` workspace.
+/// No Skill entities are created — the file IS the skill.
 async fn bootstrap_skills(
     state: &PlatformState,
     tenant_id: &TenantId,
@@ -1616,146 +1709,130 @@ async fn bootstrap_skills(
         return Vec::new();
     }
 
-    let has_skills = {
+    // Require TemperFS types (File, Directory).
+    let has_fs = {
         let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
-        registry.get_spec(tenant_id, "Skill").is_some()
+        registry.get_spec(tenant_id, "File").is_some()
+            && registry.get_spec(tenant_id, "Directory").is_some()
     };
-    if !has_skills {
+    if !has_fs {
         tracing::info!(
             tenant,
             count = skills.len(),
-            "Skipping skill bootstrap — Skill entity type not registered (install paw-agent first)"
-        );
-        return Vec::new();
-    }
-
-    let has_files = {
-        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
-        registry.get_spec(tenant_id, "File").is_some()
-    };
-    if !has_files {
-        tracing::info!(
-            tenant,
-            "Skipping skill bootstrap — File entity type not registered (install temper-fs first)"
+            "Skipping skill bootstrap — TemperFS not registered (install temper-fs first)"
         );
         return Vec::new();
     }
 
     let agent_ctx = temper_server::request_context::AgentContext::system();
+
+    // Ensure /skills/ root directory exists under os-app-docs workspace.
+    if let Err(e) = ensure_directory(
+        state,
+        tenant_id,
+        &agent_ctx,
+        DirectoryBootstrapTarget {
+            directory_id: "os-skills-root",
+            name: "skills",
+            path: "/skills",
+            parent_id: Some(APP_DOCS_ROOT_DIR_ID),
+            workspace_id: APP_DOCS_WORKSPACE_ID,
+        },
+    )
+    .await
+    {
+        tracing::warn!(tenant, error = %e, "Failed to create /skills/ root directory");
+        return Vec::new();
+    }
+
     let mut bootstrapped = Vec::new();
 
     for skill in skills {
-        // Check if Skill already exists by name.
-        let existing_ids = state.server.list_entity_ids(tenant_id, "Skill");
-        let mut already_exists = false;
-        for id in &existing_ids {
-            if let Ok(resp) = state
-                .server
-                .get_tenant_entity_state(tenant_id, "Skill", id)
-                .await
-                && let Some(name) = resp.state.fields.get("Name").and_then(|v| v.as_str())
-                && name.eq_ignore_ascii_case(&skill.name)
-            {
-                if let Some(file_id) = resp
-                    .state
-                    .fields
-                    .get("ContentFileId")
-                    .or_else(|| resp.state.fields.get("content_file_id"))
-                    .and_then(|v| v.as_str())
-                    && let Err(error) = ensure_inline_file_uploaded(
-                        state,
-                        tenant_id,
-                        &agent_ctx,
-                        file_id,
-                        &format!("{}.skill.md", skill.name.to_lowercase().replace(' ', "-")),
-                        skill.content.as_bytes(),
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        tenant,
-                        skill = %skill.name,
-                        file_id = %file_id,
-                        error = %error,
-                        "Failed to refresh existing skill content"
-                    );
-                }
-                tracing::debug!(tenant, skill = %skill.name, "Skill already exists — skipping");
-                already_exists = true;
-                bootstrapped.push(skill.name.clone());
-                break;
-            }
-        }
-        if already_exists {
-            continue;
-        }
+        let slug = skill.name.to_lowercase().replace(' ', "-");
+        let dir_id = format!("os-skill-dir-{slug}");
+        let file_id = format!("os-skill-file-{slug}");
+        let dir_path = format!("/skills/{slug}");
+        let file_path = format!("/skills/{slug}/SKILL.md");
 
-        // Create TemperFS File for skill content.
-        let file_id = format!(
-            "app-skill-file-{}",
-            skill.name.to_lowercase().replace(' ', "-")
-        );
-        let file_name = format!("{}.skill.md", skill.name.to_lowercase().replace(' ', "-"));
-        if let Err(error) = ensure_inline_file_uploaded(
+        // Create /skills/{slug}/ directory.
+        if let Err(e) = ensure_directory(
             state,
             tenant_id,
             &agent_ctx,
-            &file_id,
-            &file_name,
+            DirectoryBootstrapTarget {
+                directory_id: &dir_id,
+                name: &slug,
+                path: &dir_path,
+                parent_id: Some("os-skills-root"),
+                workspace_id: APP_DOCS_WORKSPACE_ID,
+            },
+        )
+        .await
+        {
+            tracing::warn!(tenant, skill = %skill.name, error = %e, "Failed to create skill directory");
+            continue;
+        }
+
+        // Create /skills/{slug}/SKILL.md and upload content.
+        if let Err(e) = ensure_markdown_file(
+            state,
+            tenant_id,
+            &agent_ctx,
+            MarkdownFileBootstrapTarget {
+                file_id: &file_id,
+                name: "SKILL.md",
+                path: &file_path,
+                directory_id: &dir_id,
+                workspace_id: APP_DOCS_WORKSPACE_ID,
+            },
             skill.content.as_bytes(),
         )
         .await
         {
-            tracing::warn!(
-                tenant,
-                skill = %skill.name,
-                error = %error,
-                "Failed to create TemperFS File for skill"
-            );
+            tracing::warn!(tenant, skill = %skill.name, error = %e, "Failed to create SKILL.md file");
             continue;
         }
 
-        // Create Skill entity.
-        let skill_id = format!("app-skill-{}", skill.name.to_lowercase().replace(' ', "-"));
-        match state
-            .server
-            .get_or_create_tenant_entity(tenant_id, "Skill", &skill_id, serde_json::json!({}))
+        // Bootstrap companion files in the same directory.
+        for companion in &skill.companion_files {
+            let comp_slug = companion
+                .name
+                .replace(std::path::MAIN_SEPARATOR, "-")
+                .to_lowercase();
+            let comp_file_id = format!("os-skill-file-{slug}-{comp_slug}");
+            let comp_file_path = format!("/skills/{slug}/{}", companion.name);
+            let comp_file_name = companion
+                .name
+                .rsplit('/')
+                .next()
+                .unwrap_or(&companion.name);
+            if let Err(e) = ensure_markdown_file(
+                state,
+                tenant_id,
+                &agent_ctx,
+                MarkdownFileBootstrapTarget {
+                    file_id: &comp_file_id,
+                    name: comp_file_name,
+                    path: &comp_file_path,
+                    directory_id: &dir_id,
+                    workspace_id: APP_DOCS_WORKSPACE_ID,
+                },
+                &companion.content,
+            )
             .await
-        {
-            Ok(resp) => {
-                if resp.state.status == "Active" || resp.state.status == "Created" {
-                    // Register the skill with metadata.
-                    let _ = state
-                        .server
-                        .dispatch(temper_server::state::DispatchCommand {
-                            tenant: tenant_id,
-                            entity_type: "Skill",
-                            entity_id: &skill_id,
-                            action: "Register",
-                            params: serde_json::json!({
-                                "name": skill.name,
-                                "description": skill.description,
-                                "content_file_id": file_id,
-                                "scope": skill.scope,
-                                "agent_filter": "",
-                            }),
-                            agent_ctx: &agent_ctx,
-                            await_integration: false,
-                        })
-                        .await;
-                }
-                tracing::info!(tenant, skill = %skill.name, scope = %skill.scope, "Skill bootstrapped");
-                bootstrapped.push(skill.name.clone());
-            }
-            Err(e) => {
+            {
                 tracing::warn!(
                     tenant,
                     skill = %skill.name,
+                    companion = %companion.name,
                     error = %e,
-                    "Failed to create Skill entity"
+                    "Failed to create companion file"
                 );
             }
         }
+
+        tracing::info!(tenant, skill = %skill.name, scope = %skill.scope, path = %file_path, "Skill bootstrapped as TemperFS file");
+        bootstrapped.push(skill.name.clone());
     }
     bootstrapped
 }
