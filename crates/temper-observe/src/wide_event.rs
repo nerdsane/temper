@@ -358,6 +358,10 @@ pub struct LlmCallInput<'a> {
     pub output_tokens: i64,
     /// Stop reason (e.g., "end_turn", "tool_use").
     pub stop_reason: &'a str,
+    /// Input messages serialized as a JSON array string.
+    pub input_messages: Option<&'a str>,
+    /// Output messages serialized as a JSON array string.
+    pub output_messages: Option<&'a str>,
     /// Trace ID for correlation.
     pub trace_id: &'a str,
     /// Error message, if any.
@@ -371,7 +375,10 @@ pub fn from_llm_call(input: LlmCallInput<'_>) -> WideEvent {
     tags.insert("gen_ai.system".into(), input.provider.into());
     tags.insert("gen_ai.request.model".into(), input.model.into());
     tags.insert("gen_ai.operation.name".into(), input.operation.into());
-    tags.insert("stop_reason".into(), input.stop_reason.into());
+    tags.insert(
+        "gen_ai.response.finish_reasons".into(),
+        input.stop_reason.into(),
+    );
     tags.insert("success".into(), input.success.to_string());
 
     let mut attributes = BTreeMap::new();
@@ -380,6 +387,12 @@ pub fn from_llm_call(input: LlmCallInput<'_>) -> WideEvent {
         "gen_ai.conversation.id".into(),
         serde_json::json!(input.session_id),
     );
+    if let Some(messages) = input.input_messages {
+        attributes.insert("gen_ai.input.messages".into(), serde_json::json!(messages));
+    }
+    if let Some(messages) = input.output_messages {
+        attributes.insert("gen_ai.output.messages".into(), serde_json::json!(messages));
+    }
     if let Some(err) = input.error {
         attributes.insert("error".into(), serde_json::json!(err));
     }
@@ -400,7 +413,7 @@ pub fn from_llm_call(input: LlmCallInput<'_>) -> WideEvent {
         event_kind: EventKind::LlmCall,
         entity_type: input.entity_type.into(),
         entity_id: input.entity_id.into(),
-        operation: format!("{}.{}", input.provider, input.model),
+        operation: input.operation.into(),
         from_status: String::new(),
         to_status: input.stop_reason.into(),
         success: input.success,
@@ -418,12 +431,18 @@ pub fn from_llm_call(input: LlmCallInput<'_>) -> WideEvent {
 pub struct ToolCallInput<'a> {
     /// Tool name (e.g., "temper_create", "sandbox_bash").
     pub tool_name: &'a str,
+    /// Tool call identifier from the LLM response.
+    pub tool_call_id: Option<&'a str>,
     /// Entity type (typically "Session").
     pub entity_type: &'a str,
     /// Entity ID (session ID).
     pub entity_id: &'a str,
     /// Session/conversation ID for grouping.
     pub session_id: &'a str,
+    /// Tool arguments serialized as JSON.
+    pub tool_arguments: Option<&'a str>,
+    /// Tool result content serialized as JSON or text.
+    pub tool_result: Option<&'a str>,
     /// Whether the tool call succeeded.
     pub success: bool,
     /// Duration in nanoseconds.
@@ -438,7 +457,8 @@ pub struct ToolCallInput<'a> {
 pub fn from_tool_call(input: ToolCallInput<'_>) -> WideEvent {
     let span_id = sim_uuid().to_string();
     let mut tags = BTreeMap::new();
-    tags.insert("tool_name".into(), input.tool_name.into());
+    tags.insert("gen_ai.operation.name".into(), "execute_tool".into());
+    tags.insert("gen_ai.tool.name".into(), input.tool_name.into());
     tags.insert("entity_type".into(), input.entity_type.into());
     tags.insert("success".into(), input.success.to_string());
 
@@ -448,6 +468,21 @@ pub fn from_tool_call(input: ToolCallInput<'_>) -> WideEvent {
         "gen_ai.conversation.id".into(),
         serde_json::json!(input.session_id),
     );
+    if let Some(tool_call_id) = input.tool_call_id {
+        attributes.insert(
+            "gen_ai.tool.call.id".into(),
+            serde_json::json!(tool_call_id),
+        );
+    }
+    if let Some(arguments) = input.tool_arguments {
+        attributes.insert(
+            "gen_ai.tool.call.arguments".into(),
+            serde_json::json!(arguments),
+        );
+    }
+    if let Some(result) = input.tool_result {
+        attributes.insert("gen_ai.tool.call.result".into(), serde_json::json!(result));
+    }
     if let Some(err) = input.error {
         attributes.insert("error".into(), serde_json::json!(err));
     }
@@ -460,7 +495,7 @@ pub fn from_tool_call(input: ToolCallInput<'_>) -> WideEvent {
         event_kind: EventKind::ToolCall,
         entity_type: input.entity_type.into(),
         entity_id: input.entity_id.into(),
-        operation: input.tool_name.into(),
+        operation: "execute_tool".into(),
         from_status: String::new(),
         to_status: String::new(),
         success: input.success,
@@ -723,6 +758,8 @@ mod tests {
             input_tokens: 150,
             output_tokens: 50,
             stop_reason: "end_turn",
+            input_messages: Some(r#"[{"role":"user","content":"hello"}]"#),
+            output_messages: Some(r#"[{"role":"assistant","content":"hi"}]"#),
             trace_id: "trace-llm",
             error: None,
         });
@@ -730,11 +767,19 @@ mod tests {
         assert_eq!(event.tags["gen_ai.system"], "anthropic");
         assert_eq!(event.tags["gen_ai.request.model"], "claude-sonnet-4-6");
         assert_eq!(event.tags["gen_ai.operation.name"], "chat");
-        assert_eq!(event.tags["stop_reason"], "end_turn");
+        assert_eq!(event.tags["gen_ai.response.finish_reasons"], "end_turn");
         assert!(event.success);
         assert_eq!(event.measurements["gen_ai.usage.input_tokens"], 150.0);
         assert_eq!(event.measurements["gen_ai.usage.output_tokens"], 50.0);
         assert_eq!(event.attributes["gen_ai.conversation.id"], "sess-1");
+        assert_eq!(
+            event.attributes["gen_ai.input.messages"],
+            r#"[{"role":"user","content":"hello"}]"#
+        );
+        assert_eq!(
+            event.attributes["gen_ai.output.messages"],
+            r#"[{"role":"assistant","content":"hi"}]"#
+        );
         assert!(!event.tags.contains_key("entity_id"));
     }
 
@@ -752,6 +797,8 @@ mod tests {
             input_tokens: 100,
             output_tokens: 0,
             stop_reason: "",
+            input_messages: None,
+            output_messages: None,
             trace_id: "trace-fail",
             error: Some("rate limit exceeded"),
         });
@@ -763,18 +810,25 @@ mod tests {
     fn test_tool_call_event() {
         let event = from_tool_call(ToolCallInput {
             tool_name: "temper_create",
+            tool_call_id: Some("toolu_123"),
             entity_type: "Session",
             entity_id: "sess-1",
             session_id: "sess-1",
+            tool_arguments: Some(r#"{"entity":"Task"}"#),
+            tool_result: Some(r#"{"id":"task-1"}"#),
             success: true,
             duration_ns: 200_000_000,
             trace_id: "trace-tool",
             error: None,
         });
         assert_eq!(event.event_kind, EventKind::ToolCall);
-        assert_eq!(event.tags["tool_name"], "temper_create");
+        assert_eq!(event.tags["gen_ai.operation.name"], "execute_tool");
+        assert_eq!(event.tags["gen_ai.tool.name"], "temper_create");
         assert!(event.success);
         assert_eq!(event.attributes["gen_ai.conversation.id"], "sess-1");
+        assert_eq!(event.attributes["gen_ai.tool.call.id"], "toolu_123");
+        assert_eq!(event.attributes["gen_ai.tool.call.arguments"], r#"{"entity":"Task"}"#);
+        assert_eq!(event.attributes["gen_ai.tool.call.result"], r#"{"id":"task-1"}"#);
         assert!(!event.tags.contains_key("entity_id"));
     }
 
@@ -782,9 +836,12 @@ mod tests {
     fn test_tool_call_failure() {
         let event = from_tool_call(ToolCallInput {
             tool_name: "sandbox_bash",
+            tool_call_id: None,
             entity_type: "Session",
             entity_id: "sess-3",
             session_id: "sess-3",
+            tool_arguments: None,
+            tool_result: None,
             success: false,
             duration_ns: 1_000_000,
             trace_id: "trace-tool-fail",
@@ -837,14 +894,19 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 stop_reason: "end_turn",
+                input_messages: None,
+                output_messages: None,
                 trace_id: "",
                 error: None,
             }),
             from_tool_call(ToolCallInput {
                 tool_name: "temper_get",
+                tool_call_id: None,
                 entity_type: "Session",
                 entity_id: "s",
                 session_id: "s",
+                tool_arguments: None,
+                tool_result: None,
                 success: true,
                 duration_ns: 0,
                 trace_id: "",

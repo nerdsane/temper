@@ -10,9 +10,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::{Value, json};
 use tokio::sync::Semaphore;
+use uuid::Uuid;
 
 use crate::metrics;
+use crate::types::WasmInvocationContext;
+use temper_observe::wide_event::{self, EventKind, WideEvent};
 
 /// Host capabilities provided to WASM modules.
 ///
@@ -112,6 +117,21 @@ pub trait WasmHost: Send + Sync {
     fn emit_progress(&self, _event_json: &str) -> Result<(), String> {
         Ok(())
     }
+
+    /// Emit a Temper wide event from the guest module.
+    fn emit_wide_event(&self, _event_json: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Emit a structured log event from the guest module.
+    fn log_structured(&self, _log_json: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Emit a metric directly from the guest module.
+    fn emit_metric(&self, _metric_json: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Callback for evaluating IOA spec transitions.
@@ -152,6 +172,47 @@ pub struct ProductionWasmHost {
     trace_id: Option<String>,
     /// Optional short-circuit for binary HTTP calls.
     binary_http_interceptor: Option<BinaryHttpInterceptorFn>,
+    /// Invocation context for auto-enriching guest telemetry.
+    invocation_context: Option<WasmInvocationContext>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestWideEventInput {
+    kind: EventKind,
+    #[serde(default)]
+    operation: Option<String>,
+    #[serde(default)]
+    success: Option<bool>,
+    #[serde(default)]
+    duration_ns: Option<u64>,
+    #[serde(default)]
+    from_status: Option<String>,
+    #[serde(default)]
+    to_status: Option<String>,
+    #[serde(default)]
+    tags: BTreeMap<String, String>,
+    #[serde(default)]
+    attributes: BTreeMap<String, Value>,
+    #[serde(default)]
+    measurements: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestStructuredLogInput {
+    level: String,
+    message: String,
+    #[serde(default)]
+    fields: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuestMetricInput {
+    name: String,
+    value: f64,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    tags: BTreeMap<String, String>,
 }
 
 const DEFAULT_BLOB_TRANSPORT_MAX_CONCURRENCY: usize = 32;
@@ -237,6 +298,7 @@ impl ProductionWasmHost {
             progress_emitter: None,
             trace_id: None,
             binary_http_interceptor: None,
+            invocation_context: None,
         }
     }
 
@@ -258,10 +320,103 @@ impl ProductionWasmHost {
         self
     }
 
+    /// Attach invocation context for guest telemetry auto-enrichment.
+    pub fn with_invocation_context(mut self, context: WasmInvocationContext) -> Self {
+        self.invocation_context = Some(context);
+        self
+    }
+
     /// Create with a binary HTTP interceptor for local fast paths.
     pub fn with_binary_http_interceptor(mut self, interceptor: BinaryHttpInterceptorFn) -> Self {
         self.binary_http_interceptor = Some(interceptor);
         self
+    }
+
+    fn build_guest_wide_event(&self, event_json: &str) -> Result<WideEvent, String> {
+        let payload: GuestWideEventInput = serde_json::from_str(event_json)
+            .map_err(|e| format!("invalid guest wide event payload: {e}"))?;
+
+        let mut tags = payload.tags;
+        let mut attributes = payload.attributes;
+        let measurements = payload.measurements;
+
+        let entity_type = self
+            .invocation_context
+            .as_ref()
+            .map(|ctx| ctx.entity_type.clone())
+            .or_else(|| tags.get("entity_type").cloned())
+            .unwrap_or_else(|| "WasmGuest".to_string());
+        let entity_id = self
+            .invocation_context
+            .as_ref()
+            .map(|ctx| ctx.entity_id.clone())
+            .or_else(|| {
+                attributes
+                    .get("entity_id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_default();
+        let trace_id = self
+            .invocation_context
+            .as_ref()
+            .map(|ctx| ctx.trace_id.clone())
+            .unwrap_or_default();
+        let operation = payload
+            .operation
+            .or_else(|| infer_guest_operation(payload.kind, &tags))
+            .unwrap_or_else(|| "guest_event".to_string());
+        let success = payload
+            .success
+            .or_else(|| tags.get("success").map(|value| value == "true"))
+            .unwrap_or(true);
+        let duration_ns = payload.duration_ns.unwrap_or_else(|| {
+            measurements
+                .get("duration_ms")
+                .map(|value| (value * 1_000_000.0) as u64)
+                .unwrap_or_default()
+        });
+
+        tags.entry("entity_type".into())
+            .or_insert_with(|| entity_type.clone());
+        if let Some(ctx) = &self.invocation_context {
+            attributes
+                .entry("tenant".into())
+                .or_insert_with(|| json!(ctx.tenant));
+            attributes
+                .entry("trigger_action".into())
+                .or_insert_with(|| json!(ctx.trigger_action));
+            if let Some(agent_id) = &ctx.agent_id {
+                attributes
+                    .entry("agent_id".into())
+                    .or_insert_with(|| json!(agent_id));
+            }
+            if let Some(session_id) = &ctx.session_id {
+                attributes
+                    .entry("gen_ai.conversation.id".into())
+                    .or_insert_with(|| json!(session_id));
+            }
+        }
+        attributes
+            .entry("entity_id".into())
+            .or_insert_with(|| json!(entity_id));
+
+        Ok(WideEvent {
+            event_kind: payload.kind,
+            entity_type,
+            entity_id,
+            operation,
+            from_status: payload.from_status.unwrap_or_default(),
+            to_status: payload.to_status.unwrap_or_default(),
+            success,
+            duration_ns,
+            timestamp: chrono::Utc::now(),
+            trace_id,
+            span_id: Uuid::new_v4().to_string(),
+            tags,
+            attributes,
+            measurements,
+        })
     }
 }
 
@@ -643,6 +798,145 @@ impl WasmHost for ProductionWasmHost {
             None => Ok(()),
         }
     }
+
+    fn emit_wide_event(&self, event_json: &str) -> Result<(), String> {
+        let event = self.build_guest_wide_event(event_json)?;
+        wide_event::emit_span(&event);
+        wide_event::emit_metrics(&event);
+        Ok(())
+    }
+
+    fn log_structured(&self, log_json: &str) -> Result<(), String> {
+        let payload: GuestStructuredLogInput = serde_json::from_str(log_json)
+            .map_err(|e| format!("invalid guest structured log payload: {e}"))?;
+        let fields_json = serde_json::to_string(&payload.fields)
+            .map_err(|e| format!("structured log fields serialize: {e}"))?;
+        let tenant = self
+            .invocation_context
+            .as_ref()
+            .map(|ctx| ctx.tenant.as_str())
+            .unwrap_or("");
+        let entity_type = self
+            .invocation_context
+            .as_ref()
+            .map(|ctx| ctx.entity_type.as_str())
+            .unwrap_or("");
+        let entity_id = self
+            .invocation_context
+            .as_ref()
+            .map(|ctx| ctx.entity_id.as_str())
+            .unwrap_or("");
+        let trigger_action = self
+            .invocation_context
+            .as_ref()
+            .map(|ctx| ctx.trigger_action.as_str())
+            .unwrap_or("");
+        let session_id = self
+            .invocation_context
+            .as_ref()
+            .and_then(|ctx| ctx.session_id.as_deref())
+            .unwrap_or("");
+        let trace_id = self.trace_id.as_deref().unwrap_or("");
+
+        match payload.level.as_str() {
+            "error" => tracing::error!(
+                target: "wasm_guest",
+                tenant,
+                entity_type,
+                entity_id,
+                trigger_action,
+                session_id,
+                trace_id,
+                fields_json = %fields_json,
+                "{}",
+                payload.message
+            ),
+            "warn" => tracing::warn!(
+                target: "wasm_guest",
+                tenant,
+                entity_type,
+                entity_id,
+                trigger_action,
+                session_id,
+                trace_id,
+                fields_json = %fields_json,
+                "{}",
+                payload.message
+            ),
+            "info" => tracing::info!(
+                target: "wasm_guest",
+                tenant,
+                entity_type,
+                entity_id,
+                trigger_action,
+                session_id,
+                trace_id,
+                fields_json = %fields_json,
+                "{}",
+                payload.message
+            ),
+            _ => tracing::debug!(
+                target: "wasm_guest",
+                tenant,
+                entity_type,
+                entity_id,
+                trigger_action,
+                session_id,
+                trace_id,
+                fields_json = %fields_json,
+                "{}",
+                payload.message
+            ),
+        }
+        Ok(())
+    }
+
+    fn emit_metric(&self, metric_json: &str) -> Result<(), String> {
+        let payload: GuestMetricInput = serde_json::from_str(metric_json)
+            .map_err(|e| format!("invalid guest metric payload: {e}"))?;
+        let meter = opentelemetry::global::meter("temper");
+        let mut attrs: Vec<opentelemetry::KeyValue> = payload
+            .tags
+            .into_iter()
+            .map(|(key, value)| opentelemetry::KeyValue::new(key, value))
+            .collect();
+        if let Some(ctx) = &self.invocation_context {
+            attrs.push(opentelemetry::KeyValue::new(
+                "entity_type",
+                ctx.entity_type.clone(),
+            ));
+        }
+
+        match payload.kind.as_deref() {
+            Some("counter") => {
+                meter
+                    .f64_counter(payload.name)
+                    .build()
+                    .add(payload.value, &attrs);
+            }
+            _ => {
+                meter
+                    .f64_histogram(payload.name)
+                    .build()
+                    .record(payload.value, &attrs);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn infer_guest_operation(kind: EventKind, tags: &BTreeMap<String, String>) -> Option<String> {
+    match kind {
+        EventKind::ToolCall => tags
+            .get("gen_ai.operation.name")
+            .cloned()
+            .or_else(|| Some("execute_tool".to_string())),
+        EventKind::LlmCall => tags
+            .get("gen_ai.operation.name")
+            .cloned()
+            .or_else(|| Some("chat".to_string())),
+        _ => tags.get("operation").cloned(),
+    }
 }
 
 fn telemetry_url(url: &str) -> String {
@@ -888,6 +1182,18 @@ impl WasmHost for SimWasmHost {
     }
 
     fn emit_progress(&self, _event_json: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn emit_wide_event(&self, _event_json: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn log_structured(&self, _log_json: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn emit_metric(&self, _metric_json: &str) -> Result<(), String> {
         Ok(())
     }
 }

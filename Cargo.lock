@@ -6108,10 +6108,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "temper-observe",
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
  "tracing",
+ "uuid",
  "wasmtime",
  "wasmtime-wasi",
 ]

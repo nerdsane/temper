@@ -257,6 +257,79 @@ impl Context {
         }
     }
 
+    /// Emit a wide event from the guest module.
+    pub fn emit_wide_event(
+        &self,
+        kind: &str,
+        operation: &str,
+        success: bool,
+        duration_ns: u64,
+        tags: &Value,
+        attributes: &Value,
+        measurements: &Value,
+    ) -> Result<(), String> {
+        let json = serde_json::json!({
+            "kind": kind,
+            "operation": operation,
+            "success": success,
+            "duration_ns": duration_ns,
+            "tags": tags,
+            "attributes": attributes,
+            "measurements": measurements,
+        })
+        .to_string();
+        let rc = unsafe { host::host_emit_wide_event(json.as_ptr() as i32, json.len() as i32) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err("host_emit_wide_event failed".to_string())
+        }
+    }
+
+    /// Emit a structured log event from the guest module.
+    pub fn log_structured(
+        &self,
+        level: &str,
+        message: &str,
+        fields: &Value,
+    ) -> Result<(), String> {
+        let json = serde_json::json!({
+            "level": level,
+            "message": message,
+            "fields": fields,
+        })
+        .to_string();
+        let rc = unsafe { host::host_log_structured(json.as_ptr() as i32, json.len() as i32) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err("host_log_structured failed".to_string())
+        }
+    }
+
+    /// Emit a metric directly from the guest module.
+    pub fn emit_metric(
+        &self,
+        name: &str,
+        value: f64,
+        tags: &Value,
+        kind: Option<&str>,
+    ) -> Result<(), String> {
+        let json = serde_json::json!({
+            "name": name,
+            "value": value,
+            "tags": tags,
+            "kind": kind,
+        })
+        .to_string();
+        let rc = unsafe { host::host_emit_metric(json.as_ptr() as i32, json.len() as i32) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err("host_emit_metric failed".to_string())
+        }
+    }
+
     /// Evaluate a single transition against an IOA spec via the host.
     ///
     /// The host builds a `TransitionTable` from the IOA source and evaluates

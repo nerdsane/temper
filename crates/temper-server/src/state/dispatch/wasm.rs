@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tracing::instrument;
+use tracing::{Span, instrument};
 
 use crate::entity_actor::{EntityResponse, EntityState};
 use crate::request_context::AgentContext;
@@ -225,11 +225,13 @@ impl crate::state::ServerState {
         gen_ai.system = tracing::field::Empty,
         gen_ai.request.model = tracing::field::Empty,
         gen_ai.operation.name = tracing::field::Empty,
+        gen_ai.response.finish_reasons = tracing::field::Empty,
         gen_ai.usage.input_tokens = tracing::field::Empty,
         gen_ai.usage.output_tokens = tracing::field::Empty,
         gen_ai.conversation.id = tracing::field::Empty,
         gen_ai.input.messages = tracing::field::Empty,
         gen_ai.output.messages = tracing::field::Empty,
+        error.type = tracing::field::Empty,
     ))]
     async fn dispatch_single_integration(
         &self,
@@ -344,6 +346,7 @@ impl crate::state::ServerState {
             ctx.entity_ref.entity_id.to_string(),
             module_name.clone(),
         );
+        let host_invocation_context = inv_ctx.clone();
         let inner: Arc<dyn WasmHost> = Arc::new(
             ProductionWasmHost::with_timeout(tenant_secrets, http_timeout)
                 .with_binary_http_interceptor(
@@ -352,6 +355,7 @@ impl crate::state::ServerState {
                 )
                 .with_spec_evaluator(spec_evaluator_fn())
                 .with_progress_emitter(progress_emitter)
+                .with_invocation_context(host_invocation_context)
                 .with_trace_id(ctx.agent_ctx.trace_id.clone()),
         );
         let host: Arc<dyn WasmHost> = Arc::new(AuthorizedWasmHost::new(inner, gate, authz_ctx));
@@ -411,6 +415,7 @@ impl crate::state::ServerState {
             integration,
             &module_name,
             &hash,
+            entity_state,
             inv_ctx,
             host,
             &limits,
@@ -591,6 +596,7 @@ impl crate::state::ServerState {
         integration: &temper_spec::automaton::Integration,
         module_name: &str,
         hash: &str,
+        entity_state: &EntityState,
         inv_ctx: WasmInvocationContext,
         host: Arc<dyn WasmHost>,
         limits: &WasmResourceLimits,
@@ -609,44 +615,42 @@ impl crate::state::ServerState {
             .await
         {
             Ok(result) if result.success => {
+                let callback_params = &result.callback_params;
+
                 // Record GenAI token usage from callback params (if present)
-                if let Some(input) = result
-                    .callback_params
-                    .get("input_tokens")
-                    .and_then(|v| v.as_i64())
+                if let Some(input) = callback_params.get("input_tokens").and_then(|v| v.as_i64())
                 {
-                    tracing::Span::current().record("gen_ai.usage.input_tokens", input);
+                    Span::current().record("gen_ai.usage.input_tokens", input);
                 }
-                if let Some(output) = result
-                    .callback_params
-                    .get("output_tokens")
-                    .and_then(|v| v.as_i64())
+                if let Some(output) = callback_params.get("output_tokens").and_then(|v| v.as_i64())
                 {
-                    tracing::Span::current().record("gen_ai.usage.output_tokens", output);
+                    Span::current().record("gen_ai.usage.output_tokens", output);
                 }
                 // Record GenAI input/output messages for LLM Observability content.
                 // These are JSON strings of message arrays set by WASM modules.
-                if let Some(input_msgs) = result
-                    .callback_params
+                if let Some(input_msgs) = callback_params
                     .get("_gen_ai_input_messages")
                     .and_then(|v| v.as_str())
                 {
-                    tracing::Span::current().record("gen_ai.input.messages", input_msgs);
+                    Span::current().record("gen_ai.input.messages", input_msgs);
                 }
-                if let Some(output_msgs) = result
-                    .callback_params
+                if let Some(output_msgs) = callback_params
                     .get("_gen_ai_output_messages")
                     .and_then(|v| v.as_str())
                 {
-                    tracing::Span::current().record("gen_ai.output.messages", output_msgs);
+                    Span::current().record("gen_ai.output.messages", output_msgs);
                 }
                 // Dynamic provider override (if WASM module reports actual provider used)
-                if let Some(provider) = result
-                    .callback_params
-                    .get("_gen_ai_provider")
-                    .and_then(|v| v.as_str())
+                if let Some(provider) = callback_params.get("_gen_ai_provider").and_then(|v| v.as_str())
                 {
-                    tracing::Span::current().record("gen_ai.system", provider);
+                    Span::current().record("gen_ai.system", provider);
+                }
+                if let Some(finish_reason) = callback_params
+                    .get("_gen_ai_finish_reason")
+                    .and_then(|v| v.as_str())
+                    .filter(|value| !value.is_empty())
+                {
+                    Span::current().record("gen_ai.response.finish_reasons", finish_reason);
                 }
 
                 let complete_seq = self.next_entity_event_sequence(
@@ -672,6 +676,10 @@ impl crate::state::ServerState {
                 );
                 if let Some(reason) = denial_tracker.take_denial() {
                     let error_str = http_call_authz_denied_error(&reason);
+                    if module_name == "llm_caller" {
+                        Span::current()
+                            .record("error.type", llm_error_type(&error_str).as_str());
+                    }
                     return self
                         .handle_wasm_failure(
                             ctx,
@@ -682,6 +690,17 @@ impl crate::state::ServerState {
                             result.duration_ms,
                         )
                         .await;
+                }
+
+                if module_name == "llm_caller" {
+                    let event = llm_call_wide_event(
+                        ctx,
+                        entity_state,
+                        callback_params,
+                        result.duration_ms,
+                    );
+                    temper_observe::wide_event::emit_span(&event);
+                    temper_observe::wide_event::emit_metrics(&event);
                 }
 
                 self.record_invocation(
@@ -750,6 +769,9 @@ impl crate::state::ServerState {
                 if let Some(reason) = denial_tracker.take_denial() {
                     error_str = http_call_authz_denied_error(&reason);
                 }
+                if module_name == "llm_caller" {
+                    Span::current().record("error.type", llm_error_type(&error_str).as_str());
+                }
                 self.handle_wasm_failure(
                     ctx,
                     &integration.name,
@@ -787,6 +809,9 @@ impl crate::state::ServerState {
                     && !is_http_call_authz_denial(&error_str)
                 {
                     error_str = http_call_authz_denied_error(&reason);
+                }
+                if module_name == "llm_caller" {
+                    Span::current().record("error.type", llm_error_type(&error_str).as_str());
                 }
                 self.handle_wasm_failure(
                     ctx,
@@ -849,7 +874,8 @@ impl crate::state::ServerState {
         );
         let mut base_host = ProductionWasmHost::new(tenant_secrets)
             .with_spec_evaluator(spec_evaluator_fn())
-            .with_progress_emitter(progress_emitter);
+            .with_progress_emitter(progress_emitter)
+            .with_invocation_context(context.clone());
         if let Some(interceptor) = local_blob_interceptor {
             base_host = base_host.with_binary_http_interceptor(interceptor);
         }
@@ -870,6 +896,81 @@ impl crate::state::ServerState {
             .invoke(&hash, &context, host, &limits, streams)
             .await
             .map_err(|e| e.to_string())
+    }
+}
+
+fn llm_call_wide_event<'a>(
+    ctx: &'a WasmDispatchCtx<'a>,
+    entity_state: &'a EntityState,
+    callback_params: &'a Value,
+    duration_ms: u64,
+) -> temper_observe::wide_event::WideEvent {
+    let provider = callback_params
+        .get("_gen_ai_provider")
+        .and_then(Value::as_str)
+        .or_else(|| entity_state.fields.get("provider").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let model = entity_state
+        .fields
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let session_id = ctx
+        .agent_ctx
+        .session_id
+        .as_deref()
+        .unwrap_or(ctx.entity_ref.entity_id);
+    let input_tokens = callback_params
+        .get("input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let output_tokens = callback_params
+        .get("output_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let stop_reason = callback_params
+        .get("_gen_ai_finish_reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let input_messages = callback_params
+        .get("_gen_ai_input_messages")
+        .and_then(Value::as_str);
+    let output_messages = callback_params
+        .get("_gen_ai_output_messages")
+        .and_then(Value::as_str);
+    let trace_id = ctx.agent_ctx.trace_id.as_deref().unwrap_or_default();
+
+    temper_observe::wide_event::from_llm_call(temper_observe::wide_event::LlmCallInput {
+        provider,
+        model,
+        operation: "chat",
+        entity_type: ctx.entity_ref.entity_type,
+        entity_id: ctx.entity_ref.entity_id,
+        session_id,
+        success: true,
+        duration_ns: duration_ms * 1_000_000,
+        input_tokens,
+        output_tokens,
+        stop_reason,
+        input_messages,
+        output_messages,
+        trace_id,
+        error: None,
+    })
+}
+
+fn llm_error_type(error: &str) -> String {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("rate limit") {
+        "rate_limit".to_string()
+    } else if normalized.contains("timeout") {
+        "timeout".to_string()
+    } else if normalized.contains("authorization denied") {
+        "authorization_denied".to_string()
+    } else if normalized.contains("connection") {
+        "connection_error".to_string()
+    } else {
+        "integration_error".to_string()
     }
 }
 
