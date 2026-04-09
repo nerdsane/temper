@@ -1827,11 +1827,9 @@ async fn bootstrap_agents(
             bootstrapped.push(agent.name.clone());
 
             // Set source_app_id on Agent entity if available.
-            if has_agents {
-                if let Some(app_id) = app_id {
-                    set_agent_source_app(state, tenant_id, tenant, &agent_ctx, &agent.name, app_id)
-                        .await;
-                }
+            if has_agents && let Some(app_id) = app_id {
+                set_agent_source_app(state, tenant_id, tenant, &agent_ctx, &agent.name, app_id)
+                    .await;
             }
             continue;
         }
@@ -1916,18 +1914,9 @@ async fn bootstrap_agents(
                 bootstrapped.push(agent.name.clone());
 
                 // Set source_app_id on Agent entity if available.
-                if has_agents {
-                    if let Some(app_id) = app_id {
-                        set_agent_source_app(
-                            state,
-                            tenant_id,
-                            tenant,
-                            &agent_ctx,
-                            &agent.name,
-                            app_id,
-                        )
+                if has_agents && let Some(app_id) = app_id {
+                    set_agent_source_app(state, tenant_id, tenant, &agent_ctx, &agent.name, app_id)
                         .await;
-                    }
                 }
             }
             Err(e) => {
