@@ -823,61 +823,61 @@ struct SkillFrontmatter {
 /// Extract frontmatter from SKILL.md content. Supports YAML (`---`) and TOML (`+++`).
 fn extract_frontmatter(content: &str) -> SkillFrontmatter {
     // Try YAML frontmatter (---)
-    if let Some(rest) = content.strip_prefix("---") {
-        if let Some(end) = rest.find("\n---") {
-            let fm = &rest[..end];
-            let mut name = None;
-            let mut description = None;
-            let mut scope = None;
-            for line in fm.lines() {
-                let trimmed = line.trim();
-                if let Some(val) = trimmed.strip_prefix("name:") {
-                    let val = val.trim().trim_matches('"').trim_matches('\'');
-                    if !val.is_empty() {
-                        name = Some(val.to_string());
-                    }
-                } else if let Some(val) = trimmed.strip_prefix("description:") {
-                    let val = val.trim().trim_matches('"').trim_matches('\'');
-                    if !val.is_empty() {
-                        description = Some(val.to_string());
-                    }
-                } else if let Some(val) = trimmed.strip_prefix("scope:") {
-                    let val = val.trim().trim_matches('"').trim_matches('\'');
-                    if !val.is_empty() {
-                        scope = Some(val.to_string());
-                    }
+    if let Some(rest) = content.strip_prefix("---")
+        && let Some(end) = rest.find("\n---")
+    {
+        let fm = &rest[..end];
+        let mut name = None;
+        let mut description = None;
+        let mut scope = None;
+        for line in fm.lines() {
+            let trimmed = line.trim();
+            if let Some(val) = trimmed.strip_prefix("name:") {
+                let val = val.trim().trim_matches('"').trim_matches('\'');
+                if !val.is_empty() {
+                    name = Some(val.to_string());
+                }
+            } else if let Some(val) = trimmed.strip_prefix("description:") {
+                let val = val.trim().trim_matches('"').trim_matches('\'');
+                if !val.is_empty() {
+                    description = Some(val.to_string());
+                }
+            } else if let Some(val) = trimmed.strip_prefix("scope:") {
+                let val = val.trim().trim_matches('"').trim_matches('\'');
+                if !val.is_empty() {
+                    scope = Some(val.to_string());
                 }
             }
-            return SkillFrontmatter {
-                name,
-                description,
-                scope,
-            };
         }
+        return SkillFrontmatter {
+            name,
+            description,
+            scope,
+        };
     }
 
     // Fall back to TOML frontmatter (+++)
-    if let Some(rest) = content.strip_prefix("+++") {
-        if let Some(end) = rest.find("+++") {
-            let fm = &rest[..end];
-            let mut scope = None;
-            for line in fm.lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with("scope")
-                    && let Some(val) = trimmed.split('=').nth(1)
-                {
-                    let val = val.trim().trim_matches('"');
-                    if !val.is_empty() {
-                        scope = Some(val.to_string());
-                    }
+    if let Some(rest) = content.strip_prefix("+++")
+        && let Some(end) = rest.find("+++")
+    {
+        let fm = &rest[..end];
+        let mut scope = None;
+        for line in fm.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("scope")
+                && let Some(val) = trimmed.split('=').nth(1)
+            {
+                let val = val.trim().trim_matches('"');
+                if !val.is_empty() {
+                    scope = Some(val.to_string());
                 }
             }
-            return SkillFrontmatter {
-                name: None,
-                description: None,
-                scope,
-            };
         }
+        return SkillFrontmatter {
+            name: None,
+            description: None,
+            scope,
+        };
     }
 
     SkillFrontmatter {
