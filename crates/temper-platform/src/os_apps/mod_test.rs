@@ -666,9 +666,14 @@ async fn test_install_app_bootstraps_adrs_into_temper_fs() {
     let mut state = PlatformState::new(None);
     state.server.event_store = Some(Arc::new(ServerEventStore::Turso(turso)));
 
+    // Re-add the temp dir before each install — the concurrent
+    // `test_reload_picks_up_disk_changes` test calls `reload_skills()`
+    // which replaces the global catalog, potentially wiping our entry.
+    add_os_apps_dir(app_root.clone());
     install_os_app(&state, "test-adr-app", "temper-fs")
         .await
         .expect("install temper-fs");
+    add_os_apps_dir(app_root.clone());
     let result = install_os_app(&state, "test-adr-app", "doc-app")
         .await
         .expect("install doc-app");
