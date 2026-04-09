@@ -2,9 +2,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use serde_json::Value;
+use opentelemetry::trace::TraceContextExt;
+use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{Span, instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::entity_actor::{EntityResponse, EntityState};
 use crate::request_context::AgentContext;
@@ -223,6 +225,7 @@ impl crate::state::ServerState {
         integration = %integration.name,
         wasm.module = tracing::field::Empty,
         gen_ai.system = tracing::field::Empty,
+        gen_ai.system_instructions = tracing::field::Empty,
         gen_ai.request.model = tracing::field::Empty,
         gen_ai.operation.name = tracing::field::Empty,
         gen_ai.response.finish_reasons = tracing::field::Empty,
@@ -319,7 +322,9 @@ impl crate::state::ServerState {
                 ),
                 None => integration.config.clone(),
             },
-            trace_id: ctx.agent_ctx.trace_id.clone().unwrap_or_default(),
+            trace_id: current_otel_trace_id(&Span::current())
+                .or_else(|| ctx.agent_ctx.trace_id.clone())
+                .unwrap_or_default(),
         };
         let denial_tracker = HttpCallAuthzDenialTracker::default();
         let gate: Arc<dyn WasmAuthzGate> = Arc::new(TrackingWasmAuthzGate::new(
@@ -614,15 +619,20 @@ impl crate::state::ServerState {
             .invoke(hash, &inv_ctx, host, limits, streams)
             .await
         {
-            Ok(result) if result.success => {
+            Ok(mut result) if result.success => {
+                if module_name == "llm_caller" {
+                    attach_llm_parent_context(&Span::current(), &mut result.callback_params);
+                }
+
                 let callback_params = &result.callback_params;
 
                 // Record GenAI token usage from callback params (if present)
-                if let Some(input) = callback_params.get("input_tokens").and_then(|v| v.as_i64())
-                {
+                if let Some(input) = callback_params.get("input_tokens").and_then(|v| v.as_i64()) {
                     Span::current().record("gen_ai.usage.input_tokens", input);
                 }
-                if let Some(output) = callback_params.get("output_tokens").and_then(|v| v.as_i64())
+                if let Some(output) = callback_params
+                    .get("output_tokens")
+                    .and_then(|v| v.as_i64())
                 {
                     Span::current().record("gen_ai.usage.output_tokens", output);
                 }
@@ -640,8 +650,17 @@ impl crate::state::ServerState {
                 {
                     Span::current().record("gen_ai.output.messages", output_msgs);
                 }
+                if let Some(system_instructions) = callback_params
+                    .get("_gen_ai_system_instructions")
+                    .and_then(|v| v.as_str())
+                    .filter(|value| !value.is_empty())
+                {
+                    Span::current().record("gen_ai.system_instructions", system_instructions);
+                }
                 // Dynamic provider override (if WASM module reports actual provider used)
-                if let Some(provider) = callback_params.get("_gen_ai_provider").and_then(|v| v.as_str())
+                if let Some(provider) = callback_params
+                    .get("_gen_ai_provider")
+                    .and_then(|v| v.as_str())
                 {
                     Span::current().record("gen_ai.system", provider);
                 }
@@ -677,8 +696,7 @@ impl crate::state::ServerState {
                 if let Some(reason) = denial_tracker.take_denial() {
                     let error_str = http_call_authz_denied_error(&reason);
                     if module_name == "llm_caller" {
-                        Span::current()
-                            .record("error.type", llm_error_type(&error_str).as_str());
+                        Span::current().record("error.type", llm_error_type(&error_str).as_str());
                     }
                     return self
                         .handle_wasm_failure(
@@ -693,12 +711,8 @@ impl crate::state::ServerState {
                 }
 
                 if module_name == "llm_caller" {
-                    let event = llm_call_wide_event(
-                        ctx,
-                        entity_state,
-                        callback_params,
-                        result.duration_ms,
-                    );
+                    let event =
+                        llm_call_wide_event(ctx, entity_state, callback_params, result.duration_ms);
                     temper_observe::wide_event::emit_span(&event);
                     temper_observe::wide_event::emit_metrics(&event);
                 }
@@ -938,7 +952,13 @@ fn llm_call_wide_event<'a>(
     let output_messages = callback_params
         .get("_gen_ai_output_messages")
         .and_then(Value::as_str);
-    let trace_id = ctx.agent_ctx.trace_id.as_deref().unwrap_or_default();
+    let system_instructions = callback_params
+        .get("_gen_ai_system_instructions")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let trace_id = current_otel_trace_id(&Span::current())
+        .or_else(|| ctx.agent_ctx.trace_id.clone())
+        .unwrap_or_default();
 
     temper_observe::wide_event::from_llm_call(temper_observe::wide_event::LlmCallInput {
         provider,
@@ -952,11 +972,41 @@ fn llm_call_wide_event<'a>(
         input_tokens,
         output_tokens,
         stop_reason,
+        system_instructions,
         input_messages,
         output_messages,
-        trace_id,
+        trace_id: &trace_id,
         error: None,
     })
+}
+
+fn current_otel_trace_id(span: &Span) -> Option<String> {
+    let span_context = span.context().span().span_context().clone();
+    if span_context.is_valid() {
+        Some(span_context.trace_id().to_string())
+    } else {
+        None
+    }
+}
+
+fn attach_llm_parent_context(span: &Span, callback_params: &mut Value) {
+    let span_context = span.context().span().span_context().clone();
+    if !span_context.is_valid() {
+        return;
+    }
+
+    let Some(object) = callback_params.as_object_mut() else {
+        return;
+    };
+
+    object.insert(
+        "_gen_ai_parent_trace_id".into(),
+        json!(span_context.trace_id().to_string()),
+    );
+    object.insert(
+        "_gen_ai_parent_span_id".into(),
+        json!(span_context.span_id().to_string()),
+    );
 }
 
 fn llm_error_type(error: &str) -> String {

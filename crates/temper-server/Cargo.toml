@@ -36,6 +36,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 opentelemetry = { workspace = true }

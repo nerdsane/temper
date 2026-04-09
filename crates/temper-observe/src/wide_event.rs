@@ -29,9 +29,12 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use opentelemetry::KeyValue;
-use opentelemetry::trace::{Span, Status, Tracer};
+use opentelemetry::trace::{
+    Span, SpanContext, SpanId, Status, TraceContextExt, TraceFlags, TraceId, TraceState, Tracer,
+};
 use serde::{Deserialize, Serialize};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Discriminant for the kind of wide event being emitted.
 ///
@@ -358,6 +361,8 @@ pub struct LlmCallInput<'a> {
     pub output_tokens: i64,
     /// Stop reason (e.g., "end_turn", "tool_use").
     pub stop_reason: &'a str,
+    /// System instructions passed separately from chat history.
+    pub system_instructions: Option<&'a str>,
     /// Input messages serialized as a JSON array string.
     pub input_messages: Option<&'a str>,
     /// Output messages serialized as a JSON array string.
@@ -387,6 +392,12 @@ pub fn from_llm_call(input: LlmCallInput<'_>) -> WideEvent {
         "gen_ai.conversation.id".into(),
         serde_json::json!(input.session_id),
     );
+    if let Some(system_instructions) = input.system_instructions {
+        attributes.insert(
+            "gen_ai.system_instructions".into(),
+            serde_json::json!(system_instructions),
+        );
+    }
     if let Some(messages) = input.input_messages {
         attributes.insert("gen_ai.input.messages".into(), serde_json::json!(messages));
     }
@@ -530,10 +541,17 @@ pub fn emit_span(event: &WideEvent) {
         attrs.push(KeyValue::new(k.clone(), v.clone()));
     }
     for (k, v) in &event.attributes {
+        if k.starts_with("_otel.") {
+            continue;
+        }
         attrs.push(KeyValue::new(k.clone(), v.to_string()));
     }
     for (k, v) in &event.measurements {
         attrs.push(KeyValue::new(k.clone(), *v));
+    }
+    if event.event_kind == EventKind::LlmCall {
+        // Dispatch spans are the canonical LLMObs view; wide-event LLM spans stay in APM.
+        attrs.push(KeyValue::new("dd_llmobs_enabled", false));
     }
     attrs.push(KeyValue::new("temper.trace_id", event.trace_id.clone()));
     attrs.push(KeyValue::new("temper.span_id", event.span_id.clone()));
@@ -552,14 +570,39 @@ pub fn emit_span(event: &WideEvent) {
     let start_time: SystemTime = event.timestamp.into();
     let end_time = start_time + std::time::Duration::from_nanos(event.duration_ns);
 
+    let parent_cx =
+        remote_parent_context(event).unwrap_or_else(|| tracing::Span::current().context());
     let mut span = tracer
         .span_builder(span_name)
         .with_start_time(start_time)
         .with_attributes(attrs)
-        .start(&tracer);
+        .start_with_context(&tracer, &parent_cx);
 
     span.set_status(status);
     span.end_with_timestamp(end_time);
+}
+
+fn remote_parent_context(event: &WideEvent) -> Option<opentelemetry::Context> {
+    let trace_id = event
+        .attributes
+        .get("_otel.parent_trace_id")
+        .and_then(serde_json::Value::as_str)?;
+    let span_id = event
+        .attributes
+        .get("_otel.parent_span_id")
+        .and_then(serde_json::Value::as_str)?;
+
+    let trace_id = TraceId::from_hex(trace_id).ok()?;
+    let span_id = SpanId::from_hex(span_id).ok()?;
+    let span_context = SpanContext::new(
+        trace_id,
+        span_id,
+        TraceFlags::SAMPLED,
+        true,
+        TraceState::default(),
+    );
+
+    Some(opentelemetry::Context::new().with_remote_span_context(span_context))
 }
 
 /// Project to the **Aggregated View** (OTEL metrics).
@@ -758,6 +801,7 @@ mod tests {
             input_tokens: 150,
             output_tokens: 50,
             stop_reason: "end_turn",
+            system_instructions: Some(r#"[{"type":"text","content":"be concise"}]"#),
             input_messages: Some(r#"[{"role":"user","content":"hello"}]"#),
             output_messages: Some(r#"[{"role":"assistant","content":"hi"}]"#),
             trace_id: "trace-llm",
@@ -772,6 +816,10 @@ mod tests {
         assert_eq!(event.measurements["gen_ai.usage.input_tokens"], 150.0);
         assert_eq!(event.measurements["gen_ai.usage.output_tokens"], 50.0);
         assert_eq!(event.attributes["gen_ai.conversation.id"], "sess-1");
+        assert_eq!(
+            event.attributes["gen_ai.system_instructions"],
+            r#"[{"type":"text","content":"be concise"}]"#
+        );
         assert_eq!(
             event.attributes["gen_ai.input.messages"],
             r#"[{"role":"user","content":"hello"}]"#
@@ -797,6 +845,7 @@ mod tests {
             input_tokens: 100,
             output_tokens: 0,
             stop_reason: "",
+            system_instructions: None,
             input_messages: None,
             output_messages: None,
             trace_id: "trace-fail",
@@ -827,8 +876,14 @@ mod tests {
         assert!(event.success);
         assert_eq!(event.attributes["gen_ai.conversation.id"], "sess-1");
         assert_eq!(event.attributes["gen_ai.tool.call.id"], "toolu_123");
-        assert_eq!(event.attributes["gen_ai.tool.call.arguments"], r#"{"entity":"Task"}"#);
-        assert_eq!(event.attributes["gen_ai.tool.call.result"], r#"{"id":"task-1"}"#);
+        assert_eq!(
+            event.attributes["gen_ai.tool.call.arguments"],
+            r#"{"entity":"Task"}"#
+        );
+        assert_eq!(
+            event.attributes["gen_ai.tool.call.result"],
+            r#"{"id":"task-1"}"#
+        );
         assert!(!event.tags.contains_key("entity_id"));
     }
 
@@ -894,6 +949,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 stop_reason: "end_turn",
+                system_instructions: None,
                 input_messages: None,
                 output_messages: None,
                 trace_id: "",
