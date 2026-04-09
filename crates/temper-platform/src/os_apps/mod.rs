@@ -902,10 +902,7 @@ fn collect_system_files_recursive(
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .to_string();
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let mime_type = match ext {
                 "md" => "text/markdown",
                 "json" => "application/json",

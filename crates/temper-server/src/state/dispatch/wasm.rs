@@ -224,8 +224,12 @@ impl crate::state::ServerState {
         wasm.module = tracing::field::Empty,
         gen_ai.system = tracing::field::Empty,
         gen_ai.request.model = tracing::field::Empty,
+        gen_ai.operation.name = tracing::field::Empty,
         gen_ai.usage.input_tokens = tracing::field::Empty,
         gen_ai.usage.output_tokens = tracing::field::Empty,
+        gen_ai.conversation.id = tracing::field::Empty,
+        gen_ai.input.messages = tracing::field::Empty,
+        gen_ai.output.messages = tracing::field::Empty,
     ))]
     async fn dispatch_single_integration(
         &self,
@@ -251,9 +255,23 @@ impl crate::state::ServerState {
         span.record("otel.name", format!("wasm:{module_name}").as_str());
         span.record("wasm.module", module_name.as_str());
         if module_name == "llm_caller" {
-            span.record("gen_ai.system", "anthropic");
+            // Resolve provider dynamically from entity state (default: anthropic)
+            let provider = entity_state
+                .fields
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("anthropic");
+            span.record("gen_ai.system", provider);
+            span.record("gen_ai.operation.name", "chat");
             if let Some(model) = entity_state.fields.get("model").and_then(|v| v.as_str()) {
                 span.record("gen_ai.request.model", model);
+            }
+            // Session ID for grouping turns in Datadog LLM Observability
+            if let Some(ref session_id) = ctx.agent_ctx.session_id {
+                span.record("gen_ai.conversation.id", session_id.as_str());
+            } else {
+                // Fall back to entity_id as session grouping key
+                span.record("gen_ai.conversation.id", ctx.entity_ref.entity_id);
             }
         }
 
@@ -605,6 +623,30 @@ impl crate::state::ServerState {
                     .and_then(|v| v.as_i64())
                 {
                     tracing::Span::current().record("gen_ai.usage.output_tokens", output);
+                }
+                // Record GenAI input/output messages for LLM Observability content.
+                // These are JSON strings of message arrays set by WASM modules.
+                if let Some(input_msgs) = result
+                    .callback_params
+                    .get("_gen_ai_input_messages")
+                    .and_then(|v| v.as_str())
+                {
+                    tracing::Span::current().record("gen_ai.input.messages", input_msgs);
+                }
+                if let Some(output_msgs) = result
+                    .callback_params
+                    .get("_gen_ai_output_messages")
+                    .and_then(|v| v.as_str())
+                {
+                    tracing::Span::current().record("gen_ai.output.messages", output_msgs);
+                }
+                // Dynamic provider override (if WASM module reports actual provider used)
+                if let Some(provider) = result
+                    .callback_params
+                    .get("_gen_ai_provider")
+                    .and_then(|v| v.as_str())
+                {
+                    tracing::Span::current().record("gen_ai.system", provider);
                 }
 
                 let complete_seq = self.next_entity_event_sequence(

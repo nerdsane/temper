@@ -272,6 +272,17 @@ pub fn init_tracing(
         headers.insert("Authorization".to_string(), format!("Bearer {token}"));
     }
 
+    // When Datadog API key is present, add LLM Observability routing header.
+    // This tells Datadog to map gen_ai.* semantic convention attributes on OTLP
+    // spans into the LLM Observability product (input/output messages, token
+    // counts, model info, session grouping).
+    if read_non_empty_env("DD_API_KEY").is_some() {
+        headers.insert("dd-otlp-source".to_string(), "llmobs".to_string());
+        if let Some(api_key) = read_non_empty_env("DD_API_KEY") {
+            headers.insert("dd-api-key".to_string(), api_key);
+        }
+    }
+
     // Clear signal-specific OTEL env vars that take precedence over the
     // generic endpoint.  Tools like Claude Code, Datadog agents, etc.
     // may inject these, causing telemetry to silently route to the wrong

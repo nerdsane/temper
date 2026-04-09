@@ -47,6 +47,10 @@ pub enum EventKind {
     AuthzDecision,
     /// Eventual invariant convergence check.
     InvariantCheck,
+    /// LLM API call (model invocation with gen_ai.* semantic conventions).
+    LlmCall,
+    /// Agent tool invocation (tool_use block execution).
+    ToolCall,
 }
 
 /// A wide event: the unified telemetry primitive emitted by entity actors.
@@ -330,6 +334,146 @@ pub fn from_invariant_check(input: InvariantCheckInput<'_>) -> WideEvent {
     }
 }
 
+/// Input for building an LLM call wide event.
+pub struct LlmCallInput<'a> {
+    /// LLM provider (e.g., "anthropic", "openrouter", "openai").
+    pub provider: &'a str,
+    /// Model name (e.g., "claude-sonnet-4-6").
+    pub model: &'a str,
+    /// Operation name (e.g., "chat").
+    pub operation: &'a str,
+    /// Entity type (typically "Session").
+    pub entity_type: &'a str,
+    /// Entity ID (session ID).
+    pub entity_id: &'a str,
+    /// Session/conversation ID for grouping turns.
+    pub session_id: &'a str,
+    /// Whether the call succeeded.
+    pub success: bool,
+    /// Duration in nanoseconds.
+    pub duration_ns: u64,
+    /// Input tokens consumed.
+    pub input_tokens: i64,
+    /// Output tokens generated.
+    pub output_tokens: i64,
+    /// Stop reason (e.g., "end_turn", "tool_use").
+    pub stop_reason: &'a str,
+    /// Trace ID for correlation.
+    pub trace_id: &'a str,
+    /// Error message, if any.
+    pub error: Option<&'a str>,
+}
+
+/// Build a WideEvent from an LLM API call.
+pub fn from_llm_call(input: LlmCallInput<'_>) -> WideEvent {
+    let span_id = sim_uuid().to_string();
+    let mut tags = BTreeMap::new();
+    tags.insert("gen_ai.system".into(), input.provider.into());
+    tags.insert("gen_ai.request.model".into(), input.model.into());
+    tags.insert("gen_ai.operation.name".into(), input.operation.into());
+    tags.insert("stop_reason".into(), input.stop_reason.into());
+    tags.insert("success".into(), input.success.to_string());
+
+    let mut attributes = BTreeMap::new();
+    attributes.insert("entity_id".into(), serde_json::json!(input.entity_id));
+    attributes.insert(
+        "gen_ai.conversation.id".into(),
+        serde_json::json!(input.session_id),
+    );
+    if let Some(err) = input.error {
+        attributes.insert("error".into(), serde_json::json!(err));
+    }
+
+    let mut measurements = BTreeMap::new();
+    measurements.insert(
+        "gen_ai.usage.input_tokens".into(),
+        input.input_tokens as f64,
+    );
+    measurements.insert(
+        "gen_ai.usage.output_tokens".into(),
+        input.output_tokens as f64,
+    );
+    measurements.insert("duration_ms".into(), input.duration_ns as f64 / 1_000_000.0);
+    measurements.insert("invocation_count".into(), 1.0);
+
+    WideEvent {
+        event_kind: EventKind::LlmCall,
+        entity_type: input.entity_type.into(),
+        entity_id: input.entity_id.into(),
+        operation: format!("{}.{}", input.provider, input.model),
+        from_status: String::new(),
+        to_status: input.stop_reason.into(),
+        success: input.success,
+        duration_ns: input.duration_ns,
+        timestamp: sim_now(),
+        trace_id: input.trace_id.into(),
+        span_id,
+        tags,
+        attributes,
+        measurements,
+    }
+}
+
+/// Input for building a tool call wide event.
+pub struct ToolCallInput<'a> {
+    /// Tool name (e.g., "temper_create", "sandbox_bash").
+    pub tool_name: &'a str,
+    /// Entity type (typically "Session").
+    pub entity_type: &'a str,
+    /// Entity ID (session ID).
+    pub entity_id: &'a str,
+    /// Session/conversation ID for grouping.
+    pub session_id: &'a str,
+    /// Whether the tool call succeeded.
+    pub success: bool,
+    /// Duration in nanoseconds.
+    pub duration_ns: u64,
+    /// Trace ID for correlation.
+    pub trace_id: &'a str,
+    /// Error message, if any.
+    pub error: Option<&'a str>,
+}
+
+/// Build a WideEvent from an agent tool invocation.
+pub fn from_tool_call(input: ToolCallInput<'_>) -> WideEvent {
+    let span_id = sim_uuid().to_string();
+    let mut tags = BTreeMap::new();
+    tags.insert("tool_name".into(), input.tool_name.into());
+    tags.insert("entity_type".into(), input.entity_type.into());
+    tags.insert("success".into(), input.success.to_string());
+
+    let mut attributes = BTreeMap::new();
+    attributes.insert("entity_id".into(), serde_json::json!(input.entity_id));
+    attributes.insert(
+        "gen_ai.conversation.id".into(),
+        serde_json::json!(input.session_id),
+    );
+    if let Some(err) = input.error {
+        attributes.insert("error".into(), serde_json::json!(err));
+    }
+
+    let mut measurements = BTreeMap::new();
+    measurements.insert("duration_ms".into(), input.duration_ns as f64 / 1_000_000.0);
+    measurements.insert("invocation_count".into(), 1.0);
+
+    WideEvent {
+        event_kind: EventKind::ToolCall,
+        entity_type: input.entity_type.into(),
+        entity_id: input.entity_id.into(),
+        operation: input.tool_name.into(),
+        from_status: String::new(),
+        to_status: String::new(),
+        success: input.success,
+        duration_ns: input.duration_ns,
+        timestamp: sim_now(),
+        trace_id: input.trace_id.into(),
+        span_id,
+        tags,
+        attributes,
+        measurements,
+    }
+}
+
 // =========================================================================
 // View Projections → OTEL SDK
 // =========================================================================
@@ -342,6 +486,8 @@ pub fn emit_span(event: &WideEvent) {
         EventKind::WasmInvocation => format!("wasm.{}", event.operation),
         EventKind::AuthzDecision => format!("authz.{}", event.operation),
         EventKind::InvariantCheck => format!("invariant.{}", event.operation),
+        EventKind::LlmCall => format!("llm.{}", event.operation),
+        EventKind::ToolCall => format!("tool.{}", event.operation),
     };
 
     let mut attrs: Vec<KeyValue> = Vec::new();
@@ -564,6 +710,91 @@ mod tests {
     }
 
     #[test]
+    fn test_llm_call_event() {
+        let event = from_llm_call(LlmCallInput {
+            provider: "anthropic",
+            model: "claude-sonnet-4-6",
+            operation: "chat",
+            entity_type: "Session",
+            entity_id: "sess-1",
+            session_id: "sess-1",
+            success: true,
+            duration_ns: 3_000_000_000,
+            input_tokens: 150,
+            output_tokens: 50,
+            stop_reason: "end_turn",
+            trace_id: "trace-llm",
+            error: None,
+        });
+        assert_eq!(event.event_kind, EventKind::LlmCall);
+        assert_eq!(event.tags["gen_ai.system"], "anthropic");
+        assert_eq!(event.tags["gen_ai.request.model"], "claude-sonnet-4-6");
+        assert_eq!(event.tags["gen_ai.operation.name"], "chat");
+        assert_eq!(event.tags["stop_reason"], "end_turn");
+        assert!(event.success);
+        assert_eq!(event.measurements["gen_ai.usage.input_tokens"], 150.0);
+        assert_eq!(event.measurements["gen_ai.usage.output_tokens"], 50.0);
+        assert_eq!(event.attributes["gen_ai.conversation.id"], "sess-1");
+        assert!(!event.tags.contains_key("entity_id"));
+    }
+
+    #[test]
+    fn test_llm_call_failure() {
+        let event = from_llm_call(LlmCallInput {
+            provider: "openrouter",
+            model: "gpt-4",
+            operation: "chat",
+            entity_type: "Session",
+            entity_id: "sess-2",
+            session_id: "sess-2",
+            success: false,
+            duration_ns: 500_000,
+            input_tokens: 100,
+            output_tokens: 0,
+            stop_reason: "",
+            trace_id: "trace-fail",
+            error: Some("rate limit exceeded"),
+        });
+        assert!(!event.success);
+        assert_eq!(event.attributes["error"], "rate limit exceeded");
+    }
+
+    #[test]
+    fn test_tool_call_event() {
+        let event = from_tool_call(ToolCallInput {
+            tool_name: "temper_create",
+            entity_type: "Session",
+            entity_id: "sess-1",
+            session_id: "sess-1",
+            success: true,
+            duration_ns: 200_000_000,
+            trace_id: "trace-tool",
+            error: None,
+        });
+        assert_eq!(event.event_kind, EventKind::ToolCall);
+        assert_eq!(event.tags["tool_name"], "temper_create");
+        assert!(event.success);
+        assert_eq!(event.attributes["gen_ai.conversation.id"], "sess-1");
+        assert!(!event.tags.contains_key("entity_id"));
+    }
+
+    #[test]
+    fn test_tool_call_failure() {
+        let event = from_tool_call(ToolCallInput {
+            tool_name: "sandbox_bash",
+            entity_type: "Session",
+            entity_id: "sess-3",
+            session_id: "sess-3",
+            success: false,
+            duration_ns: 1_000_000,
+            trace_id: "trace-tool-fail",
+            error: Some("sandbox timeout"),
+        });
+        assert!(!event.success);
+        assert_eq!(event.attributes["error"], "sandbox timeout");
+    }
+
+    #[test]
     fn test_emit_span_all_event_kinds() {
         let events = vec![
             sample_event(),
@@ -593,6 +824,31 @@ mod tests {
                 check_count: 1,
                 outcome: "converged",
                 duration_ns: 0,
+            }),
+            from_llm_call(LlmCallInput {
+                provider: "anthropic",
+                model: "claude-sonnet-4-6",
+                operation: "chat",
+                entity_type: "Session",
+                entity_id: "s",
+                session_id: "s",
+                success: true,
+                duration_ns: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                stop_reason: "end_turn",
+                trace_id: "",
+                error: None,
+            }),
+            from_tool_call(ToolCallInput {
+                tool_name: "temper_get",
+                entity_type: "Session",
+                entity_id: "s",
+                session_id: "s",
+                success: true,
+                duration_ns: 0,
+                trace_id: "",
+                error: None,
             }),
         ];
         for e in &events {
