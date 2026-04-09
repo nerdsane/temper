@@ -23,6 +23,8 @@ use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
 use crate::bootstrap;
 use crate::state::PlatformState;
 
+mod system_files;
+
 /// Result of an app installation, categorising each spec by what happened.
 #[derive(Debug, Clone, Serialize)]
 pub struct InstallResult {
@@ -158,19 +160,7 @@ pub struct AppSkillDefinition {
     pub companion_files: Vec<CompanionFile>,
 }
 
-/// A system file discovered from `system/` directory tree (e.g. mode-instructions).
-/// Bootstrapped into TemperFS under `/system/{relative_path}`.
-#[derive(Debug, Clone)]
-pub struct SystemFileEntry {
-    /// Relative path within the `system/` directory, e.g. `mode-instructions/plan.md`.
-    pub relative_path: String,
-    /// File name, e.g. `plan.md`.
-    pub file_name: String,
-    /// Full file content.
-    pub content: Vec<u8>,
-    /// MIME type (inferred from extension).
-    pub mime_type: String,
-}
+pub use system_files::SystemFileEntry;
 
 /// An architecture decision record discovered from `adrs/*.md`.
 #[derive(Debug, Clone, Serialize)]
@@ -865,63 +855,6 @@ fn find_adrs(app_dir: &Path) -> Vec<AdrEntry> {
     results
 }
 
-/// Discover system files from the `system/` directory tree.
-/// Recursively walks the directory and collects all files.
-fn find_system_files(app_dir: &Path) -> Vec<SystemFileEntry> {
-    let system_dir = app_dir.join("system");
-    if !system_dir.is_dir() {
-        return Vec::new();
-    }
-    let mut results = Vec::new();
-    collect_system_files_recursive(&system_dir, &system_dir, &mut results);
-    results.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    results
-}
-
-fn collect_system_files_recursive(
-    base_dir: &Path,
-    current_dir: &Path,
-    results: &mut Vec<SystemFileEntry>,
-) {
-    let Ok(entries) = std::fs::read_dir(current_dir) else {
-        return;
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_system_files_recursive(base_dir, &path, results);
-        } else if path.is_file() {
-            let Ok(content) = std::fs::read(&path) else {
-                continue;
-            };
-            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            let relative = path
-                .strip_prefix(base_dir)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let mime_type = match ext {
-                "md" => "text/markdown",
-                "json" => "application/json",
-                "toml" => "application/toml",
-                "yaml" | "yml" => "text/yaml",
-                "txt" => "text/plain",
-                _ => "application/octet-stream",
-            }
-            .to_string();
-            results.push(SystemFileEntry {
-                relative_path: relative,
-                file_name: file_name.to_string(),
-                content,
-                mime_type,
-            });
-        }
-    }
-}
-
 /// Parsed frontmatter from a SKILL.md file.
 struct SkillFrontmatter {
     #[allow(dead_code)]
@@ -1200,7 +1133,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     let agents = find_agents(app_dir);
     let skills = find_app_skills(app_dir);
     let adrs = find_adrs(app_dir);
-    let system_files = find_system_files(app_dir);
+    let system_files = system_files::find_system_files(app_dir);
     let seed_instances = find_seed_data(app_dir);
 
     // Read app guide to check if there's anything at all.
@@ -1578,7 +1511,7 @@ async fn install_os_app_without_dependencies(
         bootstrap_skills(state, &tenant_id, tenant, &bundle.skills, &agent_uuid_map).await;
 
     // ── Step 7b: Bootstrap system files (e.g. mode-instructions). ─────
-    bootstrap_system_files(state, &tenant_id, tenant, &bundle.system_files).await;
+    system_files::bootstrap_system_files(state, &tenant_id, tenant, &bundle.system_files).await;
 
     // ── Step 8: Bootstrap ADRs into TemperFS. ────────────────────────
     let adrs_bootstrapped = bootstrap_adrs(state, &tenant_id, tenant, app_name, &bundle.adrs).await;
@@ -2386,9 +2319,9 @@ async fn ensure_inline_file_uploaded(
     Ok(())
 }
 
-const APP_DOCS_WORKSPACE_ID: &str = "os-app-docs";
+pub(super) const APP_DOCS_WORKSPACE_ID: &str = "os-app-docs";
 const APP_DOCS_WORKSPACE_NAME: &str = "apps";
-const APP_DOCS_ROOT_DIR_ID: &str = "os-app-docs-root";
+pub(super) const APP_DOCS_ROOT_DIR_ID: &str = "os-app-docs-root";
 const APP_DOCS_ROOT_PATH: &str = "/apps";
 const APP_DOCS_QUOTA_BYTES: i64 = 1_099_511_627_776;
 
@@ -2524,131 +2457,7 @@ async fn bootstrap_adrs(
     bootstrapped
 }
 
-/// Bootstrap system files into TemperFS under `/system/{relative_path}`.
-///
-/// Used for files like mode-instructions that need to be accessible via TemperFS
-/// but are not skills (not unconditionally injected per ADR-003).
-async fn bootstrap_system_files(
-    state: &PlatformState,
-    tenant_id: &TenantId,
-    tenant: &str,
-    system_files: &[SystemFileEntry],
-) {
-    if system_files.is_empty() {
-        return;
-    }
-
-    let has_fs = {
-        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
-        registry.get_spec(tenant_id, "File").is_some()
-            && registry.get_spec(tenant_id, "Directory").is_some()
-    };
-    if !has_fs {
-        return;
-    }
-
-    let agent_ctx = temper_server::request_context::AgentContext::system();
-    if let Err(e) = ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
-        tracing::warn!(tenant, error = %e, "Failed to ensure workspace for system file bootstrap");
-        return;
-    }
-
-    // Ensure /system/ root exists.
-    if let Err(e) = ensure_directory(
-        state,
-        tenant_id,
-        &agent_ctx,
-        DirectoryBootstrapTarget {
-            directory_id: "os-system-root",
-            name: "system",
-            path: "/system",
-            parent_id: Some(APP_DOCS_ROOT_DIR_ID),
-            workspace_id: APP_DOCS_WORKSPACE_ID,
-        },
-    )
-    .await
-    {
-        tracing::warn!(tenant, error = %e, "Failed to create /system/ directory for system files");
-        return;
-    }
-
-    // Collect unique subdirectories from relative paths and ensure they exist.
-    let mut ensured_dirs = std::collections::HashSet::new();
-    for entry in system_files {
-        // e.g. relative_path = "mode-instructions/plan.md" → parent = "mode-instructions"
-        if let Some(parent) = std::path::Path::new(&entry.relative_path).parent() {
-            let parent_str = parent.to_string_lossy().to_string();
-            if !parent_str.is_empty() && ensured_dirs.insert(parent_str.clone()) {
-                let dir_slug = slug_fragment(&parent_str.replace('/', "-"));
-                let dir_id = format!("os-system-{dir_slug}");
-                let dir_path = format!("/system/{parent_str}");
-                if let Err(e) = ensure_directory(
-                    state,
-                    tenant_id,
-                    &agent_ctx,
-                    DirectoryBootstrapTarget {
-                        directory_id: &dir_id,
-                        name: &parent_str,
-                        path: &dir_path,
-                        parent_id: Some("os-system-root"),
-                        workspace_id: APP_DOCS_WORKSPACE_ID,
-                    },
-                )
-                .await
-                {
-                    tracing::warn!(tenant, dir = %dir_path, error = %e, "Failed to create system file directory");
-                    continue;
-                }
-            }
-        }
-    }
-
-    // Bootstrap each file.
-    for entry in system_files {
-        let file_path = format!("/system/{}", entry.relative_path);
-        let parent_dir = std::path::Path::new(&entry.relative_path)
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let dir_slug = slug_fragment(&parent_dir.replace('/', "-"));
-        let dir_id = if parent_dir.is_empty() {
-            "os-system-root".to_string()
-        } else {
-            format!("os-system-{dir_slug}")
-        };
-        let file_slug = slug_fragment(&entry.relative_path.replace('/', "-"));
-        let file_id = format!("os-system-file-{file_slug}");
-        match ensure_markdown_file(
-            state,
-            tenant_id,
-            &agent_ctx,
-            MarkdownFileBootstrapTarget {
-                file_id: &file_id,
-                name: &entry.file_name,
-                path: &file_path,
-                directory_id: &dir_id,
-                workspace_id: APP_DOCS_WORKSPACE_ID,
-            },
-            &entry.content,
-        )
-        .await
-        {
-            Ok(()) => {
-                tracing::info!(tenant, path = %file_path, "Bootstrapped system file");
-            }
-            Err(error) => {
-                tracing::warn!(
-                    tenant,
-                    path = %file_path,
-                    error = %error,
-                    "Failed to bootstrap system file"
-                );
-            }
-        }
-    }
-}
-
-async fn ensure_app_docs_workspace(
+pub(super) async fn ensure_app_docs_workspace(
     state: &PlatformState,
     tenant_id: &TenantId,
     agent_ctx: &temper_server::request_context::AgentContext,
@@ -2700,15 +2509,15 @@ async fn ensure_app_docs_workspace(
     .await
 }
 
-struct DirectoryBootstrapTarget<'a> {
-    directory_id: &'a str,
-    name: &'a str,
-    path: &'a str,
-    parent_id: Option<&'a str>,
-    workspace_id: &'a str,
+pub(super) struct DirectoryBootstrapTarget<'a> {
+    pub(super) directory_id: &'a str,
+    pub(super) name: &'a str,
+    pub(super) path: &'a str,
+    pub(super) parent_id: Option<&'a str>,
+    pub(super) workspace_id: &'a str,
 }
 
-async fn ensure_directory(
+pub(super) async fn ensure_directory(
     state: &PlatformState,
     tenant_id: &TenantId,
     agent_ctx: &temper_server::request_context::AgentContext,
@@ -2784,15 +2593,15 @@ async fn ensure_directory(
     Ok(())
 }
 
-struct MarkdownFileBootstrapTarget<'a> {
-    file_id: &'a str,
-    name: &'a str,
-    path: &'a str,
-    directory_id: &'a str,
-    workspace_id: &'a str,
+pub(super) struct MarkdownFileBootstrapTarget<'a> {
+    pub(super) file_id: &'a str,
+    pub(super) name: &'a str,
+    pub(super) path: &'a str,
+    pub(super) directory_id: &'a str,
+    pub(super) workspace_id: &'a str,
 }
 
-async fn ensure_markdown_file(
+pub(super) async fn ensure_markdown_file(
     state: &PlatformState,
     tenant_id: &TenantId,
     agent_ctx: &temper_server::request_context::AgentContext,
@@ -2918,7 +2727,7 @@ fn content_sha256(content: &[u8]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn slug_fragment(value: &str) -> String {
+pub(super) fn slug_fragment(value: &str) -> String {
     let mut slug = String::new();
     let mut last_was_sep = true;
     for ch in value.chars() {
