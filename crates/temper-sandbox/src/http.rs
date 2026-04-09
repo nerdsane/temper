@@ -129,45 +129,7 @@ async fn send_json(
     process_response(response, &url).await
 }
 
-/// Send a request with a raw binary body (e.g. WASM module bytes).
 #[allow(clippy::too_many_arguments)]
-/// Send a raw-body request with a custom content type.
-#[allow(clippy::too_many_arguments)]
-pub async fn temper_request_stream(
-    http: &reqwest::Client,
-    base_url: &str,
-    tenant: &str,
-    identity: &AgentIdentity<'_>,
-    api_key: Option<&str>,
-    method: Method,
-    path: &str,
-    body: Vec<u8>,
-    content_type: &str,
-) -> Result<Value, String> {
-    let url = format!("{base_url}{path}");
-    let mut request = http
-        .request(method, &url)
-        .header("X-Tenant-Id", tenant)
-        .header("Content-Type", content_type);
-
-    if let Some(key) = api_key {
-        request = request.header("Authorization", format!("Bearer {key}"));
-    }
-
-    if let Some(sid) = identity.session_id {
-        request = request.header("X-Session-Id", sid);
-    }
-
-    request = request.body(body);
-
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("failed to call Temper at {url}: {e}"))?;
-
-    process_response(response, &url).await
-}
-
 pub async fn temper_request_bytes(
     http: &reqwest::Client,
     base_url: &str,
