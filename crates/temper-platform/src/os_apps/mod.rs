@@ -132,7 +132,11 @@ pub struct AgentDefinition {
     pub description: String,
 }
 
-/// A skill definition discovered in the app's `skills/{name}/` directory.
+/// A skill definition discovered in the app's directory tree.
+///
+/// Skills are scoped by their location:
+/// - `system/skills/{name}/` → system-level (all agents)
+/// - `agents/{agent}/skills/{name}/` → agent-scoped
 ///
 /// Each skill directory must contain a `SKILL.md` file. Other files in the
 /// directory are companion files (examples, references, scripts) that get
@@ -145,9 +149,8 @@ pub struct AppSkillDefinition {
     pub content: String,
     /// Description extracted from the skill document.
     pub description: String,
-    /// Scope for injection filtering. Read from TOML frontmatter
-    /// (`+++scope = "Paw"+++`) or defaults to `"global"`.
-    pub scope: String,
+    /// Which agent this skill belongs to (None = system skill).
+    pub agent_name: Option<String>,
     /// Companion files in the skill directory (everything except SKILL.md).
     #[serde(skip)]
     pub companion_files: Vec<CompanionFile>,
@@ -713,17 +716,54 @@ fn find_agents(app_dir: &Path) -> Vec<AgentDefinition> {
     results
 }
 
-/// Discover skill definitions from `skills/{name}/` subdirectories.
+/// Discover skill definitions from the app's directory tree.
+///
+/// Scans two locations:
+/// - `system/skills/{name}/` → system-level skills (agent_name = None)
+/// - `agents/{agent}/skills/{name}/` → agent-scoped skills (agent_name = Some)
 ///
 /// Each subdirectory must contain a `SKILL.md` file as the main document.
 /// All other files are collected as companion files.
 fn find_app_skills(app_dir: &Path) -> Vec<AppSkillDefinition> {
-    let skills_dir = app_dir.join("skills");
-    if !skills_dir.is_dir() {
-        return Vec::new();
+    let mut results = Vec::new();
+
+    // 1. System skills: system/skills/{name}/
+    let system_skills_dir = app_dir.join("system").join("skills");
+    if system_skills_dir.is_dir() {
+        scan_skill_dirs(&system_skills_dir, None, &mut results);
     }
-    let Ok(entries) = std::fs::read_dir(&skills_dir) else {
-        return Vec::new();
+
+    // 2. Agent-scoped skills: agents/{agent}/skills/{name}/
+    let agents_dir = app_dir.join("agents");
+    if agents_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&agents_dir) {
+            let mut dirs: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .collect();
+            dirs.sort_by_key(|e| e.file_name());
+
+            for agent_entry in dirs {
+                let agent_name = agent_entry.file_name().to_string_lossy().to_string();
+                let agent_skills_dir = agent_entry.path().join("skills");
+                if agent_skills_dir.is_dir() {
+                    scan_skill_dirs(&agent_skills_dir, Some(&agent_name), &mut results);
+                }
+            }
+        }
+    }
+
+    results
+}
+
+/// Scan a directory of skill subdirectories and collect definitions.
+fn scan_skill_dirs(
+    skills_dir: &Path,
+    agent_name: Option<&str>,
+    results: &mut Vec<AppSkillDefinition>,
+) {
+    let Ok(entries) = std::fs::read_dir(skills_dir) else {
+        return;
     };
 
     let mut dirs: Vec<_> = entries
@@ -732,7 +772,6 @@ fn find_app_skills(app_dir: &Path) -> Vec<AppSkillDefinition> {
         .collect();
     dirs.sort_by_key(|e| e.file_name());
 
-    let mut results = Vec::new();
     for dir_entry in dirs {
         let skill_name = dir_entry.file_name().to_string_lossy().to_string();
         let skill_dir = dir_entry.path();
@@ -746,7 +785,6 @@ fn find_app_skills(app_dir: &Path) -> Vec<AppSkillDefinition> {
 
         // Extract frontmatter (YAML or TOML).
         let frontmatter = extract_frontmatter(&content);
-        let scope = frontmatter.scope.unwrap_or_else(|| "global".to_string());
 
         let description = frontmatter
             .description
@@ -760,11 +798,10 @@ fn find_app_skills(app_dir: &Path) -> Vec<AppSkillDefinition> {
             name: skill_name,
             content,
             description,
-            scope,
+            agent_name: agent_name.map(String::from),
             companion_files,
         });
     }
-    results
 }
 
 /// Discover app-local ADR markdown files from `adrs/*.md`.
@@ -817,7 +854,6 @@ struct SkillFrontmatter {
     #[allow(dead_code)]
     name: Option<String>,
     description: Option<String>,
-    scope: Option<String>,
 }
 
 /// Extract frontmatter from SKILL.md content. Supports YAML (`---`) and TOML (`+++`).
@@ -829,7 +865,6 @@ fn extract_frontmatter(content: &str) -> SkillFrontmatter {
         let fm = &rest[..end];
         let mut name = None;
         let mut description = None;
-        let mut scope = None;
         for line in fm.lines() {
             let trimmed = line.trim();
             if let Some(val) = trimmed.strip_prefix("name:") {
@@ -842,18 +877,9 @@ fn extract_frontmatter(content: &str) -> SkillFrontmatter {
                 if !val.is_empty() {
                     description = Some(val.to_string());
                 }
-            } else if let Some(val) = trimmed.strip_prefix("scope:") {
-                let val = val.trim().trim_matches('"').trim_matches('\'');
-                if !val.is_empty() {
-                    scope = Some(val.to_string());
-                }
             }
         }
-        return SkillFrontmatter {
-            name,
-            description,
-            scope,
-        };
+        return SkillFrontmatter { name, description };
     }
 
     // Fall back to TOML frontmatter (+++)
@@ -863,7 +889,6 @@ fn extract_frontmatter(content: &str) -> SkillFrontmatter {
         let fm = &rest[..end];
         let mut name = None;
         let mut description = None;
-        let mut scope = None;
         for line in fm.lines() {
             let trimmed = line.trim();
             if let Some((key, val)) = trimmed.split_once('=') {
@@ -875,22 +900,16 @@ fn extract_frontmatter(content: &str) -> SkillFrontmatter {
                 match key {
                     "name" => name = Some(val.to_string()),
                     "description" => description = Some(val.to_string()),
-                    "scope" => scope = Some(val.to_string()),
                     _ => {}
                 }
             }
         }
-        return SkillFrontmatter {
-            name,
-            description,
-            scope,
-        };
+        return SkillFrontmatter { name, description };
     }
 
     SkillFrontmatter {
         name: None,
         description: None,
-        scope: None,
     }
 }
 
@@ -1471,16 +1490,21 @@ async fn install_os_app_without_dependencies(
         wasm_registered,
     );
 
-    // ── Step 5: Bootstrap agents. ──────────────────────────────────────
-    let agents_bootstrapped = bootstrap_agents(state, &tenant_id, tenant, &bundle.agents).await;
+    // ── Step 5: Bootstrap App entity + APP.md. ──────────────────────────
+    let app_id = bootstrap_app_entity(state, &tenant_id, tenant, app_name).await;
 
-    // ── Step 6: Bootstrap skills. ────────────────────────────────────
-    let skills_bootstrapped = bootstrap_skills(state, &tenant_id, tenant, &bundle.skills).await;
+    // ── Step 6: Bootstrap agents (returns name→uuid map). ──────────────
+    let (agents_bootstrapped, agent_uuid_map) =
+        bootstrap_agents(state, &tenant_id, tenant, &bundle.agents, app_id.as_deref()).await;
 
-    // ── Step 7: Bootstrap ADRs into TemperFS. ────────────────────────
+    // ── Step 7: Bootstrap skills (agent-scoped + system). ──────────────
+    let skills_bootstrapped =
+        bootstrap_skills(state, &tenant_id, tenant, &bundle.skills, &agent_uuid_map).await;
+
+    // ── Step 8: Bootstrap ADRs into TemperFS. ────────────────────────
     let adrs_bootstrapped = bootstrap_adrs(state, &tenant_id, tenant, app_name, &bundle.adrs).await;
 
-    // ── Step 8: Create seed instances. ───────────────────────────────
+    // ── Step 9: Create seed instances. ───────────────────────────────
     let seed_created = bootstrap_seed_data(state, &tenant_id, tenant, &bundle.seed_instances).await;
 
     Ok(InstallResult {
@@ -1506,23 +1530,218 @@ pub async fn install_skill(
 
 // ── Bootstrap helpers (entity creation during install) ───────────────
 
+/// Bootstrap an App entity for the installed OS app.
+///
+/// Creates (or updates) an App entity and writes APP.md to TemperFS.
+/// Returns the App entity ID if successful.
+async fn bootstrap_app_entity(
+    state: &PlatformState,
+    tenant_id: &TenantId,
+    tenant: &str,
+    app_name: &str,
+) -> Option<String> {
+    // Check if App entity type is registered.
+    let has_apps = {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        registry.get_spec(tenant_id, "App").is_some()
+    };
+    if !has_apps {
+        tracing::debug!(
+            tenant,
+            app = %app_name,
+            "Skipping App entity bootstrap — App entity type not registered"
+        );
+        return None;
+    }
+
+    let agent_ctx = temper_server::request_context::AgentContext::system();
+
+    // Look for an existing App entity with this name.
+    let existing_ids = state.server.list_entity_ids(tenant_id, "App");
+    let mut existing_app_id = None;
+    for id in &existing_ids {
+        if let Ok(resp) = state
+            .server
+            .get_tenant_entity_state(tenant_id, "App", id)
+            .await
+            && let Some(name) = resp.state.fields.get("Name").and_then(|v| v.as_str())
+            && name.eq_ignore_ascii_case(app_name)
+        {
+            existing_app_id = Some(id.clone());
+            break;
+        }
+    }
+
+    // Read app manifest for metadata.
+    let manifest = {
+        let cat = catalog().read().unwrap(); // ci-ok: infallible lock
+        cat.entries.iter().find(|e| e.name == app_name).cloned()
+    };
+    let description = manifest
+        .as_ref()
+        .map(|m| m.description.clone())
+        .unwrap_or_default();
+    let version = manifest
+        .as_ref()
+        .map(|m| m.version.clone())
+        .unwrap_or_else(|| "0.1.0".to_string());
+
+    // Bootstrap APP.md into TemperFS at /apps/{app-name}/APP.md.
+    let mut app_guide_file_id = String::new();
+    if let Some(ref guide) = manifest.as_ref().and_then(|m| m.app_guide.as_ref()) {
+        // Ensure the app docs workspace and /apps/{app-name}/ directory exist.
+        let has_fs = {
+            let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+            registry.get_spec(tenant_id, "File").is_some()
+                && registry.get_spec(tenant_id, "Directory").is_some()
+                && registry.get_spec(tenant_id, "Workspace").is_some()
+        };
+        if has_fs {
+            if let Err(e) = ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
+                tracing::warn!(tenant, app = %app_name, error = %e, "Failed to ensure app docs workspace");
+            } else {
+                let app_slug = slug_fragment(app_name);
+                let app_dir_id = format!("os-app-docs-dir-{app_slug}");
+                let app_dir_path = format!("{APP_DOCS_ROOT_PATH}/{app_name}");
+                if let Err(e) = ensure_directory(
+                    state,
+                    tenant_id,
+                    &agent_ctx,
+                    DirectoryBootstrapTarget {
+                        directory_id: &app_dir_id,
+                        name: app_name,
+                        path: &app_dir_path,
+                        parent_id: Some(APP_DOCS_ROOT_DIR_ID),
+                        workspace_id: APP_DOCS_WORKSPACE_ID,
+                    },
+                )
+                .await
+                {
+                    tracing::warn!(tenant, app = %app_name, error = %e, "Failed to create app directory for APP.md");
+                } else {
+                    let file_id_str = format!("os-app-guide-{app_slug}");
+                    let file_path = format!("{app_dir_path}/APP.md");
+                    if let Err(e) = ensure_markdown_file(
+                        state,
+                        tenant_id,
+                        &agent_ctx,
+                        MarkdownFileBootstrapTarget {
+                            file_id: &file_id_str,
+                            name: "APP.md",
+                            path: &file_path,
+                            directory_id: &app_dir_id,
+                            workspace_id: APP_DOCS_WORKSPACE_ID,
+                        },
+                        guide.as_bytes(),
+                    )
+                    .await
+                    {
+                        tracing::warn!(tenant, app = %app_name, error = %e, "Failed to bootstrap APP.md");
+                    } else {
+                        app_guide_file_id = file_id_str;
+                        tracing::info!(tenant, app = %app_name, path = %file_path, "APP.md bootstrapped into TemperFS");
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(ref id) = existing_app_id {
+        // Update existing App entity.
+        let _ = state
+            .server
+            .dispatch(temper_server::state::DispatchCommand {
+                tenant: tenant_id,
+                entity_type: "App",
+                entity_id: id,
+                action: "Install",
+                params: serde_json::json!({
+                    "name": app_name,
+                    "description": description,
+                    "version": version,
+                    "app_guide_file_id": app_guide_file_id,
+                }),
+                agent_ctx: &agent_ctx,
+                await_integration: false,
+            })
+            .await;
+        tracing::info!(tenant, app = %app_name, id = %id, "App entity updated");
+        return existing_app_id;
+    }
+
+    // Create new App entity with a prefixed UUID.
+    let new_app_id = format!("ap-{}", temper_runtime::scheduler::sim_uuid());
+    match state
+        .server
+        .get_or_create_tenant_entity(tenant_id, "App", &new_app_id, serde_json::json!({}))
+        .await
+    {
+        Ok(_) => {
+            let app_id = new_app_id;
+            // Initialize with Install action.
+            if let Err(e) = state
+                .server
+                .dispatch(temper_server::state::DispatchCommand {
+                    tenant: tenant_id,
+                    entity_type: "App",
+                    entity_id: &app_id,
+                    action: "Install",
+                    params: serde_json::json!({
+                        "name": app_name,
+                        "description": description,
+                        "version": version,
+                        "app_guide_file_id": app_guide_file_id,
+                    }),
+                    agent_ctx: &agent_ctx,
+                    await_integration: false,
+                })
+                .await
+            {
+                tracing::warn!(
+                    tenant,
+                    app = %app_name,
+                    error = %e,
+                    "Failed to initialize App entity"
+                );
+                return None;
+            }
+            tracing::info!(tenant, app = %app_name, id = %app_id, "App entity created");
+            Some(app_id)
+        }
+        Err(e) => {
+            tracing::warn!(
+                tenant,
+                app = %app_name,
+                error = %e,
+                "Failed to create App entity"
+            );
+            None
+        }
+    }
+}
+
 /// Bootstrap agent definitions into the tenant by creating Soul entities.
 ///
 /// For each agent definition in the app's `agents/` directory:
 /// 1. Check if the Soul entity type is registered (skip gracefully if not)
-/// 2. Check if a Soul with this name already exists (idempotent)
+/// 2. Check if a Soul with this name already exists (idempotent — name-based lookup)
 /// 3. Create a TemperFS File entity with the agent's concatenated content
-/// 4. Create a Soul entity pointing to that file
+/// 4. Create a Soul entity pointing to that file (Temper auto-assigns prefixed UUID)
+/// 5. Set `source_app_id` on the Agent entity if App entity exists
 ///
-/// Returns the names of successfully bootstrapped agents.
+/// Returns (names of bootstrapped agents, map of agent_name → soul entity UUID).
 async fn bootstrap_agents(
     state: &PlatformState,
     tenant_id: &TenantId,
     tenant: &str,
     agents: &[AgentDefinition],
-) -> Vec<String> {
+    app_id: Option<&str>,
+) -> (Vec<String>, BTreeMap<String, String>) {
+    let mut bootstrapped = Vec::new();
+    let mut agent_uuid_map: BTreeMap<String, String> = BTreeMap::new();
+
     if agents.is_empty() {
-        return Vec::new();
+        return (bootstrapped, agent_uuid_map);
     }
 
     // Check if Soul entity type is registered.
@@ -1531,14 +1750,12 @@ async fn bootstrap_agents(
         registry.get_spec(tenant_id, "Soul").is_some()
     };
     if !has_souls {
-        if !agents.is_empty() {
-            tracing::info!(
-                tenant,
-                count = agents.len(),
-                "Skipping agent bootstrap — Soul entity type not registered (install paw-agent first)"
-            );
-        }
-        return Vec::new();
+        tracing::info!(
+            tenant,
+            count = agents.len(),
+            "Skipping agent bootstrap — Soul entity type not registered (install paw-agent first)"
+        );
+        return (bootstrapped, agent_uuid_map);
     }
 
     // Check if File entity type is registered (for TemperFS).
@@ -1551,16 +1768,21 @@ async fn bootstrap_agents(
             tenant,
             "Skipping agent bootstrap — File entity type not registered (install temper-fs first)"
         );
-        return Vec::new();
+        return (bootstrapped, agent_uuid_map);
     }
 
+    // Check if Agent entity type is registered (for source_app_id).
+    let has_agents = {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        registry.get_spec(tenant_id, "Agent").is_some()
+    };
+
     let agent_ctx = temper_server::request_context::AgentContext::system();
-    let mut bootstrapped = Vec::new();
 
     for agent in agents {
-        // Check if Soul already exists by listing and filtering.
+        // Name-based lookup: find existing Soul with this name.
         let existing_ids = state.server.list_entity_ids(tenant_id, "Soul");
-        let mut already_exists = false;
+        let mut found_soul_id: Option<String> = None;
         for id in &existing_ids {
             if let Ok(resp) = state
                 .server
@@ -1569,6 +1791,7 @@ async fn bootstrap_agents(
                 && let Some(name) = resp.state.fields.get("Name").and_then(|v| v.as_str())
                 && name.eq_ignore_ascii_case(&agent.name)
             {
+                // Update existing content file.
                 if let Some(file_id) = resp
                     .state
                     .fields
@@ -1593,27 +1816,38 @@ async fn bootstrap_agents(
                         "Failed to refresh existing agent soul content"
                     );
                 }
-                tracing::debug!(tenant, agent = %agent.name, "Soul already exists — skipping");
-                already_exists = true;
-                bootstrapped.push(agent.name.clone());
+                tracing::debug!(tenant, agent = %agent.name, soul_id = %id, "Soul already exists — updating");
+                found_soul_id = Some(id.clone());
                 break;
             }
         }
-        if already_exists {
+
+        if let Some(soul_id) = found_soul_id {
+            agent_uuid_map.insert(agent.name.clone(), soul_id.clone());
+            bootstrapped.push(agent.name.clone());
+
+            // Set source_app_id on Agent entity if available.
+            if has_agents {
+                if let Some(app_id) = app_id {
+                    set_agent_source_app(state, tenant_id, tenant, &agent_ctx, &agent.name, app_id)
+                        .await;
+                }
+            }
             continue;
         }
 
-        // Create TemperFS File entity for the content.
+        // Create new Soul — let Temper auto-assign a prefixed UUID.
+        // First, create the content file with a temporary ID (Temper will assign UUID).
         let file_name = format!("{}.soul.md", agent.name.to_lowercase().replace(' ', "-"));
-        let file_id = format!(
-            "app-soul-file-{}",
+        let temp_file_id = format!(
+            "bootstrap-soul-file-{}",
             agent.name.to_lowercase().replace(' ', "-")
         );
         if let Err(error) = ensure_inline_file_uploaded(
             state,
             tenant_id,
             &agent_ctx,
-            &file_id,
+            &temp_file_id,
             &file_name,
             agent.content.as_bytes(),
         )
@@ -1628,57 +1862,73 @@ async fn bootstrap_agents(
             continue;
         }
 
-        // Create Soul entity.
-        let soul_id = format!("app-soul-{}", agent.name.to_lowercase().replace(' ', "-"));
+        // Create Soul entity with a prefixed UUID.
+        let new_soul_id = format!("sl-{}", temper_runtime::scheduler::sim_uuid());
         match state
             .server
-            .get_or_create_tenant_entity(tenant_id, "Soul", &soul_id, serde_json::json!({}))
+            .get_or_create_tenant_entity(
+                tenant_id,
+                "Soul",
+                &new_soul_id,
+                serde_json::json!({}),
+            )
             .await
         {
-            Ok(resp) => {
-                if resp.state.status == "Draft" || resp.state.status == "Created" {
-                    // Try to register the soul with metadata.
-                    if let Err(e) = state
-                        .server
-                        .dispatch(temper_server::state::DispatchCommand {
-                            tenant: tenant_id,
-                            entity_type: "Soul",
-                            entity_id: &soul_id,
-                            action: "Create",
-                            params: serde_json::json!({
-                                "name": agent.name,
-                                "description": agent.description,
-                                "content_file_id": file_id,
-                            }),
-                            agent_ctx: &agent_ctx,
-                            await_integration: false,
-                        })
-                        .await
-                    {
-                        tracing::warn!(
-                            tenant,
-                            agent = %agent.name,
-                            error = %e,
-                            "Failed to register Soul entity"
-                        );
-                        continue;
-                    }
-                    // Publish the soul.
-                    let _ = state
-                        .server
-                        .dispatch(temper_server::state::DispatchCommand {
-                            tenant: tenant_id,
-                            entity_type: "Soul",
-                            entity_id: &soul_id,
-                            action: "Publish",
-                            params: serde_json::json!({}),
-                            agent_ctx: &agent_ctx,
-                            await_integration: false,
-                        })
-                        .await;
+            Ok(_) => {
+                let soul_id = new_soul_id;
+                // Initialize the Soul with metadata.
+                if let Err(e) = state
+                    .server
+                    .dispatch(temper_server::state::DispatchCommand {
+                        tenant: tenant_id,
+                        entity_type: "Soul",
+                        entity_id: &soul_id,
+                        action: "Create",
+                        params: serde_json::json!({
+                            "name": agent.name,
+                            "description": agent.description,
+                            "content_file_id": temp_file_id,
+                        }),
+                        agent_ctx: &agent_ctx,
+                        await_integration: false,
+                    })
+                    .await
+                {
+                    tracing::warn!(
+                        tenant,
+                        agent = %agent.name,
+                        error = %e,
+                        "Failed to register Soul entity"
+                    );
+                    continue;
                 }
-                tracing::info!(tenant, agent = %agent.name, "Agent soul bootstrapped");
+                // Publish the soul.
+                let _ = state
+                    .server
+                    .dispatch(temper_server::state::DispatchCommand {
+                        tenant: tenant_id,
+                        entity_type: "Soul",
+                        entity_id: &soul_id,
+                        action: "Publish",
+                        params: serde_json::json!({}),
+                        agent_ctx: &agent_ctx,
+                        await_integration: false,
+                    })
+                    .await;
+
+                tracing::info!(tenant, agent = %agent.name, soul_id = %soul_id, "Agent soul bootstrapped");
+                agent_uuid_map.insert(agent.name.clone(), soul_id);
                 bootstrapped.push(agent.name.clone());
+
+                // Set source_app_id on Agent entity if available.
+                if has_agents {
+                    if let Some(app_id) = app_id {
+                        set_agent_source_app(
+                            state, tenant_id, tenant, &agent_ctx, &agent.name, app_id,
+                        )
+                        .await;
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -1690,12 +1940,76 @@ async fn bootstrap_agents(
             }
         }
     }
-    bootstrapped
+    (bootstrapped, agent_uuid_map)
 }
 
-/// Bootstrap skills as TemperFS files at conventional paths (ADR-002).
+/// Set `source_app_id` on an Agent entity by looking it up by name.
+async fn set_agent_source_app(
+    state: &PlatformState,
+    tenant_id: &TenantId,
+    tenant: &str,
+    agent_ctx: &temper_server::request_context::AgentContext,
+    agent_name: &str,
+    app_id: &str,
+) {
+    // Find Agent entity by name.
+    let agent_ids = state.server.list_entity_ids(tenant_id, "Agent");
+    for id in &agent_ids {
+        if let Ok(resp) = state
+            .server
+            .get_tenant_entity_state(tenant_id, "Agent", id)
+            .await
+            && let Some(name) = resp.state.fields.get("Name").and_then(|v| v.as_str())
+            && name.eq_ignore_ascii_case(agent_name)
+        {
+            // Check if source_app_id is already set.
+            let current_app_id = resp
+                .state
+                .fields
+                .get("SourceAppId")
+                .or_else(|| resp.state.fields.get("source_app_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if current_app_id == app_id {
+                return; // Already set correctly.
+            }
+            // Update via Configure action.
+            if let Err(e) = state
+                .server
+                .dispatch(temper_server::state::DispatchCommand {
+                    tenant: tenant_id,
+                    entity_type: "Agent",
+                    entity_id: id,
+                    action: "Configure",
+                    params: serde_json::json!({
+                        "source_app_id": app_id,
+                    }),
+                    agent_ctx,
+                    await_integration: false,
+                })
+                .await
+            {
+                tracing::warn!(
+                    tenant,
+                    agent = %agent_name,
+                    error = %e,
+                    "Failed to set source_app_id on Agent entity"
+                );
+            } else {
+                tracing::debug!(tenant, agent = %agent_name, app_id = %app_id, "Set source_app_id on Agent");
+            }
+            return;
+        }
+    }
+    tracing::debug!(tenant, agent = %agent_name, "No Agent entity found to set source_app_id");
+}
+
+/// Bootstrap skills as TemperFS files at path-based scope locations (ADR-002).
 ///
-/// Skills are written to `/skills/{slug}/SKILL.md` in the `os-app-docs` workspace.
+/// Skills are written to:
+/// - `/system/skills/{slug}/SKILL.md` — system-level skills (agent_name = None)
+/// - `/agents/{agent-uuid}/skills/{slug}/SKILL.md` — agent-scoped skills
+///
 /// No Skill entities are created — the file IS the skill.
 /// Returns the names of successfully bootstrapped skills.
 async fn bootstrap_skills(
@@ -1703,6 +2017,7 @@ async fn bootstrap_skills(
     tenant_id: &TenantId,
     tenant: &str,
     skills: &[AppSkillDefinition],
+    agent_uuid_map: &BTreeMap<String, String>,
 ) -> Vec<String> {
     if skills.is_empty() {
         return Vec::new();
@@ -1725,22 +2040,66 @@ async fn bootstrap_skills(
 
     let agent_ctx = temper_server::request_context::AgentContext::system();
 
-    // Ensure /skills/ root directory exists under os-app-docs workspace.
+    // Ensure workspace exists.
+    if let Err(e) = ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
+        tracing::warn!(tenant, error = %e, "Failed to ensure app docs workspace for skill bootstrap");
+        return Vec::new();
+    }
+
+    // Ensure /system/ root directory exists.
     if let Err(e) = ensure_directory(
         state,
         tenant_id,
         &agent_ctx,
         DirectoryBootstrapTarget {
-            directory_id: "os-skills-root",
-            name: "skills",
-            path: "/skills",
+            directory_id: "os-system-root",
+            name: "system",
+            path: "/system",
             parent_id: Some(APP_DOCS_ROOT_DIR_ID),
             workspace_id: APP_DOCS_WORKSPACE_ID,
         },
     )
     .await
     {
-        tracing::warn!(tenant, error = %e, "Failed to create /skills/ root directory");
+        tracing::warn!(tenant, error = %e, "Failed to create /system/ directory");
+        return Vec::new();
+    }
+
+    // Ensure /system/skills/ directory exists.
+    if let Err(e) = ensure_directory(
+        state,
+        tenant_id,
+        &agent_ctx,
+        DirectoryBootstrapTarget {
+            directory_id: "os-system-skills-root",
+            name: "skills",
+            path: "/system/skills",
+            parent_id: Some("os-system-root"),
+            workspace_id: APP_DOCS_WORKSPACE_ID,
+        },
+    )
+    .await
+    {
+        tracing::warn!(tenant, error = %e, "Failed to create /system/skills/ directory");
+        return Vec::new();
+    }
+
+    // Ensure /agents/ root directory exists.
+    if let Err(e) = ensure_directory(
+        state,
+        tenant_id,
+        &agent_ctx,
+        DirectoryBootstrapTarget {
+            directory_id: "os-agents-root",
+            name: "agents",
+            path: "/agents",
+            parent_id: Some(APP_DOCS_ROOT_DIR_ID),
+            workspace_id: APP_DOCS_WORKSPACE_ID,
+        },
+    )
+    .await
+    {
+        tracing::warn!(tenant, error = %e, "Failed to create /agents/ directory");
         return Vec::new();
     }
 
@@ -1748,12 +2107,96 @@ async fn bootstrap_skills(
 
     for skill in skills {
         let slug = skill.name.to_lowercase().replace(' ', "-");
-        let dir_id = format!("os-skill-dir-{slug}");
-        let file_id = format!("os-skill-file-{slug}");
-        let dir_path = format!("/skills/{slug}");
-        let file_path = format!("/skills/{slug}/SKILL.md");
 
-        // Create /skills/{slug}/ directory.
+        // Determine TemperFS path based on scope.
+        let (dir_id, file_id, dir_path, file_path, parent_dir_id) = match &skill.agent_name {
+            None => {
+                // System skill: /system/skills/{slug}/SKILL.md
+                let dir_id = format!("os-sys-skill-dir-{slug}");
+                let file_id = format!("os-sys-skill-file-{slug}");
+                let dir_path = format!("/system/skills/{slug}");
+                let file_path = format!("/system/skills/{slug}/SKILL.md");
+                (
+                    dir_id,
+                    file_id,
+                    dir_path,
+                    file_path,
+                    "os-system-skills-root".to_string(),
+                )
+            }
+            Some(agent_name) => {
+                // Agent-scoped skill: /agents/{agent-uuid}/skills/{slug}/SKILL.md
+                let agent_uuid = match agent_uuid_map.get(agent_name) {
+                    Some(uuid) => uuid.clone(),
+                    None => {
+                        tracing::warn!(
+                            tenant,
+                            skill = %skill.name,
+                            agent = %agent_name,
+                            "Agent UUID not found for agent-scoped skill — skipping"
+                        );
+                        continue;
+                    }
+                };
+
+                // Ensure /agents/{agent-uuid}/ directory exists.
+                let agent_dir_id = format!("os-agent-dir-{}", slug_fragment(&agent_uuid));
+                let agent_dir_path = format!("/agents/{agent_uuid}");
+                if let Err(e) = ensure_directory(
+                    state,
+                    tenant_id,
+                    &agent_ctx,
+                    DirectoryBootstrapTarget {
+                        directory_id: &agent_dir_id,
+                        name: agent_name,
+                        path: &agent_dir_path,
+                        parent_id: Some("os-agents-root"),
+                        workspace_id: APP_DOCS_WORKSPACE_ID,
+                    },
+                )
+                .await
+                {
+                    tracing::warn!(tenant, agent = %agent_name, error = %e, "Failed to create agent directory");
+                    continue;
+                }
+
+                // Ensure /agents/{agent-uuid}/skills/ directory exists.
+                let agent_skills_dir_id =
+                    format!("os-agent-skills-dir-{}", slug_fragment(&agent_uuid));
+                let agent_skills_dir_path = format!("/agents/{agent_uuid}/skills");
+                if let Err(e) = ensure_directory(
+                    state,
+                    tenant_id,
+                    &agent_ctx,
+                    DirectoryBootstrapTarget {
+                        directory_id: &agent_skills_dir_id,
+                        name: "skills",
+                        path: &agent_skills_dir_path,
+                        parent_id: Some(&agent_dir_id),
+                        workspace_id: APP_DOCS_WORKSPACE_ID,
+                    },
+                )
+                .await
+                {
+                    tracing::warn!(tenant, agent = %agent_name, error = %e, "Failed to create agent skills directory");
+                    continue;
+                }
+
+                let dir_id = format!(
+                    "os-agent-skill-dir-{}-{slug}",
+                    slug_fragment(&agent_uuid)
+                );
+                let file_id = format!(
+                    "os-agent-skill-file-{}-{slug}",
+                    slug_fragment(&agent_uuid)
+                );
+                let dir_path = format!("/agents/{agent_uuid}/skills/{slug}");
+                let file_path = format!("/agents/{agent_uuid}/skills/{slug}/SKILL.md");
+                (dir_id, file_id, dir_path, file_path, agent_skills_dir_id)
+            }
+        };
+
+        // Create skill directory.
         if let Err(e) = ensure_directory(
             state,
             tenant_id,
@@ -1762,7 +2205,7 @@ async fn bootstrap_skills(
                 directory_id: &dir_id,
                 name: &slug,
                 path: &dir_path,
-                parent_id: Some("os-skills-root"),
+                parent_id: Some(&parent_dir_id),
                 workspace_id: APP_DOCS_WORKSPACE_ID,
             },
         )
@@ -1772,7 +2215,7 @@ async fn bootstrap_skills(
             continue;
         }
 
-        // Create /skills/{slug}/SKILL.md and upload content.
+        // Create SKILL.md and upload content.
         if let Err(e) = ensure_markdown_file(
             state,
             tenant_id,
@@ -1798,8 +2241,8 @@ async fn bootstrap_skills(
                 .name
                 .replace(std::path::MAIN_SEPARATOR, "-")
                 .to_lowercase();
-            let comp_file_id = format!("os-skill-file-{slug}-{comp_slug}");
-            let comp_file_path = format!("/skills/{slug}/{}", companion.name);
+            let comp_file_id = format!("{file_id}-{comp_slug}");
+            let comp_file_path = format!("{dir_path}/{}", companion.name);
             let comp_file_name = companion.name.rsplit('/').next().unwrap_or(&companion.name);
             if let Err(e) = ensure_markdown_file(
                 state,
@@ -1826,7 +2269,11 @@ async fn bootstrap_skills(
             }
         }
 
-        tracing::info!(tenant, skill = %skill.name, scope = %skill.scope, path = %file_path, "Skill bootstrapped as TemperFS file");
+        let scope_label = match &skill.agent_name {
+            None => "system",
+            Some(a) => a.as_str(),
+        };
+        tracing::info!(tenant, skill = %skill.name, scope = %scope_label, path = %file_path, "Skill bootstrapped as TemperFS file");
         bootstrapped.push(skill.name.clone());
     }
     bootstrapped

@@ -216,7 +216,10 @@ pub async fn handle_odata_post(
                 .get("id")
                 .and_then(|v| v.as_str())
                 .map(String::from)
-                .unwrap_or_else(|| temper_runtime::scheduler::sim_uuid().to_string());
+                .unwrap_or_else(|| {
+                    let prefix = entity_type_prefix(&entity_type);
+                    format!("{prefix}{}", temper_runtime::scheduler::sim_uuid())
+                });
 
             let initial_fields = body_json.clone();
             if let Err(resp) = run_write_prechecks(
@@ -741,5 +744,37 @@ async fn handle_stream_put(
         }
     } else {
         StatusCode::NO_CONTENT.into_response()
+    }
+}
+
+/// Map an entity type name to a short lowercase prefix for auto-generated IDs.
+///
+/// Prefixed UUIDs make IDs self-describing: `aj-01916f3b-...` is immediately
+/// identifiable as an Agent without querying. The prefix is prepended only when
+/// the caller omits the `id` field from the POST body.
+fn entity_type_prefix(entity_type: &str) -> &'static str {
+    match entity_type {
+        "App" => "ap-",
+        "Agent" => "aj-",
+        "Soul" => "sl-",
+        "Session" => "ss-",
+        "File" => "fl-",
+        "Directory" => "dr-",
+        "Workspace" => "ws-",
+        "WorkCycle" => "wc-",
+        "Issue" => "is-",
+        "Project" => "pj-",
+        "Team" => "tm-",
+        "Memory" => "mm-",
+        "Plan" => "pl-",
+        "ToolHook" => "th-",
+        "CronJob" => "cj-",
+        "CronScheduler" => "cs-",
+        "HeartbeatMonitor" => "hm-",
+        "CapabilityRequest" => "cr-",
+        "CatalogEntry" => "ce-",
+        "Monitor" => "mn-",
+        "AlertCycle" => "ac-",
+        _ => "en-",
     }
 }

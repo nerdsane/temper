@@ -12,7 +12,6 @@ use crate::helpers::{
 };
 use crate::http::{
     AgentIdentity, temper_governance_request, temper_request, temper_request_bytes,
-    temper_request_stream,
 };
 
 /// Shared context for dispatching temper methods.
@@ -86,8 +85,7 @@ pub async fn dispatch_temper_method(
             dispatch_evolution(ctx, method, args).await
         }
         // --- App Catalog ---
-        "list_apps" | "install_app" | "get_app" | "list_skills" | "install_skill" | "get_skill"
-        | "load_skill" | "create_skill" => dispatch_apps(ctx, method, args).await,
+        "list_apps" | "install_app" | "get_app" => dispatch_apps(ctx, method, args).await,
         // --- Discovery ---
         "specs" => {
             temper_request(
@@ -129,8 +127,7 @@ pub async fn dispatch_temper_method(
              upload_wasm, compile_wasm, \
              get_decisions, get_decision_status, poll_decision, \
              get_trajectories, get_insights, get_evolution_records, check_sentinel, \
-             list_apps, get_app, install_app, list_skills, get_skill, install_skill, \
-             load_skill, create_skill, \
+             list_apps, get_app, install_app, \
              specs, spec_detail"
         )),
     }
@@ -573,30 +570,8 @@ async fn dispatch_apps(
             )
             .await
         }
-        "list_skills" => {
-            // Query TemperFS for all SKILL.md files (ADR-002).
-            let filter =
-                "name%20eq%20'SKILL.md'%20and%20Status%20ne%20'Archived'";
-            temper_request(
-                ctx.http,
-                ctx.base_url,
-                ctx.tenant,
-                &ctx.identity(),
-                ctx.api_key,
-                Method::GET,
-                &format!("/tdata/Files?$filter={filter}"),
-                None,
-            )
-            .await
-            .map(|resp| resp.get("value").cloned().unwrap_or(resp))
-        }
-        "get_app" | "get_skill" => {
-            let arg_name = if method == "get_skill" {
-                "skill_name"
-            } else {
-                "app_name"
-            };
-            let app_name = expect_string_arg(args, 0, arg_name, method)?;
+        "get_app" => {
+            let app_name = expect_string_arg(args, 0, "app_name", method)?;
             temper_request(
                 ctx.http,
                 ctx.base_url,
@@ -609,13 +584,8 @@ async fn dispatch_apps(
             )
             .await
         }
-        "install_app" | "install_skill" => {
-            let arg_name = if method == "install_skill" {
-                "skill_name"
-            } else {
-                "app_name"
-            };
-            let app_name = expect_string_arg(args, 0, arg_name, method)?;
+        "install_app" => {
+            let app_name = expect_string_arg(args, 0, "app_name", method)?;
             let payload = serde_json::json!({ "tenant": ctx.tenant });
             temper_request(
                 ctx.http,
@@ -628,195 +598,6 @@ async fn dispatch_apps(
                 Some(&payload),
             )
             .await
-        }
-        // --- Skill files (ADR-002: skills as TemperFS files) ---
-        "load_skill" => {
-            let skill_name = expect_string_arg(args, 0, "skill_name", method)?;
-            // Query TemperFS for SKILL.md files matching this skill name.
-            let filter = format!(
-                "name%20eq%20'SKILL.md'%20and%20contains(path,'/skills/{skill_name}/')"
-            );
-            let resp = temper_request(
-                ctx.http,
-                ctx.base_url,
-                ctx.tenant,
-                &ctx.identity(),
-                ctx.api_key,
-                Method::GET,
-                &format!("/tdata/Files?$filter={filter}"),
-                None,
-            )
-            .await?;
-            let files = resp
-                .get("value")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            if files.is_empty() {
-                return Err(format!("temper.load_skill: skill '{skill_name}' not found"));
-            }
-            // Prefer most-specific scope: agent > project > tenant.
-            let best = files
-                .iter()
-                .min_by_key(|f| {
-                    let path = f
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if path.starts_with("/agents/") {
-                        0
-                    } else if path.starts_with("/projects/") {
-                        1
-                    } else {
-                        2
-                    }
-                })
-                .unwrap();
-            let file_id = best
-                .get("entity_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let key = escape_odata_key(file_id);
-            temper_request(
-                ctx.http,
-                ctx.base_url,
-                ctx.tenant,
-                &ctx.identity(),
-                ctx.api_key,
-                Method::GET,
-                &format!("/tdata/Files('{key}')/$value"),
-                None,
-            )
-            .await
-        }
-        "create_skill" => {
-            let skill_name = expect_string_arg(args, 0, "skill_name", method)?;
-            let content = expect_string_arg(args, 1, "content", method)?;
-            let scope = optional_string_arg(args, 2).unwrap_or_else(|| "global".to_string());
-            // Validate skill name (alphanumeric + hyphens + underscores).
-            if !skill_name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                return Err(format!(
-                    "temper.create_skill: invalid skill name '{skill_name}'. \
-                     Use alphanumeric characters, hyphens, and underscores only."
-                ));
-            }
-            // Determine path based on scope.
-            let dir_path = match scope.as_str() {
-                "global" | "tenant" | "" => format!("/skills/{skill_name}"),
-                s if s.starts_with("project:") => {
-                    let pid = &s["project:".len()..];
-                    format!("/projects/{pid}/skills/{skill_name}")
-                }
-                s if s.starts_with("agent:") => {
-                    let aid = &s["agent:".len()..];
-                    format!("/agents/{aid}/skills/{skill_name}")
-                }
-                other => {
-                    return Err(format!(
-                        "temper.create_skill: invalid scope '{other}'. \
-                         Use 'global', 'tenant', 'project:{{id}}', or 'agent:{{id}}'."
-                    ));
-                }
-            };
-            let file_path = format!("{dir_path}/SKILL.md");
-            // Ensure the skill content has frontmatter.
-            let final_content = if content.starts_with("---") {
-                content
-            } else {
-                format!(
-                    "---\nname: {skill_name}\ndescription: \nscope: {scope}\n---\n\n{content}"
-                )
-            };
-            // Step 1: Create directory entity + dispatch Create action.
-            let dir_id = format!("skill-dir-{skill_name}");
-            temper_request(
-                ctx.http,
-                ctx.base_url,
-                ctx.tenant,
-                &ctx.identity(),
-                ctx.api_key,
-                Method::POST,
-                "/tdata/Directories",
-                Some(&serde_json::json!({})),
-            )
-            .await
-            .ok(); // May already exist — that's fine.
-            let dir_key = escape_odata_key(&dir_id);
-            temper_request(
-                ctx.http,
-                ctx.base_url,
-                ctx.tenant,
-                &ctx.identity(),
-                ctx.api_key,
-                Method::POST,
-                &format!("/tdata/Directories('{dir_key}')/Temper.Create"),
-                Some(&serde_json::json!({
-                    "name": skill_name,
-                    "path": dir_path,
-                    "workspace_id": "os-app-docs",
-                })),
-            )
-            .await
-            .ok(); // May already be initialized.
-
-            // Step 2: Create file entity + dispatch Create action.
-            let file_id = format!("skill-file-{skill_name}");
-            temper_request(
-                ctx.http,
-                ctx.base_url,
-                ctx.tenant,
-                &ctx.identity(),
-                ctx.api_key,
-                Method::POST,
-                "/tdata/Files",
-                Some(&serde_json::json!({})),
-            )
-            .await
-            .ok();
-            let file_key = escape_odata_key(&file_id);
-            temper_request(
-                ctx.http,
-                ctx.base_url,
-                ctx.tenant,
-                &ctx.identity(),
-                ctx.api_key,
-                Method::POST,
-                &format!("/tdata/Files('{file_key}')/Temper.Create"),
-                Some(&serde_json::json!({
-                    "name": "SKILL.md",
-                    "path": file_path,
-                    "directory_id": dir_id,
-                    "workspace_id": "os-app-docs",
-                    "mime_type": "text/markdown",
-                })),
-            )
-            .await
-            .map_err(|e| format!("temper.create_skill: failed to create file: {e}"))?;
-
-            // Step 3: Upload content via $value.
-            temper_request_stream(
-                ctx.http,
-                ctx.base_url,
-                ctx.tenant,
-                &ctx.identity(),
-                ctx.api_key,
-                Method::PUT,
-                &format!("/tdata/Files('{file_key}')/$value"),
-                final_content.into_bytes(),
-                "text/markdown",
-            )
-            .await
-            .map_err(|e| format!("temper.create_skill: failed to upload content: {e}"))?;
-
-            Ok(serde_json::json!({
-                "skill_name": skill_name,
-                "path": file_path,
-                "file_id": file_id,
-                "scope": scope,
-            }))
         }
         _ => unreachable!("dispatch_apps called with non-app method"),
     }
