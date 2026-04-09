@@ -129,7 +129,6 @@ async fn send_json(
     process_response(response, &url).await
 }
 
-/// Send a request with a raw binary body (e.g. WASM module bytes).
 #[allow(clippy::too_many_arguments)]
 pub async fn temper_request_bytes(
     http: &reqwest::Client,

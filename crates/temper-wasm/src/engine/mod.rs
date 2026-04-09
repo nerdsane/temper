@@ -276,22 +276,48 @@ impl WasmEngine {
                 .ok_or_else(|| WasmError::ModuleNotFound(module_hash.to_string()))?
         };
 
+        let engine = self.engine.clone();
+        let context_owned = context.clone();
+        let limits_owned = limits.clone();
+        let span = tracing::Span::current();
+
+        tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
+            Self::invoke_blocking(engine, cached, context_owned, host, limits_owned, streams)
+        })
+        .await
+        .map_err(|e| WasmError::Invocation(format!("blocking wasm task failed: {e}")))?
+    }
+
+    fn invoke_blocking(
+        engine: Engine,
+        cached: Arc<CachedModule>,
+        context: WasmInvocationContext,
+        host: Arc<dyn WasmHost>,
+        limits: WasmResourceLimits,
+        streams: Arc<RwLock<StreamRegistry>>,
+    ) -> Result<WasmInvocationResult, WasmError> {
         let start = std::time::Instant::now(); // determinism-ok: wall-clock timing for WASM sandbox
-        let context_json = serde_json::to_string(context)
+        let context_json = serde_json::to_string(&context)
             .map_err(|e| WasmError::Invocation(format!("failed to serialize context: {e}")))?;
 
-        // Create a fresh store with fuel budget and memory limiter
-        // Check if the module imports wasi_snapshot_preview1 (wasm32-wasi target).
         let needs_wasi = cached
             .module
             .imports()
             .any(|imp| imp.module() == "wasi_snapshot_preview1");
-        telemetry::record_invocation_start(context, needs_wasi, &streams);
+        telemetry::record_invocation_start(&context, needs_wasi, &streams);
 
+        let wasi_stderr_pipe = if needs_wasi {
+            Some(wasmtime_wasi::pipe::MemoryOutputPipe::new(64 * 1024))
+        } else {
+            None
+        };
         let wasi_ctx = if needs_wasi {
-            // Minimal WASI context: clock + random, no filesystem or network.
-            let wasi = WasiCtxBuilder::new().build_p1();
-            Some(wasi)
+            let mut builder = WasiCtxBuilder::new();
+            if let Some(ref pipe) = wasi_stderr_pipe {
+                builder.stderr(pipe.clone());
+            }
+            Some(builder.build_p1())
         } else {
             None
         };
@@ -306,22 +332,14 @@ impl WasmEngine {
             streams,
             wasi_ctx,
         };
-        let mut store = Store::new(&self.engine, host_state);
+        let mut store = Store::new(&engine, host_state);
         store
             .set_fuel(limits.max_fuel)
             .map_err(|e| WasmError::Invocation(format!("failed to set fuel: {e}")))?;
-
-        // Register the memory limiter so memory.grow is gated by max_memory.
         store.limiter(|state| &mut state.limiter);
-
-        // Set epoch deadline to 1 tick — the engine epoch is incremented by
-        // the timeout task below. If the task fires before run() returns, the
-        // module receives a trap on the next back-edge check.
         store.set_epoch_deadline(1);
 
-        // Spawn a one-shot timer that increments the epoch after max_duration.
-        // This provides wall-clock timeout on top of the fuel instruction budget.
-        let engine_for_timeout = self.engine.clone();
+        let engine_for_timeout = engine.clone();
         let max_duration = limits.max_duration;
         let timeout_task = tokio::spawn(async move {
             // determinism-ok: epoch timer for WASM wall-clock timeout enforcement
@@ -329,8 +347,6 @@ impl WasmEngine {
             engine_for_timeout.increment_epoch();
         });
 
-        // Guard that aborts the epoch timer on any exit path (Ok or Err).
-        // This prevents a leaked timer from perturbing concurrent invocations.
         struct AbortOnDrop(tokio::task::JoinHandle<()>);
         impl Drop for AbortOnDrop {
             fn drop(&mut self) {
@@ -339,15 +355,12 @@ impl WasmEngine {
         }
         let _timer_guard = AbortOnDrop(timeout_task);
 
-        // Instantiate from cached InstancePre (pre-linked at compile time).
-        // This avoids re-linking host functions and WASI imports on every invocation.
         let instance = if needs_wasi {
             if let Some(ref pre) = cached.instance_pre_wasi {
                 pre.instantiate(&mut store)
                     .map_err(|e| WasmError::Instantiation(e.to_string()))?
             } else {
-                // Fallback: create linker on the fly (shouldn't happen for cached modules)
-                let mut linker = Linker::new(&self.engine);
+                let mut linker = Linker::new(&engine);
                 host_functions::link_host_functions(&mut linker)?;
                 preview1::add_to_linker_sync(&mut linker, |state: &mut HostState| {
                     state.wasi_ctx.as_mut().expect("wasi_ctx must be Some")
@@ -361,45 +374,39 @@ impl WasmEngine {
             pre.instantiate(&mut store)
                 .map_err(|e| WasmError::Instantiation(e.to_string()))?
         } else {
-            let mut linker = Linker::new(&self.engine);
+            let mut linker = Linker::new(&engine);
             host_functions::link_host_functions(&mut linker)?;
             linker
                 .instantiate(&mut store, &cached.module)
                 .map_err(|e| WasmError::Instantiation(e.to_string()))?
         };
 
-        // Find and call the `run` export
         let run_fn = instance
             .get_typed_func::<(i32, i32), i32>(&mut store, "run")
             .map_err(|e| WasmError::Invocation(format!("module missing 'run' export: {e}")))?;
 
-        // Write context JSON into module memory
         let memory = instance
             .get_memory(&mut store, "memory")
             .ok_or_else(|| WasmError::Invocation("module missing 'memory' export".into()))?;
 
         let ctx_bytes = context_json.as_bytes();
-        let ctx_ptr = 1024_usize; // Fixed offset for context data
+        let ctx_ptr = 1024_usize;
         memory.write(&mut store, ctx_ptr, ctx_bytes).map_err(|e| {
             WasmError::Invocation(format!("failed to write context to memory: {e}"))
         })?;
 
-        // Call run(ptr, len) -> result_ptr
         let result_ptr = run_fn
             .call(&mut store, (ctx_ptr as i32, ctx_bytes.len() as i32))
             .map_err(|e| {
-                telemetry::map_invoke_error(e, context, needs_wasi, max_duration, start)
+                telemetry::map_invoke_error(e, &context, needs_wasi, max_duration, start)
             })?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         tracing::Span::current().record("duration_ms", duration_ms);
 
-        // Read result: prefer host_set_result (explicit API), fall back to memory pointer.
         let result_json = if let Some(ref host_result) = store.data().result_json {
-            // Module used host_set_result — this is the preferred path.
             host_result.clone()
         } else if result_ptr > 0 {
-            // Legacy path: read from module memory at result_ptr with length at result_ptr-4.
             let mut len_bytes = [0u8; 4];
             memory
                 .read(&store, (result_ptr - 4) as usize, &mut len_bytes)
@@ -414,21 +421,32 @@ impl WasmEngine {
             String::from_utf8(result_bytes)
                 .map_err(|e| WasmError::Invocation(format!("result is not valid UTF-8: {e}")))?
         } else {
-            // No result from either path.
             String::new()
         };
 
-        // Parse the result JSON
         if result_json.is_empty() {
-            return Ok(telemetry::empty_result(context, needs_wasi, duration_ms));
+            if let Some(ref pipe) = wasi_stderr_pipe {
+                let stderr_bytes: Vec<u8> = pipe.contents().into();
+                if !stderr_bytes.is_empty() {
+                    let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+                    tracing::warn!(
+                        module = %context.trigger_action,
+                        entity_type = %context.entity_type,
+                        entity_id = %context.entity_id,
+                        stderr = %stderr_str,
+                        "WASI module returned empty result with stderr output"
+                    );
+                }
+            }
+            return Ok(telemetry::empty_result(&context, needs_wasi, duration_ms));
         }
 
-        let parsed = telemetry::parse_result_json(&result_json, context, needs_wasi, duration_ms)?;
+        let parsed = telemetry::parse_result_json(&result_json, &context, needs_wasi, duration_ms)?;
 
         Ok(telemetry::finalize_result(
             &store,
             parsed,
-            context,
+            &context,
             needs_wasi,
             duration_ms,
         ))

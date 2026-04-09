@@ -211,7 +211,7 @@ poll_attempts = "600"
 poll_sleep_ms = "250"
 max_agent_retries = "2"
 tools_enabled = ""
-workdir = "/tmp/workspace"
+workdir = "/workspace"
 timeout_secs = "420"
 
 [[integration]]

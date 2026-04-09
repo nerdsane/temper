@@ -22,7 +22,10 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
         let user_message_template = fields.get("user_message_template").and_then(|v| v.as_str()).unwrap_or("");
         let model = fields.get("model").and_then(|v| v.as_str()).unwrap_or("claude-sonnet-4-20250514");
         let provider = fields.get("provider").and_then(|v| v.as_str()).unwrap_or("anthropic");
-        let tools_enabled = fields.get("tools_enabled").and_then(|v| v.as_str()).unwrap_or("read,write,edit,bash");
+        let tools_enabled = fields
+            .get("tools_enabled")
+            .and_then(|v| v.as_str())
+            .unwrap_or("read,write,edit,bash,read_entity,save_memory,recall_memory,spawn_agent,list_agents,abort_agent,steer_agent,run_coding_agent,logfire_query");
         let sandbox_url = fields.get("sandbox_url").and_then(|v| v.as_str()).unwrap_or("");
         let max_turns = fields.get("max_turns").and_then(|v| v.as_str()).unwrap_or("20");
         let run_count = fields.get("run_count").and_then(|v| v.as_i64()).unwrap_or(0);

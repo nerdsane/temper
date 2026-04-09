@@ -347,11 +347,16 @@ impl crate::state::ServerState {
             .get("max_fuel")
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(WasmResourceLimits::default().max_fuel);
+        let max_memory = integration
+            .config
+            .get("max_memory")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(WasmResourceLimits::default().max_memory);
         let limits = WasmResourceLimits {
             max_duration: http_timeout,
             max_response_bytes,
             max_fuel,
-            ..WasmResourceLimits::default()
+            max_memory,
         };
 
         tracing::info!(

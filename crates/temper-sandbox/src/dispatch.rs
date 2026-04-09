@@ -83,9 +83,7 @@ pub async fn dispatch_temper_method(
             dispatch_evolution(ctx, method, args).await
         }
         // --- App Catalog ---
-        "list_apps" | "install_app" | "get_app" | "list_skills" | "install_skill" | "get_skill" => {
-            dispatch_apps(ctx, method, args).await
-        }
+        "list_apps" | "install_app" | "get_app" => dispatch_apps(ctx, method, args).await,
         // --- Discovery ---
         "specs" => {
             temper_request(
@@ -127,7 +125,7 @@ pub async fn dispatch_temper_method(
              upload_wasm, compile_wasm, \
              get_decisions, get_decision_status, poll_decision, \
              get_trajectories, get_insights, get_evolution_records, check_sentinel, \
-             list_apps, get_app, install_app, list_skills, get_skill, install_skill, \
+             list_apps, get_app, install_app, \
              specs, spec_detail"
         )),
     }
@@ -557,7 +555,7 @@ async fn dispatch_apps(
     args: &[MontyObject],
 ) -> Result<Value, String> {
     match method {
-        "list_apps" | "list_skills" => {
+        "list_apps" => {
             temper_request(
                 ctx.http,
                 ctx.base_url,
@@ -570,13 +568,8 @@ async fn dispatch_apps(
             )
             .await
         }
-        "get_app" | "get_skill" => {
-            let arg_name = if method == "get_skill" {
-                "skill_name"
-            } else {
-                "app_name"
-            };
-            let app_name = expect_string_arg(args, 0, arg_name, method)?;
+        "get_app" => {
+            let app_name = expect_string_arg(args, 0, "app_name", method)?;
             temper_request(
                 ctx.http,
                 ctx.base_url,
@@ -589,13 +582,8 @@ async fn dispatch_apps(
             )
             .await
         }
-        "install_app" | "install_skill" => {
-            let arg_name = if method == "install_skill" {
-                "skill_name"
-            } else {
-                "app_name"
-            };
-            let app_name = expect_string_arg(args, 0, arg_name, method)?;
+        "install_app" => {
+            let app_name = expect_string_arg(args, 0, "app_name", method)?;
             let payload = serde_json::json!({ "tenant": ctx.tenant });
             temper_request(
                 ctx.http,

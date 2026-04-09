@@ -22,6 +22,7 @@ use super::common::{
 };
 use super::constraints::pre_delete_relation_checks;
 use super::response::annotate_entity;
+use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::{AgentContext, extract_agent_context};
 use crate::response::{ODataResponse, odata_error};
@@ -215,7 +216,10 @@ pub async fn handle_odata_post(
                 .get("id")
                 .and_then(|v| v.as_str())
                 .map(String::from)
-                .unwrap_or_else(|| temper_runtime::scheduler::sim_uuid().to_string());
+                .unwrap_or_else(|| {
+                    let prefix = entity_type_prefix(&entity_type);
+                    format!("{prefix}{}", temper_runtime::scheduler::sim_uuid())
+                });
 
             let initial_fields = body_json.clone();
             if let Err(resp) = run_write_prechecks(
@@ -237,8 +241,10 @@ pub async fn handle_odata_post(
                 .await
             {
                 Ok(response) => {
+                    let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
+                    hydrate_blob_refs_for_tenant(&state, &tenant, &mut state_json).await;
                     let body = annotate_entity(
-                        serde_json::to_value(&response.state).unwrap_or_default(),
+                        state_json,
                         format!("$metadata#{name}/$entity"),
                         Some(format!("{name}('{entity_id}')")),
                     );
@@ -390,8 +396,10 @@ pub async fn handle_odata_patch(
                 .await
             {
                 Ok(response) => {
+                    let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
+                    hydrate_blob_refs_for_tenant(&state, &tenant, &mut state_json).await;
                     let body = annotate_entity(
-                        serde_json::to_value(&response.state).unwrap_or_default(),
+                        state_json,
                         format!("$metadata#{set_name}/$entity"),
                         Some(format!("{set_name}('{key_str}')")),
                     );
@@ -472,8 +480,10 @@ pub async fn handle_odata_put(
                 .await
             {
                 Ok(response) => {
+                    let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
+                    hydrate_blob_refs_for_tenant(&state, &tenant, &mut state_json).await;
                     let body = annotate_entity(
-                        serde_json::to_value(&response.state).unwrap_or_default(),
+                        state_json,
                         format!("$metadata#{set_name}/$entity"),
                         Some(format!("{set_name}('{key_str}')")),
                     );
@@ -626,7 +636,11 @@ async fn handle_stream_put(
         .get_tenant_entity_state(tenant, &entity_type, &key)
         .await
     {
-        Ok(resp) => serde_json::to_value(&resp.state).unwrap_or_default(),
+        Ok(resp) => {
+            let mut entity_state = serde_json::to_value(&resp.state).unwrap_or_default();
+            hydrate_blob_refs_for_tenant(state, tenant, &mut entity_state).await;
+            entity_state
+        }
         Err(e) => {
             return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "StateError", &e)
                 .into_response();
@@ -730,5 +744,37 @@ async fn handle_stream_put(
         }
     } else {
         StatusCode::NO_CONTENT.into_response()
+    }
+}
+
+/// Map an entity type name to a short lowercase prefix for auto-generated IDs.
+///
+/// Prefixed UUIDs make IDs self-describing: `aj-01916f3b-...` is immediately
+/// identifiable as an Agent without querying. The prefix is prepended only when
+/// the caller omits the `id` field from the POST body.
+fn entity_type_prefix(entity_type: &str) -> &'static str {
+    match entity_type {
+        "App" => "ap-",
+        "Agent" => "aj-",
+        "Soul" => "sl-",
+        "Session" => "ss-",
+        "File" => "fl-",
+        "Directory" => "dr-",
+        "Workspace" => "ws-",
+        "WorkCycle" => "wc-",
+        "Issue" => "is-",
+        "Project" => "pj-",
+        "Team" => "tm-",
+        "Memory" => "mm-",
+        "Plan" => "pl-",
+        "ToolHook" => "th-",
+        "CronJob" => "cj-",
+        "CronScheduler" => "cs-",
+        "HeartbeatMonitor" => "hm-",
+        "CapabilityRequest" => "cr-",
+        "CatalogEntry" => "ce-",
+        "Monitor" => "mn-",
+        "AlertCycle" => "ac-",
+        _ => "en-",
     }
 }

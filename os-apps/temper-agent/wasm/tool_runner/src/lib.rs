@@ -1503,7 +1503,7 @@ fn execute_entity_tool(
                 .unwrap_or_else(|| fields.get("provider").and_then(|v| v.as_str()).unwrap_or("anthropic"));
             let max_turns = input.get("max_turns").and_then(|v| v.as_i64()).unwrap_or(20);
             let tools = input.get("tools").and_then(|v| v.as_str())
-                .unwrap_or_else(|| fields.get("tools_enabled").and_then(|v| v.as_str()).unwrap_or("read,write,edit,bash"));
+                .unwrap_or_else(|| fields.get("tools_enabled").and_then(|v| v.as_str()).unwrap_or("read,write,edit,bash,read_entity,save_memory,recall_memory,spawn_agent,list_agents,abort_agent,steer_agent,run_coding_agent,logfire_query"));
             let soul_id = input.get("soul_id").and_then(|v| v.as_str())
                 .unwrap_or_else(|| fields.get("soul_id").and_then(|v| v.as_str()).unwrap_or(""));
             let parent_id = ctx.entity_state.get("entity_id").and_then(|v| v.as_str()).unwrap_or("");

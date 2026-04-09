@@ -45,7 +45,7 @@ temper_module! {
             .config
             .get("workdir")
             .cloned()
-            .unwrap_or_else(|| "/tmp/workspace".to_string());
+            .unwrap_or_else(|| "/workspace".to_string());
         let sandbox_url = ctx
             .config
             .get("sandbox_url")

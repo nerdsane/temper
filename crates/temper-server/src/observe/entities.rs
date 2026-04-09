@@ -14,6 +14,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tracing::instrument;
 
 use crate::authz::{observe_tenant_scope, require_observe_auth};
+use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::entity_actor::{EntityEvent, EntityMsg, EntityResponse};
 use crate::odata::extract_tenant;
 use crate::state::ServerState;
@@ -95,11 +96,13 @@ pub(crate) async fn handle_get_entity_history(
         let mut json = format_history_response(&entity_type, &entity_id, &response.state.events);
         // Include entity properties from in-memory state.
         if let Some(obj) = json.as_object_mut() {
+            let mut fields = response.state.fields.clone();
+            hydrate_blob_refs_for_tenant(&state, &tenant, &mut fields).await;
             obj.insert(
                 "current_state".to_string(),
                 serde_json::json!(response.state.status),
             );
-            obj.insert("fields".to_string(), response.state.fields.clone());
+            obj.insert("fields".to_string(), fields);
             obj.insert(
                 "counters".to_string(),
                 serde_json::json!(response.state.counters),
@@ -200,6 +203,7 @@ pub(crate) async fn handle_wait_for_entity_state(
         if target_statuses.contains(&status) || timed_out {
             let mut json = serde_json::to_value(&entity.state)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            hydrate_blob_refs_for_tenant(&state, &tenant, &mut json).await;
             if let Some(obj) = json.as_object_mut() {
                 obj.insert("timed_out".to_string(), serde_json::json!(timed_out));
             }
