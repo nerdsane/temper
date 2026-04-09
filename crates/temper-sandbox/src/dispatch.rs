@@ -10,9 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::helpers::{
     escape_odata_key, expect_json_object_arg, expect_string_arg, optional_string_arg,
 };
-use crate::http::{
-    AgentIdentity, temper_governance_request, temper_request, temper_request_bytes,
-};
+use crate::http::{AgentIdentity, temper_governance_request, temper_request, temper_request_bytes};
 
 /// Shared context for dispatching temper methods.
 pub struct DispatchContext<'a> {

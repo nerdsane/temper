@@ -1866,12 +1866,7 @@ async fn bootstrap_agents(
         let new_soul_id = format!("sl-{}", temper_runtime::scheduler::sim_uuid());
         match state
             .server
-            .get_or_create_tenant_entity(
-                tenant_id,
-                "Soul",
-                &new_soul_id,
-                serde_json::json!({}),
-            )
+            .get_or_create_tenant_entity(tenant_id, "Soul", &new_soul_id, serde_json::json!({}))
             .await
         {
             Ok(_) => {
@@ -1924,7 +1919,12 @@ async fn bootstrap_agents(
                 if has_agents {
                     if let Some(app_id) = app_id {
                         set_agent_source_app(
-                            state, tenant_id, tenant, &agent_ctx, &agent.name, app_id,
+                            state,
+                            tenant_id,
+                            tenant,
+                            &agent_ctx,
+                            &agent.name,
+                            app_id,
                         )
                         .await;
                     }
@@ -2182,14 +2182,8 @@ async fn bootstrap_skills(
                     continue;
                 }
 
-                let dir_id = format!(
-                    "os-agent-skill-dir-{}-{slug}",
-                    slug_fragment(&agent_uuid)
-                );
-                let file_id = format!(
-                    "os-agent-skill-file-{}-{slug}",
-                    slug_fragment(&agent_uuid)
-                );
+                let dir_id = format!("os-agent-skill-dir-{}-{slug}", slug_fragment(&agent_uuid));
+                let file_id = format!("os-agent-skill-file-{}-{slug}", slug_fragment(&agent_uuid));
                 let dir_path = format!("/agents/{agent_uuid}/skills/{slug}");
                 let file_path = format!("/agents/{agent_uuid}/skills/{slug}/SKILL.md");
                 (dir_id, file_id, dir_path, file_path, agent_skills_dir_id)
