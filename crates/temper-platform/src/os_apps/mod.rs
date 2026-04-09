@@ -735,20 +735,20 @@ fn find_app_skills(app_dir: &Path) -> Vec<AppSkillDefinition> {
 
     // 2. Agent-scoped skills: agents/{agent}/skills/{name}/
     let agents_dir = app_dir.join("agents");
-    if agents_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&agents_dir) {
-            let mut dirs: Vec<_> = entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().is_dir())
-                .collect();
-            dirs.sort_by_key(|e| e.file_name());
+    if agents_dir.is_dir()
+        && let Ok(entries) = std::fs::read_dir(&agents_dir)
+    {
+        let mut dirs: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        dirs.sort_by_key(|e| e.file_name());
 
-            for agent_entry in dirs {
-                let agent_name = agent_entry.file_name().to_string_lossy().to_string();
-                let agent_skills_dir = agent_entry.path().join("skills");
-                if agent_skills_dir.is_dir() {
-                    scan_skill_dirs(&agent_skills_dir, Some(&agent_name), &mut results);
-                }
+        for agent_entry in dirs {
+            let agent_name = agent_entry.file_name().to_string_lossy().to_string();
+            let agent_skills_dir = agent_entry.path().join("skills");
+            if agent_skills_dir.is_dir() {
+                scan_skill_dirs(&agent_skills_dir, Some(&agent_name), &mut results);
             }
         }
     }
@@ -1588,7 +1588,7 @@ async fn bootstrap_app_entity(
 
     // Bootstrap APP.md into TemperFS at /apps/{app-name}/APP.md.
     let mut app_guide_file_id = String::new();
-    if let Some(ref guide) = manifest.as_ref().and_then(|m| m.app_guide.as_ref()) {
+    if let Some(guide) = manifest.as_ref().and_then(|m| m.app_guide.as_ref()) {
         // Ensure the app docs workspace and /apps/{app-name}/ directory exist.
         let has_fs = {
             let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
