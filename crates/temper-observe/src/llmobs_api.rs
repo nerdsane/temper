@@ -58,7 +58,8 @@ pub async fn submit_llm_span(input: LlmSpanInput<'_>) -> Result<(), String> {
         .transpose()
         .map_err(|error| format!("failed to convert input messages: {error}"))?
         .unwrap_or_default();
-    if let Some(system) = input.system_instructions
+    if let Some(system) = input
+        .system_instructions
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
@@ -115,7 +116,10 @@ pub async fn submit_llm_span(input: LlmSpanInput<'_>) -> Result<(), String> {
         metrics.insert("input_tokens".to_string(), json!(input.input_tokens as f64));
     }
     if input.output_tokens > 0 {
-        metrics.insert("output_tokens".to_string(), json!(input.output_tokens as f64));
+        metrics.insert(
+            "output_tokens".to_string(),
+            json!(input.output_tokens as f64),
+        );
     }
     let total_tokens = input.input_tokens.saturating_add(input.output_tokens);
     if total_tokens > 0 {
@@ -341,7 +345,10 @@ fn hash_to_decimal_id(seed: &str) -> String {
 
 fn convert_otel_messages_to_llmobs(raw: &str) -> Result<Vec<Value>, serde_json::Error> {
     let parsed: Vec<Value> = serde_json::from_str(raw)?;
-    Ok(parsed.into_iter().filter_map(convert_otel_message).collect())
+    Ok(parsed
+        .into_iter()
+        .filter_map(convert_otel_message)
+        .collect())
 }
 
 fn convert_otel_message(message: Value) -> Option<Value> {

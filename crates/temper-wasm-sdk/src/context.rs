@@ -287,12 +287,7 @@ impl Context {
     }
 
     /// Emit a structured log event from the guest module.
-    pub fn log_structured(
-        &self,
-        level: &str,
-        message: &str,
-        fields: &Value,
-    ) -> Result<(), String> {
+    pub fn log_structured(&self, level: &str, message: &str, fields: &Value) -> Result<(), String> {
         let json = serde_json::json!({
             "level": level,
             "message": message,

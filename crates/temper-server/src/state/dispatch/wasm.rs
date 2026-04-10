@@ -259,7 +259,12 @@ impl crate::state::ServerState {
         // Keep llm_caller on its own root trace so LLM Observability lands on
         // the content-bearing LLM span rather than the parent workflow span.
         let llm_root_span = if module_name == "llm_caller" {
-            Some(build_llm_root_span(ctx, integration, entity_state, &module_name))
+            Some(build_llm_root_span(
+                ctx,
+                integration,
+                entity_state,
+                &module_name,
+            ))
         } else {
             None
         };
@@ -1023,8 +1028,8 @@ async fn submit_llmobs_llm_span(
         .and_then(Value::as_i64)
         .unwrap_or_default();
 
-    if let Err(error) = temper_observe::llmobs_api::submit_llm_span(
-        temper_observe::llmobs_api::LlmSpanInput {
+    if let Err(error) =
+        temper_observe::llmobs_api::submit_llm_span(temper_observe::llmobs_api::LlmSpanInput {
             service_name: OPENPAW_SERVICE_NAME,
             session_id,
             trace_id,
@@ -1047,9 +1052,8 @@ async fn submit_llmobs_llm_span(
                 .and_then(Value::as_str),
             duration_ms,
             error_type: None,
-        },
-    )
-    .await
+        })
+        .await
     {
         tracing::warn!(
             tenant = %ctx.entity_ref.tenant,
@@ -1080,7 +1084,7 @@ async fn submit_llmobs_tool_spans(
         .or_else(|| {
             entity_state
                 .fields
-        .get("_gen_ai_parent_trace_id")
+                .get("_gen_ai_parent_trace_id")
                 .and_then(Value::as_str)
         });
     let parent_span_id = entity_state
@@ -1090,7 +1094,7 @@ async fn submit_llmobs_tool_spans(
         .or_else(|| {
             entity_state
                 .fields
-        .get("_gen_ai_parent_span_id")
+                .get("_gen_ai_parent_span_id")
                 .and_then(Value::as_str)
         });
     let (Some(trace_id), Some(parent_span_id)) = (trace_id, parent_span_id) else {
