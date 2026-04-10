@@ -6,6 +6,7 @@
 
 pub mod clickhouse;
 pub mod error;
+pub mod llmobs_api;
 pub mod memory;
 pub mod otel;
 pub mod schema;

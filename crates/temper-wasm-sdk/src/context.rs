@@ -37,6 +37,16 @@ pub struct Context {
     pub trigger_action: String,
 }
 
+pub struct WideEventInput<'a> {
+    pub kind: &'a str,
+    pub operation: &'a str,
+    pub success: bool,
+    pub duration_ns: u64,
+    pub tags: &'a Value,
+    pub attributes: &'a Value,
+    pub measurements: &'a Value,
+}
+
 impl Context {
     /// Parse the invocation context from the host.
     ///
@@ -254,6 +264,65 @@ impl Context {
             Ok(())
         } else {
             Err("host_emit_progress failed".to_string())
+        }
+    }
+
+    /// Emit a wide event from the guest module.
+    pub fn emit_wide_event(&self, event: &WideEventInput<'_>) -> Result<(), String> {
+        let json = serde_json::json!({
+            "kind": event.kind,
+            "operation": event.operation,
+            "success": event.success,
+            "duration_ns": event.duration_ns,
+            "tags": event.tags,
+            "attributes": event.attributes,
+            "measurements": event.measurements,
+        })
+        .to_string();
+        let rc = unsafe { host::host_emit_wide_event(json.as_ptr() as i32, json.len() as i32) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err("host_emit_wide_event failed".to_string())
+        }
+    }
+
+    /// Emit a structured log event from the guest module.
+    pub fn log_structured(&self, level: &str, message: &str, fields: &Value) -> Result<(), String> {
+        let json = serde_json::json!({
+            "level": level,
+            "message": message,
+            "fields": fields,
+        })
+        .to_string();
+        let rc = unsafe { host::host_log_structured(json.as_ptr() as i32, json.len() as i32) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err("host_log_structured failed".to_string())
+        }
+    }
+
+    /// Emit a metric directly from the guest module.
+    pub fn emit_metric(
+        &self,
+        name: &str,
+        value: f64,
+        tags: &Value,
+        kind: Option<&str>,
+    ) -> Result<(), String> {
+        let json = serde_json::json!({
+            "name": name,
+            "value": value,
+            "tags": tags,
+            "kind": kind,
+        })
+        .to_string();
+        let rc = unsafe { host::host_emit_metric(json.as_ptr() as i32, json.len() as i32) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err("host_emit_metric failed".to_string())
         }
     }
 

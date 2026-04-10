@@ -23,6 +23,8 @@ use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
 use crate::bootstrap;
 use crate::state::PlatformState;
 
+mod system_files;
+
 /// Result of an app installation, categorising each spec by what happened.
 #[derive(Debug, Clone, Serialize)]
 pub struct InstallResult {
@@ -109,6 +111,8 @@ pub struct AppBundle {
     pub skills: Vec<AppSkillDefinition>,
     /// ADR markdown files discovered from `adrs/`.
     pub adrs: Vec<AdrEntry>,
+    /// System files discovered from `system/` directory tree.
+    pub system_files: Vec<SystemFileEntry>,
     /// Seed data instances discovered from `seed-data/` TOML files.
     pub seed_instances: Vec<SeedInstance>,
 }
@@ -155,6 +159,8 @@ pub struct AppSkillDefinition {
     #[serde(skip)]
     pub companion_files: Vec<CompanionFile>,
 }
+
+pub use system_files::SystemFileEntry;
 
 /// An architecture decision record discovered from `adrs/*.md`.
 #[derive(Debug, Clone, Serialize)]
@@ -1127,6 +1133,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     let agents = find_agents(app_dir);
     let skills = find_app_skills(app_dir);
     let adrs = find_adrs(app_dir);
+    let system_files = system_files::find_system_files(app_dir);
     let seed_instances = find_seed_data(app_dir);
 
     // Read app guide to check if there's anything at all.
@@ -1139,6 +1146,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         && agents.is_empty()
         && skills.is_empty()
         && adrs.is_empty()
+        && system_files.is_empty()
         && seed_instances.is_empty()
         && app_guide.is_none()
         && csdl.is_none()
@@ -1154,6 +1162,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         agents,
         skills,
         adrs,
+        system_files,
         seed_instances,
     })
 }
@@ -1500,6 +1509,9 @@ async fn install_os_app_without_dependencies(
     // ── Step 7: Bootstrap skills (agent-scoped + system). ──────────────
     let skills_bootstrapped =
         bootstrap_skills(state, &tenant_id, tenant, &bundle.skills, &agent_uuid_map).await;
+
+    // ── Step 7b: Bootstrap system files (e.g. mode-instructions). ─────
+    system_files::bootstrap_system_files(state, &tenant_id, tenant, &bundle.system_files).await;
 
     // ── Step 8: Bootstrap ADRs into TemperFS. ────────────────────────
     let adrs_bootstrapped = bootstrap_adrs(state, &tenant_id, tenant, app_name, &bundle.adrs).await;
@@ -2307,9 +2319,9 @@ async fn ensure_inline_file_uploaded(
     Ok(())
 }
 
-const APP_DOCS_WORKSPACE_ID: &str = "os-app-docs";
+pub(super) const APP_DOCS_WORKSPACE_ID: &str = "os-app-docs";
 const APP_DOCS_WORKSPACE_NAME: &str = "apps";
-const APP_DOCS_ROOT_DIR_ID: &str = "os-app-docs-root";
+pub(super) const APP_DOCS_ROOT_DIR_ID: &str = "os-app-docs-root";
 const APP_DOCS_ROOT_PATH: &str = "/apps";
 const APP_DOCS_QUOTA_BYTES: i64 = 1_099_511_627_776;
 
@@ -2445,7 +2457,7 @@ async fn bootstrap_adrs(
     bootstrapped
 }
 
-async fn ensure_app_docs_workspace(
+pub(super) async fn ensure_app_docs_workspace(
     state: &PlatformState,
     tenant_id: &TenantId,
     agent_ctx: &temper_server::request_context::AgentContext,
@@ -2497,15 +2509,15 @@ async fn ensure_app_docs_workspace(
     .await
 }
 
-struct DirectoryBootstrapTarget<'a> {
-    directory_id: &'a str,
-    name: &'a str,
-    path: &'a str,
-    parent_id: Option<&'a str>,
-    workspace_id: &'a str,
+pub(super) struct DirectoryBootstrapTarget<'a> {
+    pub(super) directory_id: &'a str,
+    pub(super) name: &'a str,
+    pub(super) path: &'a str,
+    pub(super) parent_id: Option<&'a str>,
+    pub(super) workspace_id: &'a str,
 }
 
-async fn ensure_directory(
+pub(super) async fn ensure_directory(
     state: &PlatformState,
     tenant_id: &TenantId,
     agent_ctx: &temper_server::request_context::AgentContext,
@@ -2581,15 +2593,15 @@ async fn ensure_directory(
     Ok(())
 }
 
-struct MarkdownFileBootstrapTarget<'a> {
-    file_id: &'a str,
-    name: &'a str,
-    path: &'a str,
-    directory_id: &'a str,
-    workspace_id: &'a str,
+pub(super) struct MarkdownFileBootstrapTarget<'a> {
+    pub(super) file_id: &'a str,
+    pub(super) name: &'a str,
+    pub(super) path: &'a str,
+    pub(super) directory_id: &'a str,
+    pub(super) workspace_id: &'a str,
 }
 
-async fn ensure_markdown_file(
+pub(super) async fn ensure_markdown_file(
     state: &PlatformState,
     tenant_id: &TenantId,
     agent_ctx: &temper_server::request_context::AgentContext,
@@ -2715,7 +2727,7 @@ fn content_sha256(content: &[u8]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn slug_fragment(value: &str) -> String {
+pub(super) fn slug_fragment(value: &str) -> String {
     let mut slug = String::new();
     let mut last_was_sep = true;
     for ch in value.chars() {

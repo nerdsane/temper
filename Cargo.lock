@@ -5822,6 +5822,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "temper-runtime",
  "thiserror 2.0.18",
@@ -5993,6 +5994,7 @@ dependencies = [
  "tower 0.5.3",
  "tower-http 0.6.8",
  "tracing",
+ "tracing-opentelemetry",
  "uuid",
  "wiremock",
 ]
@@ -6108,10 +6110,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "temper-observe",
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
  "tracing",
+ "uuid",
  "wasmtime",
  "wasmtime-wasi",
 ]

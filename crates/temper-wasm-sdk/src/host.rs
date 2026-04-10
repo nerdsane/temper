@@ -49,6 +49,18 @@ unsafe extern "C" {
     /// Returns 0 on success, -1 on error.
     pub fn host_emit_progress(ptr: i32, len: i32) -> i32;
 
+    /// Emit a Temper wide event from the guest.
+    /// Returns 0 on success, -1 on error.
+    pub fn host_emit_wide_event(ptr: i32, len: i32) -> i32;
+
+    /// Emit a structured log event from the guest.
+    /// Returns 0 on success, -1 on error.
+    pub fn host_log_structured(ptr: i32, len: i32) -> i32;
+
+    /// Emit a metric directly from the guest.
+    /// Returns 0 on success, -1 on error.
+    pub fn host_emit_metric(ptr: i32, len: i32) -> i32;
+
     /// Read a secret value by key.
     /// Returns bytes written, needed size if too small, or -1 on error.
     pub fn host_get_secret(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_len: i32) -> i32;

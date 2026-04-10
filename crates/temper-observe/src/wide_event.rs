@@ -29,9 +29,12 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use opentelemetry::KeyValue;
-use opentelemetry::trace::{Span, Status, Tracer};
+use opentelemetry::trace::{
+    Span, SpanContext, SpanId, Status, TraceContextExt, TraceFlags, TraceId, TraceState, Tracer,
+};
 use serde::{Deserialize, Serialize};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Discriminant for the kind of wide event being emitted.
 ///
@@ -47,6 +50,10 @@ pub enum EventKind {
     AuthzDecision,
     /// Eventual invariant convergence check.
     InvariantCheck,
+    /// LLM API call (model invocation with gen_ai.* semantic conventions).
+    LlmCall,
+    /// Agent tool invocation (tool_use block execution).
+    ToolCall,
 }
 
 /// A wide event: the unified telemetry primitive emitted by entity actors.
@@ -330,6 +337,189 @@ pub fn from_invariant_check(input: InvariantCheckInput<'_>) -> WideEvent {
     }
 }
 
+/// Input for building an LLM call wide event.
+pub struct LlmCallInput<'a> {
+    /// LLM provider (e.g., "anthropic", "openrouter", "openai").
+    pub provider: &'a str,
+    /// Model name (e.g., "claude-sonnet-4-6").
+    pub model: &'a str,
+    /// Operation name (e.g., "chat").
+    pub operation: &'a str,
+    /// Entity type (typically "Session").
+    pub entity_type: &'a str,
+    /// Entity ID (session ID).
+    pub entity_id: &'a str,
+    /// Session/conversation ID for grouping turns.
+    pub session_id: &'a str,
+    /// Whether the call succeeded.
+    pub success: bool,
+    /// Duration in nanoseconds.
+    pub duration_ns: u64,
+    /// Input tokens consumed.
+    pub input_tokens: i64,
+    /// Output tokens generated.
+    pub output_tokens: i64,
+    /// Stop reason (e.g., "end_turn", "tool_use").
+    pub stop_reason: &'a str,
+    /// System instructions passed separately from chat history.
+    pub system_instructions: Option<&'a str>,
+    /// Input messages serialized as a JSON array string.
+    pub input_messages: Option<&'a str>,
+    /// Output messages serialized as a JSON array string.
+    pub output_messages: Option<&'a str>,
+    /// Trace ID for correlation.
+    pub trace_id: &'a str,
+    /// Error message, if any.
+    pub error: Option<&'a str>,
+}
+
+/// Build a WideEvent from an LLM API call.
+pub fn from_llm_call(input: LlmCallInput<'_>) -> WideEvent {
+    let span_id = sim_uuid().to_string();
+    let mut tags = BTreeMap::new();
+    tags.insert("gen_ai.system".into(), input.provider.into());
+    tags.insert("gen_ai.request.model".into(), input.model.into());
+    tags.insert("gen_ai.operation.name".into(), input.operation.into());
+    tags.insert(
+        "gen_ai.response.finish_reasons".into(),
+        input.stop_reason.into(),
+    );
+    tags.insert("success".into(), input.success.to_string());
+
+    let mut attributes = BTreeMap::new();
+    attributes.insert("entity_id".into(), serde_json::json!(input.entity_id));
+    attributes.insert(
+        "gen_ai.conversation.id".into(),
+        serde_json::json!(input.session_id),
+    );
+    if let Some(system_instructions) = input.system_instructions {
+        attributes.insert(
+            "gen_ai.system_instructions".into(),
+            serde_json::json!(system_instructions),
+        );
+    }
+    if let Some(messages) = input.input_messages {
+        attributes.insert("gen_ai.input.messages".into(), serde_json::json!(messages));
+    }
+    if let Some(messages) = input.output_messages {
+        attributes.insert("gen_ai.output.messages".into(), serde_json::json!(messages));
+    }
+    if let Some(err) = input.error {
+        attributes.insert("error".into(), serde_json::json!(err));
+    }
+
+    let mut measurements = BTreeMap::new();
+    measurements.insert(
+        "gen_ai.usage.input_tokens".into(),
+        input.input_tokens as f64,
+    );
+    measurements.insert(
+        "gen_ai.usage.output_tokens".into(),
+        input.output_tokens as f64,
+    );
+    measurements.insert("duration_ms".into(), input.duration_ns as f64 / 1_000_000.0);
+    measurements.insert("invocation_count".into(), 1.0);
+
+    WideEvent {
+        event_kind: EventKind::LlmCall,
+        entity_type: input.entity_type.into(),
+        entity_id: input.entity_id.into(),
+        operation: input.operation.into(),
+        from_status: String::new(),
+        to_status: input.stop_reason.into(),
+        success: input.success,
+        duration_ns: input.duration_ns,
+        timestamp: sim_now(),
+        trace_id: input.trace_id.into(),
+        span_id,
+        tags,
+        attributes,
+        measurements,
+    }
+}
+
+/// Input for building a tool call wide event.
+pub struct ToolCallInput<'a> {
+    /// Tool name (e.g., "temper_create", "sandbox_bash").
+    pub tool_name: &'a str,
+    /// Tool call identifier from the LLM response.
+    pub tool_call_id: Option<&'a str>,
+    /// Entity type (typically "Session").
+    pub entity_type: &'a str,
+    /// Entity ID (session ID).
+    pub entity_id: &'a str,
+    /// Session/conversation ID for grouping.
+    pub session_id: &'a str,
+    /// Tool arguments serialized as JSON.
+    pub tool_arguments: Option<&'a str>,
+    /// Tool result content serialized as JSON or text.
+    pub tool_result: Option<&'a str>,
+    /// Whether the tool call succeeded.
+    pub success: bool,
+    /// Duration in nanoseconds.
+    pub duration_ns: u64,
+    /// Trace ID for correlation.
+    pub trace_id: &'a str,
+    /// Error message, if any.
+    pub error: Option<&'a str>,
+}
+
+/// Build a WideEvent from an agent tool invocation.
+pub fn from_tool_call(input: ToolCallInput<'_>) -> WideEvent {
+    let span_id = sim_uuid().to_string();
+    let mut tags = BTreeMap::new();
+    tags.insert("gen_ai.operation.name".into(), "execute_tool".into());
+    tags.insert("gen_ai.tool.name".into(), input.tool_name.into());
+    tags.insert("entity_type".into(), input.entity_type.into());
+    tags.insert("success".into(), input.success.to_string());
+
+    let mut attributes = BTreeMap::new();
+    attributes.insert("entity_id".into(), serde_json::json!(input.entity_id));
+    attributes.insert(
+        "gen_ai.conversation.id".into(),
+        serde_json::json!(input.session_id),
+    );
+    if let Some(tool_call_id) = input.tool_call_id {
+        attributes.insert(
+            "gen_ai.tool.call.id".into(),
+            serde_json::json!(tool_call_id),
+        );
+    }
+    if let Some(arguments) = input.tool_arguments {
+        attributes.insert(
+            "gen_ai.tool.call.arguments".into(),
+            serde_json::json!(arguments),
+        );
+    }
+    if let Some(result) = input.tool_result {
+        attributes.insert("gen_ai.tool.call.result".into(), serde_json::json!(result));
+    }
+    if let Some(err) = input.error {
+        attributes.insert("error".into(), serde_json::json!(err));
+    }
+
+    let mut measurements = BTreeMap::new();
+    measurements.insert("duration_ms".into(), input.duration_ns as f64 / 1_000_000.0);
+    measurements.insert("invocation_count".into(), 1.0);
+
+    WideEvent {
+        event_kind: EventKind::ToolCall,
+        entity_type: input.entity_type.into(),
+        entity_id: input.entity_id.into(),
+        operation: "execute_tool".into(),
+        from_status: String::new(),
+        to_status: String::new(),
+        success: input.success,
+        duration_ns: input.duration_ns,
+        timestamp: sim_now(),
+        trace_id: input.trace_id.into(),
+        span_id,
+        tags,
+        attributes,
+        measurements,
+    }
+}
+
 // =========================================================================
 // View Projections → OTEL SDK
 // =========================================================================
@@ -342,6 +532,8 @@ pub fn emit_span(event: &WideEvent) {
         EventKind::WasmInvocation => format!("wasm.{}", event.operation),
         EventKind::AuthzDecision => format!("authz.{}", event.operation),
         EventKind::InvariantCheck => format!("invariant.{}", event.operation),
+        EventKind::LlmCall => format!("llm.{}", event.operation),
+        EventKind::ToolCall => format!("tool.{}", event.operation),
     };
 
     let mut attrs: Vec<KeyValue> = Vec::new();
@@ -349,10 +541,20 @@ pub fn emit_span(event: &WideEvent) {
         attrs.push(KeyValue::new(k.clone(), v.clone()));
     }
     for (k, v) in &event.attributes {
+        if k.starts_with("_otel.") {
+            continue;
+        }
         attrs.push(KeyValue::new(k.clone(), v.to_string()));
     }
     for (k, v) in &event.measurements {
         attrs.push(KeyValue::new(k.clone(), *v));
+    }
+    let llm_apm_only = event.event_kind == EventKind::LlmCall;
+    if llm_apm_only {
+        // Dispatch spans are the canonical LLMObs view; wide-event LLM spans stay in APM.
+        // Datadog applies dd_llmobs_enabled=false at the trace level, so these spans must
+        // be emitted onto their own trace or they suppress the real llm_caller span too.
+        attrs.push(KeyValue::new("dd_llmobs_enabled", false));
     }
     attrs.push(KeyValue::new("temper.trace_id", event.trace_id.clone()));
     attrs.push(KeyValue::new("temper.span_id", event.span_id.clone()));
@@ -371,14 +573,45 @@ pub fn emit_span(event: &WideEvent) {
     let start_time: SystemTime = event.timestamp.into();
     let end_time = start_time + std::time::Duration::from_nanos(event.duration_ns);
 
+    let parent_cx = if llm_apm_only {
+        // Keep APM-only LLM wide events off the canonical llm_caller trace. Datadog
+        // treats dd_llmobs_enabled=false at the trace level, so attaching these spans
+        // to the real trace suppresses the actual LLMObs record we want to keep.
+        opentelemetry::Context::new()
+    } else {
+        remote_parent_context(event).unwrap_or_else(|| tracing::Span::current().context())
+    };
     let mut span = tracer
         .span_builder(span_name)
         .with_start_time(start_time)
         .with_attributes(attrs)
-        .start(&tracer);
+        .start_with_context(&tracer, &parent_cx);
 
     span.set_status(status);
     span.end_with_timestamp(end_time);
+}
+
+fn remote_parent_context(event: &WideEvent) -> Option<opentelemetry::Context> {
+    let trace_id = event
+        .attributes
+        .get("_otel.parent_trace_id")
+        .and_then(serde_json::Value::as_str)?;
+    let span_id = event
+        .attributes
+        .get("_otel.parent_span_id")
+        .and_then(serde_json::Value::as_str)?;
+
+    let trace_id = TraceId::from_hex(trace_id).ok()?;
+    let span_id = SpanId::from_hex(span_id).ok()?;
+    let span_context = SpanContext::new(
+        trace_id,
+        span_id,
+        TraceFlags::SAMPLED,
+        true,
+        TraceState::default(),
+    );
+
+    Some(opentelemetry::Context::new().with_remote_span_context(span_context))
 }
 
 /// Project to the **Aggregated View** (OTEL metrics).
@@ -564,6 +797,125 @@ mod tests {
     }
 
     #[test]
+    fn test_llm_call_event() {
+        let event = from_llm_call(LlmCallInput {
+            provider: "anthropic",
+            model: "claude-sonnet-4-6",
+            operation: "chat",
+            entity_type: "Session",
+            entity_id: "sess-1",
+            session_id: "sess-1",
+            success: true,
+            duration_ns: 3_000_000_000,
+            input_tokens: 150,
+            output_tokens: 50,
+            stop_reason: "end_turn",
+            system_instructions: Some(r#"[{"type":"text","content":"be concise"}]"#),
+            input_messages: Some(r#"[{"role":"user","content":"hello"}]"#),
+            output_messages: Some(r#"[{"role":"assistant","content":"hi"}]"#),
+            trace_id: "trace-llm",
+            error: None,
+        });
+        assert_eq!(event.event_kind, EventKind::LlmCall);
+        assert_eq!(event.tags["gen_ai.system"], "anthropic");
+        assert_eq!(event.tags["gen_ai.request.model"], "claude-sonnet-4-6");
+        assert_eq!(event.tags["gen_ai.operation.name"], "chat");
+        assert_eq!(event.tags["gen_ai.response.finish_reasons"], "end_turn");
+        assert!(event.success);
+        assert_eq!(event.measurements["gen_ai.usage.input_tokens"], 150.0);
+        assert_eq!(event.measurements["gen_ai.usage.output_tokens"], 50.0);
+        assert_eq!(event.attributes["gen_ai.conversation.id"], "sess-1");
+        assert_eq!(
+            event.attributes["gen_ai.system_instructions"],
+            r#"[{"type":"text","content":"be concise"}]"#
+        );
+        assert_eq!(
+            event.attributes["gen_ai.input.messages"],
+            r#"[{"role":"user","content":"hello"}]"#
+        );
+        assert_eq!(
+            event.attributes["gen_ai.output.messages"],
+            r#"[{"role":"assistant","content":"hi"}]"#
+        );
+        assert!(!event.tags.contains_key("entity_id"));
+    }
+
+    #[test]
+    fn test_llm_call_failure() {
+        let event = from_llm_call(LlmCallInput {
+            provider: "openrouter",
+            model: "gpt-4",
+            operation: "chat",
+            entity_type: "Session",
+            entity_id: "sess-2",
+            session_id: "sess-2",
+            success: false,
+            duration_ns: 500_000,
+            input_tokens: 100,
+            output_tokens: 0,
+            stop_reason: "",
+            system_instructions: None,
+            input_messages: None,
+            output_messages: None,
+            trace_id: "trace-fail",
+            error: Some("rate limit exceeded"),
+        });
+        assert!(!event.success);
+        assert_eq!(event.attributes["error"], "rate limit exceeded");
+    }
+
+    #[test]
+    fn test_tool_call_event() {
+        let event = from_tool_call(ToolCallInput {
+            tool_name: "temper_create",
+            tool_call_id: Some("toolu_123"),
+            entity_type: "Session",
+            entity_id: "sess-1",
+            session_id: "sess-1",
+            tool_arguments: Some(r#"{"entity":"Task"}"#),
+            tool_result: Some(r#"{"id":"task-1"}"#),
+            success: true,
+            duration_ns: 200_000_000,
+            trace_id: "trace-tool",
+            error: None,
+        });
+        assert_eq!(event.event_kind, EventKind::ToolCall);
+        assert_eq!(event.tags["gen_ai.operation.name"], "execute_tool");
+        assert_eq!(event.tags["gen_ai.tool.name"], "temper_create");
+        assert!(event.success);
+        assert_eq!(event.attributes["gen_ai.conversation.id"], "sess-1");
+        assert_eq!(event.attributes["gen_ai.tool.call.id"], "toolu_123");
+        assert_eq!(
+            event.attributes["gen_ai.tool.call.arguments"],
+            r#"{"entity":"Task"}"#
+        );
+        assert_eq!(
+            event.attributes["gen_ai.tool.call.result"],
+            r#"{"id":"task-1"}"#
+        );
+        assert!(!event.tags.contains_key("entity_id"));
+    }
+
+    #[test]
+    fn test_tool_call_failure() {
+        let event = from_tool_call(ToolCallInput {
+            tool_name: "sandbox_bash",
+            tool_call_id: None,
+            entity_type: "Session",
+            entity_id: "sess-3",
+            session_id: "sess-3",
+            tool_arguments: None,
+            tool_result: None,
+            success: false,
+            duration_ns: 1_000_000,
+            trace_id: "trace-tool-fail",
+            error: Some("sandbox timeout"),
+        });
+        assert!(!event.success);
+        assert_eq!(event.attributes["error"], "sandbox timeout");
+    }
+
+    #[test]
     fn test_emit_span_all_event_kinds() {
         let events = vec![
             sample_event(),
@@ -593,6 +945,37 @@ mod tests {
                 check_count: 1,
                 outcome: "converged",
                 duration_ns: 0,
+            }),
+            from_llm_call(LlmCallInput {
+                provider: "anthropic",
+                model: "claude-sonnet-4-6",
+                operation: "chat",
+                entity_type: "Session",
+                entity_id: "s",
+                session_id: "s",
+                success: true,
+                duration_ns: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                stop_reason: "end_turn",
+                system_instructions: None,
+                input_messages: None,
+                output_messages: None,
+                trace_id: "",
+                error: None,
+            }),
+            from_tool_call(ToolCallInput {
+                tool_name: "temper_get",
+                tool_call_id: None,
+                entity_type: "Session",
+                entity_id: "s",
+                session_id: "s",
+                tool_arguments: None,
+                tool_result: None,
+                success: true,
+                duration_ns: 0,
+                trace_id: "",
+                error: None,
             }),
         ];
         for e in &events {

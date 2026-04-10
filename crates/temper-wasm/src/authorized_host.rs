@@ -221,6 +221,18 @@ impl WasmHost for AuthorizedWasmHost {
     fn emit_progress(&self, event_json: &str) -> Result<(), String> {
         self.inner.emit_progress(event_json)
     }
+
+    fn emit_wide_event(&self, event_json: &str) -> Result<(), String> {
+        self.inner.emit_wide_event(event_json)
+    }
+
+    fn log_structured(&self, log_json: &str) -> Result<(), String> {
+        self.inner.log_structured(log_json)
+    }
+
+    fn emit_metric(&self, metric_json: &str) -> Result<(), String> {
+        self.inner.emit_metric(metric_json)
+    }
 }
 
 #[cfg(test)]
