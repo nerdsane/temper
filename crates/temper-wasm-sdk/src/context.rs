@@ -37,6 +37,16 @@ pub struct Context {
     pub trigger_action: String,
 }
 
+pub struct WideEventInput<'a> {
+    pub kind: &'a str,
+    pub operation: &'a str,
+    pub success: bool,
+    pub duration_ns: u64,
+    pub tags: &'a Value,
+    pub attributes: &'a Value,
+    pub measurements: &'a Value,
+}
+
 impl Context {
     /// Parse the invocation context from the host.
     ///
@@ -258,25 +268,15 @@ impl Context {
     }
 
     /// Emit a wide event from the guest module.
-    #[allow(clippy::too_many_arguments)]
-    pub fn emit_wide_event(
-        &self,
-        kind: &str,
-        operation: &str,
-        success: bool,
-        duration_ns: u64,
-        tags: &Value,
-        attributes: &Value,
-        measurements: &Value,
-    ) -> Result<(), String> {
+    pub fn emit_wide_event(&self, event: &WideEventInput<'_>) -> Result<(), String> {
         let json = serde_json::json!({
-            "kind": kind,
-            "operation": operation,
-            "success": success,
-            "duration_ns": duration_ns,
-            "tags": tags,
-            "attributes": attributes,
-            "measurements": measurements,
+            "kind": event.kind,
+            "operation": event.operation,
+            "success": event.success,
+            "duration_ns": event.duration_ns,
+            "tags": event.tags,
+            "attributes": event.attributes,
+            "measurements": event.measurements,
         })
         .to_string();
         let rc = unsafe { host::host_emit_wide_event(json.as_ptr() as i32, json.len() as i32) };
