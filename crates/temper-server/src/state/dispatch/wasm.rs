@@ -2,10 +2,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use opentelemetry::trace::TraceContextExt;
+use opentelemetry::{Context as OtelContext, trace::TraceContextExt};
 use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tracing::{Span, instrument};
+use tracing::{Instrument, Span, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::entity_actor::{EntityResponse, EntityState};
@@ -41,6 +41,7 @@ struct WasmDispatchCtx<'a> {
 
 const HTTP_CALL_AUTHZ_DENIED_PREFIX: &str = "authorization denied for http_call";
 const MONTY_REPL_MODULE: &str = "monty_repl";
+const OPENPAW_SERVICE_NAME: &str = "openpaw";
 
 fn monty_repl_max_concurrency() -> usize {
     static MAX_CONCURRENCY: OnceLock<usize> = OnceLock::new();
@@ -255,30 +256,17 @@ impl crate::state::ServerState {
             return Ok(None);
         };
 
-        // Set dynamic span name and GenAI attributes
-        let span = tracing::Span::current();
-        span.record("otel.name", format!("wasm:{module_name}").as_str());
-        span.record("wasm.module", module_name.as_str());
-        if module_name == "llm_caller" {
-            // Resolve provider dynamically from entity state (default: anthropic)
-            let provider = entity_state
-                .fields
-                .get("provider")
-                .and_then(|v| v.as_str())
-                .unwrap_or("anthropic");
-            span.record("gen_ai.system", provider);
-            span.record("gen_ai.operation.name", "chat");
-            if let Some(model) = entity_state.fields.get("model").and_then(|v| v.as_str()) {
-                span.record("gen_ai.request.model", model);
-            }
-            // Session ID for grouping turns in Datadog LLM Observability
-            if let Some(ref session_id) = ctx.agent_ctx.session_id {
-                span.record("gen_ai.conversation.id", session_id.as_str());
-            } else {
-                // Fall back to entity_id as session grouping key
-                span.record("gen_ai.conversation.id", ctx.entity_ref.entity_id);
-            }
-        }
+        // Keep llm_caller on its own root trace so LLM Observability lands on
+        // the content-bearing LLM span rather than the parent workflow span.
+        let llm_root_span = if module_name == "llm_caller" {
+            Some(build_llm_root_span(ctx, integration, entity_state, &module_name))
+        } else {
+            None
+        };
+        let current_span = Span::current();
+        let active_span = llm_root_span.as_ref().unwrap_or(&current_span);
+        active_span.record("otel.name", format!("wasm:{module_name}").as_str());
+        active_span.record("wasm.module", module_name.as_str());
 
         let module_hash = {
             let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
@@ -322,7 +310,7 @@ impl crate::state::ServerState {
                 ),
                 None => integration.config.clone(),
             },
-            trace_id: current_otel_trace_id(&Span::current())
+            trace_id: current_otel_trace_id(active_span)
                 .or_else(|| ctx.agent_ctx.trace_id.clone())
                 .unwrap_or_default(),
         };
@@ -361,7 +349,9 @@ impl crate::state::ServerState {
                 .with_spec_evaluator(spec_evaluator_fn())
                 .with_progress_emitter(progress_emitter)
                 .with_invocation_context(host_invocation_context)
-                .with_trace_id(ctx.agent_ctx.trace_id.clone()),
+                .with_trace_id(
+                    current_otel_trace_id(active_span).or_else(|| ctx.agent_ctx.trace_id.clone()),
+                ),
         );
         let host: Arc<dyn WasmHost> = Arc::new(AuthorizedWasmHost::new(inner, gate, authz_ctx));
         let max_response_bytes = integration
@@ -415,7 +405,7 @@ impl crate::state::ServerState {
         );
 
         // --- Invoke and handle result ---
-        self.invoke_and_handle_result(
+        let invoke = self.invoke_and_handle_result(
             ctx,
             integration,
             &module_name,
@@ -425,8 +415,13 @@ impl crate::state::ServerState {
             host,
             &limits,
             &denial_tracker,
-        )
-        .await
+        );
+
+        if let Some(span) = llm_root_span {
+            invoke.instrument(span).await
+        } else {
+            invoke.await
+        }
     }
 
     /// Fill missing replay trajectory inputs from persisted OTS traces.
@@ -715,6 +710,11 @@ impl crate::state::ServerState {
                         llm_call_wide_event(ctx, entity_state, callback_params, result.duration_ms);
                     temper_observe::wide_event::emit_span(&event);
                     temper_observe::wide_event::emit_metrics(&event);
+                    submit_llmobs_llm_span(ctx, entity_state, callback_params, result.duration_ms)
+                        .await;
+                }
+                if module_name == MONTY_REPL_MODULE {
+                    submit_llmobs_tool_spans(ctx, entity_state, callback_params).await;
                 }
 
                 self.record_invocation(
@@ -980,6 +980,190 @@ fn llm_call_wide_event<'a>(
     })
 }
 
+async fn submit_llmobs_llm_span(
+    ctx: &WasmDispatchCtx<'_>,
+    entity_state: &EntityState,
+    callback_params: &Value,
+    duration_ms: u64,
+) {
+    let current_trace_id = current_otel_trace_id(&Span::current());
+    let trace_id = callback_params
+        .get("_gen_ai_parent_trace_id")
+        .and_then(Value::as_str)
+        .or(current_trace_id.as_deref());
+    let span_id = callback_params
+        .get("_gen_ai_parent_span_id")
+        .and_then(Value::as_str);
+    let (Some(trace_id), Some(span_id)) = (trace_id, span_id) else {
+        return;
+    };
+
+    let provider = callback_params
+        .get("_gen_ai_provider")
+        .and_then(Value::as_str)
+        .or_else(|| entity_state.fields.get("provider").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let model = entity_state
+        .fields
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let session_id = ctx
+        .agent_ctx
+        .session_id
+        .as_deref()
+        .unwrap_or(ctx.entity_ref.entity_id);
+
+    let input_tokens = callback_params
+        .get("input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let output_tokens = callback_params
+        .get("output_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+
+    if let Err(error) = temper_observe::llmobs_api::submit_llm_span(
+        temper_observe::llmobs_api::LlmSpanInput {
+            service_name: OPENPAW_SERVICE_NAME,
+            session_id,
+            trace_id,
+            span_id,
+            provider,
+            model,
+            system_instructions: callback_params
+                .get("_gen_ai_system_instructions")
+                .and_then(Value::as_str),
+            input_messages_json: callback_params
+                .get("_gen_ai_input_messages")
+                .and_then(Value::as_str),
+            output_messages_json: callback_params
+                .get("_gen_ai_output_messages")
+                .and_then(Value::as_str),
+            input_tokens,
+            output_tokens,
+            finish_reason: callback_params
+                .get("_gen_ai_finish_reason")
+                .and_then(Value::as_str),
+            duration_ms,
+            error_type: None,
+        },
+    )
+    .await
+    {
+        tracing::warn!(
+            tenant = %ctx.entity_ref.tenant,
+            entity_id = ctx.entity_ref.entity_id,
+            session_id,
+            %error,
+            "failed to submit llm span to Datadog LLM Observability API"
+        );
+    }
+}
+
+async fn submit_llmobs_tool_spans(
+    ctx: &WasmDispatchCtx<'_>,
+    entity_state: &EntityState,
+    callback_params: &Value,
+) {
+    let raw_events = callback_params
+        .get("_dd_llmobs_tool_spans")
+        .and_then(Value::as_array);
+    let Some(raw_events) = raw_events else {
+        return;
+    };
+
+    let trace_id = entity_state
+        .fields
+        .get("gen_ai_parent_trace_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            entity_state
+                .fields
+        .get("_gen_ai_parent_trace_id")
+                .and_then(Value::as_str)
+        });
+    let parent_span_id = entity_state
+        .fields
+        .get("gen_ai_parent_span_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            entity_state
+                .fields
+        .get("_gen_ai_parent_span_id")
+                .and_then(Value::as_str)
+        });
+    let (Some(trace_id), Some(parent_span_id)) = (trace_id, parent_span_id) else {
+        tracing::warn!(
+            tenant = %ctx.entity_ref.tenant,
+            entity_id = ctx.entity_ref.entity_id,
+            raw_event_count = raw_events.len(),
+            "skipping Datadog LLMObs tool span submission because parent trace context is missing"
+        );
+        return;
+    };
+    let session_id = ctx
+        .agent_ctx
+        .session_id
+        .as_deref()
+        .unwrap_or(ctx.entity_ref.entity_id);
+
+    let spans: Vec<_> = raw_events
+        .iter()
+        .filter_map(|event| {
+            let tool_name = event.get("tool_name").and_then(Value::as_str)?;
+            let tool_call_id = event.get("tool_call_id").and_then(Value::as_str)?;
+            let arguments = event
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("{}");
+            let result_text = event.get("result").and_then(Value::as_str).unwrap_or("");
+            let duration_ms = event
+                .get("duration_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            let is_error = event
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Some(temper_observe::llmobs_api::ToolSpanInput {
+                service_name: OPENPAW_SERVICE_NAME,
+                session_id,
+                trace_id,
+                parent_span_id,
+                tool_name,
+                tool_call_id,
+                arguments_json: arguments,
+                result_text,
+                duration_ms,
+                is_error,
+            })
+        })
+        .collect();
+
+    if spans.is_empty() {
+        return;
+    }
+
+    if let Err(error) = temper_observe::llmobs_api::submit_tool_spans(
+        OPENPAW_SERVICE_NAME,
+        session_id,
+        trace_id,
+        parent_span_id,
+        &spans,
+    )
+    .await
+    {
+        tracing::warn!(
+            tenant = %ctx.entity_ref.tenant,
+            entity_id = ctx.entity_ref.entity_id,
+            session_id,
+            %error,
+            "failed to submit tool spans to Datadog LLM Observability API"
+        );
+    }
+}
+
 fn current_otel_trace_id(span: &Span) -> Option<String> {
     let span_context = span.context().span().span_context().clone();
     if span_context.is_valid() {
@@ -987,6 +1171,50 @@ fn current_otel_trace_id(span: &Span) -> Option<String> {
     } else {
         None
     }
+}
+
+fn build_llm_root_span(
+    ctx: &WasmDispatchCtx<'_>,
+    integration: &temper_spec::automaton::Integration,
+    entity_state: &EntityState,
+    module_name: &str,
+) -> Span {
+    let provider = entity_state
+        .fields
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("anthropic");
+    let model = entity_state
+        .fields
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let session_id = ctx
+        .agent_ctx
+        .session_id
+        .as_deref()
+        .unwrap_or(ctx.entity_ref.entity_id);
+
+    let span = tracing::info_span!(
+        parent: None,
+        "llm_caller.trace",
+        otel.name = %format!("wasm:{module_name}"),
+        integration = %integration.name,
+        wasm.module = %module_name,
+        gen_ai.system = %provider,
+        gen_ai.system_instructions = tracing::field::Empty,
+        gen_ai.request.model = %model,
+        gen_ai.operation.name = "chat",
+        gen_ai.response.finish_reasons = tracing::field::Empty,
+        gen_ai.usage.input_tokens = tracing::field::Empty,
+        gen_ai.usage.output_tokens = tracing::field::Empty,
+        gen_ai.conversation.id = %session_id,
+        gen_ai.input.messages = tracing::field::Empty,
+        gen_ai.output.messages = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+    );
+    span.set_parent(OtelContext::new());
+    span
 }
 
 fn attach_llm_parent_context(span: &Span, callback_params: &mut Value) {
@@ -1004,7 +1232,15 @@ fn attach_llm_parent_context(span: &Span, callback_params: &mut Value) {
         json!(span_context.trace_id().to_string()),
     );
     object.insert(
+        "gen_ai_parent_trace_id".into(),
+        json!(span_context.trace_id().to_string()),
+    );
+    object.insert(
         "_gen_ai_parent_span_id".into(),
+        json!(span_context.span_id().to_string()),
+    );
+    object.insert(
+        "gen_ai_parent_span_id".into(),
         json!(span_context.span_id().to_string()),
     );
 }

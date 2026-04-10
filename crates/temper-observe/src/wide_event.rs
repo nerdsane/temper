@@ -574,7 +574,10 @@ pub fn emit_span(event: &WideEvent) {
     let end_time = start_time + std::time::Duration::from_nanos(event.duration_ns);
 
     let parent_cx = if llm_apm_only {
-        remote_parent_context(event).unwrap_or_else(opentelemetry::Context::new)
+        // Keep APM-only LLM wide events off the canonical llm_caller trace. Datadog
+        // treats dd_llmobs_enabled=false at the trace level, so attaching these spans
+        // to the real trace suppresses the actual LLMObs record we want to keep.
+        opentelemetry::Context::new()
     } else {
         remote_parent_context(event).unwrap_or_else(|| tracing::Span::current().context())
     };
