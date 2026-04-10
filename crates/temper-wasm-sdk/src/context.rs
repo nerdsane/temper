@@ -258,6 +258,7 @@ impl Context {
     }
 
     /// Emit a wide event from the guest module.
+    #[allow(clippy::too_many_arguments)]
     pub fn emit_wide_event(
         &self,
         kind: &str,
