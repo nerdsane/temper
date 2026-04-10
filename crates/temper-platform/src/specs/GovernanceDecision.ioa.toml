@@ -104,7 +104,7 @@ from = ["Pending"]
 to = "Approved"
 kind = "input"
 params = ["decided_by", "scope", "generated_policy"]
-effect = ["trigger GenerateCedarPolicy", "trigger DispatchCallback"]
+effect = '[{ type = "trigger", name = "GenerateCedarPolicy" }, { type = "trigger", name = "DispatchCallback" }]'
 
 [[action]]
 name = "Deny"
