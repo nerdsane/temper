@@ -384,23 +384,23 @@ impl crate::state::ServerState {
         if !response.custom_effects.is_empty()
             && let Some(handler) = &self.custom_effect_handler
         {
-                for effect_name in &response.custom_effects {
-                    if let Err(e) = handler.handle(
-                        effect_name,
-                        ctx.entity_type,
-                        ctx.entity_id,
-                        &response.state.fields,
-                        self,
-                    ) {
-                        tracing::error!(
-                            effect = %effect_name,
-                            entity_type = ctx.entity_type,
-                            entity_id = ctx.entity_id,
-                            error = %e,
-                            "custom effect handler failed"
-                        );
-                    }
+            for effect_name in &response.custom_effects {
+                if let Err(e) = handler.handle(
+                    effect_name,
+                    ctx.entity_type,
+                    ctx.entity_id,
+                    &response.state.fields,
+                    self,
+                ) {
+                    tracing::error!(
+                        effect = %effect_name,
+                        entity_type = ctx.entity_type,
+                        entity_id = ctx.entity_id,
+                        error = %e,
+                        "custom effect handler failed"
+                    );
                 }
+            }
         }
 
         // 6. Spawn requests
