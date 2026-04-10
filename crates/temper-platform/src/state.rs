@@ -56,7 +56,13 @@ impl PlatformState {
     pub fn new(api_key: Option<String>) -> Self {
         let system = ActorSystem::new("temper-platform");
         let registry = Arc::new(RwLock::new(SpecRegistry::new()));
-        let server = ServerState::from_registry_shared(system, registry.clone());
+        let spec_store = Arc::new(RwLock::new(SpecStore::new()));
+        let mut server = ServerState::from_registry_shared(system, registry.clone());
+        // Register platform custom effect handler so hooks.rs is called
+        // from the dispatch pipeline for system entity effects.
+        server.custom_effect_handler = Some(Arc::new(crate::hooks::PlatformEffectHandler {
+            spec_store: spec_store.clone(),
+        }));
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
 
         Self {
@@ -66,7 +72,7 @@ impl PlatformState {
             record_store: RecordStore::new(),
             api_key,
             api_token: None,
-            spec_store: Arc::new(RwLock::new(SpecStore::new())),
+            spec_store,
             identity_resolver: Arc::new(IdentityResolver::new()),
         }
     }
@@ -75,7 +81,13 @@ impl PlatformState {
     pub fn with_registry(registry: SpecRegistry, api_key: Option<String>) -> Self {
         let system = ActorSystem::new("temper-platform");
         let registry = Arc::new(RwLock::new(registry));
-        let server = ServerState::from_registry_shared(system, registry.clone());
+        let spec_store = Arc::new(RwLock::new(SpecStore::new()));
+        let mut server = ServerState::from_registry_shared(system, registry.clone());
+        // Register platform custom effect handler so hooks.rs is called
+        // from the dispatch pipeline for system entity effects.
+        server.custom_effect_handler = Some(Arc::new(crate::hooks::PlatformEffectHandler {
+            spec_store: spec_store.clone(),
+        }));
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
 
         Self {
@@ -85,7 +97,7 @@ impl PlatformState {
             record_store: RecordStore::new(),
             api_key,
             api_token: None,
-            spec_store: Arc::new(RwLock::new(SpecStore::new())),
+            spec_store,
             identity_resolver: Arc::new(IdentityResolver::new()),
         }
     }

@@ -85,6 +85,9 @@ pub struct PendingDecision {
     /// Session ID at time of denial (for session-scoped approvals).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Linked GovernanceDecision entity ID (e.g. "GD-{uuid}") in temper-system tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance_decision_id: Option<String>,
 }
 
 impl PendingDecision {
@@ -120,6 +123,7 @@ impl PendingDecision {
             agent_type: None,
             principal_kind: None,
             session_id: None,
+            governance_decision_id: None,
         }
     }
 

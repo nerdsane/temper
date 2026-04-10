@@ -246,6 +246,12 @@
         <Property Name="GeneratedPolicy" Type="Edm.String" />
         <Property Name="DecidedBy" Type="Edm.String" />
         <Property Name="EvolutionRecordId" Type="Edm.String" />
+        <Property Name="PendingDecisionId" Type="Edm.String" Nullable="true"/>
+        <Property Name="CallbackTenant" Type="Edm.String" Nullable="true"/>
+        <Property Name="CallbackEntitySet" Type="Edm.String" Nullable="true"/>
+        <Property Name="CallbackEntityId" Type="Edm.String" Nullable="true"/>
+        <Property Name="CallbackOnApprove" Type="Edm.String" Nullable="true"/>
+        <Property Name="CallbackOnDeny" Type="Edm.String" Nullable="true"/>
       </EntityType>
       <Action Name="ApproveGovernanceDecision" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" />
@@ -255,6 +261,14 @@
       </Action>
       <Action Name="ExpireGovernanceDecision" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" />
+      </Action>
+      <Action Name="RegisterCallbackGovernanceDecision" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision"/>
+        <Parameter Name="CallbackTenant" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="CallbackEntitySet" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="CallbackEntityId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="CallbackOnApprove" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="CallbackOnDeny" Type="Edm.String" Nullable="true"/>
       </Action>
 
       <EntityContainer Name="Container">

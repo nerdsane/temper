@@ -13,6 +13,13 @@
 //!   transitions to Approved. Generates a Cedar permit policy from the
 //!   entity's fields and reloads the authz engine.
 
+use std::sync::{Arc, RwLock};
+
+use temper_runtime::TenantId;
+use temper_server::request_context::AgentContext;
+use temper_server::state::custom_effects::CustomEffectHandler;
+use temper_server::ServerState;
+
 use crate::deploy::{DeployInput, DeployPipeline, EntitySpecSource};
 use crate::state::PlatformState;
 
@@ -242,6 +249,269 @@ fn handle_generate_cedar_policy(
         entity_id = entity_id,
         "GenerateCedarPolicy hook: policy loaded successfully"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Platform custom effect handler (registered on ServerState)
+// ---------------------------------------------------------------------------
+
+/// Platform-level custom effect handler.
+///
+/// Registered on `ServerState` during `PlatformState` construction to
+/// route custom effects from system entities to platform hooks.
+pub struct PlatformEffectHandler {
+    /// Spec store for DeploySpecs hook (future use).
+    pub spec_store: Arc<RwLock<crate::spec_store::SpecStore>>,
+}
+
+impl CustomEffectHandler for PlatformEffectHandler {
+    fn handle(
+        &self,
+        effect_name: &str,
+        entity_type: &str,
+        entity_id: &str,
+        entity_fields: &serde_json::Value,
+        server: &ServerState,
+    ) -> Result<(), String> {
+        match effect_name {
+            "GenerateCedarPolicy" => {
+                handle_generate_cedar_from_fields(entity_id, entity_fields, server)
+            }
+            "DispatchCallback" => handle_dispatch_callback(entity_fields, server),
+            _ => {
+                tracing::debug!(
+                    effect = effect_name,
+                    entity_type,
+                    entity_id,
+                    "Unknown custom effect — ignored"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Generate Cedar policy from entity state fields.
+///
+/// Reads agent_id, action_name, resource_type, resource_id, scope, tenant,
+/// and scope_matrix from the GovernanceDecision entity's merged fields.
+fn handle_generate_cedar_from_fields(
+    entity_id: &str,
+    fields: &serde_json::Value,
+    server: &ServerState,
+) -> Result<(), String> {
+    let agent_id = fields
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let action_name = fields
+        .get("action_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let resource_type = fields
+        .get("resource_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let resource_id = fields
+        .get("resource_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let scope = fields
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or("narrow");
+    let tenant = fields
+        .get("tenant")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if agent_id.is_empty() || action_name.is_empty() || resource_type.is_empty() {
+        return Err(format!(
+            "GenerateCedarPolicy: missing required fields for entity '{entity_id}'"
+        ));
+    }
+
+    // Parse scope_matrix from fields, or build a default matrix based on the legacy scope string.
+    let matrix: temper_authz::PolicyScopeMatrix =
+        if let Some(matrix_val) = fields.get("scope_matrix") {
+            serde_json::from_value(matrix_val.clone()).map_err(|e| {
+                format!("GenerateCedarPolicy: invalid scope_matrix for entity '{entity_id}': {e}")
+            })?
+        } else {
+            match scope {
+                "narrow" => temper_authz::PolicyScopeMatrix {
+                    principal: temper_authz::PrincipalScope::ThisAgent,
+                    action: temper_authz::ActionScope::ThisAction,
+                    resource: temper_authz::ResourceScope::ThisResource,
+                    duration: temper_authz::DurationScope::Always,
+                    agent_type_value: None,
+                    role_value: None,
+                    session_id: None,
+                },
+                "broad" => temper_authz::PolicyScopeMatrix {
+                    principal: temper_authz::PrincipalScope::ThisAgent,
+                    action: temper_authz::ActionScope::AllActionsOnType,
+                    resource: temper_authz::ResourceScope::AnyOfType,
+                    duration: temper_authz::DurationScope::Always,
+                    agent_type_value: None,
+                    role_value: None,
+                    session_id: None,
+                },
+                _ => temper_authz::PolicyScopeMatrix::default_for(None),
+            }
+        };
+    temper_authz::validate_policy_scope_matrix(&matrix).map_err(|e| {
+        format!("GenerateCedarPolicy: invalid scope_matrix for entity '{entity_id}': {e}")
+    })?;
+    let principal_kind = fields
+        .get("principal_kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Agent");
+    let generated_policy = temper_authz::generate_cedar_from_matrix(
+        agent_id,
+        principal_kind,
+        action_name,
+        resource_type,
+        resource_id,
+        &matrix,
+    );
+
+    tracing::info!(
+        entity_id,
+        tenant,
+        scope,
+        "GenerateCedarPolicy hook: generated policy, validating and loading"
+    );
+
+    // Validate and reload the per-tenant policy set.
+    {
+        let Ok(mut policies) = server.tenant_policies.write() else {
+            return Err("tenant_policies lock poisoned".to_string());
+        };
+        let entry = policies.entry(tenant.to_string()).or_default();
+        if !entry.is_empty() {
+            entry.push('\n');
+        }
+        entry.push_str(&generated_policy);
+
+        let tenant_text = entry.clone();
+        if let Err(e) = server.authz.reload_tenant_policies(tenant, &tenant_text) {
+            tracing::error!(error = %e, "GenerateCedarPolicy: failed to reload policies");
+            return Err(format!("Failed to reload policies: {e}"));
+        }
+    }
+
+    tracing::info!(entity_id, "GenerateCedarPolicy hook: policy loaded successfully");
+    Ok(())
+}
+
+/// Dispatch callback to a registered target entity.
+///
+/// Reads callback fields from GovernanceDecision entity state. If a callback
+/// is registered (callback_tenant is non-empty), dispatches the appropriate
+/// action on the target entity via cross-tenant dispatch.
+fn handle_dispatch_callback(
+    entity_fields: &serde_json::Value,
+    server: &ServerState,
+) -> Result<(), String> {
+    let callback_tenant = entity_fields
+        .get("callback_tenant")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let callback_entity_set = entity_fields
+        .get("callback_entity_set")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let callback_entity_id = entity_fields
+        .get("callback_entity_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if callback_tenant.is_empty()
+        || callback_entity_set.is_empty()
+        || callback_entity_id.is_empty()
+    {
+        tracing::debug!("DispatchCallback: no callback registered — skipping");
+        return Ok(());
+    }
+
+    // Determine the callback action from the current entity status.
+    let status = entity_fields
+        .get("Status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let callback_action = match status {
+        "Approved" => entity_fields
+            .get("callback_on_approve")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        "Denied" => entity_fields
+            .get("callback_on_deny")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        _ => {
+            tracing::warn!(
+                status,
+                "DispatchCallback: unexpected status, skipping callback"
+            );
+            return Ok(());
+        }
+    };
+
+    if callback_action.is_empty() {
+        tracing::debug!(
+            status,
+            "DispatchCallback: no callback action for status — skipping"
+        );
+        return Ok(());
+    }
+
+    let params = if status == "Denied" {
+        serde_json::json!({"error_message": "Action denied by human reviewer"})
+    } else {
+        serde_json::json!({})
+    };
+
+    tracing::info!(
+        callback_tenant,
+        callback_entity_set,
+        callback_entity_id,
+        callback_action,
+        "DispatchCallback: dispatching callback"
+    );
+
+    let server = server.clone();
+    let tenant = callback_tenant.to_string();
+    let entity_set = callback_entity_set.to_string();
+    let entity_id = callback_entity_id.to_string();
+    let action = callback_action.to_string();
+
+    tokio::spawn(async move {
+        // determinism-ok: async callback dispatch for governance decision resolution
+        let tid = TenantId::new(&tenant);
+        if let Err(e) = server
+            .dispatch_tenant_action(
+                &tid,
+                &entity_set,
+                &entity_id,
+                &action,
+                params,
+                &AgentContext::system(),
+            )
+            .await
+        {
+            tracing::error!(
+                error = %e,
+                tenant,
+                entity_set,
+                entity_id,
+                action,
+                "DispatchCallback: failed to dispatch callback action"
+            );
+        }
+    });
+
     Ok(())
 }
 
