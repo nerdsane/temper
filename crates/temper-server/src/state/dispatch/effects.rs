@@ -381,8 +381,9 @@ impl crate::state::ServerState {
         // For system-tenant entities whose specs declare custom effects
         // but have no WASM/adapter integrations (e.g. GovernanceDecision),
         // the handler routes effects to platform hooks (hooks.rs).
-        if !response.custom_effects.is_empty() {
-            if let Some(handler) = &self.custom_effect_handler {
+        if !response.custom_effects.is_empty()
+            && let Some(handler) = &self.custom_effect_handler
+        {
                 for effect_name in &response.custom_effects {
                     if let Err(e) = handler.handle(
                         effect_name,
@@ -400,7 +401,6 @@ impl crate::state::ServerState {
                         );
                     }
                 }
-            }
         }
 
         // 6. Spawn requests
