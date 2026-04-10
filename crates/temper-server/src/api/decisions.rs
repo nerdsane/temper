@@ -223,10 +223,7 @@ pub(crate) async fn handle_approve_decision(
     if let Some(ref gd_id) = approved_decision.governance_decision_id {
         let state_c = state.clone();
         let gd_id = gd_id.clone();
-        let decided_by = body
-            .decided_by
-            .clone()
-            .unwrap_or_else(|| "unknown".into());
+        let decided_by = body.decided_by.clone().unwrap_or_else(|| "unknown".into());
         let generated_policy = generated_policy.clone();
         tokio::spawn(async move {
             // determinism-ok: async callback dispatch for governance decision resolution

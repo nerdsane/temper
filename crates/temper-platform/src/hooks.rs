@@ -16,9 +16,9 @@
 use std::sync::{Arc, RwLock};
 
 use temper_runtime::TenantId;
+use temper_server::ServerState;
 use temper_server::request_context::AgentContext;
 use temper_server::state::custom_effects::CustomEffectHandler;
-use temper_server::ServerState;
 
 use crate::deploy::{DeployInput, DeployPipeline, EntitySpecSource};
 use crate::state::PlatformState;
@@ -321,10 +321,7 @@ fn handle_generate_cedar_from_fields(
         .get("scope")
         .and_then(|v| v.as_str())
         .unwrap_or("narrow");
-    let tenant = fields
-        .get("tenant")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let tenant = fields.get("tenant").and_then(|v| v.as_str()).unwrap_or("");
 
     if agent_id.is_empty() || action_name.is_empty() || resource_type.is_empty() {
         return Err(format!(
@@ -402,7 +399,10 @@ fn handle_generate_cedar_from_fields(
         }
     }
 
-    tracing::info!(entity_id, "GenerateCedarPolicy hook: policy loaded successfully");
+    tracing::info!(
+        entity_id,
+        "GenerateCedarPolicy hook: policy loaded successfully"
+    );
     Ok(())
 }
 
@@ -428,9 +428,7 @@ fn handle_dispatch_callback(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    if callback_tenant.is_empty()
-        || callback_entity_set.is_empty()
-        || callback_entity_id.is_empty()
+    if callback_tenant.is_empty() || callback_entity_set.is_empty() || callback_entity_id.is_empty()
     {
         tracing::debug!("DispatchCallback: no callback registered — skipping");
         return Ok(());
