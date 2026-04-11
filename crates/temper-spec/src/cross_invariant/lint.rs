@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use super::parser::{parse_related_status_in_assert, split_trigger};
+use super::parser::{parse_related_field_assert, split_trigger};
 use super::types::{CrossInvariantSpec, InvariantKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -48,11 +48,11 @@ pub fn lint_cross_invariants(spec: &CrossInvariantSpec) -> Vec<CrossInvariantLin
                 format!("trigger '{}' must be Entity.* or Entity.Action", inv.on),
             ));
         }
-        if parse_related_status_in_assert(&inv.assertion).is_none() {
+        if parse_related_field_assert(&inv.assertion).is_none() {
             findings.push(CrossInvariantLintFinding::error(
                 "invalid_assertion",
                 Some(&inv.name),
-                "assertion must be: related(TargetEntity, source_field).status in [\"A\",\"B\"]",
+                "assertion must be: related(TargetEntity, source_field).<FieldName> (in|not in) [\"A\",\"B\"]",
             ));
         }
         if inv.kind == InvariantKind::Eventual && inv.window_ms.is_none() {

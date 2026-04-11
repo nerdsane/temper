@@ -135,9 +135,7 @@ pub fn spawn_eventual_recheck(
     state: crate::state::ServerState,
     interval: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(
-        // determinism-ok: background convergence task
-        async move {
+    tokio::spawn(async move { // determinism-ok: background convergence task
             let mut ticker = tokio::time::interval(interval); // determinism-ok: convergence polling
             loop {
                 ticker.tick().await;
@@ -266,7 +264,7 @@ async fn check_invariant_convergence(
     };
 
     let Some(assertion) =
-        temper_spec::cross_invariant::parse_related_status_in_assert(&assertion_str)
+        temper_spec::cross_invariant::parse_related_field_assert(&assertion_str)
     else {
         return true; // Invalid assertion — skip
     };
@@ -293,17 +291,45 @@ async fn check_invariant_convergence(
         return false;
     };
 
-    // Read the target entity status
-    let target_status = match state
+    // Read the target entity's field (status or an arbitrary scalar property)
+    let target_value = match state
         .get_tenant_entity_state(tenant, &assertion.target_entity, target_id)
         .await
     {
-        Ok(resp) => resp.state.status,
+        Ok(resp) => {
+            if assertion.field_name == "status" {
+                resp.state.status.clone()
+            } else {
+                let target_fields =
+                    serde_json::to_value(&resp.state.fields).unwrap_or_default();
+                let Some(v) = target_fields
+                    .get(&assertion.field_name)
+                    .or_else(|| {
+                        target_fields
+                            .get("fields")
+                            .and_then(|f| f.get(&assertion.field_name))
+                    })
+                    .and_then(|val| match val {
+                        serde_json::Value::String(s) => Some(s.clone()),
+                        serde_json::Value::Bool(b) => Some(b.to_string()),
+                        serde_json::Value::Number(n) => Some(n.to_string()),
+                        _ => None,
+                    })
+                else {
+                    return false;
+                };
+                v
+            }
+        }
         Err(_) => return false,
     };
 
     // Check if the assertion now holds
-    assertion.statuses.iter().any(|s| s == &target_status)
+    let in_list = assertion.values.iter().any(|s| s == &target_value);
+    match assertion.operator {
+        temper_spec::cross_invariant::CrossInvariantOperator::In => in_list,
+        temper_spec::cross_invariant::CrossInvariantOperator::NotIn => !in_list,
+    }
 }
 
 #[cfg(test)]

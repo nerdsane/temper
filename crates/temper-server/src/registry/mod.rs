@@ -16,6 +16,7 @@ use tracing::instrument;
 use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
+use temper_spec::FieldInvariant;
 use temper_spec::automaton;
 use temper_spec::cross_invariant::parse_cross_invariants;
 use temper_spec::csdl::{CsdlDocument, emit_csdl_xml, merge_csdl};
@@ -402,6 +403,20 @@ impl SpecRegistry {
         self.tenants
             .get(tenant)
             .and_then(|tc| tc.entities.get(entity_type))
+    }
+
+    /// Look up the `[[field_invariant]]` declarations for a tenant and entity
+    /// type, returning a cloned snapshot so the caller does not need to hold a
+    /// registry read lock across subsequent async work.
+    pub fn field_invariants_for(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Option<Vec<FieldInvariant>> {
+        self.tenants
+            .get(tenant)
+            .and_then(|tc| tc.entities.get(entity_type))
+            .map(|es| es.automaton.field_invariants.clone())
     }
 
     /// Mutable access to the IOA spec for a tenant and entity type.

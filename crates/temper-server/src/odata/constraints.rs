@@ -5,8 +5,9 @@ use std::time::Instant; // determinism-ok: scoped duration measurement only
 use tracing::instrument;
 
 use temper_runtime::tenant::TenantId;
+use temper_spec::FieldInvariant;
 use temper_spec::cross_invariant::{
-    CrossInvariant, DeletePolicy, InvariantKind, parse_related_status_in_assert,
+    CrossInvariant, CrossInvariantOperator, DeletePolicy, InvariantKind, parse_related_field_assert,
 };
 
 use crate::registry::RelationEdge;
@@ -17,6 +18,7 @@ use crate::state::ServerState;
 pub enum ConstraintViolationType {
     RelationIntegrity,
     CrossInvariant,
+    FieldInvariant,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -55,6 +57,23 @@ impl ConstraintViolation {
     ) -> Self {
         Self {
             violation_type: ConstraintViolationType::CrossInvariant,
+            invariant: Some(invariant.to_string()),
+            message: message.into(),
+            entity_type: entity_type.to_string(),
+            entity_id: entity_id.to_string(),
+            operation: operation.to_string(),
+        }
+    }
+
+    fn field_invariant(
+        invariant: &str,
+        message: impl Into<String>,
+        entity_type: &str,
+        entity_id: &str,
+        operation: &str,
+    ) -> Self {
+        Self {
+            violation_type: ConstraintViolationType::FieldInvariant,
             invariant: Some(invariant.to_string()),
             message: message.into(),
             entity_type: entity_type.to_string(),
@@ -272,7 +291,7 @@ pub async fn post_write_invariant_checks(
         state
             .metrics
             .record_cross_invariant_check(&tenant_name, entity_type, "evaluated");
-        let Some(assertion) = parse_related_status_in_assert(&inv.assertion) else {
+        let Some(assertion) = parse_related_field_assert(&inv.assertion) else {
             tracing::warn!(
                 tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
                 "constraint violation: invalid assertion syntax"
@@ -345,11 +364,55 @@ pub async fn post_write_invariant_checks(
             return Err(violation);
         }
 
-        let target_status = match state
+        let target_field_value = match state
             .get_tenant_entity_state(tenant, &assertion.target_entity, target_id)
             .await
         {
-            Ok(resp) => resp.state.status,
+            Ok(resp) => {
+                if assertion.field_name == "status" {
+                    resp.state.status.clone()
+                } else {
+                    let target_fields =
+                        serde_json::to_value(&resp.state.fields).unwrap_or_default();
+                    let Some(value) =
+                        extract_field_as_string(&target_fields, &assertion.field_name)
+                    else {
+                        tracing::warn!(
+                            tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
+                            target_entity = %assertion.target_entity, target_id,
+                            target_field = %assertion.field_name,
+                            "constraint violation: target field required by invariant is missing or not a scalar"
+                        );
+                        state.metrics.record_cross_invariant_violation(
+                            &tenant_name,
+                            &inv.name,
+                            "target_field_missing",
+                        );
+                        let violation = ConstraintViolation::invariant(
+                            &inv.name,
+                            format!(
+                                "related {}('{}') is missing field '{}' required by invariant",
+                                assertion.target_entity, target_id, assertion.field_name
+                            ),
+                            entity_type,
+                            entity_id,
+                            operation,
+                        );
+                        if inv.kind == InvariantKind::Eventual {
+                            defer_eventual_invariant(
+                                state,
+                                &inv,
+                                &tenant_name,
+                                entity_type,
+                                entity_id,
+                            );
+                            continue;
+                        }
+                        return Err(violation);
+                    };
+                    value
+                }
+            }
             Err(e) => {
                 state.metrics.record_cross_invariant_violation(
                     &tenant_name,
@@ -371,12 +434,24 @@ pub async fn post_write_invariant_checks(
             }
         };
 
-        if !assertion.statuses.iter().any(|s| s == &target_status) {
+        let in_list = assertion.values.iter().any(|s| s == &target_field_value);
+        let assertion_holds = match assertion.operator {
+            CrossInvariantOperator::In => in_list,
+            CrossInvariantOperator::NotIn => !in_list,
+        };
+        if !assertion_holds {
+            let (op_str, expectation) = match assertion.operator {
+                CrossInvariantOperator::In => ("in", "expected one of"),
+                CrossInvariantOperator::NotIn => ("not in", "expected none of"),
+            };
             tracing::warn!(
                 tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
-                target_entity = %assertion.target_entity, target_id, target_status = %target_status,
-                expected = ?assertion.statuses,
-                "constraint violation: related entity status mismatch"
+                target_entity = %assertion.target_entity, target_id,
+                target_field = %assertion.field_name,
+                target_value = %target_field_value,
+                operator = op_str,
+                expected = ?assertion.values,
+                "constraint violation: related entity field mismatch"
             );
             state.metrics.record_cross_invariant_violation(
                 &tenant_name,
@@ -386,8 +461,13 @@ pub async fn post_write_invariant_checks(
             let violation = ConstraintViolation::invariant(
                 &inv.name,
                 format!(
-                    "related {}('{}') has status '{}', expected one of {:?}",
-                    assertion.target_entity, target_id, target_status, assertion.statuses
+                    "related {}('{}') has {}='{}', {} {:?}",
+                    assertion.target_entity,
+                    target_id,
+                    assertion.field_name,
+                    target_field_value,
+                    expectation,
+                    assertion.values
                 ),
                 entity_type,
                 entity_id,
@@ -454,4 +534,101 @@ fn extract_field<'a>(fields: &'a serde_json::Value, name: &str) -> Option<&'a se
 
 fn extract_field_as_str<'a>(fields: &'a serde_json::Value, name: &str) -> Option<&'a str> {
     extract_field(fields, name).and_then(|v| v.as_str())
+}
+
+/// Extract a scalar field from a JSON object, coercing numbers/bools to their
+/// string representation so they can be compared against the quoted literals
+/// in `in`/`not in` assertions.
+fn extract_field_as_string(fields: &serde_json::Value, name: &str) -> Option<String> {
+    let v = extract_field(fields, name)?;
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Flatten a `fields` payload so leaf predicates see a single-level object.
+///
+/// OData write payloads land here with the entity's properties at the top
+/// level, but some callers wrap them under a `"fields"` key. Normalise both
+/// shapes to the unwrapped form so field_invariant authors don't have to
+/// care which handler invoked the check.
+fn field_invariant_view(fields: &serde_json::Value) -> serde_json::Value {
+    if let Some(inner) = fields.get("fields").and_then(|f| f.as_object()) {
+        serde_json::Value::Object(inner.clone())
+    } else if fields.is_object() {
+        fields.clone()
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    }
+}
+
+/// Evaluate cross-field invariants declared on an entity's IOA spec against
+/// the post-write `initial_fields` payload.
+///
+/// Runs between [`pre_upsert_relation_checks`] and
+/// [`post_write_invariant_checks`] in the write pipeline. Honours the
+/// `state.cross_invariant_enforce` feature flag so a single operator control
+/// governs all three constraint families. Iteration order follows the order
+/// declared in the spec; violations short-circuit on the first failing rule.
+#[instrument(skip_all, fields(otel.name = "constraint.pre_upsert_field_invariant_checks", tenant = %tenant, entity_type, entity_id, operation))]
+pub async fn pre_upsert_field_invariant_checks(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    operation: &str,
+    fields: &serde_json::Value,
+) -> Result<(), ConstraintViolation> {
+    if !state.cross_invariant_enforce {
+        state.metrics.record_cross_bypass();
+        return Ok(());
+    }
+
+    // Snapshot the field invariants for this (tenant, entity_type). Keep the
+    // registry lock scope tight — we don't want to hold it across await points
+    // later in the function.
+    let invariants: Vec<FieldInvariant> = {
+        let registry = state.registry.read().unwrap(); // ci-ok: RwLock read — poisoned lock = prior panic, fail-fast correct
+        registry
+            .field_invariants_for(tenant, entity_type)
+            .unwrap_or_default()
+    };
+    if invariants.is_empty() {
+        return Ok(());
+    }
+
+    let view = field_invariant_view(fields);
+
+    for inv in invariants {
+        if inv.passes(&view) {
+            continue;
+        }
+        let message = inv.message.clone().unwrap_or_else(|| {
+            format!(
+                "field invariant '{}' violated on {}('{}')",
+                inv.name, entity_type, entity_id
+            )
+        });
+        state.metrics.record_cross_invariant_violation(
+            tenant.as_str(),
+            &inv.name,
+            "field_invariant",
+        );
+        tracing::warn!(
+            tenant = %tenant, entity_type, entity_id, invariant = %inv.name, operation,
+            "constraint violation: field invariant"
+        );
+        return Err(ConstraintViolation::field_invariant(
+            &inv.name,
+            message,
+            entity_type,
+            entity_id,
+            operation,
+        ));
+    }
+
+    Ok(())
 }
