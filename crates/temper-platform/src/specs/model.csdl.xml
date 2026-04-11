@@ -262,7 +262,7 @@
       <Action Name="ExpireGovernanceDecision" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" />
       </Action>
-      <Action Name="RegisterCallbackGovernanceDecision" IsBound="true">
+      <Action Name="RegisterCallback" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision"/>
         <Parameter Name="CallbackTenant" Type="Edm.String" Nullable="true"/>
         <Parameter Name="CallbackEntitySet" Type="Edm.String" Nullable="true"/>

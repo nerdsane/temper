@@ -93,10 +93,11 @@ params = ["tenant", "agent_id", "action_name", "resource_type", "resource_id", "
 
 [[action]]
 name = "RegisterCallback"
-from = ["Pending"]
+from = ["Pending", "Approved", "Denied"]
 kind = "input"
 params = ["callback_tenant", "callback_entity_set", "callback_entity_id", "callback_on_approve", "callback_on_deny"]
-hint = "Register entity callback for decision resolution. Self-loop — does not change state."
+hint = "Register entity callback for decision resolution. Self-loop — does not change state. Late registration after approval/denial immediately replays DispatchCallback."
+effect = "trigger DispatchCallback"
 
 [[action]]
 name = "Approve"

@@ -211,4 +211,11 @@ mod tests {
         assert!(rx1.try_recv().is_ok());
         assert!(rx2.try_recv().is_ok());
     }
+
+    #[test]
+    fn temper_system_csdl_uses_register_callback_action_name() {
+        let csdl = include_str!("specs/model.csdl.xml");
+        assert!(csdl.contains(r#"<Action Name="RegisterCallback" IsBound="true">"#));
+        assert!(!csdl.contains("RegisterCallbackGovernanceDecision"));
+    }
 }

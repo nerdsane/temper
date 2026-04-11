@@ -4,6 +4,7 @@ use std::fs;
 
 use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
+use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_verify::cascade::VerificationCascade;
@@ -468,6 +469,102 @@ async fn test_install_multiple_skills_merges_and_is_idempotent() {
             "Organization".to_string(),
             "Project".to_string(),
         ]
+    );
+}
+
+#[tokio::test]
+async fn test_reinstall_of_skipped_specs_repairs_entity_set_map() {
+    let state = PlatformState::new(None);
+    let tenant_name = "test-skipped-map-repair";
+    let tenant = TenantId::new(tenant_name);
+
+    install_skill(&state, tenant_name, "project-management")
+        .await
+        .expect("install project-management");
+
+    let bundle = get_os_app("project-management").expect("project-management app not found");
+    let mut broken_csdl = bundle.csdl.expect("project-management should have CSDL");
+    broken_csdl = broken_csdl.replace(
+        r#"        <EntitySet Name="Issues" EntityType="Temper.ProjectManagement.Issue">
+          <NavigationPropertyBinding Path="ParentIssue" Target="Issues"/>
+          <NavigationPropertyBinding Path="SubIssues" Target="Issues"/>
+          <NavigationPropertyBinding Path="Project" Target="Projects"/>
+          <NavigationPropertyBinding Path="Cycle" Target="Cycles"/>
+          <NavigationPropertyBinding Path="Comments" Target="Comments"/>
+        </EntitySet>
+"#,
+        "",
+    );
+
+    {
+        let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
+        let parsed = parse_csdl(&broken_csdl).expect("broken CSDL should still parse");
+        let specs: Vec<(&str, &str)> = bundle
+            .specs
+            .iter()
+            .map(|(entity_type, ioa_source)| (entity_type.as_str(), ioa_source.as_str()))
+            .collect();
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                tenant.clone(),
+                parsed,
+                broken_csdl,
+                &specs,
+                Vec::new(),
+                None,
+                false,
+            )
+            .expect("replace tenant config with a broken entity-set map");
+
+        let verified_at = temper_runtime::scheduler::sim_now().to_rfc3339();
+        for (entity_type, _) in &bundle.specs {
+            registry.set_verification_status(
+                &tenant,
+                entity_type,
+                VerificationStatus::Completed(EntityVerificationResult {
+                    all_passed: true,
+                    levels: vec![EntityLevelSummary {
+                        level: "Test".to_string(),
+                        passed: true,
+                        summary: "Preserved verification for skipped reinstall".to_string(),
+                        details: None,
+                    }],
+                    verified_at: verified_at.clone(),
+                }),
+            );
+        }
+    }
+
+    {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        assert_eq!(
+            registry.resolve_entity_type(&tenant, "Issues").as_deref(),
+            None,
+            "test setup should remove the Issues entity-set mapping"
+        );
+        assert!(
+            registry.get_table(&tenant, "Issue").is_some(),
+            "Issue spec should still exist so reinstall is treated as skipped"
+        );
+    }
+
+    let reinstall = install_skill(&state, tenant_name, "project-management")
+        .await
+        .expect("reinstall project-management");
+
+    assert!(reinstall.added.is_empty());
+    assert!(reinstall.updated.is_empty());
+    assert_eq!(
+        reinstall.skipped.len(),
+        5,
+        "reinstall should still classify all project-management specs as skipped"
+    );
+
+    let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+    assert_eq!(
+        registry.resolve_entity_type(&tenant, "Issues").as_deref(),
+        Some("Issue"),
+        "identical reinstall should repair the entity-set map from the app CSDL"
     );
 }
 

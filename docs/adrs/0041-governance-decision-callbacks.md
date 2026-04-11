@@ -74,8 +74,10 @@ Extend the GovernanceDecision IOA spec with callback registration:
 - **New state variables**: `callback_tenant`, `callback_entity_set`,
   `callback_entity_id`, `callback_on_approve`, `callback_on_deny`,
   `pending_decision_id`
-- **New action**: `RegisterCallback` (self-loop on Pending state) — allows
-  any caller to register a callback target before the decision is resolved
+- **New action**: `RegisterCallback` (self-loop on Pending/Approved/Denied) —
+  allows any caller to register a callback target before the decision is
+  resolved, and safely replay callback delivery if registration happens after
+  approval or denial
 - **New effect**: `DispatchCallback` on both `Approve` and `Deny` actions —
   when the decision is resolved, the handler reads the callback fields and
   dispatches the registered action on the target entity
@@ -105,7 +107,7 @@ mechanism through the entity effect pipeline.
 ### Sub-Decision 5: WASM Callback Registration
 
 The `request_approval` WASM module (triggered by `Session.PauseForApproval`)
-registers the callback after posting approval buttons:
+registers the callback before posting approval buttons:
 1. Queries GovernanceDecisions in `temper-system` by `pending_decision_id`
 2. Dispatches `RegisterCallback` with the Session entity as target
 
