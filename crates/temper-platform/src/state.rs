@@ -50,6 +50,25 @@ pub struct PlatformState {
 /// Default broadcast channel capacity.
 const BROADCAST_CAPACITY: usize = 256;
 
+/// Cedar policy for the temper-system tenant.
+///
+/// Platform entities (GovernanceDecision, etc.) live in the temper-system
+/// tenant but have no os-app to ship policies with. This baseline policy
+/// permits admin principals to manage governance decisions — needed so that
+/// WASM modules can register callbacks via HTTP (system principal is blocked
+/// from HTTP headers as a privilege-escalation safeguard).
+const SYSTEM_TENANT_POLICY: &str = r#"
+// Baseline policy for the temper-system tenant.
+// Admin principals get full access to all platform entities (GovernanceDecision,
+// Project, etc.). This matches the global fallback behavior — without it, loading
+// any tenant-specific policy would shadow the global set and deny unlisted actions.
+permit(
+  principal is Admin,
+  action,
+  resource
+);
+"#;
+
 #[allow(deprecated)] // RecordStore retained during migration to IOA entities (ADR-0025)
 impl PlatformState {
     /// Create a new platform state with an empty registry.
@@ -63,6 +82,14 @@ impl PlatformState {
         server.custom_effect_handler = Some(Arc::new(crate::hooks::PlatformEffectHandler {
             spec_store: spec_store.clone(),
         }));
+        // Load baseline Cedar policies for the temper-system tenant so that
+        // WASM modules can manage GovernanceDecision entities via HTTP.
+        if let Err(e) = server
+            .authz
+            .reload_tenant_policies("temper-system", SYSTEM_TENANT_POLICY)
+        {
+            tracing::warn!(error = %e, "failed to load temper-system Cedar policies");
+        }
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
 
         Self {
@@ -88,6 +115,14 @@ impl PlatformState {
         server.custom_effect_handler = Some(Arc::new(crate::hooks::PlatformEffectHandler {
             spec_store: spec_store.clone(),
         }));
+        // Load baseline Cedar policies for the temper-system tenant so that
+        // WASM modules can manage GovernanceDecision entities via HTTP.
+        if let Err(e) = server
+            .authz
+            .reload_tenant_policies("temper-system", SYSTEM_TENANT_POLICY)
+        {
+            tracing::warn!(error = %e, "failed to load temper-system Cedar policies");
+        }
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
 
         Self {
