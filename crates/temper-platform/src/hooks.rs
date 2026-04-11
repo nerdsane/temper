@@ -13,8 +13,16 @@
 //!   transitions to Approved. Generates a Cedar permit policy from the
 //!   entity's fields and reloads the authz engine.
 
+use std::sync::{Arc, RwLock};
+
+use temper_server::ServerState;
+use temper_server::state::custom_effects::CustomEffectHandler;
+
 use crate::deploy::{DeployInput, DeployPipeline, EntitySpecSource};
 use crate::state::PlatformState;
+
+mod generate_cedar;
+mod governance_callback;
 
 /// Dispatch a custom effect from a system entity transition.
 ///
@@ -243,6 +251,48 @@ fn handle_generate_cedar_policy(
         "GenerateCedarPolicy hook: policy loaded successfully"
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Platform custom effect handler (registered on ServerState)
+// ---------------------------------------------------------------------------
+
+/// Platform-level custom effect handler.
+///
+/// Registered on `ServerState` during `PlatformState` construction to
+/// route custom effects from system entities to platform hooks.
+pub struct PlatformEffectHandler {
+    /// Spec store for DeploySpecs hook (future use).
+    pub spec_store: Arc<RwLock<crate::spec_store::SpecStore>>,
+}
+
+impl CustomEffectHandler for PlatformEffectHandler {
+    fn handle(
+        &self,
+        effect_name: &str,
+        entity_type: &str,
+        entity_id: &str,
+        entity_fields: &serde_json::Value,
+        server: &ServerState,
+    ) -> Result<(), String> {
+        match effect_name {
+            "GenerateCedarPolicy" => {
+                generate_cedar::handle_generate_cedar_from_fields(entity_id, entity_fields, server)
+            }
+            "DispatchCallback" => {
+                governance_callback::handle_dispatch_callback(entity_fields, server)
+            }
+            _ => {
+                tracing::debug!(
+                    effect = effect_name,
+                    entity_type,
+                    entity_id,
+                    "Unknown custom effect — ignored"
+                );
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Generate a Cedar permit statement for the given scope.

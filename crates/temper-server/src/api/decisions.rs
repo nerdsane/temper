@@ -16,8 +16,11 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::instrument;
 
+use temper_runtime::tenant::TenantId;
+
 use super::{empty_decision_list, format_decision_list, require_policy_auth};
 use crate::authz::{persist_and_activate_policy, require_observe_auth};
+use crate::request_context::AgentContext;
 use crate::state::{DecisionStatus, PendingDecision, ServerState};
 
 /// Query parameters for listing decisions.
@@ -215,6 +218,38 @@ pub(crate) async fn handle_approve_decision(
         }
     }
 
+    // Dispatch GovernanceDecision.Approve — triggers DispatchCallback effect
+    // which resumes/fails the waiting Session via the registered callback.
+    if let Some(ref gd_id) = approved_decision.governance_decision_id {
+        let state_c = state.clone();
+        let gd_id = gd_id.clone();
+        let decided_by = body.decided_by.clone().unwrap_or_else(|| "unknown".into());
+        let generated_policy = generated_policy.clone();
+        tokio::spawn(async move {
+            // determinism-ok: async callback dispatch for governance decision resolution
+            let system_tenant = TenantId::new("temper-system");
+            if let Err(e) = state_c
+                .dispatch_tenant_action(
+                    &system_tenant,
+                    "GovernanceDecision",
+                    &gd_id,
+                    "Approve",
+                    serde_json::json!({
+                        "decided_by": decided_by,
+                        "scope": "narrow",
+                        "generated_policy": generated_policy,
+                    }),
+                    &AgentContext::system(),
+                )
+                .await
+            {
+                tracing::error!(
+                    error = %e, gd_id, "failed to dispatch GovernanceDecision.Approve"
+                );
+            }
+        });
+    }
+
     (
         StatusCode::OK,
         axum::Json(serde_json::json!({
@@ -298,6 +333,39 @@ pub(crate) async fn handle_deny_decision(
     let _ = state
         .observe_refresh_tx
         .send(crate::state::ObserveRefreshHint::Decisions);
+
+    // Dispatch GovernanceDecision.Deny — triggers DispatchCallback effect
+    // which fails the waiting Session via the registered callback.
+    if let Some(ref gd_id) = denied_decision.governance_decision_id {
+        let state_c = state.clone();
+        let gd_id = gd_id.clone();
+        let decided_by_val = denied_decision
+            .decided_by
+            .clone()
+            .unwrap_or_else(|| "unknown".into());
+        tokio::spawn(async move {
+            // determinism-ok: async callback dispatch for governance decision resolution
+            let system_tenant = TenantId::new("temper-system");
+            if let Err(e) = state_c
+                .dispatch_tenant_action(
+                    &system_tenant,
+                    "GovernanceDecision",
+                    &gd_id,
+                    "Deny",
+                    serde_json::json!({
+                        "decided_by": decided_by_val,
+                        "denial_reason": "Denied by human reviewer",
+                    }),
+                    &AgentContext::system(),
+                )
+                .await
+            {
+                tracing::error!(
+                    error = %e, gd_id, "failed to dispatch GovernanceDecision.Deny"
+                );
+            }
+        });
+    }
 
     (
         StatusCode::OK,

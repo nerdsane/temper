@@ -50,13 +50,46 @@ pub struct PlatformState {
 /// Default broadcast channel capacity.
 const BROADCAST_CAPACITY: usize = 256;
 
+/// Cedar policy for the temper-system tenant.
+///
+/// Platform entities (GovernanceDecision, etc.) live in the temper-system
+/// tenant but have no os-app to ship policies with. This baseline policy
+/// permits admin principals to manage governance decisions — needed so that
+/// WASM modules can register callbacks via HTTP (system principal is blocked
+/// from HTTP headers as a privilege-escalation safeguard).
+const SYSTEM_TENANT_POLICY: &str = r#"
+// Baseline policy for the temper-system tenant.
+// Admin principals get full access to all platform entities (GovernanceDecision,
+// Project, etc.). This matches the global fallback behavior — without it, loading
+// any tenant-specific policy would shadow the global set and deny unlisted actions.
+permit(
+  principal is Admin,
+  action,
+  resource
+);
+"#;
+
 #[allow(deprecated)] // RecordStore retained during migration to IOA entities (ADR-0025)
 impl PlatformState {
     /// Create a new platform state with an empty registry.
     pub fn new(api_key: Option<String>) -> Self {
         let system = ActorSystem::new("temper-platform");
         let registry = Arc::new(RwLock::new(SpecRegistry::new()));
-        let server = ServerState::from_registry_shared(system, registry.clone());
+        let spec_store = Arc::new(RwLock::new(SpecStore::new()));
+        let mut server = ServerState::from_registry_shared(system, registry.clone());
+        // Register platform custom effect handler so hooks.rs is called
+        // from the dispatch pipeline for system entity effects.
+        server.custom_effect_handler = Some(Arc::new(crate::hooks::PlatformEffectHandler {
+            spec_store: spec_store.clone(),
+        }));
+        // Load baseline Cedar policies for the temper-system tenant so that
+        // WASM modules can manage GovernanceDecision entities via HTTP.
+        if let Err(e) = server
+            .authz
+            .reload_tenant_policies("temper-system", SYSTEM_TENANT_POLICY)
+        {
+            tracing::warn!(error = %e, "failed to load temper-system Cedar policies");
+        }
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
 
         Self {
@@ -66,7 +99,7 @@ impl PlatformState {
             record_store: RecordStore::new(),
             api_key,
             api_token: None,
-            spec_store: Arc::new(RwLock::new(SpecStore::new())),
+            spec_store,
             identity_resolver: Arc::new(IdentityResolver::new()),
         }
     }
@@ -75,7 +108,21 @@ impl PlatformState {
     pub fn with_registry(registry: SpecRegistry, api_key: Option<String>) -> Self {
         let system = ActorSystem::new("temper-platform");
         let registry = Arc::new(RwLock::new(registry));
-        let server = ServerState::from_registry_shared(system, registry.clone());
+        let spec_store = Arc::new(RwLock::new(SpecStore::new()));
+        let mut server = ServerState::from_registry_shared(system, registry.clone());
+        // Register platform custom effect handler so hooks.rs is called
+        // from the dispatch pipeline for system entity effects.
+        server.custom_effect_handler = Some(Arc::new(crate::hooks::PlatformEffectHandler {
+            spec_store: spec_store.clone(),
+        }));
+        // Load baseline Cedar policies for the temper-system tenant so that
+        // WASM modules can manage GovernanceDecision entities via HTTP.
+        if let Err(e) = server
+            .authz
+            .reload_tenant_policies("temper-system", SYSTEM_TENANT_POLICY)
+        {
+            tracing::warn!(error = %e, "failed to load temper-system Cedar policies");
+        }
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
 
         Self {
@@ -85,7 +132,7 @@ impl PlatformState {
             record_store: RecordStore::new(),
             api_key,
             api_token: None,
-            spec_store: Arc::new(RwLock::new(SpecStore::new())),
+            spec_store,
             identity_resolver: Arc::new(IdentityResolver::new()),
         }
     }
@@ -163,5 +210,12 @@ mod tests {
 
         assert!(rx1.try_recv().is_ok());
         assert!(rx2.try_recv().is_ok());
+    }
+
+    #[test]
+    fn temper_system_csdl_uses_register_callback_action_name() {
+        let csdl = include_str!("specs/model.csdl.xml");
+        assert!(csdl.contains(r#"<Action Name="RegisterCallback" IsBound="true">"#));
+        assert!(!csdl.contains("RegisterCallbackGovernanceDecision"));
     }
 }
