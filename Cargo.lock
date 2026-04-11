@@ -1307,6 +1307,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-reference"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.8",
+ "hyper 1.8.1",
+ "serde_json",
+ "temper-jit",
+ "temper-runtime",
+ "temper-server",
+ "temper-spec",
+ "temper-verify",
+ "tokio",
+ "tower 0.5.3",
+]
+
+[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

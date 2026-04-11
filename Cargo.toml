@@ -40,6 +40,7 @@ members = [
     "crates/temper-sandbox",
     "crates/temper-ots",
     "crates/temper-transport",
+    "reference-apps/crucible",
     "reference-apps/ecommerce",
     "reference-apps/oncall",
 ]

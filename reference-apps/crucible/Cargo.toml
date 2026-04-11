@@ -1,0 +1,19 @@
+[package]
+name = "crucible-reference"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+description = "Reference agent-runtime control plane demonstrating cross-field validation via IOA field invariants on Temper"
+
+[dev-dependencies]
+temper-jit = { path = "../../crates/temper-jit" }
+temper-runtime = { path = "../../crates/temper-runtime" }
+temper-server = { path = "../../crates/temper-server" }
+temper-verify = { path = "../../crates/temper-verify" }
+temper-spec = { path = "../../crates/temper-spec" }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+hyper = { workspace = true }
+tower = { workspace = true }

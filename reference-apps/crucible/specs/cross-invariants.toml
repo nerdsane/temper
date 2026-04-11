@@ -1,0 +1,26 @@
+# Cross-entity invariants for the Crucible reference app.
+#
+# Extends the Local-only constraint to child entities: even though Local
+# environments are rejected at Environment-create-time when they try to
+# set `AllowMcpServers`/`AllowPackageManagers`, the `allowed_hosts[]` and
+# `packages[]` collections live in separate child entities that are POSTed
+# independently. Each child POST looks up its parent's `ConfigType` via
+# the ADR-0041 extended `[[cross_invariant]]` grammar and rejects the
+# write when the parent is Local.
+
+version = 1
+default_delete_policy = "restrict"
+
+# --- Child → parent field lookups ------------------------------------------
+
+[[invariant]]
+name = "AllowedHostRequiresNonLocalParent"
+kind = "hard"
+on = "EnvironmentAllowedHost.*"
+assert = 'related(Environment, EnvironmentId).ConfigType not in ["Local"]'
+
+[[invariant]]
+name = "PackageRequiresNonLocalParent"
+kind = "hard"
+on = "EnvironmentPackage.*"
+assert = 'related(Environment, EnvironmentId).ConfigType not in ["Local"]'

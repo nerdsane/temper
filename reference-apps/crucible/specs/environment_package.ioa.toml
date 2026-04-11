@@ -1,0 +1,17 @@
+# EnvironmentPackage Entity — I/O Automaton Specification
+#
+# Child entity of Environment. Represents one package to install during
+# environment provisioning. A single `EnvironmentPackage` child entity with
+# a `Manager` enum discriminator replaces Anthropic's six parallel arrays
+# (`pip`, `npm`, `apt`, `cargo`, `gem`, `go`). See ADR-0042 for the rationale.
+#
+# The Local-parent rejection is encoded as a cross-invariant in
+# `specs/cross-invariants.toml` — see `PackageRequiresNonLocalParent`.
+
+[automaton]
+name = "EnvironmentPackage"
+states = ["Active"]
+initial = "Active"
+
+# No actions. Create + delete are the only lifecycle operations and those
+# are handled by the generic OData entity-set routes.

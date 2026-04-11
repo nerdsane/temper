@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Temper Crucible Reference App
+
+  CSDL for a subset of Anthropic's Claude Managed Agents API. Phase 0
+  ships the `Environment` entity with full CRUD plus two child entities
+  (`EnvironmentAllowedHost`, `EnvironmentPackage`). See
+  `docs/adrs/0042-crucible-reference-app.md` for why each shape was chosen
+  and the deliberate divergences from the upstream API.
+
+  Hard constraint: a `Local` environment cannot set any cloud-only
+  networking field. Enforced via the `[[field_invariant]]` rules in
+  `environment.ioa.toml` and the `[[invariant]]` rules in
+  `cross-invariants.toml`. Violations return 409 ConstraintViolation.
+-->
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+
+    <!-- ================================================================== -->
+    <!-- Custom Vocabulary: Temper Extensions                                -->
+    <!-- ================================================================== -->
+    <Schema Namespace="Temper.Vocab" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <Term Name="StateMachine.States" Type="Collection(Edm.String)"
+            AppliesTo="EntityType"/>
+      <Term Name="StateMachine.InitialState" Type="Edm.String"
+            AppliesTo="EntityType"/>
+      <Term Name="StateMachine.ValidFromStates" Type="Collection(Edm.String)"
+            AppliesTo="Action"/>
+      <Term Name="StateMachine.TargetState" Type="Edm.String"
+            AppliesTo="Action"/>
+      <Term Name="Agent.Hint" Type="Edm.String"
+            AppliesTo="Action Function EntityType"/>
+      <Term Name="ShardKey" Type="Edm.String"
+            AppliesTo="EntityType"/>
+      <Term Name="AuthZ.CedarPolicy" Type="Edm.String"
+            AppliesTo="EntityType Action Function"/>
+    </Schema>
+
+    <!-- ================================================================== -->
+    <!-- Core Domain Model                                                   -->
+    <!-- ================================================================== -->
+    <Schema Namespace="Temper.Crucible" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <!-- ============ Enums ============ -->
+
+      <EnumType Name="EnvironmentStatus">
+        <Member Name="Active" Value="0"/>
+        <Member Name="Archived" Value="1"/>
+      </EnumType>
+
+      <!--
+        ConfigType is modeled as an Edm.String rather than an EnumType so
+        `[[field_invariant]] when = { field = "ConfigType", equals = "Local" }`
+        compares against the literal string stored in `initial_fields`.
+        The allowed values are `Local` and `Cloud`; `Byoc` is out of scope
+        for Phase 0 and not accepted by the field invariants.
+      -->
+
+      <!-- ============ Entity Types ============ -->
+
+      <!-- Environment -->
+      <EntityType Name="Environment">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="Description" Type="Edm.String"/>
+        <Property Name="Status" Type="Temper.Crucible.EnvironmentStatus" Nullable="false"/>
+        <Property Name="ConfigType" Type="Edm.String" Nullable="false"/>
+        <Property Name="NetworkingType" Type="Edm.String" Nullable="false"/>
+        <Property Name="AllowMcpServers" Type="Edm.Boolean"/>
+        <Property Name="AllowPackageManagers" Type="Edm.Boolean"/>
+        <Property Name="Metadata" Type="Edm.String"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="ArchivedAt" Type="Edm.DateTimeOffset"/>
+        <NavigationProperty Name="AllowedHosts" Type="Collection(Temper.Crucible.EnvironmentAllowedHost)"/>
+        <NavigationProperty Name="Packages" Type="Collection(Temper.Crucible.EnvironmentPackage)"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+            <String>Archived</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/environment.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="An agent execution context. ConfigType is Local or Cloud; Local requires NetworkingType=Unrestricted and forbids AllowMcpServers/AllowPackageManagers."/>
+      </EntityType>
+
+      <!-- EnvironmentAllowedHost -->
+      <EntityType Name="EnvironmentAllowedHost">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="EnvironmentId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Host" Type="Edm.String" Nullable="false"/>
+        <NavigationProperty Name="Environment" Type="Temper.Crucible.Environment" Nullable="false">
+          <ReferentialConstraint Property="EnvironmentId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="EnvironmentId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/environment_allowed_host.cedar"/>
+      </EntityType>
+
+      <!-- EnvironmentPackage -->
+      <EntityType Name="EnvironmentPackage">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="EnvironmentId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Manager" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="Version" Type="Edm.String"/>
+        <NavigationProperty Name="Environment" Type="Temper.Crucible.Environment" Nullable="false">
+          <ReferentialConstraint Property="EnvironmentId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="EnvironmentId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/environment_package.cedar"/>
+      </EntityType>
+
+      <!-- ============ Actions (side-effecting, bound to entities) ============ -->
+
+      <Action Name="ArchiveEnvironment" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.Environment"/>
+        <ReturnType Type="Temper.Crucible.Environment"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Archive an environment. Retains history but makes the environment non-operational. Archived is terminal."/>
+      </Action>
+
+      <!-- ============ Entity Container ============ -->
+
+      <EntityContainer Name="CrucibleService">
+        <EntitySet Name="Environments" EntityType="Temper.Crucible.Environment">
+          <NavigationPropertyBinding Path="AllowedHosts" Target="EnvironmentAllowedHosts"/>
+          <NavigationPropertyBinding Path="Packages" Target="EnvironmentPackages"/>
+        </EntitySet>
+        <EntitySet Name="EnvironmentAllowedHosts" EntityType="Temper.Crucible.EnvironmentAllowedHost">
+          <NavigationPropertyBinding Path="Environment" Target="Environments"/>
+        </EntitySet>
+        <EntitySet Name="EnvironmentPackages" EntityType="Temper.Crucible.EnvironmentPackage">
+          <NavigationPropertyBinding Path="Environment" Target="Environments"/>
+        </EntitySet>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

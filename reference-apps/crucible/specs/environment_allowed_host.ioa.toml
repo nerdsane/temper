@@ -1,0 +1,18 @@
+# EnvironmentAllowedHost Entity — I/O Automaton Specification
+#
+# Child entity of Environment. Represents a single entry in the egress
+# allow-list for a Cloud environment running with `NetworkingType = Limited`.
+# Bound to the parent's lifecycle — when the parent archives or deletes, the
+# allowed host is cleaned up via the relation cascade.
+#
+# The Local-parent rejection is encoded as a cross-invariant in
+# `specs/cross-invariants.toml` — see `AllowedHostRequiresNonLocalParent`.
+
+[automaton]
+name = "EnvironmentAllowedHost"
+states = ["Active"]
+initial = "Active"
+
+# No actions. Create + delete are the only lifecycle operations and those
+# are handled by the generic OData entity-set routes. No state variables,
+# no input/output actions.
