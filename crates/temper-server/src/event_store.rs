@@ -120,6 +120,67 @@ impl ServerEventStore {
     }
 }
 
+impl ServerEventStore {
+    /// Upsert the field index for an entity (delegates to Turso backends only).
+    pub async fn upsert_field_index(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+    ) -> Result<(), PersistenceError> {
+        match self {
+            Self::Turso(store) => {
+                store
+                    .upsert_field_index(tenant, entity_type, entity_id, status, fields)
+                    .await
+            }
+            Self::TenantRouted(router) => {
+                if let Ok(store) = router.store_for_tenant(tenant).await {
+                    store
+                        .upsert_field_index(tenant, entity_type, entity_id, status, fields)
+                        .await
+                } else {
+                    Ok(()) // no tenant store → no-op
+                }
+            }
+            _ => Ok(()), // field index only supported on Turso backends
+        }
+    }
+
+    /// Query the field index (delegates to Turso backends only).
+    ///
+    /// Returns `Ok(Some(ids))` when the backend supports field indexing and
+    /// the query succeeded. Returns `Ok(None)` when the backend doesn't
+    /// support field indexing (Postgres, Redis, Sim).
+    pub async fn query_field_index(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        where_clause: &str,
+        params: Vec<String>,
+    ) -> Result<Option<Vec<String>>, PersistenceError> {
+        match self {
+            Self::Turso(store) => store
+                .query_field_index(tenant, entity_type, where_clause, params)
+                .await
+                .map(Some),
+            Self::TenantRouted(router) => {
+                if let Ok(store) = router.store_for_tenant(tenant).await {
+                    store
+                        .query_field_index(tenant, entity_type, where_clause, params)
+                        .await
+                        .map(Some)
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None), // field index only supported on Turso backends
+        }
+    }
+}
+
 impl EventStore for ServerEventStore {
     async fn append(
         &self,
