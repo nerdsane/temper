@@ -46,6 +46,8 @@ const AGENT_VERSION_IOA: &str = include_str!("../specs/agent_version.ioa.toml");
 const SESSION_IOA: &str = include_str!("../specs/session.ioa.toml");
 const SESSION_RESOURCE_IOA: &str = include_str!("../specs/session_resource.ioa.toml");
 const SESSION_EVENT_IOA: &str = include_str!("../specs/session_event.ioa.toml");
+const CALLABLE_AGENT_IOA: &str = include_str!("../specs/callable_agent.ioa.toml");
+const SESSION_THREAD_IOA: &str = include_str!("../specs/session_thread.ioa.toml");
 const CROSS_INVARIANTS_TOML: &str = include_str!("../specs/cross-invariants.toml");
 const MODEL_CSDL: &str = include_str!("../specs/model.csdl.xml");
 
@@ -74,6 +76,8 @@ fn build_crucible_state() -> ServerState {
             ("Session", SESSION_IOA),
             ("SessionResource", SESSION_RESOURCE_IOA),
             ("SessionEvent", SESSION_EVENT_IOA),
+            ("CallableAgent", CALLABLE_AGENT_IOA),
+            ("SessionThread", SESSION_THREAD_IOA),
         ],
         Vec::new(),
         Some(CROSS_INVARIANTS_TOML.to_string()),
@@ -97,6 +101,8 @@ fn build_crucible_state() -> ServerState {
             "Session",
             "SessionResource",
             "SessionEvent",
+            "CallableAgent",
+            "SessionThread",
         ] {
             registry.set_verification_status(
                 &TenantId::default(),

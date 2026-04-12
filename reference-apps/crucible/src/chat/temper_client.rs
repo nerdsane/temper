@@ -133,10 +133,19 @@ impl TemperClient {
         //     "fields": { ...row fields... }, "@odata.id": "...", ... }
         // POST responses also include "events":[...] and PATCH sometimes
         // returns only {"status":"..."} — we always go through `fields`.
-        let fields = body
+        //
+        // The entity_id (OData key) may differ from fields.Id (user-
+        // supplied). OData paths must use entity_id, so we inject it
+        // as the canonical Id when present.
+        let mut fields = body
             .get("fields")
             .cloned()
             .ok_or_else(|| anyhow!("response missing `fields` envelope: {body}"))?;
+        if let Some(eid) = body.get("entity_id").and_then(|v| v.as_str()) {
+            if let Some(obj) = fields.as_object_mut() {
+                obj.insert("Id".to_string(), serde_json::Value::String(eid.to_string()));
+            }
+        }
         serde_json::from_value(fields.clone())
             .with_context(|| format!("decoding entity row from: {fields}"))
     }
@@ -153,10 +162,15 @@ impl TemperClient {
             .ok_or_else(|| anyhow!("list response missing `value` array: {body}"))?;
         let mut out = Vec::with_capacity(values.len());
         for item in values {
-            let fields = item
+            let mut fields = item
                 .get("fields")
                 .cloned()
                 .ok_or_else(|| anyhow!("list entry missing `fields`: {item}"))?;
+            if let Some(eid) = item.get("entity_id").and_then(|v| v.as_str()) {
+                if let Some(obj) = fields.as_object_mut() {
+                    obj.insert("Id".to_string(), serde_json::Value::String(eid.to_string()));
+                }
+            }
             let row: T = serde_json::from_value(fields.clone())
                 .with_context(|| format!("decoding list row from: {fields}"))?;
             out.push(row);
@@ -176,6 +190,14 @@ impl TemperClient {
             )
             .await?;
         Self::require_2xx("POST", "/tdata/Environments", status, &body)
+    }
+
+    /// Fetch a single Environment by id.
+    pub async fn get_environment(&self, id: &str) -> Result<EnvironmentRow> {
+        let path = format!("/tdata/Environments('{id}')");
+        let (status, body) = self.get(&path).await?;
+        Self::require_2xx("GET", &path, status, &body)?;
+        Self::decode_entity(body)
     }
 
     // ------------------------------------------------------------------
@@ -298,6 +320,93 @@ impl TemperClient {
             .await?;
         Self::require_2xx("POST", "/tdata/AgentTools", status, &body)
     }
+
+    /// List all AgentTool children for a given ManagedAgent.
+    pub async fn list_agent_tools(&self, agent_id: &str) -> Result<Vec<AgentToolRow>> {
+        let path = format!(
+            "/tdata/AgentTools?$filter=AgentId%20eq%20%27{agent_id}%27"
+        );
+        let (status, body) = self.get(&path).await?;
+        Self::require_2xx("GET", &path, status, &body)?;
+        Self::decode_entity_list(body)
+    }
+
+    // ------------------------------------------------------------------
+    // CallableAgent
+    // ------------------------------------------------------------------
+
+    pub async fn create_callable_agent(&self, row: &CallableAgentRow) -> Result<()> {
+        let (status, body) = self
+            .post(
+                "/tdata/CallableAgents",
+                serde_json::to_value(row).context("serializing CallableAgentRow")?,
+            )
+            .await?;
+        Self::require_2xx("POST", "/tdata/CallableAgents", status, &body)
+    }
+
+    /// List all CallableAgent children for a given ManagedAgent.
+    pub async fn list_callable_agents(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<CallableAgentRow>> {
+        let path = format!(
+            "/tdata/CallableAgents?$filter=AgentId%20eq%20%27{agent_id}%27"
+        );
+        let (status, body) = self.get(&path).await?;
+        Self::require_2xx("GET", &path, status, &body)?;
+        Self::decode_entity_list(body)
+    }
+
+    // ------------------------------------------------------------------
+    // SessionThread
+    // ------------------------------------------------------------------
+
+    pub async fn create_session_thread(&self, row: &SessionThreadRow) -> Result<()> {
+        let (status, body) = self
+            .post(
+                "/tdata/SessionThreads",
+                serde_json::to_value(row).context("serializing SessionThreadRow")?,
+            )
+            .await?;
+        Self::require_2xx("POST", "/tdata/SessionThreads", status, &body)
+    }
+
+    pub async fn get_session_thread(&self, id: &str) -> Result<SessionThreadRow> {
+        let path = format!("/tdata/SessionThreads('{id}')");
+        let (status, body) = self.get(&path).await?;
+        Self::require_2xx("GET", &path, status, &body)?;
+        Self::decode_entity(body)
+    }
+
+    /// POST a bound lifecycle action on a SessionThread.
+    pub async fn invoke_thread_action(
+        &self,
+        thread_id: &str,
+        action: ThreadAction,
+    ) -> Result<()> {
+        let path = format!(
+            "/tdata/SessionThreads('{thread_id}')/Temper.Crucible.{action_name}",
+            action_name = action.as_str(),
+        );
+        let (status, body) = self.post(&path, serde_json::json!({})).await?;
+        Self::require_2xx("POST", &path, status, &body)
+    }
+
+    /// List events scoped to a specific thread within a session.
+    pub async fn list_thread_events(
+        &self,
+        session_id: &str,
+        thread_id: &str,
+        top: u32,
+    ) -> Result<Vec<SessionEventRow>> {
+        let path = format!(
+            "/tdata/SessionEvents?$filter=SessionId%20eq%20%27{session_id}%27%20and%20SessionThreadId%20eq%20%27{thread_id}%27&$orderby=Sequence%20asc&$top={top}"
+        );
+        let (status, body) = self.get(&path).await?;
+        Self::require_2xx("GET", &path, status, &body)?;
+        Self::decode_entity_list(body)
+    }
 }
 
 // ======================================================================
@@ -325,6 +434,24 @@ impl SessionAction {
     }
 }
 
+/// Bound actions on SessionThread entities.
+#[derive(Debug, Clone, Copy)]
+pub enum ThreadAction {
+    IdleThread,
+    ResumeThread,
+    TerminateThread,
+}
+
+impl ThreadAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThreadAction::IdleThread => "IdleThread",
+            ThreadAction::ResumeThread => "ResumeThread",
+            ThreadAction::TerminateThread => "TerminateThread",
+        }
+    }
+}
+
 // ======================================================================
 // Row structs (PascalCase on the wire)
 // ======================================================================
@@ -345,9 +472,9 @@ pub struct EnvironmentRow {
     pub config_type: String,
     #[serde(rename = "NetworkingType")]
     pub networking_type: String,
-    #[serde(rename = "CreatedAt")]
+    #[serde(rename = "CreatedAt", default)]
     pub created_at: String,
-    #[serde(rename = "UpdatedAt")]
+    #[serde(rename = "UpdatedAt", default)]
     pub updated_at: String,
     #[serde(rename = "Description", skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -372,11 +499,11 @@ pub struct ManagedAgentRow {
     pub model_id: String,
     #[serde(rename = "Status")]
     pub status: String,
-    #[serde(rename = "Version")]
+    #[serde(rename = "Version", default)]
     pub version: i32,
-    #[serde(rename = "CreatedAt")]
+    #[serde(rename = "CreatedAt", default)]
     pub created_at: String,
-    #[serde(rename = "UpdatedAt")]
+    #[serde(rename = "UpdatedAt", default)]
     pub updated_at: String,
     #[serde(rename = "Description", skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -400,9 +527,9 @@ pub struct SessionRow {
     pub environment_id: String,
     #[serde(rename = "Status")]
     pub status: String,
-    #[serde(rename = "CreatedAt")]
+    #[serde(rename = "CreatedAt", default)]
     pub created_at: String,
-    #[serde(rename = "UpdatedAt")]
+    #[serde(rename = "UpdatedAt", default)]
     pub updated_at: String,
     #[serde(rename = "AgentVersion", skip_serializing_if = "Option::is_none")]
     pub agent_version: Option<i32>,
@@ -498,10 +625,16 @@ pub struct SessionEventRow {
     pub tool_name: Option<String>,
     #[serde(rename = "ToolUseId", skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
+    #[serde(
+        rename = "SessionThreadId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub session_thread_id: Option<String>,
 }
 
 /// An AgentTool row — child of ManagedAgent with a `Kind` discriminator.
-/// Phase 6 only creates `agent_toolset` rows (no kind-specific fields).
+/// Kinds: `agent_toolset` (built-in tools), `custom` (user-defined tool
+/// with Name/Description/InputSchema), `mcp_toolset` (MCP server tools).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentToolRow {
     #[serde(rename(serialize = "id", deserialize = "Id"))]
@@ -510,4 +643,46 @@ pub struct AgentToolRow {
     pub agent_id: String,
     #[serde(rename = "Kind")]
     pub kind: String,
+    #[serde(rename = "Name", skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(rename = "Description", skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "InputSchema", skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<String>,
+}
+
+/// A CallableAgent row — child of ManagedAgent declaring which other
+/// agents a coordinator can delegate to via `delegate_to_agent`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallableAgentRow {
+    #[serde(rename(serialize = "id", deserialize = "Id"))]
+    pub id: String,
+    #[serde(rename = "AgentId")]
+    pub agent_id: String,
+    #[serde(rename = "CalleeAgentId")]
+    pub callee_agent_id: String,
+    #[serde(
+        rename = "CalleeAgentVersion",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub callee_agent_version: Option<i32>,
+}
+
+/// A SessionThread row — child of Session for multi-agent delegation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionThreadRow {
+    #[serde(rename(serialize = "id", deserialize = "Id"))]
+    pub id: String,
+    #[serde(rename = "SessionId")]
+    pub session_id: String,
+    #[serde(rename = "AgentId")]
+    pub agent_id: String,
+    #[serde(rename = "ParentThreadId", skip_serializing_if = "Option::is_none")]
+    pub parent_thread_id: Option<String>,
+    #[serde(rename = "Status")]
+    pub status: String,
+    #[serde(rename = "CreatedAt")]
+    pub created_at: String,
+    #[serde(rename = "UpdatedAt")]
+    pub updated_at: String,
 }

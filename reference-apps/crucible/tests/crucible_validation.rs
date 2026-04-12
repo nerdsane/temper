@@ -31,6 +31,8 @@ const SESSION_RESOURCE_IOA: &str = include_str!("../specs/session_resource.ioa.t
 const MEMORY_STORE_IOA: &str = include_str!("../specs/memory_store.ioa.toml");
 const MEMORY_IOA: &str = include_str!("../specs/memory.ioa.toml");
 const MEMORY_VERSION_IOA: &str = include_str!("../specs/memory_version.ioa.toml");
+const SESSION_SCHEDULE_IOA: &str = include_str!("../specs/session_schedule.ioa.toml");
+const CRUCIBLE_SCHEDULER_IOA: &str = include_str!("../specs/crucible_scheduler.ioa.toml");
 const CROSS_INVARIANTS_TOML: &str = include_str!("../specs/cross-invariants.toml");
 const MODEL_CSDL: &str = include_str!("../specs/model.csdl.xml");
 
@@ -55,6 +57,8 @@ fn build_crucible_state() -> ServerState {
             ("MemoryStore", MEMORY_STORE_IOA),
             ("Memory", MEMORY_IOA),
             ("MemoryVersion", MEMORY_VERSION_IOA),
+            ("SessionSchedule", SESSION_SCHEDULE_IOA),
+            ("CrucibleScheduler", CRUCIBLE_SCHEDULER_IOA),
         ],
         Vec::new(),
         Some(CROSS_INVARIANTS_TOML.to_string()),
@@ -78,6 +82,8 @@ fn build_crucible_state() -> ServerState {
             "MemoryStore",
             "Memory",
             "MemoryVersion",
+            "SessionSchedule",
+            "CrucibleScheduler",
         ] {
             registry.set_verification_status(
                 &TenantId::default(),
@@ -1160,4 +1166,150 @@ async fn delete_memory_store_with_memories_is_rejected() {
         StatusCode::CONFLICT,
         "DELETE store with memories must be rejected: {body:?}"
     );
+}
+
+// =========================================================================
+// SESSION SCHEDULES — cron scheduling
+// =========================================================================
+
+#[tokio::test]
+async fn session_schedule_create_and_activate() {
+    let state = build_crucible_state();
+    let sess_id = seed_session(&state, "sched1").await;
+
+    let (status, body) = post(
+        &state,
+        "/tdata/SessionSchedules",
+        &format!(r#"{{
+            "id": "sched-01",
+            "SessionId": "{sess_id}",
+            "CronExpression": "0 9 * * 1-5",
+            "MessageTemplate": "Daily standup for {{{{now}}}}",
+            "Status": "Draft",
+            "CreatedAt": "2026-04-12T00:00:00Z",
+            "UpdatedAt": "2026-04-12T00:00:00Z"
+        }}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create schedule: {body:?}");
+
+    let (status, body) = post(
+        &state,
+        "/tdata/SessionSchedules('sched-01')/Temper.Crucible.ActivateSchedule",
+        "{}",
+    )
+    .await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::NO_CONTENT,
+        "activate: {status}: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn session_schedule_status_invariant() {
+    let state = build_crucible_state();
+    let sess_id = seed_session(&state, "sched2").await;
+
+    let (status, body) = post(
+        &state,
+        "/tdata/SessionSchedules",
+        &format!(r#"{{
+            "id": "sched-bad",
+            "SessionId": "{sess_id}",
+            "CronExpression": "* * * * *",
+            "MessageTemplate": "test",
+            "Status": "Invalid",
+            "CreatedAt": "2026-04-12T00:00:00Z",
+            "UpdatedAt": "2026-04-12T00:00:00Z"
+        }}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "bad status rejected: {body:?}");
+    assert_eq!(
+        body["error"]["details"]["invariant"].as_str(),
+        Some("StatusMustBeKnown")
+    );
+}
+
+#[tokio::test]
+async fn session_schedule_pause_and_resume() {
+    let state = build_crucible_state();
+    let sess_id = seed_session(&state, "sched3").await;
+
+    post(
+        &state,
+        "/tdata/SessionSchedules",
+        &format!(r#"{{
+            "id": "sched-pr",
+            "SessionId": "{sess_id}",
+            "CronExpression": "*/5 * * * *",
+            "MessageTemplate": "check",
+            "Status": "Draft",
+            "CreatedAt": "2026-04-12T00:00:00Z",
+            "UpdatedAt": "2026-04-12T00:00:00Z"
+        }}"#),
+    )
+    .await;
+
+    // Activate
+    post(
+        &state,
+        "/tdata/SessionSchedules('sched-pr')/Temper.Crucible.ActivateSchedule",
+        "{}",
+    )
+    .await;
+
+    // Pause
+    let (status, _) = post(
+        &state,
+        "/tdata/SessionSchedules('sched-pr')/Temper.Crucible.PauseSchedule",
+        "{}",
+    )
+    .await;
+    assert!(status == StatusCode::OK || status == StatusCode::NO_CONTENT);
+
+    // Resume
+    let (status, _) = post(
+        &state,
+        "/tdata/SessionSchedules('sched-pr')/Temper.Crucible.ResumeSchedule",
+        "{}",
+    )
+    .await;
+    assert!(status == StatusCode::OK || status == StatusCode::NO_CONTENT);
+
+    // Expire
+    let (status, _) = post(
+        &state,
+        "/tdata/SessionSchedules('sched-pr')/Temper.Crucible.ExpireSchedule",
+        "{}",
+    )
+    .await;
+    assert!(status == StatusCode::OK || status == StatusCode::NO_CONTENT);
+
+    // Verify expired is terminal — activate should fail
+    let (status, _) = post(
+        &state,
+        "/tdata/SessionSchedules('sched-pr')/Temper.Crucible.ActivateSchedule",
+        "{}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "expired should be terminal");
+}
+
+#[tokio::test]
+async fn crucible_scheduler_create() {
+    let state = build_crucible_state();
+
+    let (status, body) = post(
+        &state,
+        "/tdata/CrucibleSchedulers",
+        r#"{
+            "id": "cs-test",
+            "Status": "Idle",
+            "HeartbeatIntervalSeconds": 30,
+            "CreatedAt": "2026-04-12T00:00:00Z"
+        }"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create scheduler: {body:?}");
 }

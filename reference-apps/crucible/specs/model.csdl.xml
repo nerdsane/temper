@@ -203,6 +203,7 @@
         <NavigationProperty Name="Skills" Type="Collection(Temper.Crucible.AgentSkill)"/>
         <NavigationProperty Name="Tools" Type="Collection(Temper.Crucible.AgentTool)"/>
         <NavigationProperty Name="Versions" Type="Collection(Temper.Crucible.AgentVersion)"/>
+        <NavigationProperty Name="CallableAgents" Type="Collection(Temper.Crucible.CallableAgent)"/>
 
         <Annotation Term="Temper.Vocab.StateMachine.States">
           <Collection>
@@ -349,6 +350,31 @@
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/agent_version.cedar"/>
       </EntityType>
 
+      <!-- CallableAgent — child of ManagedAgent, callable_agents[] rows -->
+      <EntityType Name="CallableAgent">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="AgentId" Type="Edm.String" Nullable="false"/>
+        <Property Name="CalleeAgentId" Type="Edm.String" Nullable="false"/>
+        <Property Name="CalleeAgentVersion" Type="Edm.Int32"/>
+        <NavigationProperty Name="ManagedAgent" Type="Temper.Crucible.ManagedAgent" Nullable="false">
+          <ReferentialConstraint Property="AgentId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="AgentId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/callable_agent.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Declares which other agents a coordinator can delegate to via delegate_to_agent. CalleeAgentId references the target ManagedAgent."/>
+      </EntityType>
+
       <!-- ============ Session Entity Types (ADR-0044) ============ -->
 
       <!--
@@ -403,6 +429,7 @@
         </NavigationProperty>
         <NavigationProperty Name="Resources" Type="Collection(Temper.Crucible.SessionResource)"/>
         <NavigationProperty Name="Events" Type="Collection(Temper.Crucible.SessionEvent)"/>
+        <NavigationProperty Name="Threads" Type="Collection(Temper.Crucible.SessionThread)"/>
 
         <Annotation Term="Temper.Vocab.StateMachine.States">
           <Collection>
@@ -418,6 +445,36 @@
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/session.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="A managed agent session. Requires a pre-existing ManagedAgent and Environment. Lifecycle: Rescheduling → Running → Idle → Terminated → Archived. Archive requires TerminateSession first."/>
+      </EntityType>
+
+      <!-- SessionThread — child of Session for multi-agent delegation -->
+      <EntityType Name="SessionThread">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="SessionId" Type="Edm.String" Nullable="false"/>
+        <Property Name="AgentId" Type="Edm.String" Nullable="false"/>
+        <Property Name="ParentThreadId" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Session" Type="Temper.Crucible.Session" Nullable="false">
+          <ReferentialConstraint Property="SessionId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Running</String>
+            <String>Idle</String>
+            <String>Terminated</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Running"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="SessionId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/session_thread.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="A sub-agent execution thread within a multi-agent session. Created implicitly by the responder during delegation. Lifecycle: Running → Idle → Running (resumable) or → Terminated."/>
       </EntityType>
 
       <!--
@@ -482,7 +539,9 @@
           agent.thread_context_compacted, session.status_running,
           session.status_idle, session.status_rescheduled,
           session.status_terminated, session.deleted, session.error,
-          span.model_request_start, span.model_request_end.
+          span.model_request_start, span.model_request_end,
+          session.thread_created, session.thread_idle,
+          agent.thread_message_sent, agent.thread_message_received.
       -->
       <EntityType Name="SessionEvent">
         <Key>
@@ -518,6 +577,8 @@
         <Property Name="ModelCacheCreationInputTokens" Type="Edm.Int64"/>
         <Property Name="ModelCacheReadInputTokens" Type="Edm.Int64"/>
         <Property Name="ModelSpeed" Type="Edm.String"/>
+        <!-- Multi-agent: optional thread scope for events within a delegation -->
+        <Property Name="SessionThreadId" Type="Edm.String"/>
         <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
         <NavigationProperty Name="Session" Type="Temper.Crucible.Session" Nullable="false">
           <ReferentialConstraint Property="SessionId" ReferencedProperty="Id"/>
@@ -532,7 +593,7 @@
         <Annotation Term="Temper.Vocab.ShardKey" String="SessionId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/session_event.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
-                    String="Append-only event log. Kind is one of 20 dot-notation values across user/agent/session/span groups. Queryable scalars include ToolUseId, ToolName, McpServerName, CustomToolUseId, McpToolUseId, StopReason, ErrorKind, ModelRequestStartId, and token-usage counts; Content holds the full opaque payload."/>
+                    String="Append-only event log. Kind is one of 20 dot-notation values across user/agent/session/span groups. Queryable scalars include ToolUseId, ToolName, McpServerName, CustomToolUseId, McpToolUseId, StopReason, ErrorKind, ModelRequestStartId, and token-usage counts; Content holds the full opaque payload. SessionThreadId scopes events to a delegation thread."/>
       </EntityType>
 
       <!-- ============ Memory Stores ============ -->
@@ -616,6 +677,64 @@
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/memory_version.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Immutable audit record. Operation is created/modified/deleted. RedactVersion clears content while preserving metadata."/>
+      </EntityType>
+
+      <!-- ============ Cron Scheduling ============ -->
+
+      <!-- SessionSchedule — cron-triggered user.message to a Session -->
+      <EntityType Name="SessionSchedule">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="SessionId" Type="Edm.String" Nullable="false"/>
+        <Property Name="CronExpression" Type="Edm.String" Nullable="false"/>
+        <Property Name="MessageTemplate" Type="Edm.String" Nullable="false"/>
+        <Property Name="Timezone" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="MaxRuns" Type="Edm.Int64"/>
+        <Property Name="LastTriggeredAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="NextTriggerAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="LastResult" Type="Edm.String"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Session" Type="Temper.Crucible.Session" Nullable="false">
+          <ReferentialConstraint Property="SessionId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Draft</String>
+            <String>Active</String>
+            <String>Paused</String>
+            <String>Expired</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Draft"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="SessionId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/session_schedule.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Cron schedule that posts a user.message to a Session at the specified interval. Trigger action fires the crucible_cron_trigger WASM module."/>
+      </EntityType>
+
+      <!-- CrucibleScheduler — per-tenant heartbeat that checks due SessionSchedules -->
+      <EntityType Name="CrucibleScheduler">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="HeartbeatIntervalSeconds" Type="Edm.Int64"/>
+        <Property Name="LastCheckAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Idle</String>
+            <String>Checking</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Idle"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/crucible_scheduler.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Per-tenant heartbeat that checks active SessionSchedules every N seconds and fires due ones. Self-scheduling via WASM heartbeat loop."/>
       </EntityType>
 
       <!-- ============ Actions (side-effecting, bound to entities) ============ -->
@@ -739,6 +858,82 @@
                     String="Archive a terminated session. Mirrors Anthropic's POST /v1/sessions/{id}/archive but requires TerminateSession first. Archived is terminal."/>
       </Action>
 
+      <!-- ============ SessionThread lifecycle actions ============ -->
+
+      <Action Name="IdleThread" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionThread"/>
+        <ReturnType Type="Temper.Crucible.SessionThread"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Running</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Idle"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Mark a running thread as Idle when the sub-agent yields."/>
+      </Action>
+
+      <Action Name="ResumeThread" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionThread"/>
+        <ReturnType Type="Temper.Crucible.SessionThread"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Idle</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Running"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Resume an idle thread back to Running."/>
+      </Action>
+
+      <Action Name="TerminateThread" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionThread"/>
+        <ReturnType Type="Temper.Crucible.SessionThread"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Running</String>
+            <String>Idle</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Terminated"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Terminate the thread when the sub-agent finishes its delegated task."/>
+      </Action>
+
+      <!-- ============ SessionSchedule lifecycle actions ============ -->
+
+      <Action Name="ActivateSchedule" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionSchedule"/>
+        <ReturnType Type="Temper.Crucible.SessionSchedule"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Draft</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Active"/>
+      </Action>
+
+      <Action Name="PauseSchedule" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionSchedule"/>
+        <ReturnType Type="Temper.Crucible.SessionSchedule"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Paused"/>
+      </Action>
+
+      <Action Name="ResumeSchedule" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionSchedule"/>
+        <ReturnType Type="Temper.Crucible.SessionSchedule"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Paused</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Active"/>
+      </Action>
+
+      <Action Name="ExpireSchedule" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionSchedule"/>
+        <ReturnType Type="Temper.Crucible.SessionSchedule"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Expired"/>
+      </Action>
+
       <!-- ============ Entity Container ============ -->
 
       <EntityContainer Name="CrucibleService">
@@ -757,6 +952,7 @@
           <NavigationPropertyBinding Path="Skills" Target="AgentSkills"/>
           <NavigationPropertyBinding Path="Tools" Target="AgentTools"/>
           <NavigationPropertyBinding Path="Versions" Target="AgentVersions"/>
+          <NavigationPropertyBinding Path="CallableAgents" Target="CallableAgents"/>
         </EntitySet>
         <EntitySet Name="AgentMcpServers" EntityType="Temper.Crucible.AgentMcpServer">
           <NavigationPropertyBinding Path="ManagedAgent" Target="ManagedAgents"/>
@@ -774,16 +970,24 @@
         <EntitySet Name="AgentVersions" EntityType="Temper.Crucible.AgentVersion">
           <NavigationPropertyBinding Path="ManagedAgent" Target="ManagedAgents"/>
         </EntitySet>
+        <EntitySet Name="CallableAgents" EntityType="Temper.Crucible.CallableAgent">
+          <NavigationPropertyBinding Path="ManagedAgent" Target="ManagedAgents"/>
+        </EntitySet>
         <EntitySet Name="Sessions" EntityType="Temper.Crucible.Session">
           <NavigationPropertyBinding Path="ManagedAgent" Target="ManagedAgents"/>
           <NavigationPropertyBinding Path="Environment" Target="Environments"/>
           <NavigationPropertyBinding Path="Resources" Target="SessionResources"/>
           <NavigationPropertyBinding Path="Events" Target="SessionEvents"/>
+          <NavigationPropertyBinding Path="Threads" Target="SessionThreads"/>
         </EntitySet>
         <EntitySet Name="SessionResources" EntityType="Temper.Crucible.SessionResource">
           <NavigationPropertyBinding Path="Session" Target="Sessions"/>
         </EntitySet>
         <EntitySet Name="SessionEvents" EntityType="Temper.Crucible.SessionEvent">
+          <NavigationPropertyBinding Path="Session" Target="Sessions"/>
+        </EntitySet>
+        <EntitySet Name="SessionThreads" EntityType="Temper.Crucible.SessionThread">
+          <NavigationPropertyBinding Path="Session" Target="Sessions"/>
         </EntitySet>
         <EntitySet Name="MemoryStores" EntityType="Temper.Crucible.MemoryStore">
         </EntitySet>
@@ -791,6 +995,11 @@
         </EntitySet>
         <EntitySet Name="MemoryVersions" EntityType="Temper.Crucible.MemoryVersion">
           <NavigationPropertyBinding Path="Session" Target="Sessions"/>
+        </EntitySet>
+        <EntitySet Name="SessionSchedules" EntityType="Temper.Crucible.SessionSchedule">
+          <NavigationPropertyBinding Path="Session" Target="Sessions"/>
+        </EntitySet>
+        <EntitySet Name="CrucibleSchedulers" EntityType="Temper.Crucible.CrucibleScheduler">
         </EntitySet>
       </EntityContainer>
 

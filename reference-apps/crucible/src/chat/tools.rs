@@ -12,7 +12,9 @@
 //! for Local environments. Modal environments route through the
 //! Python tool server (`modal_bridge/server.py`) instead.
 
+use crate::chat::anthropic::ToolDefinition;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::path::Path;
 
 /// Maximum bytes of output we return from any single tool invocation.
@@ -45,6 +47,131 @@ impl ToolResult {
             is_error: true,
         }
     }
+}
+
+// ── Tool definitions ───────────────────────────────────────────
+
+/// Return JSON Schema definitions for the 6 built-in tools.
+/// These match the `agent_toolset_20260401` surface.
+pub fn tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "bash".into(),
+            description: "Execute a bash command and return stdout/stderr.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The bash command to execute"
+                    }
+                },
+                "required": ["command"]
+            }),
+        },
+        ToolDefinition {
+            name: "read".into(),
+            description: "Read a file and return its contents with line numbers.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Absolute path to the file to read"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Line number to start reading from (0-based)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to read"
+                    }
+                },
+                "required": ["file_path"]
+            }),
+        },
+        ToolDefinition {
+            name: "write".into(),
+            description: "Write content to a file, creating directories as needed.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Absolute path to the file to write"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The content to write"
+                    }
+                },
+                "required": ["file_path", "content"]
+            }),
+        },
+        ToolDefinition {
+            name: "edit".into(),
+            description: "Replace a unique string in a file with a new string.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Absolute path to the file to edit"
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "The text to find (must be unique in the file)"
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The replacement text"
+                    }
+                },
+                "required": ["file_path", "old_string", "new_string"]
+            }),
+        },
+        ToolDefinition {
+            name: "glob".into(),
+            description: "Find files matching a glob pattern.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern (e.g. '**/*.rs')"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Base directory to search in (default: current dir)"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolDefinition {
+            name: "grep".into(),
+            description: "Search file contents for a regex pattern.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regex pattern to search for"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "File or directory to search (default: current dir)"
+                    },
+                    "include": {
+                        "type": "string",
+                        "description": "File glob to filter (e.g. '*.rs')"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        },
+    ]
 }
 
 // ── Executor ────────────────────────────────────────────────────
@@ -252,6 +379,44 @@ fn tool_grep(args: &serde_json::Value) -> ToolResult {
             ToolResult::ok(text)
         }
         Err(e) => ToolResult::err(format!("grep: failed to execute: {e}")),
+    }
+}
+
+// ── Remote tool executor (tool server) ─────────────────────────
+
+/// Execute a tool via the remote Python tool server. Used for Modal
+/// environments where tools must run inside a sandbox container.
+pub async fn execute_tool_remote(
+    tool_server_url: &str,
+    name: &str,
+    args: &serde_json::Value,
+    environment_id: &str,
+) -> ToolResult {
+    let url = format!("{}/tools/{}", tool_server_url.trim_end_matches('/'), name);
+    let body = serde_json::json!({
+        "arguments": args,
+        "environment_id": environment_id,
+    });
+    let client = reqwest::Client::new();
+    match client
+        .post(&url)
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
+                return ToolResult::err(format!("tool server {status}: {text}"));
+            }
+            match serde_json::from_str::<ToolResult>(&text) {
+                Ok(r) => r,
+                Err(_) => ToolResult::ok(text),
+            }
+        }
+        Err(e) => ToolResult::err(format!("tool server unreachable: {e}")),
     }
 }
 

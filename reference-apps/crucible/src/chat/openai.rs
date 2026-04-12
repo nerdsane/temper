@@ -63,12 +63,47 @@ struct OpenAIRequest {
     model: String,
     messages: Vec<OpenAIMessage>,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OpenAITool>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct OpenAIMessage {
     role: String,
-    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAIToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAITool {
+    #[serde(rename = "type")]
+    ty: String,
+    function: OpenAIToolFunction,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAIToolFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAIToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    ty: String,
+    function: OpenAIFunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAIFunctionCall {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,7 +125,9 @@ struct OpenAIChoice {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct OpenAIChoiceMessage {
     #[serde(default)]
-    content: String,
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAIToolCall>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -105,42 +142,111 @@ struct OpenAIUsage {
 // Pure translation helpers (unit-tested)
 // ----------------------------------------------------------------------
 
-/// Flatten a sequence of content blocks into the single string OpenAI
-/// expects. Phase 4 only emits text blocks, so this is a plain
-/// newline-join. Preserves ordering.
+/// Flatten text content blocks into the single string OpenAI expects
+/// for regular messages. Non-text blocks are skipped.
 fn collapse_blocks_to_text(blocks: &[ContentBlock]) -> String {
     let mut out = String::new();
     for b in blocks {
-        if !out.is_empty() {
-            out.push('\n');
+        if let Some(t) = b.as_text() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(t);
         }
-        out.push_str(b.as_text());
     }
     out
 }
 
 /// Map a neutral [`MessagesRequest`] onto OpenAI's Chat Completions
-/// request body. The system prompt becomes the first message with
-/// `role: "system"`; every subsequent Anthropic-shaped turn becomes a
-/// flattened OpenAI message.
+/// request body. Handles system prompts, regular messages, tool_use
+/// blocks (→ `tool_calls`), and tool_result blocks (→ `role:"tool"`).
 fn request_to_openai(req: &MessagesRequest) -> OpenAIRequest {
     let mut messages: Vec<OpenAIMessage> = Vec::with_capacity(req.messages.len() + 1);
     if let Some(sys) = &req.system {
         messages.push(OpenAIMessage {
             role: "system".to_string(),
-            content: sys.clone(),
+            content: Some(sys.clone()),
+            tool_calls: None,
+            tool_call_id: None,
         });
     }
     for m in &req.messages {
-        messages.push(OpenAIMessage {
-            role: m.role.clone(),
-            content: collapse_blocks_to_text(&m.content),
-        });
+        let has_tool_results = m
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+        let has_tool_use = m.content.iter().any(|b| b.is_tool_use());
+
+        if has_tool_results {
+            // Each tool_result becomes a separate "tool" role message.
+            for block in &m.content {
+                if let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } = block
+                {
+                    messages.push(OpenAIMessage {
+                        role: "tool".to_string(),
+                        content: Some(content.clone()),
+                        tool_calls: None,
+                        tool_call_id: Some(tool_use_id.clone()),
+                    });
+                }
+            }
+        } else if has_tool_use {
+            // Assistant message with tool_calls.
+            let text = collapse_blocks_to_text(&m.content);
+            let tool_calls: Vec<OpenAIToolCall> = m
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse { id, name, input } => Some(OpenAIToolCall {
+                        id: id.clone(),
+                        ty: "function".to_string(),
+                        function: OpenAIFunctionCall {
+                            name: name.clone(),
+                            arguments: serde_json::to_string(input).unwrap_or_default(),
+                        },
+                    }),
+                    _ => None,
+                })
+                .collect();
+            messages.push(OpenAIMessage {
+                role: m.role.clone(),
+                content: if text.is_empty() { None } else { Some(text) },
+                tool_calls: Some(tool_calls),
+                tool_call_id: None,
+            });
+        } else {
+            // Plain text message.
+            messages.push(OpenAIMessage {
+                role: m.role.clone(),
+                content: Some(collapse_blocks_to_text(&m.content)),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
     }
+
+    let tools = req.tools.as_ref().map(|defs| {
+        defs.iter()
+            .map(|d| OpenAITool {
+                ty: "function".to_string(),
+                function: OpenAIToolFunction {
+                    name: d.name.clone(),
+                    description: d.description.clone(),
+                    parameters: d.input_schema.clone(),
+                },
+            })
+            .collect()
+    });
+
     OpenAIRequest {
         model: req.model.clone(),
         messages,
         max_tokens: req.max_tokens,
+        tools,
     }
 }
 
@@ -161,8 +267,7 @@ fn map_finish_reason(fr: Option<&str>) -> String {
 }
 
 /// Decode an OpenAI response into the neutral shape the responder
-/// expects. Fails if the response has zero choices (should never
-/// happen on a 200, but worth guarding against).
+/// expects. Handles both plain text responses and tool_calls.
 fn response_from_openai(body: OpenAIResponse) -> Result<MessagesResponse> {
     let choice = body
         .choices
@@ -171,8 +276,30 @@ fn response_from_openai(body: OpenAIResponse) -> Result<MessagesResponse> {
         .ok_or_else(|| anyhow!("OpenAI response had no choices"))?;
     let stop_reason = map_finish_reason(choice.finish_reason.as_deref());
     let usage = body.usage.unwrap_or_default();
+
+    let mut content = Vec::new();
+    if let Some(text) = choice.message.content {
+        if !text.is_empty() {
+            content.push(ContentBlock::text(text));
+        }
+    }
+    if let Some(tool_calls) = choice.message.tool_calls {
+        for tc in tool_calls {
+            let input: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                .unwrap_or(serde_json::json!({}));
+            content.push(ContentBlock::ToolUse {
+                id: tc.id,
+                name: tc.function.name,
+                input,
+            });
+        }
+    }
+    if content.is_empty() {
+        content.push(ContentBlock::text(""));
+    }
+
     Ok(MessagesResponse {
-        content: vec![ContentBlock::text(choice.message.content)],
+        content,
         stop_reason: Some(stop_reason),
         usage: Usage {
             input_tokens: usage.prompt_tokens,
@@ -282,19 +409,20 @@ mod tests {
             system: Some("you are a concise assistant".into()),
             messages: vec![user("hello"), assistant("hi"), user("what is 2+2?")],
             max_tokens: 512,
+            tools: None,
         };
         let out = request_to_openai(&req);
         assert_eq!(out.model, "gpt-4o-mini");
         assert_eq!(out.max_tokens, 512);
         assert_eq!(out.messages.len(), 4);
         assert_eq!(out.messages[0].role, "system");
-        assert_eq!(out.messages[0].content, "you are a concise assistant");
+        assert_eq!(out.messages[0].content.as_deref(), Some("you are a concise assistant"));
         assert_eq!(out.messages[1].role, "user");
-        assert_eq!(out.messages[1].content, "hello");
+        assert_eq!(out.messages[1].content.as_deref(), Some("hello"));
         assert_eq!(out.messages[2].role, "assistant");
-        assert_eq!(out.messages[2].content, "hi");
+        assert_eq!(out.messages[2].content.as_deref(), Some("hi"));
         assert_eq!(out.messages[3].role, "user");
-        assert_eq!(out.messages[3].content, "what is 2+2?");
+        assert_eq!(out.messages[3].content.as_deref(), Some("what is 2+2?"));
     }
 
     #[test]
@@ -304,11 +432,12 @@ mod tests {
             system: None,
             messages: vec![user("probe")],
             max_tokens: 16,
+            tools: None,
         };
         let out = request_to_openai(&req);
         assert_eq!(out.messages.len(), 1);
         assert_eq!(out.messages[0].role, "user");
-        assert_eq!(out.messages[0].content, "probe");
+        assert_eq!(out.messages[0].content.as_deref(), Some("probe"));
     }
 
     #[test]
@@ -327,7 +456,8 @@ mod tests {
         let body = OpenAIResponse {
             choices: vec![OpenAIChoice {
                 message: OpenAIChoiceMessage {
-                    content: "2 + 2 equals 4.".to_string(),
+                    content: Some("2 + 2 equals 4.".to_string()),
+                    tool_calls: None,
                 },
                 finish_reason: Some("stop".to_string()),
             }],
@@ -348,7 +478,8 @@ mod tests {
         let body = OpenAIResponse {
             choices: vec![OpenAIChoice {
                 message: OpenAIChoiceMessage {
-                    content: "truncated".to_string(),
+                    content: Some("truncated".to_string()),
+                    tool_calls: None,
                 },
                 finish_reason: Some("length".to_string()),
             }],
@@ -358,6 +489,31 @@ mod tests {
         assert_eq!(resp.stop_reason.as_deref(), Some("max_tokens"));
         assert_eq!(resp.usage.input_tokens, 0);
         assert_eq!(resp.usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn response_from_openai_handles_tool_calls() {
+        let body = OpenAIResponse {
+            choices: vec![OpenAIChoice {
+                message: OpenAIChoiceMessage {
+                    content: Some("Let me check.".to_string()),
+                    tool_calls: Some(vec![OpenAIToolCall {
+                        id: "call_1".into(),
+                        ty: "function".into(),
+                        function: OpenAIFunctionCall {
+                            name: "bash".into(),
+                            arguments: r#"{"command":"ls"}"#.into(),
+                        },
+                    }]),
+                },
+                finish_reason: Some("tool_calls".to_string()),
+            }],
+            usage: None,
+        };
+        let resp = response_from_openai(body).unwrap();
+        assert_eq!(resp.text(), "Let me check.");
+        assert!(resp.has_tool_use());
+        assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
     }
 
     #[test]

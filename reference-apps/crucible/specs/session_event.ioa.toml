@@ -1,9 +1,9 @@
 # SessionEvent Entity — I/O Automaton Specification
 #
 # Append-only child of Session. Full coverage of Anthropic's
-# `GET /v1/sessions/{id}/events` feed — all 20 documented event
-# types (ADR-0045) collapsed into a single table with a `Kind`
-# discriminator:
+# `GET /v1/sessions/{id}/events` feed — 24 event types (20 base from
+# ADR-0045 + 4 thread events for multi-agent delegation) collapsed
+# into a single table with a `Kind` discriminator:
 #
 #   User events (4) — POSTable via /v1/sessions/{id}/events:
 #     user.message            — text + content blocks from the user
@@ -27,6 +27,12 @@
 #     session.status_rescheduled  — recovering from error state
 #     session.status_terminated   — session ended
 #     session.deleted             — tombstone (manual; no auto-emit on DELETE)
+#
+#   Thread events (4) — multi-agent delegation:
+#     session.thread_created         — a delegation thread was created
+#     session.thread_idle            — a delegation thread idled
+#     agent.thread_message_sent      — coordinator sent a message to a sub-agent
+#     agent.thread_message_received  — coordinator received a result from a sub-agent
 #
 #   Error event (1):
 #     session.error               — error variant + retry status
@@ -88,8 +94,13 @@ require = { any_of = [
   { field = "Kind", equals = "session.error" },
   { field = "Kind", equals = "span.model_request_start" },
   { field = "Kind", equals = "span.model_request_end" },
+  # Multi-agent thread events
+  { field = "Kind", equals = "session.thread_created" },
+  { field = "Kind", equals = "session.thread_idle" },
+  { field = "Kind", equals = "agent.thread_message_sent" },
+  { field = "Kind", equals = "agent.thread_message_received" },
 ]}
-message = "SessionEvent.Kind must be one of the 20 documented event kinds"
+message = "SessionEvent.Kind must be one of the 24 documented event kinds"
 
 # --- User event rules ---
 
@@ -154,6 +165,32 @@ name = "AgentMcpToolResultRequiresMcpToolUseId"
 when = { field = "Kind", equals = "agent.mcp_tool_result" }
 require = { not = { field = "McpToolUseId", empty = true } }
 message = "agent.mcp_tool_result events must reference an McpToolUseId"
+
+# --- Thread event rules (multi-agent delegation) ---
+
+[[field_invariant]]
+name = "ThreadCreatedRequiresThreadId"
+when = { field = "Kind", equals = "session.thread_created" }
+require = { not = { field = "SessionThreadId", empty = true } }
+message = "session.thread_created events must set SessionThreadId"
+
+[[field_invariant]]
+name = "ThreadIdleRequiresThreadId"
+when = { field = "Kind", equals = "session.thread_idle" }
+require = { not = { field = "SessionThreadId", empty = true } }
+message = "session.thread_idle events must set SessionThreadId"
+
+[[field_invariant]]
+name = "ThreadMessageSentRequiresThreadId"
+when = { field = "Kind", equals = "agent.thread_message_sent" }
+require = { not = { field = "SessionThreadId", empty = true } }
+message = "agent.thread_message_sent events must set SessionThreadId"
+
+[[field_invariant]]
+name = "ThreadMessageReceivedRequiresThreadId"
+when = { field = "Kind", equals = "agent.thread_message_received" }
+require = { not = { field = "SessionThreadId", empty = true } }
+message = "agent.thread_message_received events must set SessionThreadId"
 
 # --- Enum-value sanity rules ---
 

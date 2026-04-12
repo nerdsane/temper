@@ -36,6 +36,17 @@ pub struct MessagesRequest {
     pub system: Option<String>,
     pub messages: Vec<ChatMessage>,
     pub max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolDefinition>>,
+}
+
+/// A tool the model is allowed to call. Matches Anthropic's
+/// `tool` object in the Messages API request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,7 +58,20 @@ pub struct ChatMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+    },
 }
 
 impl ContentBlock {
@@ -55,10 +79,16 @@ impl ContentBlock {
         ContentBlock::Text { text: s.into() }
     }
 
-    pub fn as_text(&self) -> &str {
+    /// Returns the text if this is a `Text` block, `None` otherwise.
+    pub fn as_text(&self) -> Option<&str> {
         match self {
-            ContentBlock::Text { text } => text,
+            ContentBlock::Text { text } => Some(text),
+            _ => None,
         }
+    }
+
+    pub fn is_tool_use(&self) -> bool {
+        matches!(self, ContentBlock::ToolUse { .. })
     }
 }
 
@@ -86,18 +116,24 @@ pub struct Usage {
 
 impl MessagesResponse {
     /// Concatenate every text block in the response into a single
-    /// string. Phase 4 only deals with text — no tool_use blocks, no
-    /// thinking blocks — so this is exactly what
-    /// `crate::chat::responder` needs to emit as an `agent.message`.
+    /// string. Non-text blocks (tool_use, etc.) are skipped.
     pub fn text(&self) -> String {
         let mut out = String::new();
         for block in &self.content {
-            if !out.is_empty() {
-                out.push('\n');
+            if let Some(t) = block.as_text() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(t);
             }
-            out.push_str(block.as_text());
         }
         out
+    }
+
+    /// True if the response contains at least one `tool_use` block,
+    /// meaning the model wants to call a tool before finishing.
+    pub fn has_tool_use(&self) -> bool {
+        self.content.iter().any(|b| b.is_tool_use())
     }
 }
 
@@ -177,15 +213,14 @@ impl Model for AnthropicModel {
 /// [`MessagesRequest`] it saw in a `Mutex` so integration tests can
 /// assert on multi-turn history reconstruction.
 ///
-/// The reply is `"Echo: <last user text>"` (or just `"Echo: (empty)"`
-/// if the request has no user turns). Usage counts are synthesized
-/// as `input_tokens = total_user_chars`, `output_tokens = reply.len()`
-/// — small, non-zero, and deterministic. `stop_reason` is always
-/// `"end_turn"`, matching the happy-path contract the responder
-/// needs for `StatusIdleRequiresStopReason`.
+/// By default the reply is `"Echo: <last user text>"`. If
+/// [`MockModel::push_response`] has been called, queued responses
+/// are returned in FIFO order instead — this lets tests exercise the
+/// iterative tool loop by staging tool_use + end_turn responses.
 #[derive(Default)]
 pub struct MockModel {
     last_request: Mutex<Option<MessagesRequest>>,
+    response_queue: Mutex<std::collections::VecDeque<MessagesResponse>>,
 }
 
 impl MockModel {
@@ -196,6 +231,12 @@ impl MockModel {
     pub fn last_request(&self) -> Option<MessagesRequest> {
         self.last_request.lock().unwrap().clone()
     }
+
+    /// Queue a canned response. When the queue is non-empty,
+    /// `complete()` pops the front instead of echoing.
+    pub fn push_response(&self, resp: MessagesResponse) {
+        self.response_queue.lock().unwrap().push_back(resp);
+    }
 }
 
 impl Model for MockModel {
@@ -203,36 +244,39 @@ impl Model for MockModel {
         &self,
         req: MessagesRequest,
     ) -> impl std::future::Future<Output = Result<MessagesResponse>> + Send {
-        // Do all the work synchronously; the returned future is a
-        // trivial ready-now — Send automatically because the closure
-        // captures nothing beyond owned values.
-        let mut last_user_text = String::from("(empty)");
-        let mut total_user_chars: i64 = 0;
-        for msg in &req.messages {
-            if msg.role == "user" {
-                for block in &msg.content {
-                    let text = block.as_text();
-                    total_user_chars += text.chars().count() as i64;
-                    last_user_text.clear();
-                    last_user_text.push_str(text);
+        *self.last_request.lock().unwrap() = Some(req.clone());
+
+        let resp = if let Some(queued) = self.response_queue.lock().unwrap().pop_front() {
+            queued
+        } else {
+            // Default echo behavior.
+            let mut last_user_text = String::from("(empty)");
+            let mut total_user_chars: i64 = 0;
+            for msg in &req.messages {
+                if msg.role == "user" {
+                    for block in &msg.content {
+                        if let Some(text) = block.as_text() {
+                            total_user_chars += text.chars().count() as i64;
+                            last_user_text.clear();
+                            last_user_text.push_str(text);
+                        }
+                    }
                 }
             }
-        }
-        let reply = format!("Echo: {last_user_text}");
-        let output_tokens = reply.chars().count() as i64;
-
-        *self.last_request.lock().unwrap() = Some(req);
-
-        let resp = MessagesResponse {
-            content: vec![ContentBlock::text(reply)],
-            stop_reason: Some("end_turn".to_string()),
-            usage: Usage {
-                input_tokens: total_user_chars.max(1),
-                output_tokens: output_tokens.max(1),
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-            },
+            let reply = format!("Echo: {last_user_text}");
+            let output_tokens = reply.chars().count() as i64;
+            MessagesResponse {
+                content: vec![ContentBlock::text(reply)],
+                stop_reason: Some("end_turn".to_string()),
+                usage: Usage {
+                    input_tokens: total_user_chars.max(1),
+                    output_tokens: output_tokens.max(1),
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                },
+            }
         };
+
         async move { Ok(resp) }
     }
 }
@@ -343,6 +387,7 @@ mod tests {
                 },
             ],
             max_tokens: 1024,
+            tools: None,
         };
         let resp = m.complete(req).await.unwrap();
         assert_eq!(resp.text(), "Echo: what is 2+2?");
@@ -362,20 +407,100 @@ mod tests {
                 content: vec![ContentBlock::text("probe")],
             }],
             max_tokens: 8,
+            tools: None,
         };
         let _ = m.complete(req.clone()).await.unwrap();
         let seen = m.last_request().expect("mock should capture request");
         assert_eq!(seen.messages.len(), 1);
         assert_eq!(seen.messages[0].role, "user");
-        assert_eq!(seen.messages[0].content[0].as_text(), "probe");
+        assert_eq!(seen.messages[0].content[0].as_text(), Some("probe"));
     }
 
     #[test]
-    fn content_block_round_trips_json() {
+    fn content_block_text_round_trips_json() {
         let block = ContentBlock::text("hi");
         let j = serde_json::to_string(&block).unwrap();
         assert_eq!(j, r#"{"type":"text","text":"hi"}"#);
         let back: ContentBlock = serde_json::from_str(&j).unwrap();
         assert_eq!(back, block);
+    }
+
+    #[test]
+    fn content_block_tool_use_round_trips_json() {
+        let block = ContentBlock::ToolUse {
+            id: "toolu_1".into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+        };
+        let j = serde_json::to_string(&block).unwrap();
+        let back: ContentBlock = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, block);
+        assert!(j.contains(r#""type":"tool_use""#));
+    }
+
+    #[test]
+    fn content_block_tool_result_round_trips_json() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "toolu_1".into(),
+            content: "file1.txt\nfile2.txt".into(),
+            is_error: Some(false),
+        };
+        let j = serde_json::to_string(&block).unwrap();
+        let back: ContentBlock = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, block);
+        assert!(j.contains(r#""type":"tool_result""#));
+    }
+
+    #[test]
+    fn text_method_skips_non_text_blocks() {
+        let resp = MessagesResponse {
+            content: vec![
+                ContentBlock::text("hello"),
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::text("world"),
+            ],
+            stop_reason: Some("tool_use".into()),
+            usage: Usage::default(),
+        };
+        assert_eq!(resp.text(), "hello\nworld");
+        assert!(resp.has_tool_use());
+    }
+
+    #[tokio::test]
+    async fn mock_returns_queued_responses() {
+        let m = MockModel::new();
+        m.push_response(MessagesResponse {
+            content: vec![ContentBlock::ToolUse {
+                id: "toolu_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            }],
+            stop_reason: Some("tool_use".into()),
+            usage: Usage::default(),
+        });
+        m.push_response(MessagesResponse {
+            content: vec![ContentBlock::text("Done.")],
+            stop_reason: Some("end_turn".into()),
+            usage: Usage::default(),
+        });
+
+        let req = MessagesRequest {
+            model: "test".into(),
+            system: None,
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: vec![ContentBlock::text("run ls")],
+            }],
+            max_tokens: 1024,
+            tools: None,
+        };
+        let r1 = m.complete(req.clone()).await.unwrap();
+        assert!(r1.has_tool_use());
+        let r2 = m.complete(req).await.unwrap();
+        assert_eq!(r2.text(), "Done.");
     }
 }

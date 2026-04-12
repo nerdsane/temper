@@ -357,6 +357,7 @@ fn blank_event() -> SessionEventRow {
         model_speed: None,
         tool_name: None,
         tool_use_id: None,
+        session_thread_id: None,
     }
 }
 

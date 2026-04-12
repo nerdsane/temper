@@ -1,0 +1,28 @@
+# CallableAgent Entity — I/O Automaton Specification
+#
+# Child of ManagedAgent representing one entry in the coordinator's
+# callable_agents[] list. Declares which other agents this coordinator
+# is allowed to delegate work to via the `delegate_to_agent` tool.
+#
+# Single-state (Active) — same pattern as AgentTool, AgentSkill, etc.
+# A cross-invariant in cross-invariants.toml gates writes on the parent
+# ManagedAgent being non-Archived.
+
+[automaton]
+name = "CallableAgent"
+states = ["Active"]
+initial = "Active"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "CalleeAgentIdRequired"
+when = { not = { field = "CalleeAgentId", absent = true } }
+require = { not = { field = "CalleeAgentId", empty = true } }
+message = "CallableAgent.CalleeAgentId must be non-empty"
+
+[[field_invariant]]
+name = "CalleeAgentVersionRequired"
+when = { not = { field = "CalleeAgentVersion", absent = true } }
+require = { not = { field = "CalleeAgentVersion", empty = true } }
+message = "CallableAgent.CalleeAgentVersion must be set when present"

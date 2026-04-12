@@ -10,7 +10,7 @@
 //! servers + no package managers.
 
 use crate::chat::temper_client::{
-    AgentToolRow, EnvironmentRow, ManagedAgentRow, SessionRow, TemperClient,
+    AgentToolRow, CallableAgentRow, EnvironmentRow, ManagedAgentRow, SessionRow, TemperClient,
 };
 use anyhow::{Context, Result};
 use uuid::Uuid;
@@ -27,6 +27,19 @@ pub struct SeedOptions {
     pub model_id: String,
     pub model_speed: String,
     pub now: String,
+    /// Optional list of (callee_agent_id, callee_agent_name, system_prompt)
+    /// to create as sub-agents with CallableAgent links. Each sub-agent
+    /// gets its own ManagedAgent entity.
+    pub callable_agents: Vec<CallableAgentSeedSpec>,
+}
+
+/// Spec for a sub-agent to create during seeding.
+#[derive(Debug, Clone)]
+pub struct CallableAgentSeedSpec {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub system_prompt: String,
+    pub model_id: Option<String>,
 }
 
 impl Default for SeedOptions {
@@ -42,6 +55,7 @@ impl Default for SeedOptions {
             model_id: "claude-sonnet-4-6".to_string(),
             model_speed: "standard".to_string(),
             now: "2026-04-11T00:00:00Z".to_string(),
+            callable_agents: Vec::new(),
         }
     }
 }
@@ -122,6 +136,9 @@ pub async fn seed(temper: &TemperClient, opts: SeedOptions) -> Result<SeedOutcom
         id: format!("tool-{}", short_uuid()),
         agent_id: agent_id.clone(),
         kind: "agent_toolset".to_string(),
+        name: None,
+        description: None,
+        input_schema: None,
     };
     temper
         .create_agent_tool(&tool_row)
@@ -155,6 +172,44 @@ pub async fn seed(temper: &TemperClient, opts: SeedOptions) -> Result<SeedOutcom
         .create_session(&session_row)
         .await
         .context("seeding Session")?;
+
+    // ------------------------------------------------------------------
+    // Callable agents: create sub-agent ManagedAgents + CallableAgent links.
+    // ------------------------------------------------------------------
+    for spec in &opts.callable_agents {
+        let sub_agent_row = ManagedAgentRow {
+            id: spec.agent_id.clone(),
+            name: spec.agent_name.clone(),
+            model_id: spec
+                .model_id
+                .clone()
+                .unwrap_or_else(|| opts.model_id.clone()),
+            status: "Active".to_string(),
+            version: 1,
+            created_at: opts.now.clone(),
+            updated_at: opts.now.clone(),
+            description: Some(format!("Sub-agent: {}", spec.agent_name)),
+            system: Some(spec.system_prompt.clone()),
+            model_speed: Some(opts.model_speed.clone()),
+            metadata: None,
+            archived_at: None,
+        };
+        temper
+            .create_managed_agent(&sub_agent_row)
+            .await
+            .with_context(|| format!("seeding sub-agent ManagedAgent('{}')", spec.agent_id))?;
+
+        let ca_row = CallableAgentRow {
+            id: format!("ca-{}-{}", agent_id, spec.agent_id),
+            agent_id: agent_id.clone(),
+            callee_agent_id: spec.agent_id.clone(),
+            callee_agent_version: Some(1),
+        };
+        temper
+            .create_callable_agent(&ca_row)
+            .await
+            .with_context(|| format!("seeding CallableAgent for '{}'", spec.agent_id))?;
+    }
 
     Ok(SeedOutcome {
         environment_id: env_id,

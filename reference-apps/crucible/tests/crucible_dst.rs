@@ -30,6 +30,8 @@ const AGENT_VERSION_IOA: &str = include_str!("../specs/agent_version.ioa.toml");
 const SESSION_IOA: &str = include_str!("../specs/session.ioa.toml");
 const SESSION_RESOURCE_IOA: &str = include_str!("../specs/session_resource.ioa.toml");
 const SESSION_EVENT_IOA: &str = include_str!("../specs/session_event.ioa.toml");
+const CALLABLE_AGENT_IOA: &str = include_str!("../specs/callable_agent.ioa.toml");
+const SESSION_THREAD_IOA: &str = include_str!("../specs/session_thread.ioa.toml");
 
 fn environment_table() -> Arc<TransitionTable> {
     Arc::new(TransitionTable::from_ioa_source(ENVIRONMENT_IOA))
@@ -77,6 +79,14 @@ fn session_resource_table() -> Arc<TransitionTable> {
 
 fn session_event_table() -> Arc<TransitionTable> {
     Arc::new(TransitionTable::from_ioa_source(SESSION_EVENT_IOA))
+}
+
+fn callable_agent_table() -> Arc<TransitionTable> {
+    Arc::new(TransitionTable::from_ioa_source(CALLABLE_AGENT_IOA))
+}
+
+fn session_thread_table() -> Arc<TransitionTable> {
+    Arc::new(TransitionTable::from_ioa_source(SESSION_THREAD_IOA))
 }
 
 // =========================================================================
@@ -459,6 +469,79 @@ fn scripted_session_child_entities_start_active() {
 }
 
 // =========================================================================
+// SCRIPTED SCENARIOS — Multi-Agent (CallableAgent, SessionThread)
+// =========================================================================
+
+#[test]
+fn scripted_callable_agent_starts_active() {
+    let config = SimActorSystemConfig {
+        seed: 30,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    let handler = EntityActorHandler::new("CallableAgent", "ca-1", callable_agent_table())
+        .with_ioa_invariants(CALLABLE_AGENT_IOA);
+    sim.register_actor("ca-1", Box::new(handler));
+
+    sim.assert_status("ca-1", "Active");
+}
+
+#[test]
+fn scripted_session_thread_full_lifecycle() {
+    // Running → Idle → Running → Terminated
+    let config = SimActorSystemConfig {
+        seed: 31,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    let handler = EntityActorHandler::new("SessionThread", "thread-1", session_thread_table())
+        .with_ioa_invariants(SESSION_THREAD_IOA);
+    sim.register_actor("thread-1", Box::new(handler));
+
+    sim.assert_status("thread-1", "Running");
+
+    sim.step("thread-1", "IdleThread", "{}").unwrap();
+    sim.assert_status("thread-1", "Idle");
+
+    sim.step("thread-1", "ResumeThread", "{}").unwrap();
+    sim.assert_status("thread-1", "Running");
+
+    sim.step("thread-1", "TerminateThread", "{}").unwrap();
+    sim.assert_status("thread-1", "Terminated");
+
+    assert!(!sim.has_violations());
+}
+
+#[test]
+fn scripted_session_thread_terminated_is_final() {
+    let config = SimActorSystemConfig {
+        seed: 32,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    let handler = EntityActorHandler::new("SessionThread", "thread-1", session_thread_table())
+        .with_ioa_invariants(SESSION_THREAD_IOA);
+    sim.register_actor("thread-1", Box::new(handler));
+
+    sim.step("thread-1", "TerminateThread", "{}").unwrap();
+    sim.assert_status("thread-1", "Terminated");
+
+    // No further transitions allowed from Terminated.
+    for action in ["IdleThread", "ResumeThread", "TerminateThread"] {
+        let result = sim.step("thread-1", action, "{}");
+        assert!(
+            result.is_err(),
+            "{action} should fail from terminal Terminated state"
+        );
+    }
+
+    assert!(!sim.has_violations());
+}
+
+// =========================================================================
 // RANDOM EXPLORATION
 // =========================================================================
 
@@ -514,6 +597,18 @@ fn random_all_entities_no_faults() {
             "SessionEvent",
             session_event_table(),
             SESSION_EVENT_IOA,
+        ),
+        (
+            "callable-1",
+            "CallableAgent",
+            callable_agent_table(),
+            CALLABLE_AGENT_IOA,
+        ),
+        (
+            "thread-1",
+            "SessionThread",
+            session_thread_table(),
+            SESSION_THREAD_IOA,
         ),
     ] {
         let handler = EntityActorHandler::new(entity_type, name, table).with_ioa_invariants(ioa);
@@ -583,6 +678,18 @@ fn run_determinism_trial(seed: u64) -> Vec<(String, String, usize, usize)> {
             "SessionEvent",
             session_event_table(),
             SESSION_EVENT_IOA,
+        ),
+        (
+            "callable-1",
+            "CallableAgent",
+            callable_agent_table(),
+            CALLABLE_AGENT_IOA,
+        ),
+        (
+            "thread-1",
+            "SessionThread",
+            session_thread_table(),
+            SESSION_THREAD_IOA,
         ),
     ] {
         let handler = EntityActorHandler::new(entity_type, name, table).with_ioa_invariants(ioa);

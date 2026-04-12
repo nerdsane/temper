@@ -60,6 +60,12 @@ kind = "hard"
 on = "AgentVersion.*"
 assert = 'related(ManagedAgent, AgentId).Status not in ["Archived"]'
 
+[[invariant]]
+name = "CallableAgentRequiresActiveManagedAgent"
+kind = "hard"
+on = "CallableAgent.*"
+assert = 'related(ManagedAgent, AgentId).Status not in ["Archived"]'
+
 # --- Session slice (ADR-0044): child → parent status lookups ----------------
 #
 # Sessions gate create on BOTH parent ManagedAgent and Environment being
@@ -95,6 +101,12 @@ kind = "hard"
 on = "SessionEvent.*"
 assert = 'related(Session, SessionId).Status not in ["Archived"]'
 
+[[invariant]]
+name = "ThreadRequiresNonArchivedSession"
+kind = "hard"
+on = "SessionThread.*"
+assert = 'related(Session, SessionId).Status not in ["Archived"]'
+
 # --- Memory Stores: child → parent status lookups -------------------------
 
 [[invariant]]
@@ -102,3 +114,11 @@ name = "MemoryRequiresActiveStore"
 kind = "hard"
 on = "Memory.*"
 assert = 'related(MemoryStore, MemoryStoreId).Status not in ["Archived"]'
+
+# --- Cron Scheduling: child → parent status lookups ------------------------
+
+[[invariant]]
+name = "ScheduleRequiresNonArchivedSession"
+kind = "hard"
+on = "SessionSchedule.*"
+assert = 'related(Session, SessionId).Status not in ["Archived"]'

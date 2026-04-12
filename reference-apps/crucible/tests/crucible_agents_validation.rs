@@ -41,6 +41,7 @@ const AGENT_SKILL_IOA: &str = include_str!("../specs/agent_skill.ioa.toml");
 const AGENT_TOOL_IOA: &str = include_str!("../specs/agent_tool.ioa.toml");
 const AGENT_TOOL_CONFIG_IOA: &str = include_str!("../specs/agent_tool_config.ioa.toml");
 const AGENT_VERSION_IOA: &str = include_str!("../specs/agent_version.ioa.toml");
+const CALLABLE_AGENT_IOA: &str = include_str!("../specs/callable_agent.ioa.toml");
 const CROSS_INVARIANTS_TOML: &str = include_str!("../specs/cross-invariants.toml");
 const MODEL_CSDL: &str = include_str!("../specs/model.csdl.xml");
 
@@ -65,6 +66,7 @@ fn build_crucible_state() -> ServerState {
             ("AgentTool", AGENT_TOOL_IOA),
             ("AgentToolConfig", AGENT_TOOL_CONFIG_IOA),
             ("AgentVersion", AGENT_VERSION_IOA),
+            ("CallableAgent", CALLABLE_AGENT_IOA),
         ],
         Vec::new(),
         Some(CROSS_INVARIANTS_TOML.to_string()),
@@ -85,6 +87,7 @@ fn build_crucible_state() -> ServerState {
             "AgentTool",
             "AgentToolConfig",
             "AgentVersion",
+            "CallableAgent",
         ] {
             registry.set_verification_status(
                 &TenantId::default(),

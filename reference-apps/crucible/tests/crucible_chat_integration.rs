@@ -28,7 +28,7 @@
 use axum::http::StatusCode;
 use crucible_reference::chat::anthropic::MockModel;
 use crucible_reference::chat::responder::{RespondRequest, respond};
-use crucible_reference::chat::seed::{SeedOptions, seed};
+use crucible_reference::chat::seed::{CallableAgentSeedSpec, SeedOptions, seed};
 use crucible_reference::chat::temper_client::TemperClient;
 use std::net::SocketAddr;
 use temper_runtime::ActorSystem;
@@ -55,6 +55,8 @@ const AGENT_VERSION_IOA: &str = include_str!("../specs/agent_version.ioa.toml");
 const SESSION_IOA: &str = include_str!("../specs/session.ioa.toml");
 const SESSION_RESOURCE_IOA: &str = include_str!("../specs/session_resource.ioa.toml");
 const SESSION_EVENT_IOA: &str = include_str!("../specs/session_event.ioa.toml");
+const CALLABLE_AGENT_IOA: &str = include_str!("../specs/callable_agent.ioa.toml");
+const SESSION_THREAD_IOA: &str = include_str!("../specs/session_thread.ioa.toml");
 const CROSS_INVARIANTS_TOML: &str = include_str!("../specs/cross-invariants.toml");
 const MODEL_CSDL: &str = include_str!("../specs/model.csdl.xml");
 
@@ -80,6 +82,8 @@ fn build_crucible_state() -> ServerState {
             ("Session", SESSION_IOA),
             ("SessionResource", SESSION_RESOURCE_IOA),
             ("SessionEvent", SESSION_EVENT_IOA),
+            ("CallableAgent", CALLABLE_AGENT_IOA),
+            ("SessionThread", SESSION_THREAD_IOA),
         ],
         Vec::new(),
         Some(CROSS_INVARIANTS_TOML.to_string()),
@@ -103,6 +107,8 @@ fn build_crucible_state() -> ServerState {
             "Session",
             "SessionResource",
             "SessionEvent",
+            "CallableAgent",
+            "SessionThread",
         ] {
             registry.set_verification_status(
                 &TenantId::default(),
@@ -272,21 +278,21 @@ async fn full_chat_loop_end_to_end_mock_mode() {
         last_req
             .messages
             .iter()
-            .map(|m| (m.role.clone(), m.content[0].as_text().to_string()))
+            .map(|m| (m.role.clone(), m.content[0].as_text().unwrap_or("?").to_string()))
             .collect::<Vec<_>>()
     );
     assert_eq!(last_req.messages[0].role, "user");
-    assert_eq!(last_req.messages[0].content[0].as_text(), "Hello, what is 2+2?");
+    assert_eq!(last_req.messages[0].content[0].as_text(), Some("Hello, what is 2+2?"));
     assert_eq!(last_req.messages[1].role, "assistant");
     // The assistant reply from turn 1 was the mock's "Echo: Hello, what is 2+2?"
     assert_eq!(
         last_req.messages[1].content[0].as_text(),
-        "Echo: Hello, what is 2+2?"
+        Some("Echo: Hello, what is 2+2?")
     );
     assert_eq!(last_req.messages[2].role, "user");
     assert_eq!(
         last_req.messages[2].content[0].as_text(),
-        "And what did I just ask you?"
+        Some("And what did I just ask you?")
     );
 
     // -----------------------------------------------------------------
@@ -362,6 +368,7 @@ async fn respond_without_new_user_message_uses_existing_history() {
         model_speed: None,
         tool_name: None,
         tool_use_id: None,
+        session_thread_id: None,
     };
     temper
         .create_session_event(&external_user_row)
@@ -415,4 +422,164 @@ async fn temper_client_reports_404_on_unknown_session() {
     );
     // And the StatusCode the error embedded should be a client error.
     assert_ne!(StatusCode::OK.as_u16(), 0); // sanity — reqwest StatusCode import wasn't wasted
+}
+
+// ----------------------------------------------------------------------
+// Multi-agent delegation test
+// ----------------------------------------------------------------------
+
+#[tokio::test]
+async fn multi_agent_delegation_end_to_end() {
+    use crucible_reference::chat::anthropic::{
+        ContentBlock, MessagesResponse, Usage,
+    };
+
+    let state = build_crucible_state();
+    let addr = spawn_server(state).await;
+    let temper = TemperClient::new(format!("http://{addr}"), "default");
+
+    // Seed a coordinator agent with one callable sub-agent.
+    let seed_opts = SeedOptions {
+        environment_id: Some("env-multi".to_string()),
+        agent_id: Some("agt-coordinator".to_string()),
+        session_id: Some("sess-multi".to_string()),
+        callable_agents: vec![CallableAgentSeedSpec {
+            agent_id: "agt-reviewer".to_string(),
+            agent_name: "reviewer".to_string(),
+            system_prompt: "You are a code reviewer.".to_string(),
+            model_id: None,
+        }],
+        ..SeedOptions::default()
+    };
+    let seeded = seed(&temper, seed_opts).await.expect("seed should succeed");
+    assert_eq!(seeded.session_id, "sess-multi");
+
+    // Set up a mock that returns a delegate_to_agent tool call on turn 1,
+    // then an "Echo:" response for the sub-agent, then a final text
+    // response for the coordinator.
+    let mock = MockModel::new();
+
+    // Response 1: coordinator calls delegate_to_agent
+    mock.push_response(MessagesResponse {
+        content: vec![
+            ContentBlock::Text {
+                text: "Let me delegate this.".to_string(),
+            },
+            ContentBlock::ToolUse {
+                id: "toolu_delegate_1".to_string(),
+                name: "delegate_to_agent".to_string(),
+                input: serde_json::json!({
+                    "agent_id": "agt-reviewer",
+                    "message": "Review this code please"
+                }),
+            },
+        ],
+        stop_reason: Some("tool_use".to_string()),
+        usage: Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        },
+    });
+
+    // Response 2: sub-agent replies in respond_thread().
+    mock.push_response(MessagesResponse {
+        content: vec![ContentBlock::Text {
+            text: "Code looks good, no issues found.".to_string(),
+        }],
+        stop_reason: Some("end_turn".to_string()),
+        usage: Usage {
+            input_tokens: 80,
+            output_tokens: 20,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        },
+    });
+
+    // Response 3: coordinator final text after receiving delegation result.
+    mock.push_response(MessagesResponse {
+        content: vec![ContentBlock::Text {
+            text: "The reviewer said the code looks good.".to_string(),
+        }],
+        stop_reason: Some("end_turn".to_string()),
+        usage: Usage {
+            input_tokens: 150,
+            output_tokens: 30,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        },
+    });
+
+    // Run the turn.
+    let outcome = respond(
+        &temper,
+        &mock,
+        RespondRequest {
+            session_id: "sess-multi",
+            new_user_message: Some("Please review my code"),
+        },
+    )
+    .await
+    .expect("multi-agent turn should succeed");
+
+    assert_eq!(
+        outcome.assistant_text,
+        "The reviewer said the code looks good."
+    );
+
+    // Verify the session is Idle.
+    let session = temper
+        .get_session("sess-multi")
+        .await
+        .expect("session should exist");
+    assert_eq!(session.status, "Idle");
+
+    // Verify the event feed contains the expected thread events.
+    let events = temper
+        .list_session_events("sess-multi", 500)
+        .await
+        .expect("events should load");
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+
+    // Should contain delegation events on the primary thread.
+    assert!(
+        kinds.contains(&"session.thread_created"),
+        "should have session.thread_created event, got: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"agent.thread_message_sent"),
+        "should have agent.thread_message_sent event, got: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"agent.thread_message_received"),
+        "should have agent.thread_message_received event, got: {kinds:?}"
+    );
+
+    // Should have thread-scoped events (sub-agent's user.message + agent.message).
+    let thread_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.session_thread_id.is_some())
+        .collect();
+    assert!(
+        thread_events.len() >= 4,
+        "should have at least 4 thread-scoped events (user.message, \
+         model_request_start, agent.message, model_request_end), got {} ({:?})",
+        thread_events.len(),
+        thread_events
+            .iter()
+            .map(|e| (e.sequence, e.kind.as_str()))
+            .collect::<Vec<_>>()
+    );
+
+    // The sub-agent's user.message should contain the delegated text.
+    let thread_user_msg = thread_events
+        .iter()
+        .find(|e| e.kind == "user.message")
+        .expect("thread should have a user.message");
+    let content = thread_user_msg.content.as_deref().unwrap_or("");
+    assert!(
+        content.contains("Review this code please"),
+        "thread user.message should contain the delegated text, got: {content}"
+    );
 }

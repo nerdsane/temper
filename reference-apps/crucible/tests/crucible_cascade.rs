@@ -33,6 +33,8 @@ const AGENT_VERSION_IOA: &str = include_str!("../specs/agent_version.ioa.toml");
 const SESSION_IOA: &str = include_str!("../specs/session.ioa.toml");
 const SESSION_RESOURCE_IOA: &str = include_str!("../specs/session_resource.ioa.toml");
 const SESSION_EVENT_IOA: &str = include_str!("../specs/session_event.ioa.toml");
+const CALLABLE_AGENT_IOA: &str = include_str!("../specs/callable_agent.ioa.toml");
+const SESSION_THREAD_IOA: &str = include_str!("../specs/session_thread.ioa.toml");
 const CROSS_INVARIANTS_TOML: &str = include_str!("../specs/cross-invariants.toml");
 const MODEL_CSDL: &str = include_str!("../specs/model.csdl.xml");
 
@@ -122,6 +124,18 @@ fn cascade_agent_version_all_levels_pass() {
     assert_cascade_passes("AgentVersion", AGENT_VERSION_IOA);
 }
 
+// --- Multi-agent entities ---------------------------------------------------
+
+#[test]
+fn cascade_callable_agent_all_levels_pass() {
+    assert_cascade_passes("CallableAgent", CALLABLE_AGENT_IOA);
+}
+
+#[test]
+fn cascade_session_thread_all_levels_pass() {
+    assert_cascade_passes("SessionThread", SESSION_THREAD_IOA);
+}
+
 // --- Session slice (ADR-0044) ----------------------------------------------
 
 #[test]
@@ -158,7 +172,9 @@ fn csdl_parses_and_has_all_entity_types() {
         "AgentTool",
         "AgentToolConfig",
         "AgentVersion",
+        "CallableAgent",
         "Session",
+        "SessionThread",
         "SessionResource",
         "SessionEvent",
     ] {
@@ -210,7 +226,7 @@ fn csdl_session_has_navigation_properties_to_children() {
         .iter()
         .map(|n| n.name.as_str())
         .collect();
-    for nav in ["ManagedAgent", "Environment", "Resources", "Events"] {
+    for nav in ["ManagedAgent", "Environment", "Resources", "Events", "Threads"] {
         assert!(
             nav_names.contains(&nav),
             "Session should have a `{nav}` navigation property, got {nav_names:?}"
@@ -320,6 +336,8 @@ fn csdl_session_event_has_full_adr_0045_column_set() {
         ("ModelCacheCreationInputTokens", "Edm.Int64"),
         ("ModelCacheReadInputTokens", "Edm.Int64"),
         ("ModelSpeed", "Edm.String"),
+        // Multi-agent thread scope
+        ("SessionThreadId", "Edm.String"),
     ];
 
     for (name, expected_type) in required_columns {
@@ -352,9 +370,9 @@ fn csdl_session_event_has_full_adr_0045_column_set() {
 }
 
 #[test]
-fn session_event_kind_enum_has_twenty_members() {
-    // ADR-0045: the KindMustBeKnown invariant enumerates every Anthropic
-    // event type. Pin the set so an accidental drop or rename fails here.
+fn session_event_kind_enum_has_all_members() {
+    // ADR-0045: the KindMustBeKnown invariant enumerates every event type.
+    // Pin the set so an accidental drop or rename fails here.
     let automaton = parse_automaton(SESSION_EVENT_IOA)
         .expect("SessionEvent IOA should parse");
 
@@ -414,13 +432,35 @@ fn session_event_kind_enum_has_twenty_members() {
         "session.error",
         "span.model_request_start",
         "span.model_request_end",
+        // Multi-agent thread events
+        "session.thread_created",
+        "session.thread_idle",
+        "agent.thread_message_sent",
+        "agent.thread_message_received",
     ];
     expected.sort();
 
     assert_eq!(
         kinds, expected,
-        "SessionEvent.KindMustBeKnown should enumerate exactly the 20 ADR-0045 kinds"
+        "SessionEvent.KindMustBeKnown should enumerate exactly the 24 event kinds"
     );
+}
+
+#[test]
+fn csdl_defines_session_thread_lifecycle_actions() {
+    let csdl = parse_csdl(MODEL_CSDL).expect("crucible CSDL should parse");
+    let schema = csdl
+        .schemas
+        .iter()
+        .find(|s| s.namespace == "Temper.Crucible")
+        .expect("Temper.Crucible schema should exist");
+
+    for action in ["IdleThread", "ResumeThread", "TerminateThread"] {
+        assert!(
+            schema.action(action).is_some(),
+            "CSDL should define {action} bound action"
+        );
+    }
 }
 
 #[test]
@@ -455,7 +495,7 @@ fn csdl_managed_agent_has_navigation_properties_to_children() {
         .iter()
         .map(|n| n.name.as_str())
         .collect();
-    for nav in ["McpServers", "Skills", "Tools", "Versions"] {
+    for nav in ["McpServers", "Skills", "Tools", "Versions", "CallableAgents"] {
         assert!(
             nav_names.contains(&nav),
             "ManagedAgent should have a `{nav}` navigation property, got {nav_names:?}"
@@ -518,7 +558,7 @@ fn field_invariants_reference_valid_csdl_properties() {
         .find(|s| s.namespace == "Temper.Crucible")
         .expect("Temper.Crucible schema should exist");
 
-    let cases: [(&str, &str, bool); 12] = [
+    let cases: [(&str, &str, bool); 14] = [
         ("Environment", ENVIRONMENT_IOA, true),
         ("EnvironmentAllowedHost", ALLOWED_HOST_IOA, false),
         ("EnvironmentPackage", PACKAGE_IOA, false),
@@ -528,7 +568,9 @@ fn field_invariants_reference_valid_csdl_properties() {
         ("AgentTool", AGENT_TOOL_IOA, true),
         ("AgentToolConfig", AGENT_TOOL_CONFIG_IOA, true),
         ("AgentVersion", AGENT_VERSION_IOA, false),
+        ("CallableAgent", CALLABLE_AGENT_IOA, true),
         ("Session", SESSION_IOA, true),
+        ("SessionThread", SESSION_THREAD_IOA, true),
         ("SessionResource", SESSION_RESOURCE_IOA, true),
         ("SessionEvent", SESSION_EVENT_IOA, true),
     ];
