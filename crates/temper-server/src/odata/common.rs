@@ -8,6 +8,7 @@ use temper_runtime::tenant::TenantId;
 use super::constraints::{
     ConstraintViolation, post_write_invariant_checks, pre_upsert_relation_checks,
 };
+use super::field_constraints::pre_upsert_field_invariant_checks;
 use crate::state::{ServerState, VerificationGateError};
 
 /// Extract the tenant ID from request headers.
@@ -121,6 +122,7 @@ pub(super) fn constraint_violation_response(err: ConstraintViolation) -> axum::r
     let violation_type = match err.violation_type {
         super::constraints::ConstraintViolationType::RelationIntegrity => "relation_integrity",
         super::constraints::ConstraintViolationType::CrossInvariant => "cross_invariant",
+        super::constraints::ConstraintViolationType::FieldInvariant => "field_invariant",
     };
     let body = serde_json::json!({
         "error": {
@@ -154,6 +156,12 @@ pub(super) async fn run_write_prechecks(
 ) -> Result<(), axum::response::Response> {
     if let Err(v) =
         pre_upsert_relation_checks(state, tenant, entity_type, entity_id, operation, fields).await
+    {
+        return Err(constraint_violation_response(v));
+    }
+    if let Err(v) =
+        pre_upsert_field_invariant_checks(state, tenant, entity_type, entity_id, operation, fields)
+            .await
     {
         return Err(constraint_violation_response(v));
     }

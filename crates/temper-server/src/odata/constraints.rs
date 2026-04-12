@@ -6,7 +6,7 @@ use tracing::instrument;
 
 use temper_runtime::tenant::TenantId;
 use temper_spec::cross_invariant::{
-    CrossInvariant, DeletePolicy, InvariantKind, parse_related_status_in_assert,
+    CrossInvariant, CrossInvariantOperator, DeletePolicy, InvariantKind, parse_related_field_assert,
 };
 
 use crate::registry::RelationEdge;
@@ -17,6 +17,7 @@ use crate::state::ServerState;
 pub enum ConstraintViolationType {
     RelationIntegrity,
     CrossInvariant,
+    FieldInvariant,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -30,15 +31,17 @@ pub struct ConstraintViolation {
 }
 
 impl ConstraintViolation {
-    fn relation(
+    fn new(
+        violation_type: ConstraintViolationType,
+        invariant: Option<&str>,
         message: impl Into<String>,
         entity_type: &str,
         entity_id: &str,
         operation: &str,
     ) -> Self {
         Self {
-            violation_type: ConstraintViolationType::RelationIntegrity,
-            invariant: None,
+            violation_type,
+            invariant: invariant.map(|s| s.to_string()),
             message: message.into(),
             entity_type: entity_type.to_string(),
             entity_id: entity_id.to_string(),
@@ -46,21 +49,43 @@ impl ConstraintViolation {
         }
     }
 
-    fn invariant(
-        invariant: &str,
-        message: impl Into<String>,
-        entity_type: &str,
-        entity_id: &str,
-        operation: &str,
+    fn relation(msg: impl Into<String>, et: &str, eid: &str, op: &str) -> Self {
+        Self::new(
+            ConstraintViolationType::RelationIntegrity,
+            None,
+            msg,
+            et,
+            eid,
+            op,
+        )
+    }
+
+    fn invariant(inv: &str, msg: impl Into<String>, et: &str, eid: &str, op: &str) -> Self {
+        Self::new(
+            ConstraintViolationType::CrossInvariant,
+            Some(inv),
+            msg,
+            et,
+            eid,
+            op,
+        )
+    }
+
+    pub(crate) fn field_invariant(
+        inv: &str,
+        msg: impl Into<String>,
+        et: &str,
+        eid: &str,
+        op: &str,
     ) -> Self {
-        Self {
-            violation_type: ConstraintViolationType::CrossInvariant,
-            invariant: Some(invariant.to_string()),
-            message: message.into(),
-            entity_type: entity_type.to_string(),
-            entity_id: entity_id.to_string(),
-            operation: operation.to_string(),
-        }
+        Self::new(
+            ConstraintViolationType::FieldInvariant,
+            Some(inv),
+            msg,
+            et,
+            eid,
+            op,
+        )
     }
 }
 
@@ -272,7 +297,7 @@ pub async fn post_write_invariant_checks(
         state
             .metrics
             .record_cross_invariant_check(&tenant_name, entity_type, "evaluated");
-        let Some(assertion) = parse_related_status_in_assert(&inv.assertion) else {
+        let Some(assertion) = parse_related_field_assert(&inv.assertion) else {
             tracing::warn!(
                 tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
                 "constraint violation: invalid assertion syntax"
@@ -345,11 +370,11 @@ pub async fn post_write_invariant_checks(
             return Err(violation);
         }
 
-        let target_status = match state
+        let target_resp = match state
             .get_tenant_entity_state(tenant, &assertion.target_entity, target_id)
             .await
         {
-            Ok(resp) => resp.state.status,
+            Ok(resp) => resp,
             Err(e) => {
                 state.metrics.record_cross_invariant_violation(
                     &tenant_name,
@@ -370,29 +395,71 @@ pub async fn post_write_invariant_checks(
                 return Err(violation);
             }
         };
+        let target_field_value = if assertion.field_name == "status" {
+            target_resp.state.status.clone()
+        } else {
+            let target_fields = serde_json::to_value(&target_resp.state.fields).unwrap_or_default();
+            match extract_field_as_string(&target_fields, &assertion.field_name) {
+                Some(v) => v,
+                None => {
+                    state.metrics.record_cross_invariant_violation(
+                        &tenant_name,
+                        &inv.name,
+                        "target_field_missing",
+                    );
+                    let violation = ConstraintViolation::invariant(
+                        &inv.name,
+                        format!(
+                            "related {}('{}') is missing field '{}' required by invariant",
+                            assertion.target_entity, target_id, assertion.field_name
+                        ),
+                        entity_type,
+                        entity_id,
+                        operation,
+                    );
+                    if inv.kind == InvariantKind::Eventual {
+                        defer_eventual_invariant(state, &inv, &tenant_name, entity_type, entity_id);
+                        continue;
+                    }
+                    return Err(violation);
+                }
+            }
+        };
 
-        if !assertion.statuses.iter().any(|s| s == &target_status) {
+        let assertion_holds = match assertion.operator {
+            CrossInvariantOperator::In => assertion.values.iter().any(|s| s == &target_field_value),
+            CrossInvariantOperator::NotIn => {
+                !assertion.values.iter().any(|s| s == &target_field_value)
+            }
+        };
+        if !assertion_holds {
+            let expectation = match assertion.operator {
+                CrossInvariantOperator::In => "expected one of",
+                CrossInvariantOperator::NotIn => "expected none of",
+            };
             tracing::warn!(
                 tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
-                target_entity = %assertion.target_entity, target_id, target_status = %target_status,
-                expected = ?assertion.statuses,
-                "constraint violation: related entity status mismatch"
+                target_entity = %assertion.target_entity, target_id,
+                target_field = %assertion.field_name, target_value = %target_field_value,
+                expected = ?assertion.values,
+                "constraint violation: related entity field mismatch"
             );
             state.metrics.record_cross_invariant_violation(
                 &tenant_name,
                 &inv.name,
                 "status_mismatch",
             );
-            let violation = ConstraintViolation::invariant(
-                &inv.name,
-                format!(
-                    "related {}('{}') has status '{}', expected one of {:?}",
-                    assertion.target_entity, target_id, target_status, assertion.statuses
-                ),
-                entity_type,
-                entity_id,
-                operation,
+            let msg = format!(
+                "related {}('{}') has {}='{}', {} {:?}",
+                assertion.target_entity,
+                target_id,
+                assertion.field_name,
+                target_field_value,
+                expectation,
+                assertion.values
             );
+            let violation =
+                ConstraintViolation::invariant(&inv.name, msg, entity_type, entity_id, operation);
             if inv.kind == InvariantKind::Eventual {
                 defer_eventual_invariant(state, &inv, &tenant_name, entity_type, entity_id);
                 continue;
@@ -454,4 +521,17 @@ fn extract_field<'a>(fields: &'a serde_json::Value, name: &str) -> Option<&'a se
 
 fn extract_field_as_str<'a>(fields: &'a serde_json::Value, name: &str) -> Option<&'a str> {
     extract_field(fields, name).and_then(|v| v.as_str())
+}
+
+/// Extract a scalar field from a JSON object, coercing numbers/bools to their
+/// string representation so they can be compared against the quoted literals
+/// in `in`/`not in` assertions.
+fn extract_field_as_string(fields: &serde_json::Value, name: &str) -> Option<String> {
+    let v = extract_field(fields, name)?;
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }

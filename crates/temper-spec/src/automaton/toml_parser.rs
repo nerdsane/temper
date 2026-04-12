@@ -349,6 +349,8 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
         integrations.push(ig);
     }
 
+    let field_invariants = super::field_invariant::extract_field_invariants(input)
+        .map_err(AutomatonParseError::Toml)?;
     Ok(Automaton {
         automaton: AutomatonMeta {
             name: meta_name,
@@ -363,13 +365,11 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
         webhooks: extract_webhooks(input),
         context_entities: Vec::new(),
         agent_triggers: extract_agent_triggers(input),
+        field_invariants,
     })
 }
 
-/// Extract `[[webhook]]` sections from TOML source via serde.
-///
-/// The hand-written parser does not handle `[[webhook]]` sections, so
-/// we do a second pass with `toml::from_str` to deserialize them.
+/// Extract `[[webhook]]` sections from TOML source via serde (second pass).
 fn extract_webhooks(source: &str) -> Vec<super::types::Webhook> {
     #[derive(serde::Deserialize)]
     struct WebhookWrapper {
