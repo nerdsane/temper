@@ -11,6 +11,8 @@ use temper_wasm::{
 
 /// Pre-built echo integration WASM binary (avoids needing wasm32 target in CI).
 const ECHO_WASM: &[u8] = include_bytes!("fixtures/echo_integration.wasm");
+/// Pre-built SDK-backed module that exercises `temper_wasm_sdk::Context::from_host`.
+const SDK_CONTEXT_READER_WASM: &[u8] = include_bytes!("fixtures/sdk_context_reader.wasm");
 
 fn build_context() -> WasmInvocationContext {
     WasmInvocationContext {
@@ -25,6 +27,15 @@ fn build_context() -> WasmInvocationContext {
         integration_config: std::collections::BTreeMap::new(),
         trace_id: String::new(),
     }
+}
+
+fn build_large_context(blob_len: usize) -> WasmInvocationContext {
+    let mut ctx = build_context();
+    ctx.entity_state = serde_json::json!({
+        "status": "Pending",
+        "large_blob": "x".repeat(blob_len),
+    });
+    ctx
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -128,6 +139,40 @@ async fn invoke_with_http_failure_still_succeeds() {
 
     assert!(result.success, "echo module handles HTTP errors gracefully");
     assert_eq!(result.callback_action, "EchoSucceeded");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invoke_sdk_module_with_large_context_succeeds() {
+    let engine = WasmEngine::new().expect("engine should create");
+    let hash = engine
+        .compile_and_cache(SDK_CONTEXT_READER_WASM)
+        .expect("sdk context reader should compile");
+
+    let ctx = build_large_context(700_000);
+    let host = Arc::new(SimWasmHost::new());
+
+    let streams = Arc::new(RwLock::new(StreamRegistry::default()));
+    let result = engine
+        .invoke(&hash, &ctx, host, &WasmResourceLimits::default(), streams)
+        .await
+        .expect("invoke should complete");
+
+    assert!(
+        result.success,
+        "sdk-backed module should read oversized invocation contexts successfully"
+    );
+    assert_eq!(result.callback_action, "callback");
+    assert_eq!(
+        result.callback_params["trigger_action"].as_str(),
+        Some("TriggerEcho")
+    );
+    assert!(
+        result.callback_params["entity_state_len"]
+            .as_u64()
+            .unwrap_or_default()
+            > 700_000,
+        "entity state should include the large payload"
+    );
 }
 
 #[test]
