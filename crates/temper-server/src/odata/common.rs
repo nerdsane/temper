@@ -6,9 +6,9 @@ use temper_odata::path::{KeyValue, ODataPath};
 use temper_runtime::tenant::TenantId;
 
 use super::constraints::{
-    ConstraintViolation, post_write_invariant_checks, pre_upsert_field_invariant_checks,
-    pre_upsert_relation_checks,
+    ConstraintViolation, post_write_invariant_checks, pre_upsert_relation_checks,
 };
+use super::field_constraints::pre_upsert_field_invariant_checks;
 use crate::state::{ServerState, VerificationGateError};
 
 /// Extract the tenant ID from request headers.
