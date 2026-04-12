@@ -349,7 +349,7 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
         integrations.push(ig);
     }
 
-    Ok(Automaton {
+    let mut automaton = Automaton {
         automaton: AutomatonMeta {
             name: meta_name,
             states: meta_states,
@@ -363,7 +363,14 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
         webhooks: extract_webhooks(input),
         context_entities: Vec::new(),
         agent_triggers: extract_agent_triggers(input),
-    })
+        field_invariants: Vec::new(),
+    };
+    // Field invariants use nested inline-table predicates that the hand-rolled
+    // parser does not handle, so delegate to serde. Unlike webhooks and agent
+    // triggers, parse errors are surfaced — a silently-dropped field invariant
+    // means the constraint is not enforced, which is a safety bug.
+    automaton.field_invariants = extract_field_invariants(input)?;
+    Ok(automaton)
 }
 
 /// Extract `[[webhook]]` sections from TOML source via serde.
@@ -391,6 +398,65 @@ fn extract_agent_triggers(source: &str) -> Vec<super::types::AgentTrigger> {
     toml::from_str::<AgentTriggerWrapper>(source)
         .map(|w| w.agent_triggers)
         .unwrap_or_default()
+}
+
+/// Extract `[[field_invariant]]` sections from TOML source via serde.
+///
+/// The hand-written parser does not handle nested inline-table predicates,
+/// so we delegate to `toml::from_str` in a second pass. Unlike `extract_webhooks`
+/// and `extract_agent_triggers`, parse errors here are propagated — a silently
+/// dropped field invariant would mean the constraint is not enforced at
+/// runtime, which is worse than a loud parse failure.
+///
+/// To keep this resilient against unrelated TOML quirks elsewhere in the
+/// source (e.g. duplicate keys in integration config that a strict
+/// `toml::from_str` on the whole file would reject), we first slice out
+/// only the `[[field_invariant]]` sections and parse just those.
+fn extract_field_invariants(
+    source: &str,
+) -> Result<Vec<super::field_invariant::FieldInvariant>, AutomatonParseError> {
+    let slice = isolate_field_invariant_sections(source);
+    if slice.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FieldInvariantWrapper {
+        #[serde(default, rename = "field_invariant")]
+        field_invariants: Vec<super::field_invariant::FieldInvariant>,
+    }
+    toml::from_str::<FieldInvariantWrapper>(&slice)
+        .map(|w| w.field_invariants)
+        .map_err(|e| AutomatonParseError::Toml(format!("field_invariant: {e}")))
+}
+
+/// Return a minimal TOML document containing only the `[[field_invariant]]`
+/// sections from `source`. Any other top-level section is skipped.
+///
+/// A section starts at a line whose trimmed form is `[[field_invariant]]`
+/// and ends at the next line whose trimmed form begins with `[` (either a
+/// new array-of-tables or a regular table header). Lines inside a section
+/// are copied verbatim; comment and blank lines outside any field-invariant
+/// section are dropped.
+fn isolate_field_invariant_sections(source: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let is_header = trimmed.starts_with('[');
+        if is_header {
+            inside = trimmed.starts_with("[[field_invariant]]");
+            if inside {
+                out.push_str("[[field_invariant]]\n");
+            }
+            continue;
+        }
+        if inside {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
