@@ -102,6 +102,14 @@ impl TemperClient {
         self.send_json(Method::POST, path, Some(body)).await
     }
 
+    async fn patch(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<(StatusCode, serde_json::Value)> {
+        self.send_json(Method::PATCH, path, Some(body)).await
+    }
+
     fn require_2xx(
         method: &str,
         path: &str,
@@ -407,6 +415,63 @@ impl TemperClient {
         Self::require_2xx("GET", &path, status, &body)?;
         Self::decode_entity_list(body)
     }
+
+    // ------------------------------------------------------------------
+    // Memory
+    // ------------------------------------------------------------------
+
+    /// List all memories in a memory store.
+    pub async fn list_memories(&self, store_id: &str) -> Result<Vec<MemoryRow>> {
+        let path = format!(
+            "/tdata/Memories?$filter=MemoryStoreId%20eq%20%27{store_id}%27"
+        );
+        let (status, body) = self.get(&path).await?;
+        Self::require_2xx("GET", &path, status, &body)?;
+        Self::decode_entity_list(body)
+    }
+
+    /// Get a single memory by ID (includes content).
+    pub async fn get_memory(&self, id: &str) -> Result<MemoryRow> {
+        let path = format!("/tdata/Memories('{id}')");
+        let (status, body) = self.get(&path).await?;
+        Self::require_2xx("GET", &path, status, &body)?;
+        Self::decode_entity(body)
+    }
+
+    /// Create a new memory.
+    pub async fn create_memory(
+        &self,
+        id: &str,
+        store_id: &str,
+        path: &str,
+        content: &str,
+        size: i64,
+        now: &str,
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "id": id,
+            "MemoryStoreId": store_id,
+            "Path": path,
+            "Content": content,
+            "SizeBytes": size,
+            "CreatedAt": now,
+            "UpdatedAt": now,
+        });
+        let (status, resp) = self.post("/tdata/Memories", body).await?;
+        Self::require_2xx("POST", "/tdata/Memories", status, &resp)
+    }
+
+    /// Update a memory's content.
+    pub async fn patch_memory(&self, id: &str, content: &str, size: i64) -> Result<()> {
+        let path = format!("/tdata/Memories('{id}')");
+        let body = serde_json::json!({
+            "Content": content,
+            "SizeBytes": size,
+            "UpdatedAt": crate::chat::responder::now_rfc3339(),
+        });
+        let (status, resp) = self.patch(&path, body).await?;
+        Self::require_2xx("PATCH", &path, status, &resp)
+    }
 }
 
 // ======================================================================
@@ -684,5 +749,26 @@ pub struct SessionThreadRow {
     #[serde(rename = "CreatedAt")]
     pub created_at: String,
     #[serde(rename = "UpdatedAt")]
+    pub updated_at: String,
+}
+
+/// A Memory entity row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryRow {
+    #[serde(rename(serialize = "id", deserialize = "Id"))]
+    pub id: String,
+    #[serde(rename = "MemoryStoreId")]
+    pub memory_store_id: String,
+    #[serde(rename = "Path")]
+    pub path: String,
+    #[serde(rename = "Content", skip_serializing_if = "Option::is_none", default)]
+    pub content: Option<String>,
+    #[serde(rename = "ContentSha256", skip_serializing_if = "Option::is_none", default)]
+    pub content_sha256: Option<String>,
+    #[serde(rename = "SizeBytes", skip_serializing_if = "Option::is_none", default)]
+    pub size_bytes: Option<i64>,
+    #[serde(rename = "CreatedAt", default)]
+    pub created_at: String,
+    #[serde(rename = "UpdatedAt", default)]
     pub updated_at: String,
 }

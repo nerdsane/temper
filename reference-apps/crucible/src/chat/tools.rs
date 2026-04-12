@@ -171,6 +171,98 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["pattern"]
             }),
         },
+        // ── Memory tools ─────────────────────────────────────────
+        ToolDefinition {
+            name: "memory_list".into(),
+            description: "List memories in the knowledge base, optionally filtered by path prefix. Returns paths and sizes (not content).".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "memory_store_id": {
+                        "type": "string",
+                        "description": "Memory store ID (e.g. 'ms-kb')"
+                    },
+                    "path_prefix": {
+                        "type": "string",
+                        "description": "Filter by path prefix (e.g. '/raw/', '/wiki/concepts/'). Default: list all."
+                    }
+                },
+                "required": ["memory_store_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "memory_read".into(),
+            description: "Read a specific memory's full content by its entity ID.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "The memory entity ID to read"
+                    }
+                },
+                "required": ["memory_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "memory_write".into(),
+            description: "Create or update a memory in the knowledge base. If a memory with the same path exists, update it; otherwise create a new one.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "memory_store_id": {
+                        "type": "string",
+                        "description": "Memory store ID (e.g. 'ms-kb')"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "File-like path (e.g. '/raw/my-article.md', '/wiki/concepts/transformers.md')"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The text content to store"
+                    }
+                },
+                "required": ["memory_store_id", "path", "content"]
+            }),
+        },
+        ToolDefinition {
+            name: "memory_search".into(),
+            description: "Search memory contents for a text query. Returns matching memories with content previews.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "memory_store_id": {
+                        "type": "string",
+                        "description": "Memory store ID (e.g. 'ms-kb')"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Text to search for in memory contents"
+                    }
+                },
+                "required": ["memory_store_id", "query"]
+            }),
+        },
+        // ── System tools ──────────────────────────────────────────
+        ToolDefinition {
+            name: "trigger_session".into(),
+            description: "Post a user.message to another session, triggering its agent to process it. Use this to trigger lint runs or delegate tasks to other agents.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "The session ID to trigger (e.g. 's-l' for the lint session)"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "The message to send to the session"
+                    }
+                },
+                "required": ["session_id", "message"]
+            }),
+        },
     ]
 }
 

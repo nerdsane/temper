@@ -1,249 +1,208 @@
-# Crucible — Overview
+# Crucible Overview
 
-Crucible is a reference implementation of Anthropic's
-[Managed Agents API](https://platform.claude.com/docs/en/managed-agents/overview)
-built on [Temper](https://github.com/nerdsane/temper). It demonstrates how
-an agent-runtime control plane maps onto Temper's modelling primitives:
-entities, state machines, Cedar policies, OData routes, and field
-invariants.
-
-Crucible is **not wire-compatible** with Anthropic's API. It shares the
-conceptual shape but speaks OData, flattens config into scalar columns,
-and makes several deliberate divergences documented below. The goal is to
-show *how* these concepts work on Temper, not to be a drop-in replacement.
+A governed agent runtime built on Temper. Define agents, environments, and sessions as entities — then let agents manage themselves.
 
 ---
 
-## Concepts
+Crucible turns Temper into an agent platform. Instead of writing custom orchestration code, you declare agents, tools, and execution environments as governed entities. Temper handles state machines, authorization, persistence, and verification. You focus on what your agents should do.
 
-### Environments
+Crucible shares the conceptual shape of Anthropic's [Managed Agents API](https://platform.claude.com/docs/en/managed-agents/overview) — agents, environments, sessions, events — but is not wire-compatible. It speaks OData, runs on your infrastructure, and adds governance features (Cedar policies, verified state machines, cross-entity invariants) that don't exist in the upstream API.
 
-An **Environment** defines where agent tools execute.
+## Core concepts
 
-| ConfigType | Description |
-| ---------- | ----------- |
-| `Local` | Tools execute on the host machine. Requires `Unrestricted` networking; forbids MCP servers and package managers. The simplest path for development. |
-| `Modal` | Tools execute inside a [Modal](https://modal.com) sandbox — an isolated remote container with configurable CPU, memory, GPU, and image. Provisioned lazily on the first tool call. |
+| Concept | Description |
+|---------|-------------|
+| **Agent** | The model configuration: system prompt, model ID, tools, and which sub-agents it can delegate to |
+| **Environment** | Where tools execute — on the host machine or inside a Modal cloud sandbox |
+| **Session** | A running conversation between a user and an agent, with full event history |
+| **Events** | The append-only log of everything that happens — messages, tool calls, delegations, status changes |
+| **Threads** | Isolated execution scopes for sub-agent delegation within a session |
 
-**Lifecycle:** Active → Archived (terminal). DELETE supported with
-referential integrity (rejects if Sessions reference the environment).
+## How it works
 
-**Key fields:** `Name`, `ConfigType`, `NetworkingType`,
-`AllowMcpServers`, `AllowPackageManagers`, and (for Modal)
-`ModalImage`, `ModalCpu`, `ModalMemory`, `ModalTimeout`, `ModalGpu`,
-`ModalWorkdir`, `ModalBlockNetwork`.
+**1. Define an agent**
 
-### Agents (ManagedAgent)
+Create a `ManagedAgent` with a model, system prompt, and tools. Optionally link sub-agents via `CallableAgent` for multi-agent orchestration.
 
-A **ManagedAgent** is the agent configuration: which model to use,
-what system prompt to give it, and what tools/skills/MCP servers are
-available.
+**2. Configure an environment**
 
-> The entity is called `ManagedAgent` rather than `Agent` because
-> Temper's Agent OS app already owns the `Agent` type name.
+Create an `Environment` that controls where tools run. `Local` executes on the host. `Modal` provisions a cloud sandbox — isolated, configurable, and lazily created on first use.
 
-**Key fields:** `Name`, `ModelId` (e.g.,
-`accounts/fireworks/routers/kimi-k2p5-turbo`), `System` (system
-prompt), `ModelSpeed` (`standard`/`fast`), `Version`.
+**3. Start a session**
 
-**Lifecycle:** Active → Archived (terminal).
+Launch a `Session` referencing your agent and environment. The session tracks its own lifecycle, event history, and token usage.
 
-**Child entities:**
-- `AgentTool` — tool configurations (`agent_toolset`, `custom`, `mcp_toolset`)
-- `AgentToolConfig` — per-tool permission policies (`always_allow`, `always_ask`)
-- `AgentMcpServer` — MCP server declarations
-- `AgentSkill` — skill references
-- `AgentVersion` — immutable snapshots of past agent configs
-- `CallableAgent` — multi-agent delegation references
+**4. Send messages and get responses**
 
-### Sessions
+Post user messages as events. The agent reads the conversation history, calls the LLM, executes tools, and writes its response back as new events. Every step is recorded.
 
-A **Session** is a running conversation between a user and an agent
-in a specific environment. It is the primary runtime entity — you
-send messages to a session and the agent responds.
+**5. Delegate across agents**
 
-**Lifecycle** (5-state machine):
+When an agent has callable sub-agents, it can delegate tasks to them. The platform creates a thread, runs the sub-agent with its own system prompt, and returns the result. The full delegation trajectory is captured in the event feed.
+
+## Getting started
+
+From the Monty shell or any HTTP client:
+
+```python
+# 1. Create an environment
+env = await temper.create('Environment', {
+    'Name': 'dev',
+    'ConfigType': 'Local',
+    'NetworkingType': 'Unrestricted'
+})
+
+# 2. Create an agent
+agent = await temper.create('ManagedAgent', {
+    'Name': 'assistant',
+    'System': 'You are a helpful coding assistant.',
+    'ModelId': 'claude-sonnet-4-6'
+})
+
+# 3. Create a session
+session = await temper.create('Session', {
+    'AgentId': agent['entity_id'],
+    'EnvironmentId': env['entity_id']
+})
+```
+
+Then drive the agent loop:
+
+```bash
+crucible-chat send <session-id> "What files are in the current directory?"
+crucible-chat respond <session-id>
+# Agent uses bash tool, lists files, responds with findings
+```
+
+See the [Quickstart](QUICKSTART.md) for the full walkthrough.
+
+## When to use Crucible
+
+Crucible is a good fit when you need:
+
+- **Governed agent execution** — every state transition, tool call, and delegation is verified and authorized, not just logged
+- **Multi-agent orchestration** — coordinators delegate to specialized sub-agents, each with their own model and system prompt
+- **Sandboxed tool execution** — agents run bash, edit files, and grep codebases inside Modal containers without host access
+- **Full observability** — the event feed captures every LLM call, tool result, and delegation with token counts and timing
+- **Declarative configuration** — agents, environments, and their relationships are entities you create and query, not code you deploy
+
+## Session lifecycle
+
+Sessions follow a governed five-state lifecycle:
 
 ```
-Rescheduling ──▶ Running ◀──▶ Idle
-                   │            │
-                   │            ├──▶ Rescheduling
-                   │            ├──▶ Terminated
-                   ▼            ▼
-               Terminated ◀────┘
-                   │
-                   ▼
-                Archived (terminal)
+Rescheduling ──► Running ◄──► Idle ──► Terminated ──► Archived
 ```
 
-**Key fields:** `AgentId`, `EnvironmentId`, `Status`, `Title`, plus
-usage counters (`InputTokens`, `OutputTokens`, etc.).
+| Transition | Action | When |
+|-----------|--------|------|
+| Rescheduling → Running | `StartSession` | Agent begins processing |
+| Running → Idle | `IdleSession` | Agent finishes a turn |
+| Idle → Running | `ResumeSession` | New user message arrives |
+| Idle → Terminated | `TerminateSession` | Session ends |
+| Terminated → Archived | `ArchiveSession` | Cleanup |
 
-**Bound actions:** `StartSession`, `IdleSession`, `ResumeSession`,
-`RescheduleSession`, `TerminateSession`, `ArchiveSession`.
+These are bound actions enforced by Temper's state machine — not arbitrary status fields.
 
-The agent loop is driven by the **sidecar** (`crucible-chat watch`),
-which polls the event feed, detects new `user.message` events, calls
-the LLM, executes tools, and writes response events. The sidecar
-calls `StartSession`/`ResumeSession` to enter Running, and
-`IdleSession` when done.
+## Tools
 
-### Session Events
-
-**SessionEvents** are the append-only event log for a session. Every
-user message, agent response, tool call, tool result, and
-observability span is a SessionEvent row.
-
-Crucible supports **24 event kinds** across four groups:
-
-| Group | Kinds |
-| ----- | ----- |
-| **User** | `user.message`, `user.interrupt`, `user.tool_confirmation`, `user.custom_tool_result` |
-| **Agent** | `agent.message`, `agent.thinking`, `agent.tool_use`, `agent.tool_result`, `agent.custom_tool_use`, `agent.mcp_tool_use`, `agent.mcp_tool_result`, `agent.thread_context_compacted`, `agent.thread_message_sent`, `agent.thread_message_received` |
-| **Session** | `session.status_running`, `session.status_idle`, `session.status_rescheduled`, `session.status_terminated`, `session.deleted`, `session.error`, `session.thread_created`, `session.thread_idle` |
-| **Span** | `span.model_request_start`, `span.model_request_end` |
-
-Each event has a `Sequence` (monotonic), `Kind`, `Content` (JSON
-blob), and kind-specific scalar columns (`ToolName`, `StopReason`,
-`ModelInputTokens`, etc.) enforced by field invariants.
-
-### Session Resources
-
-**SessionResources** attach external resources to a session:
-
-| Kind | Description |
-| ---- | ----------- |
-| `github_repository` | A Git repo (requires `Url`) |
-| `file` | A file reference (requires `FileId`) |
-| `memory_store` | A memory store (requires `MemoryStoreId`, optional `Access` and `Prompt`) |
-
-### Memory Stores
-
-**Memory Stores** are workspace-scoped collections of text documents
-that persist across sessions. When attached to a session, the agent
-can read and write memories to build up durable knowledge.
-
-**Entities:**
-- `MemoryStore` — named collection (Active → Archived)
-- `Memory` — text document at a file-like `Path` (e.g., `/preferences/formatting.md`), up to 100KB
-- `MemoryVersion` — immutable audit record of every mutation (Active → Redacted via `RedactVersion`)
-
-**Version operations:** `created`, `modified`, `deleted`.
-
-**Redaction:** `RedactVersion` clears content fields while preserving
-audit metadata (for compliance — leaked secrets, PII, GDPR).
-
-### Tools
-
-Crucible supports **6 built-in tools** from Anthropic's agent toolset:
+Agents have access to six built-in tools:
 
 | Tool | Description |
-| ---- | ----------- |
-| `bash` | Execute a bash command |
-| `read` | Read a file (with line numbers, offset, limit) |
-| `write` | Write a file (creates parent directories) |
-| `edit` | Find-and-replace in a file (must be unique match) |
-| `glob` | File pattern matching |
-| `grep` | Regex text search |
+|------|-------------|
+| **bash** | Run shell commands |
+| **read** | Read file contents with line numbers |
+| **write** | Create or overwrite files |
+| **edit** | Find-and-replace within a file |
+| **glob** | Find files by pattern |
+| **grep** | Search file contents by regex |
 
-For **Local** environments, tools execute directly on the host via
-the sidecar process. For **Modal** environments, the tool server
-(`modal_bridge/server.py`) proxies tool calls into the Modal sandbox.
+Where tools execute depends on the environment:
 
-Two additional Anthropic tools (`web_fetch`, `web_search`) are not
-yet implemented.
+- **Local** — directly on the host machine
+- **Modal** — inside a cloud sandbox, provisioned on first use. The agent never sees infrastructure credentials.
 
-### Multi-Agent (Callable Agents + Threads)
+## Multi-agent orchestration
 
-Crucible supports **multi-agent delegation** at the spec level. A
-coordinator agent can delegate work to callable agents, each running
-in its own session thread with an isolated context window.
-
-**Entities:**
-- `CallableAgent` — child of ManagedAgent, declares which agents the coordinator can delegate to. Requires `CalleeAgentId` and optional `CalleeAgentVersion`.
-- `SessionThread` — child of Session, represents a sub-agent execution thread. Lifecycle: Running → Idle ↔ Running → Terminated.
-
-**Event kinds** (4 thread-specific):
-- `session.thread_created` — a delegation thread was spawned
-- `session.thread_idle` — a thread finished its current work
-- `agent.thread_message_sent` — coordinator sent a message to a sub-agent
-- `agent.thread_message_received` — coordinator received a result
-
-Events carry `SessionThreadId` to scope them to specific threads.
-Field invariants enforce that thread events always have
-`SessionThreadId` set.
-
-> **Note:** The spec surface is complete but the sidecar agent loop
-> does not yet implement multi-agent orchestration (dispatching to
-> callable agents, managing threads). This is a follow-up.
-
-### Cron Scheduling
-
-**SessionSchedules** trigger agent sessions on a time basis. A
-`CrucibleScheduler` heartbeat entity periodically checks active
-schedules and fires the `crucible_cron_trigger` WASM module, which
-posts a `user.message` to the target session. The sidecar `watch`
-picks it up and drives the turn — the scheduler doesn't know about
-LLMs or tools.
-
-**Entities:**
-- `SessionSchedule` — cron definition (Draft → Active → Paused → Expired) with `CronExpression`, `MessageTemplate`, and template variables (`{{now}}`, `{{run_count}}`, `{{last_result}}`)
-- `CrucibleScheduler` — per-tenant heartbeat (Idle ↔ Checking loop) that queries active schedules and fires due ones
-
-**WASM modules** (3, uploaded at runtime):
-- `crucible_cron_trigger` — template substitution + POST user.message
-- `crucible_scheduler_check` — query active schedules, dispatch Trigger
-- `crucible_scheduler_heartbeat` — wait N seconds, re-trigger check
-
----
-
-## Entity Relationship Diagram
+A coordinator agent delegates work to sub-agents, each running in an isolated thread:
 
 ```
-MemoryStore ◄─── Memory ◄─── MemoryVersion
-                   ▲
-                   │ (via SessionResource)
-                   │
-Environment ◄─── Session ──▶ ManagedAgent
-     │              │              │
-     ├── AllowedHost│              ├── AgentTool ──▶ AgentToolConfig
-     └── Package    │              ├── AgentMcpServer
-                    │              ├── AgentSkill
-                    ├── SessionResource    ├── AgentVersion
-                    ├── SessionEvent       └── CallableAgent
-                    ├── SessionThread
-                    └── SessionSchedule ◄── CrucibleScheduler (heartbeat)
+User message
+  └─► Coordinator (LLM call)
+        └─► delegate_to_agent("code-reviewer", "Review this file")
+              └─► Thread created
+                    └─► Sub-agent (LLM call)
+                          └─► bash("python -m pytest tests/")
+                          └─► returns findings
+              └─► Result flows back
+        └─► Coordinator (LLM call)
+              └─► Synthesizes final response
 ```
 
----
+Sub-agents get their own system prompt and model. They share the session's environment — if it's Modal, their tools execute in the same sandbox. The event feed records every step with thread-scoped sequencing.
 
-## Deliberate Divergences from Anthropic
+Define the delegation graph by creating `CallableAgent` entities:
 
-| Area | Anthropic | Crucible |
-| ---- | --------- | -------- |
-| Transport | REST with nested paths | OData with flat entity sets |
-| Config | Nested JSON objects | Flattened to scalar CSDL columns |
-| Metadata | `map[string]string` | `Edm.String` holding JSON |
-| Packages | 6 parallel arrays (`pip`, `npm`, etc.) | `EnvironmentPackage` child entity |
-| Allowed hosts | `string[]` inline | `EnvironmentAllowedHost` child entity |
-| Agent name | `Agent` | `ManagedAgent` (Temper owns `Agent`) |
-| Agent loop | Server-side (SSE streaming) | Sidecar polling (`crucible-chat watch`) |
-| Session archive | Any non-archived → Archived | Requires `TerminateSession` first |
-| Event batch POST | `POST /sessions/{id}/events` array | Individual POSTs to `/tdata/SessionEvents` |
-| SSE streaming | `GET /sessions/{id}/stream` | Not supported — poll with `$filter` |
-| State drivers | Status events drive lifecycle | Bound actions drive lifecycle |
-| Memory stores | Nested paths (`/stores/{id}/memories`) | Flat: `/tdata/Memories` with `MemoryStoreId` FK |
-| Cron scheduling | Not in Anthropic API | Crucible-specific via WASM heartbeat loop |
+```python
+await temper.create('CallableAgent', {
+    'AgentId': coordinator['entity_id'],
+    'CalleeAgentId': reviewer['entity_id']
+})
+```
 
----
+## Event kinds
 
-## Related ADRs
+Everything is recorded as a `SessionEvent` with one of 20+ kinds:
 
-| ADR | Topic |
-| --- | ----- |
-| [0041](../../docs/adrs/0041-ioa-field-invariants.md) | Field invariants + cross-invariant grammar |
-| [0042](../../docs/adrs/0042-crucible-reference-app.md) | Crucible design + Phase 0 (Environment) |
-| [0043](../../docs/adrs/0043-crucible-agents-slice.md) | Phase 1 (ManagedAgent + children) |
-| [0044](../../docs/adrs/0044-crucible-sessions-slice.md) | Phase 2 (Session lifecycle) |
-| [0045](../../docs/adrs/0045-crucible-session-events-full-coverage.md) | Phase 3 (20-kind event log) |
-| [0046](../../docs/adrs/0046-crucible-agent-loop-phase-4.md) | Phase 4 (agent loop + crucible-chat) |
+| Group | Kinds | Purpose |
+|-------|-------|---------|
+| **User** | `user.message`, `user.tool_confirmation`, `user.hard_limit_message`, `user.tool_result` | User input |
+| **Agent** | `agent.message`, `agent.thinking`, `agent.tool_use`, `agent.tool_result`, `agent.mcp_tool_use`, `agent.thread_message_sent`, `agent.thread_message_received` | Agent actions |
+| **Session** | `session.status_*`, `session.thread_created`, `session.thread_idle`, `session.error` | Lifecycle pulses |
+| **Span** | `span.model_request_start`, `span.model_request_end` | LLM call observability with token counts |
+
+Query the event feed for any session:
+
+```bash
+curl '/tdata/SessionEvents?$filter=SessionId eq "<id>"&$orderby=Sequence asc'
+```
+
+## Governance
+
+Every entity in Crucible is governed by Temper's verification and authorization stack:
+
+- **State machines** — session lifecycle, thread lifecycle, and entity status transitions are declared in IOA specs and enforced at runtime
+- **Field invariants** — per-kind required fields, enum validations, and conditional constraints are checked on every write
+- **Cross-invariants** — referential integrity rules (e.g., sessions require non-archived agents) are enforced across entity boundaries
+- **Cedar policies** — fine-grained authorization controls who can create, read, and invoke actions on entities
+- **Verification cascade** — L0 through L3 (symbolic, model checking, simulation, property tests) proves spec correctness before deployment
+
+## Supported providers
+
+The agent loop works with any LLM through two provider interfaces:
+
+| Provider | Config | Examples |
+|----------|--------|----------|
+| **Anthropic** (default) | `ANTHROPIC_API_KEY` | Claude Sonnet, Opus, Haiku |
+| **OpenAI-compatible** | `OPENAI_API_KEY` + `OPENAI_BASE_URL` | GPT-4o, Fireworks, Together, Ollama |
+| **Mock** | `CRUCIBLE_RESPONDER_MODE=mock` | Deterministic echo — no API key needed |
+
+## Key differences from Anthropic's Managed Agents
+
+| | Anthropic Managed Agents | Crucible |
+|---|---|---|
+| **Runs on** | Anthropic's cloud | Your infrastructure (via Temper) |
+| **Transport** | REST with nested paths | OData with flat entity sets |
+| **Agent loop** | Server-side, SSE streaming | Client-side sidecar, polling |
+| **Authorization** | API keys | Cedar policies with entity-level granularity |
+| **Verification** | None (trust the implementation) | 4-level cascade proves spec correctness |
+| **Multi-agent** | Research preview | Fully implemented with thread isolation |
+| **Tool execution** | Anthropic containers | Local or Modal sandboxes |
+| **State management** | Implicit | Explicit state machines with bound actions |
+
+## Learn more
+
+- [Quickstart](QUICKSTART.md) — create your first agent session end-to-end
+- [Architecture](ARCHITECTURE.md) — how it works under the hood
+- [Live Agent Walkthrough](../LIVE_AGENT_WALKTHROUGH.md) — captured session against a real LLM
+- [Multi-Agent Test Findings](../MULTI_AGENT_TEST_FINDINGS.md) — delegation + Modal sandbox results

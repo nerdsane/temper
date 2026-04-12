@@ -106,7 +106,12 @@ pub async fn respond<M: Model>(
     // ------------------------------------------------------------------
     // 1b. Determine tool routing from environment ConfigType.
     // ------------------------------------------------------------------
-    let tool_router = match temper.get_environment(&session.environment_id).await {
+    let env_result = temper.get_environment(&session.environment_id).await;
+    match &env_result {
+        Ok(env) => eprintln!("[respond] Environment {} ConfigType={}", env.id, env.config_type),
+        Err(e) => eprintln!("[respond] Failed to get environment {}: {}", session.environment_id, e),
+    }
+    let tool_router = match env_result {
         Ok(env) if env.config_type == "Modal" => {
             let url = std::env::var("CRUCIBLE_TOOL_SERVER_URL")
                 .unwrap_or_else(|_| DEFAULT_TOOL_SERVER_URL.to_string());
@@ -324,7 +329,7 @@ pub async fn respond<M: Model>(
                         )
                         .await
                     } else {
-                        route_tool_call(&tool_router, name, input).await
+                        route_tool_call(&tool_router, temper, name, input).await
                     };
 
                     // Emit agent.tool_result event.
@@ -521,6 +526,7 @@ async fn emit_model_request_end(
 /// Modal environments route through the Python tool server.
 async fn route_tool_call(
     router: &ToolRouter,
+    _temper: &TemperClient,
     name: &str,
     args: &serde_json::Value,
 ) -> tools::ToolResult {
@@ -953,7 +959,7 @@ async fn respond_thread<M: Model>(
             for block in &response.content {
                 if let ContentBlock::ToolUse { id, name, input } = block {
                     // Sub-agents cannot delegate — route via tool router.
-                    let result = route_tool_call(tool_router, name, input).await;
+                    let result = route_tool_call(tool_router, temper, name, input).await;
 
                     let tr_ev = SessionEventRow {
                         id: event_id(session_id, *next_sequence),
@@ -1271,7 +1277,7 @@ fn blank_event() -> SessionEventRow {
 /// Format a UTC timestamp as RFC-3339 with millisecond precision.
 /// Kept as a tiny inline implementation to avoid pulling `chrono`
 /// into the crate just for one format string.
-fn now_rfc3339() -> String {
+pub fn now_rfc3339() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let d = SystemTime::now()
         .duration_since(UNIX_EPOCH)

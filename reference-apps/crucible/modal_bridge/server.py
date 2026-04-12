@@ -42,6 +42,9 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+import json
+from datetime import datetime, timezone
+
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -484,7 +487,15 @@ async def health():
 
 @app.post("/tools/{tool_name}", response_model=ToolResponse)
 async def handle_tool(tool_name: str, body: ToolRequest):
-    """Execute a tool, routing to Local or Modal based on environment ConfigType."""
+    """Execute a tool, routing to Local or Modal based on environment ConfigType.
+    Memory tools always go through Temper OData (no sandbox needed)."""
+
+    # Memory + system tools bypass Local/Modal routing — they talk to Temper directly.
+    if tool_name.startswith("memory_"):
+        return await _handle_memory_tool(tool_name, body.arguments)
+    if tool_name == "trigger_session":
+        return await _trigger_session(body.arguments)
+
     config_type = "Local"
     sandbox_id = None
 
@@ -512,6 +523,206 @@ async def handle_tool(tool_name: str, body: ToolRequest):
         if handler is None:
             return ToolResponse(output=f"unknown tool: {tool_name}", is_error=True)
         return handler(body.arguments)
+
+
+# ---------------------------------------------------------------------------
+# Memory tools — always route through Temper OData, never a sandbox
+# ---------------------------------------------------------------------------
+
+
+async def _handle_memory_tool(tool_name: str, args: dict) -> ToolResponse:
+    """Execute a memory tool against Temper's OData API."""
+    try:
+        if tool_name == "memory_list":
+            return await _memory_list(args)
+        elif tool_name == "memory_read":
+            return await _memory_read(args)
+        elif tool_name == "memory_write":
+            return await _memory_write(args)
+        elif tool_name == "memory_search":
+            return await _memory_search(args)
+        else:
+            return ToolResponse(output=f"unknown memory tool: {tool_name}", is_error=True)
+    except Exception as e:
+        return ToolResponse(output=f"{tool_name} error: {e}", is_error=True)
+
+
+async def _memory_list(args: dict) -> ToolResponse:
+    store_id = args.get("memory_store_id", "")
+    path_prefix = args.get("path_prefix", "")
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{TEMPER_API_URL}/tdata/Memories",
+            params={"$filter": f"MemoryStoreId eq '{store_id}'"},
+            headers={"X-Tenant-Id": TEMPER_TENANT},
+        )
+    if resp.status_code != 200:
+        return ToolResponse(output=f"memory_list failed: HTTP {resp.status_code}", is_error=True)
+    data = resp.json()
+    memories = data.get("value", [])
+    lines = []
+    for m in memories:
+        f = m.get("fields", {})
+        path = f.get("Path", "")
+        if path_prefix and not path.startswith(path_prefix):
+            continue
+        size = f.get("SizeBytes", 0) or 0
+        mid = m.get("entity_id", f.get("Id", ""))
+        lines.append(f"- {path} ({size} bytes) [id: {mid}]")
+    if not lines:
+        return ToolResponse(output="No memories found.")
+    return ToolResponse(output=f"{len(lines)} memories:\n" + "\n".join(lines))
+
+
+async def _memory_read(args: dict) -> ToolResponse:
+    mem_id = args.get("memory_id", "")
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{TEMPER_API_URL}/tdata/Memories('{mem_id}')",
+            headers={"X-Tenant-Id": TEMPER_TENANT},
+        )
+    if resp.status_code != 200:
+        return ToolResponse(output=f"memory_read failed: HTTP {resp.status_code}", is_error=True)
+    data = resp.json()
+    f = data.get("fields", {})
+    path = f.get("Path", "?")
+    content = f.get("Content", "")
+    return ToolResponse(output=f"Path: {path}\nContent:\n{content}")
+
+
+async def _memory_write(args: dict) -> ToolResponse:
+    store_id = args.get("memory_store_id", "")
+    path = args.get("path", "")
+    content = args.get("content", "")
+    size = len(content)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+    # Check if a memory at this path already exists
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{TEMPER_API_URL}/tdata/Memories",
+            params={"$filter": f"MemoryStoreId eq '{store_id}'"},
+            headers={"X-Tenant-Id": TEMPER_TENANT},
+        )
+    existing = None
+    if resp.status_code == 200:
+        for m in resp.json().get("value", []):
+            if m.get("fields", {}).get("Path") == path:
+                existing = m
+                break
+
+    async with httpx.AsyncClient() as client:
+        if existing:
+            # Update existing memory
+            mem_id = existing.get("entity_id", existing.get("fields", {}).get("Id", ""))
+            resp = await client.patch(
+                f"{TEMPER_API_URL}/tdata/Memories('{mem_id}')",
+                headers={"X-Tenant-Id": TEMPER_TENANT, "Content-Type": "application/json"},
+                json={"Content": content, "SizeBytes": size, "UpdatedAt": now},
+            )
+            if resp.status_code >= 400:
+                return ToolResponse(output=f"memory_write update failed: HTTP {resp.status_code} {resp.text[:200]}", is_error=True)
+            return ToolResponse(output=f"Updated memory at {path} ({size} bytes)")
+        else:
+            # Create new memory
+            slug = path.strip("/").replace("/", "-")
+            mem_id = f"mem-{slug}"
+            resp = await client.post(
+                f"{TEMPER_API_URL}/tdata/Memories",
+                headers={"X-Tenant-Id": TEMPER_TENANT, "Content-Type": "application/json"},
+                json={
+                    "id": mem_id,
+                    "MemoryStoreId": store_id,
+                    "Path": path,
+                    "Content": content,
+                    "SizeBytes": size,
+                    "CreatedAt": now,
+                    "UpdatedAt": now,
+                },
+            )
+            if resp.status_code >= 400:
+                return ToolResponse(output=f"memory_write create failed: HTTP {resp.status_code} {resp.text[:200]}", is_error=True)
+            return ToolResponse(output=f"Created memory at {path} ({size} bytes)")
+
+
+async def _memory_search(args: dict) -> ToolResponse:
+    store_id = args.get("memory_store_id", "")
+    query = args.get("query", "").lower()
+
+    # List all memories, then read each to search content
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{TEMPER_API_URL}/tdata/Memories",
+            params={"$filter": f"MemoryStoreId eq '{store_id}'"},
+            headers={"X-Tenant-Id": TEMPER_TENANT},
+        )
+    if resp.status_code != 200:
+        return ToolResponse(output=f"memory_search failed: HTTP {resp.status_code}", is_error=True)
+
+    results = []
+    for m in resp.json().get("value", []):
+        f = m.get("fields", {})
+        mid = m.get("entity_id", f.get("Id", ""))
+        path = f.get("Path", "")
+        # Read full content
+        async with httpx.AsyncClient() as client:
+            r2 = await client.get(
+                f"{TEMPER_API_URL}/tdata/Memories('{mid}')",
+                headers={"X-Tenant-Id": TEMPER_TENANT},
+            )
+        if r2.status_code == 200:
+            content = r2.json().get("fields", {}).get("Content", "")
+            if query in content.lower():
+                preview = content[:200] + ("..." if len(content) > 200 else "")
+                results.append(f"- {path} [id: {mid}]\n  {preview}")
+
+    if not results:
+        return ToolResponse(output=f"No memories matching '{query}' found.")
+    return ToolResponse(output=f"{len(results)} matches for '{query}':\n\n" + "\n\n".join(results))
+
+
+async def _trigger_session(args: dict) -> ToolResponse:
+    """Post a user.message to any session, triggering the agent loop."""
+    session_id = args.get("session_id", "")
+    message_text = args.get("message", "")
+    if not session_id or not message_text:
+        return ToolResponse(output="trigger_session requires session_id and message", is_error=True)
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+    # Get next sequence
+    async with httpx.AsyncClient() as c:
+        resp = await c.get(
+            f"{TEMPER_API_URL}/tdata/SessionEvents",
+            params={"$filter": f"SessionId eq '{session_id}'", "$orderby": "Sequence desc", "$top": "1"},
+            headers={"X-Tenant-Id": TEMPER_TENANT},
+        )
+    max_seq = -1
+    if resp.status_code == 200:
+        values = resp.json().get("value", [])
+        if values:
+            max_seq = values[0]["fields"].get("Sequence", -1)
+    seq = max_seq + 1
+
+    # Post user.message
+    event = {
+        "id": f"ev-trigger-{session_id}-{seq}",
+        "SessionId": session_id,
+        "Sequence": seq,
+        "Kind": "user.message",
+        "Content": json.dumps({"blocks": [{"type": "text", "text": message_text}]}),
+        "CreatedAt": now,
+        "ProcessedAt": now,
+    }
+    async with httpx.AsyncClient() as c:
+        resp = await c.post(
+            f"{TEMPER_API_URL}/tdata/SessionEvents",
+            headers={"X-Tenant-Id": TEMPER_TENANT, "Content-Type": "application/json"},
+            json=event,
+        )
+    if resp.status_code >= 400:
+        return ToolResponse(output=f"trigger_session failed: HTTP {resp.status_code}", is_error=True)
+    return ToolResponse(output=f"Triggered session {session_id} with message (seq={seq}). The agent will process it shortly.")
 
 
 # ---------------------------------------------------------------------------
