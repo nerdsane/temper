@@ -3,6 +3,7 @@
 mod bindings;
 mod common;
 pub(crate) mod constraints;
+mod filter_sql;
 mod read;
 mod read_support;
 mod response;

@@ -21,6 +21,7 @@ mod blobs;
 mod constraints;
 mod event_store;
 mod evolution;
+pub mod field_index;
 mod instrumentation;
 pub mod ots;
 mod policy;
@@ -244,6 +245,17 @@ impl TursoEventStore {
 
         // Blob storage — content-addressed binary objects for TemperFS.
         conn.execute(schema::CREATE_BLOBS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+
+        // Entity field index — EAV table for OData filter push-down.
+        conn.execute(schema::CREATE_ENTITY_FIELD_INDEX_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_ENTITY_FIELD_INDEX_LOOKUP, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_ENTITY_FIELD_INDEX_STATUS, ())
             .await
             .map_err(storage_error)?;
 
