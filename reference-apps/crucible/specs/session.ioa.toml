@@ -1,0 +1,139 @@
+# Session Entity — I/O Automaton Specification
+#
+# Crucible Session maps Anthropic's Beta Managed Agents Sessions API onto
+# Temper's OData surface (see ADR-0044). Unlike Environment and ManagedAgent
+# (single Active ↔ Archived), Session is the first Crucible entity with a
+# real multi-state lifecycle:
+#
+#     Rescheduling ─┐
+#                  ▼
+#               Running ──(idle)──▶ Idle ──(resume)──▶ Running
+#                  │                 │
+#                  │                 └──(reschedule)──▶ Rescheduling
+#                  │                 │
+#                  │                 └──(terminate)──▶ Terminated
+#                  │                                     │
+#                  └──(terminate)──▶ Terminated ◀────────┘
+#                                       │
+#                                       └──(archive)──▶ Archived (terminal)
+#
+# Session is a child of both ManagedAgent and Environment. Cross-invariants in
+# cross-invariants.toml gate create on parent.Status not in ["Archived"].
+#
+# The agent loop is driven by a sidecar process (`crucible-chat watch`)
+# that polls the event feed for new user.message events, calls the LLM,
+# executes tools, and writes response events back. The sidecar calls
+# StartSession/ResumeSession to enter Running, and IdleSession when done.
+#
+# ## Anthropic → Crucible endpoint map (see walkthrough for verified shapes)
+#
+#   POST   /v1/sessions                 → POST   /tdata/Sessions
+#   GET    /v1/sessions                 → GET    /tdata/Sessions
+#   GET    /v1/sessions/{id}            → GET    /tdata/Sessions('<id>')
+#   POST   /v1/sessions/{id}            → PATCH  /tdata/Sessions('<id>')
+#   DELETE /v1/sessions/{id}            → DELETE /tdata/Sessions('<id>')
+#   POST   /v1/sessions/{id}/archive    → POST   /tdata/Sessions('<id>')/Temper.Crucible.ArchiveSession
+#   GET    /v1/sessions/{id}/events     → GET    /tdata/SessionEvents?$filter=SessionId eq '<id>'
+#
+# ## Divergence: Archive requires Terminated
+#
+# Anthropic's `POST /v1/sessions/{id}/archive` accepts any non-archived
+# status. Crucible requires an explicit `TerminateSession` first because the
+# state machine says `ArchiveSession` is only valid from `Terminated`. This
+# is stricter than upstream and documented in ADR-0044 non-goals.
+#
+# ## Cross-field validation
+#
+#   StatusMustBeKnown              Status must be one of the five documented
+#                                  values (Rescheduling/Running/Idle/
+#                                  Terminated/Archived).
+#   TerminatedRequiresTerminatedAt when Status=Terminated, TerminatedAt is set.
+#   ArchivedRequiresArchivedAt     when Status=Archived, ArchivedAt is set.
+
+[automaton]
+name = "Session"
+states = ["Rescheduling", "Running", "Idle", "Terminated", "Archived"]
+initial = "Rescheduling"
+
+# --- Actions ---
+# No effects — the sidecar polls and drives the agent loop externally.
+
+[[action]]
+name = "StartSession"
+kind = "input"
+from = ["Rescheduling"]
+to = "Running"
+hint = "Transition from Rescheduling to Running. The sidecar calls this when it detects a new user message."
+
+[[action]]
+name = "IdleSession"
+kind = "input"
+from = ["Running"]
+to = "Idle"
+hint = "Mark the session idle when the agent yields."
+
+[[action]]
+name = "ResumeSession"
+kind = "input"
+from = ["Idle"]
+to = "Running"
+hint = "Resume an idle session. The sidecar calls this when a new user message arrives on an Idle session."
+
+[[action]]
+name = "RescheduleSession"
+kind = "input"
+from = ["Running", "Idle"]
+to = "Rescheduling"
+hint = "Pause the session and mark it for rehoming onto a new environment."
+
+[[action]]
+name = "TerminateSession"
+kind = "input"
+from = ["Rescheduling", "Running", "Idle"]
+to = "Terminated"
+hint = "Terminate the session. Mirrors Anthropic's implicit cleanup semantics. Sets TerminatedAt."
+
+[[action]]
+name = "ArchiveSession"
+kind = "input"
+from = ["Terminated"]
+to = "Archived"
+hint = "Archive a terminated session. Mirrors Anthropic's POST /v1/sessions/{id}/archive but requires TerminateSession first. Archived is terminal."
+
+[[action]]
+name = "SessionArchivedEvent"
+kind = "output"
+hint = "Emitted when the session is archived."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation (ADR-0041) ---
+
+[[field_invariant]]
+name = "StatusMustBeKnown"
+when = { not = { field = "Status", absent = true } }
+require = { any_of = [
+  { field = "Status", equals = "Rescheduling" },
+  { field = "Status", equals = "Running" },
+  { field = "Status", equals = "Idle" },
+  { field = "Status", equals = "Terminated" },
+  { field = "Status", equals = "Archived" },
+]}
+message = "Session.Status must be Rescheduling, Running, Idle, Terminated, or Archived"
+
+[[field_invariant]]
+name = "TerminatedRequiresTerminatedAt"
+when = { field = "Status", equals = "Terminated" }
+require = { not = { field = "TerminatedAt", absent = true } }
+message = "Terminated sessions must have TerminatedAt set"
+
+[[field_invariant]]
+name = "ArchivedRequiresArchivedAt"
+when = { field = "Status", equals = "Archived" }
+require = { not = { field = "ArchivedAt", absent = true } }
+message = "Archived sessions must have ArchivedAt set"

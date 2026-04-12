@@ -1,0 +1,106 @@
+# SessionResource Entity — I/O Automaton Specification
+#
+# Child entity of Session representing one row in the `resources[]`
+# collection of Anthropic's Beta Managed Agents Sessions API. `resources`
+# is a type-tagged sum with two variants:
+#
+#   github_repository — requires `Url`; may carry `CheckoutKind` + `CheckoutRef`
+#   file              — requires `FileId`; forbids github fields
+#
+# Crucible collapses the sum into a single table with a `Kind` discriminator
+# and uses field invariants to enforce the shape of each branch, mirroring
+# AgentTool's approach (see ADR-0043 Sub-Decision 5).
+#
+# A cross-invariant in cross-invariants.toml gates child writes on the
+# parent Session's Status (non-Archived, non-Terminated).
+
+[automaton]
+name = "SessionResource"
+states = ["Active"]
+initial = "Active"
+
+# --- Cross-field validation (ADR-0041) ---
+
+[[field_invariant]]
+name = "KindMustBeKnown"
+when = { not = { field = "Kind", absent = true } }
+require = { any_of = [
+  { field = "Kind", equals = "github_repository" },
+  { field = "Kind", equals = "file" },
+  { field = "Kind", equals = "memory_store" },
+]}
+message = "SessionResource.Kind must be `github_repository`, `file`, or `memory_store`"
+
+[[field_invariant]]
+name = "GithubResourceRequiresUrl"
+when = { field = "Kind", equals = "github_repository" }
+require = { not = { field = "Url", empty = true } }
+message = "github_repository resources must have a non-empty Url"
+
+[[field_invariant]]
+name = "GithubResourceForbidsFileId"
+when = { field = "Kind", equals = "github_repository" }
+require = { field = "FileId", absent = true }
+message = "github_repository resources must not set FileId"
+
+[[field_invariant]]
+name = "FileResourceRequiresFileId"
+when = { field = "Kind", equals = "file" }
+require = { not = { field = "FileId", empty = true } }
+message = "file resources must have a non-empty FileId"
+
+[[field_invariant]]
+name = "FileResourceForbidsGithubFields"
+when = { field = "Kind", equals = "file" }
+require = { all_of = [
+  { field = "Url", absent = true },
+  { field = "CheckoutKind", absent = true },
+  { field = "CheckoutRef", absent = true },
+]}
+message = "file resources must not set Url/CheckoutKind/CheckoutRef"
+
+[[field_invariant]]
+name = "CheckoutKindMustBeKnown"
+when = { not = { field = "CheckoutKind", absent = true } }
+require = { any_of = [
+  { field = "CheckoutKind", equals = "branch" },
+  { field = "CheckoutKind", equals = "commit" },
+]}
+message = "SessionResource.CheckoutKind must be `branch` or `commit`"
+
+[[field_invariant]]
+name = "CheckoutRefRequiresCheckoutKind"
+when = { not = { field = "CheckoutRef", absent = true } }
+require = { not = { field = "CheckoutKind", absent = true } }
+message = "SessionResource.CheckoutRef requires CheckoutKind to be set"
+
+# --- memory_store kind ---
+
+[[field_invariant]]
+name = "MemoryStoreResourceRequiresMemoryStoreId"
+when = { field = "Kind", equals = "memory_store" }
+require = { not = { field = "MemoryStoreId", empty = true } }
+message = "memory_store resources must have a non-empty MemoryStoreId"
+
+[[field_invariant]]
+name = "MemoryStoreAccessMustBeKnown"
+when = { all_of = [
+  { field = "Kind", equals = "memory_store" },
+  { not = { field = "Access", absent = true } },
+]}
+require = { any_of = [
+  { field = "Access", equals = "read_write" },
+  { field = "Access", equals = "read_only" },
+]}
+message = "SessionResource.Access must be read_write or read_only"
+
+[[field_invariant]]
+name = "MemoryStoreResourceForbidsFileFields"
+when = { field = "Kind", equals = "memory_store" }
+require = { all_of = [
+  { field = "Url", absent = true },
+  { field = "CheckoutKind", absent = true },
+  { field = "CheckoutRef", absent = true },
+  { field = "FileId", absent = true },
+]}
+message = "memory_store resources must not set Url/CheckoutKind/CheckoutRef/FileId"

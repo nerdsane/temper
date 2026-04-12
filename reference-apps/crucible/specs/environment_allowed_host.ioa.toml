@@ -1,7 +1,7 @@
 # EnvironmentAllowedHost Entity — I/O Automaton Specification
 #
 # Child entity of Environment. Represents a single entry in the egress
-# allow-list for a Cloud environment running with `NetworkingType = Limited`.
+# allow-list for an environment running with `NetworkingType = Limited`.
 # Bound to the parent's lifecycle — when the parent archives or deletes, the
 # allowed host is cleaned up via the relation cascade.
 #

@@ -2,16 +2,30 @@
 <!--
   Temper Crucible Reference App
 
-  CSDL for a subset of Anthropic's Claude Managed Agents API. Phase 0
-  ships the `Environment` entity with full CRUD plus two child entities
-  (`EnvironmentAllowedHost`, `EnvironmentPackage`). See
-  `docs/adrs/0042-crucible-reference-app.md` for why each shape was chosen
-  and the deliberate divergences from the upstream API.
+  CSDL for a subset of Anthropic's Claude Managed Agents API.
 
-  Hard constraint: a `Local` environment cannot set any cloud-only
-  networking field. Enforced via the `[[field_invariant]]` rules in
-  `environment.ioa.toml` and the `[[invariant]]` rules in
-  `cross-invariants.toml`. Violations return 409 ConstraintViolation.
+  Phase 0 (ADR-0042) shipped the `Environment` entity with full CRUD plus
+  two child entities (`EnvironmentAllowedHost`, `EnvironmentPackage`).
+
+  Phase 1 (ADR-0043) adds the `ManagedAgent` entity and the five
+  supporting child/grandchild entities needed to model the full Beta
+  Managed Agents API (`AgentMcpServer`, `AgentSkill`, `AgentTool`,
+  `AgentToolConfig`, `AgentVersion`) plus the `ArchiveManagedAgent`
+  bound action. The parent entity is called `ManagedAgent` (not `Agent`)
+  because the Temper platform's Agent OS app owns the `Agent` type name
+  — see `managed_agent.ioa.toml` for the full rationale.
+
+  Hard constraint (Environment): a `Local` environment cannot set any
+  cloud-only networking field. Enforced via the `[[field_invariant]]`
+  rules in `environment.ioa.toml` and the `[[invariant]]` rules in
+  `cross-invariants.toml`.
+
+  Hard constraints (ManagedAgent): AgentTool has a `Kind` discriminator
+  and kind-specific field invariants enforce the shape of each variant.
+  Child writes are gated on parent ManagedAgent Status via parent-lookup
+  cross-invariants in `cross-invariants.toml`.
+
+  Violations return 409 ConstraintViolation.
 -->
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
@@ -52,8 +66,8 @@
         ConfigType is modeled as an Edm.String rather than an EnumType so
         `[[field_invariant]] when = { field = "ConfigType", equals = "Local" }`
         compares against the literal string stored in `initial_fields`.
-        The allowed values are `Local` and `Cloud`; `Byoc` is out of scope
-        for Phase 0 and not accepted by the field invariants.
+        The allowed values are `Local` and `Modal`; field invariants
+        enforce the shape of each variant.
       -->
 
       <!-- ============ Entity Types ============ -->
@@ -72,6 +86,15 @@
         <Property Name="AllowMcpServers" Type="Edm.Boolean"/>
         <Property Name="AllowPackageManagers" Type="Edm.Boolean"/>
         <Property Name="Metadata" Type="Edm.String"/>
+        <!-- Modal sandbox configuration (nullable — only set when ConfigType=Modal) -->
+        <Property Name="ModalImage" Type="Edm.String"/>
+        <Property Name="ModalCpu" Type="Edm.Double"/>
+        <Property Name="ModalMemory" Type="Edm.Int64"/>
+        <Property Name="ModalTimeout" Type="Edm.Int64"/>
+        <Property Name="ModalGpu" Type="Edm.String"/>
+        <Property Name="ModalWorkdir" Type="Edm.String"/>
+        <Property Name="ModalBlockNetwork" Type="Edm.Boolean"/>
+        <Property Name="SandboxId" Type="Edm.String"/>
         <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
         <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
         <Property Name="ArchivedAt" Type="Edm.DateTimeOffset"/>
@@ -88,7 +111,7 @@
         <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/environment.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
-                    String="An agent execution context. ConfigType is Local or Cloud; Local requires NetworkingType=Unrestricted and forbids AllowMcpServers/AllowPackageManagers."/>
+                    String="An agent execution context. ConfigType is Local or Modal. Local requires NetworkingType=Unrestricted and forbids AllowMcpServers/AllowPackageManagers. Modal provisions a remote sandbox via Modal.com and uses the ModalImage/ModalCpu/ModalMemory/ModalTimeout columns for configuration."/>
       </EntityType>
 
       <!-- EnvironmentAllowedHost -->
@@ -137,6 +160,464 @@
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/environment_package.cedar"/>
       </EntityType>
 
+      <!-- ============ ManagedAgent Entity Types (ADR-0043) ============ -->
+
+      <EnumType Name="ManagedAgentStatus">
+        <Member Name="Active" Value="0"/>
+        <Member Name="Archived" Value="1"/>
+      </EnumType>
+
+      <!--
+        Status, ModelSpeed, and the various tool/skill/server types are
+        modeled as `Edm.String` (not EnumType) so `[[field_invariant]]`
+        rules can compare against the literal string payload the client
+        POSTs. Allowed values are documented in the IOA spec for each
+        entity and enforced by the field invariants.
+
+        The parent entity is `ManagedAgent` rather than `Agent` because
+        the Temper platform ships a built-in `Agent` entity via its
+        Agent OS app (`crates/temper-platform/src/specs/agent.ioa.toml`)
+        which gets merged into every tenant on boot. Naming the Crucible
+        parent `Agent` would cause the platform spec to silently hot-swap
+        Crucible's spec at startup. See `managed_agent.ioa.toml`.
+      -->
+
+      <!-- ManagedAgent -->
+      <EntityType Name="ManagedAgent">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="Description" Type="Edm.String"/>
+        <Property Name="System" Type="Edm.String"/>
+        <Property Name="ModelId" Type="Edm.String" Nullable="false"/>
+        <Property Name="ModelSpeed" Type="Edm.String"/>
+        <Property Name="Metadata" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="Version" Type="Edm.Int32" Nullable="false"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="ArchivedAt" Type="Edm.DateTimeOffset"/>
+        <NavigationProperty Name="McpServers" Type="Collection(Temper.Crucible.AgentMcpServer)"/>
+        <NavigationProperty Name="Skills" Type="Collection(Temper.Crucible.AgentSkill)"/>
+        <NavigationProperty Name="Tools" Type="Collection(Temper.Crucible.AgentTool)"/>
+        <NavigationProperty Name="Versions" Type="Collection(Temper.Crucible.AgentVersion)"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+            <String>Archived</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/managed_agent.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="A managed agent. ModelSpeed (optional) must be `standard` or `fast`. Version is client-managed — increment on every PATCH. Archived is terminal."/>
+      </EntityType>
+
+      <!-- AgentMcpServer — child of ManagedAgent, mcp_servers[] rows -->
+      <EntityType Name="AgentMcpServer">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="AgentId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="Type" Type="Edm.String" Nullable="false"/>
+        <Property Name="Url" Type="Edm.String" Nullable="false"/>
+        <NavigationProperty Name="ManagedAgent" Type="Temper.Crucible.ManagedAgent" Nullable="false">
+          <ReferentialConstraint Property="AgentId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="AgentId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/agent_mcp_server.cedar"/>
+      </EntityType>
+
+      <!-- AgentSkill — child of ManagedAgent, skills[] rows -->
+      <EntityType Name="AgentSkill">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="AgentId" Type="Edm.String" Nullable="false"/>
+        <Property Name="SkillId" Type="Edm.String" Nullable="false"/>
+        <Property Name="SkillType" Type="Edm.String" Nullable="false"/>
+        <Property Name="SkillVersion" Type="Edm.String"/>
+        <NavigationProperty Name="ManagedAgent" Type="Temper.Crucible.ManagedAgent" Nullable="false">
+          <ReferentialConstraint Property="AgentId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="AgentId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/agent_skill.cedar"/>
+      </EntityType>
+
+      <!--
+        AgentTool — child of ManagedAgent with a `Kind` discriminator. Encodes the
+        three-branch sum type Anthropic exposes as `tools[]` (agent_toolset,
+        mcp_toolset, custom). Field invariants in `agent_tool.ioa.toml`
+        enforce the shape of each branch.
+      -->
+      <EntityType Name="AgentTool">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="AgentId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Kind" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String"/>
+        <Property Name="Description" Type="Edm.String"/>
+        <Property Name="InputSchema" Type="Edm.String"/>
+        <Property Name="McpServerName" Type="Edm.String"/>
+        <Property Name="DefaultEnabled" Type="Edm.Boolean"/>
+        <Property Name="DefaultPermissionPolicy" Type="Edm.String"/>
+        <NavigationProperty Name="ManagedAgent" Type="Temper.Crucible.ManagedAgent" Nullable="false">
+          <ReferentialConstraint Property="AgentId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Configs" Type="Collection(Temper.Crucible.AgentToolConfig)"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="AgentId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/agent_tool.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Kind is `agent_toolset`, `mcp_toolset`, or `custom`. `custom` requires Name/Description/InputSchema. `mcp_toolset` requires McpServerName. `agent_toolset` forbids all kind-specific fields."/>
+      </EntityType>
+
+      <!-- AgentToolConfig — grandchild of ManagedAgent (child of AgentTool) -->
+      <EntityType Name="AgentToolConfig">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="AgentToolId" Type="Edm.String" Nullable="false"/>
+        <Property Name="ConfigName" Type="Edm.String" Nullable="false"/>
+        <Property Name="Enabled" Type="Edm.Boolean" Nullable="false"/>
+        <Property Name="PermissionPolicy" Type="Edm.String" Nullable="false"/>
+        <NavigationProperty Name="AgentTool" Type="Temper.Crucible.AgentTool" Nullable="false">
+          <ReferentialConstraint Property="AgentToolId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="AgentToolId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/agent_tool_config.cedar"/>
+      </EntityType>
+
+      <!-- AgentVersion — client-managed snapshot -->
+      <EntityType Name="AgentVersion">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="AgentId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Version" Type="Edm.Int32" Nullable="false"/>
+        <Property Name="Snapshot" Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="ManagedAgent" Type="Temper.Crucible.ManagedAgent" Nullable="false">
+          <ReferentialConstraint Property="AgentId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="AgentId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/agent_version.cedar"/>
+      </EntityType>
+
+      <!-- ============ Session Entity Types (ADR-0044) ============ -->
+
+      <!--
+        Session maps Anthropic's Beta Managed Agents Sessions API onto
+        Crucible's OData surface. The lifecycle is the first Crucible
+        entity with a real multi-state machine:
+
+          Rescheduling → Running → Idle → Running
+                           │          │
+                           │          └→ Rescheduling
+                           │          └→ Terminated
+                           └────────────→ Terminated
+                                             └→ Archived (terminal)
+
+        Status is `Edm.String` (not an enum) so field invariants can compare
+        against the literal payload. Allowed values are enforced by the
+        `StatusMustBeKnown` field invariant in `session.ioa.toml`.
+
+        `stats` and `usage` are flattened to scalar columns (same reason as
+        ManagedAgent.ModelId/ModelSpeed — no ComplexType support).
+      -->
+
+      <!-- Session -->
+      <EntityType Name="Session">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="AgentId" Type="Edm.String" Nullable="false"/>
+        <Property Name="AgentVersion" Type="Edm.Int32"/>
+        <Property Name="EnvironmentId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Title" Type="Edm.String"/>
+        <Property Name="Metadata" Type="Edm.String"/>
+        <Property Name="VaultIds" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="ActiveSeconds" Type="Edm.Double"/>
+        <Property Name="DurationSeconds" Type="Edm.Double"/>
+        <Property Name="InputTokens" Type="Edm.Int64"/>
+        <Property Name="OutputTokens" Type="Edm.Int64"/>
+        <Property Name="CacheReadInputTokens" Type="Edm.Int64"/>
+        <Property Name="CacheCreation1hInputTokens" Type="Edm.Int64"/>
+        <Property Name="CacheCreation5mInputTokens" Type="Edm.Int64"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="TerminatedAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="ArchivedAt" Type="Edm.DateTimeOffset"/>
+        <NavigationProperty Name="ManagedAgent" Type="Temper.Crucible.ManagedAgent" Nullable="false">
+          <ReferentialConstraint Property="AgentId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Environment" Type="Temper.Crucible.Environment" Nullable="false">
+          <ReferentialConstraint Property="EnvironmentId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Resources" Type="Collection(Temper.Crucible.SessionResource)"/>
+        <NavigationProperty Name="Events" Type="Collection(Temper.Crucible.SessionEvent)"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Rescheduling</String>
+            <String>Running</String>
+            <String>Idle</String>
+            <String>Terminated</String>
+            <String>Archived</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Rescheduling"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/session.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="A managed agent session. Requires a pre-existing ManagedAgent and Environment. Lifecycle: Rescheduling → Running → Idle → Terminated → Archived. Archive requires TerminateSession first."/>
+      </EntityType>
+
+      <!--
+        SessionResource — child of Session with a `Kind` discriminator.
+        Encodes the two-branch sum Anthropic exposes as `resources[]`
+        (github_repository, file). Field invariants in
+        `session_resource.ioa.toml` enforce the shape of each branch.
+
+        Note: `authorization_token` from Anthropic's GitHub resource
+        params is intentionally omitted — Crucible never persists secrets.
+      -->
+      <EntityType Name="SessionResource">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="SessionId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Kind" Type="Edm.String" Nullable="false"/>
+        <Property Name="MountPath" Type="Edm.String"/>
+        <Property Name="Url" Type="Edm.String"/>
+        <Property Name="CheckoutKind" Type="Edm.String"/>
+        <Property Name="CheckoutRef" Type="Edm.String"/>
+        <Property Name="FileId" Type="Edm.String"/>
+        <!-- memory_store kind columns -->
+        <Property Name="MemoryStoreId" Type="Edm.String"/>
+        <Property Name="Access" Type="Edm.String"/>
+        <Property Name="Prompt" Type="Edm.String"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Session" Type="Temper.Crucible.Session" Nullable="false">
+          <ReferentialConstraint Property="SessionId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="SessionId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/session_resource.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Kind is `github_repository`, `file`, or `memory_store`. github_repository requires Url; file requires FileId; memory_store requires MemoryStoreId. Access is read_write or read_only."/>
+      </EntityType>
+
+      <!--
+        SessionEvent — append-only child of Session with a `Kind`
+        discriminator. Encodes the full 20-branch sum Anthropic exposes
+        as the `GET /v1/sessions/{id}/events` feed (ADR-0045). Queryable
+        attributes are hoisted to scalar columns; the full payload lives
+        in `Content` as an opaque JSON blob (same pattern as
+        AgentVersion.Snapshot).
+
+        Append-only semantics are enforced by the permissive Cedar stub
+        allowing POST but denying PATCH on this entity type.
+
+        Kind discriminator values (all dot notation, matching Anthropic):
+          user.message, user.interrupt, user.tool_confirmation,
+          user.custom_tool_result, agent.message, agent.thinking,
+          agent.custom_tool_use, agent.tool_use, agent.tool_result,
+          agent.mcp_tool_use, agent.mcp_tool_result,
+          agent.thread_context_compacted, session.status_running,
+          session.status_idle, session.status_rescheduled,
+          session.status_terminated, session.deleted, session.error,
+          span.model_request_start, span.model_request_end.
+      -->
+      <EntityType Name="SessionEvent">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="SessionId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Sequence" Type="Edm.Int64" Nullable="false"/>
+        <Property Name="Kind" Type="Edm.String" Nullable="false"/>
+        <Property Name="ProcessedAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="Content" Type="Edm.String"/>
+        <Property Name="ToolUseId" Type="Edm.String"/>
+        <Property Name="ToolName" Type="Edm.String"/>
+        <Property Name="McpServerName" Type="Edm.String"/>
+        <Property Name="IsError" Type="Edm.Boolean"/>
+        <Property Name="EvaluatedPermission" Type="Edm.String"/>
+        <Property Name="ConfirmationResult" Type="Edm.String"/>
+        <Property Name="DenyMessage" Type="Edm.String"/>
+        <!-- ADR-0045: disambiguate user.custom_tool_result / agent.mcp_tool_result from agent.tool_use / agent.tool_result. -->
+        <Property Name="CustomToolUseId" Type="Edm.String"/>
+        <Property Name="McpToolUseId" Type="Edm.String"/>
+        <!-- ADR-0045: session.status_idle stop_reason. StopReasonEventIds is a JSON array blob. -->
+        <Property Name="StopReason" Type="Edm.String"/>
+        <Property Name="StopReasonEventIds" Type="Edm.String"/>
+        <!-- ADR-0045: session.error variant. McpServerName is shared with agent.mcp_tool_use. -->
+        <Property Name="ErrorKind" Type="Edm.String"/>
+        <Property Name="ErrorMessage" Type="Edm.String"/>
+        <Property Name="RetryStatus" Type="Edm.String"/>
+        <!-- ADR-0045: span.model_request_end cross-reference + usage. -->
+        <Property Name="ModelRequestStartId" Type="Edm.String"/>
+        <Property Name="ModelInputTokens" Type="Edm.Int64"/>
+        <Property Name="ModelOutputTokens" Type="Edm.Int64"/>
+        <Property Name="ModelCacheCreationInputTokens" Type="Edm.Int64"/>
+        <Property Name="ModelCacheReadInputTokens" Type="Edm.Int64"/>
+        <Property Name="ModelSpeed" Type="Edm.String"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Session" Type="Temper.Crucible.Session" Nullable="false">
+          <ReferentialConstraint Property="SessionId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="SessionId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/session_event.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Append-only event log. Kind is one of 20 dot-notation values across user/agent/session/span groups. Queryable scalars include ToolUseId, ToolName, McpServerName, CustomToolUseId, McpToolUseId, StopReason, ErrorKind, ModelRequestStartId, and token-usage counts; Content holds the full opaque payload."/>
+      </EntityType>
+
+      <!-- ============ Memory Stores ============ -->
+
+      <!-- MemoryStore — workspace-scoped collection of text memories -->
+      <EntityType Name="MemoryStore">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="false"/>
+        <Property Name="Description" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="ArchivedAt" Type="Edm.DateTimeOffset"/>
+        <NavigationProperty Name="Memories" Type="Collection(Temper.Crucible.Memory)"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+            <String>Archived</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/memory_store.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="A named collection of text memories. Attach to sessions via SessionResource with Kind=memory_store. Active → Archived lifecycle."/>
+      </EntityType>
+
+      <!-- Memory — text document at a file-like path inside a MemoryStore -->
+      <EntityType Name="Memory">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="MemoryStoreId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Path" Type="Edm.String" Nullable="false"/>
+        <Property Name="Content" Type="Edm.String"/>
+        <Property Name="ContentSha256" Type="Edm.String"/>
+        <Property Name="SizeBytes" Type="Edm.Int64"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="MemoryStore" Type="Temper.Crucible.MemoryStore" Nullable="false">
+          <ReferentialConstraint Property="MemoryStoreId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <NavigationProperty Name="Versions" Type="Collection(Temper.Crucible.MemoryVersion)"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="MemoryStoreId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/memory.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="A text document at a file-like Path inside a MemoryStore. Content up to 100KB. ContentSha256 for optimistic concurrency."/>
+      </EntityType>
+
+      <!-- MemoryVersion — immutable audit record of a Memory mutation -->
+      <EntityType Name="MemoryVersion">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="MemoryId" Type="Edm.String" Nullable="false"/>
+        <Property Name="MemoryStoreId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Operation" Type="Edm.String" Nullable="false"/>
+        <Property Name="Path" Type="Edm.String"/>
+        <Property Name="Content" Type="Edm.String"/>
+        <Property Name="ContentSha256" Type="Edm.String"/>
+        <Property Name="ContentSizeBytes" Type="Edm.Int64"/>
+        <Property Name="SessionId" Type="Edm.String"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Memory" Type="Temper.Crucible.Memory" Nullable="false">
+          <ReferentialConstraint Property="MemoryId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+            <String>Redacted</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="MemoryId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/memory_version.cedar"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Immutable audit record. Operation is created/modified/deleted. RedactVersion clears content while preserving metadata."/>
+      </EntityType>
+
       <!-- ============ Actions (side-effecting, bound to entities) ============ -->
 
       <Action Name="ArchiveEnvironment" IsBound="true">
@@ -148,6 +629,114 @@
         <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Archive an environment. Retains history but makes the environment non-operational. Archived is terminal."/>
+      </Action>
+
+      <Action Name="ArchiveManagedAgent" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.ManagedAgent"/>
+        <ReturnType Type="Temper.Crucible.ManagedAgent"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Archive a managed agent. Mirrors Anthropic's POST /v1/agents/{id}/archive. Archived is terminal."/>
+      </Action>
+
+      <!-- ============ Session lifecycle actions ============ -->
+
+      <Action Name="StartSession" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.Session"/>
+        <ReturnType Type="Temper.Crucible.Session"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Rescheduling</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Running"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Transition a rescheduled session to Running after the runtime has placed it on an environment."/>
+      </Action>
+
+      <Action Name="IdleSession" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.Session"/>
+        <ReturnType Type="Temper.Crucible.Session"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Running</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Idle"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Mark a running session as Idle when the agent yields."/>
+      </Action>
+
+      <Action Name="ResumeSession" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.Session"/>
+        <ReturnType Type="Temper.Crucible.Session"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Idle</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Running"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Resume an idle session back to Running."/>
+      </Action>
+
+      <Action Name="RescheduleSession" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.Session"/>
+        <ReturnType Type="Temper.Crucible.Session"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Running</String>
+            <String>Idle</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Rescheduling"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Pause a running or idle session and mark it for rehoming onto a new environment."/>
+      </Action>
+
+      <Action Name="TerminateSession" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.Session"/>
+        <ReturnType Type="Temper.Crucible.Session"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection>
+            <String>Rescheduling</String>
+            <String>Running</String>
+            <String>Idle</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Terminated"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Terminate a session. Mirrors Anthropic's implicit cleanup semantics. Clients should set TerminatedAt."/>
+      </Action>
+
+      <Action Name="ArchiveMemoryStore" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.MemoryStore"/>
+        <ReturnType Type="Temper.Crucible.MemoryStore"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Archive a memory store. Prevents new memory writes. Existing memories are preserved read-only."/>
+      </Action>
+
+      <Action Name="RedactVersion" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.MemoryVersion"/>
+        <ReturnType Type="Temper.Crucible.MemoryVersion"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Redacted"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Redact a memory version. Clears Content, ContentSha256, ContentSizeBytes, and Path while preserving Operation, MemoryId, SessionId, and timestamps."/>
+      </Action>
+
+      <Action Name="ArchiveSession" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.Session"/>
+        <ReturnType Type="Temper.Crucible.Session"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Terminated</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Archive a terminated session. Mirrors Anthropic's POST /v1/sessions/{id}/archive but requires TerminateSession first. Archived is terminal."/>
       </Action>
 
       <!-- ============ Entity Container ============ -->
@@ -162,6 +751,46 @@
         </EntitySet>
         <EntitySet Name="EnvironmentPackages" EntityType="Temper.Crucible.EnvironmentPackage">
           <NavigationPropertyBinding Path="Environment" Target="Environments"/>
+        </EntitySet>
+        <EntitySet Name="ManagedAgents" EntityType="Temper.Crucible.ManagedAgent">
+          <NavigationPropertyBinding Path="McpServers" Target="AgentMcpServers"/>
+          <NavigationPropertyBinding Path="Skills" Target="AgentSkills"/>
+          <NavigationPropertyBinding Path="Tools" Target="AgentTools"/>
+          <NavigationPropertyBinding Path="Versions" Target="AgentVersions"/>
+        </EntitySet>
+        <EntitySet Name="AgentMcpServers" EntityType="Temper.Crucible.AgentMcpServer">
+          <NavigationPropertyBinding Path="ManagedAgent" Target="ManagedAgents"/>
+        </EntitySet>
+        <EntitySet Name="AgentSkills" EntityType="Temper.Crucible.AgentSkill">
+          <NavigationPropertyBinding Path="ManagedAgent" Target="ManagedAgents"/>
+        </EntitySet>
+        <EntitySet Name="AgentTools" EntityType="Temper.Crucible.AgentTool">
+          <NavigationPropertyBinding Path="ManagedAgent" Target="ManagedAgents"/>
+          <NavigationPropertyBinding Path="Configs" Target="AgentToolConfigs"/>
+        </EntitySet>
+        <EntitySet Name="AgentToolConfigs" EntityType="Temper.Crucible.AgentToolConfig">
+          <NavigationPropertyBinding Path="AgentTool" Target="AgentTools"/>
+        </EntitySet>
+        <EntitySet Name="AgentVersions" EntityType="Temper.Crucible.AgentVersion">
+          <NavigationPropertyBinding Path="ManagedAgent" Target="ManagedAgents"/>
+        </EntitySet>
+        <EntitySet Name="Sessions" EntityType="Temper.Crucible.Session">
+          <NavigationPropertyBinding Path="ManagedAgent" Target="ManagedAgents"/>
+          <NavigationPropertyBinding Path="Environment" Target="Environments"/>
+          <NavigationPropertyBinding Path="Resources" Target="SessionResources"/>
+          <NavigationPropertyBinding Path="Events" Target="SessionEvents"/>
+        </EntitySet>
+        <EntitySet Name="SessionResources" EntityType="Temper.Crucible.SessionResource">
+          <NavigationPropertyBinding Path="Session" Target="Sessions"/>
+        </EntitySet>
+        <EntitySet Name="SessionEvents" EntityType="Temper.Crucible.SessionEvent">
+        </EntitySet>
+        <EntitySet Name="MemoryStores" EntityType="Temper.Crucible.MemoryStore">
+        </EntitySet>
+        <EntitySet Name="Memories" EntityType="Temper.Crucible.Memory">
+        </EntitySet>
+        <EntitySet Name="MemoryVersions" EntityType="Temper.Crucible.MemoryVersion">
+          <NavigationPropertyBinding Path="Session" Target="Sessions"/>
         </EntitySet>
       </EntityContainer>
 

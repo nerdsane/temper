@@ -21,6 +21,15 @@ use temper_server::entity_actor::sim_handler::EntityActorHandler;
 const ENVIRONMENT_IOA: &str = include_str!("../specs/environment.ioa.toml");
 const ALLOWED_HOST_IOA: &str = include_str!("../specs/environment_allowed_host.ioa.toml");
 const PACKAGE_IOA: &str = include_str!("../specs/environment_package.ioa.toml");
+const MANAGED_AGENT_IOA: &str = include_str!("../specs/managed_agent.ioa.toml");
+const AGENT_MCP_SERVER_IOA: &str = include_str!("../specs/agent_mcp_server.ioa.toml");
+const AGENT_SKILL_IOA: &str = include_str!("../specs/agent_skill.ioa.toml");
+const AGENT_TOOL_IOA: &str = include_str!("../specs/agent_tool.ioa.toml");
+const AGENT_TOOL_CONFIG_IOA: &str = include_str!("../specs/agent_tool_config.ioa.toml");
+const AGENT_VERSION_IOA: &str = include_str!("../specs/agent_version.ioa.toml");
+const SESSION_IOA: &str = include_str!("../specs/session.ioa.toml");
+const SESSION_RESOURCE_IOA: &str = include_str!("../specs/session_resource.ioa.toml");
+const SESSION_EVENT_IOA: &str = include_str!("../specs/session_event.ioa.toml");
 
 fn environment_table() -> Arc<TransitionTable> {
     Arc::new(TransitionTable::from_ioa_source(ENVIRONMENT_IOA))
@@ -32,6 +41,42 @@ fn allowed_host_table() -> Arc<TransitionTable> {
 
 fn package_table() -> Arc<TransitionTable> {
     Arc::new(TransitionTable::from_ioa_source(PACKAGE_IOA))
+}
+
+fn managed_agent_table() -> Arc<TransitionTable> {
+    Arc::new(TransitionTable::from_ioa_source(MANAGED_AGENT_IOA))
+}
+
+fn agent_mcp_server_table() -> Arc<TransitionTable> {
+    Arc::new(TransitionTable::from_ioa_source(AGENT_MCP_SERVER_IOA))
+}
+
+fn agent_skill_table() -> Arc<TransitionTable> {
+    Arc::new(TransitionTable::from_ioa_source(AGENT_SKILL_IOA))
+}
+
+fn agent_tool_table() -> Arc<TransitionTable> {
+    Arc::new(TransitionTable::from_ioa_source(AGENT_TOOL_IOA))
+}
+
+fn agent_tool_config_table() -> Arc<TransitionTable> {
+    Arc::new(TransitionTable::from_ioa_source(AGENT_TOOL_CONFIG_IOA))
+}
+
+fn agent_version_table() -> Arc<TransitionTable> {
+    Arc::new(TransitionTable::from_ioa_source(AGENT_VERSION_IOA))
+}
+
+fn session_table() -> Arc<TransitionTable> {
+    Arc::new(TransitionTable::from_ioa_source(SESSION_IOA))
+}
+
+fn session_resource_table() -> Arc<TransitionTable> {
+    Arc::new(TransitionTable::from_ioa_source(SESSION_RESOURCE_IOA))
+}
+
+fn session_event_table() -> Arc<TransitionTable> {
+    Arc::new(TransitionTable::from_ioa_source(SESSION_EVENT_IOA))
 }
 
 // =========================================================================
@@ -131,6 +176,289 @@ fn scripted_package_starts_active() {
 }
 
 // =========================================================================
+// SCRIPTED SCENARIOS — ManagedAgent Lifecycle (ADR-0043)
+// =========================================================================
+
+#[test]
+fn scripted_managed_agent_starts_active() {
+    let config = SimActorSystemConfig {
+        seed: 10,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    let handler = EntityActorHandler::new("ManagedAgent", "agent-1", managed_agent_table())
+        .with_ioa_invariants(MANAGED_AGENT_IOA);
+    sim.register_actor("agent-1", Box::new(handler));
+
+    sim.assert_status("agent-1", "Active");
+}
+
+#[test]
+fn scripted_managed_agent_archive_transitions_to_archived() {
+    let config = SimActorSystemConfig {
+        seed: 11,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    let handler = EntityActorHandler::new("ManagedAgent", "agent-1", managed_agent_table())
+        .with_ioa_invariants(MANAGED_AGENT_IOA);
+    sim.register_actor("agent-1", Box::new(handler));
+
+    sim.step("agent-1", "ArchiveManagedAgent", "{}").unwrap();
+    sim.assert_status("agent-1", "Archived");
+
+    assert!(!sim.has_violations());
+}
+
+#[test]
+fn scripted_managed_agent_archive_is_final() {
+    let config = SimActorSystemConfig {
+        seed: 12,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    let handler = EntityActorHandler::new("ManagedAgent", "agent-1", managed_agent_table())
+        .with_ioa_invariants(MANAGED_AGENT_IOA);
+    sim.register_actor("agent-1", Box::new(handler));
+
+    sim.step("agent-1", "ArchiveManagedAgent", "{}").unwrap();
+    sim.assert_status("agent-1", "Archived");
+
+    // Second archive must be rejected — Archived is terminal.
+    let result = sim.step("agent-1", "ArchiveManagedAgent", "{}");
+    assert!(
+        result.is_err(),
+        "ArchiveManagedAgent should fail from Archived state"
+    );
+
+    assert!(!sim.has_violations());
+}
+
+#[test]
+fn scripted_managed_agent_child_entities_start_active() {
+    let config = SimActorSystemConfig {
+        seed: 13,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    for (name, entity_type, table, ioa) in [
+        (
+            "mcp-1",
+            "AgentMcpServer",
+            agent_mcp_server_table(),
+            AGENT_MCP_SERVER_IOA,
+        ),
+        ("skill-1", "AgentSkill", agent_skill_table(), AGENT_SKILL_IOA),
+        ("tool-1", "AgentTool", agent_tool_table(), AGENT_TOOL_IOA),
+        (
+            "config-1",
+            "AgentToolConfig",
+            agent_tool_config_table(),
+            AGENT_TOOL_CONFIG_IOA,
+        ),
+        (
+            "version-1",
+            "AgentVersion",
+            agent_version_table(),
+            AGENT_VERSION_IOA,
+        ),
+    ] {
+        let handler = EntityActorHandler::new(entity_type, name, table).with_ioa_invariants(ioa);
+        sim.register_actor(name, Box::new(handler));
+        sim.assert_status(name, "Active");
+    }
+}
+
+// =========================================================================
+// SCRIPTED SCENARIOS — Session Lifecycle (ADR-0044)
+// =========================================================================
+
+#[test]
+fn scripted_session_starts_rescheduling() {
+    let config = SimActorSystemConfig {
+        seed: 20,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    let handler = EntityActorHandler::new("Session", "sess-1", session_table())
+        .with_ioa_invariants(SESSION_IOA);
+    sim.register_actor("sess-1", Box::new(handler));
+
+    sim.assert_status("sess-1", "Rescheduling");
+}
+
+#[test]
+fn scripted_session_full_lifecycle() {
+    // Rescheduling → Running → Idle → Running → Terminated → Archived
+    let config = SimActorSystemConfig {
+        seed: 21,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    let handler = EntityActorHandler::new("Session", "sess-1", session_table())
+        .with_ioa_invariants(SESSION_IOA);
+    sim.register_actor("sess-1", Box::new(handler));
+
+    sim.step("sess-1", "StartSession", "{}").unwrap();
+    sim.assert_status("sess-1", "Running");
+
+    sim.step("sess-1", "IdleSession", "{}").unwrap();
+    sim.assert_status("sess-1", "Idle");
+
+    sim.step("sess-1", "ResumeSession", "{}").unwrap();
+    sim.assert_status("sess-1", "Running");
+
+    sim.step("sess-1", "TerminateSession", "{}").unwrap();
+    sim.assert_status("sess-1", "Terminated");
+
+    sim.step("sess-1", "ArchiveSession", "{}").unwrap();
+    sim.assert_status("sess-1", "Archived");
+
+    assert!(!sim.has_violations());
+}
+
+#[test]
+fn scripted_session_reschedule_roundtrip() {
+    // Rescheduling → Running → Rescheduling → Running
+    let config = SimActorSystemConfig {
+        seed: 22,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    let handler = EntityActorHandler::new("Session", "sess-1", session_table())
+        .with_ioa_invariants(SESSION_IOA);
+    sim.register_actor("sess-1", Box::new(handler));
+
+    sim.step("sess-1", "StartSession", "{}").unwrap();
+    sim.assert_status("sess-1", "Running");
+
+    sim.step("sess-1", "RescheduleSession", "{}").unwrap();
+    sim.assert_status("sess-1", "Rescheduling");
+
+    sim.step("sess-1", "StartSession", "{}").unwrap();
+    sim.assert_status("sess-1", "Running");
+
+    assert!(!sim.has_violations());
+}
+
+#[test]
+fn scripted_session_terminate_from_idle() {
+    // Rescheduling → Running → Idle → Terminated (multi-from test)
+    let config = SimActorSystemConfig {
+        seed: 23,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    let handler = EntityActorHandler::new("Session", "sess-1", session_table())
+        .with_ioa_invariants(SESSION_IOA);
+    sim.register_actor("sess-1", Box::new(handler));
+
+    sim.step("sess-1", "StartSession", "{}").unwrap();
+    sim.step("sess-1", "IdleSession", "{}").unwrap();
+    sim.step("sess-1", "TerminateSession", "{}").unwrap();
+    sim.assert_status("sess-1", "Terminated");
+
+    assert!(!sim.has_violations());
+}
+
+#[test]
+fn scripted_session_archive_requires_terminated() {
+    // ArchiveSession must fail from Running — only Terminated → Archived is valid
+    let config = SimActorSystemConfig {
+        seed: 24,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    let handler = EntityActorHandler::new("Session", "sess-1", session_table())
+        .with_ioa_invariants(SESSION_IOA);
+    sim.register_actor("sess-1", Box::new(handler));
+
+    sim.step("sess-1", "StartSession", "{}").unwrap();
+    sim.assert_status("sess-1", "Running");
+
+    let result = sim.step("sess-1", "ArchiveSession", "{}");
+    assert!(
+        result.is_err(),
+        "ArchiveSession should fail from Running — must Terminate first"
+    );
+
+    assert!(!sim.has_violations());
+}
+
+#[test]
+fn scripted_session_archive_is_final() {
+    let config = SimActorSystemConfig {
+        seed: 25,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    let handler = EntityActorHandler::new("Session", "sess-1", session_table())
+        .with_ioa_invariants(SESSION_IOA);
+    sim.register_actor("sess-1", Box::new(handler));
+
+    sim.step("sess-1", "StartSession", "{}").unwrap();
+    sim.step("sess-1", "TerminateSession", "{}").unwrap();
+    sim.step("sess-1", "ArchiveSession", "{}").unwrap();
+    sim.assert_status("sess-1", "Archived");
+
+    // No further transitions allowed from Archived.
+    for action in [
+        "StartSession",
+        "IdleSession",
+        "ResumeSession",
+        "RescheduleSession",
+        "TerminateSession",
+        "ArchiveSession",
+    ] {
+        let result = sim.step("sess-1", action, "{}");
+        assert!(
+            result.is_err(),
+            "{action} should fail from terminal Archived state"
+        );
+    }
+
+    assert!(!sim.has_violations());
+}
+
+#[test]
+fn scripted_session_child_entities_start_active() {
+    let config = SimActorSystemConfig {
+        seed: 26,
+        ..Default::default()
+    };
+    let mut sim = SimActorSystem::new(config);
+
+    for (name, entity_type, table, ioa) in [
+        (
+            "resource-1",
+            "SessionResource",
+            session_resource_table(),
+            SESSION_RESOURCE_IOA,
+        ),
+        (
+            "event-1",
+            "SessionEvent",
+            session_event_table(),
+            SESSION_EVENT_IOA,
+        ),
+    ] {
+        let handler = EntityActorHandler::new(entity_type, name, table).with_ioa_invariants(ioa);
+        sim.register_actor(name, Box::new(handler));
+        sim.assert_status(name, "Active");
+    }
+}
+
+// =========================================================================
 // RANDOM EXPLORATION
 // =========================================================================
 
@@ -153,6 +481,40 @@ fn random_all_entities_no_faults() {
             ALLOWED_HOST_IOA,
         ),
         ("pkg-1", "EnvironmentPackage", package_table(), PACKAGE_IOA),
+        ("agent-1", "ManagedAgent", managed_agent_table(), MANAGED_AGENT_IOA),
+        (
+            "mcp-1",
+            "AgentMcpServer",
+            agent_mcp_server_table(),
+            AGENT_MCP_SERVER_IOA,
+        ),
+        ("skill-1", "AgentSkill", agent_skill_table(), AGENT_SKILL_IOA),
+        ("tool-1", "AgentTool", agent_tool_table(), AGENT_TOOL_IOA),
+        (
+            "config-1",
+            "AgentToolConfig",
+            agent_tool_config_table(),
+            AGENT_TOOL_CONFIG_IOA,
+        ),
+        (
+            "version-1",
+            "AgentVersion",
+            agent_version_table(),
+            AGENT_VERSION_IOA,
+        ),
+        ("sess-1", "Session", session_table(), SESSION_IOA),
+        (
+            "resource-1",
+            "SessionResource",
+            session_resource_table(),
+            SESSION_RESOURCE_IOA,
+        ),
+        (
+            "event-1",
+            "SessionEvent",
+            session_event_table(),
+            SESSION_EVENT_IOA,
+        ),
     ] {
         let handler = EntityActorHandler::new(entity_type, name, table).with_ioa_invariants(ioa);
         sim.register_actor(name, Box::new(handler));
@@ -188,6 +550,40 @@ fn run_determinism_trial(seed: u64) -> Vec<(String, String, usize, usize)> {
             ALLOWED_HOST_IOA,
         ),
         ("pkg-1", "EnvironmentPackage", package_table(), PACKAGE_IOA),
+        ("agent-1", "ManagedAgent", managed_agent_table(), MANAGED_AGENT_IOA),
+        (
+            "mcp-1",
+            "AgentMcpServer",
+            agent_mcp_server_table(),
+            AGENT_MCP_SERVER_IOA,
+        ),
+        ("skill-1", "AgentSkill", agent_skill_table(), AGENT_SKILL_IOA),
+        ("tool-1", "AgentTool", agent_tool_table(), AGENT_TOOL_IOA),
+        (
+            "config-1",
+            "AgentToolConfig",
+            agent_tool_config_table(),
+            AGENT_TOOL_CONFIG_IOA,
+        ),
+        (
+            "version-1",
+            "AgentVersion",
+            agent_version_table(),
+            AGENT_VERSION_IOA,
+        ),
+        ("sess-1", "Session", session_table(), SESSION_IOA),
+        (
+            "resource-1",
+            "SessionResource",
+            session_resource_table(),
+            SESSION_RESOURCE_IOA,
+        ),
+        (
+            "event-1",
+            "SessionEvent",
+            session_event_table(),
+            SESSION_EVENT_IOA,
+        ),
     ] {
         let handler = EntityActorHandler::new(entity_type, name, table).with_ioa_invariants(ioa);
         sim.register_actor(name, Box::new(handler));

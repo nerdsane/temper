@@ -24,3 +24,81 @@ name = "PackageRequiresNonLocalParent"
 kind = "hard"
 on = "EnvironmentPackage.*"
 assert = 'related(Environment, EnvironmentId).ConfigType not in ["Local"]'
+
+# --- ManagedAgent slice (ADR-0043): child → parent status lookups -----------
+#
+# Every ManagedAgent child entity gates its writes on the parent being
+# non-Archived. AgentToolConfig is parented by AgentTool (which is single
+# -state), not ManagedAgent directly — and the parent-lookup grammar is
+# depth-1, so there's no way to express "the grandparent ManagedAgent is
+# Active" from a tool-config row. The gap is bounded: a POST to
+# AgentToolConfig on a tool whose ManagedAgent was archived after the tool
+# was created will succeed even though the agent itself is frozen.
+# Documented in ADR-0043 non-goals.
+
+[[invariant]]
+name = "McpServerRequiresActiveManagedAgent"
+kind = "hard"
+on = "AgentMcpServer.*"
+assert = 'related(ManagedAgent, AgentId).Status not in ["Archived"]'
+
+[[invariant]]
+name = "SkillRequiresActiveManagedAgent"
+kind = "hard"
+on = "AgentSkill.*"
+assert = 'related(ManagedAgent, AgentId).Status not in ["Archived"]'
+
+[[invariant]]
+name = "ToolRequiresActiveManagedAgent"
+kind = "hard"
+on = "AgentTool.*"
+assert = 'related(ManagedAgent, AgentId).Status not in ["Archived"]'
+
+[[invariant]]
+name = "VersionRequiresActiveManagedAgent"
+kind = "hard"
+on = "AgentVersion.*"
+assert = 'related(ManagedAgent, AgentId).Status not in ["Archived"]'
+
+# --- Session slice (ADR-0044): child → parent status lookups ----------------
+#
+# Sessions gate create on BOTH parent ManagedAgent and Environment being
+# non-Archived — ADR-0044 Sub-Decision 1 picks two cross-invariants over one
+# for symmetry with the ManagedAgent child rules above.
+#
+# Resources and events gate on parent Session being non-Archived. Events are
+# still accepted on Terminated sessions because agents often emit trailing
+# messages after the terminate signal; the rule only blocks writes to fully
+# archived sessions.
+
+[[invariant]]
+name = "SessionRequiresActiveManagedAgent"
+kind = "hard"
+on = "Session.*"
+assert = 'related(ManagedAgent, AgentId).Status not in ["Archived"]'
+
+[[invariant]]
+name = "SessionRequiresActiveEnvironment"
+kind = "hard"
+on = "Session.*"
+assert = 'related(Environment, EnvironmentId).Status not in ["Archived"]'
+
+[[invariant]]
+name = "ResourceRequiresNonArchivedSession"
+kind = "hard"
+on = "SessionResource.*"
+assert = 'related(Session, SessionId).Status not in ["Archived"]'
+
+[[invariant]]
+name = "EventRequiresNonArchivedSession"
+kind = "hard"
+on = "SessionEvent.*"
+assert = 'related(Session, SessionId).Status not in ["Archived"]'
+
+# --- Memory Stores: child → parent status lookups -------------------------
+
+[[invariant]]
+name = "MemoryRequiresActiveStore"
+kind = "hard"
+on = "Memory.*"
+assert = 'related(MemoryStore, MemoryStoreId).Status not in ["Archived"]'

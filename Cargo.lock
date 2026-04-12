@@ -1310,16 +1310,25 @@ dependencies = [
 name = "crucible-reference"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum 0.8.8",
+ "clap",
+ "glob",
  "hyper 1.8.1",
+ "reqwest",
+ "serde",
  "serde_json",
  "temper-jit",
  "temper-runtime",
  "temper-server",
  "temper-spec",
  "temper-verify",
+ "thiserror 2.0.18",
  "tokio",
  "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

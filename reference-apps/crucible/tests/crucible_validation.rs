@@ -1,4 +1,4 @@
-//! End-to-end HTTP validation of the hard `Local` constraint.
+//! End-to-end HTTP validation of the Environment constraint surface.
 //!
 //! Every branch of the Crucible constraint surface is exercised through the
 //! real OData router — POST/PATCH/action requests flow through
@@ -8,9 +8,8 @@
 //! `error.details.type == "field_invariant" | "cross_invariant"` and the
 //! configured message).
 //!
-//! This is the primary correctness gate for ADR-0042's "Local environments
-//! reject cloud-only fields" guarantee: the only test that proves the
-//! production pipeline honors the spec end to end.
+//! Covers the `Local` hard constraint (ADR-0042), the `Modal` environment
+//! type constraints, and cross-invariant rejection on child entities.
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -26,6 +25,12 @@ use tower::ServiceExt;
 const ENVIRONMENT_IOA: &str = include_str!("../specs/environment.ioa.toml");
 const ALLOWED_HOST_IOA: &str = include_str!("../specs/environment_allowed_host.ioa.toml");
 const PACKAGE_IOA: &str = include_str!("../specs/environment_package.ioa.toml");
+const MANAGED_AGENT_IOA: &str = include_str!("../specs/managed_agent.ioa.toml");
+const SESSION_IOA: &str = include_str!("../specs/session.ioa.toml");
+const SESSION_RESOURCE_IOA: &str = include_str!("../specs/session_resource.ioa.toml");
+const MEMORY_STORE_IOA: &str = include_str!("../specs/memory_store.ioa.toml");
+const MEMORY_IOA: &str = include_str!("../specs/memory.ioa.toml");
+const MEMORY_VERSION_IOA: &str = include_str!("../specs/memory_version.ioa.toml");
 const CROSS_INVARIANTS_TOML: &str = include_str!("../specs/cross-invariants.toml");
 const MODEL_CSDL: &str = include_str!("../specs/model.csdl.xml");
 
@@ -44,6 +49,12 @@ fn build_crucible_state() -> ServerState {
             ("Environment", ENVIRONMENT_IOA),
             ("EnvironmentAllowedHost", ALLOWED_HOST_IOA),
             ("EnvironmentPackage", PACKAGE_IOA),
+            ("ManagedAgent", MANAGED_AGENT_IOA),
+            ("Session", SESSION_IOA),
+            ("SessionResource", SESSION_RESOURCE_IOA),
+            ("MemoryStore", MEMORY_STORE_IOA),
+            ("Memory", MEMORY_IOA),
+            ("MemoryVersion", MEMORY_VERSION_IOA),
         ],
         Vec::new(),
         Some(CROSS_INVARIANTS_TOML.to_string()),
@@ -61,6 +72,12 @@ fn build_crucible_state() -> ServerState {
             "Environment",
             "EnvironmentAllowedHost",
             "EnvironmentPackage",
+            "ManagedAgent",
+            "Session",
+            "SessionResource",
+            "MemoryStore",
+            "Memory",
+            "MemoryVersion",
         ] {
             registry.set_verification_status(
                 &TenantId::default(),
@@ -110,6 +127,10 @@ async fn post(state: &ServerState, uri: &str, body: &str) -> (StatusCode, serde_
 
 async fn patch(state: &ServerState, uri: &str, body: &str) -> (StatusCode, serde_json::Value) {
     send(state, Method::PATCH, uri, body).await
+}
+
+async fn delete(state: &ServerState, uri: &str) -> (StatusCode, serde_json::Value) {
+    send(state, Method::DELETE, uri, "").await
 }
 
 // =========================================================================
@@ -495,5 +516,648 @@ async fn archive_environment_action_succeeds() {
     assert!(
         status == StatusCode::OK || status == StatusCode::NO_CONTENT,
         "ArchiveEnvironment must succeed on an Active environment; got {status}: {body:?}"
+    );
+}
+
+// =========================================================================
+// MODAL HAPPY PATH
+// =========================================================================
+
+#[tokio::test]
+async fn modal_unrestricted_environment_is_allowed() {
+    let state = build_crucible_state();
+    let (status, body) = post(
+        &state,
+        "/tdata/Environments",
+        r#"{
+            "id": "env-modal-ok",
+            "Name": "modal-sandbox",
+            "ConfigType": "Modal",
+            "NetworkingType": "Unrestricted",
+            "ModalImage": "python:3.12-slim",
+            "ModalCpu": 2.0,
+            "ModalMemory": 4096,
+            "ModalTimeout": 600,
+            "ModalWorkdir": "/workspace"
+        }"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "Modal + Unrestricted with Modal fields must be allowed: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn modal_minimal_config_is_allowed() {
+    let state = build_crucible_state();
+    let (status, body) = post(
+        &state,
+        "/tdata/Environments",
+        r#"{
+            "id": "env-modal-minimal",
+            "Name": "modal-minimal",
+            "ConfigType": "Modal",
+            "NetworkingType": "Unrestricted"
+        }"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "Modal with only required fields must be allowed: {body:?}"
+    );
+}
+
+// =========================================================================
+// MODAL HARD CONSTRAINTS
+// =========================================================================
+
+#[tokio::test]
+async fn modal_limited_networking_is_rejected() {
+    let state = build_crucible_state();
+    let (status, body) = post(
+        &state,
+        "/tdata/Environments",
+        r#"{
+            "id": "env-modal-limited",
+            "Name": "bad-modal",
+            "ConfigType": "Modal",
+            "NetworkingType": "Limited"
+        }"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "Modal + Limited networking must be rejected: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["details"]["invariant"].as_str(),
+        Some("ModalNetworkingMustBeUnrestricted")
+    );
+}
+
+#[tokio::test]
+async fn modal_allow_mcp_servers_is_rejected() {
+    let state = build_crucible_state();
+    let (status, body) = post(
+        &state,
+        "/tdata/Environments",
+        r#"{
+            "id": "env-modal-mcp",
+            "Name": "bad-modal-mcp",
+            "ConfigType": "Modal",
+            "NetworkingType": "Unrestricted",
+            "AllowMcpServers": true
+        }"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "Modal + AllowMcpServers must be rejected: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["details"]["invariant"].as_str(),
+        Some("ModalCannotAllowMcpServers")
+    );
+}
+
+#[tokio::test]
+async fn modal_allow_package_managers_is_rejected() {
+    let state = build_crucible_state();
+    let (status, body) = post(
+        &state,
+        "/tdata/Environments",
+        r#"{
+            "id": "env-modal-pkg",
+            "Name": "bad-modal-pkg",
+            "ConfigType": "Modal",
+            "NetworkingType": "Unrestricted",
+            "AllowPackageManagers": true
+        }"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "Modal + AllowPackageManagers must be rejected: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["details"]["invariant"].as_str(),
+        Some("ModalCannotAllowPackageManagers")
+    );
+}
+
+// =========================================================================
+// LOCAL — cannot set Modal-specific fields
+// =========================================================================
+
+#[tokio::test]
+async fn local_with_modal_image_is_rejected() {
+    let state = build_crucible_state();
+    let (status, body) = post(
+        &state,
+        "/tdata/Environments",
+        r#"{
+            "id": "env-local-modal",
+            "Name": "bad-local-modal",
+            "ConfigType": "Local",
+            "NetworkingType": "Unrestricted",
+            "ModalImage": "python:3.12-slim"
+        }"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "Local + ModalImage must be rejected: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["details"]["invariant"].as_str(),
+        Some("LocalCannotSetModalFields")
+    );
+}
+
+#[tokio::test]
+async fn local_with_modal_cpu_is_rejected() {
+    let state = build_crucible_state();
+    let (status, body) = post(
+        &state,
+        "/tdata/Environments",
+        r#"{
+            "id": "env-local-modal-cpu",
+            "Name": "bad-local-cpu",
+            "ConfigType": "Local",
+            "NetworkingType": "Unrestricted",
+            "ModalCpu": 4.0
+        }"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "Local + ModalCpu must be rejected: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["details"]["invariant"].as_str(),
+        Some("LocalCannotSetModalFields")
+    );
+}
+
+// =========================================================================
+// DELETE — referential integrity
+// =========================================================================
+
+#[tokio::test]
+async fn delete_unreferenced_environment_succeeds() {
+    let state = build_crucible_state();
+
+    let (status, _) = post(
+        &state,
+        "/tdata/Environments",
+        r#"{
+            "id": "env-del-ok",
+            "Name": "deleteable",
+            "ConfigType": "Local",
+            "NetworkingType": "Unrestricted"
+        }"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _) = delete(&state, "/tdata/Environments('env-del-ok')").await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "DELETE of unreferenced environment should succeed"
+    );
+
+    // Confirm it's gone.
+    let (status, _) = send(
+        &state,
+        Method::GET,
+        "/tdata/Environments('env-del-ok')",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn delete_environment_with_child_host_is_rejected() {
+    let state = build_crucible_state();
+
+    let (status, _) = post(
+        &state,
+        "/tdata/Environments",
+        r#"{
+            "id": "env-del-host",
+            "Name": "has-host",
+            "ConfigType": "Cloud",
+            "NetworkingType": "Limited"
+        }"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _) = post(
+        &state,
+        "/tdata/EnvironmentAllowedHosts",
+        r#"{
+            "id": "host-del-1",
+            "EnvironmentId": "env-del-host",
+            "Host": "api.example.com"
+        }"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = delete(&state, "/tdata/Environments('env-del-host')").await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "DELETE with child AllowedHost must be rejected: {body:?}"
+    );
+    assert_eq!(body["error"]["code"].as_str(), Some("ConstraintViolation"));
+}
+
+#[tokio::test]
+async fn delete_environment_with_child_package_is_rejected() {
+    let state = build_crucible_state();
+
+    let (status, _) = post(
+        &state,
+        "/tdata/Environments",
+        r#"{
+            "id": "env-del-pkg",
+            "Name": "has-package",
+            "ConfigType": "Cloud",
+            "NetworkingType": "Unrestricted"
+        }"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _) = post(
+        &state,
+        "/tdata/EnvironmentPackages",
+        r#"{
+            "id": "pkg-del-1",
+            "EnvironmentId": "env-del-pkg",
+            "Manager": "Pip",
+            "Name": "requests"
+        }"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = delete(&state, "/tdata/Environments('env-del-pkg')").await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "DELETE with child Package must be rejected: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn delete_nonexistent_environment_returns_404() {
+    let state = build_crucible_state();
+    let (status, _) = delete(&state, "/tdata/Environments('no-such-env')").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// =========================================================================
+// MEMORY STORES — CRUD + field invariants + cross-invariants
+// =========================================================================
+
+#[tokio::test]
+async fn memory_store_create_and_archive() {
+    let state = build_crucible_state();
+
+    let (status, body) = post(
+        &state,
+        "/tdata/MemoryStores",
+        r#"{
+            "id": "ms-01",
+            "Name": "project-context",
+            "Description": "Project conventions and preferences",
+            "Status": "Active",
+            "CreatedAt": "2026-04-12T00:00:00Z",
+            "UpdatedAt": "2026-04-12T00:00:00Z"
+        }"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create store: {body:?}");
+
+    let (status, body) = post(
+        &state,
+        "/tdata/MemoryStores('ms-01')/Temper.Crucible.ArchiveMemoryStore",
+        "{}",
+    )
+    .await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::NO_CONTENT,
+        "archive store: {status}: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn memory_create_and_read() {
+    let state = build_crucible_state();
+
+    // Seed store
+    post(
+        &state,
+        "/tdata/MemoryStores",
+        r#"{"id":"ms-mem","Name":"test","Status":"Active","CreatedAt":"2026-04-12T00:00:00Z","UpdatedAt":"2026-04-12T00:00:00Z"}"#,
+    )
+    .await;
+
+    // Create memory
+    let (status, body) = post(
+        &state,
+        "/tdata/Memories",
+        r#"{
+            "id": "mem-01",
+            "MemoryStoreId": "ms-mem",
+            "Path": "/preferences/formatting.md",
+            "Content": "Always use 2-space indentation.",
+            "ContentSha256": "abc123",
+            "SizeBytes": 31,
+            "CreatedAt": "2026-04-12T00:00:00Z",
+            "UpdatedAt": "2026-04-12T00:00:00Z"
+        }"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create memory: {body:?}");
+
+    // Read back
+    let (status, body) = send(
+        &state,
+        Method::GET,
+        "/tdata/Memories('mem-01')",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let fields = &body["fields"];
+    assert_eq!(fields["Path"].as_str(), Some("/preferences/formatting.md"));
+    assert_eq!(
+        fields["Content"].as_str(),
+        Some("Always use 2-space indentation.")
+    );
+}
+
+#[tokio::test]
+async fn memory_on_archived_store_is_rejected() {
+    let state = build_crucible_state();
+
+    // Create and archive store
+    post(
+        &state,
+        "/tdata/MemoryStores",
+        r#"{"id":"ms-arc","Name":"archived","Status":"Active","CreatedAt":"2026-04-12T00:00:00Z","UpdatedAt":"2026-04-12T00:00:00Z"}"#,
+    )
+    .await;
+    post(
+        &state,
+        "/tdata/MemoryStores('ms-arc')/Temper.Crucible.ArchiveMemoryStore",
+        "{}",
+    )
+    .await;
+
+    // Try to create memory on archived store
+    let (status, body) = post(
+        &state,
+        "/tdata/Memories",
+        r#"{
+            "id": "mem-bad",
+            "MemoryStoreId": "ms-arc",
+            "Path": "/test.md",
+            "Content": "should fail",
+            "CreatedAt": "2026-04-12T00:00:00Z",
+            "UpdatedAt": "2026-04-12T00:00:00Z"
+        }"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "memory on archived store must be rejected: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["details"]["invariant"].as_str(),
+        Some("MemoryRequiresActiveStore")
+    );
+}
+
+#[tokio::test]
+async fn memory_version_create_and_operation_invariant() {
+    let state = build_crucible_state();
+
+    // Seed store + memory
+    post(&state, "/tdata/MemoryStores",
+        r#"{"id":"ms-ver","Name":"ver-test","Status":"Active","CreatedAt":"2026-04-12T00:00:00Z","UpdatedAt":"2026-04-12T00:00:00Z"}"#,
+    ).await;
+    post(&state, "/tdata/Memories",
+        r#"{"id":"mem-ver","MemoryStoreId":"ms-ver","Path":"/a.md","Content":"hello","CreatedAt":"2026-04-12T00:00:00Z","UpdatedAt":"2026-04-12T00:00:00Z"}"#,
+    ).await;
+
+    // Create version with valid operation
+    let (status, body) = post(
+        &state,
+        "/tdata/MemoryVersions",
+        r#"{
+            "id": "mv-01",
+            "MemoryId": "mem-ver",
+            "MemoryStoreId": "ms-ver",
+            "Operation": "created",
+            "Path": "/a.md",
+            "Content": "hello",
+            "CreatedAt": "2026-04-12T00:00:00Z"
+        }"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create version: {body:?}");
+
+    // Invalid operation
+    let (status, body) = post(
+        &state,
+        "/tdata/MemoryVersions",
+        r#"{
+            "id": "mv-bad",
+            "MemoryId": "mem-ver",
+            "MemoryStoreId": "ms-ver",
+            "Operation": "bogus",
+            "CreatedAt": "2026-04-12T00:00:00Z"
+        }"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "bad operation must be rejected: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["details"]["invariant"].as_str(),
+        Some("OperationMustBeKnown")
+    );
+}
+
+#[tokio::test]
+async fn redact_version_clears_to_redacted_state() {
+    let state = build_crucible_state();
+
+    post(&state, "/tdata/MemoryStores",
+        r#"{"id":"ms-red","Name":"redact-test","Status":"Active","CreatedAt":"2026-04-12T00:00:00Z","UpdatedAt":"2026-04-12T00:00:00Z"}"#,
+    ).await;
+    post(&state, "/tdata/Memories",
+        r#"{"id":"mem-red","MemoryStoreId":"ms-red","Path":"/secret.md","Content":"password123","CreatedAt":"2026-04-12T00:00:00Z","UpdatedAt":"2026-04-12T00:00:00Z"}"#,
+    ).await;
+    post(&state, "/tdata/MemoryVersions",
+        r#"{"id":"mv-red","MemoryId":"mem-red","MemoryStoreId":"ms-red","Operation":"created","Content":"password123","CreatedAt":"2026-04-12T00:00:00Z"}"#,
+    ).await;
+
+    let (status, body) = post(
+        &state,
+        "/tdata/MemoryVersions('mv-red')/Temper.Crucible.RedactVersion",
+        "{}",
+    )
+    .await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::NO_CONTENT,
+        "redact should succeed: {status}: {body:?}"
+    );
+
+    // Verify state is Redacted
+    let (status, body) = send(&state, Method::GET, "/tdata/MemoryVersions('mv-red')", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"].as_str(), Some("Redacted"));
+}
+
+/// Helper to seed a minimal Environment + ManagedAgent + Session for
+/// SessionResource tests that need a valid parent Session.
+async fn seed_session(state: &ServerState, suffix: &str) -> String {
+    let env_id = format!("env-sr-{suffix}");
+    let agt_id = format!("agt-sr-{suffix}");
+    let sess_id = format!("sess-sr-{suffix}");
+    post(state, "/tdata/Environments", &format!(
+        r#"{{"id":"{env_id}","Name":"sr-env","ConfigType":"Local","NetworkingType":"Unrestricted","CreatedAt":"2026-04-12T00:00:00Z","UpdatedAt":"2026-04-12T00:00:00Z"}}"#
+    )).await;
+    post(state, "/tdata/ManagedAgents", &format!(
+        r#"{{"id":"{agt_id}","Name":"sr-agt","Status":"Active","Version":1,"ModelId":"test","CreatedAt":"2026-04-12T00:00:00Z","UpdatedAt":"2026-04-12T00:00:00Z"}}"#
+    )).await;
+    post(state, "/tdata/Sessions", &format!(
+        r#"{{"id":"{sess_id}","AgentId":"{agt_id}","EnvironmentId":"{env_id}","Status":"Rescheduling","CreatedAt":"2026-04-12T00:00:00Z","UpdatedAt":"2026-04-12T00:00:00Z","AgentVersion":1,"ActiveSeconds":0,"DurationSeconds":0,"InputTokens":0,"OutputTokens":0,"CacheReadInputTokens":0,"CacheCreation1hInputTokens":0,"CacheCreation5mInputTokens":0}}"#
+    )).await;
+    sess_id
+}
+
+#[tokio::test]
+async fn session_resource_memory_store_kind() {
+    let state = build_crucible_state();
+    let sess_id = seed_session(&state, "ms1").await;
+
+    let (status, body) = post(
+        &state,
+        "/tdata/SessionResources",
+        &format!(r#"{{
+            "id": "sr-ms-01",
+            "SessionId": "{sess_id}",
+            "Kind": "memory_store",
+            "MemoryStoreId": "ms-fake",
+            "Access": "read_write",
+            "Prompt": "Check preferences before coding.",
+            "CreatedAt": "2026-04-12T00:00:00Z",
+            "UpdatedAt": "2026-04-12T00:00:00Z"
+        }}"#),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "memory_store resource should be created: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn session_resource_memory_store_bad_access_is_rejected() {
+    let state = build_crucible_state();
+    let sess_id = seed_session(&state, "ms2").await;
+
+    let (status, body) = post(
+        &state,
+        "/tdata/SessionResources",
+        &format!(r#"{{
+            "id": "sr-ms-bad",
+            "SessionId": "{sess_id}",
+            "Kind": "memory_store",
+            "MemoryStoreId": "ms-fake",
+            "Access": "full_access",
+            "CreatedAt": "2026-04-12T00:00:00Z",
+            "UpdatedAt": "2026-04-12T00:00:00Z"
+        }}"#),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "bad Access must be rejected: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["details"]["invariant"].as_str(),
+        Some("MemoryStoreAccessMustBeKnown")
+    );
+}
+
+#[tokio::test]
+async fn session_resource_memory_store_forbids_file_fields() {
+    let state = build_crucible_state();
+    let sess_id = seed_session(&state, "ms3").await;
+
+    let (status, body) = post(
+        &state,
+        "/tdata/SessionResources",
+        &format!(r#"{{
+            "id": "sr-ms-file",
+            "SessionId": "{sess_id}",
+            "Kind": "memory_store",
+            "MemoryStoreId": "ms-fake",
+            "FileId": "some-file",
+            "CreatedAt": "2026-04-12T00:00:00Z",
+            "UpdatedAt": "2026-04-12T00:00:00Z"
+        }}"#),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "memory_store + FileId must be rejected: {body:?}"
+    );
+    assert_eq!(
+        body["error"]["details"]["invariant"].as_str(),
+        Some("MemoryStoreResourceForbidsFileFields")
+    );
+}
+
+#[tokio::test]
+async fn delete_memory_store_with_memories_is_rejected() {
+    let state = build_crucible_state();
+
+    post(&state, "/tdata/MemoryStores",
+        r#"{"id":"ms-del","Name":"del-test","Status":"Active","CreatedAt":"2026-04-12T00:00:00Z","UpdatedAt":"2026-04-12T00:00:00Z"}"#,
+    ).await;
+    post(&state, "/tdata/Memories",
+        r#"{"id":"mem-del","MemoryStoreId":"ms-del","Path":"/x.md","Content":"x","CreatedAt":"2026-04-12T00:00:00Z","UpdatedAt":"2026-04-12T00:00:00Z"}"#,
+    ).await;
+
+    let (status, body) = delete(&state, "/tdata/MemoryStores('ms-del')").await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "DELETE store with memories must be rejected: {body:?}"
     );
 }

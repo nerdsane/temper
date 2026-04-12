@@ -1,0 +1,27 @@
+# AgentMcpServer Entity — I/O Automaton Specification
+#
+# Child entity of ManagedAgent, representing one row in the `mcp_servers[]`
+# array of Anthropic's Beta Managed Agents API. Single-state (Active); the
+# interesting rules live in the field invariant and the cross-invariant in
+# `specs/cross-invariants.toml`:
+#
+#   ServerTypeMustBeUrl       the `Type` field must equal `url` — Anthropic
+#                             only supports URL-style MCP servers today.
+#   McpServerRequiresActiveManagedAgent  cross-invariant in
+#                             cross-invariants.toml gates the POST on
+#                             parent ManagedAgent Status.
+
+[automaton]
+name = "AgentMcpServer"
+states = ["Active"]
+initial = "Active"
+
+# No actions. POST/DELETE happen via the generic OData entity-set routes.
+
+# --- Cross-field validation (ADR-0041) ---
+
+[[field_invariant]]
+name = "ServerTypeMustBeUrl"
+when = { not = { field = "Type", absent = true } }
+require = { field = "Type", equals = "url" }
+message = "AgentMcpServer.Type must be `url`"
