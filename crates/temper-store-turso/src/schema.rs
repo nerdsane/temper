@@ -400,6 +400,33 @@ CREATE INDEX IF NOT EXISTS idx_ots_trajectories_outcome
     ON ots_trajectories(outcome);";
 
 // ---------------------------------------------------------------------------
+// Entity catalog (durable query-plane corpus)
+// ---------------------------------------------------------------------------
+
+/// One row per live entity in the durable query plane.
+pub const CREATE_ENTITY_CATALOG_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS entity_catalog (
+    tenant             TEXT NOT NULL,
+    entity_type        TEXT NOT NULL,
+    entity_id          TEXT NOT NULL,
+    status             TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+    sequence_nr        INTEGER NOT NULL DEFAULT 0,
+    projection_version INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (tenant, entity_type, entity_id)
+);";
+
+/// Fast path for collection lookups by tenant/entity type.
+pub const CREATE_ENTITY_CATALOG_TYPE_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_entity_catalog_type
+    ON entity_catalog(tenant, entity_type);";
+
+/// Fast path for status-based collection filtering.
+pub const CREATE_ENTITY_CATALOG_STATUS_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_entity_catalog_status
+    ON entity_catalog(tenant, entity_type, status);";
+
+// ---------------------------------------------------------------------------
 // Entity field index (EAV table for OData filter push-down)
 // ---------------------------------------------------------------------------
 
@@ -463,6 +490,9 @@ mod tests {
         assert!(CREATE_OTS_TRAJECTORIES_AGENT_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_OTS_TRAJECTORIES_TENANT_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_OTS_TRAJECTORIES_OUTCOME_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_ENTITY_CATALOG_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_ENTITY_CATALOG_TYPE_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_ENTITY_CATALOG_STATUS_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_ENTITY_FIELD_INDEX_TABLE.contains("IF NOT EXISTS"));
         assert!(CREATE_ENTITY_FIELD_INDEX_LOOKUP.contains("IF NOT EXISTS"));
         assert!(CREATE_ENTITY_FIELD_INDEX_STATUS.contains("IF NOT EXISTS"));

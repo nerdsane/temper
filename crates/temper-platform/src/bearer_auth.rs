@@ -13,6 +13,11 @@ use axum::middleware::Next;
 use axum::response::Response;
 use temper_runtime::tenant::TenantId;
 
+/// Marker extension for requests that were already authenticated by an
+/// outer layer and have trusted principal headers injected server-side.
+#[derive(Debug, Clone, Copy)]
+pub struct PreAuthenticatedRequest;
+
 /// Axum middleware that validates Bearer token authentication and resolves
 /// agent identity from credentials.
 ///
@@ -44,6 +49,13 @@ pub async fn bearer_auth_check(
         // No API key configured — passthrough (local dev mode).
         return Ok(next.run(req).await);
     };
+
+    if req.extensions().get::<PreAuthenticatedRequest>().is_some()
+        && req.headers().contains_key("x-temper-principal-kind")
+        && req.headers().contains_key("x-temper-principal-id")
+    {
+        return Ok(next.run(req).await);
+    }
 
     let Some(auth_header) = req.headers().get("authorization") else {
         return Err(StatusCode::UNAUTHORIZED);
@@ -239,6 +251,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn pre_authenticated_request_bypasses_bearer_requirement() {
+        async fn mark_pre_authenticated(
+            mut req: Request,
+            next: Next,
+        ) -> Result<Response, StatusCode> {
+            req.extensions_mut().insert(PreAuthenticatedRequest);
+            req.headers_mut()
+                .insert("x-tenant-id", "default".parse().unwrap());
+            req.headers_mut()
+                .insert("x-temper-principal-kind", "admin".parse().unwrap());
+            req.headers_mut()
+                .insert("x-temper-principal-id", "dashboard-user".parse().unwrap());
+            Ok(next.run(req).await)
+        }
+
+        let mut state = PlatformState::new(None);
+        state.api_token = Some("secret123".into());
+        let app = Router::new()
+            .route("/tdata/Orders", get(ok_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                bearer_auth_check,
+            ))
+            .layer(middleware::from_fn(mark_pre_authenticated))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(HttpRequest::get("/tdata/Orders").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[test]
