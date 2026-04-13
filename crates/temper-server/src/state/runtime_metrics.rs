@@ -64,24 +64,23 @@ impl RuntimeMetricInstruments {
         let indexed_total: u64 = indexed_by_tenant.values().copied().sum();
         self.active_entities.record(indexed_total, &[]);
 
-        if let Some(store) = state.event_store.as_ref() {
-            if let Ok(Some(projected_by_tenant)) = store.projected_entity_counts_by_tenant().await {
-                let projected_total: u64 =
-                    projected_by_tenant.iter().map(|(_, count)| *count).sum();
-                self.projected_entities.record(projected_total, &[]);
+        if let Some(store) = state.event_store.as_ref()
+            && let Ok(Some(projected_by_tenant)) = store.projected_entity_counts_by_tenant().await
+        {
+            let projected_total: u64 = projected_by_tenant.iter().map(|(_, count)| *count).sum();
+            self.projected_entities.record(projected_total, &[]);
 
-                let coverage_total = coverage_ratio(projected_total, indexed_total);
-                self.projection_coverage_ratio.record(coverage_total, &[]);
+            let coverage_total = coverage_ratio(projected_total, indexed_total);
+            self.projection_coverage_ratio.record(coverage_total, &[]);
 
-                for (tenant, count) in projected_by_tenant {
-                    self.projected_entities
-                        .record(count, &[KeyValue::new("tenant", tenant.clone())]);
-                    let indexed = indexed_by_tenant.get(&tenant).copied().unwrap_or(0);
-                    self.projection_coverage_ratio.record(
-                        coverage_ratio(count, indexed),
-                        &[KeyValue::new("tenant", tenant)],
-                    );
-                }
+            for (tenant, count) in projected_by_tenant {
+                self.projected_entities
+                    .record(count, &[KeyValue::new("tenant", tenant.clone())]);
+                let indexed = indexed_by_tenant.get(&tenant).copied().unwrap_or(0);
+                self.projection_coverage_ratio.record(
+                    coverage_ratio(count, indexed),
+                    &[KeyValue::new("tenant", tenant)],
+                );
             }
         }
     }
