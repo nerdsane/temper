@@ -28,8 +28,16 @@ use super::types::{LoadDirRequest, LoadInlineRequest};
 pub(crate) async fn handle_load_inline(
     State(state): State<ServerState>,
     headers: HeaderMap,
-    Json(body): Json<LoadInlineRequest>,
+    raw_body: String,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
+    let body: LoadInlineRequest = serde_json::from_str(&raw_body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Invalid load-inline request body: {e}. Ensure 'specs' is a map of filename strings to content strings."
+            ),
+        )
+    })?;
     let tenant = body.tenant.clone();
 
     // Cedar authorization gate.
