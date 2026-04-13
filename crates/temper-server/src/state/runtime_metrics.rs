@@ -67,8 +67,7 @@ impl RuntimeMetricInstruments {
         if let Some(store) = state.event_store.as_ref()
             && let Ok(Some(projected_by_tenant)) = store.projected_entity_counts_by_tenant().await
         {
-            let projected_total: u64 =
-                projected_by_tenant.iter().map(|(_, count)| *count).sum();
+            let projected_total: u64 = projected_by_tenant.iter().map(|(_, count)| *count).sum();
             self.projected_entities.record(projected_total, &[]);
 
             let coverage_total = coverage_ratio(projected_total, indexed_total);
