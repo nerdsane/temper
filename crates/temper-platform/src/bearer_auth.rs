@@ -281,7 +281,11 @@ mod tests {
             .with_state(state);
 
         let resp = app
-            .oneshot(HttpRequest::get("/tdata/Orders").body(Body::empty()).unwrap())
+            .oneshot(
+                HttpRequest::get("/tdata/Orders")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
