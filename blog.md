@@ -60,11 +60,11 @@ Crucible has two layers.
                  └────────────────────────────────────────┘
 ```
 
-**The control layer, [Temper](https://github.com/nerdsane/temper).** Temper is [Sesh Nalla's](https://www.linkedin.com/in/seshendranalla/) actor-based runtime with an entity-relationship layer inspired by OData. Every agent, environment, session, and event is modeled as a governed entity with a declared state machine. You write a spec that defines the legal states and transitions for each entity. For example, a session spec declares that when an agent is processing a message, it must not accept new user messages unless interrupted. Temper verifies these specs symbolically at build time using SMT solving, so violations are caught before anything runs. At runtime, every action flows through Cedar authorization policies and gets recorded in an append-only event log.
+**The control layer, [Temper](https://github.com/nerdsane/temper).** [Sesh Nalla's](https://www.linkedin.com/in/seshendranalla/) Temper is built around a [related insight](https://github.com/nerdsane/temper/blob/main/docs/POSITIONING.md): agents are starting to build their own tools, and most of those tools turn out to be state machines. If you have a kernel that can verify and deploy state machines from descriptions alone, agents can safely build and operate their own tooling. The same applies to the agent infrastructure itself, since agents, sessions, and environments all follow governed lifecycles with states and transitions. In Crucible, all of these are modeled as state machines that Temper verifies symbolically at build time. A session spec, for example, declares that when an agent is processing a message, it must not accept new user messages unless interrupted. At runtime, every action flows through Cedar authorization policies and gets recorded in an append-only event log.
 
-**The execution layer, LLM + Tool Router.** The execution layer combines the language model with a tool router that polls Crucible for new session events. When a user sends a message, the router picks it up, calls out to the LLM, and appends the response as new events. If tool calls are needed (run a bash command, read a file, fetch a URL) the router executes them in a Modal sandbox and appends those results back to the session. The LLM reasons. The router acts. Temper records.
+**The execution layer, LLM + Tool Router.** The execution layer combines the language model with a tool router that polls Crucible for new session events. When a user sends a message, the router picks it up, calls out to the LLM, and appends the response as new events. If tool calls are needed (run a bash command, read a file, fetch a URL) the router executes them in a Modal sandbox and appends those results back to the session.
 
-The session event log is the contract between these two layers. The control layer doesn't know or care which model is reasoning. The execution layer doesn't manage state. They communicate through events. [Anthropic describes](https://www.anthropic.com/engineering/managed-agents) this as separating the "brain" from the "hands." In [Schrödinger's Sandbox](https://open.substack.com/pub/arunparthiban/p/schrodingers-sandbox), I argued that the tool execution boundary is an implementation detail, not an architectural one. The same agent should be able to run tools locally or in a remote sandbox without changing its reasoning. Crucible is that argument turned into code. The session event log is the seam. The control layer doesn't know where tools execute. The execution layer doesn't manage state.
+The session event log is the contract between these two layers. The control layer doesn't know or care which model is reasoning. The execution layer doesn't manage state. They communicate through events. [Anthropic describes](https://www.anthropic.com/engineering/managed-agents) this as separating the "brain" from the "hands." In [Schrödinger's Sandbox](https://open.substack.com/pub/arunparthiban/p/schrodingers-sandbox), I argued that the tool execution boundary is an implementation detail, not an architectural one. The same agent should be able to run tools locally or in a remote sandbox without changing its reasoning. Crucible implements that idea, using the session event log as the boundary between the two layers.
 
 ## What Crucible Looks Like
 
@@ -147,15 +147,15 @@ Drop a link in the **ingest** channel, and the agent opens it in an isolated Mod
 
 Ask a question in the **ask** channel, and the agent retrieves from the knowledge base and answers.
 
-That's it. API-driven agents, sandboxed execution, stateful knowledge management, all stitched together on top of Crucible's primitives.
+API-driven agents, sandboxed execution, stateful knowledge management, all stitched together on top of Crucible's primitives.
 
 ![Ingest channel — drop a link, the agent processes it in a Modal sandbox and stores a summary](discord-ingest.png)
 
 ![Ask channel — query the knowledge base and get an answer grounded in ingested content](discord-ask.png)
 
 
-The new stack is a simple user interface, a set of primitives for constructing agents, a sandbox, and an LLM. The interface gives humans a way in. The primitives give agents structure — state machines, event logs, lifecycle rules. The sandbox and tools gives them hands. The LLM gives them a brain. The models are ready. The infrastructure is catching up.
+The new stack is a simple user interface, a set of primitives for constructing agents, a sandbox, and an LLM. The interface gives humans a way in. The primitives give agents structure — state machines, event logs, lifecycle rules. The sandbox and tools give them hands. The LLM gives them a brain. The models are ready. The infrastructure is catching up.
 
 ---
 
-*Crucible is open source and built on [Temper](https://github.com/nerdsane/temper). You can find the code at [github.com/ArunParthiban10/temper](https://github.com/ArunParthiban10/temper).*
+*Crucible is open source and built on [Temper](https://github.com/nerdsane/temper). You can find the code at [github.com/nerdsane/temper](https://github.com/nerdsane/temper).*
