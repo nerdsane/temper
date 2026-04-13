@@ -151,6 +151,149 @@ impl ServerState {
         }
     }
 
+    /// Populate the entity field index for OData filter push-down.
+    ///
+    /// Two-phase approach:
+    /// 1. **Snapshot pass** — cheap: deserialises snapshots for entities that have
+    ///    them (≥100 events).
+    /// 2. **Actor hydration pass** — for remaining entities: spawns/reuses actors
+    ///    to reconstruct state from events.  Most actors are already hydrated by
+    ///    bootstrap (e.g. `ensure_markdown_file` calls `get_tenant_entity_state`),
+    ///    so this is typically fast.
+    ///
+    /// Runs once as a background task after startup.  New entities created after
+    /// boot are indexed via `run_post_dispatch_effects` step 8.
+    #[instrument(skip_all, fields(otel.name = "entity.populate_field_index", tenant = %tenant))]
+    pub async fn populate_field_index_from_snapshots(&self, tenant: &TenantId) {
+        let Some(store) = self.event_store.as_ref() else {
+            return;
+        };
+
+        let entities = {
+            let index = self.entity_index.read().unwrap();
+            let mut result = Vec::new();
+            for (index_key, ids) in index.iter() {
+                // index_key format: "{tenant}:{entity_type}"
+                let prefix = format!("{tenant}:");
+                if let Some(entity_type) = index_key.strip_prefix(&prefix) {
+                    for id in ids {
+                        result.push((entity_type.to_string(), id.clone()));
+                    }
+                }
+            }
+            result
+        };
+
+        let total = entities.len();
+        let mut indexed = 0usize;
+        let mut errors = 0usize;
+        let mut needs_hydration = Vec::new();
+
+        // ── Phase 1: snapshot-based backfill (cheap) ──
+        for (entity_type, entity_id) in &entities {
+            let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+            match store.load_snapshot(&persistence_id).await {
+                Ok(Some((_seq, snapshot_bytes))) => {
+                    if let Ok(state) =
+                        serde_json::from_slice::<crate::entity_actor::EntityState>(&snapshot_bytes)
+                    {
+                        if let Err(e) = store
+                            .upsert_field_index(
+                                tenant.as_str(),
+                                entity_type,
+                                entity_id,
+                                &state.status,
+                                &state.fields,
+                            )
+                            .await
+                        {
+                            tracing::debug!(
+                                error = %e,
+                                entity_type = %entity_type,
+                                entity_id = %entity_id,
+                                "field index backfill: upsert failed"
+                            );
+                            errors += 1;
+                        } else {
+                            indexed += 1;
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // No snapshot — needs actor hydration in phase 2.
+                    needs_hydration.push((entity_type.clone(), entity_id.clone()));
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        "field index backfill: snapshot load failed"
+                    );
+                    errors += 1;
+                }
+            }
+        }
+
+        tracing::info!(
+            tenant = %tenant,
+            total,
+            snapshot_indexed = indexed,
+            needs_hydration = needs_hydration.len(),
+            "field index phase 1 (snapshots) complete, starting phase 2 (hydration)"
+        );
+
+        // ── Phase 2: actor hydration for entities without snapshots ──
+        for (entity_type, entity_id) in &needs_hydration {
+            match self
+                .get_tenant_entity_state(tenant, entity_type, entity_id)
+                .await
+            {
+                Ok(response) => {
+                    if let Err(e) = store
+                        .upsert_field_index(
+                            tenant.as_str(),
+                            entity_type,
+                            entity_id,
+                            &response.state.status,
+                            &response.state.fields,
+                        )
+                        .await
+                    {
+                        tracing::debug!(
+                            error = %e,
+                            entity_type = %entity_type,
+                            entity_id = %entity_id,
+                            "field index backfill: hydration upsert failed"
+                        );
+                        errors += 1;
+                    } else {
+                        indexed += 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        "field index backfill: actor hydration failed"
+                    );
+                    errors += 1;
+                }
+            }
+            // Yield to avoid starving the runtime during large backfills.
+            tokio::task::yield_now().await;
+        }
+
+        tracing::info!(
+            tenant = %tenant,
+            total,
+            indexed,
+            errors,
+            "populated field index (snapshots + hydration)"
+        );
+    }
+
     /// Hydrate actor state from the event store by spawning actors for all
     /// entities that have persisted events in this tenant.
     #[instrument(skip_all, fields(otel.name = "entity.hydrate_from_store", tenant = %tenant))]

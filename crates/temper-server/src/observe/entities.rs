@@ -75,7 +75,7 @@ pub(crate) async fn handle_get_entity_history(
     headers: HeaderMap,
     Path((entity_type, entity_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_entities", "Entity")?;
+    require_observe_auth(&state, &headers, "read", &entity_type)?;
     let tenant = extract_tenant(&headers, &state).map_err(|(code, _)| code)?;
 
     // Path 1: If the actor is loaded, read events from in-memory state.
@@ -172,7 +172,7 @@ pub(crate) async fn handle_wait_for_entity_state(
     Path((entity_type, entity_id)): Path<(String, String)>,
     Query(params): Query<WaitForEntityStateParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_entities", "Entity")?;
+    require_observe_auth(&state, &headers, "read", &entity_type)?;
     let tenant = extract_tenant(&headers, &state).map_err(|(code, _)| code)?;
 
     let target_statuses: std::collections::BTreeSet<String> = params
@@ -221,7 +221,7 @@ pub(crate) async fn handle_entity_event_stream(
     Path((entity_type, entity_id)): Path<(String, String)>,
     Query(params): Query<EntityEventStreamParams>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_events", "Entity")?;
+    require_observe_auth(&state, &headers, "read", &entity_type)?;
     let tenant = extract_tenant(&headers, &state).map_err(|(code, _)| code)?;
     let since = headers
         .get("last-event-id")

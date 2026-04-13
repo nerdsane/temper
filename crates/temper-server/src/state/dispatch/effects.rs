@@ -426,6 +426,33 @@ impl crate::state::ServerState {
             );
         }
 
+        // 8. Update field index for OData filter push-down
+        if let Some(store) = self.event_store.as_ref() {
+            let store = store.clone();
+            let tenant = ctx.tenant.to_string();
+            let entity_type = ctx.entity_type.to_string();
+            let entity_id = ctx.entity_id.to_string();
+            let status = response.state.status.clone();
+            let fields = response.state.fields.clone();
+            tokio::spawn(
+                async move {
+                    if let Err(e) = store
+                        .upsert_field_index(&tenant, &entity_type, &entity_id, &status, &fields)
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            tenant = %tenant,
+                            entity_type = %entity_type,
+                            entity_id = %entity_id,
+                            "failed to update field index"
+                        );
+                    }
+                }
+                .instrument(tracing::info_span!("field_index_upsert")),
+            );
+        }
+
         response
     }
 }
