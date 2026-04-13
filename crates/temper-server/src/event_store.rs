@@ -233,15 +233,14 @@ impl ServerEventStore {
             Self::TenantRouted(router) => {
                 let mut counts = Vec::new();
                 for tenant_id in router.connected_tenants().await {
-                    if let Ok(store) = router.store_for_tenant(&tenant_id).await {
-                        if let Some((_, count)) = store
+                    if let Ok(store) = router.store_for_tenant(&tenant_id).await
+                        && let Some((_, count)) = store
                             .projected_entity_counts_by_tenant()
                             .await?
                             .into_iter()
                             .find(|(tenant, _)| tenant == &tenant_id)
-                        {
-                            counts.push((tenant_id.clone(), count));
-                        }
+                    {
+                        counts.push((tenant_id.clone(), count));
                     }
                 }
                 Ok(Some(counts))
