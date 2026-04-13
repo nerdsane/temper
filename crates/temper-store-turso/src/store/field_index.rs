@@ -7,33 +7,51 @@
 
 use libsql::{TransactionBehavior, params};
 use temper_runtime::persistence::{PersistenceError, storage_error};
+use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
 use super::TursoEventStore;
 
 impl TursoEventStore {
-    /// Upsert field index entries for a single entity.
+    /// Upsert the durable query-plane projection for a single entity.
     ///
-    /// Flattens the top-level scalars from `fields` into individual EAV rows.
-    /// Non-scalar values (objects, arrays) are skipped — they require full
-    /// materialization for filtering.
+    /// Maintains both:
+    /// - `entity_catalog`: one live row per entity
+    /// - `entity_field_index`: EAV rows for OData filter push-down
     #[instrument(skip_all, fields(
-        otel.name = "turso.upsert_field_index",
+        otel.name = "turso.upsert_query_projection",
         tenant, entity_type, entity_id,
     ))]
-    pub async fn upsert_field_index(
+    pub async fn upsert_query_projection(
         &self,
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
         status: &str,
         fields: &serde_json::Value,
+        sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         let conn = self.configured_connection().await?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
+
+        tx.execute(
+            "INSERT OR REPLACE INTO entity_catalog \
+             (tenant, entity_type, entity_id, status, updated_at, sequence_nr, projection_version) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+            params![
+                tenant,
+                entity_type,
+                entity_id,
+                status,
+                sim_now().to_rfc3339(),
+                i64::try_from(sequence_nr).unwrap_or(i64::MAX),
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
 
         // Delete existing rows for this entity, then re-insert.
         // This is simpler than tracking individual field changes and handles
@@ -75,7 +93,56 @@ impl TursoEventStore {
         Ok(())
     }
 
-    /// Remove all field index entries for a single entity.
+    /// Backwards-compatible alias for the old name.
+    #[instrument(skip_all, fields(
+        otel.name = "turso.upsert_field_index",
+        tenant, entity_type, entity_id,
+    ))]
+    pub async fn upsert_field_index(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+    ) -> Result<(), PersistenceError> {
+        self.upsert_query_projection(tenant, entity_type, entity_id, status, fields, 0)
+            .await
+    }
+
+    /// Remove the durable query-plane projection for a single entity.
+    #[instrument(skip_all, fields(
+        otel.name = "turso.remove_query_projection",
+        tenant, entity_type, entity_id,
+    ))]
+    pub async fn remove_query_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        tx.execute(
+            "DELETE FROM entity_catalog WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .map_err(storage_error)?;
+        tx.execute(
+            "DELETE FROM entity_field_index WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .map_err(storage_error)?;
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Backwards-compatible alias for the old name.
     #[instrument(skip_all, fields(
         otel.name = "turso.remove_field_index",
         tenant, entity_type, entity_id,
@@ -86,14 +153,8 @@ impl TursoEventStore {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<(), PersistenceError> {
-        let conn = self.configured_connection().await?;
-        conn.execute(
-            "DELETE FROM entity_field_index WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
-            params![tenant, entity_type, entity_id],
-        )
-        .await
-        .map_err(storage_error)?;
-        Ok(())
+        self.remove_query_projection(tenant, entity_type, entity_id)
+            .await
     }
 
     /// Query the field index with a pre-built SQL WHERE clause.
@@ -141,6 +202,32 @@ impl TursoEventStore {
             }
         }
         Ok(ids)
+    }
+
+    /// Return projected entity counts grouped by tenant.
+    #[instrument(skip_all, fields(otel.name = "turso.projected_entity_counts_by_tenant"))]
+    pub async fn projected_entity_counts_by_tenant(
+        &self,
+    ) -> Result<Vec<(String, u64)>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, COUNT(*) AS projected_count \
+                 FROM entity_catalog \
+                 GROUP BY tenant \
+                 ORDER BY tenant",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut counts = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let tenant: String = row.get(0).map_err(storage_error)?;
+            let count: i64 = row.get(1).map_err(storage_error)?;
+            counts.push((tenant, count.max(0) as u64));
+        }
+        Ok(counts)
     }
 }
 

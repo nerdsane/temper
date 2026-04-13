@@ -248,6 +248,17 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
 
+        // Entity catalog — durable query-plane corpus.
+        conn.execute(schema::CREATE_ENTITY_CATALOG_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_ENTITY_CATALOG_TYPE_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_ENTITY_CATALOG_STATUS_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+
         // Entity field index — EAV table for OData filter push-down.
         conn.execute(schema::CREATE_ENTITY_FIELD_INDEX_TABLE, ())
             .await

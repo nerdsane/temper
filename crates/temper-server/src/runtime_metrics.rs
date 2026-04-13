@@ -17,6 +17,7 @@ struct RuntimeMetrics {
     process_resident_memory_bytes: Gauge<u64>,
     active_actors: Gauge<u64>,
     active_entities: Gauge<u64>,
+    projection_backfill_snapshot_misses_total: Counter<u64>,
     event_replay_duration: Histogram<f64>,
     blob_io_wait_duration_ms: Histogram<f64>,
     blob_local_fast_path_requests_total: Counter<u64>,
@@ -41,6 +42,12 @@ fn metrics() -> &'static RuntimeMetrics {
             active_entities: meter
                 .u64_gauge("temper_active_entities")
                 .with_description("Number of hydrated entities currently indexed by tenant.")
+                .build(),
+            projection_backfill_snapshot_misses_total: meter
+                .u64_counter("temper_projection_backfill_snapshot_misses_total")
+                .with_description(
+                    "Entities encountered during projection backfill that had no snapshot and required direct event replay.",
+                )
                 .build(),
             event_replay_duration: meter
                 .f64_histogram("temper_event_replay_duration")
@@ -108,6 +115,13 @@ pub fn record_active_entity_counts(index: &BTreeMap<String, BTreeSet<String>>) {
             .active_entities
             .record(count, &[KeyValue::new("tenant", tenant)]);
     }
+}
+
+/// Record entities that required replay because no snapshot existed during startup backfill.
+pub fn record_projection_backfill_snapshot_misses(tenant: &str, count: u64) {
+    metrics()
+        .projection_backfill_snapshot_misses_total
+        .add(count, &[KeyValue::new("tenant", tenant.to_string())]);
 }
 
 /// Record event replay duration.

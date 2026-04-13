@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::Gauge;
 
@@ -13,6 +14,8 @@ struct RuntimeMetricInstruments {
     process_resident_memory_bytes: Gauge<u64>,
     active_actors: Gauge<u64>,
     active_entities: Gauge<u64>,
+    projected_entities: Gauge<u64>,
+    projection_coverage_ratio: Gauge<f64>,
 }
 
 impl RuntimeMetricInstruments {
@@ -38,17 +41,49 @@ impl RuntimeMetricInstruments {
                 .u64_gauge("temper_active_entities")
                 .with_description("Number of active indexed entities.")
                 .build(),
+            projected_entities: meter
+                .u64_gauge("temper_projected_entities")
+                .with_description("Number of entities present in the durable query-plane catalog.")
+                .build(),
+            projection_coverage_ratio: meter
+                .f64_gauge("temper_projection_coverage_ratio")
+                .with_description(
+                    "Projected entity count divided by indexed entity count for the current process.",
+                )
+                .build(),
         }
     }
 
-    fn record(&self, state: &ServerState) {
+    async fn record(&self, state: &ServerState) {
         self.up.record(1, &[]);
         if let Some(rss) = read_process_resident_memory_bytes() {
             self.process_resident_memory_bytes.record(rss, &[]);
         }
         self.active_actors.record(state.active_actor_count(), &[]);
-        self.active_entities
-            .record(state.active_entity_count(), &[]);
+        let indexed_by_tenant = state.active_entity_counts_by_tenant();
+        let indexed_total: u64 = indexed_by_tenant.values().copied().sum();
+        self.active_entities.record(indexed_total, &[]);
+
+        if let Some(store) = state.event_store.as_ref() {
+            if let Ok(Some(projected_by_tenant)) = store.projected_entity_counts_by_tenant().await {
+                let projected_total: u64 =
+                    projected_by_tenant.iter().map(|(_, count)| *count).sum();
+                self.projected_entities.record(projected_total, &[]);
+
+                let coverage_total = coverage_ratio(projected_total, indexed_total);
+                self.projection_coverage_ratio.record(coverage_total, &[]);
+
+                for (tenant, count) in projected_by_tenant {
+                    self.projected_entities
+                        .record(count, &[KeyValue::new("tenant", tenant.clone())]);
+                    let indexed = indexed_by_tenant.get(&tenant).copied().unwrap_or(0);
+                    self.projection_coverage_ratio.record(
+                        coverage_ratio(count, indexed),
+                        &[KeyValue::new("tenant", tenant)],
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -71,9 +106,17 @@ impl ServerState {
 
             loop {
                 ticker.tick().await;
-                instruments.record(&state);
+                instruments.record(&state).await;
             }
         });
+    }
+}
+
+fn coverage_ratio(projected: u64, indexed: u64) -> f64 {
+    if indexed == 0 {
+        if projected == 0 { 1.0 } else { 0.0 }
+    } else {
+        projected as f64 / indexed as f64
     }
 }
 
