@@ -8,6 +8,7 @@ pub mod metrics;
 pub mod pending_decisions;
 mod persistence;
 pub mod policy_suggestions;
+mod projection_backfill;
 mod runtime_metrics;
 pub mod trajectory;
 pub mod wasm_invocation_log;
