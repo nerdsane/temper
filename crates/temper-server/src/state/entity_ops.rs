@@ -11,9 +11,7 @@ use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
 use super::{ServerState, projection_backfill};
-use crate::entity_actor::{
-    EntityActor, EntityMsg, EntityResponse, recover_entity_state_from_store,
-};
+use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::runtime_metrics;
