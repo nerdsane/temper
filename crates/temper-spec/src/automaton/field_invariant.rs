@@ -166,7 +166,7 @@ impl FieldPredicate {
 
         // Combinator branch.
         if has_any_of {
-            let children = table.get("any_of").unwrap();
+            let children = table.get("any_of").unwrap(); // ci-ok: key matched in enclosing arm
             let list = children
                 .as_array()
                 .ok_or_else(|| err("`any_of` must be an array of predicates"))?;
@@ -180,7 +180,7 @@ impl FieldPredicate {
             return Ok(FieldPredicate::AnyOf { any_of: out });
         }
         if has_all_of {
-            let children = table.get("all_of").unwrap();
+            let children = table.get("all_of").unwrap(); // ci-ok: key matched in enclosing arm
             let list = children
                 .as_array()
                 .ok_or_else(|| err("`all_of` must be an array of predicates"))?;
@@ -194,9 +194,9 @@ impl FieldPredicate {
             return Ok(FieldPredicate::AllOf { all_of: out });
         }
         if has_not {
-            let child_val = table.get("not").unwrap();
-            let inner = FieldPredicate::from_toml_value(child_val)
-                .map_err(|e| err(format!("not: {e}")))?;
+            let child_val = table.get("not").unwrap(); // ci-ok: key matched in enclosing arm
+            let inner =
+                FieldPredicate::from_toml_value(child_val).map_err(|e| err(format!("not: {e}")))?;
             return Ok(FieldPredicate::Not {
                 not: Box::new(inner),
             });
@@ -229,7 +229,7 @@ impl FieldPredicate {
         }
 
         if has_absent {
-            let v = table.get("absent").unwrap();
+            let v = table.get("absent").unwrap(); // ci-ok: key matched in enclosing arm
             let b = v
                 .as_bool()
                 .ok_or_else(|| err("`absent` must be the literal `true`"))?;
@@ -241,7 +241,7 @@ impl FieldPredicate {
             return Ok(FieldPredicate::Absent { field, absent: () });
         }
         if has_empty {
-            let v = table.get("empty").unwrap();
+            let v = table.get("empty").unwrap(); // ci-ok: key matched in enclosing arm
             let b = v
                 .as_bool()
                 .ok_or_else(|| err("`empty` must be the literal `true`"))?;
@@ -254,7 +254,7 @@ impl FieldPredicate {
         }
 
         // has_equals
-        let v = table.get("equals").unwrap();
+        let v = table.get("equals").unwrap(); // ci-ok: key matched in enclosing arm
         let equals = toml_literal_to_json(v)
             .map_err(|e| err(format!("`equals` value on field `{field}`: {e}")))?;
         Ok(FieldPredicate::Equals { field, equals })

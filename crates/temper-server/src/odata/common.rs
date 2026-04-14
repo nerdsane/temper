@@ -176,10 +176,9 @@ pub(super) async fn run_write_prechecks(
     {
         return Err(constraint_violation_response(v));
     }
-    if let Err(v) = pre_upsert_field_invariant_checks(
-        state, tenant, entity_type, entity_id, operation, fields,
-    )
-    .await
+    if let Err(v) =
+        pre_upsert_field_invariant_checks(state, tenant, entity_type, entity_id, operation, fields)
+            .await
     {
         return Err(constraint_violation_response(v));
     }

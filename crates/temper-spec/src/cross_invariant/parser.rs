@@ -241,7 +241,7 @@ fn is_identifier(s: &str) -> bool {
         return false;
     }
     let mut chars = s.chars();
-    let first = chars.next().unwrap();
+    let first = chars.next().unwrap(); // ci-ok: non-empty checked above
     if !(first.is_ascii_alphabetic() || first == '_') {
         return false;
     }
@@ -314,10 +314,9 @@ assert = "related(Payment, payment_id).status in [\"Captured\"]"
 
     #[test]
     fn parse_field_assert_legacy_status_in_form() {
-        let parsed = parse_related_field_assert(
-            r#"related(Payment, payment_id).status in ["Captured"]"#,
-        )
-        .expect("should parse");
+        let parsed =
+            parse_related_field_assert(r#"related(Payment, payment_id).status in ["Captured"]"#)
+                .expect("should parse");
         assert_eq!(parsed.target_entity, "Payment");
         assert_eq!(parsed.source_field, "payment_id");
         assert_eq!(parsed.field_name, "status");
@@ -352,20 +351,16 @@ assert = "related(Payment, payment_id).status in [\"Captured\"]"
     #[test]
     fn parse_field_assert_rejects_bad_field_name() {
         assert!(
-            parse_related_field_assert(
-                r#"related(Environment, EnvironmentId).1Config in ["A"]"#
-            )
-            .is_none()
+            parse_related_field_assert(r#"related(Environment, EnvironmentId).1Config in ["A"]"#)
+                .is_none()
         );
     }
 
     #[test]
     fn parse_field_assert_rejects_empty_values() {
         assert!(
-            parse_related_field_assert(
-                r#"related(Environment, EnvironmentId).ConfigType in []"#
-            )
-            .is_none()
+            parse_related_field_assert(r#"related(Environment, EnvironmentId).ConfigType in []"#)
+                .is_none()
         );
     }
 

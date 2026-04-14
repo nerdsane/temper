@@ -135,13 +135,15 @@ pub fn spawn_eventual_recheck(
     state: crate::state::ServerState,
     interval: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move { // determinism-ok: background convergence task
+    tokio::spawn(
+        async move {
+            // determinism-ok: background convergence task
             let mut ticker = tokio::time::interval(interval); // determinism-ok: convergence polling
             loop {
                 ticker.tick().await;
 
                 let due_items = {
-                    let tracker = state.eventual_tracker.read().unwrap();
+                    let tracker = state.eventual_tracker.read().unwrap(); // ci-ok: infallible lock
                     tracker.due_for_recheck()
                 };
 
@@ -199,7 +201,7 @@ pub fn spawn_eventual_recheck(
 
                 // Clean up exhausted invariants
                 let exhausted = {
-                    let tracker = state.eventual_tracker.read().unwrap();
+                    let tracker = state.eventual_tracker.read().unwrap(); // ci-ok: infallible lock
                     tracker.exhausted()
                 };
                 for (key, inv) in exhausted {
@@ -246,7 +248,7 @@ async fn check_invariant_convergence(
 ) -> bool {
     // Re-read the invariant assertion from the registry
     let assertion_info = {
-        let registry = state.registry.read().unwrap();
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
         let tc = registry.get_tenant(tenant);
         tc.and_then(|tc| {
             tc.cross_invariants.as_ref().and_then(|ci| {
@@ -263,8 +265,7 @@ async fn check_invariant_convergence(
         return true;
     };
 
-    let Some(assertion) =
-        temper_spec::cross_invariant::parse_related_field_assert(&assertion_str)
+    let Some(assertion) = temper_spec::cross_invariant::parse_related_field_assert(&assertion_str)
     else {
         return true; // Invalid assertion — skip
     };
@@ -300,8 +301,7 @@ async fn check_invariant_convergence(
             if assertion.field_name == "status" {
                 resp.state.status.clone()
             } else {
-                let target_fields =
-                    serde_json::to_value(&resp.state.fields).unwrap_or_default();
+                let target_fields = serde_json::to_value(&resp.state.fields).unwrap_or_default();
                 let Some(v) = target_fields
                     .get(&assertion.field_name)
                     .or_else(|| {
