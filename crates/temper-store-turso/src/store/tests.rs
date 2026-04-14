@@ -423,3 +423,41 @@ async fn query_projection_roundtrip_updates_catalog_and_field_index() {
         "entity catalog should be empty after removing the projection"
     );
 }
+
+#[tokio::test]
+async fn load_wasm_module_metadata_all_tenants_returns_metadata_without_bulk_bytes() {
+    let store = make_store("wasm-metadata").await;
+
+    store
+        .upsert_wasm_module("tenant-a", "mod-a", b"hello-a", "hash-a")
+        .await
+        .expect("persist mod-a");
+    store
+        .upsert_wasm_module("tenant-b", "mod-b", b"hello-b", "hash-b")
+        .await
+        .expect("persist mod-b");
+
+    let rows = store
+        .load_wasm_module_metadata_all_tenants()
+        .await
+        .expect("load wasm metadata");
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].tenant, "tenant-a");
+    assert_eq!(rows[0].module_name, "mod-a");
+    assert_eq!(rows[0].sha256_hash, "hash-a");
+    assert_eq!(rows[0].size_bytes, 7);
+    assert!(!rows[0].updated_at.is_empty());
+    assert_eq!(rows[1].tenant, "tenant-b");
+    assert_eq!(rows[1].module_name, "mod-b");
+    assert_eq!(rows[1].sha256_hash, "hash-b");
+    assert_eq!(rows[1].size_bytes, 7);
+    assert!(!rows[1].updated_at.is_empty());
+
+    let full_row = store
+        .load_wasm_module("tenant-a", "mod-a")
+        .await
+        .expect("load full wasm row")
+        .expect("full row should exist");
+    assert_eq!(full_row.wasm_bytes, b"hello-a");
+}

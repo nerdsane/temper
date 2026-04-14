@@ -24,97 +24,13 @@ use crate::bootstrap;
 use crate::state::PlatformState;
 
 mod system_files;
-
-/// Result of an app installation, categorising each spec by what happened.
-#[derive(Debug, Clone, Serialize)]
-pub struct InstallResult {
-    /// Entity types registered for the first time.
-    pub added: Vec<String>,
-    /// Entity types that already existed but whose IOA source changed.
-    pub updated: Vec<String>,
-    /// Entity types whose IOA source was byte-for-byte identical — skipped.
-    pub skipped: Vec<String>,
-    /// WASM modules compiled and registered.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub wasm_modules: Vec<String>,
-    /// Agent definitions bootstrapped.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<String>,
-    /// Skill definitions bootstrapped.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<String>,
-    /// ADR markdown files bootstrapped into TemperFS.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub adrs_bootstrapped: Vec<String>,
-    /// Seed data instances created.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub seed_instances: Vec<String>,
-}
-
-/// Parsed app.toml manifest.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct AppManifest {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default = "default_version")]
-    pub version: String,
-    #[serde(default)]
-    pub dependencies: Vec<String>,
-}
-
-fn default_version() -> String {
-    "0.1.0".to_string()
-}
+mod types;
+pub use types::*;
 
 fn read_app_manifest(app_dir: &Path) -> Option<AppManifest> {
     let path = app_dir.join("app.toml");
     let content = std::fs::read_to_string(&path).ok()?;
     toml::from_str(&content).ok()
-}
-
-/// Metadata for an app in the catalog.
-#[derive(Debug, Clone, Serialize)]
-pub struct AppEntry {
-    /// Short name used in CLI flags and API calls (e.g. `"project-management"`).
-    pub name: String,
-    /// Human-readable description.
-    pub description: String,
-    /// Entity types included in the app.
-    pub entity_types: Vec<String>,
-    /// Semantic version.
-    pub version: String,
-    /// Full app guide markdown (from `APP.md`/`app.md`/`skill.md`), if available.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub app_guide: Option<String>,
-    /// Declared dependencies (from app.toml).
-    #[serde(default)]
-    pub dependencies: Vec<String>,
-}
-
-// Backward-compatible alias: SkillEntry → AppEntry.
-pub type SkillEntry = AppEntry;
-
-/// Full spec bundle for an app (owned, loaded from disk).
-pub struct AppBundle {
-    /// IOA spec sources as `(entity_type, ioa_toml_source)` pairs.
-    pub specs: Vec<(String, String)>,
-    /// CSDL XML source (None if app has no IOA specs).
-    pub csdl: Option<String>,
-    /// Cedar policy sources (may be empty).
-    pub cedar_policies: Vec<String>,
-    /// WASM module binaries as `(module_name, wasm_bytes)` pairs.
-    pub wasm_modules: BTreeMap<String, Vec<u8>>,
-    /// Agent definitions discovered from `agents/` subdirectories.
-    pub agents: Vec<AgentDefinition>,
-    /// Skill definitions discovered from `skills/` subdirectories.
-    pub skills: Vec<AppSkillDefinition>,
-    /// ADR markdown files discovered from `adrs/`.
-    pub adrs: Vec<AdrEntry>,
-    /// System files discovered from `system/` directory tree.
-    pub system_files: Vec<SystemFileEntry>,
-    /// Seed data instances discovered from `seed-data/` TOML files.
-    pub seed_instances: Vec<SeedInstance>,
 }
 
 // ── Agent / Skill / Seed Data types ─────────────────────────────────
@@ -304,6 +220,22 @@ pub fn reload_skills() {
     reload_os_apps();
 }
 
+/// List OS apps that belong to the default startup surface.
+pub fn list_startup_os_apps() -> Vec<String> {
+    let cat = match catalog().read() {
+        Ok(cat) => cat,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut apps: Vec<String> = cat
+        .entries
+        .iter()
+        .filter(|entry| entry.startup_install == StartupInstallMode::Core)
+        .map(|entry| entry.name.clone())
+        .collect();
+    apps.sort();
+    apps
+}
+
 impl AppCatalog {
     /// Discover the apps directory and scan it.
     fn discover() -> Self {
@@ -454,6 +386,7 @@ impl AppCatalog {
             };
 
             let version = manifest.version.clone();
+            let startup_install = manifest.startup_install;
             let dependencies = manifest.dependencies.clone();
 
             let app_path = app_dir.clone();
@@ -466,6 +399,7 @@ impl AppCatalog {
                 description,
                 entity_types,
                 version,
+                startup_install,
                 app_guide,
                 dependencies,
             });
@@ -1107,6 +1041,7 @@ pub fn get_skill_guide(name: &str) -> Option<String> {
 
 /// Load a complete app bundle from a directory on disk.
 fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
+    let manifest = read_app_manifest(app_dir)?;
     let ioa_files = find_ioa_files(app_dir);
 
     // Read IOA specs, extracting entity type from the parsed automaton name.
@@ -1128,6 +1063,11 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
 
     // Read WASM module binaries from wasm/*/target/wasm32-unknown-unknown/release/*.wasm.
     let wasm_modules = find_wasm_modules(app_dir);
+    let wasm_module_configs: BTreeMap<String, WasmModuleManifest> = manifest
+        .wasm_modules
+        .into_iter()
+        .map(|module| (module.name.clone(), module))
+        .collect();
 
     // Discover agents, skills, and seed data.
     let agents = find_agents(app_dir);
@@ -1143,6 +1083,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     if specs.is_empty()
         && cedar_policies.is_empty()
         && wasm_modules.is_empty()
+        && wasm_module_configs.is_empty()
         && agents.is_empty()
         && skills.is_empty()
         && adrs.is_empty()
@@ -1159,6 +1100,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         csdl,
         cedar_policies,
         wasm_modules,
+        wasm_module_configs,
         agents,
         skills,
         adrs,
@@ -1395,7 +1337,6 @@ async fn install_os_app_without_dependencies(
         let specs_to_bootstrap: Vec<(&str, &str)> = bundle
             .specs
             .iter()
-            .filter(|(entity_type, _)| !skipped.contains(entity_type))
             .map(|(et, src)| (et.as_str(), src.as_str()))
             .collect();
         let verified_cache = if let Some(ref store) = state.server.event_store
@@ -1416,8 +1357,10 @@ async fn install_os_app_without_dependencies(
         if let Some(ref merged) = merged_csdl {
             // Even when every spec is byte-for-byte unchanged, we still need to
             // merge the app's CSDL back into the in-memory registry so entity-set
-            // mappings survive partial restores and process restarts.
-            bootstrap::bootstrap_tenant_specs(
+            // mappings survive partial restores and process restarts. Re-running
+            // bootstrap also lets recovery heal specs that were durably left
+            // in `pending` by older installs.
+            let spec_hashes = bootstrap::bootstrap_tenant_specs(
                 state,
                 tenant,
                 merged,
@@ -1426,6 +1369,19 @@ async fn install_os_app_without_dependencies(
                 &format!("OsApp({app_name})"),
                 &verified_cache,
             );
+
+            if let Some(ref store) = state.server.event_store
+                && let Some(ps) = store.platform_store()
+            {
+                bootstrap::persist_bootstrap_verification(
+                    ps,
+                    tenant,
+                    &specs_to_bootstrap,
+                    merged,
+                    &spec_hashes,
+                )
+                .await;
+            }
         }
     }
 
@@ -1447,44 +1403,78 @@ async fn install_os_app_without_dependencies(
         }
     }
 
-    // ── Step 4: Compile and register WASM modules. ──────────────────
+    // ── Step 4: Persist/register WASM modules, warming only eager modules. ──
     let mut wasm_registered = Vec::new();
+    let mut wasm_skipped = Vec::new();
+    let mut wasm_failures = Vec::new();
     for (module_name, wasm_bytes) in &bundle.wasm_modules {
-        match state.server.wasm_engine.compile_and_cache(wasm_bytes) {
-            Ok(hash) => {
-                // Persist to Turso FIRST for durability.
-                if let Err(e) = state
-                    .server
-                    .upsert_wasm_module(tenant, module_name, wasm_bytes, &hash)
-                    .await
-                {
-                    tracing::warn!(
-                        tenant,
-                        module = %module_name,
-                        error = %e,
-                        "Failed to persist WASM module to durable store (continuing in-memory only)"
-                    );
-                }
-                // Register in module registry.
-                {
-                    let mut wasm_reg = state.server.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
-                    wasm_reg.register(&tenant_id, module_name, &hash);
-                }
-                tracing::info!(
-                    tenant,
-                    module = %module_name,
-                    hash = %hash,
-                    size = wasm_bytes.len(),
-                    "WASM module loaded from OS app"
-                );
-                wasm_registered.push(module_name.clone());
-            }
-            Err(e) => {
+        let module_config = bundle.wasm_module_configs.get(module_name);
+        let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
+
+        if let Err(e) = state
+            .server
+            .upsert_wasm_module(tenant, module_name, wasm_bytes, &hash)
+            .await
+        {
+            tracing::warn!(
+                tenant,
+                module = %module_name,
+                error = %e,
+                "Failed to persist WASM module to durable store (continuing in-memory only)"
+            );
+        }
+        {
+            let mut wasm_reg = state.server.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
+            wasm_reg.register(&tenant_id, module_name, &hash);
+        }
+
+        if matches!(
+            module_config.map(|config| config.startup_loading),
+            Some(WasmStartupLoading::Eager)
+        ) && let Err(e) = state.server.wasm_engine.compile_and_cache(wasm_bytes)
+        {
+            wasm_failures.push(module_name.clone());
+            tracing::warn!(
+                tenant,
+                module = %module_name,
+                error = %e,
+                "Failed to eagerly compile WASM module from OS app"
+            );
+        }
+
+        tracing::info!(
+            tenant,
+            module = %module_name,
+            hash = %hash,
+            size = wasm_bytes.len(),
+            startup_loading = ?module_config
+                .map(|config| config.startup_loading)
+                .unwrap_or_default(),
+            "WASM module registered from OS app"
+        );
+        wasm_registered.push(module_name.clone());
+    }
+
+    for (module_name, module_config) in &bundle.wasm_module_configs {
+        if bundle.wasm_modules.contains_key(module_name) {
+            continue;
+        }
+        match module_config.criticality {
+            WasmModuleCriticality::Optional => {
+                wasm_skipped.push(module_name.clone());
                 tracing::warn!(
                     tenant,
                     module = %module_name,
-                    error = %e,
-                    "Failed to compile WASM module from OS app"
+                    "Configured optional WASM module artifact is missing from the app bundle"
+                );
+            }
+            WasmModuleCriticality::PlatformRequired | WasmModuleCriticality::AppRequired => {
+                wasm_failures.push(module_name.clone());
+                tracing::error!(
+                    tenant,
+                    module = %module_name,
+                    criticality = ?module_config.criticality,
+                    "Configured required WASM module artifact is missing from the app bundle"
                 );
             }
         }
@@ -1524,6 +1514,8 @@ async fn install_os_app_without_dependencies(
         updated,
         skipped,
         wasm_modules: wasm_registered,
+        wasm_skipped,
+        wasm_failures,
         agents: agents_bootstrapped,
         skills: skills_bootstrapped,
         adrs_bootstrapped,

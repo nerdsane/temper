@@ -571,7 +571,8 @@ async fn test_health_counts_entities_and_transitions() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["active_entities"], 1);
+    assert_eq!(json["active_actors"], 1);
+    assert_eq!(json["indexed_entities"], 1);
     assert_eq!(json["transitions_total"], 1);
     assert_eq!(json["errors_total"], 0);
 }
@@ -639,8 +640,8 @@ async fn test_metrics_returns_prometheus_format() {
         "should contain transitions metric"
     );
     assert!(
-        text.contains("temper_active_entities"),
-        "should contain active entities metric"
+        text.contains("temper_indexed_entities"),
+        "should contain indexed entities metric"
     );
 }
 

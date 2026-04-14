@@ -251,9 +251,9 @@ pub fn bootstrap_agent_specs(
 /// On subsequent boots, `load_verification_cache` finds these rows and
 /// the cascade is skipped — preventing OOM on memory-constrained hosts.
 ///
-/// Note: the upsert + mark-verified is two statements, not atomic.  If
-/// the process crashes between them the spec row will have `verified=0`
-/// and the cascade will re-run on next boot — safe, just slower.
+/// Note: the upsert + mark-verified is two statements, not atomic. If the
+/// process crashes between them the spec row will have `verified=0` until
+/// we recommit the tenant's spec set at the end — safe, just slower.
 pub(crate) async fn persist_bootstrap_verification(
     store: &dyn PlatformStore,
     tenant: &str,
@@ -295,6 +295,13 @@ pub(crate) async fn persist_bootstrap_verification(
         {
             tracing::warn!("Failed to persist verification status for {tenant}/{entity_type}: {e}");
         }
+    }
+
+    // `upsert_spec` marks rows as uncommitted while content is rewritten. Once
+    // bootstrap verification succeeds, promote the tenant's spec set back to a
+    // durable committed state so restart recovery can actually see the rows.
+    if let Err(e) = store.commit_specs(tenant).await {
+        tracing::warn!("Failed to commit bootstrap specs for tenant '{tenant}': {e}");
     }
 }
 

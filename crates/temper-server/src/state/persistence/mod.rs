@@ -129,6 +129,97 @@ impl ServerState {
         }
     }
 
+    /// Ensure a registered WASM module is compiled and cached in-memory.
+    ///
+    /// Startup recovery restores registry entries without eagerly compiling
+    /// every persisted module. The first invocation compiles on demand.
+    pub async fn ensure_wasm_module_cached(
+        &self,
+        tenant: &temper_runtime::tenant::TenantId,
+        module_name: &str,
+        expected_hash: &str,
+    ) -> Result<(), String> {
+        if self.wasm_engine.is_cached(expected_hash) {
+            return Ok(());
+        }
+
+        let tenant_name = tenant.to_string();
+        let Some(backend) = self.metadata_backend_for_tenant(&tenant_name).await else {
+            return Err(format!(
+                "cannot lazy-load WASM module '{module_name}' for tenant '{tenant_name}' without a metadata backend"
+            ));
+        };
+
+        let (wasm_bytes, stored_hash) = match backend {
+            TenantMetadataBackend::Postgres(pool) => {
+                let row: Option<(Vec<u8>, String)> = sqlx::query_as(
+                    "SELECT wasm_bytes, sha256_hash FROM wasm_modules WHERE tenant = $1 AND module_name = $2",
+                )
+                .bind(&tenant_name)
+                .bind(module_name)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "failed to lazy-load WASM module {tenant_name}/{module_name} from postgres: {e}"
+                    )
+                })?;
+                let Some((wasm_bytes, sha256_hash)) = row else {
+                    return Err(format!(
+                        "WASM module '{module_name}' not found in persistence for tenant '{tenant_name}'"
+                    ));
+                };
+                (wasm_bytes, sha256_hash)
+            }
+            TenantMetadataBackend::Turso(turso) => {
+                let row = turso
+                    .load_wasm_module(&tenant_name, module_name)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "failed to lazy-load WASM module {tenant_name}/{module_name} from turso: {e}"
+                        )
+                    })?;
+                let Some(row) = row else {
+                    return Err(format!(
+                        "WASM module '{module_name}' not found in persistence for tenant '{tenant_name}'"
+                    ));
+                };
+                (row.wasm_bytes, row.sha256_hash)
+            }
+            TenantMetadataBackend::Redis => {
+                return Err(Self::redis_ephemeral_error("WASM lazy-load"));
+            }
+        };
+
+        let resolved_hash = if stored_hash.is_empty() {
+            temper_wasm::WasmEngine::hash_module(&wasm_bytes)
+        } else {
+            stored_hash
+        };
+        if resolved_hash != expected_hash {
+            return Err(format!(
+                "WASM module hash mismatch for {tenant_name}/{module_name}: registry={expected_hash} persisted={resolved_hash}"
+            ));
+        }
+
+        self.wasm_engine
+            .compile_and_cache(&wasm_bytes)
+            .map(|_| {
+                tracing::info!(
+                    tenant = %tenant_name,
+                    module = %module_name,
+                    hash = %expected_hash,
+                    "lazy-compiled persisted WASM module on first use"
+                );
+            })
+            .map_err(|e| {
+                format!(
+                    "failed to compile lazy-loaded WASM module {tenant_name}/{module_name}: {e}"
+                )
+            })
+    }
+
     /// Persist a WASM invocation log entry (Postgres or Turso).
     ///
     /// Fire-and-forget — callers should not block the dispatch path on this.
@@ -198,8 +289,8 @@ impl ServerState {
 
     /// Load all WASM modules from the persistence backend and register them.
     ///
-    /// For each module, compiles the bytes via `WasmEngine::compile_and_cache()`
-    /// and registers in the `WasmModuleRegistry`.
+    /// Startup recovery now restores registry entries only; compilation is
+    /// deferred until first invoke via [`ensure_wasm_module_cached`].
     pub async fn load_wasm_modules(&self) -> Result<usize, String> {
         let Some(store) = self.event_store.as_ref() else {
             return Ok(0);
@@ -209,30 +300,35 @@ impl ServerState {
 
         // Postgres path.
         if let Some(pool) = store.postgres_pool() {
-            let rows: Vec<(String, String, Vec<u8>, String)> = sqlx::query_as(
-                "SELECT tenant, module_name, wasm_bytes, sha256_hash FROM wasm_modules ORDER BY tenant, module_name",
+            let rows: Vec<(String, String, String)> = sqlx::query_as(
+                "SELECT tenant, module_name, sha256_hash FROM wasm_modules ORDER BY tenant, module_name",
             )
             .fetch_all(pool)
             .await
             .map_err(|e| format!("failed to load WASM modules from postgres: {e}"))?;
 
-            for (tenant, module_name, wasm_bytes, _stored_hash) in rows {
-                match self.wasm_engine.compile_and_cache(&wasm_bytes) {
-                    Ok(hash) => {
-                        let tenant_id = temper_runtime::tenant::TenantId::new(&tenant);
-                        let mut wasm_reg = self.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
-                        wasm_reg.register(&tenant_id, &module_name, &hash);
-                        recovered += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            tenant = %tenant,
-                            module = %module_name,
-                            error = %e,
-                            "failed to compile recovered WASM module, skipping"
-                        );
-                    }
-                }
+            for (tenant, module_name, stored_hash) in rows {
+                let hash = if stored_hash.is_empty() {
+                    let wasm_bytes: Vec<u8> = sqlx::query_scalar(
+                        "SELECT wasm_bytes FROM wasm_modules WHERE tenant = $1 AND module_name = $2",
+                    )
+                    .bind(&tenant)
+                    .bind(&module_name)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "failed to recover legacy WASM bytes for {tenant}/{module_name} from postgres: {e}"
+                        )
+                    })?;
+                    temper_wasm::WasmEngine::hash_module(&wasm_bytes)
+                } else {
+                    stored_hash
+                };
+                let tenant_id = temper_runtime::tenant::TenantId::new(&tenant);
+                let mut wasm_reg = self.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
+                wasm_reg.register(&tenant_id, &module_name, &hash);
+                recovered += 1;
             }
             return Ok(recovered);
         }
@@ -240,27 +336,35 @@ impl ServerState {
         // Turso path (single-DB).
         if let Some(turso) = store.platform_turso_store() {
             let rows = turso
-                .load_wasm_modules_all_tenants()
+                .load_wasm_module_metadata_all_tenants()
                 .await
                 .map_err(|e| format!("failed to load WASM modules from turso: {e}"))?;
 
             for row in rows {
-                match self.wasm_engine.compile_and_cache(&row.wasm_bytes) {
-                    Ok(hash) => {
-                        let tenant_id = temper_runtime::tenant::TenantId::new(&row.tenant);
-                        let mut wasm_reg = self.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
-                        wasm_reg.register(&tenant_id, &row.module_name, &hash);
-                        recovered += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            tenant = %row.tenant,
-                            module = %row.module_name,
-                            error = %e,
-                            "failed to compile recovered WASM module, skipping"
-                        );
-                    }
-                }
+                let hash = if row.sha256_hash.is_empty() {
+                    let full_row = turso
+                        .load_wasm_module(&row.tenant, &row.module_name)
+                        .await
+                        .map_err(|e| {
+                            format!(
+                                "failed to recover legacy WASM bytes for {}/{} from turso: {e}",
+                                row.tenant, row.module_name
+                            )
+                        })?
+                        .ok_or_else(|| {
+                            format!(
+                                "legacy WASM module bytes missing for {}/{} in turso",
+                                row.tenant, row.module_name
+                            )
+                        })?;
+                    temper_wasm::WasmEngine::hash_module(&full_row.wasm_bytes)
+                } else {
+                    row.sha256_hash.clone()
+                };
+                let tenant_id = temper_runtime::tenant::TenantId::new(&row.tenant);
+                let mut wasm_reg = self.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
+                wasm_reg.register(&tenant_id, &row.module_name, &hash);
+                recovered += 1;
             }
             return Ok(recovered);
         }
@@ -270,16 +374,28 @@ impl ServerState {
             // Load from platform store (system modules).
             if let Ok(rows) = router
                 .platform_store()
-                .load_wasm_modules_all_tenants()
+                .load_wasm_module_metadata_all_tenants()
                 .await
             {
                 for row in rows {
-                    if let Ok(hash) = self.wasm_engine.compile_and_cache(&row.wasm_bytes) {
-                        let tenant_id = temper_runtime::tenant::TenantId::new(&row.tenant);
-                        let mut wasm_reg = self.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
-                        wasm_reg.register(&tenant_id, &row.module_name, &hash);
-                        recovered += 1;
-                    }
+                    let hash = if row.sha256_hash.is_empty() {
+                        let Some(full_row) = router
+                            .platform_store()
+                            .load_wasm_module(&row.tenant, &row.module_name)
+                            .await
+                            .ok()
+                            .flatten()
+                        else {
+                            continue;
+                        };
+                        temper_wasm::WasmEngine::hash_module(&full_row.wasm_bytes)
+                    } else {
+                        row.sha256_hash.clone()
+                    };
+                    let tenant_id = temper_runtime::tenant::TenantId::new(&row.tenant);
+                    let mut wasm_reg = self.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
+                    wasm_reg.register(&tenant_id, &row.module_name, &hash);
+                    recovered += 1;
                 }
             }
             // Load from each tenant store.
@@ -287,26 +403,27 @@ impl ServerState {
                 let Ok(turso) = router.store_for_tenant(&tid).await else {
                     continue;
                 };
-                let Ok(rows) = turso.load_wasm_modules_all_tenants().await else {
+                let Ok(rows) = turso.load_wasm_module_metadata_all_tenants().await else {
                     continue;
                 };
                 for row in rows {
-                    match self.wasm_engine.compile_and_cache(&row.wasm_bytes) {
-                        Ok(hash) => {
-                            let tenant_id = temper_runtime::tenant::TenantId::new(&row.tenant);
-                            let mut wasm_reg = self.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
-                            wasm_reg.register(&tenant_id, &row.module_name, &hash);
-                            recovered += 1;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                tenant = %row.tenant,
-                                module = %row.module_name,
-                                error = %e,
-                                "failed to compile recovered WASM module, skipping"
-                            );
-                        }
-                    }
+                    let hash = if row.sha256_hash.is_empty() {
+                        let Some(full_row) = turso
+                            .load_wasm_module(&row.tenant, &row.module_name)
+                            .await
+                            .ok()
+                            .flatten()
+                        else {
+                            continue;
+                        };
+                        temper_wasm::WasmEngine::hash_module(&full_row.wasm_bytes)
+                    } else {
+                        row.sha256_hash.clone()
+                    };
+                    let tenant_id = temper_runtime::tenant::TenantId::new(&row.tenant);
+                    let mut wasm_reg = self.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
+                    wasm_reg.register(&tenant_id, &row.module_name, &hash);
+                    recovered += 1;
                 }
             }
             return Ok(recovered);

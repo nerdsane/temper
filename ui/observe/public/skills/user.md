@@ -119,7 +119,7 @@ After reporting an unmet intent:
 | `GET` | `/{tenant}/{EntityType}({id})` | Get entity by ID |
 | `POST` | `/{tenant}/{EntityType}({id})` | Trigger action on entity |
 | `POST` | `/api/evolution/trajectories/unmet` | Report unmet intent |
-| `GET` | `/observe/entities` | List all active entities |
+| `GET` | `/observe/entities` | List all hydrated in-memory entities |
 
 ---
 

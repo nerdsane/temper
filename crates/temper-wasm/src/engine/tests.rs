@@ -101,7 +101,7 @@ fn module_too_large_rejected() {
 fn resource_limits_default() {
     let limits = WasmResourceLimits::default();
     assert_eq!(limits.max_fuel, 1_000_000_000);
-    assert_eq!(limits.max_memory, 64 * 1024 * 1024);
+    assert_eq!(limits.max_memory, 16 * 1024 * 1024);
     assert_eq!(limits.max_duration, std::time::Duration::from_secs(30));
     assert_eq!(limits.max_response_bytes, 1024 * 1024);
 }

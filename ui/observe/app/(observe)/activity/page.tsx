@@ -332,12 +332,12 @@ export default function ActivityPage() {
         </div>
       )}
 
-      {/* Active Entities */}
+      {/* Hydrated Actors */}
       {entities.length > 0 && (
         <div className="mb-6">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-base font-semibold text-[var(--color-text-primary)] tracking-tight">
-              Active Entities
+              Hydrated Actors
               <span className="text-[var(--color-text-muted)] font-normal text-[13px] ml-2">{filteredEntities.length}</span>
             </h2>
             <div className="flex items-center gap-2">

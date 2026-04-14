@@ -16,7 +16,7 @@ use crate::state::ServerState;
 struct RuntimeMetrics {
     process_resident_memory_bytes: Gauge<u64>,
     active_actors: Gauge<u64>,
-    active_entities: Gauge<u64>,
+    indexed_entities: Gauge<u64>,
     projection_backfill_snapshot_misses_total: Counter<u64>,
     event_replay_duration: Histogram<f64>,
     blob_io_wait_duration_ms: Histogram<f64>,
@@ -39,9 +39,11 @@ fn metrics() -> &'static RuntimeMetrics {
                 .u64_gauge("temper_active_actors")
                 .with_description("Number of currently active spawned entity actors.")
                 .build(),
-            active_entities: meter
-                .u64_gauge("temper_active_entities")
-                .with_description("Number of hydrated entities currently indexed by tenant.")
+            indexed_entities: meter
+                .u64_gauge("temper_indexed_entities")
+                .with_description(
+                    "Number of entities currently present in the in-memory query-plane index, reported globally and by tenant.",
+                )
                 .build(),
             projection_backfill_snapshot_misses_total: meter
                 .u64_counter("temper_projection_backfill_snapshot_misses_total")
@@ -108,11 +110,11 @@ pub fn record_active_entity_counts(index: &BTreeMap<String, BTreeSet<String>>) {
     }
 
     let total: u64 = by_tenant.values().copied().sum();
-    metrics().active_entities.record(total, &[]);
+    metrics().indexed_entities.record(total, &[]);
 
     for (tenant, count) in by_tenant {
         metrics()
-            .active_entities
+            .indexed_entities
             .record(count, &[KeyValue::new("tenant", tenant)]);
     }
 }

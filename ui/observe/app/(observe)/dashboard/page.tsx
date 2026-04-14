@@ -249,7 +249,7 @@ export default function Dashboard() {
         <div>
           <h1 className="text-2xl text-[var(--color-text-primary)] tracking-tight font-serif">Dashboard</h1>
           <p className="text-sm text-[var(--color-text-muted)] mt-0.5">
-            Overview of loaded specs and active entities
+            Overview of loaded specs and hydrated actors
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -292,7 +292,7 @@ export default function Dashboard() {
           className={`glass rounded-[2px] p-4 ${entityHighlight}`}
           onAnimationEnd={() => setEntityHighlight("")}
         >
-          <div className="text-xs text-[var(--color-text-muted)]">Active Entities</div>
+          <div className="text-xs text-[var(--color-text-muted)]">Hydrated Actors</div>
           <div className="text-4xl font-bold font-mono text-[var(--color-text-primary)] mt-0.5">
             {entities.length}
           </div>
