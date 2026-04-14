@@ -120,6 +120,136 @@ impl ServerEventStore {
     }
 }
 
+impl ServerEventStore {
+    /// Upsert the durable query-plane projection for an entity.
+    pub async fn upsert_query_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        match self {
+            Self::Turso(store) => {
+                store
+                    .upsert_query_projection(
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        status,
+                        fields,
+                        sequence_nr,
+                    )
+                    .await
+            }
+            Self::TenantRouted(router) => {
+                if let Ok(store) = router.store_for_tenant(tenant).await {
+                    store
+                        .upsert_query_projection(
+                            tenant,
+                            entity_type,
+                            entity_id,
+                            status,
+                            fields,
+                            sequence_nr,
+                        )
+                        .await
+                } else {
+                    Ok(()) // no tenant store → no-op
+                }
+            }
+            _ => Ok(()), // query-plane projections only supported on Turso backends
+        }
+    }
+
+    /// Remove the durable query-plane projection for an entity.
+    pub async fn remove_query_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<(), PersistenceError> {
+        match self {
+            Self::Turso(store) => {
+                store
+                    .remove_query_projection(tenant, entity_type, entity_id)
+                    .await
+            }
+            Self::TenantRouted(router) => {
+                if let Ok(store) = router.store_for_tenant(tenant).await {
+                    store
+                        .remove_query_projection(tenant, entity_type, entity_id)
+                        .await
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Query the field index (delegates to Turso backends only).
+    ///
+    /// Returns `Ok(Some(ids))` when the backend supports field indexing and
+    /// the query succeeded. Returns `Ok(None)` when the backend doesn't
+    /// support field indexing (Postgres, Redis, Sim).
+    pub async fn query_field_index(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        where_clause: &str,
+        params: Vec<String>,
+    ) -> Result<Option<Vec<String>>, PersistenceError> {
+        match self {
+            Self::Turso(store) => store
+                .query_field_index(tenant, entity_type, where_clause, params)
+                .await
+                .map(Some),
+            Self::TenantRouted(router) => {
+                if let Ok(store) = router.store_for_tenant(tenant).await {
+                    store
+                        .query_field_index(tenant, entity_type, where_clause, params)
+                        .await
+                        .map(Some)
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None), // field index only supported on Turso backends
+        }
+    }
+
+    /// Return projected entity counts grouped by tenant.
+    ///
+    /// Returns `Ok(Some(counts))` when the backend supports query-plane projections.
+    /// Returns `Ok(None)` for backends without a durable query plane.
+    pub async fn projected_entity_counts_by_tenant(
+        &self,
+    ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
+        match self {
+            Self::Turso(store) => store.projected_entity_counts_by_tenant().await.map(Some),
+            Self::TenantRouted(router) => {
+                let mut counts = Vec::new();
+                for tenant_id in router.connected_tenants().await {
+                    if let Ok(store) = router.store_for_tenant(&tenant_id).await
+                        && let Some((_, count)) = store
+                            .projected_entity_counts_by_tenant()
+                            .await?
+                            .into_iter()
+                            .find(|(tenant, _)| tenant == &tenant_id)
+                    {
+                        counts.push((tenant_id.clone(), count));
+                    }
+                }
+                Ok(Some(counts))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
 impl EventStore for ServerEventStore {
     async fn append(
         &self,

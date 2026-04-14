@@ -241,7 +241,7 @@ fn is_identifier(s: &str) -> bool {
         return false;
     }
     let mut chars = s.chars();
-    let first = chars.next().unwrap(); // ci-ok: chars guaranteed non-empty after is_empty check
+    let first = chars.next().unwrap(); // ci-ok: non-empty checked above
     if !(first.is_ascii_alphabetic() || first == '_') {
         return false;
     }

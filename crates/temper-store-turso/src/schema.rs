@@ -1,5 +1,13 @@
 //! SQLite-compatible schema for the Turso/libSQL event store.
 
+mod query_plane;
+
+pub use query_plane::{
+    CREATE_ENTITY_CATALOG_STATUS_INDEX, CREATE_ENTITY_CATALOG_TABLE,
+    CREATE_ENTITY_CATALOG_TYPE_INDEX, CREATE_ENTITY_FIELD_INDEX_LOOKUP,
+    CREATE_ENTITY_FIELD_INDEX_STATUS, CREATE_ENTITY_FIELD_INDEX_TABLE,
+};
+
 pub const CREATE_EVENTS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -433,6 +441,12 @@ mod tests {
         assert!(CREATE_OTS_TRAJECTORIES_AGENT_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_OTS_TRAJECTORIES_TENANT_INDEX.contains("IF NOT EXISTS"));
         assert!(CREATE_OTS_TRAJECTORIES_OUTCOME_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_ENTITY_CATALOG_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_ENTITY_CATALOG_TYPE_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_ENTITY_CATALOG_STATUS_INDEX.contains("IF NOT EXISTS"));
+        assert!(CREATE_ENTITY_FIELD_INDEX_TABLE.contains("IF NOT EXISTS"));
+        assert!(CREATE_ENTITY_FIELD_INDEX_LOOKUP.contains("IF NOT EXISTS"));
+        assert!(CREATE_ENTITY_FIELD_INDEX_STATUS.contains("IF NOT EXISTS"));
     }
 
     #[test]

@@ -440,12 +440,68 @@ async fn handle_entity_set(
     let default_page_size = odata_default_page_size();
     let max_entities = odata_max_entities();
 
-    let (entity_ids, apply_options, precomputed_count) = select_entity_ids_for_materialization(
-        state.list_entity_ids_lazy(tenant, &entity_type).await,
-        query_options,
-        default_page_size,
-        max_entities,
-    );
+    // ---- Filter push-down: try SQL-level filtering first ----
+    let sql_pushdown_ids = if let Some(filter) = &query_options.filter {
+        if let Some(translated) = super::filter_sql::try_translate_filter(filter) {
+            if let Some(store) = state.event_store.as_ref() {
+                match store
+                    .query_field_index(
+                        tenant.as_str(),
+                        &entity_type,
+                        &translated.where_clause,
+                        translated.params,
+                    )
+                    .await
+                {
+                    Ok(Some(ids)) => {
+                        tracing::debug!(
+                            entity_type = %entity_type,
+                            matched = ids.len(),
+                            "OData filter push-down succeeded"
+                        );
+                        Some(ids)
+                    }
+                    Ok(None) => None, // backend doesn't support field index
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "OData filter push-down query failed, falling back to in-memory"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None // filter couldn't be translated
+        }
+    } else {
+        None // no filter
+    };
+
+    let (entity_ids, apply_options, precomputed_count) = if let Some(pushed_ids) = sql_pushdown_ids
+    {
+        // SQL push-down already filtered — apply pagination only.
+        // The $filter is still in query_options for apply_query_options to
+        // re-verify in memory (belt-and-suspenders), but we've reduced the
+        // materialization set dramatically.
+        let mut opts = query_options.clone();
+        if opts.top.is_none() {
+            opts.top = Some(default_page_size);
+        } else if let Some(top) = opts.top {
+            opts.top = Some(top.min(max_entities));
+        }
+        (pushed_ids, opts, None)
+    } else {
+        // No push-down — use existing materialization path.
+        select_entity_ids_for_materialization(
+            state.list_entity_ids_lazy(tenant, &entity_type).await,
+            query_options,
+            default_page_size,
+            max_entities,
+        )
+    };
 
     let mut entities = Vec::new();
     for id in &entity_ids {

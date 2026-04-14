@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
@@ -26,8 +28,16 @@ use super::types::{LoadDirRequest, LoadInlineRequest};
 pub(crate) async fn handle_load_inline(
     State(state): State<ServerState>,
     headers: HeaderMap,
-    Json(body): Json<LoadInlineRequest>,
+    raw_body: String,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
+    let body: LoadInlineRequest = serde_json::from_str(&raw_body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Invalid load-inline request body: {e}. Ensure 'specs' is a map of filename strings to content strings."
+            ),
+        )
+    })?;
     let tenant = body.tenant.clone();
 
     // Cedar authorization gate.
@@ -205,8 +215,19 @@ pub(crate) async fn handle_load_inline(
         )
     })?;
 
+    let specs_root = resolve_inline_specs_root(&tmp_dir, &body.specs)?;
+
     for (filename, content) in &body.specs {
         let path = tmp_dir.join(filename);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                // determinism-ok: HTTP handler creates temp subdirectories for nested inline specs
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to create parent directory for {filename}: {e}"),
+                )
+            })?;
+        }
         std::fs::write(&path, content).map_err(|e| {
             // determinism-ok: HTTP handler writes specs
             (
@@ -217,7 +238,7 @@ pub(crate) async fn handle_load_inline(
     }
 
     if let Some(source) = body.cross_invariants_toml.as_deref() {
-        std::fs::write(tmp_dir.join("cross-invariants.toml"), source).map_err(|e| {
+        std::fs::write(specs_root.join("cross-invariants.toml"), source).map_err(|e| {
             // determinism-ok: HTTP handler writes cross-invariants
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -231,7 +252,7 @@ pub(crate) async fn handle_load_inline(
     let cedar_policies = body.cedar_policies.clone();
     let dir_request = LoadDirRequest {
         tenant: tenant.clone(),
-        specs_dir: tmp_dir.to_string_lossy().to_string(),
+        specs_dir: specs_root.to_string_lossy().to_string(),
         merge: true,
     };
     let result = handle_load_dir(State(state.clone()), Json(dir_request)).await;
@@ -351,6 +372,41 @@ fn extract_submitted_namespaces(specs: &std::collections::BTreeMap<String, Strin
         }
     }
     namespaces.into_iter().collect()
+}
+
+fn resolve_inline_specs_root(
+    tmp_dir: &Path,
+    specs: &std::collections::BTreeMap<String, String>,
+) -> Result<PathBuf, (StatusCode, String)> {
+    let model_paths: Vec<&str> = specs
+        .keys()
+        .filter_map(|path| path.ends_with("model.csdl.xml").then_some(path.as_str()))
+        .collect();
+
+    if model_paths.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Inline spec submission must include model.csdl.xml".to_string(),
+        ));
+    }
+
+    if model_paths.len() > 1 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Inline spec submission must contain exactly one model.csdl.xml, found {}",
+                model_paths.len()
+            ),
+        ));
+    }
+
+    let model_path = Path::new(model_paths[0]);
+    let relative_root = model_path.parent().unwrap_or_else(|| Path::new(""));
+    Ok(if relative_root.as_os_str().is_empty() {
+        tmp_dir.to_path_buf()
+    } else {
+        tmp_dir.join(relative_root)
+    })
 }
 
 fn adr_candidate_paths(app_name: Option<&str>, namespaces: &[String]) -> Vec<String> {

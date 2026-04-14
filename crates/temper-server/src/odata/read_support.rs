@@ -58,8 +58,25 @@ pub(super) fn select_entity_ids_for_materialization(
         adjusted.count = None;
         adjusted
     } else {
-        if entity_ids.len() > max_entities {
-            entity_ids.truncate(max_entities);
+        // When a $filter or $orderby is present, we must materialise ALL
+        // candidate entities before the filter/sort can be applied.
+        // Truncating the candidate set before filtering would silently hide
+        // entities that match the filter but sort past the cutoff — a
+        // correctness bug that caused system skills to vanish from large File
+        // collections (see ADR: skill-bootstrap-invisible-in-odata).
+        //
+        // Safety cap: we still impose a hard ceiling (10× max_entities) to
+        // prevent unbounded materialisation in pathological cases, but log a
+        // warning so the operator knows results may be incomplete.
+        let safety_cap = max_entities.saturating_mul(10);
+        if entity_ids.len() > safety_cap {
+            tracing::warn!(
+                total = entity_ids.len(),
+                safety_cap,
+                "OData filtered query exceeds safety cap — results may be incomplete; \
+                 raise TEMPER_ODATA_MAX_ENTITIES to cover all entities"
+            );
+            entity_ids.truncate(safety_cap);
         }
 
         let mut adjusted = query_options.clone();
@@ -150,7 +167,9 @@ mod tests {
     }
 
     #[test]
-    fn hard_cap_limits_materialization_and_filter_orderby_path_sets_default_top() {
+    fn filtered_query_materialises_all_entities_under_safety_cap() {
+        // With max_entities=1000, the safety cap is 10_000.
+        // 2500 entities should ALL be materialised (no truncation).
         let ids: Vec<String> = (0..2500).map(|i| format!("id-{i}")).collect();
         let opts = QueryOptions {
             filter: Some(FilterExpr::Literal(ODataValue::Boolean(true))),
@@ -164,7 +183,25 @@ mod tests {
         let (selected, apply_opts, count) =
             select_entity_ids_for_materialization(ids, &opts, 100, 1000);
 
-        assert_eq!(selected.len(), 1000);
+        assert_eq!(selected.len(), 2500);
+        assert_eq!(count, None);
+        assert_eq!(apply_opts.top, Some(100));
+    }
+
+    #[test]
+    fn safety_cap_truncates_at_10x_max_entities() {
+        // With max_entities=1000, the safety cap is 10_000.
+        // 15_000 entities should be truncated to 10_000.
+        let ids: Vec<String> = (0..15_000).map(|i| format!("id-{i}")).collect();
+        let opts = QueryOptions {
+            filter: Some(FilterExpr::Literal(ODataValue::Boolean(true))),
+            ..QueryOptions::default()
+        };
+
+        let (selected, apply_opts, count) =
+            select_entity_ids_for_materialization(ids, &opts, 100, 1000);
+
+        assert_eq!(selected.len(), 10_000);
         assert_eq!(count, None);
         assert_eq!(apply_opts.top, Some(100));
     }

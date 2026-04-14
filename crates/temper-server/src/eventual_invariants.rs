@@ -143,7 +143,7 @@ pub fn spawn_eventual_recheck(
                 ticker.tick().await;
 
                 let due_items = {
-                    let tracker = state.eventual_tracker.read().unwrap();
+                    let tracker = state.eventual_tracker.read().unwrap(); // ci-ok: infallible lock
                     tracker.due_for_recheck()
                 };
 
@@ -201,7 +201,7 @@ pub fn spawn_eventual_recheck(
 
                 // Clean up exhausted invariants
                 let exhausted = {
-                    let tracker = state.eventual_tracker.read().unwrap();
+                    let tracker = state.eventual_tracker.read().unwrap(); // ci-ok: infallible lock
                     tracker.exhausted()
                 };
                 for (key, inv) in exhausted {
@@ -248,7 +248,7 @@ async fn check_invariant_convergence(
 ) -> bool {
     // Re-read the invariant assertion from the registry
     let assertion_info = {
-        let registry = state.registry.read().unwrap();
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
         let tc = registry.get_tenant(tenant);
         tc.and_then(|tc| {
             tc.cross_invariants.as_ref().and_then(|ci| {

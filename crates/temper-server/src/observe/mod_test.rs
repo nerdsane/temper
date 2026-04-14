@@ -97,11 +97,26 @@ permit(
 );
 "#;
 
+const ADMIN_SUBMIT_SPECS_POLICY: &str = r#"
+permit(
+  principal is Admin,
+  action == Action::"submit_specs",
+  resource is SpecRegistry
+);
+"#;
+
 fn install_admin_policy(state: &ServerState) {
     state
         .authz
         .reload_policies(ADMIN_MANAGE_POLICIES_POLICY)
         .expect("admin policy should parse");
+}
+
+fn install_admin_submit_specs_policy(state: &ServerState) {
+    state
+        .authz
+        .reload_policies(ADMIN_SUBMIT_SPECS_POLICY)
+        .expect("submit_specs policy should parse");
 }
 
 fn build_app_with_state(state: ServerState) -> Router {
@@ -160,6 +175,37 @@ async fn test_get_spec_detail_not_found() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_load_inline_supports_nested_paths() {
+    let state = test_state_with_registry();
+    install_admin_submit_specs_policy(&state);
+    let app = build_app_with_state(state.clone());
+
+    let response = app
+        .oneshot(system_post(
+            "/api/specs/load-inline",
+            &serde_json::json!({
+                "tenant": "nested-inline",
+                "specs": {
+                    "InlineProbe/model.csdl.xml": CSDL_XML,
+                    "InlineProbe/order.ioa.toml": ORDER_IOA
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let registry = state.registry.read().unwrap();
+    let tenant = TenantId::new("nested-inline");
+    let spec = registry
+        .get_spec(&tenant, "Order")
+        .expect("nested inline load should register Order");
+    assert_eq!(spec.automaton.automaton.name, "Order");
 }
 
 #[tokio::test]
