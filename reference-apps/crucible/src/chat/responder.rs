@@ -21,8 +21,8 @@ use crate::chat::anthropic::{
     ChatMessage, ContentBlock, MessagesRequest, MessagesResponse, Model, ToolDefinition,
 };
 use crate::chat::temper_client::{
-    AgentToolRow, CallableAgentRow, SessionAction, SessionEventRow, SessionRow,
-    SessionThreadRow, TemperClient, ThreadAction,
+    AgentToolRow, CallableAgentRow, SessionAction, SessionEventRow, SessionRow, SessionThreadRow,
+    TemperClient, ThreadAction,
 };
 use crate::chat::tools;
 use anyhow::{Context, Result, anyhow};
@@ -108,8 +108,14 @@ pub async fn respond<M: Model>(
     // ------------------------------------------------------------------
     let env_result = temper.get_environment(&session.environment_id).await;
     match &env_result {
-        Ok(env) => eprintln!("[respond] Environment {} ConfigType={}", env.id, env.config_type),
-        Err(e) => eprintln!("[respond] Failed to get environment {}: {}", session.environment_id, e),
+        Ok(env) => eprintln!(
+            "[respond] Environment {} ConfigType={}",
+            env.id, env.config_type
+        ),
+        Err(e) => eprintln!(
+            "[respond] Failed to get environment {}: {}",
+            session.environment_id, e
+        ),
     }
     let tool_router = match env_result {
         Ok(env) if env.config_type == "Modal" => {
@@ -569,8 +575,8 @@ pub fn build_tools_from_agent(agent_tools: &[AgentToolRow]) -> Vec<ToolDefinitio
                 let name = at.name.as_deref().unwrap_or("");
                 let description = at.description.as_deref().unwrap_or("");
                 let input_schema_str = at.input_schema.as_deref().unwrap_or("{}");
-                let input_schema: serde_json::Value =
-                    serde_json::from_str(input_schema_str).unwrap_or(serde_json::json!({
+                let input_schema: serde_json::Value = serde_json::from_str(input_schema_str)
+                    .unwrap_or(serde_json::json!({
                         "type": "object",
                         "properties": {}
                     }));
@@ -637,14 +643,8 @@ async fn execute_delegation<M: Model>(
     now: &str,
     tool_router: &ToolRouter,
 ) -> tools::ToolResult {
-    let agent_id = input
-        .get("agent_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let message = input
-        .get("message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let agent_id = input.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+    let message = input.get("message").and_then(|v| v.as_str()).unwrap_or("");
     let thread_id_opt = input.get("thread_id").and_then(|v| v.as_str());
 
     // Validate agent_id is in callable_agents.
@@ -762,8 +762,17 @@ async fn execute_delegation<M: Model>(
     *next_sequence += 1;
 
     // Run sub-agent turn.
-    match respond_thread(temper, model, session_id, &thread_id, agent_id, message, next_sequence, tool_router)
-        .await
+    match respond_thread(
+        temper,
+        model,
+        session_id,
+        &thread_id,
+        agent_id,
+        message,
+        next_sequence,
+        tool_router,
+    )
+    .await
     {
         Ok(result_text) => {
             // Emit agent.thread_message_received on primary.
@@ -829,10 +838,7 @@ async fn respond_thread<M: Model>(
         .with_context(|| format!("loading sub-agent ManagedAgent('{agent_id}')"))?;
 
     // Load sub-agent's tools (no callable agents — one level only).
-    let sub_agent_tools = temper
-        .list_agent_tools(agent_id)
-        .await
-        .unwrap_or_default();
+    let sub_agent_tools = temper.list_agent_tools(agent_id).await.unwrap_or_default();
     let tool_defs = build_tools_from_agent(&sub_agent_tools);
     let tools_for_request = if tool_defs.is_empty() {
         None
@@ -938,9 +944,7 @@ async fn respond_thread<M: Model>(
                 is_error: Some(false),
                 model_input_tokens: Some(response.usage.input_tokens),
                 model_output_tokens: Some(response.usage.output_tokens),
-                model_cache_creation_input_tokens: Some(
-                    response.usage.cache_creation_input_tokens,
-                ),
+                model_cache_creation_input_tokens: Some(response.usage.cache_creation_input_tokens),
                 model_cache_read_input_tokens: Some(response.usage.cache_read_input_tokens),
                 model_speed: sub_agent.model_speed.clone(),
                 session_thread_id: Some(thread_id.to_string()),
@@ -1160,10 +1164,7 @@ fn extract_content_blocks(blob: &str, kind: &str, sequence: i64) -> Result<Vec<C
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let input = block
-                    .get("input")
-                    .cloned()
-                    .unwrap_or(serde_json::json!({}));
+                let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
                 out.push(ContentBlock::ToolUse { id, name, input });
             }
             "tool_result" => {
@@ -1415,10 +1416,7 @@ mod tests {
     fn empty_content_blob_is_rejected() {
         let history = vec![blank_row(0, "user.message", Some(""))];
         let err = events_to_messages(&history).unwrap_err();
-        assert!(
-            err.to_string().contains("empty Content"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("empty Content"), "{err}");
     }
 
     #[test]
@@ -1464,8 +1462,8 @@ mod tests {
         let history = vec![
             blank_row(0, "user.message", Some(&text_blob("do it"))),
             blank_row(1, "agent.message", Some(&agent_blob)),
-            blank_row(2, "agent.tool_use", Some("{}")),  // observability, skipped
-            blank_row(3, "agent.tool_use", Some("{}")),  // observability, skipped
+            blank_row(2, "agent.tool_use", Some("{}")), // observability, skipped
+            blank_row(3, "agent.tool_use", Some("{}")), // observability, skipped
             blank_row(4, "agent.tool_result", Some(&tr1)),
             blank_row(5, "agent.tool_result", Some(&tr2)),
             blank_row(6, "agent.message", Some(&final_blob)),
@@ -1477,8 +1475,12 @@ mod tests {
         assert_eq!(msgs[1].role, "assistant"); // tool_use blocks
         assert_eq!(msgs[2].role, "user"); // grouped tool_results
         assert_eq!(msgs[2].content.len(), 2);
-        assert!(matches!(&msgs[2].content[0], ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "t1"));
-        assert!(matches!(&msgs[2].content[1], ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "t2"));
+        assert!(
+            matches!(&msgs[2].content[0], ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "t1")
+        );
+        assert!(
+            matches!(&msgs[2].content[1], ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "t2")
+        );
         assert_eq!(msgs[3].role, "assistant");
         assert_eq!(msgs[3].content[0].as_text(), Some("Done."));
     }

@@ -225,7 +225,12 @@ fn session_body(id: &str, agent_id: &str, env_id: &str) -> String {
 async fn make_session(state: &ServerState, id: &str, agent_id: &str, env_id: &str) {
     make_environment(state, env_id).await;
     make_managed_agent(state, agent_id).await;
-    let (status, body_out) = post(state, "/tdata/Sessions", &session_body(id, agent_id, env_id)).await;
+    let (status, body_out) = post(
+        state,
+        "/tdata/Sessions",
+        &session_body(id, agent_id, env_id),
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::CREATED,
@@ -1389,13 +1394,7 @@ async fn create_session_status_terminated_event_happy_path() {
     let state = build_crucible_state();
     make_session(&state, "sess-ev-sst", "agent-ev-sst", "env-ev-sst").await;
 
-    let body = event_body(
-        "ev-sst",
-        "sess-ev-sst",
-        0,
-        "session.status_terminated",
-        "",
-    );
+    let body = event_body("ev-sst", "sess-ev-sst", 0, "session.status_terminated", "");
     let (status, body_out) = post(&state, "/tdata/SessionEvents", &body).await;
     assert_eq!(status, StatusCode::CREATED, "{body_out:?}");
 }
@@ -1567,13 +1566,7 @@ async fn create_span_model_request_start_event_happy_path() {
     let state = build_crucible_state();
     make_session(&state, "sess-ev-mrs", "agent-ev-mrs", "env-ev-mrs").await;
 
-    let body = event_body(
-        "ev-mrs",
-        "sess-ev-mrs",
-        0,
-        "span.model_request_start",
-        "",
-    );
+    let body = event_body("ev-mrs", "sess-ev-mrs", 0, "span.model_request_start", "");
     let (status, body_out) = post(&state, "/tdata/SessionEvents", &body).await;
     assert_eq!(status, StatusCode::CREATED, "{body_out:?}");
 }

@@ -135,7 +135,9 @@ pub fn spawn_eventual_recheck(
     state: crate::state::ServerState,
     interval: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move { // determinism-ok: background convergence task
+    tokio::spawn(
+        async move {
+            // determinism-ok: background convergence task
             let mut ticker = tokio::time::interval(interval); // determinism-ok: convergence polling
             loop {
                 ticker.tick().await;
@@ -263,8 +265,7 @@ async fn check_invariant_convergence(
         return true;
     };
 
-    let Some(assertion) =
-        temper_spec::cross_invariant::parse_related_field_assert(&assertion_str)
+    let Some(assertion) = temper_spec::cross_invariant::parse_related_field_assert(&assertion_str)
     else {
         return true; // Invalid assertion — skip
     };
@@ -300,8 +301,7 @@ async fn check_invariant_convergence(
             if assertion.field_name == "status" {
                 resp.state.status.clone()
             } else {
-                let target_fields =
-                    serde_json::to_value(&resp.state.fields).unwrap_or_default();
+                let target_fields = serde_json::to_value(&resp.state.fields).unwrap_or_default();
                 let Some(v) = target_fields
                     .get(&assertion.field_name)
                     .or_else(|| {

@@ -170,7 +170,12 @@ fn agent_body(id: &str, name: &str) -> String {
 #[tokio::test]
 async fn create_agent_happy_path() {
     let state = build_crucible_state();
-    let (status, body) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-1", "research")).await;
+    let (status, body) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-1", "research"),
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::CREATED,
@@ -217,7 +222,10 @@ async fn create_agent_with_unknown_model_speed_is_rejected() {
         StatusCode::CONFLICT,
         "unknown ModelSpeed must be rejected: {body_out:?}"
     );
-    assert_eq!(body_out["error"]["code"].as_str(), Some("ConstraintViolation"));
+    assert_eq!(
+        body_out["error"]["code"].as_str(),
+        Some("ConstraintViolation")
+    );
     assert_eq!(
         body_out["error"]["details"]["type"].as_str(),
         Some("field_invariant")
@@ -280,7 +288,12 @@ async fn list_agents_returns_created_rows() {
 #[tokio::test]
 async fn get_agent_by_id_returns_row() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-get", "get-me")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-get", "get-me"),
+    )
+    .await;
 
     let (status, body) = get(&state, "/tdata/ManagedAgents('agent-get')").await;
     assert_eq!(status, StatusCode::OK, "get by id must succeed: {body:?}");
@@ -298,7 +311,12 @@ async fn get_agent_by_id_returns_row() {
 #[tokio::test]
 async fn patch_agent_bumps_version_client_managed() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-patch", "patch-me")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-patch", "patch-me"),
+    )
+    .await;
 
     // Single-writer PATCH: client computes the next Version and sends it
     // back; the server does not enforce optimistic concurrency (ADR-0043
@@ -323,7 +341,12 @@ async fn patch_agent_bumps_version_client_managed() {
 #[tokio::test]
 async fn patch_agent_to_bad_model_speed_is_rejected() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-patch-bad", "x")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-patch-bad", "x"),
+    )
+    .await;
 
     let (status, body) = patch(
         &state,
@@ -349,7 +372,12 @@ async fn patch_agent_to_bad_model_speed_is_rejected() {
 #[tokio::test]
 async fn archive_agent_action_succeeds() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-arch", "archive-me")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-arch", "archive-me"),
+    )
+    .await;
 
     let (status, body) = post(
         &state,
@@ -411,7 +439,11 @@ async fn list_agent_versions_after_client_snapshots() {
         "/tdata/AgentVersions?$filter=AgentId%20eq%20%27agent-versioned%27",
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "versions list must succeed: {body:?}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "versions list must succeed: {body:?}"
+    );
     let values = body["value"].as_array().expect("value array");
     assert_eq!(values.len(), 2, "both snapshots must be returned");
 }
@@ -423,7 +455,12 @@ async fn list_agent_versions_after_client_snapshots() {
 #[tokio::test]
 async fn create_mcp_server_happy_path() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-mcp", "m")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-mcp", "m"),
+    )
+    .await;
 
     let body = r#"{
         "id": "mcp-1",
@@ -443,7 +480,12 @@ async fn create_mcp_server_happy_path() {
 #[tokio::test]
 async fn create_mcp_server_with_bad_type_is_rejected() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-mcp2", "m")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-mcp2", "m"),
+    )
+    .await;
 
     let body = r#"{
         "id": "mcp-bad",
@@ -512,7 +554,12 @@ async fn create_mcp_server_on_archived_agent_is_rejected() {
 #[tokio::test]
 async fn create_skill_happy_path() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-skill", "s")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-skill", "s"),
+    )
+    .await;
 
     let body = r#"{
         "id": "skill-1",
@@ -532,7 +579,12 @@ async fn create_skill_happy_path() {
 #[tokio::test]
 async fn create_skill_with_bad_type_is_rejected() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-skill2", "s")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-skill2", "s"),
+    )
+    .await;
 
     let body = r#"{
         "id": "skill-bad",
@@ -559,7 +611,12 @@ async fn create_skill_with_bad_type_is_rejected() {
 #[tokio::test]
 async fn create_agent_toolset_happy_path() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-tool-at", "t")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-tool-at", "t"),
+    )
+    .await;
 
     let body = r#"{
         "id": "tool-at-1",
@@ -577,7 +634,12 @@ async fn create_agent_toolset_happy_path() {
 #[tokio::test]
 async fn create_agent_toolset_with_name_is_rejected() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-tool-at2", "t")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-tool-at2", "t"),
+    )
+    .await;
 
     let body = r#"{
         "id": "tool-at-bad",
@@ -596,7 +658,12 @@ async fn create_agent_toolset_with_name_is_rejected() {
 #[tokio::test]
 async fn create_mcp_toolset_requires_mcp_server_name() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-tool-mcp", "t")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-tool-mcp", "t"),
+    )
+    .await;
 
     // Happy: McpServerName present.
     let body = r#"{
@@ -701,7 +768,12 @@ async fn create_custom_tool_requires_name_description_input_schema() {
 #[tokio::test]
 async fn create_tool_with_unknown_kind_is_rejected() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-tool-bad", "t")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-tool-bad", "t"),
+    )
+    .await;
 
     let body = r#"{
         "id": "tool-bad-kind",
@@ -723,7 +795,12 @@ async fn create_tool_with_unknown_kind_is_rejected() {
 #[tokio::test]
 async fn create_tool_config_happy_path() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-cfg", "t")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-cfg", "t"),
+    )
+    .await;
 
     let tool = r#"{
         "id": "tool-cfg-parent",
@@ -751,7 +828,12 @@ async fn create_tool_config_happy_path() {
 #[tokio::test]
 async fn create_tool_config_with_bad_permission_policy_is_rejected() {
     let state = build_crucible_state();
-    let (_, _) = post(&state, "/tdata/ManagedAgents", &agent_body("agent-cfg2", "t")).await;
+    let (_, _) = post(
+        &state,
+        "/tdata/ManagedAgents",
+        &agent_body("agent-cfg2", "t"),
+    )
+    .await;
 
     let tool = r#"{
         "id": "tool-cfg-parent2",

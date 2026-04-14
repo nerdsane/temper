@@ -262,7 +262,12 @@ fn scripted_managed_agent_child_entities_start_active() {
             agent_mcp_server_table(),
             AGENT_MCP_SERVER_IOA,
         ),
-        ("skill-1", "AgentSkill", agent_skill_table(), AGENT_SKILL_IOA),
+        (
+            "skill-1",
+            "AgentSkill",
+            agent_skill_table(),
+            AGENT_SKILL_IOA,
+        ),
         ("tool-1", "AgentTool", agent_tool_table(), AGENT_TOOL_IOA),
         (
             "config-1",
@@ -564,14 +569,24 @@ fn random_all_entities_no_faults() {
             ALLOWED_HOST_IOA,
         ),
         ("pkg-1", "EnvironmentPackage", package_table(), PACKAGE_IOA),
-        ("agent-1", "ManagedAgent", managed_agent_table(), MANAGED_AGENT_IOA),
+        (
+            "agent-1",
+            "ManagedAgent",
+            managed_agent_table(),
+            MANAGED_AGENT_IOA,
+        ),
         (
             "mcp-1",
             "AgentMcpServer",
             agent_mcp_server_table(),
             AGENT_MCP_SERVER_IOA,
         ),
-        ("skill-1", "AgentSkill", agent_skill_table(), AGENT_SKILL_IOA),
+        (
+            "skill-1",
+            "AgentSkill",
+            agent_skill_table(),
+            AGENT_SKILL_IOA,
+        ),
         ("tool-1", "AgentTool", agent_tool_table(), AGENT_TOOL_IOA),
         (
             "config-1",
@@ -645,14 +660,24 @@ fn run_determinism_trial(seed: u64) -> Vec<(String, String, usize, usize)> {
             ALLOWED_HOST_IOA,
         ),
         ("pkg-1", "EnvironmentPackage", package_table(), PACKAGE_IOA),
-        ("agent-1", "ManagedAgent", managed_agent_table(), MANAGED_AGENT_IOA),
+        (
+            "agent-1",
+            "ManagedAgent",
+            managed_agent_table(),
+            MANAGED_AGENT_IOA,
+        ),
         (
             "mcp-1",
             "AgentMcpServer",
             agent_mcp_server_table(),
             AGENT_MCP_SERVER_IOA,
         ),
-        ("skill-1", "AgentSkill", agent_skill_table(), AGENT_SKILL_IOA),
+        (
+            "skill-1",
+            "AgentSkill",
+            agent_skill_table(),
+            AGENT_SKILL_IOA,
+        ),
         ("tool-1", "AgentTool", agent_tool_table(), AGENT_TOOL_IOA),
         (
             "config-1",

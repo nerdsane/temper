@@ -76,10 +76,7 @@ enum Command {
     },
 
     /// Post a user message. Rejects if session is Running.
-    Send {
-        session_id: String,
-        message: String,
-    },
+    Send { session_id: String, message: String },
 
     /// Poll for new user messages and drive the agent loop.
     Watch {
@@ -98,9 +95,7 @@ enum Command {
     },
 
     /// Run one turn without posting a new user message (legacy).
-    Respond {
-        session_id: String,
-    },
+    Respond { session_id: String },
 }
 
 #[tokio::main]
@@ -126,15 +121,26 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Seed {
-            session_id, agent_id, environment_id, name, system, model,
+            session_id,
+            agent_id,
+            environment_id,
+            name,
+            system,
+            model,
         } => {
             let mut opts = SeedOptions::default();
             opts.session_id = session_id;
             opts.agent_id = agent_id;
             opts.environment_id = environment_id;
-            if let Some(n) = name { opts.agent_name = n; }
-            if let Some(s) = system { opts.system_prompt = s; }
-            if let Some(m) = model { opts.model_id = m; }
+            if let Some(n) = name {
+                opts.agent_name = n;
+            }
+            if let Some(s) = system {
+                opts.system_prompt = s;
+            }
+            if let Some(m) = model {
+                opts.model_id = m;
+            }
             let outcome = seed(&temper, opts).await.context("seed failed")?;
             println!("environment_id={}", outcome.environment_id);
             println!("agent_id={}", outcome.agent_id);
@@ -142,7 +148,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
 
-        Command::Send { session_id, message } => {
+        Command::Send {
+            session_id,
+            message,
+        } => {
             // Reject if session is Running (match Anthropic's behavior).
             let session = temper.get_session(&session_id).await?;
             if session.status == "Running" {
@@ -152,7 +161,10 @@ async fn main() -> Result<()> {
                 ));
             }
             if session.status == "Terminated" || session.status == "Archived" {
-                return Err(anyhow!("Session is {} — cannot send messages.", session.status));
+                return Err(anyhow!(
+                    "Session is {} — cannot send messages.",
+                    session.status
+                ));
             }
 
             // POST the user.message event.
@@ -166,9 +178,12 @@ async fn main() -> Result<()> {
                 kind: "user.message".to_string(),
                 created_at: now.clone(),
                 processed_at: Some(now),
-                content: Some(serde_json::json!({
-                    "blocks": [{"type": "text", "text": message}]
-                }).to_string()),
+                content: Some(
+                    serde_json::json!({
+                        "blocks": [{"type": "text", "text": message}]
+                    })
+                    .to_string(),
+                ),
                 ..blank_event()
             };
             temper.create_session_event(&row).await?;
@@ -176,16 +191,26 @@ async fn main() -> Result<()> {
             Ok(())
         }
 
-        Command::Watch { session_id, poll_interval } => {
+        Command::Watch {
+            session_id,
+            poll_interval,
+        } => {
             let resolved = model_from_env().context("resolving model provider")?;
             match resolved {
-                ResolvedModel::Anthropic(m) => watch_loop(&temper, &m, &session_id, poll_interval).await,
-                ResolvedModel::OpenAI(m) => watch_loop(&temper, &m, &session_id, poll_interval).await,
+                ResolvedModel::Anthropic(m) => {
+                    watch_loop(&temper, &m, &session_id, poll_interval).await
+                }
+                ResolvedModel::OpenAI(m) => {
+                    watch_loop(&temper, &m, &session_id, poll_interval).await
+                }
                 ResolvedModel::Mock(m) => watch_loop(&temper, &m, &session_id, poll_interval).await,
             }
         }
 
-        Command::Interrupt { session_id, message } => {
+        Command::Interrupt {
+            session_id,
+            message,
+        } => {
             let events = temper.list_session_events(&session_id, 500).await?;
             let next_seq = events.iter().map(|e| e.sequence).max().unwrap_or(-1) + 1;
             let now = chrono_now();
@@ -213,9 +238,12 @@ async fn main() -> Result<()> {
                     kind: "user.message".to_string(),
                     created_at: now.clone(),
                     processed_at: Some(now),
-                    content: Some(serde_json::json!({
-                        "blocks": [{"type": "text", "text": msg}]
-                    }).to_string()),
+                    content: Some(
+                        serde_json::json!({
+                            "blocks": [{"type": "text", "text": msg}]
+                        })
+                        .to_string(),
+                    ),
                     ..blank_event()
                 };
                 temper.create_session_event(&row).await?;
@@ -224,9 +252,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
 
-        Command::Respond { session_id } => {
-            run_turn(&temper, &session_id, None).await
-        }
+        Command::Respond { session_id } => run_turn(&temper, &session_id, None).await,
     }
 }
 

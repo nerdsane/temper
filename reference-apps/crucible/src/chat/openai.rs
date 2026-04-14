@@ -285,8 +285,8 @@ fn response_from_openai(body: OpenAIResponse) -> Result<MessagesResponse> {
     }
     if let Some(tool_calls) = choice.message.tool_calls {
         for tc in tool_calls {
-            let input: serde_json::Value = serde_json::from_str(&tc.function.arguments)
-                .unwrap_or(serde_json::json!({}));
+            let input: serde_json::Value =
+                serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
             content.push(ContentBlock::ToolUse {
                 id: tc.id,
                 name: tc.function.name,
@@ -330,10 +330,7 @@ impl OpenAIModel {
     /// base URL. Trailing slashes on `base_url` are trimmed so either
     /// `https://api.fireworks.ai/inference/v1` or
     /// `https://api.fireworks.ai/inference/v1/` works.
-    pub fn new_with_base_url(
-        api_key: impl Into<String>,
-        base_url: impl Into<String>,
-    ) -> Self {
+    pub fn new_with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         let base = base_url.into();
         let base = base.trim_end_matches('/').to_string();
         Self {
@@ -416,7 +413,10 @@ mod tests {
         assert_eq!(out.max_tokens, 512);
         assert_eq!(out.messages.len(), 4);
         assert_eq!(out.messages[0].role, "system");
-        assert_eq!(out.messages[0].content.as_deref(), Some("you are a concise assistant"));
+        assert_eq!(
+            out.messages[0].content.as_deref(),
+            Some("you are a concise assistant")
+        );
         assert_eq!(out.messages[1].role, "user");
         assert_eq!(out.messages[1].content.as_deref(), Some("hello"));
         assert_eq!(out.messages[2].role, "assistant");
@@ -533,10 +533,7 @@ mod tests {
 
     #[test]
     fn chat_url_trims_trailing_slash_on_base() {
-        let m = OpenAIModel::new_with_base_url(
-            "ignored",
-            "https://api.fireworks.ai/inference/v1/",
-        );
+        let m = OpenAIModel::new_with_base_url("ignored", "https://api.fireworks.ai/inference/v1/");
         assert_eq!(
             m.chat_url(),
             "https://api.fireworks.ai/inference/v1/chat/completions"
@@ -545,10 +542,7 @@ mod tests {
 
     #[test]
     fn chat_url_honours_custom_base() {
-        let m = OpenAIModel::new_with_base_url(
-            "ignored",
-            "https://api.fireworks.ai/inference/v1",
-        );
+        let m = OpenAIModel::new_with_base_url("ignored", "https://api.fireworks.ai/inference/v1");
         assert_eq!(
             m.chat_url(),
             "https://api.fireworks.ai/inference/v1/chat/completions"

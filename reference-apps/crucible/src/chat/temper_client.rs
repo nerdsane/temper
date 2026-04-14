@@ -331,9 +331,7 @@ impl TemperClient {
 
     /// List all AgentTool children for a given ManagedAgent.
     pub async fn list_agent_tools(&self, agent_id: &str) -> Result<Vec<AgentToolRow>> {
-        let path = format!(
-            "/tdata/AgentTools?$filter=AgentId%20eq%20%27{agent_id}%27"
-        );
+        let path = format!("/tdata/AgentTools?$filter=AgentId%20eq%20%27{agent_id}%27");
         let (status, body) = self.get(&path).await?;
         Self::require_2xx("GET", &path, status, &body)?;
         Self::decode_entity_list(body)
@@ -354,13 +352,8 @@ impl TemperClient {
     }
 
     /// List all CallableAgent children for a given ManagedAgent.
-    pub async fn list_callable_agents(
-        &self,
-        agent_id: &str,
-    ) -> Result<Vec<CallableAgentRow>> {
-        let path = format!(
-            "/tdata/CallableAgents?$filter=AgentId%20eq%20%27{agent_id}%27"
-        );
+    pub async fn list_callable_agents(&self, agent_id: &str) -> Result<Vec<CallableAgentRow>> {
+        let path = format!("/tdata/CallableAgents?$filter=AgentId%20eq%20%27{agent_id}%27");
         let (status, body) = self.get(&path).await?;
         Self::require_2xx("GET", &path, status, &body)?;
         Self::decode_entity_list(body)
@@ -388,11 +381,7 @@ impl TemperClient {
     }
 
     /// POST a bound lifecycle action on a SessionThread.
-    pub async fn invoke_thread_action(
-        &self,
-        thread_id: &str,
-        action: ThreadAction,
-    ) -> Result<()> {
+    pub async fn invoke_thread_action(&self, thread_id: &str, action: ThreadAction) -> Result<()> {
         let path = format!(
             "/tdata/SessionThreads('{thread_id}')/Temper.Crucible.{action_name}",
             action_name = action.as_str(),
@@ -422,9 +411,7 @@ impl TemperClient {
 
     /// List all memories in a memory store.
     pub async fn list_memories(&self, store_id: &str) -> Result<Vec<MemoryRow>> {
-        let path = format!(
-            "/tdata/Memories?$filter=MemoryStoreId%20eq%20%27{store_id}%27"
-        );
+        let path = format!("/tdata/Memories?$filter=MemoryStoreId%20eq%20%27{store_id}%27");
         let (status, body) = self.get(&path).await?;
         Self::require_2xx("GET", &path, status, &body)?;
         Self::decode_entity_list(body)
@@ -655,10 +642,7 @@ pub struct SessionEventRow {
     pub content: Option<String>,
     #[serde(rename = "StopReason", skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
-    #[serde(
-        rename = "StopReasonEventIds",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "StopReasonEventIds", skip_serializing_if = "Option::is_none")]
     pub stop_reason_event_ids: Option<String>,
     #[serde(
         rename = "ModelRequestStartId",
@@ -669,10 +653,7 @@ pub struct SessionEventRow {
     pub is_error: Option<bool>,
     #[serde(rename = "ModelInputTokens", skip_serializing_if = "Option::is_none")]
     pub model_input_tokens: Option<i64>,
-    #[serde(
-        rename = "ModelOutputTokens",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "ModelOutputTokens", skip_serializing_if = "Option::is_none")]
     pub model_output_tokens: Option<i64>,
     #[serde(
         rename = "ModelCacheCreationInputTokens",
@@ -690,10 +671,7 @@ pub struct SessionEventRow {
     pub tool_name: Option<String>,
     #[serde(rename = "ToolUseId", skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
-    #[serde(
-        rename = "SessionThreadId",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "SessionThreadId", skip_serializing_if = "Option::is_none")]
     pub session_thread_id: Option<String>,
 }
 
@@ -726,10 +704,7 @@ pub struct CallableAgentRow {
     pub agent_id: String,
     #[serde(rename = "CalleeAgentId")]
     pub callee_agent_id: String,
-    #[serde(
-        rename = "CalleeAgentVersion",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "CalleeAgentVersion", skip_serializing_if = "Option::is_none")]
     pub callee_agent_version: Option<i32>,
 }
 
@@ -763,7 +738,11 @@ pub struct MemoryRow {
     pub path: String,
     #[serde(rename = "Content", skip_serializing_if = "Option::is_none", default)]
     pub content: Option<String>,
-    #[serde(rename = "ContentSha256", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "ContentSha256",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub content_sha256: Option<String>,
     #[serde(rename = "SizeBytes", skip_serializing_if = "Option::is_none", default)]
     pub size_bytes: Option<i64>,

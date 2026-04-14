@@ -101,11 +101,7 @@ async fn post_order(state: &ServerState, body: &str) -> (StatusCode, serde_json:
 }
 
 /// Send a PATCH `/tdata/Orders('<id>')` with the given JSON body.
-async fn patch_order(
-    state: &ServerState,
-    id: &str,
-    body: &str,
-) -> (StatusCode, serde_json::Value) {
+async fn patch_order(state: &ServerState, id: &str, body: &str) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
     let req = Request::builder()
         .method(axum::http::Method::PATCH)
@@ -125,11 +121,7 @@ async fn patch_order(
 #[tokio::test]
 async fn post_usd_without_notes_is_allowed() {
     let state = build_state_with_field_invariant();
-    let (status, body) = post_order(
-        &state,
-        r#"{"id": "ord-usd-ok", "Currency": "USD"}"#,
-    )
-    .await;
+    let (status, body) = post_order(&state, r#"{"id": "ord-usd-ok", "Currency": "USD"}"#).await;
     assert_eq!(
         status,
         StatusCode::CREATED,

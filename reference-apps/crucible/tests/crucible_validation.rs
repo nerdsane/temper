@@ -742,13 +742,7 @@ async fn delete_unreferenced_environment_succeeds() {
     );
 
     // Confirm it's gone.
-    let (status, _) = send(
-        &state,
-        Method::GET,
-        "/tdata/Environments('env-del-ok')",
-        "",
-    )
-    .await;
+    let (status, _) = send(&state, Method::GET, "/tdata/Environments('env-del-ok')", "").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -901,13 +895,7 @@ async fn memory_create_and_read() {
     assert_eq!(status, StatusCode::CREATED, "create memory: {body:?}");
 
     // Read back
-    let (status, body) = send(
-        &state,
-        Method::GET,
-        "/tdata/Memories('mem-01')",
-        "",
-    )
-    .await;
+    let (status, body) = send(&state, Method::GET, "/tdata/Memories('mem-01')", "").await;
     assert_eq!(status, StatusCode::OK);
     let fields = &body["fields"];
     assert_eq!(fields["Path"].as_str(), Some("/preferences/formatting.md"));
@@ -1070,7 +1058,8 @@ async fn session_resource_memory_store_kind() {
     let (status, body) = post(
         &state,
         "/tdata/SessionResources",
-        &format!(r#"{{
+        &format!(
+            r#"{{
             "id": "sr-ms-01",
             "SessionId": "{sess_id}",
             "Kind": "memory_store",
@@ -1079,7 +1068,8 @@ async fn session_resource_memory_store_kind() {
             "Prompt": "Check preferences before coding.",
             "CreatedAt": "2026-04-12T00:00:00Z",
             "UpdatedAt": "2026-04-12T00:00:00Z"
-        }}"#),
+        }}"#
+        ),
     )
     .await;
     assert_eq!(
@@ -1097,7 +1087,8 @@ async fn session_resource_memory_store_bad_access_is_rejected() {
     let (status, body) = post(
         &state,
         "/tdata/SessionResources",
-        &format!(r#"{{
+        &format!(
+            r#"{{
             "id": "sr-ms-bad",
             "SessionId": "{sess_id}",
             "Kind": "memory_store",
@@ -1105,7 +1096,8 @@ async fn session_resource_memory_store_bad_access_is_rejected() {
             "Access": "full_access",
             "CreatedAt": "2026-04-12T00:00:00Z",
             "UpdatedAt": "2026-04-12T00:00:00Z"
-        }}"#),
+        }}"#
+        ),
     )
     .await;
     assert_eq!(
@@ -1127,7 +1119,8 @@ async fn session_resource_memory_store_forbids_file_fields() {
     let (status, body) = post(
         &state,
         "/tdata/SessionResources",
-        &format!(r#"{{
+        &format!(
+            r#"{{
             "id": "sr-ms-file",
             "SessionId": "{sess_id}",
             "Kind": "memory_store",
@@ -1135,7 +1128,8 @@ async fn session_resource_memory_store_forbids_file_fields() {
             "FileId": "some-file",
             "CreatedAt": "2026-04-12T00:00:00Z",
             "UpdatedAt": "2026-04-12T00:00:00Z"
-        }}"#),
+        }}"#
+        ),
     )
     .await;
     assert_eq!(
@@ -1180,7 +1174,8 @@ async fn session_schedule_create_and_activate() {
     let (status, body) = post(
         &state,
         "/tdata/SessionSchedules",
-        &format!(r#"{{
+        &format!(
+            r#"{{
             "id": "sched-01",
             "SessionId": "{sess_id}",
             "CronExpression": "0 9 * * 1-5",
@@ -1188,7 +1183,8 @@ async fn session_schedule_create_and_activate() {
             "Status": "Draft",
             "CreatedAt": "2026-04-12T00:00:00Z",
             "UpdatedAt": "2026-04-12T00:00:00Z"
-        }}"#),
+        }}"#
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "create schedule: {body:?}");
@@ -1213,7 +1209,8 @@ async fn session_schedule_status_invariant() {
     let (status, body) = post(
         &state,
         "/tdata/SessionSchedules",
-        &format!(r#"{{
+        &format!(
+            r#"{{
             "id": "sched-bad",
             "SessionId": "{sess_id}",
             "CronExpression": "* * * * *",
@@ -1221,10 +1218,15 @@ async fn session_schedule_status_invariant() {
             "Status": "Invalid",
             "CreatedAt": "2026-04-12T00:00:00Z",
             "UpdatedAt": "2026-04-12T00:00:00Z"
-        }}"#),
+        }}"#
+        ),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "bad status rejected: {body:?}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "bad status rejected: {body:?}"
+    );
     assert_eq!(
         body["error"]["details"]["invariant"].as_str(),
         Some("StatusMustBeKnown")
@@ -1239,7 +1241,8 @@ async fn session_schedule_pause_and_resume() {
     post(
         &state,
         "/tdata/SessionSchedules",
-        &format!(r#"{{
+        &format!(
+            r#"{{
             "id": "sched-pr",
             "SessionId": "{sess_id}",
             "CronExpression": "*/5 * * * *",
@@ -1247,7 +1250,8 @@ async fn session_schedule_pause_and_resume() {
             "Status": "Draft",
             "CreatedAt": "2026-04-12T00:00:00Z",
             "UpdatedAt": "2026-04-12T00:00:00Z"
-        }}"#),
+        }}"#
+        ),
     )
     .await;
 

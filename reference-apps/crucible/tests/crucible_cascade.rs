@@ -226,7 +226,13 @@ fn csdl_session_has_navigation_properties_to_children() {
         .iter()
         .map(|n| n.name.as_str())
         .collect();
-    for nav in ["ManagedAgent", "Environment", "Resources", "Events", "Threads"] {
+    for nav in [
+        "ManagedAgent",
+        "Environment",
+        "Resources",
+        "Events",
+        "Threads",
+    ] {
         assert!(
             nav_names.contains(&nav),
             "Session should have a `{nav}` navigation property, got {nav_names:?}"
@@ -373,8 +379,7 @@ fn csdl_session_event_has_full_adr_0045_column_set() {
 fn session_event_kind_enum_has_all_members() {
     // ADR-0045: the KindMustBeKnown invariant enumerates every event type.
     // Pin the set so an accidental drop or rename fails here.
-    let automaton = parse_automaton(SESSION_EVENT_IOA)
-        .expect("SessionEvent IOA should parse");
+    let automaton = parse_automaton(SESSION_EVENT_IOA).expect("SessionEvent IOA should parse");
 
     let kind_invariant = automaton
         .field_invariants
@@ -385,8 +390,8 @@ fn session_event_kind_enum_has_all_members() {
     // Serialize the predicate and extract string literals that the `require`
     // side compares against. We do this via the rendered serde form rather
     // than pattern-matching the enum to stay resilient to grammar additions.
-    let json = serde_json::to_value(&kind_invariant.require)
-        .expect("FieldPredicate should serialize");
+    let json =
+        serde_json::to_value(&kind_invariant.require).expect("FieldPredicate should serialize");
 
     fn collect_equals<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
         match value {
@@ -495,7 +500,13 @@ fn csdl_managed_agent_has_navigation_properties_to_children() {
         .iter()
         .map(|n| n.name.as_str())
         .collect();
-    for nav in ["McpServers", "Skills", "Tools", "Versions", "CallableAgents"] {
+    for nav in [
+        "McpServers",
+        "Skills",
+        "Tools",
+        "Versions",
+        "CallableAgents",
+    ] {
         assert!(
             nav_names.contains(&nav),
             "ManagedAgent should have a `{nav}` navigation property, got {nav_names:?}"
@@ -576,13 +587,12 @@ fn field_invariants_reference_valid_csdl_properties() {
     ];
 
     for (entity_name, ioa, expect_invariants) in cases {
-        let automaton = parse_automaton(ioa)
-            .unwrap_or_else(|e| panic!("{entity_name} IOA should parse: {e}"));
+        let automaton =
+            parse_automaton(ioa).unwrap_or_else(|e| panic!("{entity_name} IOA should parse: {e}"));
         let entity = schema
             .entity_type(entity_name)
             .unwrap_or_else(|| panic!("{entity_name} entity type should exist"));
-        let property_names: Vec<&str> =
-            entity.properties.iter().map(|p| p.name.as_str()).collect();
+        let property_names: Vec<&str> = entity.properties.iter().map(|p| p.name.as_str()).collect();
 
         if expect_invariants {
             assert!(

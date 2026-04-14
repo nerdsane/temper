@@ -218,7 +218,10 @@ async fn full_chat_loop_end_to_end_mock_mode() {
             .map(|e| (e.sequence, e.kind.clone()))
             .collect::<Vec<_>>()
     );
-    let kinds: Vec<&str> = events_after_turn_1.iter().map(|e| e.kind.as_str()).collect();
+    let kinds: Vec<&str> = events_after_turn_1
+        .iter()
+        .map(|e| e.kind.as_str())
+        .collect();
     assert_eq!(
         kinds,
         vec![
@@ -278,11 +281,17 @@ async fn full_chat_loop_end_to_end_mock_mode() {
         last_req
             .messages
             .iter()
-            .map(|m| (m.role.clone(), m.content[0].as_text().unwrap_or("?").to_string()))
+            .map(|m| (
+                m.role.clone(),
+                m.content[0].as_text().unwrap_or("?").to_string()
+            ))
             .collect::<Vec<_>>()
     );
     assert_eq!(last_req.messages[0].role, "user");
-    assert_eq!(last_req.messages[0].content[0].as_text(), Some("Hello, what is 2+2?"));
+    assert_eq!(
+        last_req.messages[0].content[0].as_text(),
+        Some("Hello, what is 2+2?")
+    );
     assert_eq!(last_req.messages[1].role, "assistant");
     // The assistant reply from turn 1 was the mock's "Echo: Hello, what is 2+2?"
     assert_eq!(
@@ -430,9 +439,7 @@ async fn temper_client_reports_404_on_unknown_session() {
 
 #[tokio::test]
 async fn multi_agent_delegation_end_to_end() {
-    use crucible_reference::chat::anthropic::{
-        ContentBlock, MessagesResponse, Usage,
-    };
+    use crucible_reference::chat::anthropic::{ContentBlock, MessagesResponse, Usage};
 
     let state = build_crucible_state();
     let addr = spawn_server(state).await;

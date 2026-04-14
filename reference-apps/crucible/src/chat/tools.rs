@@ -327,10 +327,7 @@ fn tool_read(args: &serde_json::Value) -> ToolResult {
         Ok(c) => c,
         Err(e) => return ToolResult::err(format!("read: {file_path}: {e}")),
     };
-    let offset = args
-        .get("offset")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
+    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
     let limit = args
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -386,9 +383,7 @@ fn tool_edit(args: &serde_json::Value) -> ToolResult {
     };
     let count = content.matches(old_string).count();
     if count == 0 {
-        return ToolResult::err(format!(
-            "edit: `old_string` not found in {file_path}"
-        ));
+        return ToolResult::err(format!("edit: `old_string` not found in {file_path}"));
     }
     if count > 1 {
         return ToolResult::err(format!(
@@ -406,10 +401,7 @@ fn tool_glob(args: &serde_json::Value) -> ToolResult {
     let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()) else {
         return ToolResult::err("glob: missing required parameter `pattern`");
     };
-    let base = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
+    let base = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     let full_pattern = if pattern.starts_with('/') {
         pattern.to_string()
     } else {
@@ -449,10 +441,7 @@ fn tool_grep(args: &serde_json::Value) -> ToolResult {
     let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()) else {
         return ToolResult::err("grep: missing required parameter `pattern`");
     };
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     let include = args.get("include").and_then(|v| v.as_str());
 
     let mut cmd = std::process::Command::new("grep");

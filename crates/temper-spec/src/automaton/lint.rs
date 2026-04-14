@@ -231,7 +231,7 @@ fn is_valid_field_identifier(s: &str) -> bool {
         return false;
     }
     let mut chars = s.chars();
-    let first = chars.next().unwrap();
+    let first = chars.next().unwrap(); // ci-ok: chars guaranteed non-empty after is_empty check
     if !(first.is_ascii_alphabetic() || first == '_') {
         return false;
     }
