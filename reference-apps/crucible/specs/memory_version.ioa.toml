@@ -1,0 +1,38 @@
+# MemoryVersion Entity — I/O Automaton Specification
+#
+# Immutable audit record of every Memory mutation. One version is
+# created for each create/modify/delete operation on a Memory.
+#
+# Lifecycle: Active → Redacted. RedactVersion clears Content,
+# ContentSha256, ContentSizeBytes, and Path while preserving the
+# audit metadata (Operation, MemoryId, SessionId, CreatedAt).
+# This is for compliance workflows (leaked secrets, PII, GDPR).
+
+[automaton]
+name = "MemoryVersion"
+states = ["Active", "Redacted"]
+initial = "Active"
+
+[[action]]
+name = "RedactVersion"
+kind = "input"
+from = ["Active"]
+to = "Redacted"
+hint = "Redact this version. Clears content fields while preserving audit metadata."
+
+[[invariant]]
+name = "RedactedIsFinal"
+when = ["Redacted"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "OperationMustBeKnown"
+when = { not = { field = "Operation", absent = true } }
+require = { any_of = [
+  { field = "Operation", equals = "created" },
+  { field = "Operation", equals = "modified" },
+  { field = "Operation", equals = "deleted" },
+]}
+message = "MemoryVersion.Operation must be created, modified, or deleted"

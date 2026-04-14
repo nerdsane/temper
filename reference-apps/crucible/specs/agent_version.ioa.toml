@@ -1,0 +1,18 @@
+# AgentVersion Entity — I/O Automaton Specification
+#
+# Client-managed snapshot rows for a ManagedAgent. Anthropic's API
+# auto-snapshots on every server-side write; Crucible Phase 1 defers the
+# `write_hook` platform extension required for that and instead lets
+# clients POST snapshot rows explicitly (see ADR-0043 Sub-Decision 2).
+#
+# Single-state (Active), no actions. Immutability from the client's
+# perspective is enforced at the Cedar layer in a follow-up slice; Phase 1
+# ships a permissive stub. The parent-lookup cross-invariant in
+# cross-invariants.toml gates the POST on the parent ManagedAgent Status.
+
+[automaton]
+name = "AgentVersion"
+states = ["Active"]
+initial = "Active"
+
+# No actions. Snapshots are append-only from the platform's perspective.

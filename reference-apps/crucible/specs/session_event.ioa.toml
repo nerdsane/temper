@@ -1,0 +1,317 @@
+# SessionEvent Entity — I/O Automaton Specification
+#
+# Append-only child of Session. Full coverage of Anthropic's
+# `GET /v1/sessions/{id}/events` feed — 24 event types (20 base from
+# ADR-0045 + 4 thread events for multi-agent delegation) collapsed
+# into a single table with a `Kind` discriminator:
+#
+#   User events (4) — POSTable via /v1/sessions/{id}/events:
+#     user.message            — text + content blocks from the user
+#     user.interrupt          — user interrupted the agent
+#     user.tool_confirmation  — user allow/deny for a tool ask
+#     user.custom_tool_result — result of a custom tool invocation
+#
+#   Agent events (8) — emitted by the agent loop:
+#     agent.message                  — agent response text + content blocks
+#     agent.thinking                 — agent's extended thinking
+#     agent.custom_tool_use          — agent invoked a custom tool
+#     agent.tool_use                 — agent invoked a built-in tool
+#     agent.tool_result              — result of a built-in tool
+#     agent.mcp_tool_use             — agent invoked an MCP tool
+#     agent.mcp_tool_result          — MCP tool result
+#     agent.thread_context_compacted — session context summarization happened
+#
+#   Session status events (5) — pulses mirroring session state:
+#     session.status_running      — session actively working
+#     session.status_idle         — agent paused, awaiting input (has StopReason)
+#     session.status_rescheduled  — recovering from error state
+#     session.status_terminated   — session ended
+#     session.deleted             — tombstone (manual; no auto-emit on DELETE)
+#
+#   Thread events (4) — multi-agent delegation:
+#     session.thread_created         — a delegation thread was created
+#     session.thread_idle            — a delegation thread idled
+#     agent.thread_message_sent      — coordinator sent a message to a sub-agent
+#     agent.thread_message_received  — coordinator received a result from a sub-agent
+#
+#   Error event (1):
+#     session.error               — error variant + retry status
+#
+#   Span events (2) — observability:
+#     span.model_request_start    — model request initiated
+#     span.model_request_end      — model request completed, carries usage
+#
+# Crucible collapses the 20-branch sum into a single table with a `Kind`
+# discriminator, same pattern as AgentTool, SessionResource, and
+# AgentVersion. Queryable attributes (ToolUseId, ToolName, McpServerName,
+# IsError, ConfirmationResult, EvaluatedPermission, DenyMessage,
+# CustomToolUseId, McpToolUseId, StopReason, StopReasonEventIds,
+# ErrorKind, ErrorMessage, RetryStatus, ModelRequestStartId,
+# ModelInputTokens, ModelOutputTokens, ModelCacheCreationInputTokens,
+# ModelCacheReadInputTokens, ModelSpeed) are hoisted out of the event
+# payload into scalar columns. The full event payload lives in an opaque
+# `Content` JSON blob, same shape as AgentVersion.Snapshot.
+#
+# Append-only semantics are enforced by a permissive Cedar stub that
+# allows POST but denies PATCH, mirroring AgentVersion.
+#
+# A cross-invariant in cross-invariants.toml gates writes on the parent
+# Session being non-Archived. Events are still accepted on Terminated
+# sessions because agents often emit trailing messages after termination.
+#
+# Divergences from Anthropic documented in ADR-0045.
+
+[automaton]
+name = "SessionEvent"
+states = ["Active"]
+initial = "Active"
+
+# --- Cross-field validation (ADR-0041, ADR-0045) ---
+
+# --- Kind discriminator (20-way) ---
+
+[[field_invariant]]
+name = "KindMustBeKnown"
+when = { not = { field = "Kind", absent = true } }
+require = { any_of = [
+  { field = "Kind", equals = "user.message" },
+  { field = "Kind", equals = "user.interrupt" },
+  { field = "Kind", equals = "user.tool_confirmation" },
+  { field = "Kind", equals = "user.custom_tool_result" },
+  { field = "Kind", equals = "agent.message" },
+  { field = "Kind", equals = "agent.thinking" },
+  { field = "Kind", equals = "agent.custom_tool_use" },
+  { field = "Kind", equals = "agent.tool_use" },
+  { field = "Kind", equals = "agent.tool_result" },
+  { field = "Kind", equals = "agent.mcp_tool_use" },
+  { field = "Kind", equals = "agent.mcp_tool_result" },
+  { field = "Kind", equals = "agent.thread_context_compacted" },
+  { field = "Kind", equals = "session.status_running" },
+  { field = "Kind", equals = "session.status_idle" },
+  { field = "Kind", equals = "session.status_rescheduled" },
+  { field = "Kind", equals = "session.status_terminated" },
+  { field = "Kind", equals = "session.deleted" },
+  { field = "Kind", equals = "session.error" },
+  { field = "Kind", equals = "span.model_request_start" },
+  { field = "Kind", equals = "span.model_request_end" },
+  # Multi-agent thread events
+  { field = "Kind", equals = "session.thread_created" },
+  { field = "Kind", equals = "session.thread_idle" },
+  { field = "Kind", equals = "agent.thread_message_sent" },
+  { field = "Kind", equals = "agent.thread_message_received" },
+]}
+message = "SessionEvent.Kind must be one of the 24 documented event kinds"
+
+# --- User event rules ---
+
+[[field_invariant]]
+name = "UserToolConfirmationRequiresToolUseId"
+when = { field = "Kind", equals = "user.tool_confirmation" }
+require = { not = { field = "ToolUseId", empty = true } }
+message = "user.tool_confirmation events must reference a ToolUseId"
+
+[[field_invariant]]
+name = "UserToolConfirmationRequiresResult"
+when = { field = "Kind", equals = "user.tool_confirmation" }
+require = { not = { field = "ConfirmationResult", absent = true } }
+message = "user.tool_confirmation events must set ConfirmationResult"
+
+[[field_invariant]]
+name = "DenyConfirmationRequiresDenyMessage"
+when = { field = "ConfirmationResult", equals = "deny" }
+require = { not = { field = "DenyMessage", empty = true } }
+message = "user.tool_confirmation with ConfirmationResult=deny must set DenyMessage"
+
+[[field_invariant]]
+name = "UserCustomToolResultRequiresCustomToolUseId"
+when = { field = "Kind", equals = "user.custom_tool_result" }
+require = { not = { field = "CustomToolUseId", empty = true } }
+message = "user.custom_tool_result events must reference a CustomToolUseId"
+
+# --- Agent event rules ---
+
+[[field_invariant]]
+name = "AgentCustomToolUseRequiresName"
+when = { field = "Kind", equals = "agent.custom_tool_use" }
+require = { not = { field = "ToolName", empty = true } }
+message = "agent.custom_tool_use events must set ToolName"
+
+[[field_invariant]]
+name = "AgentToolUseRequiresName"
+when = { field = "Kind", equals = "agent.tool_use" }
+require = { not = { field = "ToolName", empty = true } }
+message = "agent.tool_use events must set ToolName"
+
+[[field_invariant]]
+name = "AgentToolResultRequiresToolUseId"
+when = { field = "Kind", equals = "agent.tool_result" }
+require = { not = { field = "ToolUseId", empty = true } }
+message = "agent.tool_result events must reference a ToolUseId"
+
+[[field_invariant]]
+name = "AgentMcpToolUseRequiresName"
+when = { field = "Kind", equals = "agent.mcp_tool_use" }
+require = { not = { field = "ToolName", empty = true } }
+message = "agent.mcp_tool_use events must set ToolName"
+
+[[field_invariant]]
+name = "AgentMcpToolUseRequiresServerName"
+when = { field = "Kind", equals = "agent.mcp_tool_use" }
+require = { not = { field = "McpServerName", empty = true } }
+message = "agent.mcp_tool_use events must set McpServerName"
+
+[[field_invariant]]
+name = "AgentMcpToolResultRequiresMcpToolUseId"
+when = { field = "Kind", equals = "agent.mcp_tool_result" }
+require = { not = { field = "McpToolUseId", empty = true } }
+message = "agent.mcp_tool_result events must reference an McpToolUseId"
+
+# --- Thread event rules (multi-agent delegation) ---
+
+[[field_invariant]]
+name = "ThreadCreatedRequiresThreadId"
+when = { field = "Kind", equals = "session.thread_created" }
+require = { not = { field = "SessionThreadId", empty = true } }
+message = "session.thread_created events must set SessionThreadId"
+
+[[field_invariant]]
+name = "ThreadIdleRequiresThreadId"
+when = { field = "Kind", equals = "session.thread_idle" }
+require = { not = { field = "SessionThreadId", empty = true } }
+message = "session.thread_idle events must set SessionThreadId"
+
+[[field_invariant]]
+name = "ThreadMessageSentRequiresThreadId"
+when = { field = "Kind", equals = "agent.thread_message_sent" }
+require = { not = { field = "SessionThreadId", empty = true } }
+message = "agent.thread_message_sent events must set SessionThreadId"
+
+[[field_invariant]]
+name = "ThreadMessageReceivedRequiresThreadId"
+when = { field = "Kind", equals = "agent.thread_message_received" }
+require = { not = { field = "SessionThreadId", empty = true } }
+message = "agent.thread_message_received events must set SessionThreadId"
+
+# --- Enum-value sanity rules ---
+
+[[field_invariant]]
+name = "ConfirmationResultMustBeKnown"
+when = { not = { field = "ConfirmationResult", absent = true } }
+require = { any_of = [
+  { field = "ConfirmationResult", equals = "allow" },
+  { field = "ConfirmationResult", equals = "deny" },
+]}
+message = "SessionEvent.ConfirmationResult must be `allow` or `deny`"
+
+[[field_invariant]]
+name = "EvaluatedPermissionMustBeKnown"
+when = { not = { field = "EvaluatedPermission", absent = true } }
+require = { any_of = [
+  { field = "EvaluatedPermission", equals = "allow" },
+  { field = "EvaluatedPermission", equals = "ask" },
+  { field = "EvaluatedPermission", equals = "deny" },
+]}
+message = "SessionEvent.EvaluatedPermission must be `allow`, `ask`, or `deny`"
+
+# --- Session status event rules ---
+
+[[field_invariant]]
+name = "StatusIdleRequiresStopReason"
+when = { field = "Kind", equals = "session.status_idle" }
+require = { not = { field = "StopReason", empty = true } }
+message = "session.status_idle events must set StopReason"
+
+[[field_invariant]]
+name = "StopReasonMustBeKnown"
+when = { not = { field = "StopReason", absent = true } }
+require = { any_of = [
+  { field = "StopReason", equals = "end_turn" },
+  { field = "StopReason", equals = "requires_action" },
+  { field = "StopReason", equals = "retries_exhausted" },
+]}
+message = "SessionEvent.StopReason must be `end_turn`, `requires_action`, or `retries_exhausted`"
+
+[[field_invariant]]
+name = "RequiresActionRequiresEventIds"
+when = { all_of = [
+  { field = "Kind",       equals = "session.status_idle" },
+  { field = "StopReason", equals = "requires_action" },
+]}
+require = { not = { field = "StopReasonEventIds", empty = true } }
+message = "session.status_idle with StopReason=requires_action must set StopReasonEventIds"
+
+# --- session.error rules ---
+
+[[field_invariant]]
+name = "SessionErrorRequiresKind"
+when = { field = "Kind", equals = "session.error" }
+require = { not = { field = "ErrorKind", empty = true } }
+message = "session.error events must set ErrorKind"
+
+[[field_invariant]]
+name = "SessionErrorRequiresMessage"
+when = { field = "Kind", equals = "session.error" }
+require = { not = { field = "ErrorMessage", empty = true } }
+message = "session.error events must set ErrorMessage"
+
+[[field_invariant]]
+name = "SessionErrorRequiresRetryStatus"
+when = { field = "Kind", equals = "session.error" }
+require = { not = { field = "RetryStatus", empty = true } }
+message = "session.error events must set RetryStatus"
+
+[[field_invariant]]
+name = "ErrorKindMustBeKnown"
+when = { not = { field = "ErrorKind", absent = true } }
+require = { any_of = [
+  { field = "ErrorKind", equals = "unknown_error" },
+  { field = "ErrorKind", equals = "model_overloaded_error" },
+  { field = "ErrorKind", equals = "model_rate_limited_error" },
+  { field = "ErrorKind", equals = "model_request_failed_error" },
+  { field = "ErrorKind", equals = "mcp_connection_failed_error" },
+  { field = "ErrorKind", equals = "mcp_authentication_failed_error" },
+  { field = "ErrorKind", equals = "billing_error" },
+]}
+message = "SessionEvent.ErrorKind must be one of the 7 documented error variants"
+
+[[field_invariant]]
+name = "RetryStatusMustBeKnown"
+when = { not = { field = "RetryStatus", absent = true } }
+require = { any_of = [
+  { field = "RetryStatus", equals = "retrying" },
+  { field = "RetryStatus", equals = "exhausted" },
+  { field = "RetryStatus", equals = "terminal" },
+]}
+message = "SessionEvent.RetryStatus must be `retrying`, `exhausted`, or `terminal`"
+
+[[field_invariant]]
+name = "McpErrorRequiresServerName"
+when = { any_of = [
+  { field = "ErrorKind", equals = "mcp_connection_failed_error" },
+  { field = "ErrorKind", equals = "mcp_authentication_failed_error" },
+]}
+require = { not = { field = "McpServerName", empty = true } }
+message = "MCP error kinds must identify the failing McpServerName"
+
+# --- span.model_request_end rules ---
+
+[[field_invariant]]
+name = "ModelRequestEndRequiresStartId"
+when = { field = "Kind", equals = "span.model_request_end" }
+require = { not = { field = "ModelRequestStartId", empty = true } }
+message = "span.model_request_end events must reference ModelRequestStartId"
+
+[[field_invariant]]
+name = "ModelRequestEndRequiresIsError"
+when = { field = "Kind", equals = "span.model_request_end" }
+require = { not = { field = "IsError", absent = true } }
+message = "span.model_request_end events must set IsError"
+
+[[field_invariant]]
+name = "ModelSpeedMustBeKnown"
+when = { not = { field = "ModelSpeed", absent = true } }
+require = { any_of = [
+  { field = "ModelSpeed", equals = "standard" },
+  { field = "ModelSpeed", equals = "fast" },
+]}
+message = "SessionEvent.ModelSpeed must be `standard` or `fast`"

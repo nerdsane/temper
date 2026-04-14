@@ -1,0 +1,78 @@
+# SessionThread Entity — I/O Automaton Specification
+#
+# Child of Session representing a sub-agent execution thread within a
+# multi-agent session. Created implicitly by the coordinator's responder
+# when it processes a `delegate_to_agent` tool call.
+#
+# Lifecycle mirrors a simplified Session:
+#
+#     Running ──(idle)──▶ Idle ──(resume)──▶ Running
+#        │                 │
+#        │                 └──(terminate)──▶ Terminated
+#        │                                     │
+#        └──(terminate)──▶ Terminated ◀────────┘
+#
+# No Rescheduling or Archived states — threads are ephemeral within a
+# session and do not survive session archival.
+#
+# A cross-invariant in cross-invariants.toml gates writes on the parent
+# Session being non-Archived.
+
+[automaton]
+name = "SessionThread"
+states = ["Running", "Idle", "Terminated"]
+initial = "Running"
+
+# --- Actions ---
+
+[[action]]
+name = "IdleThread"
+kind = "input"
+from = ["Running"]
+to = "Idle"
+hint = "Mark the thread idle when the sub-agent yields."
+
+[[action]]
+name = "ResumeThread"
+kind = "input"
+from = ["Idle"]
+to = "Running"
+hint = "Resume an idle thread back to Running."
+
+[[action]]
+name = "TerminateThread"
+kind = "input"
+from = ["Running", "Idle"]
+to = "Terminated"
+hint = "Terminate the thread. Called when the sub-agent finishes its delegated task."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "TerminatedIsFinal"
+when = ["Terminated"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "StatusMustBeKnown"
+when = { not = { field = "Status", absent = true } }
+require = { any_of = [
+  { field = "Status", equals = "Running" },
+  { field = "Status", equals = "Idle" },
+  { field = "Status", equals = "Terminated" },
+]}
+message = "SessionThread.Status must be Running, Idle, or Terminated"
+
+[[field_invariant]]
+name = "AgentIdRequired"
+when = { not = { field = "AgentId", absent = true } }
+require = { not = { field = "AgentId", empty = true } }
+message = "SessionThread.AgentId must be non-empty"
+
+[[field_invariant]]
+name = "SessionIdRequired"
+when = { not = { field = "SessionId", absent = true } }
+require = { not = { field = "SessionId", empty = true } }
+message = "SessionThread.SessionId must be non-empty"

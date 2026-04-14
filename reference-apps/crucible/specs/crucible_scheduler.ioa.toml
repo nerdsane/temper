@@ -1,0 +1,80 @@
+# CrucibleScheduler Entity — I/O Automaton Specification
+#
+# Per-tenant heartbeat that periodically checks all active
+# SessionSchedules and fires due ones. Follows the same
+# self-scheduling pattern as the temper-agent CronScheduler:
+#
+#   Start → Checking (check_schedules WASM) → Idle
+#   → (heartbeat WASM waits N seconds) → Checking → ...
+#
+# Create one CrucibleScheduler per tenant and call Start to
+# begin the heartbeat loop.
+
+[automaton]
+name = "CrucibleScheduler"
+states = ["Idle", "Checking"]
+initial = "Idle"
+
+[[action]]
+name = "Start"
+kind = "input"
+from = ["Idle"]
+to = "Checking"
+params = ["heartbeat_interval_seconds"]
+hint = "Begin the heartbeat loop. Triggers the first schedule check."
+effect = [{ type = "trigger", name = "crucible_check_schedules" }]
+
+[[action]]
+name = "ScheduledCheck"
+kind = "input"
+from = ["Idle"]
+to = "Checking"
+hint = "Periodic check triggered by the heartbeat WASM module."
+effect = [{ type = "trigger", name = "crucible_check_schedules" }]
+
+[[action]]
+name = "CheckComplete"
+kind = "input"
+from = ["Checking"]
+to = "Idle"
+params = ["schedules_triggered"]
+hint = "Check cycle finished. Triggers the heartbeat wait."
+effect = [{ type = "trigger", name = "crucible_schedule_next_check" }]
+
+[[action]]
+name = "CheckFailed"
+kind = "input"
+from = ["Checking"]
+to = "Idle"
+params = ["error"]
+hint = "Check cycle failed. Triggers the heartbeat wait to retry."
+effect = [{ type = "trigger", name = "crucible_schedule_next_check" }]
+
+[[action]]
+name = "ScheduleFailed"
+kind = "input"
+from = ["Idle"]
+to = "Idle"
+params = ["error"]
+hint = "Heartbeat wait failed. Loop stops — call Start again to restart."
+
+# --- Integrations ---
+
+[[integration]]
+name = "crucible_check_schedules"
+trigger = "crucible_check_schedules"
+type = "wasm"
+module = "crucible_scheduler_check"
+on_success = "CheckComplete"
+on_failure = "CheckFailed"
+
+[integration.config]
+temper_api_url = "http://127.0.0.1:3000"
+
+[[integration]]
+name = "crucible_schedule_next_check"
+trigger = "crucible_schedule_next_check"
+type = "wasm"
+module = "crucible_scheduler_heartbeat"
+on_success = "ScheduledCheck"
+on_failure = "ScheduleFailed"

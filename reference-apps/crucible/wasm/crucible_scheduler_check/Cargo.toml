@@ -1,0 +1,13 @@
+[package]
+name = "crucible_scheduler_check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+temper-wasm-sdk = { path = "../../../../crates/temper-wasm-sdk" }

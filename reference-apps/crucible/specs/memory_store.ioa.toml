@@ -1,0 +1,35 @@
+# MemoryStore Entity — I/O Automaton Specification
+#
+# A workspace-scoped collection of text memories. When attached to a
+# Session via SessionResource (Kind=memory_store), the agent gains
+# memory_list/memory_search/memory_read/memory_write/memory_edit/
+# memory_delete tools.
+#
+# Lifecycle: Active → Archived. Archiving prevents new memory writes
+# but preserves all existing memories and versions for read access.
+
+[automaton]
+name = "MemoryStore"
+states = ["Active", "Archived"]
+initial = "Active"
+
+[[action]]
+name = "ArchiveMemoryStore"
+kind = "input"
+from = ["Active"]
+to = "Archived"
+hint = "Archive the memory store. Prevents new writes; existing memories are preserved."
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
+
+[[field_invariant]]
+name = "StatusMustBeKnown"
+when = { not = { field = "Status", absent = true } }
+require = { any_of = [
+  { field = "Status", equals = "Active" },
+  { field = "Status", equals = "Archived" },
+]}
+message = "MemoryStore.Status must be Active or Archived"

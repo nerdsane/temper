@@ -1,0 +1,68 @@
+# AgentTool Entity — I/O Automaton Specification
+#
+# Child entity of ManagedAgent representing one row in the `tools[]`
+# collection of Anthropic's Beta Managed Agents API. `tools` is a
+# type-tagged sum with three variants:
+#
+#   agent_toolset   — no kind-specific fields
+#   mcp_toolset     — requires `McpServerName`
+#   custom          — requires `Name`, `Description`, `InputSchema`
+#
+# Crucible collapses the sum into a single table with a `Kind` discriminator
+# and uses field invariants to enforce the shape of each branch. Six field
+# invariants encode the rules, plus a cross-invariant in cross-invariants.toml
+# gates child writes on the parent ManagedAgent's Status.
+#
+# See ADR-0043 Sub-Decision 5 for the reasoning.
+
+[automaton]
+name = "AgentTool"
+states = ["Active"]
+initial = "Active"
+
+# --- Cross-field validation (ADR-0041) ---
+
+[[field_invariant]]
+name = "KindMustBeKnown"
+when = { not = { field = "Kind", absent = true } }
+require = { any_of = [
+  { field = "Kind", equals = "agent_toolset" },
+  { field = "Kind", equals = "mcp_toolset" },
+  { field = "Kind", equals = "custom" },
+]}
+message = "AgentTool.Kind must be `agent_toolset`, `mcp_toolset`, or `custom`"
+
+[[field_invariant]]
+name = "CustomToolRequiresName"
+when = { field = "Kind", equals = "custom" }
+require = { not = { field = "Name", empty = true } }
+message = "Custom tools must have a non-empty Name"
+
+[[field_invariant]]
+name = "CustomToolRequiresDescription"
+when = { field = "Kind", equals = "custom" }
+require = { not = { field = "Description", empty = true } }
+message = "Custom tools must have a non-empty Description"
+
+[[field_invariant]]
+name = "CustomToolRequiresInputSchema"
+when = { field = "Kind", equals = "custom" }
+require = { not = { field = "InputSchema", empty = true } }
+message = "Custom tools must have a non-empty InputSchema"
+
+[[field_invariant]]
+name = "McpToolsetRequiresMcpServerName"
+when = { field = "Kind", equals = "mcp_toolset" }
+require = { not = { field = "McpServerName", empty = true } }
+message = "mcp_toolset tools must reference an McpServerName"
+
+[[field_invariant]]
+name = "AgentToolsetForbidsKindSpecificFields"
+when = { field = "Kind", equals = "agent_toolset" }
+require = { all_of = [
+  { field = "Name", absent = true },
+  { field = "Description", absent = true },
+  { field = "InputSchema", absent = true },
+  { field = "McpServerName", absent = true },
+]}
+message = "agent_toolset tools must not set Name/Description/InputSchema/McpServerName"

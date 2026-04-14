@@ -1,0 +1,25 @@
+# AgentSkill Entity — I/O Automaton Specification
+#
+# Child entity of ManagedAgent, representing one row in the `skills[]`
+# array of Anthropic's Beta Managed Agents API. Single-state (Active).
+#
+#   SkillTypeMustBeKnown       SkillType must equal `anthropic` or `custom`
+#                              (matches Anthropic's `skills[].type` enum).
+#   SkillRequiresActiveManagedAgent  cross-invariant in cross-invariants.toml
+#                              gates the POST on parent ManagedAgent Status.
+
+[automaton]
+name = "AgentSkill"
+states = ["Active"]
+initial = "Active"
+
+# --- Cross-field validation (ADR-0041) ---
+
+[[field_invariant]]
+name = "SkillTypeMustBeKnown"
+when = { not = { field = "SkillType", absent = true } }
+require = { any_of = [
+  { field = "SkillType", equals = "anthropic" },
+  { field = "SkillType", equals = "custom" },
+]}
+message = "AgentSkill.SkillType must be `anthropic` or `custom`"
