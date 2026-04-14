@@ -128,19 +128,16 @@ async fn main() -> Result<()> {
             system,
             model,
         } => {
-            let mut opts = SeedOptions::default();
-            opts.session_id = session_id;
-            opts.agent_id = agent_id;
-            opts.environment_id = environment_id;
-            if let Some(n) = name {
-                opts.agent_name = n;
-            }
-            if let Some(s) = system {
-                opts.system_prompt = s;
-            }
-            if let Some(m) = model {
-                opts.model_id = m;
-            }
+            let defaults = SeedOptions::default();
+            let opts = SeedOptions {
+                session_id,
+                agent_id,
+                environment_id,
+                agent_name: name.unwrap_or(defaults.agent_name),
+                system_prompt: system.unwrap_or(defaults.system_prompt),
+                model_id: model.unwrap_or(defaults.model_id),
+                ..defaults
+            };
             let outcome = seed(&temper, opts).await.context("seed failed")?;
             println!("environment_id={}", outcome.environment_id);
             println!("agent_id={}", outcome.agent_id);

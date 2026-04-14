@@ -278,10 +278,10 @@ fn response_from_openai(body: OpenAIResponse) -> Result<MessagesResponse> {
     let usage = body.usage.unwrap_or_default();
 
     let mut content = Vec::new();
-    if let Some(text) = choice.message.content {
-        if !text.is_empty() {
-            content.push(ContentBlock::text(text));
-        }
+    if let Some(text) = choice.message.content
+        && !text.is_empty()
+    {
+        content.push(ContentBlock::text(text));
     }
     if let Some(tool_calls) = choice.message.tool_calls {
         for tc in tool_calls {

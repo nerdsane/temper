@@ -633,6 +633,7 @@ fn build_delegate_tool_definition(callable_agents: &[CallableAgentRow]) -> ToolD
 
 /// Handle a `delegate_to_agent` tool call by creating or resuming a
 /// thread and running a sub-agent turn on it.
+#[allow(clippy::too_many_arguments)]
 async fn execute_delegation<M: Model>(
     temper: &TemperClient,
     model: &M,
@@ -819,6 +820,7 @@ async fn execute_delegation<M: Model>(
 /// - Scopes events to the thread via `SessionThreadId`
 /// - Sub-agents cannot delegate (no callable agents injected)
 /// - Returns just the response text
+#[allow(clippy::too_many_arguments)]
 async fn respond_thread<M: Model>(
     temper: &TemperClient,
     model: &M,
@@ -1118,7 +1120,7 @@ fn flush_tool_results(out: &mut Vec<ChatMessage>, pending: &mut Vec<ContentBlock
     if !pending.is_empty() {
         out.push(ChatMessage {
             role: "user".to_string(),
-            content: pending.drain(..).collect(),
+            content: std::mem::take(pending),
         });
     }
 }

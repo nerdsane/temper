@@ -354,12 +354,11 @@ fn tool_write(args: &serde_json::Value) -> ToolResult {
         return ToolResult::err("write: missing required parameter `content`");
     };
     let path = Path::new(file_path);
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return ToolResult::err(format!("write: failed to create directory: {e}"));
-            }
-        }
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return ToolResult::err(format!("write: failed to create directory: {e}"));
     }
     match std::fs::write(file_path, content) {
         Ok(()) => ToolResult::ok(format!("wrote {} bytes to {file_path}", content.len())),

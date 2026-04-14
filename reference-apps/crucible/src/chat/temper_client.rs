@@ -149,10 +149,10 @@ impl TemperClient {
             .get("fields")
             .cloned()
             .ok_or_else(|| anyhow!("response missing `fields` envelope: {body}"))?;
-        if let Some(eid) = body.get("entity_id").and_then(|v| v.as_str()) {
-            if let Some(obj) = fields.as_object_mut() {
-                obj.insert("Id".to_string(), serde_json::Value::String(eid.to_string()));
-            }
+        if let Some(eid) = body.get("entity_id").and_then(|v| v.as_str())
+            && let Some(obj) = fields.as_object_mut()
+        {
+            obj.insert("Id".to_string(), serde_json::Value::String(eid.to_string()));
         }
         serde_json::from_value(fields.clone())
             .with_context(|| format!("decoding entity row from: {fields}"))
@@ -174,10 +174,10 @@ impl TemperClient {
                 .get("fields")
                 .cloned()
                 .ok_or_else(|| anyhow!("list entry missing `fields`: {item}"))?;
-            if let Some(eid) = item.get("entity_id").and_then(|v| v.as_str()) {
-                if let Some(obj) = fields.as_object_mut() {
-                    obj.insert("Id".to_string(), serde_json::Value::String(eid.to_string()));
-                }
+            if let Some(eid) = item.get("entity_id").and_then(|v| v.as_str())
+                && let Some(obj) = fields.as_object_mut()
+            {
+                obj.insert("Id".to_string(), serde_json::Value::String(eid.to_string()));
             }
             let row: T = serde_json::from_value(fields.clone())
                 .with_context(|| format!("decoding list row from: {fields}"))?;
