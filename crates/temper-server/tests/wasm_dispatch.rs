@@ -300,6 +300,132 @@ async fn wasm_integration_dispatches_callback() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn persisted_wasm_modules_are_lazy_compiled_on_first_invoke() {
+    let state = build_echo_test_state_with_turso().await;
+    let tenant = TenantId::default();
+    let hash = temper_wasm::WasmEngine::hash_module(ECHO_WASM);
+
+    state
+        .upsert_wasm_module("default", "echo_integration", ECHO_WASM, &hash)
+        .await
+        .expect("persist echo module");
+    state
+        .load_wasm_modules()
+        .await
+        .expect("recover persisted wasm modules");
+
+    {
+        let wasm_reg = state
+            .wasm_module_registry
+            .read()
+            .expect("wasm registry lock"); // ci-ok: infallible lock
+        assert_eq!(
+            wasm_reg.get_hash(&tenant, "echo_integration"),
+            Some(hash.as_str())
+        );
+    }
+    assert!(
+        !state.wasm_engine.is_cached(&hash),
+        "startup recovery should register the module without eagerly compiling it"
+    );
+
+    let response = state
+        .dispatch_tenant_action(
+            &tenant,
+            "EchoTest",
+            "echo-lazy-1",
+            "TriggerEcho",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
+        .await
+        .expect("TriggerEcho should succeed");
+
+    assert!(response.success, "TriggerEcho should succeed");
+    let final_status = wait_for_status(
+        &state,
+        &tenant,
+        "EchoTest",
+        "echo-lazy-1",
+        &["Done", "Failed"],
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(final_status, "Done");
+    assert!(
+        state.wasm_engine.is_cached(&hash),
+        "the first invoke should lazily compile the recovered module"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn persisted_wasm_modules_with_missing_hash_still_execute_after_startup_restore() {
+    let state = build_echo_test_state_with_turso().await;
+    let tenant = TenantId::default();
+    let turso = state
+        .platform_persistent_store()
+        .expect("turso backend required");
+
+    turso
+        .upsert_wasm_module("default", "echo_integration", ECHO_WASM, "")
+        .await
+        .expect("persist legacy echo module with missing hash");
+
+    state
+        .load_wasm_modules()
+        .await
+        .expect("recover persisted wasm modules");
+
+    let recovered_hash = {
+        let wasm_reg = state
+            .wasm_module_registry
+            .read()
+            .expect("wasm registry lock"); // ci-ok: infallible lock
+        wasm_reg
+            .get_hash(&tenant, "echo_integration")
+            .expect("legacy module should still be registered")
+            .to_string()
+    };
+
+    assert!(
+        !recovered_hash.is_empty(),
+        "startup restore should recover a usable hash even for legacy rows"
+    );
+    assert!(
+        !state.wasm_engine.is_cached(&recovered_hash),
+        "startup restore should still avoid eager compilation for legacy rows"
+    );
+
+    let response = state
+        .dispatch_tenant_action(
+            &tenant,
+            "EchoTest",
+            "echo-legacy-hash",
+            "TriggerEcho",
+            serde_json::json!({}),
+            &AgentContext::default(),
+        )
+        .await
+        .expect("TriggerEcho should succeed");
+
+    assert!(response.success, "TriggerEcho should succeed");
+    let final_status = wait_for_status(
+        &state,
+        &tenant,
+        "EchoTest",
+        "echo-legacy-hash",
+        &["Done", "Failed"],
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(final_status, "Done");
+    assert!(
+        state.wasm_engine.is_cached(&recovered_hash),
+        "legacy recovered modules should still lazy-compile on first invoke"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_missing_module_dispatches_failure_callback() {
     let state = build_echo_test_state();
     let tenant = TenantId::default();

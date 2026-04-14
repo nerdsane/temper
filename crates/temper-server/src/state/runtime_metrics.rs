@@ -13,7 +13,7 @@ struct RuntimeMetricInstruments {
     up: Gauge<u64>,
     process_resident_memory_bytes: Gauge<u64>,
     active_actors: Gauge<u64>,
-    active_entities: Gauge<u64>,
+    indexed_entities: Gauge<u64>,
     projected_entities: Gauge<u64>,
     projection_coverage_ratio: Gauge<f64>,
 }
@@ -37,9 +37,9 @@ impl RuntimeMetricInstruments {
                 .u64_gauge("temper_active_actors")
                 .with_description("Number of active in-memory actors.")
                 .build(),
-            active_entities: meter
-                .u64_gauge("temper_active_entities")
-                .with_description("Number of active indexed entities.")
+            indexed_entities: meter
+                .u64_gauge("temper_indexed_entities")
+                .with_description("Number of entities currently present in the in-memory query-plane index.")
                 .build(),
             projected_entities: meter
                 .u64_gauge("temper_projected_entities")
@@ -62,7 +62,7 @@ impl RuntimeMetricInstruments {
         self.active_actors.record(state.active_actor_count(), &[]);
         let indexed_by_tenant = state.active_entity_counts_by_tenant();
         let indexed_total: u64 = indexed_by_tenant.values().copied().sum();
-        self.active_entities.record(indexed_total, &[]);
+        self.indexed_entities.record(indexed_total, &[]);
 
         if let Some(store) = state.event_store.as_ref()
             && let Ok(Some(projected_by_tenant)) = store.projected_entity_counts_by_tenant().await

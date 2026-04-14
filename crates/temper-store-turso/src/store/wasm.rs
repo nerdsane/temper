@@ -4,7 +4,9 @@ use libsql::params;
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
-use super::{TursoEventStore, TursoWasmInvocationRow, TursoWasmModuleRow};
+use super::{
+    TursoEventStore, TursoWasmInvocationRow, TursoWasmModuleMetadataRow, TursoWasmModuleRow,
+};
 use crate::TursoWasmInvocationInsert;
 use crate::metrics::TursoQueryTimer;
 
@@ -115,6 +117,33 @@ impl TursoEventStore {
         Ok(out)
     }
 
+    /// Load WASM module metadata across all tenants without the raw bytes.
+    ///
+    /// Startup registry recovery should use this instead of loading the full
+    /// WASM corpus into memory.
+    #[instrument(skip_all, fields(otel.name = "turso.load_wasm_module_metadata_all_tenants"))]
+    pub async fn load_wasm_module_metadata_all_tenants(
+        &self,
+    ) -> Result<Vec<TursoWasmModuleMetadataRow>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_wasm_module_metadata_all_tenants");
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, module_name, sha256_hash, size_bytes, updated_at \
+                 FROM wasm_modules \
+                 ORDER BY tenant, module_name",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(Self::row_to_wasm_module_metadata(&row)?);
+        }
+        Ok(out)
+    }
+
     /// Persist a WASM invocation log entry.
     #[instrument(skip_all, fields(otel.name = "turso.persist_wasm_invocation"))]
     pub async fn persist_wasm_invocation(
@@ -214,6 +243,19 @@ impl TursoEventStore {
             version: row.get::<i64>(4).map_err(storage_error)? as i32,
             size_bytes: row.get::<i64>(5).map_err(storage_error)? as i32,
             updated_at: row.get::<String>(6).map_err(storage_error)?,
+        })
+    }
+
+    /// Parse a WASM module metadata row from a libsql Row (5 columns).
+    fn row_to_wasm_module_metadata(
+        row: &libsql::Row,
+    ) -> Result<TursoWasmModuleMetadataRow, PersistenceError> {
+        Ok(TursoWasmModuleMetadataRow {
+            tenant: row.get::<String>(0).map_err(storage_error)?,
+            module_name: row.get::<String>(1).map_err(storage_error)?,
+            sha256_hash: row.get::<String>(2).map_err(storage_error)?,
+            size_bytes: row.get::<i64>(3).map_err(storage_error)? as i32,
+            updated_at: row.get::<String>(4).map_err(storage_error)?,
         })
     }
 }

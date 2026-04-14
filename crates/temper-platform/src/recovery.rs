@@ -9,6 +9,7 @@
 
 use temper_runtime::tenant::TenantId;
 use temper_server::platform_store::PlatformStore;
+use temper_server::registry::VerificationStatus;
 
 use crate::os_apps;
 use crate::state::PlatformState;
@@ -77,8 +78,9 @@ pub async fn restore_installed_apps(state: &PlatformState, ps: &dyn PlatformStor
     };
 
     for (tenant, app_name) in installed {
-        // Check if the app's entity types are already in the registry.
-        if tenant_has_app_specs(state, &tenant, &app_name) {
+        // Only skip recovery if the app's specs are both present and in a
+        // stable verified/restored state. Pending specs must be healed.
+        if tenant_has_ready_app_specs(state, &tenant, &app_name) {
             continue;
         }
 
@@ -114,15 +116,20 @@ pub async fn restore_installed_os_apps(state: &PlatformState, ps: &dyn PlatformS
 }
 
 /// Check if all entity types for an app are already registered.
-fn tenant_has_app_specs(state: &PlatformState, tenant: &str, app_name: &str) -> bool {
+fn tenant_has_ready_app_specs(state: &PlatformState, tenant: &str, app_name: &str) -> bool {
     let Some(bundle) = os_apps::get_os_app(app_name) else {
         return false;
     };
     let tenant_id = TenantId::new(tenant);
     let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
     bundle.specs.iter().all(|(entity_type, _)| {
-        registry
+        let has_table = registry
             .get_table(&tenant_id, entity_type.as_str())
-            .is_some()
+            .is_some();
+        let is_ready = matches!(
+            registry.get_verification_status(&tenant_id, entity_type.as_str()),
+            Some(VerificationStatus::Completed(_) | VerificationStatus::Restored(_))
+        );
+        has_table && is_ready
     })
 }

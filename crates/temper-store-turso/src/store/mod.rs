@@ -542,6 +542,21 @@ pub struct TursoWasmModuleRow {
     pub updated_at: String,
 }
 
+/// Metadata row returned by startup WASM registry restore queries.
+#[derive(Debug, Clone)]
+pub struct TursoWasmModuleMetadataRow {
+    /// Tenant name.
+    pub tenant: String,
+    /// Module name.
+    pub module_name: String,
+    /// SHA-256 hash of the WASM binary.
+    pub sha256_hash: String,
+    /// Module size in bytes.
+    pub size_bytes: i32,
+    /// ISO-8601 updated_at timestamp.
+    pub updated_at: String,
+}
+
 /// Row returned by WASM invocation log queries.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TursoWasmInvocationRow {

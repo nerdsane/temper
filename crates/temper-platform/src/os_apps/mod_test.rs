@@ -7,6 +7,7 @@ use temper_runtime::tenant::TenantId;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
+use temper_store_turso::TursoSpecVerificationUpdate;
 use temper_verify::cascade::VerificationCascade;
 
 #[test]
@@ -661,6 +662,19 @@ async fn test_skill_install_survives_restart() {
             .any(|r| r.tenant == "test-ws" && r.entity_type == "Issue"),
         "Issue spec not found in Turso"
     );
+    let issue_row = rows
+        .iter()
+        .find(|r| r.tenant == "test-ws" && r.entity_type == "Issue")
+        .expect("Issue spec should exist");
+    assert!(
+        issue_row.verified,
+        "Issue spec should be durably marked verified after install"
+    );
+    assert_ne!(
+        issue_row.verification_status.to_lowercase(),
+        "pending",
+        "Issue spec should not remain pending after install"
+    );
 
     let installed = turso_ref.list_all_installed_apps().await.unwrap();
     assert!(
@@ -697,7 +711,96 @@ async fn test_skill_install_survives_restart() {
         assert!(registry.get_table(&tenant, "Cycle").is_some());
         assert!(registry.get_table(&tenant, "Comment").is_some());
         assert!(registry.get_table(&tenant, "Label").is_some());
+        assert!(
+            matches!(
+                registry.get_verification_status(&tenant, "Issue"),
+                Some(VerificationStatus::Completed(_) | VerificationStatus::Restored(_))
+            ),
+            "Issue spec should restore with a stable verification status"
+        );
     }
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_restore_installed_app_heals_pending_specs_on_restart() {
+    let db_path = format!("/tmp/temper-test-heal-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state.server.event_store = Some(std::sync::Arc::new(
+        temper_server::event_store::ServerEventStore::Turso(turso),
+    ));
+
+    install_skill(&state, "test-heal", "project-management")
+        .await
+        .expect("install should succeed");
+
+    let turso_ref = state
+        .server
+        .event_store
+        .as_ref()
+        .unwrap()
+        .platform_turso_store()
+        .unwrap();
+
+    for entity_type in ["Issue", "Project", "Cycle", "Comment", "Label"] {
+        turso_ref
+            .persist_spec_verification(
+                "test-heal",
+                entity_type,
+                TursoSpecVerificationUpdate {
+                    status: "pending",
+                    verified: false,
+                    levels_passed: None,
+                    levels_total: None,
+                    verification_result_json: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        state.registry.write().unwrap().set_verification_status(
+            &TenantId::new("test-heal"),
+            entity_type,
+            VerificationStatus::Pending,
+        );
+    }
+
+    crate::recovery::restore_installed_apps(&state, turso_ref).await;
+
+    {
+        let registry = state.registry.read().unwrap();
+        let tenant = TenantId::new("test-heal");
+        assert!(
+            matches!(
+                registry.get_verification_status(&tenant, "Issue"),
+                Some(VerificationStatus::Completed(_) | VerificationStatus::Restored(_))
+            ),
+            "Issue spec should be healed out of pending after recovery"
+        );
+    }
+
+    let rows = turso_ref.load_specs().await.unwrap();
+    let issue_row = rows
+        .iter()
+        .find(|r| r.tenant == "test-heal" && r.entity_type == "Issue")
+        .expect("Issue row should exist");
+    assert!(
+        issue_row.verified,
+        "Issue row should be durably re-marked verified during recovery"
+    );
+    assert_ne!(
+        issue_row.verification_status.to_lowercase(),
+        "pending",
+        "Issue row should not remain pending after recovery"
+    );
 
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(format!("{db_path}-wal"));
@@ -712,6 +815,87 @@ fn test_reload_picks_up_disk_changes() {
         !skills.is_empty(),
         "catalog should not be empty after reload"
     );
+}
+
+#[test]
+fn test_manifest_parses_startup_install_and_wasm_loading_policy() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("temper-app-manifest-test-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&temp_dir).unwrap();
+    fs::write(
+        temp_dir.join("app.toml"),
+        r#"name = "core-app"
+description = "Core app"
+version = "1.0.0"
+startup_install = "core"
+
+[[wasm_modules]]
+name = "echo"
+criticality = "app-required"
+startup_loading = "lazy"
+"#,
+    )
+    .unwrap();
+
+    let manifest = read_app_manifest(&temp_dir).expect("manifest should parse");
+    assert_eq!(manifest.startup_install, StartupInstallMode::Core);
+    assert_eq!(manifest.wasm_modules.len(), 1);
+    assert_eq!(manifest.wasm_modules[0].name, "echo");
+    assert_eq!(
+        manifest.wasm_modules[0].criticality,
+        WasmModuleCriticality::AppRequired
+    );
+    assert_eq!(
+        manifest.wasm_modules[0].startup_loading,
+        WasmStartupLoading::Lazy
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_load_app_bundle_carries_wasm_module_contracts() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("temper-app-bundle-test-{}", uuid::Uuid::new_v4()));
+    let module_dir = temp_dir
+        .join("wasm")
+        .join("echo")
+        .join("target")
+        .join("wasm32-unknown-unknown")
+        .join("release");
+    fs::create_dir_all(&module_dir).unwrap();
+    fs::write(
+        temp_dir.join("app.toml"),
+        r#"name = "bundle-app"
+description = "Bundle app"
+version = "1.0.0"
+startup_install = "manual"
+
+[[wasm_modules]]
+name = "echo"
+criticality = "app-required"
+startup_loading = "lazy"
+"#,
+    )
+    .unwrap();
+    fs::write(temp_dir.join("APP.md"), "# Bundle App\n\nTest.\n").unwrap();
+    fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../temper-wasm/tests/fixtures/echo_integration.wasm"),
+        module_dir.join("echo.wasm"),
+    )
+    .unwrap();
+
+    let bundle = load_app_bundle(&temp_dir).expect("bundle should load");
+    assert!(bundle.wasm_modules.contains_key("echo"));
+    let config = bundle
+        .wasm_module_configs
+        .get("echo")
+        .expect("wasm module config should be present");
+    assert_eq!(config.startup_loading, WasmStartupLoading::Lazy);
+    assert_eq!(config.criticality, WasmModuleCriticality::AppRequired);
+
+    let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[test]

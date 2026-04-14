@@ -17,6 +17,7 @@ temper-observe = { workspace = true }
 temper-runtime = { workspace = true }
 temper-authz = { workspace = true }
 temper-optimize = { workspace = true }
+temper-wasm = { workspace = true }
 opentelemetry = { workspace = true }
 reqwest = { workspace = true }
 axum = { workspace = true }

@@ -285,6 +285,8 @@ impl crate::state::ServerState {
                 .handle_module_not_found(ctx, integration, &module_name)
                 .await;
         };
+        self.ensure_wasm_module_cached(ctx.entity_ref.tenant, &module_name, &hash)
+            .await?;
         let trigger_params = self
             .maybe_inject_ots_trajectory_actions(&module_name, ctx, action_params)
             .await;
@@ -868,6 +870,8 @@ impl crate::state::ServerState {
         let hash = module_hash.ok_or_else(|| {
             format!("WASM module '{module_name}' not found for tenant '{tenant}'")
         })?;
+        self.ensure_wasm_module_cached(tenant, module_name, &hash)
+            .await?;
 
         // Build authorized host chain
         let base_gate = self.wasm_authz_gate();

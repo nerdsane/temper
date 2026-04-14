@@ -53,12 +53,16 @@ pub(crate) async fn handle_health(State(state): State<ServerState>) -> Json<serd
         count
     };
 
-    let active_entities = {
+    let active_actors = {
         let reg = state
             .actor_registry
             .read()
             .unwrap_or_else(|e| e.into_inner());
         reg.len() as u64
+    };
+    let indexed_entities = {
+        let index = state.entity_index.read().unwrap_or_else(|e| e.into_inner());
+        index.values().map(|ids| ids.len() as u64).sum::<u64>()
     };
 
     let transitions_total = state.metrics.transitions_total.load(Ordering::Relaxed);
@@ -74,7 +78,8 @@ pub(crate) async fn handle_health(State(state): State<ServerState>) -> Json<serd
         "status": "healthy",
         "uptime_seconds": uptime,
         "specs_loaded": specs_loaded,
-        "active_entities": active_entities,
+        "active_actors": active_actors,
+        "indexed_entities": indexed_entities,
         "transitions_total": transitions_total,
         "errors_total": errors_total,
         "event_store": event_store_type,
@@ -116,11 +121,11 @@ pub(crate) async fn handle_metrics(
         }
     }
 
-    // -- temper_active_entities --
+    // -- temper_indexed_entities --
     lines.push(
-        "# HELP temper_active_entities Number of currently active entity actors.".to_string(),
+        "# HELP temper_indexed_entities Number of entities currently present in the in-memory query-plane index.".to_string(),
     );
-    lines.push("# TYPE temper_active_entities gauge".to_string());
+    lines.push("# TYPE temper_indexed_entities gauge".to_string());
     {
         // Count per entity_type from the entity index.
         let index = state.entity_index.read().unwrap_or_else(|e| e.into_inner());
@@ -128,7 +133,7 @@ pub(crate) async fn handle_metrics(
             // key format: "tenant:entity_type"
             if let Some(entity_type) = key.split(':').nth(1) {
                 lines.push(format!(
-                    "temper_active_entities{{entity_type=\"{}\"}} {}",
+                    "temper_indexed_entities{{entity_type=\"{}\"}} {}",
                     entity_type,
                     ids.len()
                 ));
