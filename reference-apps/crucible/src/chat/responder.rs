@@ -1517,10 +1517,10 @@ mod tests {
             },
         ];
         let defs = build_tools_from_agent(&rows);
-        // 6 built-in + 1 custom = 7
-        assert_eq!(defs.len(), 7);
-        assert_eq!(defs[6].name, "my_tool");
-        assert_eq!(defs[6].description, "does stuff");
+        // 11 built-in + 1 custom = 12
+        assert_eq!(defs.len(), 12);
+        assert_eq!(defs[11].name, "my_tool");
+        assert_eq!(defs[11].description, "does stuff");
     }
 
     #[test]
