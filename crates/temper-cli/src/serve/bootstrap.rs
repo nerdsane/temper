@@ -274,6 +274,7 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
             )
         })
         .unwrap_or(false);
+    let mut all_tenants = Vec::new();
     for (tenant, _dir) in apps {
         let tenant_id = TenantId::new(tenant.as_str());
         if eager_hydrate {
@@ -281,6 +282,7 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
         } else {
             state.server.populate_index_from_store(&tenant_id).await;
         }
+        all_tenants.push(tenant_id);
     }
     // In TenantRouted mode, also hydrate all registered tenants.
     if let Some(ref store) = state.server.event_store
@@ -293,8 +295,19 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
             } else {
                 state.server.populate_index_from_store(&tenant_id).await;
             }
+            all_tenants.push(tenant_id);
         }
     }
+
+    // Background task: populate the field index from snapshots for OData
+    // filter push-down. This runs after the entity index is populated so
+    // pre-existing entities are queryable via SQL-level filters.
+    let server = state.server.clone();
+    tokio::spawn(async move {
+        for tenant_id in all_tenants {
+            server.populate_field_index_from_snapshots(&tenant_id).await;
+        }
+    });
 }
 
 /// Phase 6: Recover Cedar policies from persistent storage.

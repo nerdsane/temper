@@ -55,11 +55,28 @@ impl Context {
         let ctx_json = unsafe {
             let ptr = addr_of!(host::CTX_BUF) as *const u8;
             let len = host::host_get_context(ptr as i32, host::CTX_BUF_LEN as i32);
-            if len <= 0 || len as usize > host::CTX_BUF_LEN {
+            if len <= 0 {
                 return Err("failed to read invocation context".to_string());
             }
-            let slice = core::slice::from_raw_parts(ptr, len as usize);
-            String::from_utf8_lossy(slice).to_string()
+
+            if len as usize <= host::CTX_BUF_LEN {
+                let slice = core::slice::from_raw_parts(ptr, len as usize);
+                String::from_utf8_lossy(slice).to_string()
+            } else {
+                let needed = len as usize;
+                if needed > i32::MAX as usize {
+                    return Err("failed to read invocation context".to_string());
+                }
+
+                let mut buf = vec![0u8; needed];
+                let actual = host::host_get_context(buf.as_mut_ptr() as i32, needed as i32);
+                if actual <= 0 || actual as usize > buf.len() {
+                    return Err("failed to read invocation context".to_string());
+                }
+
+                let slice = core::slice::from_raw_parts(buf.as_ptr(), actual as usize);
+                String::from_utf8_lossy(slice).to_string()
+            }
         };
 
         let parsed: Value = serde_json::from_str(&ctx_json)

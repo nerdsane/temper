@@ -1398,34 +1398,34 @@ async fn install_os_app_without_dependencies(
             .filter(|(entity_type, _)| !skipped.contains(entity_type))
             .map(|(et, src)| (et.as_str(), src.as_str()))
             .collect();
+        let verified_cache = if let Some(ref store) = state.server.event_store
+            && let Some(turso) = store.platform_turso_store()
+        {
+            turso
+                .load_verification_cache(tenant)
+                .await
+                .unwrap_or_default()
+        } else if let Some(ref store) = state.server.event_store
+            && let Some(ps) = store.platform_store()
+        {
+            ps.load_verification_cache(tenant).await.unwrap_or_default()
+        } else {
+            std::collections::BTreeMap::new()
+        };
 
-        if !specs_to_bootstrap.is_empty() {
-            let verified_cache = if let Some(ref store) = state.server.event_store
-                && let Some(turso) = store.platform_turso_store()
-            {
-                turso
-                    .load_verification_cache(tenant)
-                    .await
-                    .unwrap_or_default()
-            } else if let Some(ref store) = state.server.event_store
-                && let Some(ps) = store.platform_store()
-            {
-                ps.load_verification_cache(tenant).await.unwrap_or_default()
-            } else {
-                std::collections::BTreeMap::new()
-            };
-
-            if let Some(ref merged) = merged_csdl {
-                bootstrap::bootstrap_tenant_specs(
-                    state,
-                    tenant,
-                    merged,
-                    &specs_to_bootstrap,
-                    true,
-                    &format!("OsApp({app_name})"),
-                    &verified_cache,
-                );
-            }
+        if let Some(ref merged) = merged_csdl {
+            // Even when every spec is byte-for-byte unchanged, we still need to
+            // merge the app's CSDL back into the in-memory registry so entity-set
+            // mappings survive partial restores and process restarts.
+            bootstrap::bootstrap_tenant_specs(
+                state,
+                tenant,
+                merged,
+                &specs_to_bootstrap,
+                true,
+                &format!("OsApp({app_name})"),
+                &verified_cache,
+            );
         }
     }
 

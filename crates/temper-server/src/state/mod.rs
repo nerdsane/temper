@@ -1,5 +1,6 @@
 //! Server state shared across all request handlers.
 
+pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
 mod evolution;
@@ -7,6 +8,7 @@ pub mod metrics;
 pub mod pending_decisions;
 mod persistence;
 pub mod policy_suggestions;
+mod projection_backfill;
 mod runtime_metrics;
 pub mod trajectory;
 pub mod wasm_invocation_log;
@@ -286,6 +288,13 @@ pub struct ServerState {
     /// Each entity's IOA source is written to stdin; the result is read from stdout
     /// as JSON. A 30-second timeout is applied per entity.
     pub verify_subprocess_bin: Option<Arc<std::path::PathBuf>>,
+    /// Optional custom effect handler for platform-level hooks.
+    ///
+    /// When set, the post-dispatch pipeline calls this handler for each
+    /// custom effect triggered by entity transitions. This is the extension
+    /// point that `temper-platform` uses to wire `hooks.rs` into the
+    /// dispatch pipeline.
+    pub custom_effect_handler: Option<Arc<dyn custom_effects::CustomEffectHandler>>,
 }
 
 #[allow(deprecated)] // ADR-0025 Phase 4: RecordStore used until chain validation replaced
@@ -359,6 +368,7 @@ impl ServerState {
             single_tenant_mode: true,
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
+            custom_effect_handler: None,
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -587,6 +597,7 @@ impl ServerState {
             single_tenant_mode: false,
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
+            custom_effect_handler: None,
         };
         state.register_builtin_wasm_modules();
         state
