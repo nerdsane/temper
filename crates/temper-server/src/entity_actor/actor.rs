@@ -60,6 +60,35 @@ pub struct EntityActor {
 }
 
 impl EntityActor {
+    fn build_initial_state(
+        entity_type: &str,
+        entity_id: &str,
+        table: &TransitionTable,
+        initial_fields: &serde_json::Value,
+    ) -> EntityState {
+        let mut fields = initial_fields.clone();
+        if let Some(obj) = fields.as_object_mut() {
+            obj.entry("Id".to_string())
+                .or_insert(serde_json::Value::String(entity_id.to_string()));
+            obj.entry("Status".to_string())
+                .or_insert(serde_json::Value::String(table.initial_state.clone()));
+        }
+
+        EntityState {
+            entity_type: entity_type.to_string(),
+            entity_id: entity_id.to_string(),
+            status: table.initial_state.clone(),
+            item_count: 0,
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+            fields,
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            sequence_nr: 0,
+        }
+    }
+
     /// Snapshot frequency in events.
     ///
     /// Controlled by `TEMPER_SNAPSHOT_INTERVAL` (default 100).
@@ -396,6 +425,20 @@ impl EntityActor {
     }
 }
 
+pub(crate) async fn recover_entity_state_from_store(
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+    table: &TransitionTable,
+    store: &ServerEventStore,
+    initial_fields: &serde_json::Value,
+) -> EntityState {
+    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+    let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
+    EntityActor::replay_events(table, store, &persistence_id, &mut state, tenant).await;
+    state
+}
+
 impl Actor for EntityActor {
     type Msg = EntityMsg;
     type State = EntityState;
@@ -405,38 +448,24 @@ impl Actor for EntityActor {
         // This is a cheap clone — TransitionTable is a few Vecs of strings.
         let table = self.table.read().expect("table lock poisoned").clone();
 
-        let mut fields = self.initial_fields.clone();
-        if let Some(obj) = fields.as_object_mut() {
-            obj.entry("Id".to_string())
-                .or_insert(serde_json::Value::String(self.entity_id.clone()));
-            obj.entry("Status".to_string())
-                .or_insert(serde_json::Value::String(table.initial_state.clone()));
-        }
-
-        let mut state = EntityState {
-            entity_type: self.entity_type.clone(),
-            entity_id: self.entity_id.clone(),
-            status: table.initial_state.clone(),
-            item_count: 0,
-            counters: BTreeMap::new(),
-            booleans: BTreeMap::new(),
-            lists: BTreeMap::new(),
-            fields,
-            events: std::collections::VecDeque::new(),
-            total_event_count: 0,
-            sequence_nr: 0,
-        };
+        let mut state = Self::build_initial_state(
+            &self.entity_type,
+            &self.entity_id,
+            &table,
+            &self.initial_fields,
+        );
 
         // Replay events from Postgres to rebuild state (if persistence is configured).
         // Re-evaluates each event through the TransitionTable to reconstruct
         // all state variables (status, counters, booleans) — not just item_count.
         if let Some(ref store) = self.event_store {
-            Self::replay_events(
+            state = recover_entity_state_from_store(
+                &self.tenant,
+                &self.entity_type,
+                &self.entity_id,
                 &table,
                 store,
-                &self.persistence_id(),
-                &mut state,
-                &self.tenant,
+                &self.initial_fields,
             )
             .await;
         }

@@ -224,6 +224,12 @@ pub(crate) async fn record_authz_denial(
             "failed to create GovernanceDecision entity for denial"
         );
     }
+    pd.governance_decision_id = Some(gd_id.clone());
+
+    // Re-persist with governance_decision_id link so approve/deny endpoints can find the GD.
+    if let Err(e) = state.persist_pending_decision(&pd).await {
+        tracing::warn!(error = %e, id = %pd.id, "failed to persist PD with governance_decision_id");
+    }
 
     // Record trajectory to Turso synchronously.
     let traj = TrajectoryEntry {

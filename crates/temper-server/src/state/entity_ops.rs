@@ -10,7 +10,7 @@ use temper_runtime::persistence::{EventStore, PersistenceEnvelope};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
-use super::ServerState;
+use super::{ServerState, projection_backfill};
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
@@ -87,6 +87,22 @@ impl ServerState {
             .unwrap_or(0)
     }
 
+    /// Active entity counts grouped by tenant from the in-memory index.
+    pub fn active_entity_counts_by_tenant(&self) -> BTreeMap<String, u64> {
+        self.entity_index
+            .read()
+            .map(|index| {
+                let mut counts = BTreeMap::new();
+                for (index_key, ids) in index.iter() {
+                    if let Some((tenant, _entity_type)) = index_key.split_once(':') {
+                        *counts.entry(tenant.to_string()).or_insert(0) += ids.len() as u64;
+                    }
+                }
+                counts
+            })
+            .unwrap_or_default()
+    }
+
     /// Returns `true` when a tenant/entity_type has a registered spec.
     pub(crate) fn has_registered_spec(
         &self,
@@ -149,6 +165,19 @@ impl ServerState {
                 );
             }
         }
+    }
+
+    /// Populate the durable query-plane projections for collection reads.
+    ///
+    /// Two-phase approach:
+    /// 1. **Snapshot pass** — cheap: deserialises snapshots for entities that have them.
+    /// 2. **Persistence replay pass** — reconstructs state directly from the event log.
+    ///
+    /// Runs once as a background task after startup.  New entities created after
+    /// boot are indexed via `run_post_dispatch_effects` step 8.
+    #[instrument(skip_all, fields(otel.name = "entity.populate_field_index", tenant = %tenant))]
+    pub async fn populate_field_index_from_snapshots(&self, tenant: &TenantId) {
+        projection_backfill::populate_field_index_from_snapshots(self, tenant).await;
     }
 
     /// Hydrate actor state from the event store by spawning actors for all
@@ -518,6 +547,20 @@ impl ServerState {
             .map_err(|e| format!("Actor delete failed: {e}"))?;
 
         if response.success {
+            if let Some(store) = self.event_store.as_ref()
+                && let Err(e) = store
+                    .remove_query_projection(tenant.as_str(), entity_type, entity_id)
+                    .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    tenant = %tenant,
+                    entity_type = %entity_type,
+                    entity_id = %entity_id,
+                    "failed to remove query projection during delete"
+                );
+            }
+
             // Tombstone persisted successfully; now it is safe to remove actor
             // and in-memory index entries.
             let _ = actor_ref.stop();
