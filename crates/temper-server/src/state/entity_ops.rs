@@ -10,7 +10,7 @@ use temper_runtime::persistence::{EventStore, PersistenceEnvelope};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
-use super::ServerState;
+use super::{ServerState, projection_backfill};
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
@@ -87,6 +87,22 @@ impl ServerState {
             .unwrap_or(0)
     }
 
+    /// Active entity counts grouped by tenant from the in-memory index.
+    pub fn active_entity_counts_by_tenant(&self) -> BTreeMap<String, u64> {
+        self.entity_index
+            .read()
+            .map(|index| {
+                let mut counts = BTreeMap::new();
+                for (index_key, ids) in index.iter() {
+                    if let Some((tenant, _entity_type)) = index_key.split_once(':') {
+                        *counts.entry(tenant.to_string()).or_insert(0) += ids.len() as u64;
+                    }
+                }
+                counts
+            })
+            .unwrap_or_default()
+    }
+
     /// Returns `true` when a tenant/entity_type has a registered spec.
     pub(crate) fn has_registered_spec(
         &self,
@@ -151,147 +167,17 @@ impl ServerState {
         }
     }
 
-    /// Populate the entity field index for OData filter push-down.
+    /// Populate the durable query-plane projections for collection reads.
     ///
     /// Two-phase approach:
-    /// 1. **Snapshot pass** — cheap: deserialises snapshots for entities that have
-    ///    them (≥100 events).
-    /// 2. **Actor hydration pass** — for remaining entities: spawns/reuses actors
-    ///    to reconstruct state from events.  Most actors are already hydrated by
-    ///    bootstrap (e.g. `ensure_markdown_file` calls `get_tenant_entity_state`),
-    ///    so this is typically fast.
+    /// 1. **Snapshot pass** — cheap: deserialises snapshots for entities that have them.
+    /// 2. **Persistence replay pass** — reconstructs state directly from the event log.
     ///
     /// Runs once as a background task after startup.  New entities created after
     /// boot are indexed via `run_post_dispatch_effects` step 8.
     #[instrument(skip_all, fields(otel.name = "entity.populate_field_index", tenant = %tenant))]
     pub async fn populate_field_index_from_snapshots(&self, tenant: &TenantId) {
-        let Some(store) = self.event_store.as_ref() else {
-            return;
-        };
-
-        let entities = {
-            let index = self.entity_index.read().unwrap();
-            let mut result = Vec::new();
-            for (index_key, ids) in index.iter() {
-                // index_key format: "{tenant}:{entity_type}"
-                let prefix = format!("{tenant}:");
-                if let Some(entity_type) = index_key.strip_prefix(&prefix) {
-                    for id in ids {
-                        result.push((entity_type.to_string(), id.clone()));
-                    }
-                }
-            }
-            result
-        };
-
-        let total = entities.len();
-        let mut indexed = 0usize;
-        let mut errors = 0usize;
-        let mut needs_hydration = Vec::new();
-
-        // ── Phase 1: snapshot-based backfill (cheap) ──
-        for (entity_type, entity_id) in &entities {
-            let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-            match store.load_snapshot(&persistence_id).await {
-                Ok(Some((_seq, snapshot_bytes))) => {
-                    if let Ok(state) =
-                        serde_json::from_slice::<crate::entity_actor::EntityState>(&snapshot_bytes)
-                    {
-                        if let Err(e) = store
-                            .upsert_field_index(
-                                tenant.as_str(),
-                                entity_type,
-                                entity_id,
-                                &state.status,
-                                &state.fields,
-                            )
-                            .await
-                        {
-                            tracing::debug!(
-                                error = %e,
-                                entity_type = %entity_type,
-                                entity_id = %entity_id,
-                                "field index backfill: upsert failed"
-                            );
-                            errors += 1;
-                        } else {
-                            indexed += 1;
-                        }
-                    }
-                }
-                Ok(None) => {
-                    // No snapshot — needs actor hydration in phase 2.
-                    needs_hydration.push((entity_type.clone(), entity_id.clone()));
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        error = %e,
-                        entity_type = %entity_type,
-                        entity_id = %entity_id,
-                        "field index backfill: snapshot load failed"
-                    );
-                    errors += 1;
-                }
-            }
-        }
-
-        tracing::info!(
-            tenant = %tenant,
-            total,
-            snapshot_indexed = indexed,
-            needs_hydration = needs_hydration.len(),
-            "field index phase 1 (snapshots) complete, starting phase 2 (hydration)"
-        );
-
-        // ── Phase 2: actor hydration for entities without snapshots ──
-        for (entity_type, entity_id) in &needs_hydration {
-            match self
-                .get_tenant_entity_state(tenant, entity_type, entity_id)
-                .await
-            {
-                Ok(response) => {
-                    if let Err(e) = store
-                        .upsert_field_index(
-                            tenant.as_str(),
-                            entity_type,
-                            entity_id,
-                            &response.state.status,
-                            &response.state.fields,
-                        )
-                        .await
-                    {
-                        tracing::debug!(
-                            error = %e,
-                            entity_type = %entity_type,
-                            entity_id = %entity_id,
-                            "field index backfill: hydration upsert failed"
-                        );
-                        errors += 1;
-                    } else {
-                        indexed += 1;
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        error = %e,
-                        entity_type = %entity_type,
-                        entity_id = %entity_id,
-                        "field index backfill: actor hydration failed"
-                    );
-                    errors += 1;
-                }
-            }
-            // Yield to avoid starving the runtime during large backfills.
-            tokio::task::yield_now().await;
-        }
-
-        tracing::info!(
-            tenant = %tenant,
-            total,
-            indexed,
-            errors,
-            "populated field index (snapshots + hydration)"
-        );
+        projection_backfill::populate_field_index_from_snapshots(self, tenant).await;
     }
 
     /// Hydrate actor state from the event store by spawning actors for all
@@ -661,6 +547,20 @@ impl ServerState {
             .map_err(|e| format!("Actor delete failed: {e}"))?;
 
         if response.success {
+            if let Some(store) = self.event_store.as_ref()
+                && let Err(e) = store
+                    .remove_query_projection(tenant.as_str(), entity_type, entity_id)
+                    .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    tenant = %tenant,
+                    entity_type = %entity_type,
+                    entity_id = %entity_id,
+                    "failed to remove query projection during delete"
+                );
+            }
+
             // Tombstone persisted successfully; now it is safe to remove actor
             // and in-memory index entries.
             let _ = actor_ref.stop();

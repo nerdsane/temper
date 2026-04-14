@@ -354,3 +354,72 @@ async fn append_is_durable_before_return() {
     assert_eq!(events[0].sequence_nr, 1);
     assert_eq!(events[0].event_type, "Created");
 }
+
+#[tokio::test]
+async fn query_projection_roundtrip_updates_catalog_and_field_index() {
+    let store = make_store("query-projection-roundtrip").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+    let entity_type = "Order";
+    let entity_id = "ord-projection";
+
+    store
+        .upsert_query_projection(
+            &tenant,
+            entity_type,
+            entity_id,
+            "Draft",
+            &serde_json::json!({
+                "Title": "Projection Test",
+                "Owner": "alice",
+                "Count": 3,
+            }),
+            7,
+        )
+        .await
+        .expect("upsert query projection");
+
+    let title_matches = store
+        .query_field_index(
+            &tenant,
+            entity_type,
+            "field_name = ?3 AND field_value = ?4",
+            vec!["Title".to_string(), "Projection Test".to_string()],
+        )
+        .await
+        .expect("query field index by title");
+    assert_eq!(title_matches, vec![entity_id.to_string()]);
+
+    let counts = store
+        .projected_entity_counts_by_tenant()
+        .await
+        .expect("load projected entity counts");
+    assert_eq!(counts, vec![(tenant.clone(), 1)]);
+
+    store
+        .remove_query_projection(&tenant, entity_type, entity_id)
+        .await
+        .expect("remove query projection");
+
+    let remaining = store
+        .query_field_index(
+            &tenant,
+            entity_type,
+            "field_name = ?3 AND field_value = ?4",
+            vec!["Title".to_string(), "Projection Test".to_string()],
+        )
+        .await
+        .expect("query field index after delete");
+    assert!(
+        remaining.is_empty(),
+        "field index rows should be removed with the query projection"
+    );
+
+    let counts = store
+        .projected_entity_counts_by_tenant()
+        .await
+        .expect("load projected entity counts after delete");
+    assert!(
+        counts.is_empty(),
+        "entity catalog should be empty after removing the projection"
+    );
+}
