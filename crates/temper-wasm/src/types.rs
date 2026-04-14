@@ -63,7 +63,7 @@ impl Default for WasmResourceLimits {
     fn default() -> Self {
         Self {
             max_fuel: 1_000_000_000,
-            max_memory: 16 * 1024 * 1024,
+            max_memory: 64 * 1024 * 1024,
             max_duration: std::time::Duration::from_secs(30),
             max_response_bytes: 1024 * 1024,
         }
@@ -174,7 +174,7 @@ mod tests {
     fn resource_limits_defaults() {
         let limits = WasmResourceLimits::default();
         assert_eq!(limits.max_fuel, 1_000_000_000);
-        assert_eq!(limits.max_memory, 16 * 1024 * 1024);
+        assert_eq!(limits.max_memory, 64 * 1024 * 1024);
         assert_eq!(limits.max_duration, std::time::Duration::from_secs(30));
         assert_eq!(limits.max_response_bytes, 1024 * 1024);
     }
