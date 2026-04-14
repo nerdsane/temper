@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use super::field_invariant::FieldInvariant;
+
 /// A complete I/O Automaton specification for a single entity type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Automaton {
@@ -36,6 +38,9 @@ pub struct Automaton {
     /// Agent trigger declarations (auto-spawn agents on state transitions).
     #[serde(default, rename = "agent_trigger")]
     pub agent_triggers: Vec<AgentTrigger>,
+    /// Cross-field validation rules evaluated on OData `POST`/`PATCH`.
+    #[serde(default, rename = "field_invariant")]
+    pub field_invariants: Vec<FieldInvariant>,
 }
 
 /// Automaton metadata.

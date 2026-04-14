@@ -9,8 +9,8 @@ mod types;
 
 pub use lint::{CrossInvariantLintFinding, CrossInvariantLintSeverity, lint_cross_invariants};
 pub use parser::{
-    CrossInvariantParseError, RelatedStatusInAssert, parse_cross_invariants,
-    parse_related_status_in_assert,
+    CrossInvariantOperator, CrossInvariantParseError, RelatedFieldAssert, RelatedStatusInAssert,
+    parse_cross_invariants, parse_related_field_assert, parse_related_status_in_assert,
 };
 pub use types::{
     CrossInvariant, CrossInvariantSpec, DeletePolicy, InvariantKind, RelationOverride,
