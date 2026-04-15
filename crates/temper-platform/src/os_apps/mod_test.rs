@@ -903,10 +903,8 @@ fn test_find_wasm_modules_respects_manifest_target() {
     // When the manifest declares `target = "wasm32-wasip1"`, the discovery
     // function must pick the wasip1 binary even if a wasm32-unknown-unknown
     // binary also exists (e.g. a stale build from a different compilation).
-    let temp_dir = std::env::temp_dir().join(format!(
-        "temper-wasm-target-test-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("temper-wasm-target-test-{}", uuid::Uuid::new_v4()));
 
     // Create both target directories with different content.
     let uu_dir = temp_dir
@@ -946,8 +944,7 @@ fn test_find_wasm_modules_respects_manifest_target() {
     let modules = find_wasm_modules(&temp_dir, &configs);
     assert!(modules.contains_key("echo"), "echo module should be found");
     assert_eq!(
-        modules["echo"],
-        correct_bytes,
+        modules["echo"], correct_bytes,
         "should pick the wasip1 binary, not wasm32-unknown-unknown"
     );
 
@@ -959,10 +956,8 @@ fn test_find_wasm_modules_finds_sibling_artifact() {
     // When no target/ directories exist, the discovery function should find
     // a sibling bundled artifact at {module_name}/{module_name}.wasm — this
     // is where build.sh copies compiled modules for deployment.
-    let temp_dir = std::env::temp_dir().join(format!(
-        "temper-wasm-sibling-test-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("temper-wasm-sibling-test-{}", uuid::Uuid::new_v4()));
 
     let module_dir = temp_dir.join("wasm").join("echo");
     fs::create_dir_all(&module_dir).unwrap();

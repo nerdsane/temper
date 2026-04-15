@@ -547,36 +547,35 @@ fn find_wasm_modules(
         // build from the wrong target (e.g. wasm32-unknown-unknown when the
         // module requires wasm32-wasip1). Fall back to a sibling bundled
         // artifact ({module_name}.wasm) which build.sh copies after compilation.
-        let candidates: Vec<PathBuf> =
-            if let Some(config) = module_configs.get(&module_name)
-                && let Some(ref target) = config.target
-            {
-                vec![
-                    entry
-                        .path()
-                        .join("target")
-                        .join(target)
-                        .join("release")
-                        .join(format!("{module_name}.wasm")),
-                    entry.path().join(format!("{module_name}.wasm")),
-                ]
-            } else {
-                vec![
-                    entry
-                        .path()
-                        .join("target")
-                        .join("wasm32-unknown-unknown")
-                        .join("release")
-                        .join(format!("{module_name}.wasm")),
-                    entry
-                        .path()
-                        .join("target")
-                        .join("wasm32-wasip1")
-                        .join("release")
-                        .join(format!("{module_name}.wasm")),
-                    entry.path().join(format!("{module_name}.wasm")),
-                ]
-            };
+        let candidates: Vec<PathBuf> = if let Some(config) = module_configs.get(&module_name)
+            && let Some(ref target) = config.target
+        {
+            vec![
+                entry
+                    .path()
+                    .join("target")
+                    .join(target)
+                    .join("release")
+                    .join(format!("{module_name}.wasm")),
+                entry.path().join(format!("{module_name}.wasm")),
+            ]
+        } else {
+            vec![
+                entry
+                    .path()
+                    .join("target")
+                    .join("wasm32-unknown-unknown")
+                    .join("release")
+                    .join(format!("{module_name}.wasm")),
+                entry
+                    .path()
+                    .join("target")
+                    .join("wasm32-wasip1")
+                    .join("release")
+                    .join(format!("{module_name}.wasm")),
+                entry.path().join(format!("{module_name}.wasm")),
+            ]
+        };
 
         for wasm_path in candidates {
             if !wasm_path.exists() {
