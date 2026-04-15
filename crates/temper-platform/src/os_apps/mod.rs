@@ -7,8 +7,7 @@
 //! Backward-compatible skill aliases are preserved (`list_skills()`,
 //! `install_skill()`) to avoid breaking older callers.
 //!
-//! Install reuses [`crate::bootstrap::bootstrap_tenant_specs`] so every app
-//! goes through the same verification cascade as system specs.
+//! Install reuses [`crate::bootstrap::bootstrap_tenant_specs`] so every app goes through the same verification cascade as system specs.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};

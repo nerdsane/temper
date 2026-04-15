@@ -3,8 +3,8 @@
 ## MANDATORY FIRST ACTION: Check Assigned Issues
 
 **On EVERY session start, your FIRST action — before responding to the user — MUST be:**
-1. Call `mcp__temper__execute` with: `await temper.list("rita-agents", "Issues", "$filter=AssigneeId eq 'claude-code'")`
-2. If the call fails (403/404), install the PM app first: `await temper.install_app("rita-agents", "project-management")`, then retry
+1. Call `mcp__temper__execute` with the tenant configured for the current project, for example: `await temper.list("{tenant}", "Issues", "$filter=AssigneeId eq 'claude-code'")`
+2. If the call fails (403/404), install the PM app first for your configured tenant: `await temper.install_app("{tenant}", "project-management")`, then retry
 3. Summarize assigned issues, then mention other open issues
 4. **Do NOT skip this. Do NOT wait for the user to ask.**
 
@@ -13,7 +13,7 @@
 **You are an agent running on Temper. This is your operating layer — not an optional tool.** When a Temper server is running (`mcp__temper__execute` is available), ALL your stateful work — planning, task tracking, progress, knowledge — MUST flow through Temper entities, not markdown files.
 
 **Specifically:**
-- **Planning and task tracking** → Use the PM OS app (`await temper.install_app("pm")` if not installed, tenant `rita-agents`). Create Issues, use `BeginPlanning` → `WritePlan` → `ApprovePlan` → `StartWork` flow. Do NOT use `.progress/` files when Temper is available.
+- **Planning and task tracking** → Use the PM OS app (`await temper.install_app("{tenant}", "project-management")` if not installed). Create Issues, use `BeginPlanning` → `WritePlan` → `ApprovePlan` → `StartWork` flow. Do NOT use `.progress/` files when Temper is available.
 - **Building apps for users** → Use the Temper App Builder skill (`.claude/skills/temper-developer.md`). Workflow: interview → generate IOA specs + CSDL → verify → deploy. Use `/temper-developer`.
 - **Any MCP tool call** → ALWAYS read `.claude/skills/temper-agent.md` first. It has the exact Python API, spec format, and governance flow.
 
@@ -102,7 +102,7 @@ Cedar policies reference this attribute to distinguish verified agents from unve
 - SpecRegistry maps (TenantId, EntityType) → specs + TransitionTable
 - Postgres/Redis are tenant-scoped
 - Single-tenant uses TenantId::default() = "default"
-- **Active agent tenant: `rita-agents`** — all agent MCP calls should use tenant `"rita-agents"`
+- **Active agent tenant:** use the tenant configured for the current project or server. Pass it explicitly to agent MCP calls instead of assuming a hardcoded repository tenant.
 
 ### Deterministic Simulation (FoundationDB/TigerBeetle Standards)
 In simulation-visible crates (temper-runtime, temper-jit, temper-server):

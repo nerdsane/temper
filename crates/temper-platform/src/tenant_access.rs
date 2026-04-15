@@ -39,7 +39,7 @@ fn extract_tenant(req: &Request) -> Option<String> {
 /// - `X-Temper-Principal-Kind` is `agent` (trusted backend-to-backend)
 /// - Principal doesn't start with `github:` (non-human principal)
 /// - No tenant could be extracted from the request
-/// - Tenant is `default` or `temper-system` (always accessible)
+/// - Tenant is `temper-system` (always accessible)
 /// - Not in TenantRouted mode (single-DB has no per-tenant access control)
 pub async fn tenant_access_check(
     State(state): State<PlatformState>,
@@ -77,7 +77,7 @@ pub async fn tenant_access_check(
     };
 
     // Always-accessible tenants.
-    if tenant_id == "default" || tenant_id == "temper-system" {
+    if tenant_id == "temper-system" {
         return Ok(next.run(req).await);
     }
 

@@ -22,8 +22,8 @@ set -euo pipefail
 
 SERVER="http://localhost:3000"
 SANDBOX="http://localhost:9999"
-TENANT="rita-agents"
-HEADERS='-H "content-type: application/json" -H "x-tenant-id: rita-agents" -H "x-temper-principal-kind: admin"'
+TENANT="test-tenant"
+HEADERS='-H "content-type: application/json" -H "x-tenant-id: test-tenant" -H "x-temper-principal-kind: admin"'
 
 pass() { echo "  PASS: $1"; }
 fail() { echo "  FAIL: $1"; FAILURES=$((FAILURES + 1)); }

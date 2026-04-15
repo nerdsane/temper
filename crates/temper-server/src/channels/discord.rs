@@ -1553,11 +1553,11 @@ mod tests {
             entity_id: "discord-123".into(),
             action: "RecordResult".into(),
             status: "Completed".into(),
-            tenant: "rita-agents".into(),
+            tenant: "test-tenant".into(),
             agent_id: None,
             session_id: None,
         };
-        assert!(is_agent_terminal_event(&event, "rita-agents"));
+        assert!(is_agent_terminal_event(&event, "test-tenant"));
     }
 
     #[test]
@@ -1568,11 +1568,11 @@ mod tests {
             entity_id: "discord-123".into(),
             action: "Fail".into(),
             status: "Failed".into(),
-            tenant: "rita-agents".into(),
+            tenant: "test-tenant".into(),
             agent_id: None,
             session_id: None,
         };
-        assert!(is_agent_terminal_event(&event, "rita-agents"));
+        assert!(is_agent_terminal_event(&event, "test-tenant"));
     }
 
     #[test]
@@ -1583,11 +1583,11 @@ mod tests {
             entity_id: "discord-123".into(),
             action: "SandboxReady".into(),
             status: "Thinking".into(),
-            tenant: "rita-agents".into(),
+            tenant: "test-tenant".into(),
             agent_id: None,
             session_id: None,
         };
-        assert!(!is_agent_terminal_event(&event, "rita-agents"));
+        assert!(!is_agent_terminal_event(&event, "test-tenant"));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! (`TEMPER_VAULT_KEY` env var). Secrets are cached in memory and
 //! persisted to Postgres as `(ciphertext, nonce)` pairs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
 use aes_gcm::aead::{Aead, OsRng}; // determinism-ok: cryptographic nonce generation, not simulation-visible
@@ -24,6 +24,8 @@ pub const MAX_SECRET_VALUE_BYTES: usize = 8192;
 pub struct SecretsVault {
     /// AES-256-GCM cipher instance.
     cipher: Arc<Aes256Gcm>,
+    /// Shared platform secrets available to every tenant.
+    platform: Arc<RwLock<BTreeMap<String, String>>>,
     /// In-memory cache: tenant → (key_name → plaintext_value).
     cache: Arc<RwLock<BTreeMap<String, BTreeMap<String, String>>>>,
 }
@@ -36,6 +38,7 @@ impl SecretsVault {
         let cipher = Aes256Gcm::new(key);
         Self {
             cipher: Arc::new(cipher),
+            platform: Arc::new(RwLock::new(BTreeMap::new())),
             cache: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
@@ -78,36 +81,66 @@ impl SecretsVault {
     pub fn cache_secret(&self, tenant: &str, key: &str, value: String) -> Result<(), String> {
         let mut cache = self.cache.write().unwrap(); // ci-ok: infallible lock
         let tenant_secrets = cache.entry(tenant.to_string()).or_default();
+        Self::insert_secret_with_budget(tenant_secrets, key, value, tenant)
+    }
 
+    /// Cache a shared platform secret in memory.
+    ///
+    /// Platform secrets act as a baseline for all tenants but are not
+    /// associated with any specific tenant ID.
+    pub fn cache_platform_secret(&self, key: &str, value: String) -> Result<(), String> {
+        let mut platform = self
+            .platform
+            .write()
+            .expect("platform secrets lock poisoned");
+        Self::insert_secret_with_budget(&mut platform, key, value, "platform")
+    }
+
+    fn insert_secret_with_budget(
+        secrets: &mut BTreeMap<String, String>,
+        key: &str,
+        value: String,
+        scope: &str,
+    ) -> Result<(), String> {
         // Budget check: only enforce on new keys, not updates.
-        if !tenant_secrets.contains_key(key) && tenant_secrets.len() >= MAX_SECRETS_PER_TENANT {
+        if !secrets.contains_key(key) && secrets.len() >= MAX_SECRETS_PER_TENANT {
             return Err(format!(
-                "tenant '{tenant}' has reached the maximum of {MAX_SECRETS_PER_TENANT} secrets"
+                "{scope} has reached the maximum of {MAX_SECRETS_PER_TENANT} secrets"
             ));
         }
 
-        tenant_secrets.insert(key.to_string(), value);
+        secrets.insert(key.to_string(), value);
         Ok(())
+    }
+
+    /// Get a platform secret value.
+    pub fn get_platform_secret(&self, key: &str) -> Option<String> {
+        let platform = self
+            .platform
+            .read()
+            .expect("platform secrets lock poisoned");
+        platform.get(key).cloned()
+    }
+
+    /// Get all platform secrets.
+    pub fn get_platform_secrets(&self) -> BTreeMap<String, String> {
+        let platform = self
+            .platform
+            .read()
+            .expect("platform secrets lock poisoned");
+        platform.clone()
     }
 
     /// Get a single secret value for a tenant.
     ///
-    /// Falls back to the `default` tenant so platform bootstrap secrets remain
-    /// available to newly created tenants until they override them.
+    /// Falls back to the platform secrets layer so shared infrastructure
+    /// configuration remains available until a tenant overrides it.
     pub fn get_secret(&self, tenant: &str, key: &str) -> Option<String> {
         let cache = self.cache.read().unwrap(); // ci-ok: infallible lock
         cache
             .get(tenant)
             .and_then(|secrets| secrets.get(key).cloned())
-            .or_else(|| {
-                if tenant == "default" {
-                    None
-                } else {
-                    cache
-                        .get("default")
-                        .and_then(|secrets| secrets.get(key).cloned())
-                }
-            })
+            .or_else(|| self.get_platform_secret(key))
     }
 
     /// Remove a secret from the in-memory cache.
@@ -120,25 +153,30 @@ impl SecretsVault {
     }
 
     /// List secret key names for a tenant (never values).
+    ///
+    /// Platform secrets are included because they are visible through the
+    /// same fallback path as tenant secrets.
     pub fn list_keys(&self, tenant: &str) -> Vec<String> {
         let cache = self.cache.read().unwrap(); // ci-ok: infallible lock
-        cache
-            .get(tenant)
-            .map(|secrets| secrets.keys().cloned().collect())
-            .unwrap_or_default()
+        let platform = self
+            .platform
+            .read()
+            .expect("platform secrets lock poisoned");
+        let mut keys = BTreeSet::new();
+        keys.extend(platform.keys().cloned());
+        if let Some(secrets) = cache.get(tenant) {
+            keys.extend(secrets.keys().cloned());
+        }
+        keys.into_iter().collect()
     }
 
     /// Get all decrypted secrets for a tenant (for WASM host injection).
     ///
-    /// `default` secrets act as a baseline and tenant-local secrets override
+    /// Platform secrets act as a baseline and tenant-local secrets override
     /// them when present.
     pub fn get_tenant_secrets(&self, tenant: &str) -> BTreeMap<String, String> {
+        let mut merged = self.get_platform_secrets();
         let cache = self.cache.read().unwrap(); // ci-ok: infallible lock
-        if tenant == "default" {
-            return cache.get("default").cloned().unwrap_or_default();
-        }
-
-        let mut merged = cache.get("default").cloned().unwrap_or_default();
         if let Some(tenant_secrets) = cache.get(tenant) {
             merged.extend(tenant_secrets.clone());
         }
@@ -186,15 +224,31 @@ mod tests {
     }
 
     #[test]
-    fn get_secret_falls_back_to_default() {
+    fn platform_secret_fallback() {
         let vault = SecretsVault::new(&test_key());
         vault
-            .cache_secret("default", "API_KEY", "sk-default".into())
+            .cache_platform_secret("API_KEY", "sk-platform".into())
             .unwrap();
 
         assert_eq!(
             vault.get_secret("tenant-b", "API_KEY"),
-            Some("sk-default".into())
+            Some("sk-platform".into())
+        );
+    }
+
+    #[test]
+    fn tenant_overrides_platform() {
+        let vault = SecretsVault::new(&test_key());
+        vault
+            .cache_platform_secret("API_KEY", "sk-platform".into())
+            .unwrap();
+        vault
+            .cache_secret("tenant-a", "API_KEY", "sk-tenant".into())
+            .unwrap();
+
+        assert_eq!(
+            vault.get_secret("tenant-a", "API_KEY"),
+            Some("sk-tenant".into())
         );
     }
 
@@ -227,17 +281,20 @@ mod tests {
     #[test]
     fn list_keys_returns_names_only() {
         let vault = SecretsVault::new(&test_key());
+        vault
+            .cache_platform_secret("GLOBAL", "platform".into())
+            .unwrap();
         vault.cache_secret("t", "B_KEY", "val-b".into()).unwrap();
         vault.cache_secret("t", "A_KEY", "val-a".into()).unwrap();
         let keys = vault.list_keys("t");
-        assert_eq!(keys, vec!["A_KEY", "B_KEY"]); // BTreeMap order
+        assert_eq!(keys, vec!["A_KEY", "B_KEY", "GLOBAL"]); // BTree order
     }
 
     #[test]
-    fn get_tenant_secrets_for_wasm() {
+    fn platform_secrets_merged() {
         let vault = SecretsVault::new(&test_key());
         vault
-            .cache_secret("default", "GLOBAL", "base".into())
+            .cache_platform_secret("GLOBAL", "base".into())
             .unwrap();
         vault.cache_secret("t", "K1", "V1".into()).unwrap();
         vault.cache_secret("t", "K2", "V2".into()).unwrap();
@@ -249,6 +306,34 @@ mod tests {
         assert_eq!(secrets["GLOBAL"], "override");
         assert_eq!(secrets["K1"], "V1");
         assert_eq!(secrets["K2"], "V2");
+    }
+
+    #[test]
+    fn no_default_special_casing() {
+        let vault = SecretsVault::new(&test_key());
+        vault
+            .cache_platform_secret("API_KEY", "sk-platform".into())
+            .unwrap();
+        vault
+            .cache_secret("default", "API_KEY", "sk-default".into())
+            .unwrap();
+        vault
+            .cache_secret("tenant-a", "OTHER", "value".into())
+            .unwrap();
+
+        assert_eq!(
+            vault.get_secret("default", "API_KEY"),
+            Some("sk-default".into())
+        );
+        assert_eq!(
+            vault.get_secret("default", "OTHER"),
+            None,
+            "default should not inherit another tenant's secrets"
+        );
+        assert_eq!(
+            vault.get_secret("tenant-b", "API_KEY"),
+            Some("sk-platform".into())
+        );
     }
 
     #[test]
