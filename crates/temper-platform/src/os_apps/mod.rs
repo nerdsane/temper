@@ -1594,7 +1594,7 @@ async fn bootstrap_app_entity(
             .server
             .get_tenant_entity_state(tenant_id, "App", id)
             .await
-            && let Some(name) = resp.state.fields.get("Name").and_then(|v| v.as_str())
+            && let Some(name) = state_field_str(&resp.state.fields, &["Name", "name"])
             && name.eq_ignore_ascii_case(app_name)
         {
             existing_app_id = Some(id.clone());
@@ -1810,6 +1810,90 @@ async fn bootstrap_agents(
     let agent_ctx = temper_server::request_context::AgentContext::system();
 
     for agent in agents {
+        let stable_soul_id = bootstrapped_agent_soul_entity_id(&agent.name);
+
+        if let Ok(resp) = state
+            .server
+            .get_tenant_entity_state(tenant_id, "Soul", &stable_soul_id)
+            .await
+        {
+            if let Some(file_id) = resp
+                .state
+                .fields
+                .get("ContentFileId")
+                .or_else(|| resp.state.fields.get("content_file_id"))
+                .and_then(|v| v.as_str())
+            {
+                let desired_hash = content_sha256(agent.content.as_bytes());
+                match inspect_agent_soul_refresh(
+                    state,
+                    tenant_id,
+                    file_id,
+                    &desired_hash,
+                )
+                .await
+                {
+                    Ok(AgentSoulRefreshDecision::AlreadyCurrent) => {
+                        tracing::debug!(
+                            tenant,
+                            agent = %agent.name,
+                            soul_id = %stable_soul_id,
+                            file_id = %file_id,
+                            "Stable agent soul already matches app bundle"
+                        );
+                    }
+                    Ok(AgentSoulRefreshDecision::PreserveCustomized) => {
+                        tracing::info!(
+                            tenant,
+                            agent = %agent.name,
+                            soul_id = %stable_soul_id,
+                            file_id = %file_id,
+                            "Preserving customized stable agent soul content"
+                        );
+                    }
+                    Ok(AgentSoulRefreshDecision::Upload) => {
+                        if let Err(error) = ensure_inline_file_uploaded(
+                            state,
+                            tenant_id,
+                            &agent_ctx,
+                            file_id,
+                            &format!("{}.soul.md", slugify_bootstrapped_agent_name(&agent.name)),
+                            agent.content.as_bytes(),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                tenant,
+                                agent = %agent.name,
+                                soul_id = %stable_soul_id,
+                                file_id = %file_id,
+                                error = %error,
+                                "Failed to refresh stable agent soul content"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            tenant,
+                            agent = %agent.name,
+                            soul_id = %stable_soul_id,
+                            file_id = %file_id,
+                            error = %error,
+                            "Failed to inspect stable agent soul content"
+                        );
+                    }
+                }
+            }
+
+            agent_uuid_map.insert(agent.name.clone(), stable_soul_id.clone());
+            bootstrapped.push(agent.name.clone());
+            if has_agents && let Some(app_id) = app_id {
+                set_agent_source_app(state, tenant_id, tenant, &agent_ctx, &agent.name, app_id)
+                    .await;
+            }
+            continue;
+        }
+
         // Name-based lookup: find existing Soul with this name.
         let existing_ids = state.server.list_entity_ids(tenant_id, "Soul");
         let mut found_soul_id: Option<String> = None;
@@ -1818,7 +1902,7 @@ async fn bootstrap_agents(
                 .server
                 .get_tenant_entity_state(tenant_id, "Soul", id)
                 .await
-                && let Some(name) = resp.state.fields.get("Name").and_then(|v| v.as_str())
+                && let Some(name) = state_field_str(&resp.state.fields, &["Name", "name"])
                 && name.eq_ignore_ascii_case(&agent.name)
             {
                 // Update existing content file.
@@ -1828,23 +1912,62 @@ async fn bootstrap_agents(
                     .get("ContentFileId")
                     .or_else(|| resp.state.fields.get("content_file_id"))
                     .and_then(|v| v.as_str())
-                    && let Err(error) = ensure_inline_file_uploaded(
+                {
+                    let desired_hash = content_sha256(agent.content.as_bytes());
+                    match inspect_agent_soul_refresh(
                         state,
                         tenant_id,
-                        &agent_ctx,
                         file_id,
-                        &format!("{}.soul.md", agent.name.to_lowercase().replace(' ', "-")),
-                        agent.content.as_bytes(),
+                        &desired_hash,
                     )
                     .await
-                {
-                    tracing::warn!(
-                        tenant,
-                        agent = %agent.name,
-                        file_id = %file_id,
-                        error = %error,
-                        "Failed to refresh existing agent soul content"
-                    );
+                    {
+                        Ok(AgentSoulRefreshDecision::AlreadyCurrent) => {
+                            tracing::debug!(
+                                tenant,
+                                agent = %agent.name,
+                                file_id = %file_id,
+                                "Existing agent soul content already matches app bundle"
+                            );
+                        }
+                        Ok(AgentSoulRefreshDecision::PreserveCustomized) => {
+                            tracing::info!(
+                                tenant,
+                                agent = %agent.name,
+                                file_id = %file_id,
+                                "Preserving customized existing agent soul content"
+                            );
+                        }
+                        Ok(AgentSoulRefreshDecision::Upload) => {
+                            if let Err(error) = ensure_inline_file_uploaded(
+                                state,
+                                tenant_id,
+                                &agent_ctx,
+                                file_id,
+                                &format!("{}.soul.md", agent.name.to_lowercase().replace(' ', "-")),
+                                agent.content.as_bytes(),
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    tenant,
+                                    agent = %agent.name,
+                                    file_id = %file_id,
+                                    error = %error,
+                                    "Failed to refresh existing agent soul content"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                tenant,
+                                agent = %agent.name,
+                                file_id = %file_id,
+                                error = %error,
+                                "Failed to inspect existing agent soul content"
+                            );
+                        }
+                    }
                 }
                 tracing::debug!(tenant, agent = %agent.name, soul_id = %id, "Soul already exists — updating");
                 found_soul_id = Some(id.clone());
@@ -1866,10 +1989,10 @@ async fn bootstrap_agents(
 
         // Create new Soul — let Temper auto-assign a prefixed UUID.
         // First, create the content file with a temporary ID (Temper will assign UUID).
-        let file_name = format!("{}.soul.md", agent.name.to_lowercase().replace(' ', "-"));
+        let file_name = format!("{}.soul.md", slugify_bootstrapped_agent_name(&agent.name));
         let temp_file_id = format!(
             "bootstrap-soul-file-{}",
-            agent.name.to_lowercase().replace(' ', "-")
+            slugify_bootstrapped_agent_name(&agent.name)
         );
         if let Err(error) = ensure_inline_file_uploaded(
             state,
@@ -1890,8 +2013,9 @@ async fn bootstrap_agents(
             continue;
         }
 
-        // Create Soul entity with a prefixed UUID.
-        let new_soul_id = format!("sl-{}", temper_runtime::scheduler::sim_uuid());
+        // Create Soul entity with a stable prefixed ID so restarts stay idempotent
+        // even when entity indexes are still warming.
+        let new_soul_id = stable_soul_id;
         match state
             .server
             .get_or_create_tenant_entity(tenant_id, "Soul", &new_soul_id, serde_json::json!({}))
@@ -1978,7 +2102,7 @@ async fn set_agent_source_app(
             .server
             .get_tenant_entity_state(tenant_id, "Agent", id)
             .await
-            && let Some(name) = resp.state.fields.get("Name").and_then(|v| v.as_str())
+            && let Some(name) = state_field_str(&resp.state.fields, &["Name", "name"])
             && name.eq_ignore_ascii_case(agent_name)
         {
             // Check if source_app_id is already set.
@@ -2335,6 +2459,75 @@ async fn ensure_inline_file_uploaded(
         .map_err(|e| format!("failed to upload File('{file_id}') content: {e}"))?;
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentSoulRefreshDecision {
+    Upload,
+    AlreadyCurrent,
+    PreserveCustomized,
+}
+
+fn slugify_bootstrapped_agent_name(name: &str) -> String {
+    name.trim().to_lowercase().replace(' ', "-")
+}
+
+fn bootstrapped_agent_soul_entity_id(name: &str) -> String {
+    format!("sl-bootstrap-agent-soul-{}", slugify_bootstrapped_agent_name(name))
+}
+
+async fn inspect_agent_soul_refresh(
+    state: &PlatformState,
+    tenant_id: &TenantId,
+    file_id: &str,
+    desired_hash: &str,
+) -> Result<AgentSoulRefreshDecision, String> {
+    let response = state
+        .server
+        .get_tenant_entity_state(tenant_id, "File", file_id)
+        .await
+        .map_err(|e| format!("failed to inspect File('{file_id}'): {e}"))?;
+
+    let has_content = response
+        .state
+        .booleans
+        .get("has_content")
+        .copied()
+        .unwrap_or(false);
+    let current_hash = response
+        .state
+        .fields
+        .get("content_hash")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    Ok(decide_agent_soul_refresh(
+        has_content,
+        current_hash,
+        desired_hash,
+    ))
+}
+
+fn decide_agent_soul_refresh(
+    has_content: bool,
+    current_hash: &str,
+    desired_hash: &str,
+) -> AgentSoulRefreshDecision {
+    if !has_content || current_hash.is_empty() {
+        AgentSoulRefreshDecision::Upload
+    } else if current_hash == desired_hash {
+        AgentSoulRefreshDecision::AlreadyCurrent
+    } else {
+        AgentSoulRefreshDecision::PreserveCustomized
+    }
+}
+
+fn state_field_str<'a>(
+    fields: &'a serde_json::Value,
+    keys: &[&str],
+) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| fields.get(*key).and_then(|value| value.as_str()))
 }
 
 pub(super) const APP_DOCS_WORKSPACE_ID: &str = "os-app-docs";
