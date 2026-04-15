@@ -517,7 +517,10 @@ fn find_cedar_policies(app_dir: &Path) -> Vec<PathBuf> {
 /// Scans both `wasm32-unknown-unknown` and `wasm32-wasip1` release outputs
 /// because some OS apps mix pure WASM modules with WASI modules such as
 /// sandboxed tool runners.
-fn find_wasm_modules(app_dir: &Path) -> BTreeMap<String, Vec<u8>> {
+fn find_wasm_modules(
+    app_dir: &Path,
+    module_configs: &BTreeMap<String, WasmModuleManifest>,
+) -> BTreeMap<String, Vec<u8>> {
     let mut modules = BTreeMap::new();
     let wasm_dir = app_dir.join("wasm");
     if !wasm_dir.is_dir() {
@@ -538,20 +541,42 @@ fn find_wasm_modules(app_dir: &Path) -> BTreeMap<String, Vec<u8>> {
         if module_name == "target" {
             continue;
         }
-        let candidates = [
-            entry
-                .path()
-                .join("target")
-                .join("wasm32-unknown-unknown")
-                .join("release")
-                .join(format!("{module_name}.wasm")),
-            entry
-                .path()
-                .join("target")
-                .join("wasm32-wasip1")
-                .join("release")
-                .join(format!("{module_name}.wasm")),
-        ];
+
+        // When the manifest declares a specific compilation target, search
+        // only that target's release directory — avoids picking up a stale
+        // build from the wrong target (e.g. wasm32-unknown-unknown when the
+        // module requires wasm32-wasip1). Fall back to a sibling bundled
+        // artifact ({module_name}.wasm) which build.sh copies after compilation.
+        let candidates: Vec<PathBuf> =
+            if let Some(config) = module_configs.get(&module_name)
+                && let Some(ref target) = config.target
+            {
+                vec![
+                    entry
+                        .path()
+                        .join("target")
+                        .join(target)
+                        .join("release")
+                        .join(format!("{module_name}.wasm")),
+                    entry.path().join(format!("{module_name}.wasm")),
+                ]
+            } else {
+                vec![
+                    entry
+                        .path()
+                        .join("target")
+                        .join("wasm32-unknown-unknown")
+                        .join("release")
+                        .join(format!("{module_name}.wasm")),
+                    entry
+                        .path()
+                        .join("target")
+                        .join("wasm32-wasip1")
+                        .join("release")
+                        .join(format!("{module_name}.wasm")),
+                    entry.path().join(format!("{module_name}.wasm")),
+                ]
+            };
 
         for wasm_path in candidates {
             if !wasm_path.exists() {
@@ -1061,13 +1086,15 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         .filter_map(|p| std::fs::read_to_string(&p).ok())
         .collect();
 
-    // Read WASM module binaries from wasm/*/target/wasm32-unknown-unknown/release/*.wasm.
-    let wasm_modules = find_wasm_modules(app_dir);
+    // Build module configs first so find_wasm_modules can use declared targets.
     let wasm_module_configs: BTreeMap<String, WasmModuleManifest> = manifest
         .wasm_modules
         .into_iter()
         .map(|module| (module.name.clone(), module))
         .collect();
+
+    // Read WASM module binaries, respecting declared targets from app.toml.
+    let wasm_modules = find_wasm_modules(app_dir, &wasm_module_configs);
 
     // Discover agents, skills, and seed data.
     let agents = find_agents(app_dir);
