@@ -303,6 +303,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // requires network + git credentials for private repo
     fn sync_clones_real_repo() {
         let tmp = make_temp_dir("git-clone");
         let source = GitAppSource {
@@ -320,6 +321,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // requires network + git credentials for private repo
     fn sync_update_existing_clone() {
         let tmp = make_temp_dir("git-update");
         let source = GitAppSource {
@@ -338,6 +340,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // requires network access
     fn sync_bad_url_returns_error() {
         let tmp = make_temp_dir("git-bad-url");
         let source = GitAppSource {
