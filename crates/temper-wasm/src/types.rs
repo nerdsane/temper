@@ -51,7 +51,7 @@ pub struct WasmInvocationResult {
 pub struct WasmResourceLimits {
     /// Maximum fuel (instruction budget). Default: 1 billion.
     pub max_fuel: u64,
-    /// Maximum memory in bytes. Default: 16 MB.
+    /// Maximum memory in bytes. Default: 64 MB.
     pub max_memory: usize,
     /// Maximum execution duration. Default: 30 seconds.
     pub max_duration: std::time::Duration,
