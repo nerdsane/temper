@@ -143,7 +143,7 @@ impl TenantStoreRouter {
         tenant: &str,
     ) -> Result<TursoEventStore, PersistenceError> {
         // System tenant uses the platform DB.
-        if tenant == "temper-system" || tenant == "default" {
+        if tenant == "temper-system" {
             return Ok(self.platform.clone());
         }
 
