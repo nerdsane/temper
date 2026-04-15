@@ -899,6 +899,83 @@ startup_loading = "lazy"
 }
 
 #[test]
+fn test_find_wasm_modules_respects_manifest_target() {
+    // When the manifest declares `target = "wasm32-wasip1"`, the discovery
+    // function must pick the wasip1 binary even if a wasm32-unknown-unknown
+    // binary also exists (e.g. a stale build from a different compilation).
+    let temp_dir =
+        std::env::temp_dir().join(format!("temper-wasm-target-test-{}", uuid::Uuid::new_v4()));
+
+    // Create both target directories with different content.
+    let uu_dir = temp_dir
+        .join("wasm")
+        .join("echo")
+        .join("target")
+        .join("wasm32-unknown-unknown")
+        .join("release");
+    let wasip1_dir = temp_dir
+        .join("wasm")
+        .join("echo")
+        .join("target")
+        .join("wasm32-wasip1")
+        .join("release");
+    fs::create_dir_all(&uu_dir).unwrap();
+    fs::create_dir_all(&wasip1_dir).unwrap();
+
+    let wrong_bytes = b"wrong-target-binary";
+    let correct_bytes = b"correct-wasip1-binary";
+    fs::write(uu_dir.join("echo.wasm"), wrong_bytes).unwrap();
+    fs::write(wasip1_dir.join("echo.wasm"), correct_bytes).unwrap();
+
+    // Build module configs with a declared target.
+    let mut configs = BTreeMap::new();
+    configs.insert(
+        "echo".to_string(),
+        WasmModuleManifest {
+            name: "echo".to_string(),
+            target: Some("wasm32-wasip1".to_string()),
+            criticality: WasmModuleCriticality::default(),
+            startup_loading: WasmStartupLoading::default(),
+            provenance: None,
+            import_class: None,
+        },
+    );
+
+    let modules = find_wasm_modules(&temp_dir, &configs);
+    assert!(modules.contains_key("echo"), "echo module should be found");
+    assert_eq!(
+        modules["echo"], correct_bytes,
+        "should pick the wasip1 binary, not wasm32-unknown-unknown"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_find_wasm_modules_finds_sibling_artifact() {
+    // When no target/ directories exist, the discovery function should find
+    // a sibling bundled artifact at {module_name}/{module_name}.wasm — this
+    // is where build.sh copies compiled modules for deployment.
+    let temp_dir =
+        std::env::temp_dir().join(format!("temper-wasm-sibling-test-{}", uuid::Uuid::new_v4()));
+
+    let module_dir = temp_dir.join("wasm").join("echo");
+    fs::create_dir_all(&module_dir).unwrap();
+
+    let artifact_bytes = b"sibling-artifact-binary";
+    fs::write(module_dir.join("echo.wasm"), artifact_bytes).unwrap();
+
+    let modules = find_wasm_modules(&temp_dir, &BTreeMap::new());
+    assert!(
+        modules.contains_key("echo"),
+        "echo module should be found at sibling path"
+    );
+    assert_eq!(modules["echo"], artifact_bytes);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
 fn test_find_adrs_discovers_markdown_in_sorted_order() {
     let temp_dir = std::env::temp_dir().join(format!("temper-adrs-test-{}", uuid::Uuid::new_v4()));
     let adrs_dir = temp_dir.join("adrs");
