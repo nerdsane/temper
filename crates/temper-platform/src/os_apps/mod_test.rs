@@ -1,3 +1,6 @@
+use super::agent_bootstrap::{
+    AgentSoulRefreshDecision, bootstrapped_agent_soul_entity_id, decide_agent_soul_refresh,
+};
 use super::*;
 use std::collections::HashMap;
 use std::fs;
