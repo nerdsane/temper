@@ -34,13 +34,13 @@ curl -s -H "X-Tenant-Id: {TENANT}" <TEMPER_URL>/tdata/\$metadata
 
 Parse these silently. Then greet the user with a friendly summary in plain language:
 
-> "Hey! This app lets you manage **Bugs** and **Developers**.
+> "Hey! You've got a system for tracking **Bugs** and managing your **Developers**.
 >
-> For bugs, you can create them, triage them, start working on them, resolve them, and close them. You can also cancel a bug at any point.
+> For bugs — you can capture issues as they come in, route them through triage, track who's working on what, and close them out when they're resolved. Nothing falls through the cracks.
 >
-> For developers, you can invite them, activate them, and mark them as on leave.
+> For developers — you can see who's available, who's on leave, and bring new people on board with an invite.
 >
-> What would you like to do?"
+> What are you working on?"
 
 Use their domain language, not API language. Say "create a bug" not "POST to the Bug entity set". Say "mark it as resolved" not "invoke the Resolve action".
 

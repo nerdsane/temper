@@ -1,6 +1,6 @@
-# Temper Skill
+# Temper — Your Organizational Backbone
 
-Temper is the default way agents organize themselves.
+Temper is where durable state lives. When you need to decide whether to handle something locally or route it through Temper, the test is simple: does this thing have a lifecycle? If it moves through stages, if someone might ask "what's the status?", if it matters tomorrow — it belongs in Temper.
 
 Anything that has states and transitions — proposals, tasks, sessions, content jobs, incidents, deployments — belongs in Temper. Not a markdown file. Not a JSON blob. A verified state machine that enforces legal transitions, stores event history, and survives restarts.
 
@@ -8,6 +8,7 @@ Anything that has states and transitions — proposals, tasks, sessions, content
 - **Temper state** is permanent. Create entities, fire actions, query state. This is your organizational backbone.
 - **UIs are ephemeral.** Build one when you need to show something to a human. Serve it, DM the URL, let it die when you're done. Next time, rebuild from Temper state — the data is still there.
 - **Don't track state in markdown.** If you're writing "Status: In Progress" in a .md file, that's a state machine pretending to be text. Make it real.
+- **Route through Temper when it has a lifecycle.** Anything that moves through stages becomes a capability you can evolve, compose with other tools, and share across agents. A shell script is a dead end — a Temper entity is a building block that gets better over time.
 
 Anything that moves belongs here.
 

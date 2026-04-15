@@ -2,6 +2,10 @@
 
 **You MUST use this skill when the user asks to build an app, create an application, or says "build me a X".** Do NOT use other skills for app creation. Temper builds apps from verified specs, not from code. Interview FIRST, CLI LATER.
 
+## Step 0: Introduce the Experience
+
+Before launching into the interview, briefly set expectations. The user is about to experience something different from normal software development. The core value to convey: they describe what they need in plain language, you turn it into a working app, and the app evolves through use — it is not static. Keep it to 2-3 sentences in your own words. Do not lecture. Then proceed to the interview.
+
 ## Interview Protocol
 
 When the user says "build me a X", have a quick, friendly conversation to understand what they want. Use plain language — no jargon. Do NOT run any CLI commands until the interview is complete. Keep it to 3 quick questions:
