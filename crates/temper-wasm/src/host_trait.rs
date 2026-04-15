@@ -456,6 +456,45 @@ impl WasmHost for ProductionWasmHost {
             builder = builder.header(k.as_str(), v.as_str());
         }
 
+        // Auto-inject Temper auth headers for internal API calls (ADR-0043).
+        // Internal = URL starts with temper_api_url from secrets.
+        // Only inject when the guest hasn't already set principal headers,
+        // allowing cross-tenant admin calls (e.g. request_approval → temper-system).
+        let is_internal = self
+            .secrets
+            .get("temper_api_url")
+            .is_some_and(|api_url| url.starts_with(api_url.trim_end_matches('/')));
+        if is_internal && let Some(ref inv_ctx) = self.invocation_context {
+            let has_principal = headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("x-temper-principal-kind"));
+            if !has_principal {
+                let agent_type = if inv_ctx.entity_type.eq_ignore_ascii_case("Session") {
+                    "agent"
+                } else {
+                    "system"
+                };
+                let principal_id = inv_ctx
+                    .agent_id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(inv_ctx.entity_id.as_str());
+                builder = builder
+                    .header("x-tenant-id", inv_ctx.tenant.as_str())
+                    .header("x-temper-principal-kind", "agent")
+                    .header("x-temper-principal-id", principal_id)
+                    .header("x-temper-agent-type", agent_type);
+                if let Some(ref sid) = inv_ctx.session_id {
+                    builder = builder.header("x-temper-ctx-sessionid", sid.as_str());
+                }
+                if let Some(key) = self.secrets.get("temper_api_key").filter(|k| !k.is_empty()) {
+                    builder = builder.header("authorization", format!("Bearer {key}"));
+                }
+            }
+        }
+        // determinism-ok: is_internal check uses non-deterministic URL comparison,
+        // but this runs in WasmHost (not simulation), so wall-clock/network access is fine.
+
         // Auto-inject traceparent for cross-request trace correlation.
         if let Some(ref trace_id) = self.trace_id
             && !headers
@@ -483,6 +522,22 @@ impl WasmHost for ProductionWasmHost {
             format!("HTTP request failed: {e}")
         })?;
         let status = resp.status().as_u16();
+
+        // Loud auth failure logging for internal API calls (ADR-0043).
+        if is_internal && (status == 401 || status == 403) {
+            let (module, agent) = self
+                .invocation_context
+                .as_ref()
+                .map(|c| (c.entity_type.as_str(), c.agent_id.as_deref().unwrap_or("?")))
+                .unwrap_or(("?", "?"));
+            tracing::warn!(
+                status = status,
+                url = %telemetry_url(url),
+                module = module,
+                agent_id = agent,
+                "WASM internal API call auth failure — check principal headers"
+            );
+        }
 
         // Auto-detect SSE streaming responses and use chunked reading.
         // This avoids the total-response timeout killing long-running LLM generations.
