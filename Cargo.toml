@@ -1,0 +1,170 @@
+[workspace]
+resolver = "2"
+exclude = [
+    "wasm-modules/http-fetch",
+    "wasm-modules/gepa-replay",
+    "wasm-modules/gepa-score",
+    "wasm-modules/gepa-pareto",
+    "wasm-modules/gepa-reflective",
+    "wasm-modules/gepa-proposer-agent",
+    "wasm-modules/gepa-verify",
+    "crates/temper-wasm/tests/fixtures/echo-integration-src",
+    "os-apps/temper-agent/wasm/llm_caller",
+    "os-apps/temper-agent/wasm/tool_runner",
+    "os-apps/temper-agent/wasm/sandbox_provisioner",
+    "os-apps/temper-fs/wasm/blob_adapter",
+]
+members = [
+    "crates/temper-macros",
+    "crates/temper-runtime",
+    "crates/temper-spec",
+    "crates/temper-codegen",
+    "crates/temper-odata",
+    "crates/temper-authz",
+    "crates/temper-observe",
+    "crates/temper-verify",
+    "crates/temper-store-postgres",
+    "crates/temper-store-turso",
+    "crates/temper-store-redis",
+    "crates/temper-store-sim",
+    "crates/temper-server",
+    "crates/temper-cli",
+    "crates/temper-mcp",
+    "crates/temper-evolution",
+    "crates/temper-jit",
+    "crates/temper-optimize",
+    "crates/temper-platform",
+    "crates/temper-wasm",
+    "crates/temper-wasm-sdk",
+    "crates/temper-sdk",
+    "crates/temper-sandbox",
+    "crates/temper-ots",
+    "crates/temper-transport",
+    "reference-apps/crucible",
+    "reference-apps/ecommerce",
+    "reference-apps/oncall",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.92"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging / Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# HTTP
+axum = "0.8"
+hyper = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json", "chrono", "uuid"] }
+fred = { version = "10", features = ["subscriber-client", "i-scripts", "sha-1"] }
+
+# Auth
+cedar-policy = "4"
+
+# Verification
+stateright = "0.31"
+proptest = "1"
+
+# OpenTelemetry
+opentelemetry = "0.28"
+opentelemetry-otlp = { version = "0.28", features = ["logs", "metrics"] }
+opentelemetry_sdk = { version = "0.28", features = ["logs", "metrics"] }
+opentelemetry-appender-tracing = "0.28"
+tracing-opentelemetry = "0.29"
+
+# Environment
+dotenvy = "0.15"
+
+# XML (CSDL parsing)
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Proc macro support (for temper-codegen)
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+# UUID
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# HTTP client (for ClickHouse adapter + LLM API calls)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Testing
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+wiremock = "0.6"
+
+# Internal crates
+temper-macros = { path = "crates/temper-macros" }
+temper-runtime = { path = "crates/temper-runtime" }
+temper-spec = { path = "crates/temper-spec" }
+temper-codegen = { path = "crates/temper-codegen" }
+temper-odata = { path = "crates/temper-odata" }
+temper-authz = { path = "crates/temper-authz" }
+temper-observe = { path = "crates/temper-observe" }
+temper-verify = { path = "crates/temper-verify" }
+temper-store-postgres = { path = "crates/temper-store-postgres" }
+temper-store-turso = { path = "crates/temper-store-turso", features = ["cloud"] }
+temper-store-redis = { path = "crates/temper-store-redis" }
+temper-store-sim = { path = "crates/temper-store-sim" }
+temper-server = { path = "crates/temper-server" }
+temper-cli = { path = "crates/temper-cli" }
+temper-mcp = { path = "crates/temper-mcp" }
+temper-evolution = { path = "crates/temper-evolution" }
+temper-jit = { path = "crates/temper-jit" }
+temper-optimize = { path = "crates/temper-optimize" }
+temper-platform = { path = "crates/temper-platform" }
+temper-wasm = { path = "crates/temper-wasm" }
+temper-wasm-sdk = { path = "crates/temper-wasm-sdk" }
+temper-sdk = { path = "crates/temper-sdk" }
+temper-sandbox = { path = "crates/temper-sandbox" }
+temper-ots = { path = "crates/temper-ots" }
+temper-transport = { path = "crates/temper-transport" }
+
+# WASM runtime
+wasmtime = { version = "29", features = ["component-model"] }
+wasmtime-wasi = "29"
+sha2 = "0.10"
+hostname = "0.4"
+aes-gcm = "0.10"
+async-trait = "0.1"
+tikv-jemallocator = { version = "0.6", features = ["stats"] }
+lru = "0.12"
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

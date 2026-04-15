@@ -1,0 +1,482 @@
+//! temper-cli: Command-line interface for Temper.
+//!
+//! Provides commands for parsing specifications, generating code,
+//! running model checks, and managing Temper projects.
+
+/// Use jemalloc to aggressively return freed pages to the OS via MADV_DONTNEED,
+/// preventing the RSS bloat caused by glibc malloc on Debian bookworm (Railway).
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+mod codegen;
+mod decide;
+mod init;
+mod install;
+mod mcp;
+mod serve;
+mod util;
+mod verify;
+mod verify_ioa;
+
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub(crate) enum StorageBackend {
+    Postgres,
+    Turso,
+    Redis,
+}
+
+#[derive(Parser)]
+#[command(name = "temper", about = "Temper framework CLI")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Initialize a new Temper project
+    Init { name: String },
+    /// Generate Rust code from specifications
+    Codegen {
+        /// Path to the specs directory
+        #[arg(short, long, default_value = "specs")]
+        specs_dir: String,
+        /// Output directory for generated code
+        #[arg(short, long, default_value = "generated")]
+        output_dir: String,
+    },
+    /// Run the verification cascade
+    Verify {
+        /// Path to the specs directory
+        #[arg(short, long, default_value = "specs")]
+        specs_dir: String,
+    },
+    /// Install the Temper App Builder skill into Claude Code (global)
+    Install,
+    /// Approve or deny pending governance decisions from the terminal
+    Decide {
+        /// Port where Temper HTTP server is running
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+        /// Tenant name to watch for decisions
+        #[arg(short, long, default_value = "default")]
+        tenant: String,
+    },
+    /// Start the platform server
+    Serve {
+        /// Port to listen on
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+        /// Storage backend (`postgres`, `turso`, `redis`).
+        ///
+        /// If omitted, startup preserves legacy behavior:
+        /// - use Postgres when `DATABASE_URL` is set
+        /// - otherwise run in-memory only
+        #[arg(long, value_enum, default_value = "turso")]
+        storage: StorageBackend,
+        /// Load an app: --app name=specs-dir (repeatable)
+        #[arg(long)]
+        app: Vec<String>,
+        /// Skip the Observe UI (Next.js dev server in observe/)
+        #[arg(long)]
+        no_observe: bool,
+        /// Directory containing IOA TOML and CSDL specs to load at startup (legacy, use --app)
+        #[arg(long)]
+        specs_dir: Option<String>,
+        /// Tenant name (used with --specs-dir to load user specs)
+        #[arg(long, default_value = "default")]
+        tenant: String,
+        /// Install a skill into the default tenant at startup (repeatable)
+        #[arg(long, alias = "os-app")]
+        skill: Vec<String>,
+        /// Run spec verification in an isolated subprocess (panics/hangs won't crash the server).
+        ///
+        /// Each entity's IOA source is written to stdin of `temper verify-ioa`;
+        /// the result is read from stdout as JSON. A 30-second timeout is applied
+        /// per entity. Exit 0 = pass; non-zero or timeout = failure.
+        #[arg(long)]
+        verify_subprocess: bool,
+        /// Discord bot token for channel transport (enables Discord Gateway).
+        /// Falls back to DISCORD_BOT_TOKEN env var if not provided.
+        #[arg(long)]
+        discord_bot_token: Option<String>,
+    },
+    /// Run the verification cascade on IOA TOML source read from stdin.
+    ///
+    /// Reads the full IOA TOML source from stdin, runs the verification cascade,
+    /// and writes a JSON-encoded `CascadeResult` to stdout.
+    /// Exits 0 if all levels pass; exits 1 if any level fails or an error occurs.
+    ///
+    /// This subcommand is used internally by `temper serve --verify-subprocess`.
+    VerifyIoa,
+    /// Start the stdio MCP server for Code Mode
+    Mcp {
+        /// Port where Temper HTTP server is running.
+        /// Mutually exclusive with --url.
+        #[arg(short, long, conflicts_with = "url")]
+        port: Option<u16>,
+        /// Full URL of a remote Temper server (e.g. https://temper.railway.app).
+        /// Mutually exclusive with --port.
+        #[arg(long, conflicts_with = "port")]
+        url: Option<String>,
+        /// Override auto-derived agent identity (deprecated: identity is now auto-derived)
+        #[arg(long, hide = true)]
+        agent_id: Option<String>,
+    },
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Load .env file from project root (silently ignored if missing).
+    dotenvy::dotenv().ok();
+
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Init { name } => init::run(&name)?,
+        Commands::Install => install::run()?,
+        Commands::Decide { port, tenant } => decide::run(port, &tenant).await?,
+        Commands::Codegen {
+            specs_dir,
+            output_dir,
+        } => codegen::run(&specs_dir, &output_dir)?,
+        Commands::Verify { specs_dir } => verify::run(&specs_dir)?,
+        Commands::VerifyIoa => verify_ioa::run()?,
+        Commands::Serve {
+            port,
+            storage,
+            app,
+            no_observe,
+            specs_dir,
+            tenant,
+            skill,
+            verify_subprocess,
+            discord_bot_token,
+        } => {
+            let storage_explicit =
+                std::env::args().any(|arg| arg == "--storage" || arg.starts_with("--storage="));
+            // Build app list from --app flags, fall back to --specs-dir/--tenant
+            let mut apps: Vec<(String, String)> = Vec::new();
+            for entry in &app {
+                if let Some((name, path)) = entry.split_once('=') {
+                    apps.push((name.to_string(), path.to_string()));
+                } else {
+                    anyhow::bail!("Invalid --app format: '{entry}'. Expected name=specs-dir");
+                }
+            }
+            if apps.is_empty()
+                && let Some(ref dir) = specs_dir
+            {
+                apps.push((tenant.clone(), dir.clone()));
+            }
+            let discord_token =
+                discord_bot_token.or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok()); // determinism-ok: read once at startup
+            serve::run(
+                port,
+                apps,
+                skill,
+                storage,
+                storage_explicit,
+                !no_observe,
+                verify_subprocess,
+                discord_token,
+                tenant,
+            )
+            .await?
+        }
+        Commands::Mcp {
+            port,
+            url,
+            agent_id,
+        } => mcp::run(port, url, agent_id).await?,
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn test_cli_parse_init() {
+        let cli = Cli::parse_from(["temper", "init", "my-project"]);
+        match cli.command {
+            Commands::Init { name } => assert_eq!(name, "my-project"),
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_codegen_defaults() {
+        let cli = Cli::parse_from(["temper", "codegen"]);
+        match cli.command {
+            Commands::Codegen {
+                specs_dir,
+                output_dir,
+            } => {
+                assert_eq!(specs_dir, "specs");
+                assert_eq!(output_dir, "generated");
+            }
+            _ => panic!("expected Codegen command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_codegen_custom() {
+        let cli = Cli::parse_from([
+            "temper",
+            "codegen",
+            "--specs-dir",
+            "my-specs",
+            "--output-dir",
+            "my-out",
+        ]);
+        match cli.command {
+            Commands::Codegen {
+                specs_dir,
+                output_dir,
+            } => {
+                assert_eq!(specs_dir, "my-specs");
+                assert_eq!(output_dir, "my-out");
+            }
+            _ => panic!("expected Codegen command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_verify() {
+        let cli = Cli::parse_from(["temper", "verify", "--specs-dir", "custom-specs"]);
+        match cli.command {
+            Commands::Verify { specs_dir } => assert_eq!(specs_dir, "custom-specs"),
+            _ => panic!("expected Verify command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_install() {
+        let cli = Cli::parse_from(["temper", "install"]);
+        match cli.command {
+            Commands::Install => {}
+            _ => panic!("expected Install command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_default_port() {
+        let cli = Cli::parse_from(["temper", "serve"]);
+        match cli.command {
+            Commands::Serve { port, .. } => {
+                assert_eq!(port, 3000);
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_custom_port() {
+        let cli = Cli::parse_from(["temper", "serve", "--port", "8080"]);
+        match cli.command {
+            Commands::Serve { port, .. } => assert_eq!(port, 8080),
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_with_specs() {
+        let cli = Cli::parse_from([
+            "temper",
+            "serve",
+            "--specs-dir",
+            "my-specs",
+            "--tenant",
+            "my-app",
+        ]);
+        match cli.command {
+            Commands::Serve {
+                specs_dir, tenant, ..
+            } => {
+                assert_eq!(specs_dir, Some("my-specs".into()));
+                assert_eq!(tenant, "my-app");
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_with_app_flags() {
+        let cli = Cli::parse_from([
+            "temper",
+            "serve",
+            "--app",
+            "ecommerce=specs/ecommerce",
+            "--app",
+            "linear=specs/linear",
+        ]);
+        match cli.command {
+            Commands::Serve { app, .. } => {
+                assert_eq!(app.len(), 2);
+                assert_eq!(app[0], "ecommerce=specs/ecommerce");
+                assert_eq!(app[1], "linear=specs/linear");
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_with_storage() {
+        let cli = Cli::parse_from(["temper", "serve", "--storage", "turso"]);
+        match cli.command {
+            Commands::Serve {
+                storage: StorageBackend::Turso,
+                ..
+            } => {}
+            _ => panic!("expected Serve command with turso storage"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_default_storage() {
+        let cli = Cli::parse_from(["temper", "serve"]);
+        match cli.command {
+            Commands::Serve {
+                storage: StorageBackend::Turso,
+                ..
+            } => {}
+            _ => panic!("expected Serve command with default turso storage"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_with_skill() {
+        let cli = Cli::parse_from(["temper", "serve", "--skill", "project-management"]);
+        match cli.command {
+            Commands::Serve { skill, .. } => {
+                assert_eq!(skill.len(), 1);
+                assert_eq!(skill[0], "project-management");
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_with_os_app_alias() {
+        let cli = Cli::parse_from(["temper", "serve", "--os-app", "project-management"]);
+        match cli.command {
+            Commands::Serve { skill, .. } => {
+                assert_eq!(skill.len(), 1);
+                assert_eq!(skill[0], "project-management");
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_with_multiple_skills() {
+        let cli = Cli::parse_from([
+            "temper",
+            "serve",
+            "--skill",
+            "project-management",
+            "--skill",
+            "crm",
+        ]);
+        match cli.command {
+            Commands::Serve { skill, .. } => {
+                assert_eq!(skill.len(), 2);
+                assert_eq!(skill[0], "project-management");
+                assert_eq!(skill[1], "crm");
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_mcp_no_port() {
+        let cli = Cli::parse_from(["temper", "mcp"]);
+        match cli.command {
+            Commands::Mcp {
+                port,
+                url,
+                agent_id,
+                ..
+            } => {
+                assert_eq!(port, None);
+                assert_eq!(url, None);
+                assert_eq!(agent_id, None);
+            }
+            _ => panic!("expected Mcp command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_mcp_with_port() {
+        let cli = Cli::parse_from(["temper", "mcp", "--port", "3001"]);
+        match cli.command {
+            Commands::Mcp {
+                port,
+                url,
+                agent_id,
+            } => {
+                assert_eq!(port, Some(3001));
+                assert_eq!(url, None);
+                assert_eq!(agent_id, None);
+            }
+            _ => panic!("expected Mcp command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_mcp_with_agent_id() {
+        let cli = Cli::parse_from(["temper", "mcp", "--port", "3001", "--agent-id", "haku"]);
+        match cli.command {
+            Commands::Mcp {
+                port,
+                url,
+                agent_id,
+            } => {
+                assert_eq!(port, Some(3001));
+                assert_eq!(url, None);
+                assert_eq!(agent_id, Some("haku".to_string()));
+            }
+            _ => panic!("expected Mcp command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_mcp_with_url() {
+        let cli = Cli::parse_from(["temper", "mcp", "--url", "https://temper.railway.app"]);
+        match cli.command {
+            Commands::Mcp {
+                port,
+                url,
+                agent_id,
+            } => {
+                assert_eq!(port, None);
+                assert_eq!(url, Some("https://temper.railway.app".to_string()));
+                assert_eq!(agent_id, None);
+            }
+            _ => panic!("expected Mcp command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_mcp_url_and_port_conflict() {
+        let result = Cli::try_parse_from([
+            "temper",
+            "mcp",
+            "--port",
+            "3001",
+            "--url",
+            "https://temper.railway.app",
+        ]);
+        assert!(
+            result.is_err(),
+            "--port and --url should be mutually exclusive"
+        );
+    }
+}

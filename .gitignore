@@ -1,0 +1,72 @@
+# Build artifacts
+/target
+**/target
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.*
+!.env.example
+
+# Secrets
+*.pem
+*.key
+credentials.json
+
+# Logs
+*.log
+.z3-trace
+
+# Generated assets
+generated_imgs/
+
+# Harness
+.cascade-results/
+.proof/archive/
+apps/scratch/
+
+# Development tooling
+.mcp.json
+.reviews/
+.slop/
+.worktrees/
+.progress/
+.claude/worktrees/
+.claude/hooks/session-start-temper.sh
+
+# Node.js (observe UI)
+node_modules/
+.next/
+
+# Generated data
+ui/observe/public/graph-data.json
+
+# Unfinished observe UI pages
+ui/observe/app/visualize/
+ui/observe/components/Graph3D.tsx
+
+# Personal scripts
+scripts/discord-clean-view.js
+scripts/generate-graph-json.js
+
+.proof/*
+!.proof/
+!.proof/*.md
+.code-review-pass
+.dst-review-pass
+.vercel
+.desloppify/
+scorecard.png
+temper-e2e-test.db

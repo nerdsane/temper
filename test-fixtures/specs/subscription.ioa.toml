@@ -1,0 +1,113 @@
+# Subscription Management Entity — I/O Automaton Specification
+#
+# Models a SaaS subscription lifecycle with payment failure handling.
+# 5 states, 8 transition actions, 2 integration webhooks.
+# Tracks payment failure count and auto-renewal preference.
+
+[automaton]
+name = "Subscription"
+states = ["Active", "PastDue", "Suspended", "Cancelled", "Expired"]
+initial = "Active"
+
+# --- State Variables ---
+
+[[state]]
+name = "payment_failures"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "auto_renew"
+type = "bool"
+initial = "false"
+
+# --- Actions: Subscription Lifecycle ---
+
+[[action]]
+name = "PaymentFailed"
+kind = "internal"
+from = ["Active"]
+to = "PastDue"
+effect = "increment payment_failures"
+hint = "Payment processor reports a failed charge."
+
+[[action]]
+name = "RetryPayment"
+kind = "input"
+from = ["PastDue"]
+to = "Active"
+hint = "Retry payment after updating billing info."
+
+[[action]]
+name = "SuspendSubscription"
+kind = "internal"
+from = ["PastDue"]
+to = "Suspended"
+hint = "System suspends access after repeated payment failures."
+
+[[action]]
+name = "ReactivateSubscription"
+kind = "input"
+from = ["Suspended"]
+to = "Active"
+hint = "Customer reactivates by paying outstanding balance."
+
+[[action]]
+name = "CancelSubscription"
+kind = "input"
+from = ["Active", "PastDue", "Suspended"]
+to = "Cancelled"
+params = ["Reason"]
+hint = "Customer or admin cancels the subscription."
+
+[[action]]
+name = "ExpireSubscription"
+kind = "internal"
+from = ["Suspended"]
+to = "Expired"
+hint = "System expires after prolonged suspension."
+
+[[action]]
+name = "EnableAutoRenew"
+kind = "input"
+from = ["Active"]
+to = "Active"
+effect = "set auto_renew true"
+hint = "Customer enables automatic renewal."
+
+[[action]]
+name = "DisableAutoRenew"
+kind = "input"
+from = ["Active"]
+to = "Active"
+effect = "set auto_renew false"
+hint = "Customer disables automatic renewal."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "CancelledIsFinal"
+when = ["Cancelled"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "ExpiredIsFinal"
+when = ["Expired"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "PastDueHasFailure"
+when = ["PastDue", "Suspended", "Expired"]
+assert = "payment_failures > 0"
+
+# --- Integrations ---
+
+[[integration]]
+name = "billing_webhook"
+trigger = "PaymentFailed"
+type = "webhook"
+
+[[integration]]
+name = "dunning_notice"
+trigger = "SuspendSubscription"
+type = "webhook"

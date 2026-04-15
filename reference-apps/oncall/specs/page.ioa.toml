@@ -1,0 +1,120 @@
+# Page Entity — I/O Automaton Specification
+#
+# An alert assigned to an on-call agent. The core lifecycle of incident
+# response: trigger → assign agent → investigate → remediate → resolve.
+# Agents are the primary responders; humans are last-resort escalation.
+
+[automaton]
+name = "Page"
+states = ["Triggered", "Investigating", "Escalated", "Remediated", "Resolved"]
+initial = "Triggered"
+
+# --- State Variables ---
+
+[[state]]
+name = "escalation_tier"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "agent_assigned"
+type = "bool"
+initial = "false"
+
+# --- Actions: Page Lifecycle ---
+
+[[action]]
+name = "AssignAgent"
+kind = "input"
+from = ["Triggered"]
+effect = "set agent_assigned true"
+params = ["AgentId"]
+hint = "Assign an on-call agent to the page. Must happen before investigation can begin."
+
+[[action]]
+name = "StartInvestigation"
+kind = "internal"
+from = ["Triggered"]
+to = "Investigating"
+guard = "is_true agent_assigned"
+hint = "Agent begins investigating the alert. Requires an assigned agent."
+
+[[action]]
+name = "Escalate"
+kind = "internal"
+from = ["Investigating"]
+to = "Escalated"
+effect = "increment escalation_tier"
+hint = "Agent escalates to a higher tier. Increments escalation counter."
+
+[[action]]
+name = "ReassignAgent"
+kind = "input"
+from = ["Escalated"]
+to = "Investigating"
+effect = "set agent_assigned true"
+params = ["AgentId"]
+hint = "Reassign to a more capable agent after escalation."
+
+[[action]]
+name = "StartRemediation"
+kind = "internal"
+from = ["Investigating"]
+to = "Remediated"
+hint = "Agent starts remediation after identifying the issue."
+
+[[action]]
+name = "Resolve"
+kind = "internal"
+from = ["Remediated"]
+to = "Resolved"
+hint = "Mark the page as fully resolved after successful remediation."
+
+[[action]]
+name = "AutoResolve"
+kind = "input"
+from = ["Triggered"]
+to = "Resolved"
+hint = "Source alert cleared automatically — page resolves without investigation."
+
+[[action]]
+name = "Timeout"
+kind = "internal"
+from = ["Investigating"]
+to = "Escalated"
+effect = "increment escalation_tier"
+hint = "Investigation timed out — automatic escalation."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ResolvedIsFinal"
+when = ["Resolved"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "InvestigationRequiresAgent"
+when = ["Investigating", "Remediated"]
+assert = "agent_assigned"
+
+[[invariant]]
+name = "EscalationTracked"
+when = ["Escalated"]
+assert = "escalation_tier > 0"
+
+# --- Integrations ---
+
+[[integration]]
+name = "notify_agent"
+trigger = "AssignAgent"
+type = "webhook"
+
+[[integration]]
+name = "notify_escalation"
+trigger = "Escalate"
+type = "webhook"
+
+[[integration]]
+name = "notify_resolved"
+trigger = "Resolve"
+type = "webhook"

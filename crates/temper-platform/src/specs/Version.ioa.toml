@@ -1,0 +1,22 @@
+[automaton]
+name = "Version"
+initial = "Created"
+states = ["Created", "Deployed", "Superseded"]
+
+[[action]]
+name = "CreateVersion"
+from = []
+to = "Created"
+kind = "input"
+
+[[action]]
+name = "MarkDeployed"
+from = ["Created"]
+to = "Deployed"
+kind = "internal"
+
+[[action]]
+name = "Supersede"
+from = ["Deployed"]
+to = "Superseded"
+kind = "internal"

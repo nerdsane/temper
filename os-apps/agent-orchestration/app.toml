@@ -1,0 +1,3 @@
+name = "agent-orchestration"
+description = "Multi-agent orchestration with organizations, budget ledgers, and heartbeat runs"
+version = "0.1.0"

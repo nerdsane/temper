@@ -1,0 +1,53 @@
+# TemperFS Reaction Rules
+#
+# Cross-entity reactions fired by the ReactionDispatcher.
+# Reactions are fire-and-forget, cascade depth bounded by MAX_REACTION_DEPTH = 8.
+
+# When a file's content is updated via $value PUT, create a new FileVersion.
+[[reaction]]
+name = "file_stream_updated_creates_version"
+
+[reaction.when]
+entity_type = "File"
+action = "StreamUpdated"
+to_state = "Ready"
+
+[reaction.then]
+entity_type = "FileVersion"
+action = "Create"
+
+[reaction.resolve_target]
+type = "CreateIfMissing"
+id_field = "last_version_id"
+
+# When a new version is created, supersede the previous FileVersion.
+[[reaction]]
+name = "file_stream_updated_supersedes_old_version"
+
+[reaction.when]
+entity_type = "File"
+action = "StreamUpdated"
+
+[reaction.then]
+entity_type = "FileVersion"
+action = "Supersede"
+
+[reaction.resolve_target]
+type = "Field"
+field = "last_version_id"
+
+# When a file's content is updated, increment the workspace's used bytes.
+[[reaction]]
+name = "file_stream_updated_increments_workspace_usage"
+
+[reaction.when]
+entity_type = "File"
+action = "StreamUpdated"
+
+[reaction.then]
+entity_type = "Workspace"
+action = "IncrementUsage"
+
+[reaction.resolve_target]
+type = "Field"
+field = "workspace_id"

@@ -1,0 +1,512 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Agent" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <EntityType Name="TemperAgent">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Model" Type="Edm.String"/>
+        <Property Name="Provider" Type="Edm.String"/>
+        <Property Name="ConversationFileId" Type="Edm.String"/>
+        <Property Name="WorkspaceId" Type="Edm.String"/>
+        <Property Name="PendingToolCalls" Type="Edm.String"/>
+        <Property Name="TurnCount" Type="Edm.Int64"/>
+        <Property Name="MaxTurns" Type="Edm.String"/>
+        <Property Name="InputTokens" Type="Edm.Int64"/>
+        <Property Name="OutputTokens" Type="Edm.Int64"/>
+        <Property Name="CostCents" Type="Edm.String"/>
+        <Property Name="Result" Type="Edm.String"/>
+        <Property Name="HasResult" Type="Edm.Boolean"/>
+        <Property Name="ErrorMessage" Type="Edm.String"/>
+        <Property Name="SandboxUrl" Type="Edm.String"/>
+        <Property Name="TemperApiUrl" Type="Edm.String"/>
+        <Property Name="SandboxId" Type="Edm.String"/>
+        <Property Name="TemperApiUrl" Type="Edm.String"/>
+        <Property Name="FileManifestId" Type="Edm.String"/>
+        <Property Name="Workdir" Type="Edm.String"/>
+        <Property Name="ToolsEnabled" Type="Edm.String"/>
+        <Property Name="SystemPrompt" Type="Edm.String"/>
+        <Property Name="UserMessage" Type="Edm.String"/>
+        <Property Name="Conversation" Type="Edm.String"/>
+        <Property Name="SessionFileId" Type="Edm.String"/>
+        <Property Name="SessionLeafId" Type="Edm.String"/>
+        <Property Name="ContextTokens" Type="Edm.Int64"/>
+        <Property Name="ReserveTokens" Type="Edm.String"/>
+        <Property Name="KeepRecentTokens" Type="Edm.String"/>
+        <Property Name="CompactionCount" Type="Edm.Int64"/>
+        <Property Name="CompactionModel" Type="Edm.String"/>
+        <Property Name="SteeringMessages" Type="Edm.String"/>
+        <Property Name="FollowUpCount" Type="Edm.Int64"/>
+        <Property Name="MaxFollowUps" Type="Edm.String"/>
+        <Property Name="SoulId" Type="Edm.String"/>
+        <Property Name="HookPolicy" Type="Edm.String"/>
+        <Property Name="ParentAgentId" Type="Edm.String"/>
+        <Property Name="ChildAgentIds" Type="Edm.String"/>
+        <Property Name="AgentDepth" Type="Edm.Int64"/>
+        <Property Name="LastHeartbeatAt" Type="Edm.String"/>
+        <Property Name="HeartbeatTimeoutSeconds" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="AgentSoul">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Name" Type="Edm.String"/>
+        <Property Name="Description" Type="Edm.String"/>
+        <Property Name="ContentFileId" Type="Edm.String"/>
+        <Property Name="Version" Type="Edm.Int64"/>
+        <Property Name="AuthorId" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="AgentSkill">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Name" Type="Edm.String"/>
+        <Property Name="Description" Type="Edm.String"/>
+        <Property Name="ContentFileId" Type="Edm.String"/>
+        <Property Name="Scope" Type="Edm.String"/>
+        <Property Name="AgentFilter" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="AgentMemory">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Key" Type="Edm.String"/>
+        <Property Name="Content" Type="Edm.String"/>
+        <Property Name="MemoryType" Type="Edm.String"/>
+        <Property Name="SoulId" Type="Edm.String"/>
+        <Property Name="AuthorAgentId" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="ToolHook">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Name" Type="Edm.String"/>
+        <Property Name="HookType" Type="Edm.String"/>
+        <Property Name="ToolPattern" Type="Edm.String"/>
+        <Property Name="HookAction" Type="Edm.String"/>
+        <Property Name="SoulId" Type="Edm.String"/>
+        <Property Name="Priority" Type="Edm.Int64"/>
+      </EntityType>
+
+      <EntityType Name="HeartbeatMonitor">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="ScanIntervalSeconds" Type="Edm.String"/>
+        <Property Name="LastScanAt" Type="Edm.String"/>
+        <Property Name="StaleAgentsFound" Type="Edm.Int64"/>
+      </EntityType>
+
+      <EntityType Name="CronJob">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Name" Type="Edm.String"/>
+        <Property Name="Schedule" Type="Edm.String"/>
+        <Property Name="SoulId" Type="Edm.String"/>
+        <Property Name="SystemPrompt" Type="Edm.String"/>
+        <Property Name="UserMessageTemplate" Type="Edm.String"/>
+        <Property Name="Model" Type="Edm.String"/>
+        <Property Name="Provider" Type="Edm.String"/>
+        <Property Name="ToolsEnabled" Type="Edm.String"/>
+        <Property Name="SandboxUrl" Type="Edm.String"/>
+        <Property Name="MaxTurns" Type="Edm.String"/>
+        <Property Name="LastRunAt" Type="Edm.String"/>
+        <Property Name="NextRunAt" Type="Edm.String"/>
+        <Property Name="RunCount" Type="Edm.Int64"/>
+        <Property Name="MaxRuns" Type="Edm.String"/>
+        <Property Name="LastAgentId" Type="Edm.String"/>
+        <Property Name="LastResult" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="CronScheduler">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="HeartbeatIntervalSeconds" Type="Edm.String"/>
+        <Property Name="LastCheckAt" Type="Edm.String"/>
+        <Property Name="JobsTriggered" Type="Edm.Int64"/>
+      </EntityType>
+
+      <Action Name="Configure" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="system_prompt" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="user_message" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="model" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="provider" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="max_turns" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="tools_enabled" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="workdir" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="sandbox_url" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="temper_api_url" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="soul_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="parent_agent_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="agent_depth" Type="Edm.Int64" Nullable="true"/>
+        <Parameter Name="max_follow_ups" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="hook_policy" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="reserve_tokens" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="keep_recent_tokens" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="compaction_model" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="heartbeat_timeout_seconds" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="Provision" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="SandboxReady" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="sandbox_url" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="sandbox_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="workspace_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="conversation_file_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="file_manifest_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="session_file_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="session_leaf_id" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="ProcessToolCalls" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="pending_tool_calls" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="conversation" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="input_tokens" Type="Edm.Int64" Nullable="true"/>
+        <Parameter Name="output_tokens" Type="Edm.Int64" Nullable="true"/>
+        <Parameter Name="session_leaf_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="context_tokens" Type="Edm.Int64" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="HandleToolResults" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="pending_tool_calls" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="conversation" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="session_leaf_id" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="NeedsCompaction" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="input_tokens" Type="Edm.Int64" Nullable="true"/>
+        <Parameter Name="output_tokens" Type="Edm.Int64" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="CompactionComplete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="session_leaf_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="context_tokens" Type="Edm.Int64" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="CheckSteering" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="input_tokens" Type="Edm.Int64" Nullable="true"/>
+        <Parameter Name="output_tokens" Type="Edm.Int64" Nullable="true"/>
+        <Parameter Name="session_leaf_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="context_tokens" Type="Edm.Int64" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="ContinueWithSteering" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="session_leaf_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="steering_messages" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="conversation" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="FinalizeResult" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="result" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="conversation" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="session_leaf_id" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="Steer" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="steering_messages" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="RecordResult" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="result" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="conversation" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="input_tokens" Type="Edm.Int64" Nullable="true"/>
+        <Parameter Name="output_tokens" Type="Edm.Int64" Nullable="true"/>
+        <Parameter Name="session_leaf_id" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="Heartbeat" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="last_heartbeat_at" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="TimeoutFail" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="Resume" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="sandbox_url" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="sandbox_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="workspace_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="conversation_file_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="file_manifest_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="session_file_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="session_leaf_id" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="Fail" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="Cancel" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.TemperAgent"/>
+        <ReturnType Type="Temper.Agent.TemperAgent"/>
+      </Action>
+
+      <Action Name="Create" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.AgentSoul"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="content_file_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="author_id" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.AgentSoul"/>
+      </Action>
+
+      <Action Name="Publish" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.AgentSoul"/>
+        <ReturnType Type="Temper.Agent.AgentSoul"/>
+      </Action>
+
+      <Action Name="Update" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.AgentSoul"/>
+        <Parameter Name="content_file_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.AgentSoul"/>
+      </Action>
+
+      <Action Name="Archive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.AgentSoul"/>
+        <ReturnType Type="Temper.Agent.AgentSoul"/>
+      </Action>
+
+      <Action Name="Register" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.AgentSkill"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="content_file_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="scope" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="agent_filter" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.AgentSkill"/>
+      </Action>
+
+      <Action Name="Disable" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.AgentSkill"/>
+        <ReturnType Type="Temper.Agent.AgentSkill"/>
+      </Action>
+
+      <Action Name="Enable" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.AgentSkill"/>
+        <ReturnType Type="Temper.Agent.AgentSkill"/>
+      </Action>
+
+      <Action Name="Update" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.AgentSkill"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="content_file_id" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.AgentSkill"/>
+      </Action>
+
+      <Action Name="Save" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.AgentMemory"/>
+        <Parameter Name="key" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="content" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="memory_type" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="soul_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="author_agent_id" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.AgentMemory"/>
+      </Action>
+
+      <Action Name="Update" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.AgentMemory"/>
+        <Parameter Name="content" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Agent.AgentMemory"/>
+      </Action>
+
+      <Action Name="Archive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.AgentMemory"/>
+        <ReturnType Type="Temper.Agent.AgentMemory"/>
+      </Action>
+
+      <Action Name="Recall" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.AgentMemory"/>
+        <ReturnType Type="Temper.Agent.AgentMemory"/>
+      </Action>
+
+      <Action Name="Register" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.ToolHook"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="hook_type" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="tool_pattern" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="hook_action" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="soul_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="priority" Type="Edm.Int64" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.ToolHook"/>
+      </Action>
+
+      <Action Name="Disable" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.ToolHook"/>
+        <ReturnType Type="Temper.Agent.ToolHook"/>
+      </Action>
+
+      <Action Name="Enable" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.ToolHook"/>
+        <ReturnType Type="Temper.Agent.ToolHook"/>
+      </Action>
+
+      <Action Name="Start" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.HeartbeatMonitor"/>
+        <ReturnType Type="Temper.Agent.HeartbeatMonitor"/>
+      </Action>
+
+      <Action Name="ScanComplete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.HeartbeatMonitor"/>
+        <Parameter Name="last_scan_at" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="stale_agents_found" Type="Edm.Int64" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.HeartbeatMonitor"/>
+      </Action>
+
+      <Action Name="ScheduledScan" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.HeartbeatMonitor"/>
+        <ReturnType Type="Temper.Agent.HeartbeatMonitor"/>
+      </Action>
+
+      <Action Name="ScanFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.HeartbeatMonitor"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Agent.HeartbeatMonitor"/>
+      </Action>
+
+      <Action Name="ScheduleFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.HeartbeatMonitor"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Agent.HeartbeatMonitor"/>
+      </Action>
+
+      <Action Name="Configure" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronJob"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="schedule" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="soul_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="system_prompt" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="user_message_template" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="model" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="provider" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="tools_enabled" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="sandbox_url" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="max_turns" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="max_runs" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.CronJob"/>
+      </Action>
+
+      <Action Name="Activate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronJob"/>
+        <ReturnType Type="Temper.Agent.CronJob"/>
+      </Action>
+
+      <Action Name="Pause" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronJob"/>
+        <ReturnType Type="Temper.Agent.CronJob"/>
+      </Action>
+
+      <Action Name="Resume" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronJob"/>
+        <ReturnType Type="Temper.Agent.CronJob"/>
+      </Action>
+
+      <Action Name="Trigger" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronJob"/>
+        <Parameter Name="last_run_at" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.CronJob"/>
+      </Action>
+
+      <Action Name="TriggerComplete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronJob"/>
+        <Parameter Name="last_agent_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="last_result" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.CronJob"/>
+      </Action>
+
+      <Action Name="Expire" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronJob"/>
+        <ReturnType Type="Temper.Agent.CronJob"/>
+      </Action>
+
+      <Action Name="TriggerFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronJob"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Agent.CronJob"/>
+      </Action>
+
+      <Action Name="Start" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronScheduler"/>
+        <ReturnType Type="Temper.Agent.CronScheduler"/>
+      </Action>
+
+      <Action Name="CheckComplete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronScheduler"/>
+        <Parameter Name="last_check_at" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="jobs_triggered" Type="Edm.Int64" Nullable="true"/>
+        <ReturnType Type="Temper.Agent.CronScheduler"/>
+      </Action>
+
+      <Action Name="ScheduledCheck" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronScheduler"/>
+        <ReturnType Type="Temper.Agent.CronScheduler"/>
+      </Action>
+
+      <Action Name="CheckFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronScheduler"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Agent.CronScheduler"/>
+      </Action>
+
+      <Action Name="ScheduleFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent.CronScheduler"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Agent.CronScheduler"/>
+      </Action>
+
+      <EntityContainer Name="Service">
+        <EntitySet Name="TemperAgents" EntityType="Temper.Agent.TemperAgent"/>
+        <EntitySet Name="AgentSouls" EntityType="Temper.Agent.AgentSoul"/>
+        <EntitySet Name="AgentSkills" EntityType="Temper.Agent.AgentSkill"/>
+        <EntitySet Name="AgentMemorys" EntityType="Temper.Agent.AgentMemory"/>
+        <EntitySet Name="ToolHooks" EntityType="Temper.Agent.ToolHook"/>
+        <EntitySet Name="HeartbeatMonitors" EntityType="Temper.Agent.HeartbeatMonitor"/>
+        <EntitySet Name="CronJobs" EntityType="Temper.Agent.CronJob"/>
+        <EntitySet Name="CronSchedulers" EntityType="Temper.Agent.CronScheduler"/>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

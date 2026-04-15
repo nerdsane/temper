@@ -1,0 +1,30 @@
+[automaton]
+name = "Problem"
+initial = "Open"
+states = ["Open", "Reviewed", "Resolved", "Superseded"]
+
+[[action]]
+name = "CreateProblem"
+from = []
+to = "Open"
+kind = "input"
+params = ["observation_id", "problem_statement", "severity", "invariants"]
+guard = [{ type = "cross_entity_state", entity_type = "Observation", entity_id_source = "observation_id", required_status = ["Open", "UnderReview"] }]
+
+[[action]]
+name = "MarkReviewed"
+from = ["Open"]
+to = "Reviewed"
+kind = "input"
+
+[[action]]
+name = "Resolve"
+from = ["Open", "Reviewed"]
+to = "Resolved"
+kind = "input"
+
+[[action]]
+name = "Supersede"
+from = ["Open", "Reviewed"]
+to = "Superseded"
+kind = "input"

@@ -1,0 +1,26 @@
+# AgentToolConfig Entity — I/O Automaton Specification
+#
+# Grandchild of ManagedAgent (child of AgentTool). Represents one row in
+# the `configs[]` collection that `agent_toolset` and `mcp_toolset` tools
+# carry. Single-state (Active).
+#
+#   PermissionPolicyMustBeKnown   PermissionPolicy must equal
+#                                 `always_allow` or `always_ask`.
+#   ConfigRequiresActiveTool      cross-invariant in cross-invariants.toml
+#                                 gates the POST on parent AgentTool.
+
+[automaton]
+name = "AgentToolConfig"
+states = ["Active"]
+initial = "Active"
+
+# --- Cross-field validation (ADR-0041) ---
+
+[[field_invariant]]
+name = "PermissionPolicyMustBeKnown"
+when = { not = { field = "PermissionPolicy", absent = true } }
+require = { any_of = [
+  { field = "PermissionPolicy", equals = "always_allow" },
+  { field = "PermissionPolicy", equals = "always_ask" },
+]}
+message = "AgentToolConfig.PermissionPolicy must be `always_allow` or `always_ask`"

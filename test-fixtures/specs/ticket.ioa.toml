@@ -1,0 +1,89 @@
+# Support Ticket Entity — I/O Automaton Specification
+#
+# Models a customer support ticket lifecycle.
+# 5 states, 6 transition actions.
+# Tracks agent reply count and customer response status.
+
+[automaton]
+name = "Ticket"
+states = ["Open", "InProgress", "WaitingOnCustomer", "Resolved", "Closed"]
+initial = "Open"
+
+# --- State Variables ---
+
+[[state]]
+name = "replies"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "customer_responded"
+type = "bool"
+initial = "false"
+
+# --- Actions: Ticket Lifecycle ---
+
+[[action]]
+name = "AssignAgent"
+kind = "input"
+from = ["Open"]
+to = "InProgress"
+params = ["AgentId"]
+hint = "Assign a support agent to the ticket."
+
+[[action]]
+name = "ReplyToCustomer"
+kind = "internal"
+from = ["InProgress"]
+to = "WaitingOnCustomer"
+effect = "increment replies"
+hint = "Agent sends a reply and waits for customer response."
+
+[[action]]
+name = "CustomerReply"
+kind = "input"
+from = ["WaitingOnCustomer"]
+to = "InProgress"
+effect = "set customer_responded true"
+hint = "Customer responds to the agent's reply."
+
+[[action]]
+name = "ResolveTicket"
+kind = "internal"
+from = ["InProgress"]
+to = "Resolved"
+guard = "replies > 0"
+hint = "Agent marks the ticket as resolved. Requires at least one reply."
+
+[[action]]
+name = "CloseTicket"
+kind = "internal"
+from = ["Resolved"]
+to = "Closed"
+hint = "System closes the ticket after resolution."
+
+[[action]]
+name = "ReopenTicket"
+kind = "input"
+from = ["Resolved"]
+to = "Open"
+hint = "Customer reopens a resolved ticket."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ClosedIsFinal"
+when = ["Closed"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "ResolvedNeedsReply"
+when = ["Resolved", "Closed"]
+assert = "replies > 0"
+
+# --- Liveness Properties ---
+
+[[liveness]]
+name = "TicketEventuallyResolved"
+from = ["Open"]
+reaches = ["Resolved", "Closed"]

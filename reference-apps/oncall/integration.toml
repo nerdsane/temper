@@ -1,0 +1,39 @@
+# Integration deployment configuration for the on-call reference app.
+#
+# Maps IOA [[integration]] declarations to actual webhook endpoints.
+# This file is deployment-specific — not part of the spec itself.
+
+[[webhook]]
+name = "notify_agent"
+url = "https://pagerduty.example.com/notify"
+method = "POST"
+timeout_ms = 5000
+max_retries = 3
+
+[[webhook]]
+name = "notify_escalation"
+url = "https://pagerduty.example.com/escalate"
+method = "POST"
+timeout_ms = 5000
+max_retries = 3
+
+[[webhook]]
+name = "notify_resolved"
+url = "https://pagerduty.example.com/resolve"
+method = "POST"
+timeout_ms = 5000
+max_retries = 3
+
+[[webhook]]
+name = "request_approval"
+url = "https://approvals.example.com/request"
+method = "POST"
+timeout_ms = 10000
+max_retries = 5
+
+[[webhook]]
+name = "notify_execution"
+url = "https://runbooks.example.com/execute"
+method = "POST"
+timeout_ms = 5000
+max_retries = 3

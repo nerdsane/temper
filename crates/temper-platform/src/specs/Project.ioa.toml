@@ -1,0 +1,46 @@
+[automaton]
+name = "Project"
+initial = "Created"
+states = ["Created", "Building", "Verified", "Archived"]
+
+[[state]]
+name = "spec_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "verified"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "CreateProject"
+from = []
+to = "Created"
+kind = "input"
+
+[[action]]
+name = "UpdateSpecs"
+from = ["Created", "Building", "Verified"]
+to = "Building"
+kind = "input"
+effect = "increment spec_count"
+
+[[action]]
+name = "Verify"
+from = ["Building"]
+to = "Verified"
+kind = "internal"
+guard = "min spec_count 1"
+effect = "set verified true"
+
+[[action]]
+name = "Archive"
+from = ["Created", "Building", "Verified"]
+to = "Archived"
+kind = "input"
+
+[[invariant]]
+name = "VerifiedRequiresSpecs"
+when = ["Verified"]
+assert = "spec_count > 0"

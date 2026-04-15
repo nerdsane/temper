@@ -1,0 +1,27 @@
+[automaton]
+name = "CatalogEntry"
+initial = "Draft"
+states = ["Draft", "Published", "Deprecated"]
+
+[[action]]
+name = "CreateEntry"
+from = []
+to = "Draft"
+kind = "input"
+
+[[action]]
+name = "Publish"
+from = ["Draft"]
+to = "Published"
+kind = "internal"
+
+[[action]]
+name = "Deprecate"
+from = ["Published"]
+to = "Deprecated"
+kind = "input"
+
+[[action]]
+name = "Fork"
+from = ["Published"]
+kind = "input"

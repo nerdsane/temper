@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Temper — Design Direction v7</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,200..900;1,8..60,200..900&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=Playfair+Display:ital,wght@0,400..900;1,400..900&family=Lora:ital,wght@0,400..700;1,400..700&family=DM+Serif+Display:ital@0;1&family=Crimson+Pro:ital,wght@0,200..900;1,200..900&family=Inter:opsz,wght@14..32,300..700&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --sans: 'Inter', -apple-system, system-ui, sans-serif;
+    --serif: 'Source Serif 4', Georgia, serif;
+    --mono: 'SF Mono', 'Cascadia Code', Menlo, monospace;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+    --fast: 120ms;
+    --radius: 2px;
+  }
+
+  body {
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    font-optical-sizing: auto;
+    font-kerning: normal;
+    transition: background 0.4s var(--ease), color 0.4s var(--ease);
+    overflow-x: hidden;
+  }
+
+  /* ─── Dark base ─── */
+  body.dark {
+    --bg: #0A0A0A;
+    --bg-subtle: #0F0F0F;
+    --bg-muted: #141414;
+    --fg: #D4D4D4;
+    --fg-2: #8A8A8A;
+    --fg-3: #4A4A4A;
+    --rule: rgba(255,255,255,0.05);
+    --rule-center: rgba(255,255,255,0.08);
+    --fill-hover: rgba(255,255,255,0.03);
+    --fill-active: rgba(255,255,255,0.05);
+    --btn-bg: #D4D4D4; --btn-fg: #0A0A0A; --btn-hover: #C0C0C0;
+    --corner-color: rgba(255,255,255,0.03);
+    background: var(--bg); color: var(--fg);
+  }
+
+  /* ─── Light base ─── */
+  body.light {
+    --bg: #FAFAFA;
+    --bg-subtle: #F5F5F5;
+    --bg-muted: #EFEFEF;
+    --fg: #2A2A2A;
+    --fg-2: #6B6B6B;
+    --fg-3: #A0A0A0;
+    --rule: rgba(0,0,0,0.05);
+    --rule-center: rgba(0,0,0,0.07);
+    --fill-hover: rgba(0,0,0,0.02);
+    --fill-active: rgba(0,0,0,0.04);
+    --btn-bg: #2A2A2A; --btn-fg: #FAFAFA; --btn-hover: #3D3D3D;
+    --corner-color: rgba(0,0,0,0.04);
+    background: var(--bg); color: var(--fg);
+  }
+
+  /* Palette colors — set via JS */
+  body { --c1: #2dd4bf; --c2: #fbbf24; --c3: #f472b6; --c1-dim: rgba(45,212,191,0.07); --c2-dim: rgba(251,191,36,0.06); --c3-dim: rgba(244,114,182,0.06); }
+
+  /* Background canvas */
+  #bg-canvas {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 0;
+  }
+
+  /* Grain */
+  .grain-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    pointer-events: none; z-index: 9999;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-repeat: repeat; background-size: 256px 256px;
+  }
+  body.dark .grain-overlay { opacity: 0.015; }
+  body.light .grain-overlay { opacity: 0.02; }
+
+  body > *:not(#bg-canvas):not(.grain-overlay) { position: relative; z-index: 1; }
+
+  /* ═══════════════════════════════════════════ */
+  /*  CONTROLS PANEL                             */
+  /* ═══════════════════════════════════════════ */
+  .controls {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    padding: 8px 20px;
+    border-bottom: 1px solid var(--rule);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  body.dark .controls { background: rgba(10,10,10,0.8); }
+  body.light .controls { background: rgba(250,250,250,0.85); }
+
+  .ctrl-row {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .ctrl-row .lbl {
+    font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--fg-3); width: 72px; flex-shrink: 0;
+  }
+  .ctrl-row button {
+    font-family: var(--sans); font-size: 11px; font-weight: 500;
+    padding: 3px 10px; border-radius: var(--radius); border: 1px solid var(--rule);
+    background: transparent; color: var(--fg-2); cursor: pointer;
+    transition: all var(--fast) var(--ease); white-space: nowrap;
+  }
+  .ctrl-row button:hover { color: var(--fg); border-color: var(--rule-center); }
+  .ctrl-row button.on { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+
+  /* Palette swatch in button */
+  .pal-dots {
+    display: inline-flex; gap: 3px; margin-right: 4px; vertical-align: middle;
+  }
+  .pal-dots span {
+    width: 7px; height: 7px; border-radius: 50%; display: inline-block;
+  }
+
+  /* ═══════════════════════════════════════════ */
+  /*  LAYOUT                                     */
+  /* ═══════════════════════════════════════════ */
+  .page { padding: 100px 0 96px; max-width: 960px; margin: 0 auto; }
+  .col { padding: 0 48px; }
+
+  .fade-rule {
+    height: 1px; border: none; margin: 56px 0;
+    background: linear-gradient(90deg, transparent 0%, var(--rule-center) 50%, transparent 100%);
+  }
+
+  .section-head { margin-top: 64px; margin-bottom: 36px; }
+  .section-head .folio {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--fg-3);
+    padding-bottom: 12px; border-bottom: 1px solid var(--rule);
+    display: inline-block;
+  }
+
+  /* ═══════════════════════════════════════════ */
+  /*  HERO                                       */
+  /* ═══════════════════════════════════════════ */
+  .hero { padding: 88px 0 0; position: relative; }
+  .hero::before, .hero::after {
+    content: ''; position: absolute; width: 64px; height: 64px; pointer-events: none;
+  }
+  .hero::before { top: 60px; left: -20px; border-left: 1px solid var(--corner-color); border-top: 1px solid var(--corner-color); }
+  .hero::after { bottom: -20px; right: -20px; border-right: 1px solid var(--corner-color); border-bottom: 1px solid var(--corner-color); }
+
+  .hero h1 {
+    font-family: var(--serif);
+    font-size: 58px; font-weight: 300;
+    font-optical-sizing: auto;
+    letter-spacing: -0.015em; line-height: 1.12;
+  }
+  body.dark .hero h1 {
+    background: linear-gradient(180deg, #D4D4D4 20%, rgba(212,212,212,0.5) 100%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  body.light .hero h1 {
+    background: linear-gradient(180deg, #2A2A2A 20%, rgba(42,42,42,0.6) 100%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .hero h1 em { font-style: italic; -webkit-text-fill-color: var(--c1); }
+  .hero .lede {
+    font-size: 16px; line-height: 1.7; color: var(--fg-2);
+    max-width: 480px; margin-top: 24px; font-weight: 400;
+  }
+  .hero-actions { margin-top: 40px; display: flex; gap: 16px; align-items: center; }
+
+  .btn {
+    font-family: var(--sans); font-size: 13px; font-weight: 500;
+    padding: 9px 22px; border-radius: var(--radius); border: none;
+    background: var(--btn-bg); color: var(--btn-fg);
+    cursor: pointer; transition: all var(--fast) var(--ease);
+  }
+  .btn:hover { background: var(--btn-hover); }
+  .btn-ghost { background: none; border: 1px solid var(--rule); color: var(--fg-2); }
+  .btn-ghost:hover { border-color: var(--rule-center); color: var(--fg); background: var(--fill-hover); }
+  .btn-sm { font-size: 12px; padding: 5px 12px; }
+  .btn-accent-soft { background: var(--c1-dim); color: var(--c1); border: none; padding: 7px 16px; }
+  .link-text {
+    font-size: 13px; font-weight: 500; color: var(--fg-2); text-decoration: none; cursor: pointer;
+    transition: color var(--fast) var(--ease);
+  }
+  .link-text:hover { color: var(--fg); }
+  .link-text .arr { display: inline-block; transition: transform var(--fast) var(--ease); margin-left: 2px; }
+  .link-text:hover .arr { transform: translateX(3px); }
+
+  /* Watermark */
+  .watermark {
+    position: absolute; font-family: var(--serif); font-size: 220px; font-weight: 200;
+    letter-spacing: 0.12em; text-transform: uppercase; white-space: nowrap;
+    pointer-events: none; user-select: none; z-index: 0;
+  }
+  body.dark .watermark { color: rgba(255,255,255,0.013); }
+  body.light .watermark { color: rgba(0,0,0,0.018); }
+
+  /* ═══════════════════════════════════════════ */
+  /*  DASHBOARD                                  */
+  /* ═══════════════════════════════════════════ */
+  .dash-wrapper { position: relative; }
+  .dash-wrapper .watermark { top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-5deg); }
+  .dash {
+    display: grid; grid-template-columns: 176px 1fr; min-height: 520px;
+    border: 1px solid var(--rule); border-radius: var(--radius);
+    overflow: hidden; position: relative; z-index: 1;
+  }
+  body.dark .dash { background: rgba(15,15,15,0.6); }
+  body.light .dash { background: rgba(245,245,245,0.5); }
+
+  .dash-wrapper::before, .dash-wrapper::after {
+    content: ''; position: absolute; width: 48px; height: 48px; pointer-events: none; z-index: 2;
+  }
+  .dash-wrapper::before { top: -8px; left: -8px; border-left: 1px solid var(--corner-color); border-top: 1px solid var(--corner-color); }
+  .dash-wrapper::after { bottom: -8px; right: -8px; border-right: 1px solid var(--corner-color); border-bottom: 1px solid var(--corner-color); }
+
+  .dash-nav { padding: 20px 0; border-right: 1px solid var(--rule); }
+  body.dark .dash-nav { background: rgba(10,10,10,0.4); }
+  body.light .dash-nav { background: rgba(250,250,250,0.4); }
+  .dash-logo {
+    font-size: 14px; font-weight: 600; letter-spacing: -0.02em;
+    padding: 0 16px; margin-bottom: 24px; display: flex; align-items: center; gap: 7px;
+  }
+  .dash-logo .mark { width: 14px; height: 14px; border-radius: 2px; background: var(--c1); }
+  .dash-links { list-style: none; }
+  .dash-links li a {
+    display: block; padding: 5px 16px; font-size: 13px; font-weight: 400;
+    color: var(--fg-3); text-decoration: none; transition: color var(--fast) var(--ease);
+  }
+  .dash-links li a:hover { color: var(--fg); }
+  .dash-links li a.active { color: var(--fg); font-weight: 500; }
+
+  .dash-main { padding: 20px 28px; }
+  body.dark .dash-main { background: rgba(10,10,10,0.3); }
+  body.light .dash-main { background: rgba(250,250,250,0.3); }
+  .dash-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 32px; }
+  .dash-title { font-family: var(--serif); font-size: 20px; font-weight: 400; letter-spacing: -0.01em; }
+
+  .stats { display: flex; margin-bottom: 36px; padding-bottom: 28px; }
+  .stat { flex: 1; padding: 0 20px; position: relative; }
+  .stat:first-child { padding-left: 0; }
+  .stat:last-child { padding-right: 0; }
+  .stat + .stat::before {
+    content: ''; position: absolute; left: 0; top: 10%; bottom: 10%; width: 1px;
+    background: linear-gradient(180deg, transparent 0%, var(--rule-center) 50%, transparent 100%);
+  }
+  .stat-label { font-size: 11px; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; color: var(--fg-3); margin-bottom: 6px; }
+  .stat-val { font-family: var(--mono); font-size: 26px; font-weight: 500; letter-spacing: -0.03em; line-height: 1.15; font-variant-numeric: tabular-nums lining-nums; }
+  .stat-val .unit { font-size: 14px; color: var(--fg-3); font-weight: 400; }
+  .stat-delta { font-size: 12px; margin-top: 3px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+  .stat-delta.up { color: var(--c1); }
+
+  .stats-rule { height: 1px; border: none; margin: 0 0 28px; background: linear-gradient(90deg, transparent 0%, var(--rule-center) 50%, transparent 100%); }
+
+  .tbl { width: 100%; border-collapse: collapse; }
+  .tbl th { text-align: left; font-size: 11px; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; color: var(--fg-3); padding: 0 0 8px; border-bottom: 1px solid var(--rule); }
+  .tbl td { font-size: 13px; padding: 10px 0; color: var(--fg-2); border-bottom: 1px solid var(--rule); font-variant-numeric: tabular-nums lining-nums; }
+  .tbl tr:last-child td { border-bottom: none; }
+  .tbl tr { transition: color var(--fast) var(--ease); }
+  .tbl tr:hover td { color: var(--fg); }
+  .tbl .name { color: var(--fg); font-weight: 450; }
+  .tbl .mono { font-family: var(--mono); font-size: 12px; color: var(--fg-3); }
+  .tbl .s-ok { color: var(--c1); }
+  .tbl .s-err { color: var(--c3); }
+  .tbl .s-accent { color: var(--c1); }
+  .tbl .s-warn { color: var(--c2); }
+  .tbl .s-mute { color: var(--fg-3); }
+  .tbl th + th, .tbl td + td { padding-left: 20px; }
+
+  /* Components */
+  .comp-row { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; }
+  .comp-row + .comp-row { margin-top: 40px; padding-top: 40px; border-top: 1px solid var(--rule); }
+  .comp-label { font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-3); margin-bottom: 16px; }
+  .tag-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+  .tag { font-size: 11px; font-weight: 500; padding: 3px 9px; border-radius: var(--radius); letter-spacing: 0.005em; }
+  .tag-default { background: var(--fill-active); color: var(--fg-2); }
+  .tag-accent { background: var(--c1-dim); color: var(--c1); }
+  .tag-ok { background: var(--c1-dim); color: var(--c1); }
+  .tag-err { background: var(--c3-dim); color: var(--c3); }
+  .tag-warn { background: var(--c2-dim); color: var(--c2); }
+
+  .field { margin-bottom: 20px; }
+  .field-label { font-size: 12px; font-weight: 500; color: var(--fg-2); margin-bottom: 6px; display: block; }
+  .field-input {
+    font-family: var(--sans); font-size: 14px; width: 100%; padding: 8px 0; border: none;
+    border-bottom: 1px solid var(--rule); background: transparent; color: var(--fg);
+    outline: none; transition: border-color var(--fast) var(--ease);
+  }
+  .field-input::placeholder { color: var(--fg-3); }
+  .field-input:focus { border-color: var(--c1); }
+  .link-accent { font-size: 13px; font-weight: 500; color: var(--c1); text-decoration: none; }
+  .link-accent:hover { text-decoration: underline; }
+
+  .setting-row { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; }
+  .setting-row + .setting-row { border-top: 1px solid var(--rule); }
+  .setting-label { font-size: 13px; color: var(--fg-2); }
+  .switch { width: 30px; height: 16px; border-radius: 8px; position: relative; background: var(--fill-active); cursor: pointer; transition: background var(--fast) var(--ease); }
+  .switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--fg-3); transition: all var(--fast) var(--ease); }
+  .switch.on { background: var(--c1); }
+  .switch.on::after { transform: translateX(14px); background: var(--bg); }
+
+  /* Palette display */
+  .pal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+  .pal-section-label { font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-3); margin-bottom: 12px; }
+  .pal-item { display: flex; align-items: center; gap: 12px; padding: 6px 0; }
+  .pal-swatch { width: 28px; height: 28px; border-radius: var(--radius); flex-shrink: 0; }
+  .pal-name { font-size: 13px; font-weight: 450; }
+  .pal-hex { font-family: var(--mono); font-size: 11px; color: var(--fg-3); margin-left: auto; }
+
+  .specimen-row { display: grid; grid-template-columns: 140px 1fr; gap: 16px; align-items: baseline; padding: 16px 0; border-bottom: 1px solid var(--rule); }
+  .specimen-row:last-child { border-bottom: none; }
+  .specimen-meta { font-family: var(--mono); font-size: 11px; color: var(--fg-3); }
+</style>
+</head>
+<body class="dark">
+
+<canvas id="bg-canvas"></canvas>
+<div class="grain-overlay"></div>
+
+<div class="controls">
+  <div class="ctrl-row">
+    <span class="lbl">Mode</span>
+    <button onclick="setMode('dark')" class="on" data-mode="dark">Dark</button>
+    <button onclick="setMode('light')" data-mode="light">Light</button>
+    <span class="lbl" style="margin-left: 12px;">Effect</span>
+    <button onclick="setEffect('none')" class="on" data-fx="none">None</button>
+    <button onclick="setEffect('heatflow')" data-fx="heatflow">Heat flow</button>
+    <button onclick="setEffect('sparks')" data-fx="sparks">Sparks</button>
+    <button onclick="setEffect('temper')" data-fx="temper">Temper bands</button>
+    <button onclick="setEffect('forge')" data-fx="forge">Forge pulse</button>
+  </div>
+  <div class="ctrl-row">
+    <span class="lbl">Font</span>
+    <button onclick="setFont(0)" class="on font-btn" data-fi="0">Source Serif</button>
+    <button onclick="setFont(1)" class="font-btn" data-fi="1">Cormorant</button>
+    <button onclick="setFont(2)" class="font-btn" data-fi="2">Playfair</button>
+    <button onclick="setFont(3)" class="font-btn" data-fi="3">Lora</button>
+    <button onclick="setFont(4)" class="font-btn" data-fi="4">DM Serif</button>
+    <button onclick="setFont(5)" class="font-btn" data-fi="5">Crimson Pro</button>
+  </div>
+  <div class="ctrl-row">
+    <span class="lbl">Palette</span>
+    <button onclick="setPalette(0)" class="on pal-btn" data-pi="0"><span class="pal-dots"><span style="background:#2dd4bf"></span><span style="background:#fbbf24"></span><span style="background:#f472b6"></span></span>Forge</button>
+    <button onclick="setPalette(1)" class="pal-btn" data-pi="1"><span class="pal-dots"><span style="background:#34d399"></span><span style="background:#f59e0b"></span><span style="background:#f43f5e"></span></span>Crucible</button>
+    <button onclick="setPalette(2)" class="pal-btn" data-pi="2"><span class="pal-dots"><span style="background:#60a5fa"></span><span style="background:#e8944a"></span><span style="background:#e11d48"></span></span>Anvil</button>
+    <button onclick="setPalette(3)" class="pal-btn" data-pi="3"><span class="pal-dots"><span style="background:#22d3ee"></span><span style="background:#a8a29e"></span><span style="background:#ea580c"></span></span>Quench</button>
+    <button onclick="setPalette(4)" class="pal-btn" data-pi="4"><span class="pal-dots"><span style="background:#a78bfa"></span><span style="background:#d4a04a"></span><span style="background:#fb7185"></span></span>Oxide</button>
+    <button onclick="setPalette(5)" class="pal-btn" data-pi="5"><span class="pal-dots"><span style="background:#86efac"></span><span style="background:#d4b896"></span><span style="background:#ef4444"></span></span>Patina</button>
+  </div>
+</div>
+
+<div class="page">
+<div class="col">
+
+  <div class="hero">
+    <h1>Build apps from<br><em>conversation</em></h1>
+    <p class="lede">Describe what you want. The system generates verified specs, deploys actors, and evolves through use.</p>
+    <div class="hero-actions">
+      <button class="btn">Get started</button>
+      <a class="link-text" href="#">Documentation <span class="arr">&rarr;</span></a>
+    </div>
+  </div>
+
+  <hr class="fade-rule">
+
+  <div class="section-head"><span class="folio">Dashboard</span></div>
+
+  <div class="dash-wrapper">
+    <span class="watermark">TEMPER</span>
+    <div class="dash">
+      <div class="dash-nav">
+        <div class="dash-logo"><div class="mark"></div>temper</div>
+        <ul class="dash-links">
+          <li><a href="#" class="active">Overview</a></li>
+          <li><a href="#">Entities</a></li>
+          <li><a href="#">Transitions</a></li>
+          <li><a href="#">Trajectories</a></li>
+          <li><a href="#">Tenants</a></li>
+          <li><a href="#">Specs</a></li>
+        </ul>
+      </div>
+      <div class="dash-main">
+        <div class="dash-header">
+          <h2 class="dash-title">Overview</h2>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <button class="btn btn-ghost btn-sm">Last 24h</button>
+            <button class="btn btn-sm">Deploy</button>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat"><div class="stat-label">Active entities</div><div class="stat-val">2,847</div><div class="stat-delta up">+12.4%</div></div>
+          <div class="stat"><div class="stat-label">Transitions / min</div><div class="stat-val">156</div><div class="stat-delta">+0.8%</div></div>
+          <div class="stat"><div class="stat-label">Unmet intents</div><div class="stat-val">3</div></div>
+          <div class="stat"><div class="stat-label">Verification</div><div class="stat-val">99.2<span class="unit">%</span></div></div>
+        </div>
+        <hr class="stats-rule">
+        <table class="tbl">
+          <thead><tr><th>Entity</th><th>State</th><th>Last transition</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr><td class="name">Issue #1042</td><td class="mono">in_progress</td><td class="mono">2m ago</td><td class="s-ok">Verified</td></tr>
+            <tr><td class="name">Project Alpha</td><td class="mono">active</td><td class="mono">14m ago</td><td class="s-ok">Verified</td></tr>
+            <tr><td class="name">Cycle Q1-2026</td><td class="mono">review</td><td class="mono">1h ago</td><td class="s-accent">Evolving</td></tr>
+            <tr><td class="name">Label: Critical</td><td class="mono">archived</td><td class="mono">3d ago</td><td class="s-mute">Idle</td></tr>
+            <tr><td class="name">Deploy #47</td><td class="mono">failed</td><td class="mono">4d ago</td><td class="s-err">Failed</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-head"><span class="folio">Components</span></div>
+
+  <div class="comp-row">
+    <div>
+      <div class="comp-label">Actions</div>
+      <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+        <button class="btn">Deploy</button>
+        <button class="btn btn-ghost">Cancel</button>
+        <button class="btn btn-accent-soft">Evolve</button>
+      </div>
+      <div class="tag-row">
+        <span class="tag tag-ok">Verified</span>
+        <span class="tag tag-err">Failed</span>
+        <span class="tag tag-warn">Pending</span>
+        <span class="tag tag-accent">Evolving</span>
+        <span class="tag tag-default">Idle</span>
+      </div>
+    </div>
+    <div>
+      <div class="comp-label">Inputs</div>
+      <div class="field"><label class="field-label">Entity name</label><input class="field-input" placeholder="e.g. project-tracker" /></div>
+      <div class="field"><label class="field-label">Tenant</label><input class="field-input" value="acme-corp" /></div>
+      <a class="link-accent">View documentation &rarr;</a>
+    </div>
+  </div>
+
+  <div class="comp-row">
+    <div>
+      <div class="comp-label">Settings</div>
+      <div class="setting-row"><span class="setting-label">Dark mode</span><div class="switch on"></div></div>
+      <div class="setting-row"><span class="setting-label">Auto-deploy</span><div class="switch on"></div></div>
+      <div class="setting-row"><span class="setting-label">Telemetry</span><div class="switch"></div></div>
+      <div class="setting-row"><span class="setting-label">Notifications</span><div class="switch"></div></div>
+    </div>
+    <div>
+      <div class="comp-label">Color story</div>
+      <p style="font-size: 13px; color: var(--fg-2); line-height: 1.7;">
+        Each palette uses three hue families. The background effect uses the first two palette colors. Toggle between palettes and effects to explore combinations.
+      </p>
+    </div>
+  </div>
+
+  <div class="section-head"><span class="folio">Typography</span></div>
+  <div>
+    <div class="specimen-row"><span class="specimen-meta">Display / 58</span><span class="display-specimen" style="font-family: var(--serif); font-size: 52px; font-weight: 300; letter-spacing: -0.015em; line-height: 1.12;">Build apps</span></div>
+    <div class="specimen-row"><span class="specimen-meta">Title / 20</span><span class="title-specimen" style="font-family: var(--serif); font-size: 20px; font-weight: 400; letter-spacing: -0.01em; line-height: 1.3;">Overview</span></div>
+    <div class="specimen-row"><span class="specimen-meta">Body / 14</span><span>The system generates verified specs and deploys entity actors.</span></div>
+    <div class="specimen-row"><span class="specimen-meta">Mono / 12</span><span style="font-family: var(--mono); font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums;">in_progress · 2m ago · 99.2%</span></div>
+    <div class="specimen-row"><span class="specimen-meta">Label / 11</span><span style="font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-3);">Section Label</span></div>
+  </div>
+
+  <div class="section-head"><span class="folio">Palette</span></div>
+  <div class="pal-grid">
+    <div>
+      <div class="pal-section-label">Active palette</div>
+      <div class="pal-item"><div class="pal-swatch" id="sw-c1"></div><span class="pal-name" id="pn-c1"></span><span class="pal-hex" id="ph-c1"></span></div>
+      <div class="pal-item"><div class="pal-swatch" id="sw-c2"></div><span class="pal-name" id="pn-c2"></span><span class="pal-hex" id="ph-c2"></span></div>
+      <div class="pal-item"><div class="pal-swatch" id="sw-c3"></div><span class="pal-name" id="pn-c3"></span><span class="pal-hex" id="ph-c3"></span></div>
+    </div>
+    <div>
+      <div class="pal-section-label">Neutrals</div>
+      <div class="pal-item"><div class="pal-swatch" style="background: var(--fg);"></div><span class="pal-name">Foreground</span><span class="pal-hex" id="ph-fg"></span></div>
+      <div class="pal-item"><div class="pal-swatch" style="background: var(--fg-2);"></div><span class="pal-name">Secondary</span><span class="pal-hex" id="ph-fg2"></span></div>
+      <div class="pal-item"><div class="pal-swatch" style="background: var(--fg-3);"></div><span class="pal-name">Muted</span><span class="pal-hex" id="ph-fg3"></span></div>
+      <div class="pal-item"><div class="pal-swatch" style="background: var(--bg); border: 1px solid var(--rule);"></div><span class="pal-name">Background</span><span class="pal-hex" id="ph-bg"></span></div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+<script>
+// ─── Configuration ───
+const FONTS = [
+  { name: 'Source Serif 4', family: "'Source Serif 4', Georgia, serif", weight: 300 },
+  { name: 'Cormorant Garamond', family: "'Cormorant Garamond', Georgia, serif", weight: 400 },
+  { name: 'Playfair Display', family: "'Playfair Display', Georgia, serif", weight: 400 },
+  { name: 'Lora', family: "'Lora', Georgia, serif", weight: 400 },
+  { name: 'DM Serif Display', family: "'DM Serif Display', Georgia, serif", weight: 400 },
+  { name: 'Crimson Pro', family: "'Crimson Pro', Georgia, serif", weight: 300 },
+];
+
+const PALETTES = [
+  { name: 'Forge', labels: ['Teal', 'Amber', 'Rose'],
+    dark:  { c1: '#2dd4bf', c2: '#fbbf24', c3: '#f472b6' },
+    light: { c1: '#0F766E', c2: '#A16207', c3: '#9D174D' } },
+  { name: 'Crucible', labels: ['Emerald', 'Gold', 'Crimson'],
+    dark:  { c1: '#34d399', c2: '#f59e0b', c3: '#f43f5e' },
+    light: { c1: '#047857', c2: '#92400E', c3: '#BE123C' } },
+  { name: 'Anvil', labels: ['Steel', 'Copper', 'Wine'],
+    dark:  { c1: '#60a5fa', c2: '#e8944a', c3: '#e11d48' },
+    light: { c1: '#1D4ED8', c2: '#9A5B1E', c3: '#9F1239' } },
+  { name: 'Quench', labels: ['Cyan', 'Iron', 'Burnt'],
+    dark:  { c1: '#22d3ee', c2: '#a8a29e', c3: '#ea580c' },
+    light: { c1: '#0E7490', c2: '#57534e', c3: '#9A3412' } },
+  { name: 'Oxide', labels: ['Violet', 'Bronze', 'Coral'],
+    dark:  { c1: '#a78bfa', c2: '#d4a04a', c3: '#fb7185' },
+    light: { c1: '#6D28D9', c2: '#8B6914', c3: '#BE123C' } },
+  { name: 'Patina', labels: ['Mint', 'Sand', 'Rust'],
+    dark:  { c1: '#86efac', c2: '#d4b896', c3: '#ef4444' },
+    light: { c1: '#059669', c2: '#7C6640', c3: '#B91C1C' } },
+];
+
+const NEUTRALS = {
+  dark:  { fg: '#D4D4D4', fg2: '#8A8A8A', fg3: '#4A4A4A', bg: '#0A0A0A' },
+  light: { fg: '#2A2A2A', fg2: '#6B6B6B', fg3: '#A0A0A0', bg: '#FAFAFA' },
+};
+
+let mode = 'dark', fontIdx = 0, palIdx = 0, effectId = 'none';
+
+// ─── Hex to RGB helper ───
+function hexToRgb(hex) {
+  const r = parseInt(hex.slice(1,3), 16);
+  const g = parseInt(hex.slice(3,5), 16);
+  const b = parseInt(hex.slice(5,7), 16);
+  return [r, g, b];
+}
+
+// ─── Apply state ───
+function apply() {
+  const s = document.documentElement.style;
+  const pal = PALETTES[palIdx][mode];
+  const font = FONTS[fontIdx];
+
+  document.body.className = mode;
+
+  // Set CSS vars for palette
+  s.setProperty('--c1', pal.c1);
+  s.setProperty('--c2', pal.c2);
+  s.setProperty('--c3', pal.c3);
+
+  const [r1,g1,b1] = hexToRgb(pal.c1);
+  const [r2,g2,b2] = hexToRgb(pal.c2);
+  const [r3,g3,b3] = hexToRgb(pal.c3);
+  s.setProperty('--c1-dim', `rgba(${r1},${g1},${b1},0.07)`);
+  s.setProperty('--c2-dim', `rgba(${r2},${g2},${b2},0.06)`);
+  s.setProperty('--c3-dim', `rgba(${r3},${g3},${b3},0.06)`);
+
+  // Font
+  s.setProperty('--serif', font.family);
+  document.querySelectorAll('.hero h1, .dash-title, .display-specimen, .title-specimen').forEach(el => {
+    el.style.fontWeight = font.weight;
+  });
+
+  // Toolbar active states
+  document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  document.querySelectorAll('.font-btn').forEach(b => b.classList.toggle('on', b.dataset.fi == fontIdx));
+  document.querySelectorAll('.pal-btn').forEach(b => b.classList.toggle('on', b.dataset.pi == palIdx));
+  document.querySelectorAll('[data-fx]').forEach(b => b.classList.toggle('on', b.dataset.fx === effectId));
+
+  // Palette display
+  const labels = PALETTES[palIdx].labels;
+  document.getElementById('sw-c1').style.background = pal.c1;
+  document.getElementById('sw-c2').style.background = pal.c2;
+  document.getElementById('sw-c3').style.background = pal.c3;
+  document.getElementById('pn-c1').textContent = labels[0];
+  document.getElementById('pn-c2').textContent = labels[1];
+  document.getElementById('pn-c3').textContent = labels[2];
+  document.getElementById('ph-c1').textContent = pal.c1;
+  document.getElementById('ph-c2').textContent = pal.c2;
+  document.getElementById('ph-c3').textContent = pal.c3;
+
+  const n = NEUTRALS[mode];
+  document.getElementById('ph-fg').textContent = n.fg;
+  document.getElementById('ph-fg2').textContent = n.fg2;
+  document.getElementById('ph-fg3').textContent = n.fg3;
+  document.getElementById('ph-bg').textContent = n.bg;
+}
+
+function setMode(m) { mode = m; apply(); }
+function setFont(i) { fontIdx = i; apply(); }
+function setPalette(i) { palIdx = i; apply(); }
+function setEffect(id) { effectId = id; document.querySelectorAll('[data-fx]').forEach(b => b.classList.toggle('on', b.dataset.fx === id)); }
+
+// ─── Canvas background effects ───
+const canvas = document.getElementById('bg-canvas');
+const ctx = canvas.getContext('2d');
+let particles = [];
+let animFrame;
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Simplex-like noise (fast approximation)
+function noise(x, y, t) {
+  return (Math.sin(x * 0.8 + t * 0.3) * Math.cos(y * 0.6 + t * 0.2) +
+          Math.sin(x * 0.3 - t * 0.15) * Math.cos(y * 1.1 + t * 0.25) +
+          Math.cos(x * 0.5 + y * 0.4 + t * 0.1)) / 3;
+}
+
+function initParticles() {
+  particles = [];
+  for (let i = 0; i < 60; i++) {
+    particles.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      vx: (Math.random() - 0.5) * 0.3,
+      vy: -(Math.random() * 0.5 + 0.2),
+      size: Math.random() * 2 + 0.5,
+      life: Math.random(),
+      decay: 0.001 + Math.random() * 0.002,
+      flicker: Math.random() * Math.PI * 2,
+    });
+  }
+}
+initParticles();
+
+function getColors() {
+  const pal = PALETTES[palIdx][mode];
+  return { c1: hexToRgb(pal.c1), c2: hexToRgb(pal.c2), c3: hexToRgb(pal.c3) };
+}
+
+let t = 0;
+function render() {
+  const w = canvas.width, h = canvas.height;
+  const isDark = mode === 'dark';
+
+  ctx.clearRect(0, 0, w, h);
+
+  if (effectId === 'none') {
+    // Static wash — same as v6 but via canvas
+    const colors = getColors();
+    const g1 = ctx.createRadialGradient(w * 0.25, 0, 0, w * 0.25, 0, w * 0.55);
+    g1.addColorStop(0, `rgba(${colors.c1[0]},${colors.c1[1]},${colors.c1[2]},${isDark ? 0.03 : 0.025})`);
+    g1.addColorStop(1, 'transparent');
+    ctx.fillStyle = g1;
+    ctx.fillRect(0, 0, w, h);
+
+    const g2 = ctx.createRadialGradient(w * 0.75, h * 0.3, 0, w * 0.75, h * 0.3, w * 0.5);
+    g2.addColorStop(0, `rgba(${colors.c2[0]},${colors.c2[1]},${colors.c2[2]},${isDark ? 0.025 : 0.02})`);
+    g2.addColorStop(1, 'transparent');
+    ctx.fillStyle = g2;
+    ctx.fillRect(0, 0, w, h);
+
+  } else if (effectId === 'heatflow') {
+    // Slowly undulating gradient — conveys heat convection
+    const colors = getColors();
+    const alpha = isDark ? 0.025 : 0.02;
+    const cellW = 80, cellH = 80;
+    for (let x = 0; x < w; x += cellW) {
+      for (let y = 0; y < h; y += cellH) {
+        const n = noise(x / w * 4, y / h * 4, t);
+        const mix = (n + 1) / 2;
+        const r = Math.round(colors.c1[0] * mix + colors.c2[0] * (1 - mix));
+        const g = Math.round(colors.c1[1] * mix + colors.c2[1] * (1 - mix));
+        const b = Math.round(colors.c1[2] * mix + colors.c2[2] * (1 - mix));
+        ctx.fillStyle = `rgba(${r},${g},${b},${alpha * (0.5 + Math.abs(n) * 0.5)})`;
+        ctx.fillRect(x, y, cellW, cellH);
+      }
+    }
+
+  } else if (effectId === 'sparks') {
+    // Forge sparks — tiny embers drifting upward
+    const colors = getColors();
+    const baseAlpha = isDark ? 1 : 0.7;
+
+    // Static wash underneath
+    const g1 = ctx.createRadialGradient(w * 0.5, h, 0, w * 0.5, h, h * 0.8);
+    g1.addColorStop(0, `rgba(${colors.c2[0]},${colors.c2[1]},${colors.c2[2]},${isDark ? 0.03 : 0.02})`);
+    g1.addColorStop(1, 'transparent');
+    ctx.fillStyle = g1;
+    ctx.fillRect(0, 0, w, h);
+
+    particles.forEach(p => {
+      p.x += p.vx + Math.sin(t * 2 + p.flicker) * 0.15;
+      p.y += p.vy;
+      p.life -= p.decay;
+      p.flicker += 0.02;
+
+      if (p.life <= 0 || p.y < -10) {
+        p.x = w * 0.3 + Math.random() * w * 0.4;
+        p.y = h + 10;
+        p.life = 0.7 + Math.random() * 0.3;
+        p.vx = (Math.random() - 0.5) * 0.3;
+        p.vy = -(Math.random() * 0.5 + 0.3);
+      }
+
+      const flicker = 0.5 + Math.sin(p.flicker * 8) * 0.5;
+      const a = p.life * baseAlpha * flicker;
+      const mix = p.life;
+      const r = Math.round(colors.c2[0] * mix + colors.c1[0] * (1 - mix));
+      const g = Math.round(colors.c2[1] * mix + colors.c1[1] * (1 - mix));
+      const b = Math.round(colors.c2[2] * mix + colors.c1[2] * (1 - mix));
+
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${r},${g},${b},${a * 0.3})`;
+      ctx.fill();
+
+      // Glow
+      const grd = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 4);
+      grd.addColorStop(0, `rgba(${r},${g},${b},${a * 0.06})`);
+      grd.addColorStop(1, 'transparent');
+      ctx.fillStyle = grd;
+      ctx.fillRect(p.x - p.size * 4, p.y - p.size * 4, p.size * 8, p.size * 8);
+    });
+
+  } else if (effectId === 'temper') {
+    // Temper color bands — horizontal bands shifting through oxide colors
+    // Real tempering scale: straw (220C) → gold (240C) → brown (260C) → purple (280C) → blue (300C)
+    const temperColors = isDark
+      ? [[202,155,58], [196,130,40], [160,100,60], [130,80,140], [70,100,180]]
+      : [[140,110,30], [140,90,20], [110,65,35], [90,50,100], [40,65,130]];
+    const alpha = isDark ? 0.025 : 0.02;
+    const bandH = h / 5;
+
+    for (let i = 0; i < 5; i++) {
+      const shift = noise(0, i * 0.5, t * 0.5) * 0.3;
+      const ci = (i + Math.floor(t * 0.2)) % 5;
+      const ni = (ci + 1) % 5;
+      const mix = ((t * 0.2) % 1 + shift + 1) % 1;
+      const c = temperColors[ci];
+      const n2 = temperColors[ni];
+      const r = Math.round(c[0] * (1 - mix) + n2[0] * mix);
+      const g = Math.round(c[1] * (1 - mix) + n2[1] * mix);
+      const b2 = Math.round(c[2] * (1 - mix) + n2[2] * mix);
+
+      const yOff = noise(i, 0, t * 0.3) * 20;
+      const grd = ctx.createLinearGradient(0, i * bandH + yOff, 0, (i + 1) * bandH + yOff);
+      grd.addColorStop(0, `rgba(${r},${g},${b2},${alpha * 0.3})`);
+      grd.addColorStop(0.5, `rgba(${r},${g},${b2},${alpha})`);
+      grd.addColorStop(1, `rgba(${r},${g},${b2},${alpha * 0.3})`);
+      ctx.fillStyle = grd;
+      ctx.fillRect(0, i * bandH + yOff - 10, w, bandH + 20);
+    }
+
+  } else if (effectId === 'forge') {
+    // Forge pulse — radial glow from bottom center, breathing
+    const colors = getColors();
+    const breath = (Math.sin(t * 0.4) + 1) / 2;
+    const alpha1 = (isDark ? 0.04 : 0.03) * (0.6 + breath * 0.4);
+    const alpha2 = (isDark ? 0.025 : 0.02) * (0.7 + breath * 0.3);
+
+    const cx = w * 0.5 + Math.sin(t * 0.15) * w * 0.05;
+    const cy = h * 0.85;
+
+    const g1 = ctx.createRadialGradient(cx, cy, 0, cx, cy, h * 0.7);
+    g1.addColorStop(0, `rgba(${colors.c2[0]},${colors.c2[1]},${colors.c2[2]},${alpha1})`);
+    g1.addColorStop(0.4, `rgba(${colors.c1[0]},${colors.c1[1]},${colors.c1[2]},${alpha2})`);
+    g1.addColorStop(1, 'transparent');
+    ctx.fillStyle = g1;
+    ctx.fillRect(0, 0, w, h);
+
+    // Secondary pulse
+    const breath2 = (Math.sin(t * 0.6 + 1) + 1) / 2;
+    const g2 = ctx.createRadialGradient(cx, cy, 0, cx, cy, h * 0.4);
+    g2.addColorStop(0, `rgba(${colors.c2[0]},${colors.c2[1]},${colors.c2[2]},${alpha1 * 0.5 * breath2})`);
+    g2.addColorStop(1, 'transparent');
+    ctx.fillStyle = g2;
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  t += 0.016;
+  animFrame = requestAnimationFrame(render);
+}
+
+// Start
+apply();
+render();
+</script>
+
+</body>
+</html>

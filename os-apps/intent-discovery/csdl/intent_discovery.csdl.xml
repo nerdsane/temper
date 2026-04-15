@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.IntentDiscovery" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="IntentDiscovery">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Reason" Type="Edm.String"/>
+        <Property Name="Source" Type="Edm.String"/>
+        <Property Name="TriggerContextJson" Type="Edm.String"/>
+        <Property Name="SignalSummaryJson" Type="Edm.String"/>
+        <Property Name="SignalSourcesJson" Type="Edm.String"/>
+        <Property Name="SignalCount" Type="Edm.Int64"/>
+        <Property Name="AnalystAgentId" Type="Edm.String"/>
+        <Property Name="AnalysisJson" Type="Edm.String"/>
+        <Property Name="FindingCount" Type="Edm.Int64"/>
+        <Property Name="RecordsCreatedCount" Type="Edm.Int64"/>
+        <Property Name="IssuesCreatedCount" Type="Edm.Int64"/>
+        <Property Name="RecordIdsJson" Type="Edm.String"/>
+        <Property Name="IssueIdsJson" Type="Edm.String"/>
+        <Property Name="MaterializationReportJson" Type="Edm.String"/>
+        <Property Name="ErrorMessage" Type="Edm.String"/>
+      </EntityType>
+
+      <Action Name="Trigger" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery"/>
+        <Parameter Name="reason" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="source" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="trigger_context_json" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.IntentDiscovery.IntentDiscovery"/>
+      </Action>
+
+      <Action Name="GatheringComplete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery"/>
+        <Parameter Name="signal_summary_json" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="signal_sources_json" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="signal_count" Type="Edm.Int64" Nullable="false"/>
+        <ReturnType Type="Temper.IntentDiscovery.IntentDiscovery"/>
+      </Action>
+
+      <Action Name="AnalysisComplete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery"/>
+        <Parameter Name="analyst_agent_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="analysis_json" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="finding_count" Type="Edm.Int64" Nullable="false"/>
+        <ReturnType Type="Temper.IntentDiscovery.IntentDiscovery"/>
+      </Action>
+
+      <Action Name="ProposalComplete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery"/>
+        <Parameter Name="records_created_count" Type="Edm.Int64" Nullable="false"/>
+        <Parameter Name="issues_created_count" Type="Edm.Int64" Nullable="false"/>
+        <Parameter Name="record_ids_json" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="issue_ids_json" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="materialization_report_json" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.IntentDiscovery.IntentDiscovery"/>
+      </Action>
+
+      <Action Name="Fail" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.IntentDiscovery.IntentDiscovery"/>
+      </Action>
+
+      <EntityContainer Name="Service">
+        <EntitySet Name="IntentDiscoveries" EntityType="Temper.IntentDiscovery.IntentDiscovery"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

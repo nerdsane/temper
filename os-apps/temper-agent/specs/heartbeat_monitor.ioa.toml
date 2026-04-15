@@ -1,0 +1,84 @@
+# HeartbeatMonitor — Periodic scanner for stale agents.
+#
+# One per tenant. Self-scheduling via HeartbeatRun pattern.
+# Scans agents in non-terminal states and fires TimeoutFail on stale ones.
+
+[automaton]
+name = "HeartbeatMonitor"
+states = ["Idle", "Scanning"]
+initial = "Idle"
+
+[[state]]
+name = "scan_interval_seconds"
+type = "string"
+initial = "30"
+
+[[state]]
+name = "last_scan_at"
+type = "string"
+initial = ""
+
+[[state]]
+name = "stale_agents_found"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Start"
+kind = "input"
+from = ["Idle"]
+to = "Scanning"
+hint = "Begin scanning for stale agents."
+effect = [{ type = "trigger", name = "scan_agents" }]
+
+[[action]]
+name = "ScanComplete"
+kind = "input"
+from = ["Scanning"]
+to = "Idle"
+params = ["last_scan_at", "stale_agents_found"]
+hint = "Scan finished. Schedule next scan."
+effect = [{ type = "increment", var = "stale_agents_found" }, { type = "trigger", name = "schedule_next_scan" }]
+
+[[action]]
+name = "ScheduledScan"
+kind = "input"
+from = ["Idle"]
+to = "Scanning"
+hint = "Scheduled scan triggered."
+effect = [{ type = "trigger", name = "scan_agents" }]
+
+[[action]]
+name = "ScanFailed"
+kind = "input"
+from = ["Scanning"]
+to = "Idle"
+params = ["error_message"]
+hint = "Scan WASM failed. Return to Idle for next scheduled scan."
+
+[[action]]
+name = "ScheduleFailed"
+kind = "input"
+from = ["Idle"]
+params = ["error_message"]
+hint = "Schedule WASM failed. Stay Idle."
+
+[[integration]]
+name = "scan_agents"
+trigger = "scan_agents"
+type = "wasm"
+module = "heartbeat_scan"
+on_failure = "ScanFailed"
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"
+
+[[integration]]
+name = "schedule_next_scan"
+trigger = "schedule_next_scan"
+type = "wasm"
+module = "heartbeat_scheduler"
+on_failure = "ScheduleFailed"
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"

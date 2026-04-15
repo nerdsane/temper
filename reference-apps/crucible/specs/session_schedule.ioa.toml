@@ -1,0 +1,126 @@
+# SessionSchedule Entity — I/O Automaton Specification
+#
+# A cron schedule that posts a user.message to a Crucible Session at
+# the specified interval. The CrucibleScheduler heartbeat entity queries
+# active SessionSchedules and fires the Trigger action when due.
+#
+# The Trigger action fires the crucible_cron_trigger WASM module, which:
+#   1. Substitutes {{now}}, {{run_count}}, {{last_result}} in MessageTemplate
+#   2. Checks Session.Status (skips if Running/Terminated/Archived)
+#   3. POSTs a user.message event to the Session's event feed
+#   4. Returns TriggerComplete with the result
+#
+# The sidecar watch process picks up the posted user.message and drives
+# the agent turn — the scheduler doesn't know about LLMs or tools.
+
+[automaton]
+name = "SessionSchedule"
+states = ["Draft", "Active", "Paused", "Expired"]
+initial = "Draft"
+
+# --- State variables ---
+
+[[state]]
+name = "run_count"
+type = "counter"
+initial = "0"
+
+# --- Actions ---
+
+[[action]]
+name = "ActivateSchedule"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+hint = "Start the schedule. The CrucibleScheduler will begin firing triggers."
+
+[[action]]
+name = "Trigger"
+kind = "input"
+from = ["Active"]
+to = "Active"
+hint = "Fire this schedule — posts a user.message to the target session."
+effect = [{ type = "trigger", name = "crucible_cron_trigger" },
+          { type = "increment", var = "run_count" }]
+
+[[action]]
+name = "TriggerComplete"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["last_result"]
+hint = "Callback from crucible_cron_trigger on success."
+
+[[action]]
+name = "TriggerFailed"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["error", "error_message", "integration"]
+hint = "Callback from crucible_cron_trigger on failure."
+
+[[action]]
+name = "PauseSchedule"
+kind = "input"
+from = ["Active"]
+to = "Paused"
+hint = "Temporarily disable this schedule."
+
+[[action]]
+name = "ResumeSchedule"
+kind = "input"
+from = ["Paused"]
+to = "Active"
+hint = "Re-enable a paused schedule."
+
+[[action]]
+name = "ExpireSchedule"
+kind = "input"
+from = ["Active"]
+to = "Expired"
+hint = "Mark this schedule as expired (max_runs reached or manual)."
+
+# --- Safety ---
+
+[[invariant]]
+name = "ExpiredIsFinal"
+when = ["Expired"]
+assert = "no_further_transitions"
+
+# --- Field invariants ---
+
+[[field_invariant]]
+name = "CronExpressionRequired"
+when = { not = { field = "CronExpression", absent = true } }
+require = { not = { field = "CronExpression", empty = true } }
+message = "SessionSchedule.CronExpression must not be empty"
+
+[[field_invariant]]
+name = "MessageTemplateRequired"
+when = { not = { field = "MessageTemplate", absent = true } }
+require = { not = { field = "MessageTemplate", empty = true } }
+message = "SessionSchedule.MessageTemplate must not be empty"
+
+[[field_invariant]]
+name = "StatusMustBeKnown"
+when = { not = { field = "Status", absent = true } }
+require = { any_of = [
+  { field = "Status", equals = "Draft" },
+  { field = "Status", equals = "Active" },
+  { field = "Status", equals = "Paused" },
+  { field = "Status", equals = "Expired" },
+]}
+message = "SessionSchedule.Status must be Draft, Active, Paused, or Expired"
+
+# --- Integration ---
+
+[[integration]]
+name = "crucible_cron_trigger"
+trigger = "crucible_cron_trigger"
+type = "wasm"
+module = "crucible_cron_trigger"
+on_success = "TriggerComplete"
+on_failure = "TriggerFailed"
+
+[integration.config]
+temper_api_url = "http://127.0.0.1:3000"

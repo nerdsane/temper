@@ -1,0 +1,36 @@
+//! I/O Automaton specification format for Temper entities.
+//!
+//! Based on Lynch-Tuttle I/O Automata (1987): a labeled state transition system
+//! with input, output, and internal actions, each specified by precondition/effect pairs.
+//!
+//! This replaces TLA+ as the primary agent-facing specification format because:
+//! - **Precondition/effect** maps 1:1 to TransitionTable guards and effects
+//! - **Input/output/internal** action classification maps to the actor model
+//! - **TOML format** is natively readable/writable by LLM agents
+//! - **Composition** via shared actions maps to actor message passing
+//! - **No temporal logic overhead** — we use Stateright for model checking
+//!
+//! TLA+ remains available for humans who want temporal reasoning.
+
+pub mod assert_parser;
+pub mod field_invariant;
+mod initial;
+mod lint;
+pub mod metadata;
+pub mod parser;
+mod toml_parser;
+pub mod translate;
+mod types;
+
+pub use assert_parser::{AssertCompareOp, ParsedAssert, parse_assert_expr};
+pub use field_invariant::{FieldInvariant, FieldPredicate, PredicateParseError};
+pub use initial::{
+    parse_bool_initial, parse_counter_initial_usize, parse_list_initial, parse_var_initial_json,
+};
+pub use lint::{
+    BundleLintFinding, LintFinding, LintSeverity, lint_automata_bundle, lint_automaton,
+};
+pub use metadata::SpecMetadata;
+pub use parser::{parse_automaton, to_state_machine};
+pub use translate::{ResolvedAction, ResolvedEffect, ResolvedGuard, translate_actions};
+pub use types::*;

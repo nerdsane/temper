@@ -1,0 +1,248 @@
+# EvolutionRun Entity — I/O Automaton Specification
+#
+# Orchestrates the GEPA self-improvement loop. Each run targets a skill
+# (OS app) and evolves its specs through LLM-guided mutation, verification,
+# and Pareto frontier management.
+#
+# LLM-creative steps run through TemperAgent (spec+WASM), not direct adapters.
+# Computation steps (replay, scoring, Pareto update, reflective dataset)
+# use dedicated GEPA WASM modules.
+#
+# Verification retry loop: on L0-L3 failure, errors are fed back as
+# reflective data for the next mutation attempt (max 3 per candidate).
+
+[automaton]
+name = "EvolutionRun"
+states = ["Created", "Selecting", "Evaluating", "Reflecting", "Proposing", "Verifying", "Scoring", "Updating", "AwaitingApproval", "Deploying", "Completed", "Failed"]
+initial = "Created"
+
+# --- State Variables ---
+
+[[state]]
+name = "candidate_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "mutation_attempts"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "generation"
+type = "counter"
+initial = "0"
+
+# --- Actions ---
+
+[[action]]
+name = "Start"
+kind = "input"
+from = ["Created"]
+to = "Selecting"
+params = ["SkillName", "TargetEntityType", "AutonomyLevel"]
+hint = "Start the evolution run targeting a skill."
+
+[[action]]
+name = "SelectCandidate"
+kind = "input"
+from = ["Selecting"]
+to = "Evaluating"
+effect = [{ type = "increment", var = "candidate_count" }, { type = "trigger", name = "evaluate_candidate" }]
+params = ["CandidateId", "SpecSource", "TrajectoryActions", "Trajectories"]
+hint = "Select a candidate spec from the Pareto frontier or seed pool."
+
+[[action]]
+name = "RecordEvaluation"
+kind = "input"
+from = ["Evaluating"]
+to = "Reflecting"
+effect = "trigger build_reflective_dataset"
+params = ["ReplayResultJson"]
+hint = "Record evaluation (replay) results from the WASM replay module."
+
+[[action]]
+name = "RecordDataset"
+kind = "input"
+from = ["Reflecting"]
+to = "Proposing"
+effect = "trigger propose_mutation"
+params = ["DatasetJson"]
+hint = "Record reflective dataset built by WASM module from OTS traces."
+
+[[action]]
+name = "RecordMutation"
+kind = "input"
+from = ["Proposing"]
+to = "Verifying"
+effect = [{ type = "increment", var = "mutation_attempts" }, { type = "trigger", name = "verify_candidate" }]
+params = ["MutatedSpecSource", "MutationSummary"]
+hint = "Record the LLM-proposed spec mutation."
+
+[[action]]
+name = "RecordVerificationPass"
+kind = "input"
+from = ["Verifying"]
+to = "Scoring"
+effect = "trigger score_candidate"
+params = ["VerificationReport"]
+hint = "Record successful L0-L3 verification of the mutated spec."
+
+[[action]]
+name = "RecordVerificationFailure"
+kind = "input"
+from = ["Verifying"]
+to = "Reflecting"
+params = ["VerificationErrors"]
+hint = "Verification failed — feed errors back to reflective dataset for retry."
+
+[[action]]
+name = "ExhaustRetries"
+kind = "input"
+from = ["Verifying"]
+to = "Failed"
+params = ["FailureReason"]
+hint = "Max mutation attempts reached without passing verification."
+
+[[action]]
+name = "RecordScore"
+kind = "input"
+from = ["Scoring"]
+to = "Updating"
+effect = "trigger update_frontier"
+params = ["ScoresJson"]
+hint = "Record multi-objective scores from WASM scoring module."
+
+[[action]]
+name = "RecordFrontier"
+kind = "input"
+from = ["Updating"]
+to = "AwaitingApproval"
+params = ["FrontierUpdateJson"]
+hint = "Frontier updated, approval required before deployment."
+
+[[action]]
+name = "RecordFrontierAutoApprove"
+kind = "input"
+from = ["Updating"]
+to = "Deploying"
+effect = "trigger deploy_candidate"
+params = ["FrontierUpdateJson"]
+hint = "Frontier updated, auto-approved for deployment."
+
+[[action]]
+name = "ContinueEvolution"
+kind = "input"
+from = ["Updating"]
+to = "Selecting"
+effect = "increment generation"
+hint = "Continue to next generation."
+
+[[action]]
+name = "Approve"
+kind = "input"
+from = ["AwaitingApproval"]
+to = "Deploying"
+effect = "trigger deploy_candidate"
+params = ["ApproverId"]
+hint = "Human or verified agent approves the evolution candidate."
+
+[[action]]
+name = "Reject"
+kind = "input"
+from = ["AwaitingApproval"]
+to = "Selecting"
+effect = "increment generation"
+params = ["RejectionReason"]
+hint = "Reject the candidate, continue evolving."
+
+[[action]]
+name = "Deploy"
+kind = "input"
+from = ["Deploying"]
+to = "Completed"
+params = ["DeploymentId"]
+hint = "Spec hot-deployed via SpecRegistry::swap_table()."
+
+[[action]]
+name = "Fail"
+kind = "input"
+from = ["Created", "Selecting", "Evaluating", "Reflecting", "Proposing", "Verifying", "Scoring", "Updating", "Deploying"]
+to = "Failed"
+params = ["FailureReason"]
+hint = "Unrecoverable error — evolution run failed."
+
+# --- Integrations ---
+
+[[integration]]
+name = "evaluate_candidate"
+trigger = "evaluate_candidate"
+type = "wasm"
+module = "gepa-replay"
+on_success = "RecordEvaluation"
+on_failure = "Fail"
+
+[[integration]]
+name = "build_reflective_dataset"
+trigger = "build_reflective_dataset"
+type = "wasm"
+module = "gepa-reflective"
+on_success = "RecordDataset"
+on_failure = "Fail"
+
+[[integration]]
+name = "propose_mutation"
+trigger = "propose_mutation"
+type = "wasm"
+module = "gepa-proposer-agent"
+on_success = "RecordMutation"
+on_failure = "Fail"
+prompt = "You are the GEPA evolution agent. Read trigger_params.DatasetJson with workflow-level triplets and patterns. Preserve triplets where preserve=true and improve failed/partial workflows using feedback. GEPA is optimizer-only here: do not introduce/remove entities, actions, or states. If missing_capabilities indicates net-new functionality, emit it as unmet-intent handoff suggestions instead of changing structure. Return the full mutated spec source and a summary."
+
+[integration.config]
+temper_api_url = "http://127.0.0.1:4455"
+temper_api_key = "{secret:temper_api_key}"
+temper_api_key = "{secret:temper_api_key}"
+sandbox_url = "http://127.0.0.1:9999"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+max_turns = "8"
+poll_attempts = "600"
+poll_sleep_ms = "250"
+max_agent_retries = "2"
+tools_enabled = ""
+workdir = "/workspace"
+timeout_secs = "420"
+
+[[integration]]
+name = "verify_candidate"
+trigger = "verify_candidate"
+type = "wasm"
+module = "gepa-verify"
+on_failure = "Fail"
+
+[integration.config]
+temper_api_url = "http://127.0.0.1:4455"
+
+[[integration]]
+name = "score_candidate"
+trigger = "score_candidate"
+type = "wasm"
+module = "gepa-score"
+on_success = "RecordScore"
+on_failure = "Fail"
+
+[[integration]]
+name = "update_frontier"
+trigger = "update_frontier"
+type = "wasm"
+module = "gepa-pareto"
+on_success = "RecordFrontier"
+on_failure = "Fail"
+
+[[integration]]
+name = "deploy_candidate"
+trigger = "deploy_candidate"
+type = "wasm"
+module = "gepa-deploy"
+on_failure = "Fail"

@@ -1,0 +1,13 @@
+[package]
+name = "wasm-helpers"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib"]
+
+[workspace]
+
+[dependencies]
+temper-wasm-sdk = { path = "../../../../crates/temper-wasm-sdk" }
+serde_json = "1"

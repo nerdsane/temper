@@ -1,0 +1,93 @@
+# Issue Tracker Entity — I/O Automaton Specification
+#
+# Models a project management issue lifecycle.
+# 5 states, 8 transition actions.
+# Tracks assignee status and review cycle count.
+
+[automaton]
+name = "Issue"
+states = ["Backlog", "InProgress", "Review", "Done", "Archived"]
+initial = "Backlog"
+
+# --- State Variables ---
+
+[[state]]
+name = "assignee_set"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "review_cycles"
+type = "counter"
+initial = "0"
+
+# --- Actions: Issue Lifecycle ---
+
+[[action]]
+name = "AssignIssue"
+kind = "input"
+from = ["Backlog"]
+to = "Backlog"
+effect = "set assignee_set true"
+hint = "Assign a team member to the issue."
+
+[[action]]
+name = "UnassignIssue"
+kind = "input"
+from = ["Backlog"]
+to = "Backlog"
+effect = "set assignee_set false"
+hint = "Remove the assignee from the issue."
+
+[[action]]
+name = "StartWork"
+kind = "internal"
+from = ["Backlog"]
+to = "InProgress"
+guard = "is_true assignee_set"
+hint = "Begin work on the issue. Requires an assignee."
+
+[[action]]
+name = "SubmitForReview"
+kind = "internal"
+from = ["InProgress"]
+to = "Review"
+hint = "Submit completed work for code review."
+
+[[action]]
+name = "RequestChanges"
+kind = "internal"
+from = ["Review"]
+to = "InProgress"
+effect = "increment review_cycles"
+hint = "Reviewer requests changes to the implementation."
+
+[[action]]
+name = "ApproveReview"
+kind = "internal"
+from = ["Review"]
+to = "Done"
+effect = "increment review_cycles"
+hint = "Reviewer approves the implementation."
+
+[[action]]
+name = "ArchiveIssue"
+kind = "internal"
+from = ["Done"]
+to = "Archived"
+hint = "Archive a completed issue."
+
+[[action]]
+name = "ReopenIssue"
+kind = "input"
+from = ["Done"]
+to = "InProgress"
+hint = "Reopen a completed issue for further work."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
+

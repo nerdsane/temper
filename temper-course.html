@@ -1,0 +1,3477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>How Temper Works — An Interactive Guide</title>
+  <meta name="description" content="An interactive course about Temper, the operating layer for AI agents.">
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700;12..96,800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400;1,9..40,500&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <style>
+    /* ========================================
+       DESIGN SYSTEM — CSS Custom Properties
+       ======================================== */
+    :root {
+      /* --- BACKGROUNDS --- */
+      --color-bg:             #FAF7F2;
+      --color-bg-warm:        #F5F0E8;
+      --color-bg-code:        #1E1E2E;
+      --color-text:           #2C2A28;
+      --color-text-secondary: #6B6560;
+      --color-text-muted:     #9E9790;
+      --color-border:         #E5DFD6;
+      --color-border-light:   #EEEBE5;
+      --color-surface:        #FFFFFF;
+      --color-surface-warm:   #FDF9F3;
+
+      /* --- ACCENT (teal — trust/verification theme) --- */
+      --color-accent:         #2A7B9B;
+      --color-accent-hover:   #22667F;
+      --color-accent-light:   #E4F2F7;
+      --color-accent-muted:   #5A9DB5;
+
+      /* --- SEMANTIC --- */
+      --color-success:        #2D8B55;
+      --color-success-light:  #E8F5EE;
+      --color-error:          #C93B3B;
+      --color-error-light:    #FDE8E8;
+      --color-info:           #2A7B9B;
+      --color-info-light:     #E4F2F7;
+
+      /* --- ACTOR COLORS --- */
+      --color-actor-1:        #D94F30;
+      --color-actor-2:        #2A7B9B;
+      --color-actor-3:        #7B6DAA;
+      --color-actor-4:        #D4A843;
+      --color-actor-5:        #2D8B55;
+
+      /* --- FONTS --- */
+      --font-display:  'Bricolage Grotesque', Georgia, serif;
+      --font-body:     'DM Sans', -apple-system, sans-serif;
+      --font-mono:     'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+
+      /* --- TYPE SCALE (1.25 ratio) --- */
+      --text-xs:   0.75rem;
+      --text-sm:   0.875rem;
+      --text-base: 1rem;
+      --text-lg:   1.125rem;
+      --text-xl:   1.25rem;
+      --text-2xl:  1.5rem;
+      --text-3xl:  1.875rem;
+      --text-4xl:  2.25rem;
+      --text-5xl:  3rem;
+      --text-6xl:  3.75rem;
+
+      /* --- LINE HEIGHTS --- */
+      --leading-tight:  1.15;
+      --leading-snug:   1.3;
+      --leading-normal: 1.6;
+      --leading-loose:  1.8;
+
+      /* --- SPACING --- */
+      --space-1:  0.25rem;
+      --space-2:  0.5rem;
+      --space-3:  0.75rem;
+      --space-4:  1rem;
+      --space-5:  1.25rem;
+      --space-6:  1.5rem;
+      --space-8:  2rem;
+      --space-10: 2.5rem;
+      --space-12: 3rem;
+      --space-16: 4rem;
+      --space-20: 5rem;
+      --space-24: 6rem;
+
+      --content-width:      800px;
+      --content-width-wide: 1000px;
+      --nav-height:         50px;
+      --radius-sm:  8px;
+      --radius-md:  12px;
+      --radius-lg:  16px;
+      --radius-full: 9999px;
+
+      /* --- SHADOWS --- */
+      --shadow-sm:  0 1px 2px rgba(44, 42, 40, 0.05);
+      --shadow-md:  0 4px 12px rgba(44, 42, 40, 0.08);
+      --shadow-lg:  0 8px 24px rgba(44, 42, 40, 0.1);
+      --shadow-xl:  0 16px 48px rgba(44, 42, 40, 0.12);
+
+      /* --- ANIMATIONS --- */
+      --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+      --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+      --duration-fast:   150ms;
+      --duration-normal: 300ms;
+      --duration-slow:   500ms;
+      --stagger-delay:   120ms;
+    }
+
+    /* ========================================
+       RESET & BASE
+       ======================================== */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      scroll-snap-type: y proximity;
+      scroll-behavior: smooth;
+    }
+
+    body {
+      font-family: var(--font-body);
+      font-size: var(--text-base);
+      line-height: var(--leading-normal);
+      color: var(--color-text);
+      background: var(--color-bg);
+      background-image: radial-gradient(
+        ellipse at 20% 50%,
+        rgba(42, 123, 155, 0.03) 0%,
+        transparent 50%
+      );
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    pre, code {
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-x: hidden;
+    }
+
+    /* ========================================
+       SCROLLBAR
+       ======================================== */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb {
+      background: var(--color-border);
+      border-radius: var(--radius-full);
+    }
+
+    /* ========================================
+       NAVIGATION
+       ======================================== */
+    .nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: var(--nav-height);
+      background: rgba(250, 247, 242, 0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--color-border-light);
+      z-index: 1000;
+    }
+
+    .progress-bar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 3px;
+      width: 0%;
+      background: var(--color-accent);
+      transition: width 100ms linear;
+    }
+
+    .nav-inner {
+      max-width: var(--content-width-wide);
+      margin: 0 auto;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 var(--space-6);
+    }
+
+    .nav-title {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: var(--text-sm);
+      color: var(--color-text);
+      letter-spacing: -0.01em;
+    }
+
+    .nav-dots {
+      display: flex;
+      gap: var(--space-3);
+      align-items: center;
+    }
+
+    .nav-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      border: 2px solid var(--color-text-muted);
+      background: transparent;
+      cursor: pointer;
+      padding: 0;
+      transition: border-color var(--duration-fast), background var(--duration-fast),
+                  box-shadow var(--duration-fast);
+    }
+    .nav-dot:hover {
+      border-color: var(--color-accent-muted);
+    }
+    .nav-dot.current {
+      border-color: var(--color-accent);
+      background: var(--color-accent);
+      box-shadow: 0 0 0 3px var(--color-accent-light);
+    }
+    .nav-dot.visited {
+      border-color: var(--color-accent);
+      background: var(--color-accent);
+    }
+
+    /* ========================================
+       MODULE LAYOUT
+       ======================================== */
+    .module {
+      min-height: 100vh;
+      min-height: 100dvh;
+      scroll-snap-align: start;
+      padding: var(--space-16) var(--space-6);
+      padding-top: calc(var(--nav-height) + var(--space-12));
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+    }
+
+    .module-content {
+      max-width: var(--content-width);
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    .module-header {
+      margin-bottom: var(--space-12);
+    }
+
+    .module-number {
+      font-family: var(--font-display);
+      font-size: var(--text-6xl);
+      font-weight: 800;
+      color: var(--color-accent);
+      opacity: 0.15;
+      line-height: var(--leading-tight);
+      display: block;
+      margin-bottom: var(--space-2);
+    }
+
+    .module-title {
+      font-family: var(--font-display);
+      font-size: var(--text-4xl);
+      font-weight: 700;
+      line-height: var(--leading-tight);
+      color: var(--color-text);
+      margin-bottom: var(--space-3);
+    }
+
+    .module-subtitle {
+      font-size: var(--text-lg);
+      color: var(--color-text-secondary);
+      line-height: var(--leading-snug);
+    }
+
+    .module-body {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-12);
+    }
+
+    .screen {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-6);
+    }
+
+    .screen-heading {
+      font-family: var(--font-display);
+      font-size: var(--text-2xl);
+      font-weight: 600;
+      color: var(--color-text);
+      line-height: var(--leading-snug);
+    }
+
+    /* ========================================
+       SCROLL-TRIGGERED ANIMATIONS
+       ======================================== */
+    .animate-in {
+      opacity: 0;
+      transform: translateY(20px);
+      transition: opacity var(--duration-slow) var(--ease-out),
+                  transform var(--duration-slow) var(--ease-out);
+    }
+    .animate-in.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .stagger-children > .animate-in {
+      transition-delay: calc(var(--stagger-index, 0) * var(--stagger-delay));
+    }
+
+    /* ========================================
+       MODULE 0 — HERO
+       ======================================== */
+    .hero-module {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+    }
+
+    .hero-module .module-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-2);
+      padding: var(--space-2) var(--space-4);
+      background: var(--color-accent-light);
+      color: var(--color-accent);
+      border-radius: var(--radius-full);
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 600;
+      margin-bottom: var(--space-6);
+    }
+
+    .hero-badge-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.8); }
+    }
+
+    .hero-title {
+      font-family: var(--font-display);
+      font-size: var(--text-5xl);
+      font-weight: 800;
+      line-height: var(--leading-tight);
+      color: var(--color-text);
+      margin-bottom: var(--space-4);
+      letter-spacing: -0.02em;
+    }
+
+    .hero-subtitle {
+      font-size: var(--text-xl);
+      color: var(--color-text-secondary);
+      line-height: var(--leading-snug);
+      max-width: 560px;
+      margin-bottom: var(--space-8);
+    }
+
+    .hero-intro {
+      font-size: var(--text-lg);
+      color: var(--color-text-secondary);
+      line-height: var(--leading-normal);
+      max-width: 620px;
+      margin-bottom: var(--space-12);
+    }
+
+    /* Core loop cards */
+    .core-loop {
+      display: flex;
+      align-items: stretch;
+      gap: var(--space-4);
+      margin-bottom: var(--space-16);
+      width: 100%;
+      max-width: 700px;
+    }
+
+    .core-card {
+      flex: 1;
+      background: var(--color-surface);
+      border-radius: var(--radius-md);
+      padding: var(--space-6) var(--space-5);
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      gap: var(--space-3);
+      transition: transform var(--duration-normal) var(--ease-out),
+                  box-shadow var(--duration-normal);
+    }
+    .core-card:hover {
+      transform: translateY(-4px);
+      box-shadow: var(--shadow-md);
+    }
+
+    .core-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: var(--radius-md);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.5rem;
+      flex-shrink: 0;
+    }
+
+    .core-card-title {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: var(--text-lg);
+      color: var(--color-text);
+    }
+
+    .core-card-desc {
+      font-size: var(--text-sm);
+      color: var(--color-text-secondary);
+      line-height: var(--leading-normal);
+    }
+
+    .core-arrow {
+      display: flex;
+      align-items: center;
+      color: var(--color-text-muted);
+      font-size: var(--text-xl);
+      flex-shrink: 0;
+      user-select: none;
+    }
+
+    /* Scroll indicator */
+    .scroll-indicator {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: var(--space-2);
+      color: var(--color-text-muted);
+      font-size: var(--text-sm);
+      animation: scrollBounce 2s infinite;
+    }
+
+    .scroll-indicator-arrow {
+      width: 24px;
+      height: 24px;
+      border-right: 2px solid var(--color-text-muted);
+      border-bottom: 2px solid var(--color-text-muted);
+      transform: rotate(45deg);
+      margin-top: -4px;
+    }
+
+    @keyframes scrollBounce {
+      0%, 100% { transform: translateY(0); opacity: 1; }
+      50% { transform: translateY(8px); opacity: 0.5; }
+    }
+
+    /* ========================================
+       EMPTY MODULE PLACEHOLDER
+       ======================================== */
+    .module-coming-soon {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      gap: var(--space-4);
+      padding: var(--space-16) 0;
+      min-height: 40vh;
+    }
+
+    .coming-soon-icon {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background: var(--color-border-light);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.5rem;
+      color: var(--color-text-muted);
+    }
+
+    .coming-soon-text {
+      color: var(--color-text-muted);
+      font-size: var(--text-base);
+    }
+
+    /* ========================================
+       GLOSSARY TOOLTIPS
+       ======================================== */
+    .term {
+      border-bottom: 1.5px dashed var(--color-accent-muted);
+      cursor: pointer;
+      position: relative;
+    }
+    .term:hover, .term.active {
+      border-bottom-color: var(--color-accent);
+      color: var(--color-accent);
+    }
+
+    .term-tooltip {
+      position: fixed;
+      background: var(--color-bg-code);
+      color: #CDD6F4;
+      padding: var(--space-3) var(--space-4);
+      border-radius: var(--radius-sm);
+      font-size: var(--text-sm);
+      font-family: var(--font-body);
+      line-height: var(--leading-normal);
+      width: max(200px, min(320px, 80vw));
+      box-shadow: var(--shadow-lg);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity var(--duration-fast);
+      z-index: 10000;
+    }
+    .term-tooltip::after {
+      content: '';
+      position: absolute;
+      top: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      border: 6px solid transparent;
+      border-top-color: var(--color-bg-code);
+    }
+    .term-tooltip.visible {
+      opacity: 1;
+    }
+    .term-tooltip.flip::after {
+      top: auto;
+      bottom: 100%;
+      border-top-color: transparent;
+      border-bottom-color: var(--color-bg-code);
+    }
+
+    /* ========================================
+       QUIZ INFRASTRUCTURE
+       ======================================== */
+    .quiz-container {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-6);
+    }
+
+    .quiz-question-block {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-3);
+    }
+
+    .quiz-question {
+      font-family: var(--font-display);
+      font-size: var(--text-xl);
+      font-weight: 600;
+    }
+
+    .quiz-options {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+    }
+
+    .quiz-option {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      padding: var(--space-3) var(--space-4);
+      border: 2px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      background: var(--color-surface);
+      cursor: pointer;
+      width: 100%;
+      font-family: var(--font-body);
+      font-size: var(--text-base);
+      color: var(--color-text);
+      text-align: left;
+      transition: border-color var(--duration-fast), background var(--duration-fast);
+    }
+    .quiz-option:hover { border-color: var(--color-accent-muted); }
+    .quiz-option.selected { border-color: var(--color-accent); background: var(--color-accent-light); }
+    .quiz-option.correct { border-color: var(--color-success); background: var(--color-success-light); }
+    .quiz-option.incorrect { border-color: var(--color-error); background: var(--color-error-light); }
+
+    .quiz-option-radio {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 2px solid var(--color-border);
+      flex-shrink: 0;
+      transition: all var(--duration-fast);
+    }
+    .quiz-option.selected .quiz-option-radio {
+      border-color: var(--color-accent);
+      background: var(--color-accent);
+      box-shadow: inset 0 0 0 3px white;
+    }
+
+    .quiz-feedback {
+      max-height: 0;
+      overflow: hidden;
+      opacity: 0;
+      transition: max-height var(--duration-normal), opacity var(--duration-normal);
+    }
+    .quiz-feedback.show {
+      max-height: 200px;
+      opacity: 1;
+      padding: var(--space-3);
+      margin-top: var(--space-2);
+      border-radius: var(--radius-sm);
+    }
+    .quiz-feedback.success { background: var(--color-success-light); color: var(--color-success); }
+    .quiz-feedback.error { background: var(--color-error-light); color: var(--color-error); }
+    .quiz-feedback.warning { background: var(--color-accent-light); color: var(--color-accent); }
+
+    .quiz-check-btn, .quiz-reset-btn {
+      padding: var(--space-3) var(--space-6);
+      border-radius: var(--radius-sm);
+      font-family: var(--font-body);
+      font-size: var(--text-base);
+      font-weight: 600;
+      cursor: pointer;
+      transition: background var(--duration-fast), transform var(--duration-fast);
+      border: none;
+    }
+    .quiz-check-btn {
+      background: var(--color-accent);
+      color: white;
+    }
+    .quiz-check-btn:hover {
+      background: var(--color-accent-hover);
+    }
+    .quiz-reset-btn {
+      background: var(--color-border-light);
+      color: var(--color-text-secondary);
+    }
+
+    /* ========================================
+       CHAT ANIMATION INFRASTRUCTURE
+       ======================================== */
+    .chat-window {
+      background: var(--color-surface);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-md);
+      overflow: hidden;
+    }
+
+    .chat-messages {
+      padding: var(--space-6);
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-4);
+      min-height: 200px;
+    }
+
+    .chat-message {
+      display: flex;
+      gap: var(--space-3);
+      align-items: flex-start;
+    }
+
+    .chat-avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-weight: 700;
+      font-family: var(--font-display);
+      font-size: var(--text-sm);
+      flex-shrink: 0;
+    }
+
+    .chat-bubble {
+      background: var(--color-bg);
+      border-radius: var(--radius-md);
+      padding: var(--space-3) var(--space-4);
+      max-width: 80%;
+    }
+
+    .chat-sender {
+      font-weight: 600;
+      font-size: var(--text-xs);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      display: block;
+      margin-bottom: var(--space-1);
+    }
+
+    .chat-bubble p {
+      font-size: var(--text-sm);
+      line-height: var(--leading-normal);
+      margin: 0;
+    }
+
+    .chat-typing {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      padding: 0 var(--space-6) var(--space-4);
+    }
+
+    .chat-typing-dots {
+      display: flex;
+      gap: var(--space-1);
+    }
+
+    .typing-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--color-text-muted);
+      animation: typingBounce 1.4s infinite;
+    }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes typingBounce {
+      0%, 60%, 100% { transform: translateY(0); }
+      30% { transform: translateY(-6px); }
+    }
+
+    .chat-controls {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      padding: var(--space-3) var(--space-6);
+      border-top: 1px solid var(--color-border-light);
+      background: var(--color-surface-warm);
+    }
+
+    .chat-controls button {
+      padding: var(--space-2) var(--space-4);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      background: var(--color-surface);
+      font-family: var(--font-body);
+      font-size: var(--text-sm);
+      cursor: pointer;
+      transition: border-color var(--duration-fast);
+    }
+    .chat-controls button:hover {
+      border-color: var(--color-accent-muted);
+    }
+
+    .chat-progress {
+      font-size: var(--text-xs);
+      color: var(--color-text-muted);
+      margin-left: auto;
+    }
+
+    @keyframes fadeSlideUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ========================================
+       CALLOUT BOXES
+       ======================================== */
+    .callout {
+      display: flex;
+      gap: var(--space-4);
+      padding: var(--space-5);
+      border-radius: var(--radius-md);
+      border-left: 4px solid;
+    }
+    .callout-accent {
+      border-left-color: var(--color-accent);
+      background: var(--color-accent-light);
+    }
+    .callout-info {
+      border-left-color: var(--color-info);
+      background: var(--color-info-light);
+    }
+    .callout-warning {
+      border-left-color: var(--color-error);
+      background: var(--color-error-light);
+    }
+    .callout-icon {
+      font-size: 1.25rem;
+      flex-shrink: 0;
+      line-height: 1;
+    }
+    .callout-content {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+    }
+    .callout-title {
+      font-family: var(--font-display);
+      font-weight: 600;
+    }
+    .callout-content p {
+      font-size: var(--text-sm);
+      color: var(--color-text-secondary);
+      line-height: var(--leading-normal);
+      margin: 0;
+    }
+
+    /* ========================================
+       STEP CARDS (numbered journey steps)
+       ======================================== */
+    .step-cards {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-3);
+      max-width: 640px;
+      width: 100%;
+    }
+    .step-card {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--space-4);
+      background: var(--color-surface);
+      border-radius: var(--radius-md);
+      padding: var(--space-4) var(--space-5);
+      box-shadow: var(--shadow-sm);
+      transition: transform var(--duration-normal) var(--ease-out),
+                  box-shadow var(--duration-normal);
+    }
+    .step-card:hover {
+      transform: translateX(4px);
+      box-shadow: var(--shadow-md);
+    }
+    .step-number {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      color: white;
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: var(--text-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .step-body {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-1);
+    }
+    .step-title {
+      font-family: var(--font-display);
+      font-weight: 600;
+      font-size: var(--text-base);
+      color: var(--color-text);
+    }
+    .step-desc {
+      font-size: var(--text-sm);
+      color: var(--color-text-secondary);
+      line-height: var(--leading-normal);
+    }
+
+    /* ========================================
+       CODE ↔ ENGLISH TRANSLATION
+       ======================================== */
+    .code-translate {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      box-shadow: var(--shadow-md);
+      max-width: 720px;
+      width: 100%;
+    }
+    @media (max-width: 640px) {
+      .code-translate { grid-template-columns: 1fr; }
+    }
+    .code-translate-code {
+      background: var(--color-bg-code);
+      color: #CDD6F4;
+      padding: var(--space-5);
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      line-height: 1.7;
+      overflow-x: auto;
+    }
+    .code-translate-code .ct-key { color: #89B4FA; }
+    .code-translate-code .ct-str { color: #A6E3A1; }
+    .code-translate-code .ct-comment { color: #6C7086; font-style: italic; }
+    .code-translate-english {
+      background: var(--color-surface);
+      padding: var(--space-5);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: var(--space-3);
+    }
+    .ct-line {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .ct-label {
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      color: var(--color-text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .ct-meaning {
+      font-size: var(--text-sm);
+      color: var(--color-text);
+      line-height: var(--leading-normal);
+    }
+
+    /* ========================================
+       SECTION DIVIDER (within a module)
+       ======================================== */
+    .screen-divider {
+      width: 48px;
+      height: 2px;
+      background: var(--color-border);
+      margin: var(--space-8) auto;
+      border-radius: 1px;
+    }
+
+    /* ========================================
+       PATTERN / FEATURE CARDS
+       ======================================== */
+    .pattern-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: var(--space-4);
+    }
+    .pattern-card {
+      background: var(--color-surface);
+      border-radius: var(--radius-md);
+      padding: var(--space-6);
+      box-shadow: var(--shadow-sm);
+      transition: transform var(--duration-normal) var(--ease-out),
+                  box-shadow var(--duration-normal);
+    }
+    .pattern-card:hover {
+      transform: translateY(-4px);
+      box-shadow: var(--shadow-md);
+    }
+    .pattern-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: var(--radius-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.125rem;
+      margin-bottom: var(--space-3);
+    }
+    .pattern-title {
+      font-family: var(--font-display);
+      font-weight: 600;
+      margin-bottom: var(--space-2);
+    }
+    .pattern-desc {
+      font-size: var(--text-sm);
+      color: var(--color-text-secondary);
+      line-height: var(--leading-normal);
+      margin: 0;
+    }
+
+    /* ========================================
+       TRANSLATION BLOCKS
+       ======================================== */
+    .translation-block {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      box-shadow: var(--shadow-md);
+      margin: var(--space-8) 0;
+    }
+    .translation-code {
+      background: var(--color-bg-code);
+      color: #CDD6F4;
+      padding: var(--space-6);
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      line-height: 1.7;
+      position: relative;
+      overflow-x: hidden;
+    }
+    .translation-code pre,
+    .translation-code code {
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-x: hidden;
+    }
+    .translation-english {
+      background: var(--color-surface-warm);
+      padding: var(--space-6);
+      font-size: var(--text-sm);
+      line-height: 1.7;
+      border-left: 3px solid var(--color-accent);
+      position: relative;
+    }
+    .translation-label {
+      position: absolute;
+      top: var(--space-2);
+      right: var(--space-3);
+      font-size: var(--text-xs);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      opacity: 0.5;
+    }
+    .translation-english .translation-label {
+      color: var(--color-text-muted);
+    }
+
+    /* ========================================
+       CODE SYNTAX HIGHLIGHTING
+       ======================================== */
+    .code-keyword  { color: #CBA6F7; }
+    .code-string   { color: #A6E3A1; }
+    .code-function { color: #89B4FA; }
+    .code-comment  { color: #6C7086; }
+    .code-number   { color: #FAB387; }
+    .code-property { color: #F9E2AF; }
+    .code-operator { color: #94E2D5; }
+    .code-tag      { color: #F38BA8; }
+    .code-attr     { color: #F9E2AF; }
+    .code-value    { color: #A6E3A1; }
+
+    .translation-code::-webkit-scrollbar,
+    pre::-webkit-scrollbar {
+      display: none;
+    }
+
+    /* ========================================
+       RESPONSIVE
+       ======================================== */
+    @media (max-width: 768px) {
+      :root {
+        --text-4xl: 1.875rem;
+        --text-5xl: 2.25rem;
+        --text-6xl: 3rem;
+      }
+      .translation-block { grid-template-columns: 1fr; }
+      .translation-english { border-left: none; border-top: 3px solid var(--color-accent); }
+      .pattern-cards { grid-template-columns: 1fr 1fr; }
+      .core-loop {
+        flex-direction: column;
+        align-items: center;
+      }
+      .core-arrow {
+        transform: rotate(90deg);
+      }
+    }
+
+    @media (max-width: 480px) {
+      :root {
+        --text-4xl: 1.5rem;
+        --text-5xl: 1.875rem;
+        --text-6xl: 2.25rem;
+      }
+      .module {
+        padding: var(--space-8) var(--space-4);
+        padding-top: calc(var(--nav-height) + var(--space-8));
+      }
+      .pattern-cards { grid-template-columns: 1fr; }
+      .flow-steps { flex-direction: column; }
+      .flow-arrow { transform: rotate(90deg); }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ========================================
+       NAVIGATION
+       ======================================== -->
+  <nav class="nav" role="navigation" aria-label="Course navigation">
+    <div class="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+    <div class="nav-inner">
+      <span class="nav-title">How Temper Works</span>
+      <div class="nav-dots" role="tablist" aria-label="Course modules">
+        <button class="nav-dot current" data-target="module-0" role="tab" aria-label="Introduction: What is Temper?" aria-selected="true" tabindex="0"></button>
+        <button class="nav-dot" data-target="module-1" role="tab" aria-label="Module 1: Tracing a User Action" aria-selected="false" tabindex="-1"></button>
+        <button class="nav-dot" data-target="module-2" role="tab" aria-label="Module 2: Meet the Cast" aria-selected="false" tabindex="-1"></button>
+        <button class="nav-dot" data-target="module-3" role="tab" aria-label="Module 3: The Blueprint Language" aria-selected="false" tabindex="-1"></button>
+        <button class="nav-dot" data-target="module-4" role="tab" aria-label="Module 4: The Verification Cascade" aria-selected="false" tabindex="-1"></button>
+        <button class="nav-dot" data-target="module-5" role="tab" aria-label="Module 5: Cedar Authorization" aria-selected="false" tabindex="-1"></button>
+        <button class="nav-dot" data-target="module-6" role="tab" aria-label="Module 6: The Living System" aria-selected="false" tabindex="-1"></button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ========================================
+       MODULE 0 — HERO
+       ======================================== -->
+  <section class="module hero-module" id="module-0" style="background: var(--color-bg)">
+    <div class="module-content">
+
+      <div class="hero-badge animate-in">
+        <span class="hero-badge-dot"></span>
+        Interactive Course
+      </div>
+
+      <h1 class="hero-title animate-in">How Temper Works</h1>
+
+      <p class="hero-subtitle animate-in">An interactive guide to the operating layer for AI agents</p>
+
+      <p class="hero-intro animate-in">
+        Temper is an
+        <span class="term" data-definition="An operating layer is the foundational software that manages resources, enforces rules, and coordinates work for programs running on top of it &mdash; like how macOS manages your laptop's apps, files, and security.">operating layer</span>
+        for
+        <span class="term" data-definition="An AI agent is a program powered by artificial intelligence that can take actions autonomously &mdash; reading data, making decisions, and executing tasks without a human clicking every button.">AI agents</span>.
+        Instead of writing code by hand, agents describe what they want in structured
+        <span class="term" data-definition="A spec (specification) is a precise blueprint that describes exactly how something should behave &mdash; like an architect's plan for a building, but for software.">specs</span>,
+        and Temper builds verified, governed systems from those descriptions.
+      </p>
+
+      <div class="core-loop stagger-children animate-in">
+        <div class="core-card animate-in">
+          <div class="core-icon" style="background: var(--color-accent-light); color: var(--color-accent);">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          </div>
+          <span class="core-card-title">Describe</span>
+          <p class="core-card-desc">Agents say what they need in plain structured language. No hand-written code.</p>
+        </div>
+
+        <div class="core-arrow" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+        </div>
+
+        <div class="core-card animate-in">
+          <div class="core-icon" style="background: #E8F5EE; color: var(--color-success);">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+          </div>
+          <span class="core-card-title">Verify</span>
+          <p class="core-card-desc">A multi-level verification cascade proves the system is correct before deployment.</p>
+        </div>
+
+        <div class="core-arrow" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+        </div>
+
+        <div class="core-card animate-in">
+          <div class="core-icon" style="background: #F3EEF8; color: var(--color-actor-3);">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+          </div>
+          <span class="core-card-title">Govern</span>
+          <p class="core-card-desc">Fine-grained authorization controls who can do what. Every action is audited.</p>
+        </div>
+      </div>
+
+      <div class="callout callout-accent animate-in" style="text-align: left; max-width: 620px;">
+        <div class="callout-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        </div>
+        <div class="callout-content">
+          <strong class="callout-title">The Von Neumann Parallel</strong>
+          <p>
+            Early computers required engineers to physically rewire circuits for each new program.
+            The
+            <span class="term" data-definition="The Von Neumann architecture is the idea (from 1945) that a computer should store its programs in memory as data, rather than being physically rewired for each task. It's the foundation of every modern computer.">Von Neumann architecture</span>
+            changed everything: store the program as data, and let the machine interpret it.
+            Temper applies the same idea to AI agents &mdash; agents write descriptions (specs) as data,
+            and a
+            <span class="term" data-definition="A kernel is the core part of an operating system that manages hardware, memory, and processes. It's the innermost layer that everything else depends on.">kernel</span>
+            builds verified, running systems from them. The agent never touches the wiring.
+          </p>
+        </div>
+      </div>
+
+      <div class="scroll-indicator animate-in" aria-hidden="true">
+        <span>Scroll to begin</span>
+        <div class="scroll-indicator-arrow"></div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ========================================
+       MODULE 1 — TRACING A USER ACTION
+       ======================================== -->
+  <section class="module" id="module-1" style="background: var(--color-bg-warm)">
+    <div class="module-content">
+      <header class="module-header animate-in">
+        <span class="module-number">01</span>
+        <h1 class="module-title">What Happens When You Tell an Agent to Do Something?</h1>
+        <p class="module-subtitle">Trace a single user action from intent to verified state change</p>
+      </header>
+      <div class="module-body">
+
+        <!-- SCREEN 1: The Setup -->
+        <div class="animate-in" style="max-width: 620px; text-align: left;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin-bottom: var(--space-3);">
+            Imagine you say: "Create an order with 3 items"
+          </h2>
+          <p style="font-size: var(--text-lg); color: var(--color-text-secondary); line-height: var(--leading-relaxed); margin-bottom: var(--space-4);">
+            You're talking to an
+            <span class="term" data-definition="An AI agent is a program powered by artificial intelligence that can take actions autonomously &mdash; reading data, making decisions, and executing tasks without a human clicking every button.">AI agent</span>.
+            You tell it to create an order. The agent doesn't just... do it. It goes through Temper.
+          </p>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); line-height: var(--leading-relaxed);">
+            Think of it like a <strong>notary public</strong>. You don't just sign a contract and call it done &mdash; you go through someone who verifies your identity, checks the document, and records it officially. Temper is that notary for every action an agent takes.
+          </p>
+        </div>
+
+        <div class="screen-divider"></div>
+
+        <!-- SCREEN 2: The Journey — Step Cards -->
+        <div class="animate-in" style="max-width: 640px; text-align: left;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin-bottom: var(--space-2);">
+            The Journey of Your Request
+          </h2>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); margin-bottom: var(--space-5);">
+            From your words to a verified
+            <span class="term" data-definition="A state change (or transition) is when an entity moves from one status to another &mdash; like an order going from 'Draft' to 'Submitted'. Each transition is recorded as an immutable event.">state change</span>,
+            here is every step your request passes through.
+          </p>
+        </div>
+
+        <div class="step-cards stagger-children animate-in">
+          <div class="step-card animate-in">
+            <div class="step-number">1</div>
+            <div class="step-body">
+              <span class="step-title">Your words reach the agent</span>
+              <span class="step-desc">
+                The
+                <span class="term" data-definition="An AI agent is a program powered by artificial intelligence that can take actions autonomously &mdash; reading data, making decisions, and executing tasks without a human clicking every button.">agent</span>
+                interprets "create an order with 3 items" and figures out you want the
+                <span class="term" data-definition="An action is a named operation that can change an entity's state &mdash; like 'SubmitOrder' or 'CancelOrder'. Actions are defined in the spec and enforced at runtime.">action</span>
+                <code>SubmitOrder</code>.
+              </span>
+            </div>
+          </div>
+          <div class="step-card animate-in">
+            <div class="step-number">2</div>
+            <div class="step-body">
+              <span class="step-title">Agent sends an HTTP request to Temper</span>
+              <span class="step-desc">
+                The agent calls Temper's
+                <span class="term" data-definition="An API (Application Programming Interface) is a set of rules that lets two programs talk to each other. An API endpoint is a specific URL where one program sends a request and gets a response.">API endpoint</span>
+                with the action name and
+                <span class="term" data-definition="Parameters are the extra pieces of information an action needs &mdash; like a shipping address or payment method. They're defined in the spec so the system knows exactly what to expect.">parameters</span>
+                (shipping address, payment method).
+              </span>
+            </div>
+          </div>
+          <div class="step-card animate-in">
+            <div class="step-number">3</div>
+            <div class="step-body">
+              <span class="step-title">Authorization check</span>
+              <span class="step-desc">
+                Temper asks: "Is this agent <em>allowed</em> to submit orders?"
+                <span class="term" data-definition="Cedar is a policy language created by AWS that Temper uses to define who can do what. Policies are written as simple permit/forbid rules that reference the actor, the action, and the resource.">Cedar authorization</span>
+                evaluates the agent's identity against the security policies.
+              </span>
+            </div>
+          </div>
+          <div class="step-card animate-in">
+            <div class="step-number">4</div>
+            <div class="step-body">
+              <span class="step-title">Guard evaluation</span>
+              <span class="step-desc">
+                Temper checks: "Is this order in the right
+                <span class="term" data-definition="State is the current status of an entity at any point in time &mdash; like 'Draft', 'Submitted', or 'Shipped'. An entity can only be in one state at a time.">state</span>?"
+                The
+                <span class="term" data-definition="A guard is a boolean condition that must be true for a transition to happen. For example, 'items &gt; 0' means you can't submit an empty order. Guards are checked at runtime and proven at verification time.">guard</span>
+                <code>items &gt; 0</code> is evaluated &mdash; no empty orders allowed.
+              </span>
+            </div>
+          </div>
+          <div class="step-card animate-in">
+            <div class="step-number">5</div>
+            <div class="step-body">
+              <span class="step-title">State transition + event recorded</span>
+              <span class="step-desc">
+                Both checks pass. The order's state changes from <code>Draft</code> to <code>Submitted</code>.
+                An immutable
+                <span class="term" data-definition="An event is an immutable record of something that happened &mdash; 'OrderSubmitted at 2:41 PM'. Events can never be deleted or changed. They form the complete audit trail of an entity's life.">event</span>
+                is persisted to the
+                <span class="term" data-definition="An event store is a database that records every state change as an append-only sequence of events. You can always replay the full history of any entity.">event store</span>.
+              </span>
+            </div>
+          </div>
+          <div class="step-card animate-in">
+            <div class="step-number">6</div>
+            <div class="step-body">
+              <span class="step-title">Response sent back</span>
+              <span class="step-desc">
+                Temper sends an
+                <span class="term" data-definition="HTTP (HyperText Transfer Protocol) is the standard way computers communicate on the web. When you visit a website or an agent calls an API, they're using HTTP to send requests and receive responses.">HTTP</span>
+                response confirming the
+                <span class="term" data-definition="A transition is the movement from one state to another, triggered by an action. For example, the SubmitOrder action transitions an order from Draft to Submitted.">transition</span>.
+                The agent tells you: "Order submitted!"
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="screen-divider"></div>
+
+        <!-- SCREEN 3: Code ↔ English Translation -->
+        <div class="animate-in" style="max-width: 720px; text-align: left;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin-bottom: var(--space-2);">
+            Reading the Blueprint
+          </h2>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); margin-bottom: var(--space-5);">
+            Here is the actual
+            <span class="term" data-definition="A spec (specification) is a precise blueprint that describes exactly how something should behave &mdash; like an architect's plan for a building, but for software.">spec</span>
+            for the <code>SubmitOrder</code>
+            <span class="term" data-definition="An action is a named operation that can change an entity's state &mdash; like 'SubmitOrder' or 'CancelOrder'. Actions are defined in the spec and enforced at runtime.">action</span>,
+            taken from a real Temper
+            <span class="term" data-definition="An entity is a thing your application manages &mdash; an Order, a User, a Ticket. Each entity has its own state machine, actions, and rules defined in a spec.">entity</span>
+            definition. Left side: code. Right side: what it means.
+          </p>
+        </div>
+
+        <div class="code-translate animate-in">
+          <div class="code-translate-code">
+<pre style="margin:0;"><span class="ct-comment"># From order.ioa.toml</span>
+[[<span class="ct-key">action</span>]]
+<span class="ct-key">name</span> = <span class="ct-str">"SubmitOrder"</span>
+<span class="ct-key">kind</span> = <span class="ct-str">"internal"</span>
+<span class="ct-key">from</span> = [<span class="ct-str">"Draft"</span>]
+<span class="ct-key">to</span> = <span class="ct-str">"Submitted"</span>
+<span class="ct-key">guard</span> = <span class="ct-str">"items > 0"</span>
+<span class="ct-key">params</span> = [<span class="ct-str">"ShippingAddressId"</span>,
+          <span class="ct-str">"PaymentMethod"</span>]
+<span class="ct-key">hint</span> = <span class="ct-str">"Submit a draft order.
+ Requires at least one item."</span></pre>
+          </div>
+          <div class="code-translate-english">
+            <div class="ct-line">
+              <span class="ct-label">name</span>
+              <span class="ct-meaning">This action is called <strong>SubmitOrder</strong></span>
+            </div>
+            <div class="ct-line">
+              <span class="ct-label">kind</span>
+              <span class="ct-meaning">It's an <span class="term" data-definition="An internal action is one triggered by the system or an authorized agent, as opposed to an input action (triggered by external users) or an output action (an event emitted to the outside world).">internal</span> action &mdash; triggered by the system, not directly by end users</span>
+            </div>
+            <div class="ct-line">
+              <span class="ct-label">from &rarr; to</span>
+              <span class="ct-meaning">Can only fire when the order is in <strong>Draft</strong>. Moves it to <strong>Submitted</strong>.</span>
+            </div>
+            <div class="ct-line">
+              <span class="ct-label">guard</span>
+              <span class="ct-meaning">The order must have at least one item (<code>items &gt; 0</code>). Otherwise, rejected.</span>
+            </div>
+            <div class="ct-line">
+              <span class="ct-label">params</span>
+              <span class="ct-meaning">Requires a shipping address and payment method to proceed.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="screen-divider"></div>
+
+        <!-- SCREEN 4: What the Guard Prevents — Callout -->
+        <div class="callout callout-accent animate-in" style="text-align: left; max-width: 620px;">
+          <div class="callout-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          </div>
+          <div class="callout-content">
+            <strong class="callout-title">Guards Are Bouncers for Your Data</strong>
+            <p>
+              <span class="term" data-definition="A guard is a boolean condition that must be true for a transition to happen. For example, 'items &gt; 0' means you can't submit an empty order. Guards are checked at runtime and proven at verification time.">Guards</span>
+              make sure nonsensical things can't happen &mdash; like submitting an empty order.
+              This isn't just
+              <span class="term" data-definition="Validation is checking that data meets certain rules (like 'email must contain @'). Traditional validation happens at runtime and can have bugs. Temper's guards go further &mdash; they're mathematically proven correct before the system runs.">validation</span>.
+              It's
+              <span class="term" data-definition="Mathematically proven means a computer has exhaustively checked every possible sequence of actions and confirmed the property always holds. Not 'tested on some examples' &mdash; literally every combination. This is what the verification cascade does.">proven mathematically</span>
+              before the system even runs.
+            </p>
+            <p>
+              The
+              <span class="term" data-definition="The verification cascade is Temper's multi-level proof system. Level 0: syntax check. Level 1: model checking (explores all reachable states). Level 2: deterministic simulation. Level 3: property-based tests. A spec must pass all levels before deployment.">verification cascade</span>
+              explores every possible sequence of actions and confirms that no path through the system can violate the guard. An empty order can never reach <code>Submitted</code> &mdash; not because of a runtime check, but because it's structurally impossible.
+            </p>
+          </div>
+        </div>
+
+        <div class="screen-divider"></div>
+
+        <!-- SCREEN 5: Quiz -->
+        <div class="animate-in" style="max-width: 620px; text-align: left;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin-bottom: var(--space-2);">
+            Check Your Understanding
+          </h2>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); margin-bottom: var(--space-5);">
+            Apply what you just learned to these scenarios.
+          </p>
+        </div>
+
+        <div class="quiz-container animate-in" style="max-width: 620px; text-align: left;">
+
+          <!-- Q1 -->
+          <div class="quiz-question-block" data-correct="a" data-explanation="The SubmitOrder action requires from = ['Draft']. ShipOrder has from = ['Processing']. Since the order is in Draft, the 'ship' action's precondition fails &mdash; Temper rejects it before anything changes.">
+            <p class="quiz-question">A user says "ship my order" but the order is still in Draft status. What happens?</p>
+            <div class="quiz-options">
+              <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Temper rejects it &mdash; <span class="term" data-definition="ShipOrder is an action defined in the Order spec. Its 'from' field is ['Processing'], meaning it can only fire when the order is in the Processing state.">ShipOrder</span> requires the order to be in <code>Processing</code>, not <code>Draft</code>
+              </button>
+              <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                The order ships immediately &mdash; the agent has permission
+              </button>
+              <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                The agent queues the request until the order reaches the right state
+              </button>
+            </div>
+            <div class="quiz-feedback"></div>
+          </div>
+
+          <!-- Q2 -->
+          <div class="quiz-question-block" data-correct="b" data-explanation="To add new behavior like gift wrapping, you'd modify the spec &mdash; adding a new action (like 'AddGiftWrap') or a new state variable. Temper rebuilds and re-verifies the system from the updated spec.">
+            <p class="quiz-question">You want to add a "gift wrap" option to orders. What would you need to change?</p>
+            <div class="quiz-options">
+              <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Write new Rust code in the <span class="term" data-definition="An EntityActor is the runtime component that processes actions for a single entity instance. It holds the current state and a TransitionTable, and evaluates each incoming action against the spec's rules.">EntityActor</span>
+              </button>
+              <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Add a new <span class="term" data-definition="An action is a named operation that can change an entity's state &mdash; like 'SubmitOrder' or 'CancelOrder'. Actions are defined in the spec and enforced at runtime.">action</span> or <span class="term" data-definition="A state variable is a named piece of data tracked alongside an entity's state &mdash; like 'items' (a counter) or 'has_address' (a boolean). Guards can reference state variables in their conditions.">state variable</span> to the <span class="term" data-definition="A spec (specification) is a precise blueprint that describes exactly how something should behave &mdash; like an architect's plan for a building, but for software.">spec</span>
+              </button>
+              <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Ask the agent to handle it in its own logic, outside Temper
+              </button>
+            </div>
+            <div class="quiz-feedback"></div>
+          </div>
+
+          <!-- Q3 -->
+          <div class="quiz-question-block" data-correct="c" data-explanation="The guard 'items > 0' on the SubmitOrder action prevents the transition. The order stays in Draft. This guard is not just a runtime check &mdash; the verification cascade has proven it holds for every possible path through the system.">
+            <p class="quiz-question">An agent submits an order with 0 items. What prevents this?</p>
+            <div class="quiz-options">
+              <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                <span class="term" data-definition="Cedar is a policy language created by AWS that Temper uses to define who can do what. Policies are written as simple permit/forbid rules that reference the actor, the action, and the resource.">Cedar</span> authorization blocks it based on the agent's role
+              </button>
+              <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                The agent catches the error itself before sending the request
+              </button>
+              <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                The <span class="term" data-definition="A guard is a boolean condition that must be true for a transition to happen. For example, 'items &gt; 0' means you can't submit an empty order. Guards are checked at runtime and proven at verification time.">guard</span> <code>items &gt; 0</code> blocks the <span class="term" data-definition="A transition is the movement from one state to another, triggered by an action. For example, the SubmitOrder action transitions an order from Draft to Submitted.">transition</span>
+              </button>
+            </div>
+            <div class="quiz-feedback"></div>
+          </div>
+
+          <div style="display: flex; gap: var(--space-3); align-items: center; margin-top: var(--space-4);">
+            <button class="quiz-check-btn" onclick="checkQuiz('module-1')">Check Answers</button>
+            <button class="quiz-reset-btn" onclick="resetQuiz('module-1')">Reset</button>
+            <span class="quiz-overall-feedback" style="display:none; font-weight: 600; color: var(--color-accent);"></span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================================
+       MODULE 2 — MEET THE CAST
+       ======================================== -->
+  <section class="module" id="module-2" style="background: var(--color-bg)">
+    <div class="module-content">
+      <header class="module-header animate-in">
+        <span class="module-number">02</span>
+        <h1 class="module-title">Meet the Cast</h1>
+        <p class="module-subtitle">The major crates and components that make up Temper</p>
+      </header>
+      <div class="module-body">
+
+        <!-- Screen 1: Every System Has Characters -->
+        <div class="animate-in" style="max-width: 640px; margin-bottom: var(--space-8);">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-xl); font-weight: 700; margin-bottom: var(--space-3);">Every System Has Characters</h2>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); line-height: var(--leading-relaxed);">
+            Temper is built from ~25 separate modules (called
+            <span class="term" data-definition="A crate is a self-contained package of Rust code &mdash; like a LEGO set with everything needed for one job. Each crate can be compiled, tested, and versioned independently.">crates</span>
+            in Rust). But you only need to know about 6 key players to understand how it all works.
+            Think of them as a film production crew &mdash; each member has a specific role, they communicate through defined channels, and together they produce something none could alone.
+          </p>
+        </div>
+
+        <!-- Screen 2: The Cast — Icon Rows -->
+        <div class="animate-in" style="display: flex; flex-direction: column; gap: var(--space-4); margin-bottom: var(--space-8); max-width: 680px;">
+
+          <!-- temper-spec -->
+          <div style="display: flex; align-items: center; gap: var(--space-4); padding: var(--space-4) var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-left: 4px solid var(--color-actor-1);">
+            <div style="width: 44px; height: 44px; border-radius: 50%; background: #FDE8E4; color: var(--color-actor-1); display: flex; align-items: center; justify-content: center; font-size: 1.25rem; flex-shrink: 0;" aria-hidden="true">&#x1F4CB;</div>
+            <div>
+              <strong style="font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-actor-1);">temper-spec</strong>
+              <span style="font-size: var(--text-xs); color: var(--color-text-muted); margin-left: var(--space-2);">The Scriptwriter</span>
+              <p style="font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-1) 0 0;">Reads your blueprint (the spec file) and translates it into a format the rest of the team understands.</p>
+            </div>
+          </div>
+
+          <!-- temper-verify -->
+          <div style="display: flex; align-items: center; gap: var(--space-4); padding: var(--space-4) var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-left: 4px solid var(--color-actor-2);">
+            <div style="width: 44px; height: 44px; border-radius: 50%; background: var(--color-accent-light); color: var(--color-actor-2); display: flex; align-items: center; justify-content: center; font-size: 1.25rem; flex-shrink: 0;" aria-hidden="true">&#x2705;</div>
+            <div>
+              <strong style="font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-actor-2);">temper-verify</strong>
+              <span style="font-size: var(--text-xs); color: var(--color-text-muted); margin-left: var(--space-2);">The Safety Inspector</span>
+              <p style="font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-1) 0 0;">Runs 4 levels of checks to prove the blueprint is correct BEFORE anything gets built.</p>
+            </div>
+          </div>
+
+          <!-- temper-jit -->
+          <div style="display: flex; align-items: center; gap: var(--space-4); padding: var(--space-4) var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-left: 4px solid var(--color-actor-3);">
+            <div style="width: 44px; height: 44px; border-radius: 50%; background: #F3EEF8; color: var(--color-actor-3); display: flex; align-items: center; justify-content: center; font-size: 1.25rem; flex-shrink: 0;" aria-hidden="true">&#x26A1;</div>
+            <div>
+              <strong style="font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-actor-3);">temper-jit</strong>
+              <span style="font-size: var(--text-xs); color: var(--color-text-muted); margin-left: var(--space-2);">The Builder</span>
+              <p style="font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-1) 0 0;">Takes the verified blueprint and builds a
+                <span class="term" data-definition="A TransitionTable is the live rulebook compiled from a spec. It maps every (current-state, action) pair to the next state, so the system can evaluate transitions in constant time.">TransitionTable</span>
+                &mdash; the live rulebook that governs every action.</p>
+            </div>
+          </div>
+
+          <!-- temper-server -->
+          <div style="display: flex; align-items: center; gap: var(--space-4); padding: var(--space-4) var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-left: 4px solid var(--color-actor-4);">
+            <div style="width: 44px; height: 44px; border-radius: 50%; background: #FDF5E0; color: var(--color-actor-4); display: flex; align-items: center; justify-content: center; font-size: 1.25rem; flex-shrink: 0;" aria-hidden="true">&#x1F3AD;</div>
+            <div>
+              <strong style="font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-actor-4);">temper-server</strong>
+              <span style="font-size: var(--text-xs); color: var(--color-text-muted); margin-left: var(--space-2);">The Stage Manager</span>
+              <p style="font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-1) 0 0;">Runs the show: receives requests, dispatches them to the right
+                <span class="term" data-definition="An entity actor is a lightweight process that owns one entity instance (e.g., order-42). It holds the entity's current state and processes actions one at a time, ensuring consistency.">entity actor</span>,
+                and returns results.</p>
+            </div>
+          </div>
+
+          <!-- temper-authz -->
+          <div style="display: flex; align-items: center; gap: var(--space-4); padding: var(--space-4) var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-left: 4px solid var(--color-actor-5);">
+            <div style="width: 44px; height: 44px; border-radius: 50%; background: var(--color-success-light); color: var(--color-actor-5); display: flex; align-items: center; justify-content: center; font-size: 1.25rem; flex-shrink: 0;" aria-hidden="true">&#x1F512;</div>
+            <div>
+              <strong style="font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-actor-5);">temper-authz</strong>
+              <span style="font-size: var(--text-xs); color: var(--color-text-muted); margin-left: var(--space-2);">The Security Guard</span>
+              <p style="font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-1) 0 0;">Checks every single action: Is this agent allowed to do this? Uses
+                <span class="term" data-definition="Cedar is an open-source policy language created by Amazon. It lets you write human-readable rules like 'permit agent-7 to SubmitOrder when order.state == Draft'. Temper evaluates these policies on every action.">Cedar</span>
+                policies. Default answer: NO.</p>
+            </div>
+          </div>
+
+          <!-- temper-observe -->
+          <div style="display: flex; align-items: center; gap: var(--space-4); padding: var(--space-4) var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-left: 4px solid var(--color-accent);">
+            <div style="width: 44px; height: 44px; border-radius: 50%; background: var(--color-accent-light); color: var(--color-accent); display: flex; align-items: center; justify-content: center; font-size: 1.25rem; flex-shrink: 0;" aria-hidden="true">&#x1F441;</div>
+            <div>
+              <strong style="font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-accent);">temper-observe</strong>
+              <span style="font-size: var(--text-xs); color: var(--color-text-muted); margin-left: var(--space-2);">The Documentarian</span>
+              <p style="font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-1) 0 0;">Records everything that happens &mdash; every transition, every decision &mdash; as
+                <span class="term" data-definition="A WideEvent is a single, rich telemetry record that captures everything about one action: who did it, what changed, when, the result, and any related context. Think of it as a detailed receipt.">WideEvents</span>,
+                automatically.</p>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Screen 3: How They Work Together — Group Chat -->
+        <div class="animate-in" style="max-width: 640px; margin-bottom: var(--space-8);">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-xl); font-weight: 700; margin-bottom: var(--space-3);">How They Work Together</h2>
+          <p style="font-size: var(--text-sm); color: var(--color-text-secondary); margin-bottom: var(--space-5);">
+            Watch what happens behind the scenes when an agent fires a single action. The
+            <span class="term" data-definition="A component is an independent, self-contained piece of a system with a clear responsibility. Components communicate through defined interfaces, not by reaching into each other's internals.">components</span>
+            coordinate like a team in a group chat.
+          </p>
+
+          <div class="chat-window" id="cast-chat">
+            <div class="chat-messages" style="min-height: 340px;">
+
+              <div class="chat-message" data-sender="server" style="display: none;">
+                <div class="chat-avatar" style="background: var(--color-actor-4);">SM</div>
+                <div class="chat-bubble">
+                  <span class="chat-sender" style="color: var(--color-actor-4);">temper-server</span>
+                  <p>Incoming! Agent wants to SubmitOrder on order-42.</p>
+                </div>
+              </div>
+
+              <div class="chat-message" data-sender="authz" style="display: none;">
+                <div class="chat-avatar" style="background: var(--color-actor-5);">SG</div>
+                <div class="chat-bubble">
+                  <span class="chat-sender" style="color: var(--color-actor-5);">temper-authz</span>
+                  <p>Let me check... <em>reads Cedar policies</em> ...Agent has permission. &#x2705;</p>
+                </div>
+              </div>
+
+              <div class="chat-message" data-sender="jit" style="display: none;">
+                <div class="chat-avatar" style="background: var(--color-actor-3);">BL</div>
+                <div class="chat-bubble">
+                  <span class="chat-sender" style="color: var(--color-actor-3);">temper-jit</span>
+                  <p>Checking TransitionTable... Order is in Draft, guard says items &gt; 0... items = 3. Guard passes! &#x2705;</p>
+                </div>
+              </div>
+
+              <div class="chat-message" data-sender="server2" style="display: none;">
+                <div class="chat-avatar" style="background: var(--color-actor-4);">SM</div>
+                <div class="chat-bubble">
+                  <span class="chat-sender" style="color: var(--color-actor-4);">temper-server</span>
+                  <p>Great. Transitioning order-42: Draft &#x2192; Submitted.</p>
+                </div>
+              </div>
+
+              <div class="chat-message" data-sender="observe" style="display: none;">
+                <div class="chat-avatar" style="background: var(--color-accent);">DC</div>
+                <div class="chat-bubble">
+                  <span class="chat-sender" style="color: var(--color-accent);">temper-observe</span>
+                  <p>Logged it. WideEvent recorded: SubmitOrder, Draft&#x2192;Submitted, agent-7, timestamp.</p>
+                </div>
+              </div>
+
+              <div class="chat-message" data-sender="server3" style="display: none;">
+                <div class="chat-avatar" style="background: var(--color-actor-4);">SM</div>
+                <div class="chat-bubble">
+                  <span class="chat-sender" style="color: var(--color-actor-4);">temper-server</span>
+                  <p>Done! Sending response back to the agent.</p>
+                </div>
+              </div>
+
+              <div class="chat-message" data-sender="verify" style="display: none;">
+                <div class="chat-avatar" style="background: var(--color-actor-2);">SI</div>
+                <div class="chat-bubble">
+                  <span class="chat-sender" style="color: var(--color-actor-2);">temper-verify</span>
+                  <p>Just to be clear &mdash; I already proved this transition was safe before it was ever deployed. You're welcome. &#x1F60E;</p>
+                </div>
+              </div>
+
+            </div>
+
+            <div class="chat-typing" style="display: none;">
+              <div class="chat-avatar" style="width: 28px; height: 28px; font-size: 11px;">?</div>
+              <div class="chat-typing-dots">
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+              </div>
+            </div>
+
+            <div class="chat-controls">
+              <button onclick="playChatNext('cast-chat')">Next message</button>
+              <button onclick="playChatAll('cast-chat')">Play all</button>
+              <button onclick="resetChat('cast-chat')">Reset</button>
+              <span class="chat-progress">0 / 7 messages</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Screen 4: Callout — Separation of Concerns -->
+        <div class="callout callout-accent animate-in" style="text-align: left; max-width: 640px; margin-bottom: var(--space-8);">
+          <div class="callout-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          </div>
+          <div class="callout-content">
+            <strong class="callout-title">Separation of Concerns</strong>
+            <p>
+              This pattern &mdash; splitting responsibilities into focused roles &mdash; is one of the most important ideas in software. Engineers call it
+              <span class="term" data-definition="Separation of concerns is a design principle where each part of a system handles one specific responsibility. When something breaks, you know exactly where to look, because only one component owns that job.">separation of concerns</span>.
+              Each
+              <span class="term" data-definition="A module is a named, self-contained unit of code within a larger system. In Rust, modules organize code into namespaces. In Temper, each major module is its own crate.">module</span>
+              does ONE thing well and trusts the others to handle their part. When something breaks, you know exactly where to look.
+            </p>
+          </div>
+        </div>
+
+        <!-- Screen 5: Quiz -->
+        <div class="animate-in" style="max-width: 640px;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-xl); font-weight: 700; margin-bottom: var(--space-5);">Check Your Understanding</h2>
+
+          <div class="quiz-container">
+
+            <!-- Q1 -->
+            <div class="quiz-question-block">
+              <p class="quiz-question">An agent's action is denied. Which component made that decision?</p>
+              <div class="quiz-options">
+                <button class="quiz-option" data-value="spec" onclick="selectQuizOption(this)">
+                  <span class="quiz-option-radio"></span>temper-spec
+                </button>
+                <button class="quiz-option" data-value="authz" onclick="selectQuizOption(this)">
+                  <span class="quiz-option-radio"></span>temper-authz
+                </button>
+                <button class="quiz-option" data-value="server" onclick="selectQuizOption(this)">
+                  <span class="quiz-option-radio"></span>temper-server
+                </button>
+                <button class="quiz-option" data-value="observe" onclick="selectQuizOption(this)">
+                  <span class="quiz-option-radio"></span>temper-observe
+                </button>
+              </div>
+              <div class="quiz-feedback" data-correct="authz" data-explain="temper-authz (the Security Guard) evaluates Cedar policies on every action. If the agent lacks permission, authz denies it."></div>
+            </div>
+
+            <!-- Q2 -->
+            <div class="quiz-question-block">
+              <p class="quiz-question">State transitions are being recorded incorrectly. Which component would you investigate?</p>
+              <div class="quiz-options">
+                <button class="quiz-option" data-value="jit" onclick="selectQuizOption(this)">
+                  <span class="quiz-option-radio"></span>temper-jit
+                </button>
+                <button class="quiz-option" data-value="verify" onclick="selectQuizOption(this)">
+                  <span class="quiz-option-radio"></span>temper-verify
+                </button>
+                <button class="quiz-option" data-value="observe" onclick="selectQuizOption(this)">
+                  <span class="quiz-option-radio"></span>temper-observe
+                </button>
+                <button class="quiz-option" data-value="authz" onclick="selectQuizOption(this)">
+                  <span class="quiz-option-radio"></span>temper-authz
+                </button>
+              </div>
+              <div class="quiz-feedback" data-correct="observe" data-explain="temper-observe (the Documentarian) is responsible for recording every transition as a WideEvent. If records are wrong, that's where you look."></div>
+            </div>
+
+            <!-- Q3 -->
+            <div class="quiz-question-block">
+              <p class="quiz-question">A new spec has a bug where an impossible state is reachable. Which component should have caught this?</p>
+              <div class="quiz-options">
+                <button class="quiz-option" data-value="spec" onclick="selectQuizOption(this)">
+                  <span class="quiz-option-radio"></span>temper-spec
+                </button>
+                <button class="quiz-option" data-value="server" onclick="selectQuizOption(this)">
+                  <span class="quiz-option-radio"></span>temper-server
+                </button>
+                <button class="quiz-option" data-value="verify" onclick="selectQuizOption(this)">
+                  <span class="quiz-option-radio"></span>temper-verify
+                </button>
+                <button class="quiz-option" data-value="jit" onclick="selectQuizOption(this)">
+                  <span class="quiz-option-radio"></span>temper-jit
+                </button>
+              </div>
+              <div class="quiz-feedback" data-correct="verify" data-explain="temper-verify (the Safety Inspector) runs the 4-level verification cascade to prove specs are correct. An impossible reachable state is exactly what it's designed to catch."></div>
+            </div>
+
+            <div style="display: flex; gap: var(--space-3); margin-top: var(--space-4);">
+              <button class="quiz-check-btn" onclick="checkQuiz('module-2')">Check Answers</button>
+              <button class="quiz-reset-btn" onclick="resetQuiz('module-2')">Reset</button>
+            </div>
+            <div class="quiz-overall-feedback" style="display: none;"></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================================
+       MODULE 3 — THE BLUEPRINT LANGUAGE (shell)
+       ======================================== -->
+  <section class="module" id="module-3" style="background: var(--color-bg-warm)">
+    <div class="module-content">
+      <header class="module-header animate-in">
+        <span class="module-number">03</span>
+        <h1 class="module-title">The Blueprint Language</h1>
+        <p class="module-subtitle">How I/O Automaton specs describe what systems should do</p>
+      </header>
+      <div class="module-body">
+
+        <!-- ── Screen 1: Specs, Not Code ── -->
+        <div class="screen animate-in">
+          <h2 class="screen-heading">Specs, Not Code</h2>
+          <p>
+            In Temper, you don't write code. You write <em>descriptions of behavior</em>. The system generates everything else &mdash;
+            the runtime actors, the API endpoints, the authorization policies, the verification proofs.
+          </p>
+          <p>
+            These descriptions are called
+            <span class="term" data-definition="I/O Automaton &mdash; a mathematical model for describing systems that receive inputs and produce outputs. Invented in 1987 by Nancy Lynch and Mark Tuttle at MIT. It gives you a precise way to say 'here are the states, here are the actions, here are the rules.'">I/O Automaton specs</span>
+            (IOA specs). They are written in
+            <span class="term" data-definition="TOML (Tom's Obvious Minimal Language) &mdash; a simple, human-readable file format for configuration. Think of it as a cleaner, less error-prone alternative to JSON or YAML.">TOML</span>,
+            and they define four things:
+          </p>
+          <ol>
+            <li>What <strong>states</strong> something can be in</li>
+            <li>What <strong>actions</strong> can happen</li>
+            <li>What <strong>conditions</strong> must be true for an action to fire</li>
+            <li>What <strong>changes</strong> when an action fires</li>
+          </ol>
+          <p>
+            Think of it like an architect's blueprint. Before a building goes up, architects draw detailed plans
+            that structural engineers can verify. You wouldn't build a skyscraper from a napkin sketch.
+            Temper applies the same discipline to software &mdash; every
+            <span class="term" data-definition="An entity is a 'thing' the system manages &mdash; an order, an issue, a user account. Each entity has its own lifecycle defined by a spec.">entity</span>
+            gets a mathematically precise blueprint before a single line of runtime code is generated.
+          </p>
+        </div>
+
+        <div class="screen-divider" aria-hidden="true"></div>
+
+        <!-- ── Screen 2: Anatomy of a Spec ── -->
+        <div class="screen animate-in">
+          <h2 class="screen-heading">Anatomy of a Spec</h2>
+          <p>
+            Here is the opening of a real spec &mdash; the Order
+            <span class="term" data-definition="Automaton &mdash; a self-operating machine that follows a fixed set of rules. In computer science, a finite automaton (or state machine) is a model with a fixed set of states and rules for moving between them.">automaton</span>
+            from Temper's test suite. On the left is the actual TOML. On the right is what each line means in plain English.
+          </p>
+          <div class="code-translate animate-in">
+            <div class="code-translate-code">
+<pre><code><span class="ct-comment"># Order Entity &mdash; I/O Automaton Spec</span>
+
+[<span class="ct-key">automaton</span>]
+<span class="ct-key">name</span> = <span class="ct-str">"Order"</span>
+<span class="ct-key">states</span> = [<span class="ct-str">"Draft"</span>, <span class="ct-str">"Submitted"</span>,
+  <span class="ct-str">"Confirmed"</span>, <span class="ct-str">"Processing"</span>,
+  <span class="ct-str">"Shipped"</span>, <span class="ct-str">"Delivered"</span>,
+  <span class="ct-str">"Cancelled"</span>, <span class="ct-str">"ReturnRequested"</span>,
+  <span class="ct-str">"Returned"</span>, <span class="ct-str">"Refunded"</span>]
+<span class="ct-key">initial</span> = <span class="ct-str">"Draft"</span></code></pre>
+            </div>
+            <div class="code-translate-english">
+              <div class="ct-line">
+                <span class="ct-label">[automaton]</span>
+                <span class="ct-meaning">This section declares a new type of thing the system manages</span>
+              </div>
+              <div class="ct-line">
+                <span class="ct-label">name = "Order"</span>
+                <span class="ct-meaning">Its name is "Order" &mdash; every order created will follow these rules</span>
+              </div>
+              <div class="ct-line">
+                <span class="ct-label">states = [...]</span>
+                <span class="ct-meaning">An order can only ever be in one of these 10 statuses. Nothing else is possible.</span>
+              </div>
+              <div class="ct-line">
+                <span class="ct-label">initial = "Draft"</span>
+                <span class="ct-meaning">Every new order starts in "Draft" &mdash; like a blank form waiting to be filled in</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="screen-divider" aria-hidden="true"></div>
+
+        <!-- ── Screen 3: The Four Building Blocks ── -->
+        <div class="screen animate-in">
+          <h2 class="screen-heading">The Four Building Blocks</h2>
+          <p>
+            Every IOA spec is built from the same four pieces. Once you know them, you can read any spec in the system.
+          </p>
+          <div class="pattern-cards stagger-children">
+            <div class="pattern-card animate-in" style="--stagger-index: 0;">
+              <div class="pattern-icon" style="background: var(--color-accent-light); color: var(--color-accent);">
+                &#x1F3F7;&#xFE0F;
+              </div>
+              <div class="pattern-title">States</div>
+              <p class="pattern-desc">
+                The list of valid statuses. Like chapters in a story &mdash; the
+                <span class="term" data-definition="Entity &mdash; a 'thing' the system manages (an order, an issue, a user account). Each entity follows the lifecycle defined by its spec.">entity</span>
+                can only be in one chapter at a time.
+              </p>
+            </div>
+            <div class="pattern-card animate-in" style="--stagger-index: 1;">
+              <div class="pattern-icon" style="background: #E8F5EE; color: var(--color-success);">
+                &#x1F4CA;
+              </div>
+              <div class="pattern-title">State Variables</div>
+              <p class="pattern-desc">
+                Data that changes as the entity moves through its lifecycle.
+                <span class="term" data-definition="Counter &mdash; a state variable type that holds a number and can be incremented or decremented. Used to track quantities like item counts.">Counters</span>,
+                <span class="term" data-definition="Boolean &mdash; a value that is either true or false. Named after mathematician George Boole.">booleans</span>,
+                flags, labels.
+              </p>
+            </div>
+            <div class="pattern-card animate-in" style="--stagger-index: 2;">
+              <div class="pattern-icon" style="background: #FFF3E0; color: #E65100;">
+                &#x26A1;
+              </div>
+              <div class="pattern-title">Actions</div>
+              <p class="pattern-desc">
+                Things that can happen. Each one says: "I can only fire FROM these states, and I move TO this state."
+                This is called a
+                <span class="term" data-definition="Transition &mdash; a change from one state to another, triggered by an action. The 'from' state is the precondition; the 'to' state is the postcondition.">transition</span>.
+              </p>
+            </div>
+            <div class="pattern-card animate-in" style="--stagger-index: 3;">
+              <div class="pattern-icon" style="background: #F3EEF8; color: var(--color-actor-3);">
+                &#x1F6E1;&#xFE0F;
+              </div>
+              <div class="pattern-title">Guards</div>
+              <p class="pattern-desc">
+                Conditions that must be true for an action to fire. Like
+                <span class="term" data-definition="Precondition &mdash; a condition that must be true before an operation can execute. If the precondition is not met, the operation is rejected.">prerequisites</span>
+                in a college course catalog.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="screen-divider" aria-hidden="true"></div>
+
+        <!-- ── Screen 4: A Real Action, Decoded ── -->
+        <div class="screen animate-in">
+          <h2 class="screen-heading">A Real Action, Decoded</h2>
+          <p>
+            Here is a real action from the Issue
+            <span class="term" data-definition="State machine &mdash; a model that can be in exactly one of a finite number of states at any given time. It changes state in response to inputs (actions), according to fixed rules (transitions).">state machine</span>
+            &mdash; the <code>BeginPlanning</code> action that kicks off the planning phase. Let's decode it line by line.
+          </p>
+          <div class="code-translate animate-in">
+            <div class="code-translate-code">
+<pre><code>[[<span class="ct-key">action</span>]]
+<span class="ct-key">name</span> = <span class="ct-str">"BeginPlanning"</span>
+<span class="ct-key">kind</span> = <span class="ct-str">"internal"</span>
+<span class="ct-key">from</span> = [<span class="ct-str">"Todo"</span>]
+<span class="ct-key">to</span> = <span class="ct-str">"Planning"</span>
+<span class="ct-key">guard</span> = <span class="ct-str">"is_true planner_set"</span>
+<span class="ct-key">hint</span> = <span class="ct-str">"Start planning phase.
+  A planner agent drafts
+  the approach."</span></code></pre>
+            </div>
+            <div class="code-translate-english">
+              <div class="ct-line">
+                <span class="ct-label">[[action]]</span>
+                <span class="ct-meaning">Here comes a new action definition &mdash; one thing that can happen to an Issue</span>
+              </div>
+              <div class="ct-line">
+                <span class="ct-label">name = "BeginPlanning"</span>
+                <span class="ct-meaning">This action is called "BeginPlanning" &mdash; agents use this exact name to trigger it</span>
+              </div>
+              <div class="ct-line">
+                <span class="ct-label">kind = "internal"</span>
+                <span class="ct-meaning">This action changes the entity's state (unlike "input" actions that just update data)</span>
+              </div>
+              <div class="ct-line">
+                <span class="ct-label">from = ["Todo"]</span>
+                <span class="ct-meaning">Can ONLY fire when the issue is in "Todo" status. Try it from any other status? Rejected.</span>
+              </div>
+              <div class="ct-line">
+                <span class="ct-label">to = "Planning"</span>
+                <span class="ct-meaning">When it fires, the issue moves to "Planning" status</span>
+              </div>
+              <div class="ct-line">
+                <span class="ct-label">guard = "is_true planner_set"</span>
+                <span class="ct-meaning">But wait &mdash; a planner must be assigned first. No planner, no planning.</span>
+              </div>
+              <div class="ct-line">
+                <span class="ct-label">hint = "..."</span>
+                <span class="ct-meaning">A human-readable description so agents know when to use this action</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="screen-divider" aria-hidden="true"></div>
+
+        <!-- ── Screen 5: Invariants — The Safety Net ── -->
+        <div class="screen animate-in">
+          <h2 class="screen-heading">Invariants &mdash; The Safety Net</h2>
+          <p>
+            <span class="term" data-definition="Invariant &mdash; a condition that must ALWAYS be true, no matter what sequence of actions has occurred. Unlike a guard (which protects one action), an invariant protects the entire system.">Invariants</span>
+            are rules that must hold <em>no matter what</em>. They don't protect a single action &mdash; they protect the entire system.
+            Here is one from the Order spec:
+          </p>
+          <div class="code-translate animate-in">
+            <div class="code-translate-code">
+<pre><code>[[<span class="ct-key">invariant</span>]]
+<span class="ct-key">name</span> = <span class="ct-str">"SubmitRequiresItems"</span>
+<span class="ct-key">when</span> = [<span class="ct-str">"Submitted"</span>, <span class="ct-str">"Confirmed"</span>,
+  <span class="ct-str">"Processing"</span>, <span class="ct-str">"Shipped"</span>,
+  <span class="ct-str">"Delivered"</span>]
+<span class="ct-key">assert</span> = <span class="ct-str">"items &gt; 0"</span></code></pre>
+            </div>
+            <div class="code-translate-english">
+              <div class="ct-line">
+                <span class="ct-label">[[invariant]]</span>
+                <span class="ct-meaning">This is a safety rule that must ALWAYS be true</span>
+              </div>
+              <div class="ct-line">
+                <span class="ct-label">when = [...]</span>
+                <span class="ct-meaning">Whenever an order is in any of these statuses&hellip;</span>
+              </div>
+              <div class="ct-line">
+                <span class="ct-label">assert = "items &gt; 0"</span>
+                <span class="ct-meaning">&hellip;it must have at least one item. If the system ever violates this, it's a bug &mdash; and Temper proves it CAN'T happen before the code ever runs.</span>
+              </div>
+            </div>
+          </div>
+          <div class="callout callout-accent animate-in" style="text-align: left; max-width: 640px;">
+            <div class="callout-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            </div>
+            <div class="callout-content">
+              <strong class="callout-title">Testing vs. Verification</strong>
+              <p>
+                Invariants are the secret weapon. Most software <em>hopes</em> things won't go wrong &mdash; you write tests
+                that try lots of cases and cross your fingers. Temper <em>proves</em> they can't. The
+                <span class="term" data-definition="Verification &mdash; the process of mathematically proving that a system satisfies its specification for ALL possible inputs and sequences of actions. Unlike testing (which checks specific cases), verification covers every case.">verification cascade</span>
+                exhaustively checks every reachable state. This is the difference between
+                <span class="term" data-definition="Testing &mdash; running a program with specific inputs to check if it behaves correctly in those cases. Testing can find bugs, but it can never prove their absence (there are always untested cases).">testing</span>
+                (trying lots of cases) and verification (mathematical proof for ALL cases).
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="screen-divider" aria-hidden="true"></div>
+
+        <!-- ── Screen 6: Quiz ── -->
+        <div class="screen animate-in">
+          <h2 class="screen-heading">Check Your Understanding</h2>
+          <div class="quiz-container">
+
+            <!-- Question 1 -->
+            <div class="quiz-question-block" data-correct="b" data-explanation="The CancelOrder action's &lt;code&gt;from&lt;/code&gt; array controls which states it can fire from. Adding &quot;Shipped&quot; to that array would allow cancelling shipped orders.">
+              <p class="quiz-question">You want to allow cancelling orders that have already shipped. What would you change in the spec?</p>
+              <div class="quiz-options">
+                <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  Add a new "ShippedCancelled" state to the states list
+                </button>
+                <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  Add "Shipped" to the <code>from</code> array of the CancelOrder action
+                </button>
+                <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  Change CancelOrder's <code>guard</code> to allow shipped orders
+                </button>
+                <button class="quiz-option" data-value="d" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  Remove "Shipped" from the <code>states</code> array
+                </button>
+              </div>
+              <div class="quiz-feedback" aria-live="polite"></div>
+            </div>
+
+            <!-- Question 2 -->
+            <div class="quiz-question-block" data-correct="a" data-explanation="BeginPlanning's &lt;code&gt;from&lt;/code&gt; array is &lt;code&gt;[&quot;Todo&quot;]&lt;/code&gt;. Backlog is not in that list, so the action is rejected &mdash; the spec makes this impossible.">
+              <p class="quiz-question">An agent tries <code>BeginPlanning</code> on an issue that is in "Backlog" status. What happens?</p>
+              <div class="quiz-options">
+                <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  Rejected &mdash; BeginPlanning can only fire from "Todo"
+                </button>
+                <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  It works, but skips the planning phase
+                </button>
+                <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  It works, but requires supervisor approval
+                </button>
+                <button class="quiz-option" data-value="d" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  The issue moves to "Backlog" first, then to "Planning"
+                </button>
+              </div>
+              <div class="quiz-feedback" aria-live="polite"></div>
+            </div>
+
+            <!-- Question 3 -->
+            <div class="quiz-question-block" data-correct="c" data-explanation="A guard protects a single action &mdash; it checks a condition before that action fires. An invariant protects the entire system &mdash; it must hold true no matter what sequence of actions occurs, across all reachable states.">
+              <p class="quiz-question">Why would you add an <span class="term" data-definition="Invariant &mdash; a rule that must be true in ALL reachable states of the system, regardless of what sequence of actions got there.">invariant</span> instead of just a <span class="term" data-definition="Guard &mdash; a condition attached to a single action that must be true for that action to fire.">guard</span>?</p>
+              <div class="quiz-options">
+                <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  Invariants are faster to check at runtime
+                </button>
+                <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  Guards don't work with <span class="term" data-definition="Counter &mdash; a state variable that holds a numeric value.">counter</span> variables
+                </button>
+                <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  Guards protect individual actions; invariants protect the ENTIRE system no matter what sequence of actions occurs
+                </button>
+                <button class="quiz-option" data-value="d" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  Invariants are optional; guards are required
+                </button>
+              </div>
+              <div class="quiz-feedback" aria-live="polite"></div>
+            </div>
+
+            <div style="display: flex; gap: var(--space-3); align-items: center; margin-top: var(--space-4);">
+              <button class="quiz-check-btn" onclick="checkQuiz('module-3')">Check Answers</button>
+              <button class="quiz-reset-btn" onclick="resetQuiz('module-3')">Reset</button>
+              <span class="quiz-overall-feedback" style="display: none; font-weight: 600; color: var(--color-text-secondary);"></span>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================================
+       MODULE 4 — TRUST BUT VERIFY
+       ======================================== -->
+  <section class="module" id="module-4" style="background: var(--color-bg)">
+    <div class="module-content">
+      <header class="module-header animate-in">
+        <span class="module-number">04</span>
+        <h1 class="module-title">Trust But Verify</h1>
+        <p class="module-subtitle">The multi-level verification cascade that proves correctness</p>
+      </header>
+      <div class="module-body">
+
+        <!-- SCREEN 1: Why Verify? -->
+        <div class="animate-in" style="max-width: 620px; text-align: left;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin-bottom: var(--space-3);">
+            Why Verify?
+          </h2>
+          <p style="font-size: var(--text-lg); color: var(--color-text-secondary); line-height: var(--leading-relaxed); margin-bottom: var(--space-4);">
+            Most software gets
+            <span class="term" data-definition="Testing is the practice of running a program with specific inputs and checking the outputs. Traditional testing tries many cases and hopes to find bugs &mdash; but it can never try ALL cases. Testing shows the presence of bugs, not their absence.">tested</span>
+            AFTER it's built. Temper
+            <span class="term" data-definition="Verification is the process of mathematically proving that a system behaves correctly for ALL possible inputs and sequences &mdash; not just the ones you thought to test. It's the difference between 'we tried 1,000 cases' and 'we proved every case.'">verifies</span>
+            BEFORE
+            <span class="term" data-definition="Deployment is the moment a spec becomes live &mdash; when entity actors start processing real actions. In Temper, deployment only happens after the verification cascade passes all levels.">deployment</span>.
+          </p>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); line-height: var(--leading-relaxed);">
+            Here is the key insight: <strong>testing tries many cases and hopes to find bugs.</strong>
+            <span class="term" data-definition="A proof is a mathematical demonstration that a property holds under ALL possible conditions. Unlike testing (which checks specific examples), a proof covers every case &mdash; including ones you never thought of.">Verification</span>
+            <strong>PROVES correctness for ALL possible cases.</strong>
+            Think of it like NASA pre-launch checks &mdash; before a rocket launches, it goes through multiple independent verification systems. No single check is enough. Each catches different types of problems.
+          </p>
+        </div>
+
+        <div class="screen-divider"></div>
+
+        <!-- SCREEN 2: The Four Levels — Step Cards -->
+        <div class="animate-in" style="max-width: 640px; text-align: left;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin-bottom: var(--space-2);">
+            The Four Levels
+          </h2>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); margin-bottom: var(--space-5);">
+            Every spec passes through four independent verification levels. Each must pass before the next begins &mdash; like stage gates on a launch countdown.
+          </p>
+        </div>
+
+        <div class="step-cards stagger-children animate-in">
+          <div class="step-card animate-in" style="border-left: 4px solid #6C7086;">
+            <div class="step-number" style="background: #6C7086;">0</div>
+            <div class="step-body">
+              <span class="step-title">Level 0: SMT Symbolic Check</span>
+              <span class="step-desc">
+                A math solver (called
+                <span class="term" data-definition="Z3 is a Satisfiability Modulo Theories (SMT) solver created by Microsoft Research. It can determine whether a logical formula is satisfiable &mdash; i.e., whether there exists any combination of values that makes it true. Temper uses Z3 to check guard expressions.">Z3</span>)
+                checks every
+                <span class="term" data-definition="A guard is a boolean condition that must be true for a transition to happen. For example, 'items &gt; 0' means you can't submit an empty order. Guards are checked at runtime and proven at verification time.">guard</span>
+                expression. Can this guard ever be true? Are there contradictions?
+                Think of it like spell-checking your blueprint.
+              </span>
+            </div>
+          </div>
+          <div class="step-card animate-in" style="border-left: 4px solid var(--color-accent);">
+            <div class="step-number" style="background: var(--color-accent);">1</div>
+            <div class="step-body">
+              <span class="step-title">Level 1: Model Checking</span>
+              <span class="step-desc">
+                <span class="term" data-definition="Stateright is a Rust-based model checker. It exhaustively explores every reachable state in a system by trying every possible sequence of actions. If a property violation exists, Stateright will find it &mdash; guaranteed.">Stateright</span>
+                explores EVERY possible sequence of actions. Every path. Every combination.
+                Like testing every possible route through a maze &mdash; not just the obvious ones.
+                This is called
+                <span class="term" data-definition="Model checking is a formal verification technique that systematically explores every reachable state of a system. Unlike testing (which samples), model checking is exhaustive &mdash; if a bug exists in any reachable state, it WILL be found.">model checking</span>.
+              </span>
+            </div>
+          </div>
+          <div class="step-card animate-in" style="border-left: 4px solid var(--color-actor-3);">
+            <div class="step-number" style="background: var(--color-actor-3);">2</div>
+            <div class="step-body">
+              <span class="step-title">Level 2: Deterministic Simulation</span>
+              <span class="step-desc">
+                Runs the system with injected failures &mdash; dropped messages, delays, reordering. This is
+                <span class="term" data-definition="Deterministic simulation (DST) runs a system in a controlled environment where all sources of non-determinism (time, randomness, network) are replaced with simulated, reproducible versions. Failures are injected on purpose to test resilience.">deterministic simulation</span>
+                with
+                <span class="term" data-definition="Fault injection is the deliberate introduction of errors (dropped messages, timeouts, reordered events) into a system to verify that it handles failures correctly. It's how you test resilience before real failures happen.">fault injection</span>.
+                Like a stress test for buildings: if it survives a simulated earthquake, it'll survive the real thing.
+              </span>
+            </div>
+          </div>
+          <div class="step-card animate-in" style="border-left: 4px solid var(--color-actor-4);">
+            <div class="step-number" style="background: var(--color-actor-4);">3</div>
+            <div class="step-body">
+              <span class="step-title">Level 3: Property-Based Testing</span>
+              <span class="step-desc">
+                Throws thousands of random action sequences at the spec.
+                <span class="term" data-definition="Edge cases are unusual or extreme inputs that are easy to overlook &mdash; empty strings, maximum values, zero quantities, actions fired in unexpected order. They are where most real-world bugs hide.">Edge cases</span>,
+                weird combinations, boundary values. This is
+                <span class="term" data-definition="Property-based testing generates random inputs and checks that certain properties always hold. Unlike example-based tests ('given input X, expect Y'), property tests say 'for ALL inputs, this property must be true.' Libraries like proptest automate this.">property-based testing</span>
+                &mdash; like a chaos monkey shaking every branch.
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="screen-divider"></div>
+
+        <!-- SCREEN 3: What Each Level Catches — Pattern Cards -->
+        <div class="animate-in" style="max-width: 640px; text-align: left;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin-bottom: var(--space-2);">
+            What Each Level Catches
+          </h2>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); margin-bottom: var(--space-5);">
+            Each level is designed to catch a different class of defect. Together, they cover the full
+            <span class="term" data-definition="The state space is the set of ALL possible states a system can be in, including every combination of state variables, entity states, and in-flight actions. For even simple specs, the state space can be enormous &mdash; which is why exhaustive exploration matters.">state space</span>.
+          </p>
+        </div>
+
+        <div class="pattern-cards stagger-children animate-in" style="max-width: 680px;">
+          <div class="pattern-card animate-in">
+            <div class="pattern-icon" style="background: #F0F0F4; color: #6C7086;" aria-hidden="true">L0</div>
+            <div class="pattern-title">Impossible Guards</div>
+            <p class="pattern-desc">
+              <code>items &gt; 0 AND items &lt; 0</code> would be caught &mdash; the
+              <span class="term" data-definition="SMT stands for Satisfiability Modulo Theories. An SMT solver determines whether a logical formula can ever be true. If a guard expression is unsatisfiable (can never be true), the solver flags it immediately.">SMT</span>
+              solver proves this guard can never be satisfied.
+            </p>
+          </div>
+          <div class="pattern-card animate-in">
+            <div class="pattern-icon" style="background: var(--color-accent-light); color: var(--color-accent);" aria-hidden="true">L1</div>
+            <div class="pattern-title">Unreachable States</div>
+            <p class="pattern-desc">
+              A state that no sequence of actions can ever reach. The model checker explores every path and proves no route leads there.
+            </p>
+          </div>
+          <div class="pattern-card animate-in">
+            <div class="pattern-icon" style="background: #F3EEF8; color: var(--color-actor-3);" aria-hidden="true">L2</div>
+            <div class="pattern-title">Timing Bugs</div>
+            <p class="pattern-desc">
+              Things that break when messages arrive out of order. The simulation injects delays and reordering to expose concurrency defects.
+            </p>
+          </div>
+          <div class="pattern-card animate-in">
+            <div class="pattern-icon" style="background: #FDF5E0; color: var(--color-actor-4);" aria-hidden="true">L3</div>
+            <div class="pattern-title">Edge Cases</div>
+            <p class="pattern-desc">
+              Boundary values, empty strings, maximum counters. Random sequences find the weird combinations humans never think to try.
+            </p>
+          </div>
+        </div>
+
+        <div class="screen-divider"></div>
+
+        <!-- SCREEN 4: The Single-Table Principle — Callout -->
+        <div class="callout callout-accent animate-in" style="text-align: left; max-width: 620px;">
+          <div class="callout-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          </div>
+          <div class="callout-content">
+            <strong class="callout-title">The Single-Table Principle</strong>
+            <p>
+              Here is the profound bit: the same
+              <span class="term" data-definition="A TransitionTable is the live rulebook compiled from a spec. It maps every (current-state, action) pair to the next state, so the system can evaluate transitions in constant time.">TransitionTable</span>
+              that
+              <span class="term" data-definition="Stateright is a Rust-based model checker. It exhaustively explores every reachable state in a system by trying every possible sequence of actions. If a property violation exists, Stateright will find it &mdash; guaranteed.">Stateright</span>
+              <span class="term" data-definition="Model checking is a formal verification technique that systematically explores every reachable state of a system. Unlike testing (which samples), model checking is exhaustive &mdash; if a bug exists in any reachable state, it WILL be found.">model-checks</span>
+              in Level 1 is the <strong>EXACT SAME code</strong> that runs in
+              <span class="term" data-definition="Production is the live environment where real users interact with the system. In Temper, the production runtime uses the same TransitionTable that was verified &mdash; there is no separate 'production version' of the logic.">production</span>.
+            </p>
+            <p>
+              Not a "similar version." Not a "simplified model." The actual thing. This is the <strong>Single-Table Principle</strong> &mdash; verify once, run forever. If the verification cascade proves your spec is correct, you KNOW production is correct too. There is no gap between what was tested and what runs.
+            </p>
+          </div>
+        </div>
+
+        <div class="screen-divider"></div>
+
+        <!-- SCREEN 5: Quiz -->
+        <div class="animate-in" style="max-width: 620px; text-align: left;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin-bottom: var(--space-2);">
+            Check Your Understanding
+          </h2>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); margin-bottom: var(--space-5);">
+            Apply what you just learned about the verification cascade.
+          </p>
+        </div>
+
+        <div class="quiz-container animate-in" style="max-width: 620px; text-align: left;">
+
+          <!-- Q1 -->
+          <div class="quiz-question-block" data-correct="a" data-explanation="Level 0 (SMT Symbolic Check) catches this first. The Z3 solver analyzes the guard expression and determines it is logically impossible &mdash; no value of 'priority' can be simultaneously greater than 10 AND less than 5. The guard is unsatisfiable.">
+            <p class="quiz-question">You write a guard that says <code>priority &gt; 10 AND priority &lt; 5</code>. Which verification level catches this first?</p>
+            <div class="quiz-options">
+              <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Level 0 (SMT check) &mdash; the guard is logically impossible
+              </button>
+              <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Level 1 (model checking) &mdash; no state can satisfy both conditions
+              </button>
+              <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Level 3 (property-based testing) &mdash; random inputs would never pass the guard
+              </button>
+            </div>
+            <div class="quiz-feedback"></div>
+          </div>
+
+          <!-- Q2 -->
+          <div class="quiz-question-block" data-correct="b" data-explanation="Level 1 (Model Checking) catches this. Stateright exhaustively explores every reachable state by trying every possible sequence of actions from the initial state. If no sequence of actions ever transitions the entity INTO the 'Paused' state, it is flagged as unreachable.">
+            <p class="quiz-question">Your spec has a "Paused" state, but no action ever transitions TO it. Which level catches this?</p>
+            <div class="quiz-options">
+              <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Level 0 &mdash; the SMT solver detects unused states
+              </button>
+              <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Level 1 &mdash; model checking explores all reachable states and finds "Paused" is never reached
+              </button>
+              <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Level 2 &mdash; deterministic simulation tries to reach it and fails
+              </button>
+            </div>
+            <div class="quiz-feedback"></div>
+          </div>
+
+          <!-- Q3 -->
+          <div class="quiz-question-block" data-correct="c" data-explanation="Because the TransitionTable is the SAME artifact in both verification and production (the Single-Table Principle), there is no gap between what was proven correct and what actually runs. If the verification cascade proves a property holds, that proof applies directly to the production system &mdash; not to a separate model or simplified version.">
+            <p class="quiz-question">Why is it important that the same TransitionTable runs in both verification and production?</p>
+            <div class="quiz-options">
+              <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                It saves memory by reusing the same data structure
+              </button>
+              <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                It makes deployment faster since nothing needs to be rebuilt
+              </button>
+              <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                If verification proves it correct, production is guaranteed correct too &mdash; there is no gap between what was tested and what runs
+              </button>
+            </div>
+            <div class="quiz-feedback"></div>
+          </div>
+
+          <div style="display: flex; gap: var(--space-3); align-items: center; margin-top: var(--space-4);">
+            <button class="quiz-check-btn" onclick="checkQuiz('module-4')">Check Answers</button>
+            <button class="quiz-reset-btn" onclick="resetQuiz('module-4')">Reset</button>
+            <span class="quiz-overall-feedback" style="display:none; font-weight: 600; color: var(--color-accent);"></span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================================
+       MODULE 5 — THE BOUNCER AT THE DOOR
+       ======================================== -->
+  <section class="module" id="module-5" style="background: var(--color-bg-warm)">
+    <div class="module-content">
+      <header class="module-header animate-in">
+        <span class="module-number">05</span>
+        <h1 class="module-title">The Bouncer at the Door</h1>
+        <p class="module-subtitle">How Cedar authorization controls every action in the system</p>
+      </header>
+      <div class="module-body">
+
+        <!-- SCREEN 1: Default: No -->
+        <div class="animate-in" style="max-width: 620px; text-align: left;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin-bottom: var(--space-3);">
+            Default: No
+          </h2>
+          <p style="font-size: var(--text-lg); color: var(--color-text-secondary); line-height: var(--leading-relaxed); margin-bottom: var(--space-4);">
+            In most software, agents can do anything unless you explicitly block them. Temper flips this: agents can do <strong>nothing</strong> unless you explicitly allow them.
+          </p>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); line-height: var(--leading-relaxed); margin-bottom: var(--space-4);">
+            Think of a concert venue. You don't walk in and go wherever you want. The door is locked. You need a badge to get in, a different badge to go backstage, and a crew pass to access the control room. No badge? No entry.
+          </p>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); line-height: var(--leading-relaxed);">
+            This is called
+            <span class="term" data-definition="Default deny means every action is blocked unless a policy explicitly allows it. The door is locked by default &mdash; you need a key for each room you want to enter.">default deny</span>.
+            Every action an agent takes needs explicit
+            <span class="term" data-definition="Authorization is the process of checking whether someone is allowed to perform a specific action. Authentication proves who you are; authorization decides what you can do.">authorization</span>.
+            No
+            <span class="term" data-definition="A permission is a specific grant allowing an agent to perform a particular action on a particular resource. Permissions are defined in Cedar policies and evaluated at runtime.">permission</span>,
+            no action.
+          </p>
+        </div>
+
+        <div class="screen-divider"></div>
+
+        <!-- SCREEN 2: Cedar: The Policy Language -->
+        <div class="animate-in" style="max-width: 720px; text-align: left;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin-bottom: var(--space-2);">
+            Cedar: The Policy Language
+          </h2>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); margin-bottom: var(--space-5);">
+            Temper uses
+            <span class="term" data-definition="Cedar is a policy language created by AWS that Temper uses to define who can do what. Policies are written as simple permit/forbid rules that reference the actor, the action, and the resource.">Cedar</span>
+            to express authorization rules. Here is a real policy from Temper's project management app. Left side: code. Right side: what it means.
+          </p>
+        </div>
+
+        <!-- Universal access policy -->
+        <div class="code-translate animate-in">
+          <div class="code-translate-code">
+<pre style="margin:0;"><span class="ct-comment">// Universal: any agent can create,</span>
+<span class="ct-comment">// read, list, comment</span>
+
+<span class="ct-key">permit</span>(
+  <span class="ct-key">principal</span>,
+  <span class="ct-key">action</span> in [
+    Action::<span class="ct-str">"create"</span>,
+    Action::<span class="ct-str">"read"</span>,
+    Action::<span class="ct-str">"list"</span>,
+    Action::<span class="ct-str">"AddComment"</span>,
+    Action::<span class="ct-str">"AddLabel"</span>,
+    Action::<span class="ct-str">"SetDescription"</span>
+  ],
+  <span class="ct-key">resource</span> is Issue
+);</pre>
+          </div>
+          <div class="code-translate-english">
+            <div class="ct-line">
+              <span class="ct-label">permit(</span>
+              <span class="ct-meaning">This rule <strong>allows</strong> something (as opposed to <code>forbid</code> which blocks it)</span>
+            </div>
+            <div class="ct-line">
+              <span class="ct-label">principal,</span>
+              <span class="ct-meaning">Any <span class="term" data-definition="A principal is the entity performing an action &mdash; an agent, a user, a service. In Cedar, the principal is who is trying to do something.">agent</span> &mdash; doesn't matter who they are</span>
+            </div>
+            <div class="ct-line">
+              <span class="ct-label">action in [...]</span>
+              <span class="ct-meaning">Can perform these specific <span class="term" data-definition="An action is a named operation that can change an entity's state &mdash; like 'SubmitOrder' or 'CancelOrder'. Actions are defined in the spec and enforced at runtime.">actions</span>: create, read, list, comment, label, describe</span>
+            </div>
+            <div class="ct-line">
+              <span class="ct-label">resource is Issue</span>
+              <span class="ct-meaning">On any <span class="term" data-definition="A resource is the thing being acted upon. In Cedar, the resource is what the principal is trying to do something to &mdash; an Issue, an Order, a Document.">Issue</span> entity</span>
+            </div>
+            <div class="ct-line">
+              <span class="ct-label" style="font-style: italic;">Summary</span>
+              <span class="ct-meaning">Everyone gets basic access. Reading and commenting are open to all.</span>
+            </div>
+          </div>
+        </div>
+
+        <p class="animate-in" style="max-width: 620px; text-align: left; font-size: var(--text-base); color: var(--color-text-secondary); margin-top: var(--space-5); margin-bottom: var(--space-5);">
+          That covers the basics. But what about the powerful stuff &mdash; assigning work, setting priority, canceling issues? Those need a stronger badge.
+        </p>
+
+        <!-- Role-gated policy -->
+        <div class="code-translate animate-in">
+          <div class="code-translate-code">
+<pre style="margin:0;"><span class="ct-comment">// Triage &amp; Prioritization:</span>
+<span class="ct-comment">// supervisors and humans only</span>
+
+<span class="ct-key">permit</span>(
+  <span class="ct-key">principal</span>,
+  <span class="ct-key">action</span> in [
+    Action::<span class="ct-str">"MoveToTriage"</span>,
+    Action::<span class="ct-str">"MoveToTodo"</span>,
+    Action::<span class="ct-str">"SetPriority"</span>,
+    Action::<span class="ct-str">"Assign"</span>,
+    Action::<span class="ct-str">"AssignPlanner"</span>,
+    Action::<span class="ct-str">"Unassign"</span>,
+    Action::<span class="ct-str">"Cancel"</span>
+  ],
+  <span class="ct-key">resource</span> is Issue
+) <span class="ct-key">when</span> {
+  [<span class="ct-str">"supervisor"</span>, <span class="ct-str">"human"</span>]
+    .contains(<span class="ct-key">principal</span>.agent_type)
+  &amp;&amp; <span class="ct-key">context</span>.agentTypeVerified
+    == <span class="ct-str">true</span>
+};</pre>
+          </div>
+          <div class="code-translate-english">
+            <div class="ct-line">
+              <span class="ct-label">action in [...]</span>
+              <span class="ct-meaning">Management actions &mdash; triaging, prioritizing, assigning &mdash; are locked down</span>
+            </div>
+            <div class="ct-line">
+              <span class="ct-label">when { ... }</span>
+              <span class="ct-meaning">Only
+                <span class="term" data-definition="An agent_type is a label that identifies what kind of agent is acting &mdash; 'supervisor', 'human', 'claude-code', etc. Cedar policies can gate actions based on agent type.">supervisors</span>
+                or humans can do them</span>
+            </div>
+            <div class="ct-line">
+              <span class="ct-label">agentTypeVerified</span>
+              <span class="ct-meaning">AND their identity must be
+                <span class="term" data-definition="Verified means the agent's claimed identity has been cryptographically confirmed by the platform &mdash; not just self-asserted. The agentTypeVerified attribute distinguishes trusted from untrusted agents.">verified</span>
+                (not just claimed)</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="screen-divider"></div>
+
+        <!-- SCREEN 3: Role Separation in Action -->
+        <div class="animate-in" style="max-width: 640px; text-align: left;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin-bottom: var(--space-2);">
+            Role Separation in Action
+          </h2>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); margin-bottom: var(--space-5);">
+            Cedar doesn't just gate actions by role. It can enforce that <em>specific agents</em> are assigned to specific responsibilities. Here is how a planning flow works, step by step.
+          </p>
+        </div>
+
+        <div class="step-cards stagger-children animate-in">
+          <div class="step-card animate-in">
+            <div class="step-number">1</div>
+            <div class="step-body">
+              <span class="step-title">Supervisor assigns a planner</span>
+              <span class="step-desc">
+                Only
+                <span class="term" data-definition="An agent_type is a label that identifies what kind of agent is acting &mdash; 'supervisor', 'human', 'claude-code', etc. Cedar policies can gate actions based on agent type.">supervisors</span>
+                or humans can call <code>AssignPlanner</code>. This sets the <code>PlannerId</code> on the issue.
+              </span>
+            </div>
+          </div>
+          <div class="step-card animate-in">
+            <div class="step-number">2</div>
+            <div class="step-body">
+              <span class="step-title">Planner drafts the plan</span>
+              <span class="step-desc">
+                Only the assigned planner &mdash; the agent whose ID matches <code>PlannerId</code> &mdash; can call <code>BeginPlanning</code> and <code>WritePlan</code>.
+              </span>
+            </div>
+          </div>
+          <div class="step-card animate-in">
+            <div class="step-number">3</div>
+            <div class="step-body">
+              <span class="step-title">Supervisor approves the plan</span>
+              <span class="step-desc">
+                A supervisor or human reviews and calls <code>ApprovePlan</code>. The human's conversational "go ahead" is the real gate.
+              </span>
+            </div>
+          </div>
+          <div class="step-card animate-in">
+            <div class="step-number">4</div>
+            <div class="step-body">
+              <span class="step-title">Implementer starts work</span>
+              <span class="step-desc">
+                Only the assigned implementer (whose ID matches <code>AssigneeId</code>) can call <code>StartWork</code>. This requires an approved plan.
+              </span>
+            </div>
+          </div>
+          <div class="step-card animate-in">
+            <div class="step-number">5</div>
+            <div class="step-body">
+              <span class="step-title">Supervisor reviews the work</span>
+              <span class="step-desc">
+                Only supervisors or humans can call <code>ApproveReview</code> or <code>RequestChanges</code>. The cycle closes.
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <p class="animate-in" style="max-width: 620px; text-align: left; font-size: var(--text-base); color: var(--color-text-secondary); margin-top: var(--space-5); margin-bottom: var(--space-3);">
+          Here is the Cedar
+          <span class="term" data-definition="A policy is a single permit or forbid rule in Cedar. Multiple policies combine to form the complete authorization logic. If any permit matches and no forbid blocks, the action is allowed.">policy</span>
+          that enforces step 2 &mdash; only the assigned planner can write the plan:
+        </p>
+
+        <div class="code-translate animate-in">
+          <div class="code-translate-code">
+<pre style="margin:0;"><span class="ct-comment">// Planning: the assigned planner</span>
+
+<span class="ct-key">permit</span>(
+  <span class="ct-key">principal</span>,
+  <span class="ct-key">action</span> in [
+    Action::<span class="ct-str">"BeginPlanning"</span>,
+    Action::<span class="ct-str">"WritePlan"</span>
+  ],
+  <span class="ct-key">resource</span> is Issue
+) <span class="ct-key">when</span> {
+  <span class="ct-key">resource</span>.PlannerId
+    == <span class="ct-key">principal</span>.id
+};</pre>
+          </div>
+          <div class="code-translate-english">
+            <div class="ct-line">
+              <span class="ct-label">resource.PlannerId == principal.id</span>
+              <span class="ct-meaning">Only the agent whose ID matches the issue's <code>PlannerId</code> field can begin planning and write the plan. No one else &mdash; not even a supervisor &mdash; unless a separate
+                <span class="term" data-definition="A policy is a single permit or forbid rule in Cedar. Multiple policies combine to form the complete authorization logic. If any permit matches and no forbid blocks, the action is allowed.">policy</span>
+                grants them access.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="screen-divider"></div>
+
+        <!-- SCREEN 4: When Access is Denied -->
+        <div class="callout callout-accent animate-in" style="text-align: left; max-width: 620px;">
+          <div class="callout-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          </div>
+          <div class="callout-content">
+            <strong class="callout-title">When Access is Denied</strong>
+            <p>
+              When an agent tries something it's not allowed to do, Temper doesn't just say "no" and move on. It creates a
+              <span class="term" data-definition="A pending decision is a structured authorization request that surfaces to a human when an agent's action is denied by Cedar. The human can approve it narrowly (just this once), broadly (for this type of action), or deny it.">pending decision</span>
+              &mdash; a structured request that surfaces to the human through the Observe UI.
+            </p>
+            <p>
+              The human can approve it narrowly (just this once), broadly (for this type of action), or deny it entirely. Over time, the
+              <span class="term" data-definition="A policy is a single permit or forbid rule in Cedar. Multiple policies combine to form the complete authorization logic. If any permit matches and no forbid blocks, the action is allowed.">policy</span>
+              set grows to match exactly what agents need. The system <em>learns</em> the right permissions from real usage.
+            </p>
+            <p>
+              Think of it like a new employee. Day one, they can barely access anything. Each time they need something, they ask. A manager approves. After a few weeks, their badge opens exactly the doors they need &mdash; no more, no less. That's how
+              <span class="term" data-definition="Scope refers to how broadly a permission applies. Narrow scope means 'just this one time for this one resource.' Broad scope means 'for all resources of this type.' Temper lets humans choose the scope when approving pending decisions.">scope</span>
+              works in Temper.
+            </p>
+          </div>
+        </div>
+
+        <div class="screen-divider"></div>
+
+        <!-- SCREEN 5: Quiz -->
+        <div class="animate-in" style="max-width: 620px; text-align: left;">
+          <h2 style="font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin-bottom: var(--space-2);">
+            Check Your Understanding
+          </h2>
+          <p style="font-size: var(--text-base); color: var(--color-text-secondary); margin-bottom: var(--space-5);">
+            Apply what you just learned about Cedar authorization.
+          </p>
+        </div>
+
+        <div class="quiz-container animate-in" style="max-width: 620px; text-align: left;">
+
+          <!-- Q1 -->
+          <div class="quiz-question-block" data-correct="b" data-explanation="Cedar requires 'supervisor' or 'human' agent_type with verified identity to cancel issues. An intern-agent doesn't match either type, so the action is denied. Temper creates a pending decision for a human to review.">
+            <p class="quiz-question">A new intern-agent tries to cancel an issue. The Cedar policy requires 'supervisor' or 'human' agent_type. What happens?</p>
+            <div class="quiz-options">
+              <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                The action succeeds &mdash; any agent can cancel issues
+              </button>
+              <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                The action is denied and a <span class="term" data-definition="A pending decision is a structured authorization request that surfaces to a human when an agent's action is denied by Cedar. The human can approve it narrowly (just this once), broadly (for this type of action), or deny it.">pending decision</span> is created for a human to review
+              </button>
+              <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                The action fails silently and the agent retries until it works
+              </button>
+            </div>
+            <div class="quiz-feedback"></div>
+          </div>
+
+          <!-- Q2 -->
+          <div class="quiz-question-block" data-correct="c" data-explanation="Agents could lie about their type. The agentTypeVerified attribute is set by the platform after cryptographically confirming the agent's identity against the registry. Without verification, any agent could claim to be a supervisor.">
+            <p class="quiz-question">Why does Cedar check <code>context.agentTypeVerified == true</code> instead of just trusting the agent's claimed type?</p>
+            <div class="quiz-options">
+              <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                It's just a formality &mdash; all agents are trusted by default
+              </button>
+              <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                It checks whether the agent has been active long enough to be trusted
+              </button>
+              <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Because agents could lie about their type &mdash; verification ensures the claim is cryptographically confirmed by the platform
+              </button>
+            </div>
+            <div class="quiz-feedback"></div>
+          </div>
+
+          <!-- Q3 -->
+          <div class="quiz-question-block" data-correct="a" data-explanation="Cedar is additive &mdash; you can layer new permit policies on top of existing ones. A new policy targeting that agent's specific ID for triage actions would grant the access without changing the existing supervisor policy.">
+            <p class="quiz-question">You want to allow a specific agent to triage issues without being a supervisor. How would you approach this?</p>
+            <div class="quiz-options">
+              <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Add a new Cedar <span class="term" data-definition="A policy is a single permit or forbid rule in Cedar. Multiple policies combine to form the complete authorization logic. If any permit matches and no forbid blocks, the action is allowed.">policy</span> that permits that specific agent's ID for triage actions &mdash; Cedar is additive
+              </button>
+              <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Change the agent's <code>agent_type</code> to "supervisor" so it matches the existing policy
+              </button>
+              <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                <span class="quiz-option-radio" aria-hidden="true"></span>
+                Remove the <code>when</code> clause from the triage policy so anyone can do it
+              </button>
+            </div>
+            <div class="quiz-feedback"></div>
+          </div>
+
+          <div style="display: flex; gap: var(--space-3); align-items: center; margin-top: var(--space-4);">
+            <button class="quiz-check-btn" onclick="checkQuiz('module-5')">Check Answers</button>
+            <button class="quiz-reset-btn" onclick="resetQuiz('module-5')">Reset</button>
+            <span class="quiz-overall-feedback" style="display:none; font-weight: 600; color: var(--color-accent);"></span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================================
+       MODULE 6 — THE LIVING SYSTEM
+       ======================================== -->
+  <section class="module" id="module-6" style="background: var(--color-bg)">
+    <div class="module-content">
+      <header class="module-header animate-in">
+        <span class="module-number">06</span>
+        <h1 class="module-title">The Living System</h1>
+        <p class="module-subtitle">The evolution engine and how the whole system grows over time</p>
+      </header>
+      <div class="module-body">
+
+        <!-- ── Screen 1: Software That Learns From Use ── -->
+        <div class="screen animate-in">
+          <h2 class="screen-heading">Software That Learns From Use</h2>
+          <p>
+            Most software is built, deployed, and stays the same until someone manually updates it. A developer notices a problem,
+            writes a ticket, waits for a sprint, ships a patch. Weeks pass. Meanwhile, users work around the limitation every single day.
+          </p>
+          <p>
+            Temper works differently. Its
+            <span class="term" data-definition="The evolution engine is the subsystem that automatically observes how agents and users interact with the system, detects patterns of friction or unmet intent, and proposes spec changes for human review. It closes the loop between runtime behavior and design-time specs.">specs</span>
+            <em>evolve</em> based on how agents and users actually use the system. Every failed action, every workaround, every friction point
+            is automatically observed and can
+            <span class="term" data-definition="A feedback loop is a cycle where the output of a system influences its future input. In Temper, runtime observations feed back into spec proposals, which — once approved — change the system's behavior.">feed back</span>
+            into spec improvements.
+          </p>
+          <p>
+            The metaphor is biological evolution. Organisms don't redesign themselves from scratch. They observe what works,
+            adapt incrementally, and the environment &mdash; natural selection &mdash; gates what changes survive. In Temper, the human holds
+            the role of natural selection: the approval gate.
+          </p>
+        </div>
+
+        <div class="screen-divider" aria-hidden="true"></div>
+
+        <!-- ── Screen 2: The O-P-A-D-I Chain ── -->
+        <div class="screen animate-in">
+          <h2 class="screen-heading">The O-P-A-D-I Chain</h2>
+          <p style="margin-bottom: var(--space-5); color: var(--color-text-secondary);">
+            The
+            <span class="term" data-definition="The evolution engine is Temper's subsystem for continuous improvement. It captures unmet intents at runtime and converts them into verified spec changes through a structured chain of records, each reviewed by a human.">evolution engine</span>
+            works through a chain of five linked records. Each one builds on the previous, creating a complete audit trail from observation to impact.
+          </p>
+
+          <div style="display: flex; flex-direction: column; gap: var(--space-4); max-width: 640px;">
+
+            <!-- Step 1: O-Record -->
+            <div style="display: flex; align-items: flex-start; gap: var(--space-4); padding: var(--space-4) var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-left: 4px solid var(--color-actor-1);">
+              <div style="width: 44px; height: 44px; border-radius: 50%; background: #FDE8E4; color: var(--color-actor-1); display: flex; align-items: center; justify-content: center; font-size: 1.25rem; flex-shrink: 0; font-weight: 700;" aria-hidden="true">1</div>
+              <div>
+                <strong style="font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-actor-1);">O &mdash;
+                  <span class="term" data-definition="An O-Record (Observation) is created automatically when the system detects a recurring pattern of failed actions, workarounds, or unmet intents. It captures what agents are trying to do that the spec doesn't support.">Observation</span></strong>
+                <p style="font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-1) 0 0;">
+                  Agents keep trying to do something the spec doesn't support. The system notices the pattern automatically.
+                  <em>"Users tried action X 47 times this week. It failed every time."</em>
+                </p>
+              </div>
+            </div>
+
+            <!-- Step 2: P-Record -->
+            <div style="display: flex; align-items: flex-start; gap: var(--space-4); padding: var(--space-4) var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-left: 4px solid var(--color-actor-2);">
+              <div style="width: 44px; height: 44px; border-radius: 50%; background: var(--color-accent-light); color: var(--color-actor-2); display: flex; align-items: center; justify-content: center; font-size: 1.25rem; flex-shrink: 0; font-weight: 700;" aria-hidden="true">2</div>
+              <div>
+                <strong style="font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-actor-2);">P &mdash;
+                  <span class="term" data-definition="A P-Record (Problem) formalizes the observation into a structured problem statement. It identifies the gap in the spec, quantifies the impact, and sets the stage for analysis.">Problem</span></strong>
+                <p style="font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-1) 0 0;">
+                  The pattern is formalized into a structured problem statement.
+                  <em>"Users tried action X 47 times this week. It failed every time. This looks like a gap in the spec."</em>
+                </p>
+              </div>
+            </div>
+
+            <!-- Step 3: A-Record -->
+            <div style="display: flex; align-items: flex-start; gap: var(--space-4); padding: var(--space-4) var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-left: 4px solid var(--color-actor-3);">
+              <div style="width: 44px; height: 44px; border-radius: 50%; background: #F3EEF8; color: var(--color-actor-3); display: flex; align-items: center; justify-content: center; font-size: 1.25rem; flex-shrink: 0; font-weight: 700;" aria-hidden="true">3</div>
+              <div>
+                <strong style="font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-actor-3);">A &mdash;
+                  <span class="term" data-definition="An A-Record (Analysis) contains a proposed spec change that would address the identified problem. It includes the specific modification — new actions, states, guards, or policies — along with impact analysis.">Analysis</span></strong>
+                <p style="font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-1) 0 0;">
+                  A proposed fix is generated.
+                  <em>"Add a Rollback action from Deployed to Testing status, with guard deployed_duration &gt; 24h."</em>
+                </p>
+              </div>
+            </div>
+
+            <!-- Step 4: D-Record -->
+            <div style="display: flex; align-items: flex-start; gap: var(--space-4); padding: var(--space-4) var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-left: 4px solid var(--color-actor-4);">
+              <div style="width: 44px; height: 44px; border-radius: 50%; background: #FDF5E0; color: var(--color-actor-4); display: flex; align-items: center; justify-content: center; font-size: 1.25rem; flex-shrink: 0; font-weight: 700;" aria-hidden="true">4</div>
+              <div>
+                <strong style="font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-actor-4);">D &mdash;
+                  <span class="term" data-definition="A D-Record (Decision) captures the human's verdict on a proposed change. They can approve (narrow, medium, or broad scope), reject, or modify the proposal. No spec change happens without a D-Record.">Decision</span></strong>
+                <p style="font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-1) 0 0;">
+                  A human reviews the proposal. They can approve (narrow, medium, or broad scope), reject, or modify it.
+                  No change goes live without explicit human approval.
+                </p>
+              </div>
+            </div>
+
+            <!-- Step 5: I-Record -->
+            <div style="display: flex; align-items: flex-start; gap: var(--space-4); padding: var(--space-4) var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-left: 4px solid var(--color-accent);">
+              <div style="width: 44px; height: 44px; border-radius: 50%; background: var(--color-accent-light); color: var(--color-accent); display: flex; align-items: center; justify-content: center; font-size: 1.25rem; flex-shrink: 0; font-weight: 700;" aria-hidden="true">5</div>
+              <div>
+                <strong style="font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-accent);">I &mdash;
+                  <span class="term" data-definition="An I-Record (Insight) tracks the impact of a deployed change. Did the proposed fix actually work? Did rollback success rates improve? Was the change worth it? It closes the feedback loop.">Insight</span></strong>
+                <p style="font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-1) 0 0;">
+                  After the change deploys, impact is tracked. Did rollback success rates improve? Was the change worth it?
+                  The I-Record closes the
+                  <span class="term" data-definition="A feedback loop is a cycle where the output of a system influences its future input. In Temper, runtime observations feed back into spec proposals, which — once approved — change the system's behavior.">feedback loop</span>.
+                </p>
+              </div>
+            </div>
+
+          </div>
+
+          <p style="margin-top: var(--space-5); font-size: var(--text-sm); color: var(--color-text-muted); max-width: 640px;">
+            Each record links to the previous one. You can trace from any change back to the
+            <span class="term" data-definition="An observation is the raw detection of a pattern — failed actions, repeated workarounds, friction points. It's the starting point of the evolution chain.">observation</span>
+            that motivated it. Complete
+            <span class="term" data-definition="An audit trail is a chronological record of every action, decision, and change in a system. In Temper, the O-P-A-D-I chain creates an unbroken audit trail from observation to impact.">audit trail</span>.
+          </p>
+        </div>
+
+        <div class="screen-divider" aria-hidden="true"></div>
+
+        <!-- ── Screen 3: The Human Gate ── -->
+        <div class="screen animate-in">
+          <div class="callout callout-accent" style="text-align: left; max-width: 640px;">
+            <div class="callout-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            </div>
+            <div class="callout-content">
+              <strong class="callout-title">The Human Gate</strong>
+              <p>
+                Here's what makes this different from "AI that rewrites itself": the system can observe, analyze, and propose &mdash;
+                but <strong>only humans can approve changes</strong>. No
+                <span class="term" data-definition="Autonomous mutation means a system modifying its own rules without external approval. Temper explicitly prevents this — the evolution engine can propose changes, but a human must approve every one.">autonomous mutation</span>.
+                The human holds the approval gate.
+              </p>
+              <p style="margin-top: var(--space-3);">
+                This isn't a limitation &mdash; it's the design. It's what makes the system trustworthy.
+                Every spec change has a
+                <span class="term" data-definition="A D-Record (Decision) captures the human's verdict on a proposed change. No spec change happens without one.">D-Record</span>
+                with a human's decision attached. Every change can be traced back to the observation that motivated it.
+                The
+                <span class="term" data-definition="An audit trail is a chronological record of every action, decision, and change in a system. In Temper, the O-P-A-D-I chain creates an unbroken audit trail from observation to impact.">audit trail</span>
+                is unbroken.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="screen-divider" aria-hidden="true"></div>
+
+        <!-- ── Screen 4: The Big Picture — Architecture Diagram ── -->
+        <div class="screen animate-in">
+          <h2 class="screen-heading">The Big Picture</h2>
+          <p style="margin-bottom: var(--space-5); color: var(--color-text-secondary);">
+            Here's how all the pieces fit together &mdash; the full Temper loop from design to runtime to evolution.
+            Click any zone to learn more.
+          </p>
+
+          <div id="arch-diagram" style="display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: auto auto; gap: var(--space-4); max-width: 720px;">
+
+            <!-- Zone 1: Design Time -->
+            <div class="arch-zone animate-in" data-zone="design" onclick="toggleArchZone(this)" style="cursor: pointer; padding: var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-top: 4px solid var(--color-actor-1); transition: box-shadow 0.2s ease, transform 0.2s ease;">
+              <div style="display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3);">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-actor-1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                <strong style="font-size: var(--text-sm); color: var(--color-actor-1);">Design Time</strong>
+              </div>
+              <ul style="font-size: var(--text-xs); color: var(--color-text-secondary); margin: 0; padding-left: var(--space-4); line-height: 1.6;">
+                <li>Developer / Agent describes capability</li>
+                <li>IOA Spec + CSDL + Cedar generated</li>
+                <li>Verification Cascade (L0 &rarr; L1 &rarr; L2 &rarr; L3)</li>
+              </ul>
+              <div class="arch-zone-detail" style="display: none; margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--color-border); font-size: var(--text-xs); color: var(--color-text-muted);">
+                This is where behavior is defined. A developer or agent describes what they want through conversation. The system generates
+                <span class="term" data-definition="I/O Automaton specs — the formal behavioral descriptions that define states, actions, guards, effects, and invariants for every entity type.">IOA specs</span>,
+                CSDL data models, and Cedar policies. Every spec passes the 4-level verification cascade before deployment.
+              </div>
+            </div>
+
+            <!-- Zone 2: Runtime -->
+            <div class="arch-zone animate-in" data-zone="runtime" onclick="toggleArchZone(this)" style="cursor: pointer; padding: var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-top: 4px solid var(--color-actor-2); transition: box-shadow 0.2s ease, transform 0.2s ease;">
+              <div style="display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3);">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-actor-2)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                <strong style="font-size: var(--text-sm); color: var(--color-actor-2);">Runtime</strong>
+              </div>
+              <ul style="font-size: var(--text-xs); color: var(--color-text-secondary); margin: 0; padding-left: var(--space-4); line-height: 1.6;">
+                <li>Entity Actors process actions</li>
+                <li>Cedar checks every request</li>
+                <li>Events persisted (event sourcing)</li>
+              </ul>
+              <div class="arch-zone-detail" style="display: none; margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--color-border); font-size: var(--text-xs); color: var(--color-text-muted);">
+                The verified specs are compiled into TransitionTables and
+                <span class="term" data-definition="Hot deploy means updating running actors with new specs without downtime. Existing entity state is preserved — only the rules change.">hot-deployed</span>
+                as entity actors. Every incoming action is authorized by Cedar, validated against the TransitionTable, and persisted via
+                <span class="term" data-definition="Event sourcing is a pattern where every state change is stored as an immutable event. Instead of just storing the current state, you store the complete history of events that led to it. You can replay events to reconstruct any past state.">event sourcing</span>.
+              </div>
+            </div>
+
+            <!-- Zone 3: Observability -->
+            <div class="arch-zone animate-in" data-zone="observe" onclick="toggleArchZone(this)" style="cursor: pointer; padding: var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-top: 4px solid var(--color-accent); transition: box-shadow 0.2s ease, transform 0.2s ease;">
+              <div style="display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3);">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                <strong style="font-size: var(--text-sm); color: var(--color-accent);">Observability</strong>
+              </div>
+              <ul style="font-size: var(--text-xs); color: var(--color-text-secondary); margin: 0; padding-left: var(--space-4); line-height: 1.6;">
+                <li>WideEvents recorded automatically</li>
+                <li>Trajectory analysis</li>
+                <li>Pattern detection</li>
+              </ul>
+              <div class="arch-zone-detail" style="display: none; margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--color-border); font-size: var(--text-xs); color: var(--color-text-muted);">
+                Every action &mdash; successful or failed &mdash; is recorded as a WideEvent. The system analyzes trajectories (sequences of actions)
+                to detect patterns: What are agents trying to do? Where are they getting stuck? What workarounds are they using?
+              </div>
+            </div>
+
+            <!-- Zone 4: Evolution (spans full width at bottom) -->
+            <div class="arch-zone animate-in" data-zone="evolution" onclick="toggleArchZone(this)" style="cursor: pointer; grid-column: 1 / -1; padding: var(--space-5); background: var(--color-surface); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); border-top: 4px solid var(--color-actor-4); transition: box-shadow 0.2s ease, transform 0.2s ease;">
+              <div style="display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3);">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-actor-4)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+                <strong style="font-size: var(--text-sm); color: var(--color-actor-4);">Evolution</strong>
+                <span style="font-size: var(--text-xs); color: var(--color-text-muted); margin-left: auto;">Connects back to Design Time &#x21BA;</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: var(--space-3); font-size: var(--text-sm); color: var(--color-text-secondary); flex-wrap: wrap;">
+                <span style="font-family: var(--font-mono); padding: 2px 8px; background: #FDE8E4; border-radius: 4px; color: var(--color-actor-1);">O</span>
+                <span style="color: var(--color-text-muted);">&rarr;</span>
+                <span style="font-family: var(--font-mono); padding: 2px 8px; background: var(--color-accent-light); border-radius: 4px; color: var(--color-actor-2);">P</span>
+                <span style="color: var(--color-text-muted);">&rarr;</span>
+                <span style="font-family: var(--font-mono); padding: 2px 8px; background: #F3EEF8; border-radius: 4px; color: var(--color-actor-3);">A</span>
+                <span style="color: var(--color-text-muted);">&rarr;</span>
+                <span style="font-family: var(--font-mono); padding: 2px 8px; background: #FDF5E0; border-radius: 4px; color: var(--color-actor-4);">D</span>
+                <span style="color: var(--color-text-muted);">&rarr;</span>
+                <span style="font-family: var(--font-mono); padding: 2px 8px; background: var(--color-accent-light); border-radius: 4px; color: var(--color-accent);">I</span>
+                <span style="color: var(--color-text-muted); margin-left: var(--space-2);">Human approval gate &bull; Spec change &bull; Re-verification &bull; Hot deploy</span>
+              </div>
+              <div class="arch-zone-detail" style="display: none; margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--color-border); font-size: var(--text-xs); color: var(--color-text-muted);">
+                Observations from runtime feed into the O-P-A-D-I chain. A human reviews and approves (or rejects) every proposed change.
+                Approved changes produce new specs that pass the full verification cascade again &mdash; no shortcuts &mdash; then
+                <span class="term" data-definition="Hot deploy means updating running actors with new specs without downtime. Existing entity state is preserved — only the rules change.">hot-deploy</span>
+                into the running system. The loop closes: Design Time &rarr; Runtime &rarr; Observability &rarr; Evolution &rarr; Design Time.
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <div class="screen-divider" aria-hidden="true"></div>
+
+        <!-- ── Screen 5: The Von Neumann Insight ── -->
+        <div class="screen animate-in">
+          <div class="callout callout-accent" style="text-align: left; max-width: 640px;">
+            <div class="callout-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            </div>
+            <div class="callout-content">
+              <strong class="callout-title">The
+                <span class="term" data-definition="John von Neumann (1903-1957) was a mathematician who designed one of the first models of a self-replicating machine. His architecture separated the description (blueprint) from the constructor (machine) from the copy mechanism (mutation). This separation is what allows complexity to grow.">Von Neumann</span>
+                Insight</strong>
+              <p>
+                In 1949, John von Neumann designed a self-replicating machine with three parts: a <strong>description</strong> (blueprint),
+                a <strong><span class="term" data-definition="The constructor is the machine that reads any description and builds what it describes. In Temper, the kernel — the runtime, the actor system, the verification cascade — is the constructor. It doesn't change. It interprets specs.">constructor</span></strong>
+                (machine that builds from any description), and a <strong>copy mechanism</strong> (that mutates descriptions over time).
+              </p>
+              <p style="margin-top: var(--space-3);">
+                Temper mirrors this exactly. The
+                <span class="term" data-definition="The kernel is the unchanging core of Temper — the runtime, actor system, verification cascade, and authorization engine. It interprets specs but is never modified by the evolution engine. Complexity grows through better specs, not by changing the kernel.">kernel</span>
+                is the constructor &mdash; it doesn't change. Specs are the descriptions &mdash; they evolve.
+                The evolution engine is the copy mechanism. Complexity grows through better descriptions,
+                not by changing the machine that interprets them.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="screen-divider" aria-hidden="true"></div>
+
+        <!-- ── Screen 6: Quiz ── -->
+        <div class="screen animate-in">
+          <h2 class="screen-heading">Check Your Understanding</h2>
+          <p style="margin-bottom: var(--space-5); color: var(--color-text-secondary);">
+            The capstone quiz. Apply everything you've learned about the evolution engine and the full Temper system.
+          </p>
+
+          <div class="quiz-container" style="max-width: 640px; text-align: left;">
+
+            <!-- Q1 -->
+            <div class="quiz-question-block" data-correct="a" data-explanation="The evolution engine starts by creating an O-Record (Observation) — it notices the pattern of failed attempts automatically. From there, the chain continues through P, A, D, and I records.">
+              <p class="quiz-question">Agents keep trying a "Pause" action that doesn't exist in the spec. What's the first thing the evolution engine creates?</p>
+              <div class="quiz-options">
+                <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  An <span class="term" data-definition="An O-Record (Observation) is created automatically when the system detects a recurring pattern of failed actions or unmet intents.">O-Record</span> (Observation) &mdash; it notices the pattern of failed attempts
+                </button>
+                <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  A D-Record (Decision) &mdash; it asks a human whether to add "Pause"
+                </button>
+                <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  An A-Record (Analysis) &mdash; it immediately proposes a spec change
+                </button>
+                <button class="quiz-option" data-value="d" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  An I-Record (Insight) &mdash; it tracks the impact of the missing action
+                </button>
+              </div>
+              <div class="quiz-feedback" aria-live="polite"></div>
+            </div>
+
+            <!-- Q2 -->
+            <div class="quiz-question-block" data-correct="b" data-explanation="Every spec change — even one that came through the evolution engine — must pass the full 4-level verification cascade before going live. No shortcuts, no exceptions.">
+              <p class="quiz-question">A proposed spec change passes the D-Record approval. What happens before it goes live?</p>
+              <div class="quiz-options">
+                <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  It deploys immediately &mdash; human approval is the final gate
+                </button>
+                <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  It runs through the full 4-level verification cascade again &mdash; no shortcuts
+                </button>
+                <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  It goes through a 24-hour staging period before production
+                </button>
+                <button class="quiz-option" data-value="d" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  A second human must approve the change as a double-check
+                </button>
+              </div>
+              <div class="quiz-feedback" aria-live="polite"></div>
+            </div>
+
+            <!-- Q3 -->
+            <div class="quiz-question-block" data-correct="c" data-explanation="Event sourcing preserves the complete history — you can replay events, audit every action, and reconstruct any past state. It's the foundation of Temper's audit trail, and it's what makes the O-P-A-D-I chain possible.">
+              <p class="quiz-question">Why does Temper use
+                <span class="term" data-definition="Event sourcing is a pattern where every state change is stored as an immutable event. Instead of just storing the current state, you store the complete history of events that led to it.">event sourcing</span>
+                instead of just storing the current state?</p>
+              <div class="quiz-options">
+                <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  It's faster than a traditional database for read-heavy workloads
+                </button>
+                <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  It uses less storage than storing full state snapshots
+                </button>
+                <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  It preserves the complete history &mdash; you can replay events, audit every action, and reconstruct any past state
+                </button>
+                <button class="quiz-option" data-value="d" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  It's required by Cedar for authorization checks
+                </button>
+              </div>
+              <div class="quiz-feedback" aria-live="polite"></div>
+            </div>
+
+            <!-- Q4 -->
+            <div class="quiz-question-block" data-correct="a" data-explanation="The Von Neumann architecture means you never change the kernel — you only change specs. The platform stays stable and verified while capabilities grow through better descriptions. This is how complexity scales safely.">
+              <p class="quiz-question">What's the practical benefit of the
+                <span class="term" data-definition="Von Neumann's self-replicating architecture separates the description (blueprint) from the constructor (machine) from the copy mechanism. This separation allows complexity to grow without changing the machine.">Von Neumann architecture</span>
+                for someone building on Temper?</p>
+              <div class="quiz-options">
+                <button class="quiz-option" data-value="a" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  You never change the kernel &mdash; only specs. The platform stays stable and verified while capabilities grow.
+                </button>
+                <button class="quiz-option" data-value="b" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  It makes the system self-replicating, so you can run multiple instances automatically
+                </button>
+                <button class="quiz-option" data-value="c" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  It allows the evolution engine to bypass verification for trusted changes
+                </button>
+                <button class="quiz-option" data-value="d" onclick="selectOption(this)">
+                  <span class="quiz-option-radio" aria-hidden="true"></span>
+                  It eliminates the need for human approval of spec changes
+                </button>
+              </div>
+              <div class="quiz-feedback" aria-live="polite"></div>
+            </div>
+
+            <div style="display: flex; gap: var(--space-3); align-items: center; margin-top: var(--space-4);">
+              <button class="quiz-check-btn" onclick="checkQuiz('module-6')">Check Answers</button>
+              <button class="quiz-reset-btn" onclick="resetQuiz('module-6')">Reset</button>
+              <span class="quiz-overall-feedback" style="display: none; font-weight: 600; color: var(--color-accent);"></span>
+            </div>
+
+          </div>
+        </div>
+
+        <div class="screen-divider" aria-hidden="true"></div>
+
+        <!-- ── Outro ── -->
+        <div class="screen animate-in" style="max-width: 640px; text-align: center; margin-left: auto; margin-right: auto;">
+          <p style="font-size: var(--text-lg); color: var(--color-text); line-height: var(--leading-relaxed); font-style: italic;">
+            You've just learned how an operating layer for AI agents works &mdash; from specs to verification to governance to evolution.
+            The next time you tell an AI agent to do something, you'll know: under the hood, there could be a system like Temper
+            making sure it does the right thing, the right way, with proof.
+          </p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================================
+       JAVASCRIPT
+       ======================================== -->
+  <script>
+  (function() {
+    'use strict';
+
+    // ========================================
+    // MODULE REGISTRY
+    // ========================================
+    var modules = Array.from(document.querySelectorAll('.module'));
+    var navDots = Array.from(document.querySelectorAll('.nav-dot'));
+    var progressBar = document.querySelector('.progress-bar');
+    var currentModuleIndex = 0;
+    var visitedModules = new Set([0]);
+
+    // ========================================
+    // INTERSECTION OBSERVER — scroll reveals
+    // ========================================
+    var revealObserver = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          revealObserver.unobserve(entry.target);
+        }
+      });
+    }, { rootMargin: '0px 0px -10% 0px', threshold: 0.1 });
+
+    document.querySelectorAll('.animate-in').forEach(function(el) {
+      revealObserver.observe(el);
+    });
+
+    // Stagger children setup
+    document.querySelectorAll('.stagger-children').forEach(function(parent) {
+      Array.from(parent.children).forEach(function(child, i) {
+        child.style.setProperty('--stagger-index', i);
+      });
+    });
+
+    // ========================================
+    // INTERSECTION OBSERVER — module tracking
+    // ========================================
+    var moduleObserver = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (entry.isIntersecting) {
+          var idx = modules.indexOf(entry.target);
+          if (idx !== -1) {
+            currentModuleIndex = idx;
+            visitedModules.add(idx);
+            updateNavDots();
+          }
+        }
+      });
+    }, { rootMargin: '-40% 0px -40% 0px', threshold: 0 });
+
+    modules.forEach(function(m) { moduleObserver.observe(m); });
+
+    // ========================================
+    // PROGRESS BAR
+    // ========================================
+    function updateProgressBar() {
+      var scrollTop = window.scrollY;
+      var scrollHeight = document.documentElement.scrollHeight - window.innerHeight;
+      var progress = scrollHeight > 0 ? (scrollTop / scrollHeight) * 100 : 0;
+      progressBar.style.width = progress + '%';
+      progressBar.setAttribute('aria-valuenow', Math.round(progress));
+    }
+
+    window.addEventListener('scroll', function() {
+      requestAnimationFrame(updateProgressBar);
+    }, { passive: true });
+
+    // ========================================
+    // NAV DOTS
+    // ========================================
+    function updateNavDots() {
+      navDots.forEach(function(dot, i) {
+        dot.classList.remove('current', 'visited');
+        dot.setAttribute('aria-selected', 'false');
+        dot.setAttribute('tabindex', '-1');
+        if (i === currentModuleIndex) {
+          dot.classList.add('current');
+          dot.setAttribute('aria-selected', 'true');
+          dot.setAttribute('tabindex', '0');
+        } else if (visitedModules.has(i)) {
+          dot.classList.add('visited');
+        }
+      });
+    }
+
+    navDots.forEach(function(dot) {
+      dot.addEventListener('click', function() {
+        var target = document.getElementById(dot.dataset.target);
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth' });
+        }
+      });
+    });
+
+    // ========================================
+    // KEYBOARD NAVIGATION
+    // ========================================
+    function nextModule() {
+      if (currentModuleIndex < modules.length - 1) {
+        modules[currentModuleIndex + 1].scrollIntoView({ behavior: 'smooth' });
+      }
+    }
+
+    function prevModule() {
+      if (currentModuleIndex > 0) {
+        modules[currentModuleIndex - 1].scrollIntoView({ behavior: 'smooth' });
+      }
+    }
+
+    document.addEventListener('keydown', function(e) {
+      if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { nextModule(); e.preventDefault(); }
+      if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { prevModule(); e.preventDefault(); }
+    });
+
+    // ========================================
+    // TOOLTIP SYSTEM (position: fixed, body-appended)
+    // ========================================
+    var activeTooltip = null;
+
+    function positionTooltip(term, tip) {
+      var rect = term.getBoundingClientRect();
+      var tipWidth = 300;
+      var left = rect.left + rect.width / 2 - tipWidth / 2;
+      left = Math.max(8, Math.min(left, window.innerWidth - tipWidth - 8));
+
+      document.body.appendChild(tip);
+      var tipHeight = tip.offsetHeight;
+
+      tip.style.left = left + 'px';
+      tip.classList.remove('flip');
+
+      if (rect.top - tipHeight - 8 < 0) {
+        tip.style.top = (rect.bottom + 8) + 'px';
+        tip.classList.add('flip');
+      } else {
+        tip.style.top = (rect.top - tipHeight - 8) + 'px';
+      }
+    }
+
+    document.querySelectorAll('.term').forEach(function(term) {
+      var tip = document.createElement('span');
+      tip.className = 'term-tooltip';
+      tip.textContent = term.dataset.definition;
+      tip.setAttribute('role', 'tooltip');
+
+      term.addEventListener('mouseenter', function() {
+        if (activeTooltip && activeTooltip !== tip) {
+          activeTooltip.classList.remove('visible');
+          if (activeTooltip.parentNode) activeTooltip.remove();
+        }
+        positionTooltip(term, tip);
+        requestAnimationFrame(function() { tip.classList.add('visible'); });
+        activeTooltip = tip;
+      });
+
+      term.addEventListener('mouseleave', function() {
+        tip.classList.remove('visible');
+        setTimeout(function() {
+          if (!tip.classList.contains('visible') && tip.parentNode) tip.remove();
+        }, 150);
+        activeTooltip = null;
+      });
+
+      term.addEventListener('click', function(e) {
+        e.stopPropagation();
+        if (activeTooltip && activeTooltip !== tip) {
+          activeTooltip.classList.remove('visible');
+          if (activeTooltip.parentNode) activeTooltip.remove();
+        }
+        if (tip.classList.contains('visible')) {
+          tip.classList.remove('visible');
+          if (tip.parentNode) tip.remove();
+          activeTooltip = null;
+        } else {
+          positionTooltip(term, tip);
+          requestAnimationFrame(function() { tip.classList.add('visible'); });
+          activeTooltip = tip;
+        }
+      });
+    });
+
+    document.addEventListener('click', function() {
+      if (activeTooltip) {
+        activeTooltip.classList.remove('visible');
+        if (activeTooltip.parentNode) activeTooltip.remove();
+        activeTooltip = null;
+      }
+    });
+
+    // ========================================
+    // QUIZ INFRASTRUCTURE
+    // ========================================
+    window.selectOption = function(btn) {
+      var block = btn.closest('.quiz-question-block');
+      block.querySelectorAll('.quiz-option').forEach(function(o) { o.classList.remove('selected'); });
+      btn.classList.add('selected');
+    };
+
+    window.checkQuiz = function(sectionId) {
+      var container = document.querySelector('#' + sectionId + ' .quiz-container');
+      if (!container) return;
+      var questions = container.querySelectorAll('.quiz-question-block');
+      var correct = 0;
+
+      questions.forEach(function(q) {
+        var selected = q.querySelector('.quiz-option.selected');
+        var feedback = q.querySelector('.quiz-feedback');
+        var correctValue = q.dataset.correct;
+
+        if (!selected) {
+          feedback.textContent = 'Pick an answer first!';
+          feedback.className = 'quiz-feedback show warning';
+          return;
+        }
+
+        if (selected.dataset.value === correctValue) {
+          correct++;
+          selected.classList.add('correct');
+          feedback.innerHTML = '<strong>Exactly!</strong> ' + (q.dataset.explanation || '');
+          feedback.className = 'quiz-feedback show success';
+        } else {
+          selected.classList.add('incorrect');
+          var correctBtn = q.querySelector('[data-value="' + correctValue + '"]');
+          if (correctBtn) correctBtn.classList.add('correct');
+          feedback.innerHTML = '<strong>Not quite.</strong> ' + (q.dataset.explanation || '');
+          feedback.className = 'quiz-feedback show error';
+        }
+
+        q.querySelectorAll('.quiz-option').forEach(function(o) { o.disabled = true; });
+      });
+
+      var overall = container.querySelector('.quiz-overall-feedback');
+      if (overall) {
+        overall.textContent = correct + ' of ' + questions.length + ' correct';
+        overall.style.display = 'block';
+      }
+    };
+
+    window.resetQuiz = function(sectionId) {
+      var container = document.querySelector('#' + sectionId + ' .quiz-container');
+      if (!container) return;
+      container.querySelectorAll('.quiz-option').forEach(function(o) {
+        o.classList.remove('selected', 'correct', 'incorrect');
+        o.disabled = false;
+      });
+      container.querySelectorAll('.quiz-feedback').forEach(function(f) {
+        f.className = 'quiz-feedback';
+        f.textContent = '';
+      });
+      var overall = container.querySelector('.quiz-overall-feedback');
+      if (overall) overall.style.display = 'none';
+    };
+
+    // ========================================
+    // ARCHITECTURE DIAGRAM — zone toggle
+    // ========================================
+    window.toggleArchZone = function(el) {
+      var detail = el.querySelector('.arch-zone-detail');
+      if (!detail) return;
+      var isOpen = detail.style.display !== 'none';
+      // Close all other zones first
+      document.querySelectorAll('.arch-zone-detail').forEach(function(d) {
+        d.style.display = 'none';
+        d.parentElement.style.boxShadow = 'var(--shadow-sm)';
+        d.parentElement.style.transform = 'none';
+      });
+      if (!isOpen) {
+        detail.style.display = 'block';
+        el.style.boxShadow = 'var(--shadow-md)';
+        el.style.transform = 'translateY(-2px)';
+      }
+    };
+
+    // ========================================
+    // CHAT ANIMATION INFRASTRUCTURE
+    // ========================================
+    var chatStates = {};
+
+    window.initChat = function(chatId, actorMap) {
+      chatStates[chatId] = {
+        index: 0,
+        messages: Array.from(document.querySelectorAll('#' + chatId + ' .chat-message')),
+        actors: actorMap || {},
+        typing: document.querySelector('#' + chatId + ' .chat-typing'),
+        typingAvatar: document.querySelector('#' + chatId + ' .chat-typing .chat-avatar'),
+        progress: document.querySelector('#' + chatId + ' .chat-progress')
+      };
+    };
+
+    window.playChatNext = function(chatId) {
+      var state = chatStates[chatId];
+      if (!state || state.index >= state.messages.length) return;
+      var msg = state.messages[state.index];
+      var sender = msg.dataset.sender;
+      var actor = state.actors[sender] || { initials: '?', color: 'var(--color-text-muted)' };
+
+      if (state.typing) {
+        state.typingAvatar.textContent = actor.initials;
+        state.typingAvatar.style.background = actor.color;
+        state.typing.style.display = 'flex';
+      }
+
+      setTimeout(function() {
+        if (state.typing) state.typing.style.display = 'none';
+        msg.style.display = 'flex';
+        msg.style.animation = 'fadeSlideUp 0.3s var(--ease-out)';
+        state.index++;
+        if (state.progress) {
+          state.progress.textContent = state.index + ' / ' + state.messages.length + ' messages';
+        }
+      }, 800);
+    };
+
+    window.playChatAll = function(chatId) {
+      var state = chatStates[chatId];
+      if (!state) return;
+      var interval = setInterval(function() {
+        if (state.index >= state.messages.length) { clearInterval(interval); return; }
+        playChatNext(chatId);
+      }, 1200);
+    };
+
+    window.resetChat = function(chatId) {
+      var state = chatStates[chatId];
+      if (!state) return;
+      state.index = 0;
+      state.messages.forEach(function(m) {
+        m.style.display = 'none';
+        m.style.animation = '';
+      });
+      if (state.typing) state.typing.style.display = 'none';
+      if (state.progress) state.progress.textContent = '0 / ' + state.messages.length + ' messages';
+    };
+
+    // ========================================
+    // INITIAL STATE
+    // ========================================
+    updateProgressBar();
+    updateNavDots();
+
+    // Initialize Module 2 chat animation
+    initChat('cast-chat', {
+      server:  { initials: 'SM', color: 'var(--color-actor-4)' },
+      authz:   { initials: 'SG', color: 'var(--color-actor-5)' },
+      jit:     { initials: 'BL', color: 'var(--color-actor-3)' },
+      server2: { initials: 'SM', color: 'var(--color-actor-4)' },
+      observe: { initials: 'DC', color: 'var(--color-accent)' },
+      server3: { initials: 'SM', color: 'var(--color-actor-4)' },
+      verify:  { initials: 'SI', color: 'var(--color-actor-2)' }
+    });
+
+  })();
+  </script>
+
+</body>
+</html>

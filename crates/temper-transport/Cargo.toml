@@ -1,0 +1,29 @@
+[package]
+name = "temper-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Platform-agnostic channel transports for Temper (Discord, Slack, etc.)"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# WebSocket (Discord Gateway)
+tokio-tungstenite = { version = "0.27", features = ["native-tls"] }
+futures-util = "0.3"
+
+# HTTP server (webhook listener for reply delivery)
+axum = { workspace = true }
+
+# Logging
+tracing = { workspace = true }

@@ -1,0 +1,21 @@
+# Memory Entity — I/O Automaton Specification
+#
+# A text document at a file-like Path inside a MemoryStore. Content is
+# up to 100KB (~25K tokens). ContentSha256 stores the SHA-256 hash of
+# Content for optimistic concurrency on updates.
+#
+# Single-state entity (Active). Cross-invariant in cross-invariants.toml
+# gates writes on parent MemoryStore being non-Archived.
+
+[automaton]
+name = "Memory"
+states = ["Active"]
+initial = "Active"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "PathMustNotBeEmpty"
+when = { not = { field = "Path", absent = true } }
+require = { not = { field = "Path", empty = true } }
+message = "Memory.Path must not be empty"

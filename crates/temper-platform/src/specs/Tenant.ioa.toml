@@ -1,0 +1,34 @@
+[automaton]
+name = "Tenant"
+initial = "Pending"
+states = ["Pending", "Deploying", "Active", "Suspended", "Archived"]
+
+[[action]]
+name = "CreateTenant"
+from = []
+to = "Pending"
+kind = "input"
+
+[[action]]
+name = "Deploy"
+from = ["Pending", "Suspended"]
+to = "Active"
+kind = "internal"
+
+[[action]]
+name = "Suspend"
+from = ["Active"]
+to = "Suspended"
+kind = "input"
+
+[[action]]
+name = "Reactivate"
+from = ["Suspended"]
+to = "Active"
+kind = "input"
+
+[[action]]
+name = "Archive"
+from = ["Pending", "Active", "Suspended"]
+to = "Archived"
+kind = "input"

@@ -1,0 +1,21 @@
+[package]
+name = "temper-jit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "JIT transition tables for Temper entity operations"
+
+[dependencies]
+temper-runtime = { workspace = true }
+temper-spec = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "table_eval"
+harness = false

@@ -1,0 +1,70 @@
+# AgentSoul — Versioned agent identity document (SOUL.md equivalent).
+#
+# A Soul defines WHO the agent is: personality, instructions, capabilities,
+# constraints. Separate from skills (WHAT) and system_prompt (per-run override).
+# Multiple agent runs can share the same Soul identity.
+
+[automaton]
+name = "AgentSoul"
+states = ["Draft", "Active", "Archived"]
+initial = "Draft"
+
+[[state]]
+name = "name"
+type = "string"
+initial = ""
+
+[[state]]
+name = "description"
+type = "string"
+initial = ""
+
+[[state]]
+name = "content_file_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "version"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "author_id"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Draft"]
+params = ["name", "description", "content_file_id", "author_id"]
+hint = "Initialize soul with identity metadata and content file reference."
+
+[[action]]
+name = "Publish"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+hint = "Make the soul available for agent assignment. Only supervisors/humans."
+effect = [{ type = "increment", var = "version" }]
+
+[[action]]
+name = "Update"
+kind = "input"
+from = ["Active"]
+params = ["content_file_id", "description"]
+hint = "Update soul content. Increments version."
+effect = [{ type = "increment", var = "version" }]
+
+[[action]]
+name = "Archive"
+kind = "input"
+from = ["Active"]
+to = "Archived"
+hint = "Archive the soul. No new agents can use it."
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"

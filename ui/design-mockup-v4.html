@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Temper — Design Direction v4</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300..700;1,14..32,300..700&family=Space+Grotesk:wght@300..700&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --sans: 'Inter', -apple-system, system-ui, sans-serif;
+    --display: 'Inter', -apple-system, system-ui, sans-serif;
+    --mono: 'SF Mono', 'Cascadia Code', Menlo, monospace;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+    --fast: 120ms;
+    --radius: 6px;
+  }
+
+  body {
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    font-optical-sizing: auto;
+    font-kerning: normal;
+    transition: background 0.3s var(--ease), color 0.3s var(--ease);
+  }
+
+  /* ─── Dark ─── */
+  body.dark {
+    --bg: #0A0A0A;
+    --bg-subtle: #111111;
+    --bg-muted: #161616;
+    --fg: #E5E5E5;
+    --fg-2: #A3A3A3;
+    --fg-3: #5A5A5A;
+    --rule: rgba(255,255,255,0.06);
+    --rule-center: rgba(255,255,255,0.10);
+    --fill-hover: rgba(255,255,255,0.04);
+    --fill-active: rgba(255,255,255,0.06);
+    --btn-bg: #E5E5E5; --btn-fg: #0A0A0A; --btn-hover: #D4D4D4;
+    --accent: #2dd4bf;
+    --accent-dim: rgba(45,212,191,0.08);
+    --accent-fg: #0A0A0A;
+    --success: #4ade80; --error: #f472b6; --warning: #fbbf24;
+    --success-dim: rgba(74,222,128,0.08);
+    --error-dim: rgba(244,114,182,0.08);
+    --warning-dim: rgba(251,191,36,0.08);
+    --ambient-glow: radial-gradient(ellipse at 50% 0%, rgba(45,212,191,0.03) 0%, transparent 60%);
+    background: var(--bg);
+    color: var(--fg);
+  }
+
+  /* ─── Light ─── */
+  body.light {
+    --bg: #FFFFFF;
+    --bg-subtle: #FAFAFA;
+    --bg-muted: #F5F5F5;
+    --fg: #1A1A1A;
+    --fg-2: #5A5A5A;
+    --fg-3: #A3A3A3;
+    --rule: rgba(0,0,0,0.06);
+    --rule-center: rgba(0,0,0,0.10);
+    --fill-hover: rgba(0,0,0,0.03);
+    --fill-active: rgba(0,0,0,0.05);
+    --btn-bg: #1A1A1A; --btn-fg: #FFFFFF; --btn-hover: #333333;
+    --accent: #0d9488;
+    --accent-dim: rgba(13,148,136,0.06);
+    --accent-fg: #FFFFFF;
+    --success: #16a34a; --error: #be185d; --warning: #b45309;
+    --success-dim: rgba(22,163,74,0.05);
+    --error-dim: rgba(190,24,93,0.05);
+    --warning-dim: rgba(180,83,9,0.05);
+    --ambient-glow: radial-gradient(ellipse at 50% 0%, rgba(13,148,136,0.02) 0%, transparent 60%);
+    background: var(--bg);
+    color: var(--fg);
+  }
+
+  /* Ambient background glow */
+  body::before {
+    content: '';
+    position: fixed; top: 0; left: 0; right: 0; height: 100vh;
+    background: var(--ambient-glow);
+    pointer-events: none; z-index: 0;
+  }
+  body > * { position: relative; z-index: 1; }
+
+  /* ═══════════════════════════════════════════ */
+  /*  TOOLBAR                                    */
+  /* ═══════════════════════════════════════════ */
+  .toolbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 10px 20px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--rule);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  }
+  body.dark .toolbar { background: rgba(10,10,10,0.8); }
+  body.light .toolbar { background: rgba(255,255,255,0.85); }
+  .toolbar .sep { width: 1px; height: 16px; background: var(--rule); margin: 0 10px; }
+  .toolbar .lbl {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--fg-3); margin-right: 6px;
+  }
+  .toolbar button {
+    font-family: var(--sans); font-size: 12px; font-weight: 500;
+    padding: 5px 12px; border-radius: var(--radius); border: 1px solid var(--rule);
+    background: transparent; color: var(--fg-2); cursor: pointer;
+    transition: all var(--fast) var(--ease);
+  }
+  .toolbar button:hover { color: var(--fg); border-color: var(--rule-center); }
+  .toolbar button.on { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+
+  .toolbar .font-toggle {
+    margin-left: 4px;
+  }
+
+  /* ═══════════════════════════════════════════ */
+  /*  LAYOUT                                     */
+  /* ═══════════════════════════════════════════ */
+  .page { padding: 64px 0 96px; max-width: 960px; margin: 0 auto; }
+  .col { padding: 0 48px; }
+
+  /* Fading divider — gradient line */
+  .fade-rule {
+    height: 1px; border: none; margin: 56px 0;
+    background: linear-gradient(90deg, transparent 0%, var(--rule-center) 50%, transparent 100%);
+  }
+
+  /* Section header — soft, no heavy rules */
+  .section-head {
+    margin-top: 64px;
+    margin-bottom: 36px;
+  }
+  .section-head .folio {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--fg-3);
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--rule);
+    display: inline-block;
+  }
+
+  /* ═══════════════════════════════════════════ */
+  /*  HERO                                       */
+  /* ═══════════════════════════════════════════ */
+  .hero { padding: 88px 0 0; }
+  .hero h1 {
+    font-family: var(--display);
+    font-size: 60px;
+    font-weight: 300;
+    letter-spacing: -0.035em;
+    line-height: 1.08;
+    color: var(--fg);
+  }
+  /* Dark mode: subtle gradient text */
+  body.dark .hero h1 {
+    background: linear-gradient(180deg, #ffffff 20%, rgba(255,255,255,0.55) 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  body.light .hero h1 {
+    background: linear-gradient(180deg, #0A0A0A 20%, rgba(0,0,0,0.65) 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero h1 em {
+    font-style: normal;
+    -webkit-text-fill-color: var(--accent);
+  }
+  .hero .lede {
+    font-size: 17px; line-height: 1.7; color: var(--fg-2);
+    max-width: 500px; margin-top: 24px; font-weight: 400;
+  }
+  .hero-actions { margin-top: 40px; display: flex; gap: 16px; align-items: center; }
+
+  /* ─── Font toggle: Space Grotesk vs Inter ─── */
+  body.font-space .hero h1,
+  body.font-space .dash-title {
+    font-family: 'Space Grotesk', var(--sans);
+    font-weight: 400;
+    letter-spacing: -0.03em;
+  }
+
+  /* Buttons */
+  .btn {
+    font-family: var(--sans); font-size: 13px; font-weight: 500;
+    padding: 9px 22px; border-radius: var(--radius); border: none;
+    background: var(--btn-bg); color: var(--btn-fg);
+    cursor: pointer; transition: all var(--fast) var(--ease);
+  }
+  .btn:hover { background: var(--btn-hover); }
+  .btn-ghost {
+    background: none; border: 1px solid var(--rule);
+    color: var(--fg-2);
+  }
+  .btn-ghost:hover { border-color: var(--rule-center); color: var(--fg); background: var(--fill-hover); }
+  .btn-sm { font-size: 12px; padding: 5px 12px; }
+  .btn-accent-soft {
+    background: var(--accent-dim); color: var(--accent); border: none;
+    padding: 7px 16px;
+  }
+  .link-text {
+    font-size: 13px; font-weight: 500; color: var(--fg-2);
+    text-decoration: none; cursor: pointer;
+    transition: color var(--fast) var(--ease);
+  }
+  .link-text:hover { color: var(--fg); }
+  .link-text .arr { display: inline-block; transition: transform var(--fast) var(--ease); margin-left: 2px; }
+  .link-text:hover .arr { transform: translateX(3px); }
+
+  /* ═══════════════════════════════════════════ */
+  /*  DASHBOARD                                  */
+  /* ═══════════════════════════════════════════ */
+  .dash {
+    display: grid;
+    grid-template-columns: 176px 1fr;
+    min-height: 520px;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--bg-subtle);
+  }
+
+  .dash-nav { padding: 20px 0; border-right: 1px solid var(--rule); }
+  .dash-logo {
+    font-size: 14px; font-weight: 600; letter-spacing: -0.02em;
+    padding: 0 16px; margin-bottom: 24px;
+    display: flex; align-items: center; gap: 7px;
+  }
+  .dash-logo .mark { width: 14px; height: 14px; border-radius: 3px; background: var(--accent); }
+  .dash-links { list-style: none; }
+  .dash-links li a {
+    display: block; padding: 5px 16px; font-size: 13px; font-weight: 400;
+    color: var(--fg-3); text-decoration: none;
+    transition: color var(--fast) var(--ease);
+  }
+  .dash-links li a:hover { color: var(--fg); }
+  .dash-links li a.active { color: var(--fg); font-weight: 500; }
+
+  .dash-main { padding: 20px 28px; background: var(--bg); }
+  .dash-header {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin-bottom: 32px;
+  }
+  .dash-title {
+    font-family: var(--display);
+    font-size: 20px; font-weight: 400; letter-spacing: -0.02em;
+  }
+
+  /* Stats — separated by fading vertical rules */
+  .stats {
+    display: flex;
+    margin-bottom: 36px;
+    padding-bottom: 28px;
+  }
+  .stat { flex: 1; padding: 0 20px; position: relative; }
+  .stat:first-child { padding-left: 0; }
+  .stat:last-child { padding-right: 0; }
+  .stat + .stat::before {
+    content: '';
+    position: absolute; left: 0; top: 10%; bottom: 10%;
+    width: 1px;
+    background: linear-gradient(180deg, transparent 0%, var(--rule-center) 50%, transparent 100%);
+  }
+  .stat-label {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
+    text-transform: uppercase; color: var(--fg-3); margin-bottom: 6px;
+  }
+  .stat-val {
+    font-family: var(--mono); font-size: 26px; font-weight: 500;
+    letter-spacing: -0.03em; line-height: 1.15;
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+  .stat-val .unit { font-size: 14px; color: var(--fg-3); font-weight: 400; }
+  .stat-delta { font-size: 12px; margin-top: 3px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+  .stat-delta.up { color: var(--success); }
+
+  /* Stats bottom fading rule */
+  .stats-rule {
+    height: 1px; border: none; margin: 0 0 28px;
+    background: linear-gradient(90deg, transparent 0%, var(--rule-center) 50%, transparent 100%);
+  }
+
+  /* Table */
+  .tbl { width: 100%; border-collapse: collapse; }
+  .tbl th {
+    text-align: left; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--fg-3); padding: 0 0 8px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .tbl td {
+    font-size: 13px; padding: 10px 0; color: var(--fg-2);
+    border-bottom: 1px solid var(--rule);
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+  .tbl tr:last-child td { border-bottom: none; }
+  .tbl tr { transition: color var(--fast) var(--ease); }
+  .tbl tr:hover td { color: var(--fg); }
+  .tbl .name { color: var(--fg); font-weight: 450; }
+  .tbl .mono { font-family: var(--mono); font-size: 12px; color: var(--fg-3); }
+  .tbl .s-ok { color: var(--success); }
+  .tbl .s-err { color: var(--error); }
+  .tbl .s-accent { color: var(--accent); }
+  .tbl .s-warn { color: var(--warning); }
+  .tbl .s-mute { color: var(--fg-3); }
+  .tbl th + th, .tbl td + td { padding-left: 20px; }
+
+  /* ═══════════════════════════════════════════ */
+  /*  COMPONENTS — two-column soft layout        */
+  /* ═══════════════════════════════════════════ */
+  .comp-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 48px;
+  }
+  .comp-row + .comp-row {
+    margin-top: 40px; padding-top: 40px;
+    border-top: 1px solid var(--rule);
+  }
+  .comp-label {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--fg-3); margin-bottom: 16px;
+  }
+
+  /* Tags — very light fills, no harsh borders */
+  .tag-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+  .tag {
+    font-size: 11px; font-weight: 500; padding: 3px 9px;
+    border-radius: var(--radius); letter-spacing: 0.005em;
+  }
+  .tag-default { background: var(--fill-active); color: var(--fg-2); }
+  .tag-accent { background: var(--accent-dim); color: var(--accent); }
+  .tag-ok { background: var(--success-dim); color: var(--success); }
+  .tag-err { background: var(--error-dim); color: var(--error); }
+  .tag-warn { background: var(--warning-dim); color: var(--warning); }
+
+  /* Inputs */
+  .field { margin-bottom: 20px; }
+  .field-label { font-size: 12px; font-weight: 500; color: var(--fg-2); margin-bottom: 6px; display: block; }
+  .field-input {
+    font-family: var(--sans); font-size: 14px;
+    width: 100%; padding: 8px 0; border: none;
+    border-bottom: 1px solid var(--rule);
+    background: transparent; color: var(--fg);
+    outline: none; transition: border-color var(--fast) var(--ease);
+  }
+  .field-input::placeholder { color: var(--fg-3); }
+  .field-input:focus { border-color: var(--accent); }
+
+  /* Settings */
+  .setting-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 0;
+  }
+  .setting-row + .setting-row { border-top: 1px solid var(--rule); }
+  .setting-label { font-size: 13px; color: var(--fg-2); }
+  .switch {
+    width: 30px; height: 16px; border-radius: 8px; position: relative;
+    background: var(--fill-active); cursor: pointer;
+    transition: background var(--fast) var(--ease);
+  }
+  .switch::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--fg-3); transition: all var(--fast) var(--ease);
+  }
+  .switch.on { background: var(--accent); }
+  .switch.on::after { transform: translateX(14px); background: var(--accent-fg); }
+
+  .link-accent { font-size: 13px; font-weight: 500; color: var(--accent); text-decoration: none; }
+  .link-accent:hover { text-decoration: underline; }
+
+  /* ═══════════════════════════════════════════ */
+  /*  TYPOGRAPHY SPECIMEN                        */
+  /* ═══════════════════════════════════════════ */
+  .specimen-row {
+    display: grid; grid-template-columns: 140px 1fr;
+    gap: 16px; align-items: baseline;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .specimen-row:last-child { border-bottom: none; }
+  .specimen-meta { font-family: var(--mono); font-size: 11px; color: var(--fg-3); }
+
+  /* ═══════════════════════════════════════════ */
+  /*  PALETTE                                    */
+  /* ═══════════════════════════════════════════ */
+  .pal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+  .pal-section-label {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--fg-3); margin-bottom: 12px;
+  }
+  .pal-item { display: flex; align-items: center; gap: 12px; padding: 6px 0; }
+  .pal-swatch { width: 28px; height: 28px; border-radius: 4px; flex-shrink: 0; }
+  .pal-name { font-size: 13px; font-weight: 450; }
+  .pal-hex { font-family: var(--mono); font-size: 11px; color: var(--fg-3); margin-left: auto; }
+</style>
+</head>
+<body class="dark">
+
+<div class="toolbar">
+  <span class="lbl">Mode</span>
+  <button onclick="setMode('light')">Light</button>
+  <button onclick="setMode('dark')" class="on">Dark</button>
+  <div class="sep"></div>
+  <span class="lbl">Display font</span>
+  <button class="font-toggle on" onclick="setFont('inter')" data-f="inter">Inter Light</button>
+  <button class="font-toggle" onclick="setFont('space')" data-f="space">Space Grotesk</button>
+</div>
+
+<div class="page">
+<div class="col">
+
+  <!-- ━━━━ HERO ━━━━ -->
+  <div class="hero">
+    <h1>Build apps from<br><em>conversation</em></h1>
+    <p class="lede">Describe what you want. The system generates verified specs, deploys actors, and evolves through use.</p>
+    <div class="hero-actions">
+      <button class="btn">Get started</button>
+      <a class="link-text" href="#">Documentation <span class="arr">&rarr;</span></a>
+    </div>
+  </div>
+
+  <hr class="fade-rule">
+
+  <!-- ━━━━ DASHBOARD ━━━━ -->
+  <div class="section-head">
+    <span class="folio">Dashboard</span>
+  </div>
+
+  <div class="dash">
+    <div class="dash-nav">
+      <div class="dash-logo">
+        <div class="mark"></div>
+        temper
+      </div>
+      <ul class="dash-links">
+        <li><a href="#" class="active">Overview</a></li>
+        <li><a href="#">Entities</a></li>
+        <li><a href="#">Transitions</a></li>
+        <li><a href="#">Trajectories</a></li>
+        <li><a href="#">Tenants</a></li>
+        <li><a href="#">Specs</a></li>
+      </ul>
+    </div>
+    <div class="dash-main">
+      <div class="dash-header">
+        <h2 class="dash-title">Overview</h2>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <button class="btn btn-ghost btn-sm">Last 24h</button>
+          <button class="btn btn-sm">Deploy</button>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-label">Active entities</div>
+          <div class="stat-val">2,847</div>
+          <div class="stat-delta up">+12.4%</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Transitions / min</div>
+          <div class="stat-val">156</div>
+          <div class="stat-delta">+0.8%</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Unmet intents</div>
+          <div class="stat-val">3</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Verification</div>
+          <div class="stat-val">99.2<span class="unit">%</span></div>
+        </div>
+      </div>
+
+      <hr class="stats-rule">
+
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>Entity</th>
+            <th>State</th>
+            <th>Last transition</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name">Issue #1042</td>
+            <td class="mono">in_progress</td>
+            <td class="mono">2m ago</td>
+            <td class="s-ok">Verified</td>
+          </tr>
+          <tr>
+            <td class="name">Project Alpha</td>
+            <td class="mono">active</td>
+            <td class="mono">14m ago</td>
+            <td class="s-ok">Verified</td>
+          </tr>
+          <tr>
+            <td class="name">Cycle Q1-2026</td>
+            <td class="mono">review</td>
+            <td class="mono">1h ago</td>
+            <td class="s-accent">Evolving</td>
+          </tr>
+          <tr>
+            <td class="name">Label: Critical</td>
+            <td class="mono">archived</td>
+            <td class="mono">3d ago</td>
+            <td class="s-mute">Idle</td>
+          </tr>
+          <tr>
+            <td class="name">Deploy #47</td>
+            <td class="mono">failed</td>
+            <td class="mono">4d ago</td>
+            <td class="s-err">Failed</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ━━━━ COMPONENTS ━━━━ -->
+  <div class="section-head">
+    <span class="folio">Components</span>
+  </div>
+
+  <div class="comp-row">
+    <div>
+      <div class="comp-label">Actions</div>
+      <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+        <button class="btn">Deploy</button>
+        <button class="btn btn-ghost">Cancel</button>
+        <button class="btn btn-accent-soft">Evolve</button>
+      </div>
+      <div class="tag-row">
+        <span class="tag tag-ok">Verified</span>
+        <span class="tag tag-err">Failed</span>
+        <span class="tag tag-warn">Pending</span>
+        <span class="tag tag-accent">Evolving</span>
+        <span class="tag tag-default">Idle</span>
+      </div>
+    </div>
+    <div>
+      <div class="comp-label">Inputs</div>
+      <div class="field">
+        <label class="field-label">Entity name</label>
+        <input class="field-input" placeholder="e.g. project-tracker" />
+      </div>
+      <div class="field">
+        <label class="field-label">Tenant</label>
+        <input class="field-input" value="acme-corp" />
+      </div>
+      <a class="link-accent">View documentation &rarr;</a>
+    </div>
+  </div>
+
+  <div class="comp-row">
+    <div>
+      <div class="comp-label">Settings</div>
+      <div class="setting-row">
+        <span class="setting-label">Dark mode</span>
+        <div class="switch on"></div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Auto-deploy</span>
+        <div class="switch on"></div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Telemetry</span>
+        <div class="switch"></div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Notifications</span>
+        <div class="switch"></div>
+      </div>
+    </div>
+    <div>
+      <div class="comp-label">Usage note</div>
+      <p style="font-size: 13px; color: var(--fg-2); line-height: 1.7;">
+        Status tags use tinted fills — each color at 6-8% opacity. This keeps them legible without visual noise. The tint values shift between modes for correct contrast.
+      </p>
+    </div>
+  </div>
+
+  <!-- ━━━━ TYPOGRAPHY ━━━━ -->
+  <div class="section-head">
+    <span class="folio">Typography</span>
+  </div>
+
+  <div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Display / 60 / 300</span>
+      <span class="display-specimen" style="font-family: var(--display); font-size: 56px; font-weight: 300; letter-spacing: -0.035em; line-height: 1.08;">Build apps</span>
+    </div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Title / 20 / 400</span>
+      <span class="title-specimen" style="font-family: var(--display); font-size: 20px; font-weight: 400; letter-spacing: -0.02em; line-height: 1.3;">Overview</span>
+    </div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Heading / 17 / 500</span>
+      <span style="font-size: 17px; font-weight: 500; letter-spacing: -0.015em;">Entity transitions</span>
+    </div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Body / 14 / 400</span>
+      <span>The system generates verified specs and deploys entity actors.</span>
+    </div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Secondary / 13</span>
+      <span style="font-size: 13px; color: var(--fg-2);">Secondary body text for descriptions and metadata.</span>
+    </div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Mono / 12</span>
+      <span style="font-family: var(--mono); font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums;">in_progress · 2m ago · 99.2%</span>
+    </div>
+    <div class="specimen-row">
+      <span class="specimen-meta">Label / 11 / caps</span>
+      <span style="font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-3);">Section Label</span>
+    </div>
+  </div>
+
+  <!-- ━━━━ PALETTE ━━━━ -->
+  <div class="section-head">
+    <span class="folio">Palette</span>
+  </div>
+
+  <div class="pal-grid">
+    <div>
+      <div class="pal-section-label">Semantic</div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--accent);"></div>
+        <span class="pal-name">Accent</span>
+        <span class="pal-hex" id="ph-accent"></span>
+      </div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--success);"></div>
+        <span class="pal-name">Success</span>
+        <span class="pal-hex" id="ph-success"></span>
+      </div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--error);"></div>
+        <span class="pal-name">Error</span>
+        <span class="pal-hex" id="ph-error"></span>
+      </div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--warning);"></div>
+        <span class="pal-name">Warning</span>
+        <span class="pal-hex" id="ph-warning"></span>
+      </div>
+    </div>
+    <div>
+      <div class="pal-section-label">Neutrals</div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--fg);"></div>
+        <span class="pal-name">Foreground</span>
+        <span class="pal-hex" id="ph-fg"></span>
+      </div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--fg-2);"></div>
+        <span class="pal-name">Secondary</span>
+        <span class="pal-hex" id="ph-fg2"></span>
+      </div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--fg-3);"></div>
+        <span class="pal-name">Muted</span>
+        <span class="pal-hex" id="ph-fg3"></span>
+      </div>
+      <div class="pal-item">
+        <div class="pal-swatch" style="background: var(--bg); border: 1px solid var(--rule);"></div>
+        <span class="pal-name">Background</span>
+        <span class="pal-hex" id="ph-bg"></span>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+<script>
+  const vals = {
+    dark: { accent:'#2dd4bf', success:'#4ade80', error:'#f472b6', warning:'#fbbf24', fg:'#E5E5E5', fg2:'#A3A3A3', fg3:'#5A5A5A', bg:'#0A0A0A' },
+    light: { accent:'#0d9488', success:'#16a34a', error:'#be185d', warning:'#b45309', fg:'#1A1A1A', fg2:'#5A5A5A', fg3:'#A3A3A3', bg:'#FFFFFF' }
+  };
+  let mode = 'dark';
+  let font = 'inter';
+
+  function setMode(m) {
+    mode = m;
+    apply();
+  }
+
+  function setFont(f) {
+    font = f;
+    apply();
+  }
+
+  function apply() {
+    let cls = mode;
+    if (font === 'space') cls += ' font-space';
+    document.body.className = cls;
+
+    // Toolbar state
+    document.querySelectorAll('.toolbar button:not(.font-toggle)').forEach(b => b.classList.remove('on'));
+    document.querySelector('.toolbar button:nth-child(' + (mode === 'light' ? 2 : 3) + ')').classList.add('on');
+    document.querySelectorAll('.font-toggle').forEach(b => {
+      b.classList.toggle('on', b.dataset.f === font);
+    });
+
+    // Palette values
+    const v = vals[mode];
+    document.getElementById('ph-accent').textContent = v.accent;
+    document.getElementById('ph-success').textContent = v.success;
+    document.getElementById('ph-error').textContent = v.error;
+    document.getElementById('ph-warning').textContent = v.warning;
+    document.getElementById('ph-fg').textContent = v.fg;
+    document.getElementById('ph-fg2').textContent = v.fg2;
+    document.getElementById('ph-fg3').textContent = v.fg3;
+    document.getElementById('ph-bg').textContent = v.bg;
+  }
+
+  apply();
+</script>
+
+</body>
+</html>

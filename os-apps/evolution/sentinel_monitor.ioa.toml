@@ -1,0 +1,91 @@
+# SentinelMonitor Entity — I/O Automaton Specification
+#
+# Temper-native scheduling via self-scheduling pattern (ADR-0012).
+# Each CheckSentinel transition schedules the next check via schedule effects.
+# The entity IS the cron job — model-checkable, deterministic, verifiable.
+#
+# When trajectory failure clusters are detected, triggers creation of an
+# EvolutionRun entity targeting the affected skill.
+
+[automaton]
+name = "SentinelMonitor"
+states = ["Active", "Checking", "Triggering"]
+initial = "Active"
+
+# --- State Variables ---
+
+[[state]]
+name = "check_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "alert_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "evolution_runs_created"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "has_alerts"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "check_interval_seconds"
+type = "counter"
+initial = "300"
+
+# --- Actions ---
+
+[[action]]
+name = "CheckSentinel"
+kind = "input"
+from = ["Active"]
+to = "Checking"
+effect = "increment check_count"
+hint = "Trigger a sentinel check. Scheduled automatically via schedule effects."
+
+[[action]]
+name = "AlertsFound"
+kind = "input"
+from = ["Checking"]
+to = "Triggering"
+effect = [{ type = "set_bool", var = "has_alerts", value = "true" }, { type = "increment", var = "alert_count" }]
+params = ["AlertDetails", "SuggestedTarget"]
+hint = "Sentinel detected trajectory failure clusters."
+
+[[action]]
+name = "NoAlerts"
+kind = "input"
+from = ["Checking"]
+to = "Active"
+effect = "set has_alerts false"
+hint = "No alerts found, return to active monitoring."
+
+[[action]]
+name = "CreateEvolutionRun"
+kind = "input"
+from = ["Triggering"]
+to = "Active"
+effect = [{ type = "increment", var = "evolution_runs_created" }, { type = "set_bool", var = "has_alerts", value = "false" }]
+params = ["EvolutionRunId", "SkillName", "TargetEntityType"]
+hint = "Created an EvolutionRun entity for the affected skill."
+
+# --- Invariants ---
+
+[[invariant]]
+name = "alerts_when_triggering"
+when = ["Triggering"]
+assert = "has_alerts"
+
+# --- Schedule Effects ---
+# Each transition back to Active schedules the next CheckSentinel.
+# This follows the self-scheduling pattern from ADR-0012 (OAuth token refresh).
+#
+# Note: Schedule effects are declared on the actions that transition to Active:
+# - NoAlerts: Active → Checking → Active (schedule next check)
+# - CreateEvolutionRun: Triggering → Active (schedule next check)

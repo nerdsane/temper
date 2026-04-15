@@ -1,0 +1,75 @@
+# EscalationPolicy Entity — I/O Automaton Specification
+#
+# Defines the agent escalation chain. Steps through tiers of
+# increasingly capable agents. Can be snoozed during maintenance
+# windows and reset after exhaustion for policy reuse.
+
+[automaton]
+name = "EscalationPolicy"
+states = ["Idle", "Active", "Exhausted"]
+initial = "Idle"
+
+# --- State Variables ---
+
+[[state]]
+name = "current_step"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "can_escalate"
+type = "bool"
+initial = "true"
+
+# --- Actions: Escalation Lifecycle ---
+
+[[action]]
+name = "Activate"
+kind = "internal"
+from = ["Idle"]
+to = "Active"
+effect = "increment current_step"
+hint = "Activate the escalation policy. Sets current step to 1."
+
+[[action]]
+name = "StepUp"
+kind = "internal"
+from = ["Active"]
+guard = "is_true can_escalate"
+effect = "increment current_step"
+hint = "Move to the next escalation tier. Requires can_escalate to be true."
+
+[[action]]
+name = "Snooze"
+kind = "input"
+from = ["Active"]
+effect = "set can_escalate false"
+hint = "Snooze the escalation policy during maintenance windows."
+
+[[action]]
+name = "Unsnooze"
+kind = "input"
+from = ["Active"]
+effect = "set can_escalate true"
+hint = "Re-enable escalation after snooze period."
+
+[[action]]
+name = "Exhaust"
+kind = "internal"
+from = ["Active"]
+to = "Exhausted"
+hint = "All escalation tiers exhausted — human intervention required."
+
+[[action]]
+name = "Reset"
+kind = "input"
+from = ["Exhausted"]
+to = "Idle"
+hint = "Reset the policy for reuse after incident resolution."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ActiveHasStep"
+when = ["Active", "Exhausted"]
+assert = "current_step > 0"

@@ -1,0 +1,4 @@
+name = "temper-agent"
+description = "Governed agent loop with souls, skills, memories, tool hooks, heartbeat monitoring, and cron scheduling"
+version = "0.1.0"
+dependencies = ["temper-fs"]

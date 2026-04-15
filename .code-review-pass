@@ -1,0 +1,28 @@
+PASS 2026-02-24
+Plan: Fix 6 Audit Issues (snazzy-beaming-bird.md)
+Reviewer: claude-opus-4-6
+Date: 2026-02-24
+Scope: 14 files across temper-jit, temper-server, temper-platform — 6 audit issues
+Files reviewed:
+  - crates/temper-jit/src/shadow.rs (Issue 3: EvalContext upgrade)
+  - crates/temper-server/src/state/mod.rs (Issue 6+4: action_dispatch_timeout, eventual_tracker)
+  - crates/temper-server/src/state/dispatch.rs (Issue 6: timeout replacement)
+  - crates/temper-server/src/state/entity_ops.rs (Issue 6: 4 timeout replacements)
+  - crates/temper-server/src/observe/entities.rs (Issue 6: timeout replacement)
+  - crates/temper-server/src/constraint_engine.rs (Issue 4: defer_eventual_invariant)
+  - crates/temper-server/src/eventual_invariants.rs (Issue 4: EventualInvariantTracker + background task)
+  - crates/temper-server/src/lib.rs (Issue 4: pub mod eventual_invariants)
+  - crates/temper-server/src/dispatch.rs (Issue 1: BoundFunction implementation)
+  - crates/temper-server/src/query_eval.rs (Issue 5: nested $expand with depth/cycle guards)
+  - crates/temper-platform/src/hooks.rs (Issue 2: deploy pipeline wiring)
+  - crates/temper-platform/src/state.rs (Issue 2: spec_store field)
+  - crates/temper-platform/src/lib.rs (Issue 2: pub mod spec_store)
+  - crates/temper-platform/src/spec_store.rs (Issue 2: SpecStore bounded storage)
+Checks:
+  plan_alignment: PASS (all 6 issues implemented exactly as planned, no deviations)
+  tigerstyle: PASS (bounded budgets: MAX_TENANTS=1000, MAX_PENDING=10000, MAX_EXPAND_DEPTH=3, MAX_RECHECK_ATTEMPTS=5; debug_assert on timeout bounds; fail-fast on invariant violations)
+  dst_compliance: PASS (BTreeMap/BTreeSet throughout, sim_now() for timestamps, determinism-ok annotations on tokio::spawn and env reads, no HashMap/HashSet)
+  error_handling: PASS (all error paths logged via tracing::warn/error, no silent failures, lock unwraps annotated ci-ok)
+  doc_comments: PASS (all new pub items documented)
+  test_coverage: PASS (new tests for shadow boolean guard, tracker record/resolve/exhaust, spec store CRUD, deploy hook dispatch)
+Issues: 0 Critical, 0 Important, 0 Advisory

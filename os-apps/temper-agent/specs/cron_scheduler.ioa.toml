@@ -1,0 +1,84 @@
+# CronScheduler — Self-scheduling heartbeat that checks for due cron jobs.
+#
+# One per tenant. Uses HeartbeatRun pattern to periodically query
+# active CronJobs and fire Trigger on due ones.
+
+[automaton]
+name = "CronScheduler"
+states = ["Idle", "Checking"]
+initial = "Idle"
+
+[[state]]
+name = "heartbeat_interval_seconds"
+type = "string"
+initial = "60"
+
+[[state]]
+name = "last_check_at"
+type = "string"
+initial = ""
+
+[[state]]
+name = "jobs_triggered"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Start"
+kind = "input"
+from = ["Idle"]
+to = "Checking"
+hint = "Begin checking for due cron jobs."
+effect = [{ type = "trigger", name = "check_due_jobs" }]
+
+[[action]]
+name = "CheckComplete"
+kind = "input"
+from = ["Checking"]
+to = "Idle"
+params = ["last_check_at", "jobs_triggered"]
+hint = "Check finished. Schedule next check."
+effect = [{ type = "increment", var = "jobs_triggered" }, { type = "trigger", name = "schedule_next_check" }]
+
+[[action]]
+name = "ScheduledCheck"
+kind = "input"
+from = ["Idle"]
+to = "Checking"
+hint = "Scheduled check triggered."
+effect = [{ type = "trigger", name = "check_due_jobs" }]
+
+[[action]]
+name = "CheckFailed"
+kind = "input"
+from = ["Checking"]
+to = "Idle"
+params = ["error_message"]
+hint = "Check WASM failed. Return to Idle for next scheduled check."
+
+[[action]]
+name = "ScheduleFailed"
+kind = "input"
+from = ["Idle"]
+params = ["error_message"]
+hint = "Schedule WASM failed. Stay Idle."
+
+[[integration]]
+name = "check_due_jobs"
+trigger = "check_due_jobs"
+type = "wasm"
+module = "cron_scheduler_check"
+on_failure = "CheckFailed"
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"
+
+[[integration]]
+name = "schedule_next_check"
+trigger = "schedule_next_check"
+type = "wasm"
+module = "cron_scheduler_heartbeat"
+on_failure = "ScheduleFailed"
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"

@@ -1,0 +1,124 @@
+// Project Management — Issue Cedar Policies
+//
+// Human-in-the-loop model: agents act on human instruction.
+// The planner CAN approve its own plan (because the human told it to).
+// The real gate is the human saying "go ahead" in conversation.
+
+// --- Universal: any agent can create, read, list, comment ---
+
+permit(
+  principal,
+  action in [Action::"create", Action::"read", Action::"list", Action::"AddComment", Action::"AddLabel", Action::"SetDescription"],
+  resource is Issue
+);
+
+// --- System-created backlog/triage work items for automated evolution ---
+
+permit(
+  principal is Admin,
+  action in [Action::"create", Action::"read", Action::"list", Action::"SetDescription", Action::"SetPriority", Action::"MoveToTriage", Action::"MoveToTodo"],
+  resource is Issue
+);
+
+permit(
+  principal,
+  action in [Action::"create", Action::"read", Action::"list", Action::"SetDescription", Action::"SetPriority", Action::"MoveToTriage", Action::"MoveToTodo"],
+  resource is Issue
+) when {
+  principal.agent_type == "system"
+};
+
+// --- Triage & Prioritization: supervisors and humans ---
+
+permit(
+  principal,
+  action in [Action::"MoveToTriage", Action::"MoveToTodo", Action::"SetPriority", Action::"Assign", Action::"AssignPlanner", Action::"Unassign", Action::"Cancel"],
+  resource is Issue
+) when {
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
+};
+
+// --- Planning: the assigned planner ---
+
+permit(
+  principal,
+  action in [Action::"BeginPlanning", Action::"WritePlan"],
+  resource is Issue
+) when {
+  resource.PlannerId == principal.id
+};
+
+// --- Plan Approval: supervisors and humans (planner CAN self-approve) ---
+
+permit(
+  principal,
+  action in [Action::"ApprovePlan", Action::"RejectPlan", Action::"RevisePlan"],
+  resource is Issue
+) when {
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
+};
+
+// --- Implementation: the assigned implementer ---
+
+permit(
+  principal,
+  action in [Action::"StartWork", Action::"UpdateImplementation", Action::"SubmitForReview"],
+  resource is Issue
+) when {
+  resource.AssigneeId == principal.id
+};
+
+// --- Review: supervisors and humans ---
+
+permit(
+  principal,
+  action in [Action::"ApproveReview", Action::"RequestChanges"],
+  resource is Issue
+) when {
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
+};
+
+// --- Reopen & Archive: supervisors and humans ---
+
+permit(
+  principal,
+  action in [Action::"Reopen", Action::"Archive"],
+  resource is Issue
+) when {
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
+};
+
+// --- Fast-track: supervisor/human can perform role-gated and uncovered actions ---
+
+permit(
+  principal,
+  action in [
+    Action::"BeginPlanning",
+    Action::"WritePlan",
+    Action::"StartWork",
+    Action::"UpdateImplementation",
+    Action::"SubmitForReview",
+    Action::"SetParent",
+    Action::"RemoveParent",
+    Action::"AddSubIssue"
+  ],
+  resource is Issue
+) when {
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
+};
+
+// --- Observe: supervisors and humans can read evolution data ---
+
+permit(
+  principal,
+  action in [Action::"read_evolution", Action::"read_observe", Action::"read_trajectories"],
+  resource
+) when {
+  ["supervisor", "human"].contains(principal.agent_type) &&
+  context.agentTypeVerified == true
+};

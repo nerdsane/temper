@@ -1,0 +1,71 @@
+# ManagedAgent Entity — I/O Automaton Specification
+#
+# Crucible ManagedAgent maps Anthropic's Beta Managed Agents resource onto
+# Temper's OData surface (see ADR-0043). The lifecycle is Active → Archived
+# with Archived terminal, mirroring Environment. Crucible Phase 1 assumes a
+# single-writer model: `Version` is an `Edm.Int32` field that clients
+# increment and send back on every PATCH. The server does not enforce
+# optimistic concurrency — a racing client can silently lose writes.
+#
+# ## Name — why not `Agent`?
+#
+# The Temper platform's built-in Agent OS app ships its own `Agent` entity
+# (see `crates/temper-platform/src/specs/agent.ioa.toml`) and auto-installs
+# it into every app tenant on boot via `bootstrap_agent_specs(..., merge=true)`.
+# If Crucible's entity were also called `Agent`, the platform's registration
+# would hot-swap Crucible's spec on startup — silently replacing the user
+# app's entity with the platform's and disabling every field invariant.
+#
+# `ManagedAgent` sidesteps the collision and is faithful to Anthropic's own
+# product name ("Beta Managed Agents API"). The OData entity set is exposed
+# as `/tdata/ManagedAgents`; the bound action is `ArchiveManagedAgent`.
+#
+# ## Cross-field validation
+#
+#   ModelSpeedMustBeKnown       when ModelSpeed is present, it must be
+#                               `standard` or `fast` (matches Anthropic's
+#                               `model.speed` enum).
+#   ArchivedRequiresArchivedAt  when Status=Archived, ArchivedAt must be set.
+
+[automaton]
+name = "ManagedAgent"
+states = ["Active", "Archived"]
+initial = "Active"
+
+# --- Actions ---
+
+[[action]]
+name = "ArchiveManagedAgent"
+kind = "input"
+from = ["Active"]
+to = "Archived"
+hint = "Archive the managed agent. Mirrors Anthropic's POST /v1/agents/{id}/archive. Archived is terminal."
+
+[[action]]
+name = "ManagedAgentArchivedEvent"
+kind = "output"
+hint = "Emitted when the managed agent is archived."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation (ADR-0041) ---
+
+[[field_invariant]]
+name = "ModelSpeedMustBeKnown"
+when = { not = { field = "ModelSpeed", absent = true } }
+require = { any_of = [
+  { field = "ModelSpeed", equals = "standard" },
+  { field = "ModelSpeed", equals = "fast" },
+]}
+message = "ModelSpeed must be `standard` or `fast` when present"
+
+[[field_invariant]]
+name = "ArchivedRequiresArchivedAt"
+when = { field = "Status", equals = "Archived" }
+require = { not = { field = "ArchivedAt", absent = true } }
+message = "Archived managed agents must have ArchivedAt set"

@@ -1,0 +1,16 @@
+[package]
+name = "temper-ots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Open Trajectory Specification types adapted for Temper's deterministic simulation"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+temper-runtime = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

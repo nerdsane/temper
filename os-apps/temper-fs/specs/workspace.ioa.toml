@@ -1,0 +1,123 @@
+# Workspace Entity — I/O Automaton Specification
+#
+# Top-level container for TemperFS. Manages storage quota and usage tracking
+# across all files within the workspace.
+
+[automaton]
+name = "Workspace"
+states = ["Active", "Frozen", "Archived"]
+initial = "Active"
+
+# --- State Variables ---
+
+[[state]]
+name = "quota_limit"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "used_bytes"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "file_count"
+type = "counter"
+initial = "0"
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["name", "quota_limit"]
+hint = "Create a new workspace with a name and storage quota."
+
+[[action]]
+name = "UpdateQuota"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["quota_limit"]
+hint = "Update the workspace storage quota limit."
+
+[[action]]
+name = "IncrementUsage"
+kind = "input"
+from = ["Active"]
+to = "Active"
+effect = "increment used_bytes"
+params = ["size_bytes"]
+hint = "Record additional storage usage. Rejected if it would exceed quota."
+
+[[action]]
+name = "DecrementUsage"
+kind = "input"
+from = ["Active"]
+to = "Active"
+effect = "decrement used_bytes"
+params = ["size_bytes"]
+hint = "Release storage usage when files are removed or shrink."
+
+[[action]]
+name = "IncrementFileCount"
+kind = "input"
+from = ["Active"]
+to = "Active"
+effect = "increment file_count"
+hint = "Increment the workspace file count when a new file is created."
+
+[[action]]
+name = "DecrementFileCount"
+kind = "input"
+from = ["Active"]
+to = "Active"
+effect = "decrement file_count"
+hint = "Decrement the workspace file count when a file is archived."
+
+[[action]]
+name = "Freeze"
+kind = "internal"
+from = ["Active"]
+to = "Frozen"
+hint = "Freeze the workspace. No new uploads or modifications allowed."
+
+[[action]]
+name = "Thaw"
+kind = "internal"
+from = ["Frozen"]
+to = "Active"
+hint = "Thaw a frozen workspace, re-enabling modifications."
+
+[[action]]
+name = "Archive"
+kind = "internal"
+from = ["Active", "Frozen"]
+to = "Archived"
+hint = "Archive the workspace. Terminal state."
+
+# --- Output Actions ---
+
+[[action]]
+name = "WorkspaceArchivedEvent"
+kind = "output"
+hint = "Emitted when workspace transitions to Archived."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "UsageBelowQuota"
+when = ["Active"]
+assert = "used_bytes <= quota_limit"
+
+[[invariant]]
+name = "FileCountNonNegative"
+when = ["Active", "Frozen", "Archived"]
+assert = "file_count >= 0"

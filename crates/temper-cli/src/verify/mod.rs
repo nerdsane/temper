@@ -1,0 +1,305 @@
+//! Verification cascade command for `temper verify`.
+//!
+//! Loads specifications and runs validation checks. Full model checking
+//! integration with temper-verify will be added in a future release.
+
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
+use temper_spec::csdl::parse_csdl;
+use temper_spec::model::build_spec_model;
+
+use crate::util::to_pascal_case;
+
+/// Run the `temper verify` command.
+///
+/// Loads specs from the given directory, builds the spec model, and reports
+/// validation results. Full Stateright model checking will be integrated
+/// once temper-verify exposes its public API.
+pub fn run(specs_dir: &str) -> Result<()> {
+    let specs_path = Path::new(specs_dir);
+
+    println!("Running verification cascade...");
+    println!("  Specs directory: {}", specs_path.display());
+
+    // Read the CSDL model file
+    let csdl_path = specs_path.join("model.csdl.xml");
+    if !csdl_path.exists() {
+        anyhow::bail!(
+            "CSDL model file not found at {}. Run `temper init` first.",
+            csdl_path.display()
+        );
+    }
+
+    let csdl_xml = fs::read_to_string(&csdl_path)
+        .with_context(|| format!("Failed to read {}", csdl_path.display()))?;
+    let csdl = parse_csdl(&csdl_xml)
+        .with_context(|| format!("Failed to parse CSDL from {}", csdl_path.display()))?;
+
+    // Read IOA TOML specs (preferred) and TLA+ specs (legacy)
+    let ioa_sources = read_ioa_sources(specs_path)?;
+    let tla_sources = read_tla_sources(specs_path)?;
+
+    // Run IOA verification cascade if IOA files found
+    if !ioa_sources.is_empty() {
+        let mut parsed_automata = std::collections::BTreeMap::new();
+        let mut lint_error_count = 0usize;
+        let mut lint_error_lines = Vec::new();
+
+        for (entity_name, ioa_source) in &ioa_sources {
+            let automaton = temper_spec::automaton::parse_automaton(ioa_source)
+                .with_context(|| format!("Failed to parse IOA spec for '{entity_name}'"))?;
+
+            for finding in lint_automaton(&automaton) {
+                match finding.severity {
+                    LintSeverity::Error => {
+                        lint_error_count += 1;
+                        lint_error_lines.push(format!(
+                            "{entity_name}: {} — {}",
+                            finding.code, finding.message
+                        ));
+                        println!(
+                            "\n  [lint:error] {entity_name}: {} — {}",
+                            finding.code, finding.message
+                        );
+                    }
+                    LintSeverity::Warning => {
+                        println!(
+                            "\n  [lint:warn] {entity_name}: {} — {}",
+                            finding.code, finding.message
+                        );
+                    }
+                }
+            }
+
+            parsed_automata.insert(entity_name.clone(), automaton);
+        }
+
+        for finding in lint_automata_bundle(&parsed_automata) {
+            match finding.severity {
+                LintSeverity::Error => {
+                    lint_error_count += 1;
+                    lint_error_lines.push(format!(
+                        "{}: {} — {}",
+                        finding.entity, finding.code, finding.message
+                    ));
+                    println!(
+                        "\n  [lint:error] {}: {} — {}",
+                        finding.entity, finding.code, finding.message
+                    );
+                }
+                LintSeverity::Warning => {
+                    println!(
+                        "\n  [lint:warn] {}: {} — {}",
+                        finding.entity, finding.code, finding.message
+                    );
+                }
+            }
+        }
+
+        if lint_error_count > 0 {
+            anyhow::bail!(
+                "IOA lint failed with {lint_error_count} error(s): {}",
+                lint_error_lines.join(" | ")
+            );
+        }
+
+        println!("\nRunning IOA verification cascade...");
+        for (entity_name, ioa_source) in &ioa_sources {
+            println!("\n  Verifying {entity_name}...");
+            let cascade = temper_verify::cascade::VerificationCascade::from_ioa(ioa_source)
+                .with_sim_seeds(5)
+                .with_prop_test_cases(100);
+            let result = cascade.run();
+            for level in &result.levels {
+                let status = if level.passed { "PASS" } else { "FAIL" };
+                println!("    [{status}] {}", level.summary);
+            }
+            if !result.all_passed {
+                anyhow::bail!("IOA verification failed for entity '{entity_name}'");
+            }
+        }
+        println!("\nIOA verification cascade: ALL PASSED");
+    }
+
+    // Build spec model (which includes cross-validation)
+    let spec = build_spec_model(csdl, tla_sources);
+
+    // Report results
+    println!("\nVerification Report");
+    println!("{}", "=".repeat(50));
+
+    // Schema summary
+    let entity_count: usize = spec.csdl.schemas.iter().map(|s| s.entity_types.len()).sum();
+    let action_count: usize = spec.csdl.schemas.iter().map(|s| s.actions.len()).sum();
+    let function_count: usize = spec.csdl.schemas.iter().map(|s| s.functions.len()).sum();
+
+    println!("\nSpecification Summary:");
+    println!("  Entity types:    {entity_count}");
+    println!("  Actions:         {action_count}");
+    println!("  Functions:       {function_count}");
+    println!("  State machines:  {}", spec.state_machines.len());
+
+    // State machine details
+    for (name, sm) in &spec.state_machines {
+        println!("\n  State Machine: {name}");
+        println!("    States:       {}", sm.states.len());
+        println!("    Transitions:  {}", sm.transitions.len());
+        println!("    Invariants:   {}", sm.invariants.len());
+        println!("    Liveness:     {}", sm.liveness_properties.len());
+    }
+
+    // Validation errors
+    if !spec.validation.errors.is_empty() {
+        println!("\nErrors ({}):", spec.validation.errors.len());
+        for err in &spec.validation.errors {
+            println!("  FAIL: {err}");
+        }
+    }
+
+    // Validation warnings
+    if !spec.validation.warnings.is_empty() {
+        println!("\nWarnings ({}):", spec.validation.warnings.len());
+        for warn in &spec.validation.warnings {
+            println!("  WARN: {warn}");
+        }
+    }
+
+    // Summary
+    println!("\n{}", "=".repeat(50));
+    if spec.validation.is_valid() {
+        println!("Result: PASS -- all cross-validation checks passed.");
+        println!("\nNote: Full model checking (Stateright) is not yet integrated.");
+        println!("      Run TLC separately for exhaustive state space exploration.");
+    } else {
+        println!(
+            "Result: FAIL -- {} error(s) found.",
+            spec.validation.errors.len()
+        );
+        anyhow::bail!("Verification failed.");
+    }
+
+    Ok(())
+}
+
+/// Read all `.ioa.toml` files from the specs directory.
+fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
+    let mut sources = HashMap::new();
+
+    if !specs_dir.is_dir() {
+        return Ok(sources);
+    }
+
+    for entry in fs::read_dir(specs_dir)
+        .with_context(|| format!("Failed to read specs directory: {}", specs_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+
+        if file_name.ends_with(".ioa.toml") {
+            let entity_name = file_name.strip_suffix(".ioa.toml").unwrap_or_default();
+            let entity_name = to_pascal_case(entity_name);
+
+            let source = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read IOA file: {}", path.display()))?;
+
+            sources.insert(entity_name, source);
+        }
+    }
+
+    Ok(sources)
+}
+
+// read_tla_sources is shared via crate::util::read_tla_sources
+use crate::util::read_tla_sources;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_verify_reference_specs() {
+        let specs_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-fixtures/specs");
+
+        if !Path::new(specs_dir).join("model.csdl.xml").exists() {
+            eprintln!("Skipping verify test: reference specs not found");
+            return;
+        }
+
+        let result = run(specs_dir);
+        result.expect("verify should pass on reference specs");
+    }
+
+    #[test]
+    fn test_verify_fails_on_broken_spawn_contract_with_exact_lint_code() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let specs_dir = tmp.path();
+
+        let csdl = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Broken" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Plan">
+        <Key><PropertyRef Name="Id" /></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false" />
+        <Property Name="status" Type="Edm.String" />
+      </EntityType>
+      <EntityType Name="Task">
+        <Key><PropertyRef Name="Id" /></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false" />
+        <Property Name="status" Type="Edm.String" />
+      </EntityType>
+      <EntityContainer Name="Service">
+        <EntitySet Name="Plans" EntityType="Temper.Broken.Plan" />
+        <EntitySet Name="Tasks" EntityType="Temper.Broken.Task" />
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+        let plan = r#"
+[automaton]
+name = "Plan"
+states = ["Active"]
+initial = "Active"
+
+[[action]]
+name = "AddTask"
+kind = "input"
+from = ["Active"]
+params = ["title"]
+effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
+"#;
+        let task = r#"
+[automaton]
+name = "Task"
+states = ["Open"]
+initial = "Open"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Open"]
+params = ["title", "description", "plan_id"]
+"#;
+
+        fs::write(specs_dir.join("model.csdl.xml"), csdl).expect("write csdl");
+        fs::write(specs_dir.join("plan.ioa.toml"), plan).expect("write plan");
+        fs::write(specs_dir.join("task.ioa.toml"), task).expect("write task");
+
+        let result = run(specs_dir.to_str().expect("tmp path utf-8"));
+        let err = result.expect_err("verify should fail on broken spawn contract");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("spawn_initial_action_params_unmapped"),
+            "expected exact lint code in error, got: {msg}"
+        );
+    }
+}

@@ -1,0 +1,3 @@
+name = "evolution"
+description = "GEPA-based self-improvement loop with evolution runs and sentinel monitoring"
+version = "0.1.0"

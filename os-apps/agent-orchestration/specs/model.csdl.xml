@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.AgentOrchestration" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <EntityType Name="HeartbeatRun">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="AgentId" Type="Edm.String"/>
+        <Property Name="OrgId" Type="Edm.String"/>
+        <Property Name="WakeReason" Type="Edm.String"/>
+        <Property Name="TokensConsumed" Type="Edm.Int64"/>
+        <Property Name="CostCents" Type="Edm.Int64"/>
+        <Property Name="DurationMs" Type="Edm.Int64"/>
+        <Property Name="BudgetApproved" Type="Edm.Boolean"/>
+        <Property Name="HasResult" Type="Edm.Boolean"/>
+        <Property Name="TurnCount" Type="Edm.Int64"/>
+        <Property Name="MaxTurns" Type="Edm.Int64"/>
+        <Property Name="Checkpoint" Type="Edm.String"/>
+        <Property Name="ErrorMessage" Type="Edm.String"/>
+        <Property Name="AdapterType" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="Organization">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Name" Type="Edm.String"/>
+        <Property Name="Description" Type="Edm.String"/>
+        <Property Name="MemberCount" Type="Edm.Int64"/>
+        <Property Name="BudgetMonthlyCents" Type="Edm.Int64"/>
+        <Property Name="BudgetConsumedCents" Type="Edm.Int64"/>
+        <Property Name="ActiveRuns" Type="Edm.Int64"/>
+      </EntityType>
+
+      <EntityType Name="BudgetLedger">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="OrgId" Type="Edm.String"/>
+        <Property Name="AgentId" Type="Edm.String"/>
+        <Property Name="RunId" Type="Edm.String"/>
+        <Property Name="AmountCents" Type="Edm.String"/>
+        <Property Name="Tokens" Type="Edm.String"/>
+        <Property Name="Category" Type="Edm.String"/>
+      </EntityType>
+
+      <Action Name="Schedule" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.HeartbeatRun"/>
+        <Parameter Name="agent_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="org_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="wake_reason" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="max_turns" Type="Edm.Int64" Nullable="false"/>
+        <Parameter Name="adapter_type" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.AgentOrchestration.HeartbeatRun"/>
+      </Action>
+
+      <Action Name="ApproveBudget" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.HeartbeatRun"/>
+        <ReturnType Type="Temper.AgentOrchestration.HeartbeatRun"/>
+      </Action>
+
+      <Action Name="CheckIn" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.HeartbeatRun"/>
+        <ReturnType Type="Temper.AgentOrchestration.HeartbeatRun"/>
+      </Action>
+
+      <Action Name="StartExecution" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.HeartbeatRun"/>
+        <ReturnType Type="Temper.AgentOrchestration.HeartbeatRun"/>
+      </Action>
+
+      <Action Name="RecordTurn" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.HeartbeatRun"/>
+        <Parameter Name="input_tokens" Type="Edm.Int64" Nullable="false"/>
+        <Parameter Name="output_tokens" Type="Edm.Int64" Nullable="false"/>
+        <Parameter Name="cost_cents" Type="Edm.Int64" Nullable="false"/>
+        <ReturnType Type="Temper.AgentOrchestration.HeartbeatRun"/>
+      </Action>
+
+      <Action Name="SaveCheckpoint" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.HeartbeatRun"/>
+        <Parameter Name="checkpoint" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.AgentOrchestration.HeartbeatRun"/>
+      </Action>
+
+      <Action Name="RecordResult" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.HeartbeatRun"/>
+        <Parameter Name="result" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.AgentOrchestration.HeartbeatRun"/>
+      </Action>
+
+      <Action Name="Complete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.HeartbeatRun"/>
+        <ReturnType Type="Temper.AgentOrchestration.HeartbeatRun"/>
+      </Action>
+
+      <Action Name="Fail" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.HeartbeatRun"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.AgentOrchestration.HeartbeatRun"/>
+      </Action>
+
+      <Action Name="Cancel" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.HeartbeatRun"/>
+        <ReturnType Type="Temper.AgentOrchestration.HeartbeatRun"/>
+      </Action>
+
+      <Action Name="Configure" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="budget_monthly_cents" Type="Edm.Int64" Nullable="false"/>
+        <ReturnType Type="Temper.AgentOrchestration.Organization"/>
+      </Action>
+
+      <Action Name="Activate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
+        <ReturnType Type="Temper.AgentOrchestration.Organization"/>
+      </Action>
+
+      <Action Name="AddMember" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
+        <Parameter Name="member_id" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.AgentOrchestration.Organization"/>
+      </Action>
+
+      <Action Name="RemoveMember" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
+        <Parameter Name="member_id" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.AgentOrchestration.Organization"/>
+      </Action>
+
+      <Action Name="RecordCost" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
+        <Parameter Name="amount_cents" Type="Edm.Int64" Nullable="false"/>
+        <ReturnType Type="Temper.AgentOrchestration.Organization"/>
+      </Action>
+
+      <Action Name="ResetBudgetCycle" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
+        <ReturnType Type="Temper.AgentOrchestration.Organization"/>
+      </Action>
+
+      <Action Name="Pause" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
+        <ReturnType Type="Temper.AgentOrchestration.Organization"/>
+      </Action>
+
+      <Action Name="Resume" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
+        <ReturnType Type="Temper.AgentOrchestration.Organization"/>
+      </Action>
+
+      <Action Name="Archive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.Organization"/>
+        <ReturnType Type="Temper.AgentOrchestration.Organization"/>
+      </Action>
+
+      <Action Name="Record" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentOrchestration.BudgetLedger"/>
+        <Parameter Name="org_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="agent_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="run_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="amount_cents" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="tokens" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="category" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.AgentOrchestration.BudgetLedger"/>
+      </Action>
+
+      <EntityContainer Name="Service">
+        <EntitySet Name="HeartbeatRuns" EntityType="Temper.AgentOrchestration.HeartbeatRun"/>
+        <EntitySet Name="Organizations" EntityType="Temper.AgentOrchestration.Organization"/>
+        <EntitySet Name="BudgetLedgers" EntityType="Temper.AgentOrchestration.BudgetLedger"/>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

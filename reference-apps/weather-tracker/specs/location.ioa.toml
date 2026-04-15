@@ -1,0 +1,35 @@
+[automaton]
+name = "Location"
+states = ["Active", "Paused", "Removed"]
+initial = "Active"
+
+[[action]]
+name = "PauseTracking"
+kind = "input"
+from = ["Active"]
+to = "Paused"
+hint = "Temporarily stop tracking weather for this location."
+
+[[action]]
+name = "ResumeTracking"
+kind = "input"
+from = ["Paused"]
+to = "Active"
+hint = "Resume tracking weather for this location."
+
+[[action]]
+name = "RemoveLocation"
+kind = "input"
+from = ["Active", "Paused"]
+to = "Removed"
+hint = "Permanently stop tracking this location."
+
+[[invariant]]
+name = "RemovedIsTerminal"
+when = ["Removed"]
+assert = "no_further_transitions"
+
+[[liveness]]
+name = "EventuallyRemoved"
+from = ["Active"]
+reaches = ["Removed"]

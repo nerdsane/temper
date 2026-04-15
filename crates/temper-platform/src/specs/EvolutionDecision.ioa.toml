@@ -1,0 +1,40 @@
+[automaton]
+name = "EvolutionDecision"
+initial = "Open"
+states = ["Open", "Approved", "Rejected", "Deferred"]
+
+[[action]]
+name = "CreateDecision"
+from = []
+to = "Open"
+kind = "input"
+params = ["analysis_id", "decided_by", "rationale", "verification_summary"]
+guard = [{ type = "cross_entity_state", entity_type = "Analysis", entity_id_source = "analysis_id", required_status = ["Reviewed"] }]
+
+[[action]]
+name = "Approve"
+from = ["Open"]
+to = "Approved"
+kind = "input"
+
+[[action]]
+name = "Reject"
+from = ["Open"]
+to = "Rejected"
+kind = "input"
+
+[[action]]
+name = "Defer"
+from = ["Open"]
+to = "Deferred"
+kind = "input"
+
+[[invariant]]
+name = "ApprovedIsTerminal"
+when = ["Approved"]
+assert = "true"
+
+[[invariant]]
+name = "RejectedIsTerminal"
+when = ["Rejected"]
+assert = "true"

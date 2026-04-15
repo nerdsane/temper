@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Claw" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <EntityType Name="Channel">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="ChannelType" Type="Edm.String"/>
+        <Property Name="ChannelId" Type="Edm.String"/>
+        <Property Name="GuildId" Type="Edm.String"/>
+        <Property Name="DefaultAgentConfig" Type="Edm.String"/>
+        <Property Name="WebhookSecret" Type="Edm.String"/>
+        <Property Name="WebhookUrl" Type="Edm.String"/>
+        <Property Name="ActiveSessions" Type="Edm.Int64"/>
+        <Property Name="MessageCount" Type="Edm.Int64"/>
+      </EntityType>
+
+      <EntityType Name="AgentRoute">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="BindingTier" Type="Edm.String"/>
+        <Property Name="ChannelId" Type="Edm.String"/>
+        <Property Name="GuildId" Type="Edm.String"/>
+        <Property Name="MatchPattern" Type="Edm.String"/>
+        <Property Name="AgentConfig" Type="Edm.String"/>
+        <Property Name="SoulId" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="ChannelSession">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="ChannelId" Type="Edm.String"/>
+        <Property Name="ThreadId" Type="Edm.String"/>
+        <Property Name="AuthorId" Type="Edm.String"/>
+        <Property Name="AgentEntityId" Type="Edm.String"/>
+        <Property Name="LastMessageAt" Type="Edm.String"/>
+      </EntityType>
+
+      <Action Name="Configure" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="channel_type" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="channel_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="guild_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="default_agent_config" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="webhook_secret" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="webhook_url" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Claw.Channel"/>
+      </Action>
+
+      <Action Name="Connect" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <ReturnType Type="Temper.Claw.Channel"/>
+      </Action>
+
+      <Action Name="Ready" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <ReturnType Type="Temper.Claw.Channel"/>
+      </Action>
+
+      <Action Name="ReceiveMessage" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="message_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="author_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="thread_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="content" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Claw.Channel"/>
+      </Action>
+
+      <Action Name="SendReply" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="thread_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="content" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="agent_entity_id" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Claw.Channel"/>
+      </Action>
+
+      <Action Name="ReplyDelivered" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="thread_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="content" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="agent_entity_id" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Claw.Channel"/>
+      </Action>
+
+      <Action Name="Disconnect" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <ReturnType Type="Temper.Claw.Channel"/>
+      </Action>
+
+      <Action Name="Reconnect" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <ReturnType Type="Temper.Claw.Channel"/>
+      </Action>
+
+      <Action Name="Archive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <ReturnType Type="Temper.Claw.Channel"/>
+      </Action>
+
+      <Action Name="ConnectFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Claw.Channel"/>
+      </Action>
+
+      <Action Name="RouteFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Claw.Channel"/>
+      </Action>
+
+      <Action Name="ReplyFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Claw.Channel"/>
+      </Action>
+
+      <Action Name="Register" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.AgentRoute"/>
+        <Parameter Name="binding_tier" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="channel_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="guild_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="match_pattern" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="agent_config" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="soul_id" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Claw.AgentRoute"/>
+      </Action>
+
+      <Action Name="Update" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.AgentRoute"/>
+        <Parameter Name="agent_config" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="match_pattern" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="soul_id" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Claw.AgentRoute"/>
+      </Action>
+
+      <Action Name="Disable" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.AgentRoute"/>
+        <ReturnType Type="Temper.Claw.AgentRoute"/>
+      </Action>
+
+      <Action Name="Enable" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.AgentRoute"/>
+        <ReturnType Type="Temper.Claw.AgentRoute"/>
+      </Action>
+
+      <Action Name="Create" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.ChannelSession"/>
+        <Parameter Name="channel_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="thread_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="author_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="agent_entity_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="last_message_at" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Claw.ChannelSession"/>
+      </Action>
+
+      <Action Name="Resume" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.ChannelSession"/>
+        <Parameter Name="last_message_at" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Claw.ChannelSession"/>
+      </Action>
+
+      <Action Name="Expire" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Claw.ChannelSession"/>
+        <ReturnType Type="Temper.Claw.ChannelSession"/>
+      </Action>
+
+      <EntityContainer Name="Service">
+        <EntitySet Name="Channels" EntityType="Temper.Claw.Channel"/>
+        <EntitySet Name="AgentRoutes" EntityType="Temper.Claw.AgentRoute"/>
+        <EntitySet Name="ChannelSessions" EntityType="Temper.Claw.ChannelSession"/>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

@@ -1,0 +1,116 @@
+# Environment Entity — I/O Automaton Specification
+#
+# A Crucible Environment models one agent execution context. Its lifecycle is
+# trivially simple (Active → Archived) because the interesting behaviour lives
+# in field invariants, not state transitions. The three `[[field_invariant]]`
+# sections at the bottom of this file enforce Crucible's hard Local constraint:
+# a Local environment cannot set any of the cloud-only networking fields.
+#
+# See `docs/adrs/0042-crucible-reference-app.md` for why this shape.
+
+[automaton]
+name = "Environment"
+states = ["Active", "Archived"]
+initial = "Active"
+
+# --- Actions ---
+
+[[action]]
+name = "ArchiveEnvironment"
+kind = "input"
+from = ["Active"]
+to = "Archived"
+hint = "Archive the environment. Retains history but makes the environment non-operational."
+
+[[action]]
+name = "EnvironmentArchivedEvent"
+kind = "output"
+hint = "Emitted when the environment is archived."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation (ADR-0041) ---
+#
+# Local environments are the real happy path for this reference app
+# (Temper runs on the developer's machine), so `Local` is first-class.
+# The three invariants below reject combinations that only make sense
+# for Modal environments — setting any of them on a Local environment
+# returns 409 ConstraintViolation with `error.details.type == "field_invariant"`.
+
+[[field_invariant]]
+name = "LocalNetworkingMustBeUnrestricted"
+when = { field = "ConfigType", equals = "Local" }
+require = { field = "NetworkingType", equals = "Unrestricted" }
+message = "Local environments must use Unrestricted networking"
+
+[[field_invariant]]
+name = "LocalCannotAllowMcpServers"
+when = { field = "ConfigType", equals = "Local" }
+require = { any_of = [
+  { field = "AllowMcpServers", absent = true },
+  { field = "AllowMcpServers", equals = false },
+]}
+message = "Local environments cannot set allow_mcp_servers"
+
+[[field_invariant]]
+name = "LocalCannotAllowPackageManagers"
+when = { field = "ConfigType", equals = "Local" }
+require = { any_of = [
+  { field = "AllowPackageManagers", absent = true },
+  { field = "AllowPackageManagers", equals = false },
+]}
+message = "Local environments cannot set allow_package_managers"
+
+# Local environments cannot set Modal-specific columns. These fields only
+# make sense when ConfigType=Modal; setting them on a Local environment is
+# a client error (likely a copy-paste from a Modal config).
+[[field_invariant]]
+name = "LocalCannotSetModalFields"
+when = { field = "ConfigType", equals = "Local" }
+require = { all_of = [
+  { any_of = [{ field = "ModalImage", absent = true }] },
+  { any_of = [{ field = "ModalCpu", absent = true }] },
+  { any_of = [{ field = "ModalMemory", absent = true }] },
+  { any_of = [{ field = "ModalTimeout", absent = true }] },
+  { any_of = [{ field = "ModalGpu", absent = true }] },
+  { any_of = [{ field = "ModalWorkdir", absent = true }] },
+  { any_of = [{ field = "ModalBlockNetwork", absent = true }] },
+]}
+message = "Local environments cannot set Modal configuration fields (ModalImage, ModalCpu, etc.)"
+
+# --- Modal environment constraints ---
+#
+# Modal environments provision a remote sandbox on Modal.com. Networking
+# isolation is managed by Modal itself (block_network / cidr_allowlist), so
+# the Crucible-level NetworkingType must be Unrestricted. MCP servers and
+# package managers are not supported — packages are baked into the Modal
+# image at creation time.
+
+[[field_invariant]]
+name = "ModalNetworkingMustBeUnrestricted"
+when = { field = "ConfigType", equals = "Modal" }
+require = { field = "NetworkingType", equals = "Unrestricted" }
+message = "Modal environments must use Unrestricted networking (Modal manages isolation internally)"
+
+[[field_invariant]]
+name = "ModalCannotAllowMcpServers"
+when = { field = "ConfigType", equals = "Modal" }
+require = { any_of = [
+  { field = "AllowMcpServers", absent = true },
+  { field = "AllowMcpServers", equals = false },
+]}
+message = "Modal environments cannot set allow_mcp_servers"
+
+[[field_invariant]]
+name = "ModalCannotAllowPackageManagers"
+when = { field = "ConfigType", equals = "Modal" }
+require = { any_of = [
+  { field = "AllowPackageManagers", absent = true },
+  { field = "AllowPackageManagers", equals = false },
+]}
+message = "Modal environments do not use runtime package managers (bake packages into ModalImage)"

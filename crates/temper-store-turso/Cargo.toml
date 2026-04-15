@@ -1,0 +1,29 @@
+[package]
+name = "temper-store-turso"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Turso/libSQL storage backend for Temper entity services"
+
+[dependencies]
+temper-runtime = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libsql = "0.9.26"
+sha2 = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true, optional = true }
+opentelemetry = { workspace = true }
+
+[features]
+default = []
+cloud = ["reqwest"]
+
+[dev-dependencies]
+tokio = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tempfile = "3"
+wiremock = { workspace = true }

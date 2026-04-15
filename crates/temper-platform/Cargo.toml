@@ -1,0 +1,40 @@
+[package]
+name = "temper-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Dogfooded hosting platform for Temper — verify-and-deploy pipeline, agentic evolution engine, and self-optimization"
+
+[dependencies]
+temper-spec = { workspace = true }
+temper-verify = { workspace = true }
+temper-jit = { workspace = true }
+temper-server = { workspace = true }
+temper-store-turso = { workspace = true }
+temper-evolution = { workspace = true }
+temper-observe = { workspace = true }
+temper-runtime = { workspace = true }
+temper-authz = { workspace = true }
+temper-optimize = { workspace = true }
+temper-wasm = { workspace = true }
+opentelemetry = { workspace = true }
+reqwest = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+temper-codegen = { workspace = true }
+tokio-test = { workspace = true }
+tower = { workspace = true }
+hyper = { workspace = true }
+wiremock = { workspace = true }

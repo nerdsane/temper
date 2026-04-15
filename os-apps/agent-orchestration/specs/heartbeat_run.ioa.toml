@@ -1,0 +1,205 @@
+# HeartbeatRun Entity — Agent execution heartbeat lifecycle.
+
+[automaton]
+name = "HeartbeatRun"
+states = ["Scheduled", "CheckingIn", "Working", "Completed", "Failed", "Cancelled"]
+initial = "Scheduled"
+
+# --- State Variables ---
+
+[[state]]
+name = "agent_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "org_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "wake_reason"
+type = "string"
+initial = ""
+
+[[state]]
+name = "tokens_consumed"
+type = "string"
+initial = "0"
+
+[[state]]
+name = "cost_cents"
+type = "string"
+initial = "0"
+
+[[state]]
+name = "duration_ms"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "budget_approved"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "has_result"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "turn_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "max_turns"
+type = "string"
+initial = "20"
+
+[[state]]
+name = "checkpoint"
+type = "string"
+initial = ""
+
+[[state]]
+name = "error_message"
+type = "string"
+initial = ""
+
+[[state]]
+name = "adapter_type"
+type = "string"
+initial = "claude_code"
+
+[[state]]
+name = "agent_bound"
+type = "bool"
+initial = "false"
+
+# --- Actions ---
+
+[[action]]
+name = "Schedule"
+kind = "input"
+from = ["Scheduled"]
+params = ["agent_id", "org_id", "wake_reason", "max_turns", "adapter_type"]
+hint = "Initialize heartbeat run context before budget approval."
+effect = [{ type = "set_bool", var = "agent_bound", value = "true" }]
+
+[[action]]
+name = "ApproveBudget"
+kind = "input"
+from = ["Scheduled"]
+hint = "Approve execution budget for this run."
+effect = [{ type = "set_bool", var = "budget_approved", value = "true" }]
+
+[[action]]
+name = "CheckIn"
+kind = "input"
+from = ["Scheduled"]
+to = "CheckingIn"
+guard = [
+  { type = "is_true", var = "budget_approved" },
+  { type = "is_true", var = "agent_bound" }
+]
+hint = "Agent checks in after budget approval."
+
+[[action]]
+name = "StartExecution"
+kind = "input"
+from = ["CheckingIn"]
+to = "Working"
+hint = "Start execution and trigger the configured adapter integration."
+effect = [{ type = "trigger", name = "execute_agent" }]
+
+[[action]]
+name = "RecordTurn"
+kind = "input"
+from = ["Working"]
+params = [
+  "input_tokens",
+  "output_tokens",
+  "turn_cost_cents",
+  "tokens_consumed",
+  "cost_cents"
+]
+hint = "Record a completed execution turn with caller-provided cumulative token and cost totals."
+effect = [
+  { type = "increment", var = "turn_count" }
+]
+
+[[action]]
+name = "SaveCheckpoint"
+kind = "input"
+from = ["Working"]
+params = ["checkpoint"]
+hint = "Persist resumable session checkpoint."
+
+[[action]]
+name = "RecordResult"
+kind = "input"
+from = ["Working"]
+params = ["result"]
+hint = "Record execution output payload."
+effect = [{ type = "set_bool", var = "has_result", value = "true" }]
+
+[[action]]
+name = "Complete"
+kind = "input"
+from = ["Working"]
+to = "Completed"
+guard = "is_true has_result"
+hint = "Complete run when a result has been recorded."
+
+[[action]]
+name = "Fail"
+kind = "input"
+from = ["Scheduled", "CheckingIn", "Working"]
+to = "Failed"
+params = ["error_message"]
+hint = "Mark heartbeat run as failed."
+
+[[action]]
+name = "Cancel"
+kind = "input"
+from = ["Scheduled", "CheckingIn", "Working"]
+to = "Cancelled"
+hint = "Cancel execution before completion."
+
+# --- Invariants ---
+
+[[invariant]]
+name = "WorkingRequiresAgent"
+when = ["CheckingIn", "Working", "Completed"]
+assert = "agent_bound"
+
+[[invariant]]
+name = "BudgetApprovedBeforeWork"
+when = ["CheckingIn", "Working", "Completed"]
+assert = "budget_approved"
+
+[[invariant]]
+name = "CompletedHasResult"
+when = ["Completed"]
+assert = "has_result"
+
+# --- Integrations ---
+
+[[integration]]
+name = "execute_agent"
+trigger = "execute_agent"
+type = "adapter"
+adapter = "{field:adapter_type}"
+on_success = "RecordResult"
+on_failure = "Fail"
+
+[[integration]]
+name = "notify_completed"
+trigger = "Complete"
+type = "webhook"
+
+[[integration]]
+name = "notify_failed"
+trigger = "Fail"
+type = "webhook"

@@ -1,0 +1,78 @@
+//! # temper-store-turso
+//!
+//! Turso/libSQL storage backend for the Temper actor framework.
+//!
+//! This crate implements the [`EventStore`](temper_runtime::persistence::EventStore)
+//! trait from `temper-runtime` using libSQL (Turso-compatible).
+
+mod metrics;
+pub mod router;
+pub mod schema;
+pub mod store;
+
+/// Compute a SHA-256 hex digest of IOA spec content.
+///
+/// Used to detect whether a spec has changed since its last verification,
+/// avoiding redundant (and expensive) verification cascade runs.
+pub fn spec_content_hash(ioa_source: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(ioa_source.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TursoSpecVerificationUpdate<'a> {
+    pub status: &'a str,
+    pub verified: bool,
+    pub levels_passed: Option<i32>,
+    pub levels_total: Option<i32>,
+    pub verification_result_json: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TursoTrajectoryInsert<'a> {
+    pub tenant: &'a str,
+    pub entity_type: &'a str,
+    pub entity_id: &'a str,
+    pub action: &'a str,
+    pub success: bool,
+    pub from_status: Option<&'a str>,
+    pub to_status: Option<&'a str>,
+    pub error: Option<&'a str>,
+    pub agent_id: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub authz_denied: Option<bool>,
+    pub denied_resource: Option<&'a str>,
+    pub denied_module: Option<&'a str>,
+    pub source: Option<&'a str>,
+    pub spec_governed: Option<bool>,
+    pub created_at: &'a str,
+    pub request_body: Option<&'a str>,
+    pub intent: Option<&'a str>,
+    pub matched_policy_ids: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TursoWasmInvocationInsert<'a> {
+    pub tenant: &'a str,
+    pub entity_type: &'a str,
+    pub entity_id: &'a str,
+    pub module_name: &'a str,
+    pub trigger_action: &'a str,
+    pub callback_action: Option<&'a str>,
+    pub success: bool,
+    pub error: Option<&'a str>,
+    pub duration_ms: u64,
+    pub created_at: &'a str,
+}
+
+pub use metrics::init_metrics;
+pub use router::{TenantRegistryRow, TenantStoreRouter, TenantUserRow};
+pub use store::{
+    ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
+    PolicyDenialPatternRow, PolicyRow, TursoEventStore, TursoSpecRow, TursoTenantConstraintRow,
+    TursoTrajectoryRow, TursoWasmInvocationRow, TursoWasmModuleMetadataRow, TursoWasmModuleRow,
+    UnmetIntentAggRow,
+    ots::{OtsTrajectoryParams, OtsTrajectoryRow},
+};

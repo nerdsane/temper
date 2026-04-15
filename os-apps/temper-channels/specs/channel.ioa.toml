@@ -1,0 +1,173 @@
+# Channel — Multi-platform messaging channel adapter.
+#
+# Manages connection lifecycle for Discord, Slack, webhook, etc.
+# Receives messages, routes to agents, delivers replies.
+
+[automaton]
+name = "Channel"
+states = ["Created", "Connecting", "Connected", "Disconnected", "Archived"]
+initial = "Created"
+
+[[state]]
+name = "channel_type"
+type = "string"
+initial = ""
+
+[[state]]
+name = "channel_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "guild_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "default_agent_config"
+type = "string"
+initial = ""
+
+[[state]]
+name = "webhook_secret"
+type = "string"
+initial = ""
+
+[[state]]
+name = "webhook_url"
+type = "string"
+initial = ""
+
+[[state]]
+name = "active_sessions"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "message_count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Configure"
+kind = "input"
+from = ["Created"]
+params = ["channel_type", "channel_id", "guild_id", "default_agent_config", "webhook_secret", "webhook_url"]
+hint = "Configure channel with type and connection details."
+
+[[action]]
+name = "Connect"
+kind = "input"
+from = ["Created"]
+to = "Connecting"
+hint = "Start channel connection."
+effect = [{ type = "trigger", name = "channel_connect" }]
+
+[[action]]
+name = "Ready"
+kind = "input"
+from = ["Connecting"]
+to = "Connected"
+hint = "Channel is connected and ready to receive messages."
+
+[[action]]
+name = "ReceiveMessage"
+kind = "input"
+from = ["Connected"]
+params = ["message_id", "author_id", "thread_id", "content"]
+hint = "Receive an incoming message from the channel platform."
+effect = [{ type = "increment", var = "message_count" }, { type = "trigger", name = "route_message" }]
+
+[[action]]
+name = "SendReply"
+kind = "input"
+from = ["Connected"]
+params = ["thread_id", "content", "agent_entity_id"]
+hint = "Send a reply back to the channel."
+effect = [{ type = "trigger", name = "send_reply" }]
+
+[[action]]
+name = "ReplyDelivered"
+kind = "input"
+from = ["Connected"]
+params = ["thread_id", "content", "agent_entity_id"]
+hint = "Reply delivery finished successfully."
+
+[[action]]
+name = "Disconnect"
+kind = "input"
+from = ["Connected"]
+to = "Disconnected"
+hint = "Channel disconnected."
+
+[[action]]
+name = "Reconnect"
+kind = "input"
+from = ["Disconnected"]
+to = "Connecting"
+hint = "Reconnect the channel."
+effect = [{ type = "trigger", name = "channel_connect" }]
+
+[[action]]
+name = "Archive"
+kind = "input"
+from = ["Connected", "Disconnected"]
+to = "Archived"
+hint = "Archive the channel permanently."
+
+[[action]]
+name = "ConnectFailed"
+kind = "input"
+from = ["Connecting"]
+to = "Disconnected"
+params = ["error_message"]
+hint = "Channel connection WASM failed."
+
+[[action]]
+name = "RouteFailed"
+kind = "input"
+from = ["Connected"]
+params = ["error_message"]
+hint = "Message routing WASM failed. Stay Connected."
+
+[[action]]
+name = "ReplyFailed"
+kind = "input"
+from = ["Connected"]
+params = ["error_message"]
+hint = "Reply delivery WASM failed. Stay Connected."
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
+
+[[integration]]
+name = "channel_connect"
+trigger = "channel_connect"
+type = "wasm"
+module = "channel_connect"
+on_failure = "ConnectFailed"
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"
+
+[[integration]]
+name = "route_message"
+trigger = "route_message"
+type = "wasm"
+module = "route_message"
+on_failure = "RouteFailed"
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"
+
+[[integration]]
+name = "send_reply"
+trigger = "send_reply"
+type = "wasm"
+module = "send_reply"
+on_failure = "ReplyFailed"
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"

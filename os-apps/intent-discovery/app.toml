@@ -1,0 +1,3 @@
+name = "intent-discovery"
+description = "Intelligent self-improvement loop that gathers product signals and materializes evolution records"
+version = "0.1.0"

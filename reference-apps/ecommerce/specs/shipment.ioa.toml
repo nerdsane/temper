@@ -1,0 +1,64 @@
+# Shipment Entity — I/O Automaton Specification
+#
+# Models the shipping lifecycle for an e-commerce order.
+# 7 states, 6 transition actions + 1 output event.
+# Delivered is NOT terminal — returns happen after delivery.
+
+[automaton]
+name = "Shipment"
+states = ["Created", "PickedUp", "InTransit", "OutForDelivery", "Delivered", "Failed", "Returned"]
+initial = "Created"
+
+# --- Actions: Shipment Lifecycle ---
+
+[[action]]
+name = "ShipOrder"
+kind = "internal"
+from = ["Created"]
+to = "PickedUp"
+params = ["Carrier", "TrackingNumber"]
+
+[[action]]
+name = "MarkInTransit"
+kind = "internal"
+from = ["PickedUp"]
+to = "InTransit"
+
+[[action]]
+name = "MarkOutForDelivery"
+kind = "internal"
+from = ["InTransit"]
+to = "OutForDelivery"
+
+[[action]]
+name = "DeliverShipment"
+kind = "internal"
+from = ["OutForDelivery"]
+to = "Delivered"
+
+[[action]]
+name = "FailDelivery"
+kind = "input"
+from = ["InTransit", "OutForDelivery"]
+to = "Failed"
+params = ["Reason"]
+
+[[action]]
+name = "ReturnShipment"
+kind = "input"
+from = ["Delivered", "Failed"]
+to = "Returned"
+params = ["Reason"]
+
+# --- Output Actions ---
+
+[[action]]
+name = "ShipmentDeliveredEvent"
+kind = "output"
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ReturnedIsFinal"
+when = ["Returned"]
+assert = "no_further_transitions"

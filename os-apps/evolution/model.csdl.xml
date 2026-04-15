@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Evolution" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <EntityType Name="EvolutionRun">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="SkillName" Type="Edm.String"/>
+        <Property Name="TargetEntityType" Type="Edm.String"/>
+        <Property Name="AutonomyLevel" Type="Edm.String"/>
+        <Property Name="CandidateCount" Type="Edm.Int64"/>
+        <Property Name="MutationAttempts" Type="Edm.Int64"/>
+        <Property Name="Generation" Type="Edm.Int64"/>
+        <Property Name="VerificationPassed" Type="Edm.Boolean"/>
+        <Property Name="BudgetExhausted" Type="Edm.Boolean"/>
+        <Property Name="ProposerAgentId" Type="Edm.String"/>
+        <Property Name="FailureReason" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="SentinelMonitor">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="CheckCount" Type="Edm.Int64"/>
+        <Property Name="AlertCount" Type="Edm.Int64"/>
+        <Property Name="EvolutionRunsCreated" Type="Edm.Int64"/>
+        <Property Name="CheckIntervalSeconds" Type="Edm.Int64"/>
+      </EntityType>
+
+      <Action Name="Start" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun"/>
+        <Parameter Name="SkillName" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="TargetEntityType" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AutonomyLevel" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="Approve" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun"/>
+        <Parameter Name="ApproverId" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="Reject" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun"/>
+        <Parameter Name="RejectionReason" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="Deploy" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun"/>
+        <Parameter Name="DeploymentId" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="Fail" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="CheckSentinel" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.SentinelMonitor"/>
+        <ReturnType Type="Temper.Evolution.SentinelMonitor"/>
+      </Action>
+
+      <Action Name="AlertsFound" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.SentinelMonitor"/>
+        <Parameter Name="AlertDetails" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SuggestedTarget" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.SentinelMonitor"/>
+      </Action>
+
+      <Action Name="NoAlerts" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.SentinelMonitor"/>
+        <ReturnType Type="Temper.Evolution.SentinelMonitor"/>
+      </Action>
+
+      <Action Name="CreateEvolutionRun" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.SentinelMonitor"/>
+        <Parameter Name="EvolutionRunId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SkillName" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="TargetEntityType" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.SentinelMonitor"/>
+      </Action>
+
+      <EntityContainer Name="Service">
+        <EntitySet Name="EvolutionRuns" EntityType="Temper.Evolution.EvolutionRun"/>
+        <EntitySet Name="SentinelMonitors" EntityType="Temper.Evolution.SentinelMonitor"/>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

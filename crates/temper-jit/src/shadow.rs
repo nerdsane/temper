@@ -1,0 +1,285 @@
+//! Shadow testing: compare old and new transition tables for observational equivalence.
+//!
+//! Before hot-swapping a transition table into production, [`shadow_test`] runs a
+//! suite of [`TestCase`]s against both the old and the new table and reports any
+//! differences in outcome. This gives operators confidence that a swap will not
+//! change observable behaviour (or surfaces the exact cases where it does).
+
+use crate::table::types::EvalContext;
+use crate::table::{TransitionResult, TransitionTable};
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/// A single test scenario: (current_state, eval_context, action).
+#[derive(Debug, Clone)]
+pub struct TestCase {
+    /// The current state of the entity.
+    pub state: String,
+    /// The evaluation context (counters, booleans, lists).
+    pub eval_context: EvalContext,
+    /// The action to attempt.
+    pub action: String,
+}
+
+/// A mismatch between the old and new table for a single test case.
+#[derive(Debug, Clone)]
+pub struct Mismatch {
+    /// The test case that produced the mismatch.
+    pub test_case: TestCase,
+    /// Result from the old table.
+    pub old_result: Option<TransitionResult>,
+    /// Result from the new table.
+    pub new_result: Option<TransitionResult>,
+}
+
+/// The result of a shadow test run.
+#[derive(Debug)]
+pub struct ShadowResult {
+    /// Number of test cases that produced identical results.
+    pub matches: usize,
+    /// All test cases that produced different results.
+    pub mismatches: Vec<Mismatch>,
+}
+
+impl ShadowResult {
+    /// Returns `true` if no mismatches were detected.
+    pub fn is_equivalent(&self) -> bool {
+        self.mismatches.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shadow test entry point
+// ---------------------------------------------------------------------------
+
+/// Compare `old` and `new` transition tables against the provided `test_cases`.
+///
+/// For each test case the action is evaluated on both tables using the full
+/// `EvalContext` (counters, booleans, lists). If the results differ (different
+/// new state, different success flag, or different effects) the case is recorded
+/// as a mismatch.
+pub fn shadow_test(
+    old: &TransitionTable,
+    new: &TransitionTable,
+    test_cases: &[TestCase],
+) -> ShadowResult {
+    let mut matches: usize = 0;
+    let mut mismatches: Vec<Mismatch> = Vec::new();
+
+    for tc in test_cases {
+        let old_result = old.evaluate_ctx(&tc.state, &tc.eval_context, &tc.action);
+        let new_result = new.evaluate_ctx(&tc.state, &tc.eval_context, &tc.action);
+
+        if old_result == new_result {
+            matches += 1;
+        } else {
+            mismatches.push(Mismatch {
+                test_case: tc.clone(),
+                old_result,
+                new_result,
+            });
+        }
+    }
+
+    ShadowResult {
+        matches,
+        mismatches,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::table::{Effect, Guard, TransitionRule, TransitionTable};
+    use std::collections::BTreeMap;
+
+    /// Build an EvalContext with a single "items" counter.
+    fn ctx_with_items(n: usize) -> EvalContext {
+        let mut counters = BTreeMap::new();
+        counters.insert("items".to_string(), n);
+        EvalContext {
+            counters,
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+        }
+    }
+
+    fn base_table() -> TransitionTable {
+        let mut table = TransitionTable {
+            entity_name: "Order".into(),
+            states: vec!["Draft".into(), "Submitted".into(), "Cancelled".into()],
+            initial_state: "Draft".into(),
+            rules: vec![
+                TransitionRule {
+                    name: "SubmitOrder".into(),
+                    from_states: vec!["Draft".into()],
+                    to_state: Some("Submitted".into()),
+                    guard: Guard::StateIn(vec!["Draft".into()]),
+                    effects: vec![
+                        Effect::SetState("Submitted".into()),
+                        Effect::EmitEvent("SubmitOrder".into()),
+                    ],
+                },
+                TransitionRule {
+                    name: "CancelOrder".into(),
+                    from_states: vec!["Draft".into(), "Submitted".into()],
+                    to_state: Some("Cancelled".into()),
+                    guard: Guard::StateIn(vec!["Draft".into(), "Submitted".into()]),
+                    effects: vec![
+                        Effect::SetState("Cancelled".into()),
+                        Effect::EmitEvent("CancelOrder".into()),
+                    ],
+                },
+            ],
+            rule_index: Default::default(),
+        };
+        table.rebuild_index();
+        table
+    }
+
+    fn test_cases() -> Vec<TestCase> {
+        vec![
+            TestCase {
+                state: "Draft".into(),
+                eval_context: ctx_with_items(1),
+                action: "SubmitOrder".into(),
+            },
+            TestCase {
+                state: "Draft".into(),
+                eval_context: ctx_with_items(0),
+                action: "CancelOrder".into(),
+            },
+            TestCase {
+                state: "Submitted".into(),
+                eval_context: ctx_with_items(1),
+                action: "CancelOrder".into(),
+            },
+            TestCase {
+                state: "Submitted".into(),
+                eval_context: ctx_with_items(1),
+                action: "SubmitOrder".into(),
+            },
+        ]
+    }
+
+    // ------------------------------------------------------------------
+    // Test: identical tables produce no mismatches
+    // ------------------------------------------------------------------
+    #[test]
+    fn identical_tables_match() {
+        let old = base_table();
+        let new = base_table();
+
+        let result = shadow_test(&old, &new, &test_cases());
+
+        assert!(result.is_equivalent());
+        assert_eq!(result.matches, 4);
+        assert_eq!(result.mismatches.len(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Test: different tables detect mismatch
+    // ------------------------------------------------------------------
+    #[test]
+    fn different_tables_detect_mismatch() {
+        let old = base_table();
+
+        // New table: SubmitOrder now goes to "Confirmed" instead of "Submitted".
+        let mut new = base_table();
+        new.rules[0].to_state = Some("Confirmed".into());
+        new.rules[0].effects = vec![
+            Effect::SetState("Confirmed".into()),
+            Effect::EmitEvent("SubmitOrder".into()),
+        ];
+
+        let result = shadow_test(&old, &new, &test_cases());
+
+        assert!(!result.is_equivalent());
+        // The first test case (Draft -> SubmitOrder) should mismatch.
+        assert!(!result.mismatches.is_empty());
+
+        let mm = &result.mismatches[0];
+        assert_eq!(mm.test_case.action, "SubmitOrder");
+        assert_eq!(mm.old_result.as_ref().unwrap().new_state, "Submitted");
+        assert_eq!(mm.new_result.as_ref().unwrap().new_state, "Confirmed");
+    }
+
+    // ------------------------------------------------------------------
+    // Test: adding a new rule causes mismatch for previously unknown action
+    // ------------------------------------------------------------------
+    #[test]
+    fn added_rule_detected() {
+        let old = base_table();
+        let mut new = base_table();
+
+        // Add a rule the old table doesn't have.
+        new.rules.push(TransitionRule {
+            name: "ExpediteOrder".into(),
+            from_states: vec!["Submitted".into()],
+            to_state: Some("Submitted".into()),
+            guard: Guard::StateIn(vec!["Submitted".into()]),
+            effects: vec![Effect::EmitEvent("ExpediteOrder".into())],
+        });
+        new.rebuild_index();
+
+        let cases = vec![TestCase {
+            state: "Submitted".into(),
+            eval_context: ctx_with_items(1),
+            action: "ExpediteOrder".into(),
+        }];
+
+        let result = shadow_test(&old, &new, &cases);
+        assert!(!result.is_equivalent());
+        assert_eq!(result.mismatches.len(), 1);
+
+        // Old should be None (no such action), new should succeed.
+        assert!(result.mismatches[0].old_result.is_none());
+        assert!(result.mismatches[0].new_result.is_some());
+    }
+
+    // ------------------------------------------------------------------
+    // Test: boolean guard mismatch detected across tables
+    // ------------------------------------------------------------------
+    #[test]
+    fn boolean_guard_mismatch_detected() {
+        // Old table: SubmitOrder requires StateIn("Draft") only
+        let old = base_table();
+
+        // New table: SubmitOrder requires BoolTrue("ready") instead
+        let mut new = base_table();
+        new.rules[0].guard = Guard::BoolTrue("ready".into());
+
+        let mut ctx_not_ready = EvalContext::default();
+        ctx_not_ready.booleans.insert("ready".to_string(), false);
+
+        let cases = vec![TestCase {
+            state: "Draft".into(),
+            eval_context: ctx_not_ready,
+            action: "SubmitOrder".into(),
+        }];
+
+        let result = shadow_test(&old, &new, &cases);
+        // Old table: StateIn(["Draft"]) matches "Draft" → succeeds (success=true)
+        // New table: BoolTrue("ready") checks booleans["ready"] = false → guard fails (success=false)
+        assert!(!result.is_equivalent());
+        assert_eq!(result.mismatches.len(), 1);
+        assert!(
+            result.mismatches[0]
+                .old_result
+                .as_ref()
+                .is_some_and(|r| r.success)
+        );
+        assert!(
+            result.mismatches[0]
+                .new_result
+                .as_ref()
+                .is_some_and(|r| !r.success)
+        );
+    }
+}

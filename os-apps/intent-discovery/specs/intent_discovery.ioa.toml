@@ -1,0 +1,152 @@
+[automaton]
+name = "IntentDiscovery"
+states = ["Triggered", "Gathering", "Analyzing", "Proposing", "Complete", "Failed"]
+initial = "Triggered"
+
+[[state]]
+name = "signal_summary_present"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "analysis_present"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "proposal_present"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "finding_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "records_created_count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "issues_created_count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Trigger"
+kind = "input"
+from = ["Triggered"]
+to = "Gathering"
+params = ["reason", "source", "trigger_context_json"]
+effect = [{ type = "trigger", name = "gather_signals" }]
+hint = "Begin one intent-discovery cycle and gather current system signals."
+
+[[action]]
+name = "GatheringComplete"
+kind = "input"
+from = ["Gathering"]
+to = "Analyzing"
+params = ["signal_summary_json", "signal_sources_json", "signal_count"]
+effect = [
+  { type = "set_bool", var = "signal_summary_present", value = "true" },
+  { type = "trigger", name = "spawn_analyst" }
+]
+hint = "Persist gathered signals and spawn the analyst TemperAgent."
+
+[[action]]
+name = "AnalysisComplete"
+kind = "input"
+from = ["Analyzing"]
+to = "Proposing"
+params = ["analyst_agent_id", "analysis_json", "finding_count"]
+effect = [
+  { type = "set_bool", var = "analysis_present", value = "true" },
+  { type = "increment", var = "finding_count" },
+  { type = "trigger", name = "create_proposals" }
+]
+hint = "Store analyst output and materialize proposals."
+
+[[action]]
+name = "ProposalComplete"
+kind = "input"
+from = ["Proposing"]
+to = "Complete"
+params = ["records_created_count", "issues_created_count", "record_ids_json", "issue_ids_json", "materialization_report_json"]
+effect = [{ type = "set_bool", var = "proposal_present", value = "true" }]
+hint = "Finish the cycle after records and PM issues are created."
+
+[[action]]
+name = "Fail"
+kind = "input"
+from = ["Triggered", "Gathering", "Analyzing", "Proposing"]
+to = "Failed"
+params = ["error_message"]
+hint = "Mark the intent-discovery cycle as failed."
+
+[[invariant]]
+name = "CompletedHasSignals"
+when = ["Complete"]
+assert = "is_true signal_summary_present"
+
+[[invariant]]
+name = "CompletedHasAnalysis"
+when = ["Complete"]
+assert = "is_true analysis_present"
+
+[[invariant]]
+name = "CompletedHasProposal"
+when = ["Complete"]
+assert = "is_true proposal_present"
+
+[[invariant]]
+name = "CompletedIsFinal"
+when = ["Complete"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "FailedIsFinal"
+when = ["Failed"]
+assert = "no_further_transitions"
+
+[[integration]]
+name = "gather_signals"
+trigger = "gather_signals"
+type = "wasm"
+module = "gather_signals"
+on_success = "GatheringComplete"
+on_failure = "Fail"
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"
+
+[[integration]]
+name = "spawn_analyst"
+trigger = "spawn_analyst"
+type = "wasm"
+module = "spawn_analyst"
+on_success = "AnalysisComplete"
+on_failure = "Fail"
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"
+sandbox_url = "http://127.0.0.1:9999"
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+timeout_secs = "420"
+max_turns = "10"
+agent_wait_timeout_ms = "300000"
+agent_wait_poll_ms = "250"
+tools_enabled = "logfire_query"
+workdir = "/workspace"
+
+[[integration]]
+name = "create_proposals"
+trigger = "create_proposals"
+type = "wasm"
+module = "create_proposals"
+on_success = "ProposalComplete"
+on_failure = "Fail"
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"

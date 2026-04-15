@@ -1,0 +1,60 @@
+# ChannelSession — Maps channel threads to TemperAgent entities.
+#
+# Tracks active conversations between channel users and agents.
+# Enables session continuity (same thread = same agent) and steering.
+
+[automaton]
+name = "ChannelSession"
+states = ["Active", "Expired"]
+initial = "Active"
+
+[[state]]
+name = "channel_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "thread_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "author_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "agent_entity_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "last_message_at"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+params = ["channel_id", "thread_id", "author_id", "agent_entity_id", "last_message_at"]
+hint = "Create a new channel session linking a thread to an agent."
+
+[[action]]
+name = "Resume"
+kind = "input"
+from = ["Active"]
+params = ["last_message_at"]
+hint = "Resume the session with a new message timestamp."
+
+[[action]]
+name = "Expire"
+kind = "input"
+from = ["Active"]
+to = "Expired"
+hint = "Expire the session (timeout or manual cleanup)."
+
+[[invariant]]
+name = "ExpiredIsFinal"
+when = ["Expired"]
+assert = "no_further_transitions"

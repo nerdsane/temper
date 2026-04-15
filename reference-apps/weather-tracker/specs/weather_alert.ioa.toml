@@ -1,0 +1,40 @@
+[automaton]
+name = "WeatherAlert"
+states = ["Pending", "Acknowledged", "Resolved", "Expired"]
+initial = "Pending"
+
+[[action]]
+name = "AcknowledgeAlert"
+kind = "input"
+from = ["Pending"]
+to = "Acknowledged"
+hint = "User acknowledges they have seen this alert."
+
+[[action]]
+name = "ResolveAlert"
+kind = "input"
+from = ["Pending", "Acknowledged"]
+to = "Resolved"
+hint = "Mark alert as resolved when weather event passes."
+
+[[action]]
+name = "ExpireAlert"
+kind = "internal"
+from = ["Pending"]
+to = "Expired"
+hint = "System expires alert after timeout period."
+
+[[invariant]]
+name = "ResolvedIsTerminal"
+when = ["Resolved"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "ExpiredIsTerminal"
+when = ["Expired"]
+assert = "no_further_transitions"
+
+[[liveness]]
+name = "EventuallyTerminal"
+from = ["Pending"]
+reaches = ["Resolved", "Expired"]

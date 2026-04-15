@@ -1,0 +1,3 @@
+name = "temper-fs"
+description = "Versioned virtual filesystem with workspaces, directories, files, and file versions"
+version = "0.1.0"
