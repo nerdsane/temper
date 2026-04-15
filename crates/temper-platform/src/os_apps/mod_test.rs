@@ -379,6 +379,18 @@ async fn test_install_temper_agent_auto_installs_temper_fs() {
     }
 }
 
+#[test]
+fn test_bootstrapped_agent_soul_ids_are_stable_and_slugged() {
+    assert_eq!(
+        bootstrapped_agent_soul_entity_id("Paw"),
+        "sl-bootstrap-agent-soul-paw"
+    );
+    assert_eq!(
+        bootstrapped_agent_soul_entity_id("Reliability Lead"),
+        "sl-bootstrap-agent-soul-reliability-lead"
+    );
+}
+
 #[tokio::test]
 async fn test_install_skill_nonexistent_returns_error() {
     let state = PlatformState::new(None);
@@ -990,6 +1002,33 @@ fn test_find_adrs_discovers_markdown_in_sorted_order() {
     assert_eq!(adrs[1].file_name, "002-second.md");
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_agent_soul_refresh_decision_preserves_customized_content() {
+    let desired_hash = content_sha256(b"expected agent content");
+
+    assert_eq!(
+        decide_agent_soul_refresh(false, "", &desired_hash),
+        AgentSoulRefreshDecision::Upload
+    );
+    assert_eq!(
+        decide_agent_soul_refresh(true, &desired_hash, &desired_hash),
+        AgentSoulRefreshDecision::AlreadyCurrent
+    );
+    assert_eq!(
+        decide_agent_soul_refresh(true, "sha256:someone-customized-this", &desired_hash),
+        AgentSoulRefreshDecision::PreserveCustomized
+    );
+}
+
+#[test]
+fn test_state_field_str_accepts_lowercase_names() {
+    let mut fields = serde_json::Map::new();
+    fields.insert("name".to_string(), serde_json::json!("paw"));
+    let fields = serde_json::Value::Object(fields);
+
+    assert_eq!(state_field_str(&fields, &["Name", "name"]), Some("paw"));
 }
 
 #[tokio::test]
