@@ -470,10 +470,7 @@ impl WasmHost for ProductionWasmHost {
                     .iter()
                     .any(|(k, _)| k.eq_ignore_ascii_case("x-temper-principal-kind"));
                 if !has_principal {
-                    let agent_type = if inv_ctx
-                        .entity_type
-                        .eq_ignore_ascii_case("Session")
-                    {
+                    let agent_type = if inv_ctx.entity_type.eq_ignore_ascii_case("Session") {
                         "agent"
                     } else {
                         "system"
@@ -491,11 +488,9 @@ impl WasmHost for ProductionWasmHost {
                     if let Some(ref sid) = inv_ctx.session_id {
                         builder = builder.header("x-temper-ctx-sessionid", sid.as_str());
                     }
-                    if let Some(key) =
-                        self.secrets.get("temper_api_key").filter(|k| !k.is_empty())
+                    if let Some(key) = self.secrets.get("temper_api_key").filter(|k| !k.is_empty())
                     {
-                        builder =
-                            builder.header("authorization", format!("Bearer {key}"));
+                        builder = builder.header("authorization", format!("Bearer {key}"));
                     }
                 }
             }
@@ -534,12 +529,7 @@ impl WasmHost for ProductionWasmHost {
             let (module, agent) = self
                 .invocation_context
                 .as_ref()
-                .map(|c| {
-                    (
-                        c.entity_type.as_str(),
-                        c.agent_id.as_deref().unwrap_or("?"),
-                    )
-                })
+                .map(|c| (c.entity_type.as_str(), c.agent_id.as_deref().unwrap_or("?")))
                 .unwrap_or(("?", "?"));
             tracing::warn!(
                 status = status,
