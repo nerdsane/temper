@@ -1825,14 +1825,7 @@ async fn bootstrap_agents(
                 .and_then(|v| v.as_str())
             {
                 let desired_hash = content_sha256(agent.content.as_bytes());
-                match inspect_agent_soul_refresh(
-                    state,
-                    tenant_id,
-                    file_id,
-                    &desired_hash,
-                )
-                .await
-                {
+                match inspect_agent_soul_refresh(state, tenant_id, file_id, &desired_hash).await {
                     Ok(AgentSoulRefreshDecision::AlreadyCurrent) => {
                         tracing::debug!(
                             tenant,
@@ -1914,13 +1907,7 @@ async fn bootstrap_agents(
                     .and_then(|v| v.as_str())
                 {
                     let desired_hash = content_sha256(agent.content.as_bytes());
-                    match inspect_agent_soul_refresh(
-                        state,
-                        tenant_id,
-                        file_id,
-                        &desired_hash,
-                    )
-                    .await
+                    match inspect_agent_soul_refresh(state, tenant_id, file_id, &desired_hash).await
                     {
                         Ok(AgentSoulRefreshDecision::AlreadyCurrent) => {
                             tracing::debug!(
@@ -2473,7 +2460,10 @@ fn slugify_bootstrapped_agent_name(name: &str) -> String {
 }
 
 fn bootstrapped_agent_soul_entity_id(name: &str) -> String {
-    format!("sl-bootstrap-agent-soul-{}", slugify_bootstrapped_agent_name(name))
+    format!(
+        "sl-bootstrap-agent-soul-{}",
+        slugify_bootstrapped_agent_name(name)
+    )
 }
 
 async fn inspect_agent_soul_refresh(
@@ -2522,10 +2512,7 @@ fn decide_agent_soul_refresh(
     }
 }
 
-fn state_field_str<'a>(
-    fields: &'a serde_json::Value,
-    keys: &[&str],
-) -> Option<&'a str> {
+fn state_field_str<'a>(fields: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| fields.get(*key).and_then(|value| value.as_str()))
 }

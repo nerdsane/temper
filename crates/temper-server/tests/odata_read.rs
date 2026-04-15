@@ -11,14 +11,14 @@ use common::{build_default_state, dispatch};
 use std::sync::Arc;
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
+use temper_server::build_router;
 use temper_server::registry::{
     EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
 };
-use temper_server::build_router;
 use temper_server::{ServerEventStore, ServerState};
-use tower::ServiceExt;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
+use tower::ServiceExt;
 
 const CSDL_XML: &str = common::CSDL_XML;
 const ORDER_IOA: &str = common::ORDER_IOA;
