@@ -23,6 +23,7 @@ use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
 use crate::bootstrap;
 use crate::state::PlatformState;
 
+pub mod git_sources;
 mod system_files;
 mod types;
 pub use types::*;
