@@ -98,9 +98,13 @@ impl EntityActorHandler {
 /// then maps the result to the runtime type. Returns `None` for expressions
 /// that the framework cannot check automatically.
 fn parse_assert_expr(expr: &str) -> Option<SpecAssert> {
-    use temper_spec::automaton::{AssertCompareOp, ParsedAssert, parse_assert_expr as parse};
+    use temper_spec::automaton::parse_assert_expr as parse;
+    translate_parsed(parse(expr)?)
+}
 
-    let parsed = parse(expr)?;
+fn translate_parsed(parsed: temper_spec::automaton::ParsedAssert) -> Option<SpecAssert> {
+    use temper_spec::automaton::{AssertCompareOp, ParsedAssert};
+
     match parsed {
         ParsedAssert::CounterPositive { var } => Some(SpecAssert::CounterPositive { var }),
         ParsedAssert::NoFurtherTransitions => Some(SpecAssert::NoFurtherTransitions),
@@ -121,6 +125,17 @@ fn parse_assert_expr(expr: &str) -> Option<SpecAssert> {
                 op: runtime_op,
                 value,
             })
+        }
+        ParsedAssert::BoolRequired { var, expect } => {
+            Some(SpecAssert::BoolRequired { var, expect })
+        }
+        ParsedAssert::And(parts) => {
+            let mapped: Option<Vec<_>> = parts.into_iter().map(translate_parsed).collect();
+            mapped.map(SpecAssert::And)
+        }
+        ParsedAssert::Or(parts) => {
+            let mapped: Option<Vec<_>> = parts.into_iter().map(translate_parsed).collect();
+            mapped.map(SpecAssert::Or)
         }
     }
 }
@@ -203,6 +218,10 @@ impl SimActorHandler for EntityActorHandler {
 
     fn spec_invariants(&self) -> &[SpecInvariant] {
         &self.invariants
+    }
+
+    fn bool_field(&self, var: &str) -> Option<bool> {
+        self.state.booleans.get(var).copied()
     }
 
     fn pending_callbacks(&self) -> Vec<String> {

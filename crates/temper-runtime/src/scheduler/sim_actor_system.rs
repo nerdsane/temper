@@ -600,57 +600,15 @@ impl SimActorSystem {
                     continue;
                 }
 
-                let violated = match &inv.assert {
-                    super::sim_handler::SpecAssert::CounterPositive { var } => {
-                        // Currently only "items" counter is tracked.
-                        if var == "items" {
-                            item_count == 0
-                        } else {
-                            false
-                        }
-                    }
-                    super::sim_handler::SpecAssert::NoFurtherTransitions => {
-                        // This is called after a successful transition. If
-                        // status_before was the terminal state (one of the
-                        // `when` states), a transition should not have fired.
-                        inv.when.iter().any(|s| s == status_before)
-                    }
-                    super::sim_handler::SpecAssert::OrderingConstraint { before, after } => {
-                        // If the entity is now in the "after" state, check
-                        // that "before" was visited in event history.
-                        if status_after == after.as_str() {
-                            let events = handler.events_json();
-                            if let Some(arr) = events.as_array() {
-                                let visited_before = arr.iter().any(|e| {
-                                    e.get("to_status").and_then(|s| s.as_str())
-                                        == Some(before.as_str())
-                                });
-                                !visited_before // violated if "before" was never visited
-                            } else {
-                                false
-                            }
-                        } else {
-                            false // Not in the "after" state, invariant doesn't apply
-                        }
-                    }
-                    super::sim_handler::SpecAssert::NeverState { state } => {
-                        // Violated if the entity is currently in the forbidden state.
-                        status_after == state.as_str()
-                    }
-                    super::sim_handler::SpecAssert::CounterCompare { var, op, value } => {
-                        // Only the "items" counter is passed to check_invariants.
-                        // Other counters require expanding the SimActorHandler trait.
-                        let counter_val = if var == "items" { item_count } else { 0 };
-                        let passed = match op {
-                            super::sim_handler::CompareOp::Gt => counter_val > *value,
-                            super::sim_handler::CompareOp::Gte => counter_val >= *value,
-                            super::sim_handler::CompareOp::Lt => counter_val < *value,
-                            super::sim_handler::CompareOp::Lte => counter_val <= *value,
-                            super::sim_handler::CompareOp::Eq => counter_val == *value,
-                        };
-                        !passed // violated if comparison fails
-                    }
-                };
+                let passed = evaluate_spec_assert(
+                    &inv.assert,
+                    handler.as_ref(),
+                    &inv.when,
+                    status_before,
+                    status_after,
+                    item_count,
+                );
+                let violated = !passed;
 
                 self.recorded_invariants
                     .push((actor_id.to_string(), inv.name.clone(), !violated));
@@ -681,6 +639,67 @@ impl SimActorSystem {
                 tick,
             });
         }
+    }
+}
+
+/// Evaluate a [`SpecAssert`] against handler state. Returns `true` if the
+/// assertion holds, `false` if violated. Recurses through `And`/`Or`.
+fn evaluate_spec_assert(
+    assert: &super::sim_handler::SpecAssert,
+    handler: &dyn super::sim_handler::SimActorHandler,
+    when: &[String],
+    status_before: &str,
+    status_after: &str,
+    item_count: usize,
+) -> bool {
+    use super::sim_handler::{CompareOp, SpecAssert};
+
+    match assert {
+        SpecAssert::CounterPositive { var } => {
+            if var == "items" {
+                item_count > 0
+            } else {
+                true // Unknown counter: not in scope for invariant checking here.
+            }
+        }
+        SpecAssert::NoFurtherTransitions => {
+            // Holds unless status_before was a terminal state in `when`.
+            !when.iter().any(|s| s == status_before)
+        }
+        SpecAssert::OrderingConstraint { before, after } => {
+            if status_after == after.as_str() {
+                let events = handler.events_json();
+                if let Some(arr) = events.as_array() {
+                    arr.iter().any(|e| {
+                        e.get("to_status").and_then(|s| s.as_str()) == Some(before.as_str())
+                    })
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        }
+        SpecAssert::NeverState { state } => status_after != state.as_str(),
+        SpecAssert::CounterCompare { var, op, value } => {
+            let counter_val = if var == "items" { item_count } else { 0 };
+            match op {
+                CompareOp::Gt => counter_val > *value,
+                CompareOp::Gte => counter_val >= *value,
+                CompareOp::Lt => counter_val < *value,
+                CompareOp::Lte => counter_val <= *value,
+                CompareOp::Eq => counter_val == *value,
+            }
+        }
+        SpecAssert::BoolRequired { var, expect } => {
+            handler.bool_field(var).unwrap_or(false) == *expect
+        }
+        SpecAssert::And(parts) => parts.iter().all(|p| {
+            evaluate_spec_assert(p, handler, when, status_before, status_after, item_count)
+        }),
+        SpecAssert::Or(parts) => parts.iter().any(|p| {
+            evaluate_spec_assert(p, handler, when, status_before, status_after, item_count)
+        }),
     }
 }
 

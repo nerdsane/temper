@@ -142,8 +142,10 @@ pub enum InvariantKind {
     StatusInSet,
     /// When status is in trigger_states, a counter must be > 0.
     CounterPositive { var: String },
-    /// When status is in trigger_states, a boolean must be true.
-    BoolRequired { var: String },
+    /// When status is in trigger_states, a boolean must match `expect`.
+    ///
+    /// `expect = true` encodes `flag`; `expect = false` encodes `!flag`.
+    BoolRequired { var: String, expect: bool },
     /// When status is in trigger_states, no transitions should be enabled.
     NoFurtherTransitions,
     /// When status is in trigger_states, status must also be in required_states.
@@ -156,6 +158,10 @@ pub enum InvariantKind {
     },
     /// The entity should never be in this state.
     NeverState { state: String },
+    /// Compound: all subexpressions must hold.
+    And(Vec<InvariantKind>),
+    /// Compound: at least one subexpression must hold.
+    Or(Vec<InvariantKind>),
     /// Assertion expression that cannot be verified at model level.
     /// Surfaces as a warning in the cascade result.
     Unverifiable { expression: String },
