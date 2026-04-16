@@ -438,6 +438,101 @@ mod tests {
         assert_eq!(decoded.as_str().unwrap(), huge);
     }
 
+    /// Regression test for the replay-path blob-persist bug: a blob written by
+    /// a live action must remain resolvable after an actor restart. Simulates
+    /// the sequence by writing a blob on behalf of a Session, then re-running
+    /// `sync_fields` (as replay would) and persisting the returned overflow
+    /// blobs (the fix). Content-addressed dedup means this is idempotent.
+    #[tokio::test]
+    async fn replay_persists_overflow_blobs_and_hydration_resolves() {
+        let (store, _dir) = open_store().await;
+
+        // Live path: first action projects a 200KB value, produces overflow, persists it.
+        let mut state_live = make_state("Session", "s-replay-1");
+        let big = "R".repeat(200 * 1024);
+        let params = json!({ "user_message": big.clone() });
+        let overflow = sync_fields(&mut state_live, &params, FieldSyncMode::blob_refs_default());
+        put_overflow_blobs(&store, &overflow)
+            .await
+            .expect("put_overflow_blobs live");
+        assert_eq!(overflow.len(), 1, "live action writes one overflow blob");
+
+        // Now simulate replay: fresh EntityState, sync_fields re-runs with the
+        // same event.params, returns overflow. BEFORE the fix this return was
+        // discarded (`let _ =`), leaving fields with a blob-ref envelope that
+        // pointed to nothing after the blob was dropped. With the fix, replay
+        // re-persists via put_overflow_blobs (idempotent on content-addressed).
+        let mut state_replay = make_state("Session", "s-replay-1");
+        let replay_overflow = sync_fields(
+            &mut state_replay,
+            &params,
+            FieldSyncMode::blob_refs_default(),
+        );
+        assert_eq!(replay_overflow.len(), 1);
+        assert_eq!(
+            replay_overflow[0].key, overflow[0].key,
+            "content-addressed dedup: same key both times"
+        );
+        // This is the fix — persist on replay.
+        put_overflow_blobs(&store, &replay_overflow)
+            .await
+            .expect("put_overflow_blobs replay (idempotent INSERT OR IGNORE)");
+
+        // Hydration must succeed against the replayed state.
+        let mut hydrated = state_replay.fields.clone();
+        hydrate_blob_refs_in_value(&store, &mut hydrated).await;
+        let recovered = hydrated
+            .get("user_message")
+            .and_then(|v| v.as_str())
+            .expect("user_message hydrated as string after replay");
+        assert_eq!(recovered, big, "blob content intact after replay-persist");
+    }
+
+    /// Regression test for the inverse case: a replayed overflow blob on an
+    /// entity that has no live blob written (the prior server died between
+    /// event persist and blob persist). The replay path must write the blob
+    /// so that hydration recovers the value.
+    #[tokio::test]
+    async fn replay_recovers_blob_when_live_write_was_dropped() {
+        let (store, _dir) = open_store().await;
+
+        // Simulate: live action projected params into fields but died before
+        // put_overflow_blobs completed. On replay we get the same event.params.
+        let mut state = make_state("Session", "s-replay-2");
+        let big = "S".repeat(200 * 1024);
+        let params = json!({ "user_message": big.clone() });
+        let overflow = sync_fields(&mut state, &params, FieldSyncMode::blob_refs_default());
+        // NOTE: skip put_overflow_blobs here — simulates the server dying
+        // before the blob persisted.
+
+        // Now the fields has a blob-ref envelope, but the blob store is empty.
+        // Hydration before replay-persist would log "missing" and leave the
+        // envelope in place:
+        let mut hydrated_before = state.fields.clone();
+        hydrate_blob_refs_in_value(&store, &mut hydrated_before).await;
+        assert!(
+            hydrated_before
+                .get("user_message")
+                .and_then(|v| v.as_object())
+                .is_some(),
+            "before replay-persist: blob ref remains an object (no backing blob)"
+        );
+
+        // Replay path (the fix): persist the overflow blobs on replay.
+        put_overflow_blobs(&store, &overflow)
+            .await
+            .expect("replay-persist recovers the lost write");
+
+        // Now hydration succeeds.
+        let mut hydrated_after = state.fields.clone();
+        hydrate_blob_refs_in_value(&store, &mut hydrated_after).await;
+        let recovered = hydrated_after
+            .get("user_message")
+            .and_then(|v| v.as_str())
+            .expect("user_message hydrated after replay-persist");
+        assert_eq!(recovered, big);
+    }
+
     /// End-to-end: when the default ceiling is used on read (the dispatcher's
     /// path), every field whose stored size exceeds `DEFAULT_FIELD_INLINE_MAX`
     /// lands in the deferred map and the fields object keeps ref envelopes.
