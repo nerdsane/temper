@@ -121,6 +121,13 @@ struct SimEventStoreInner {
     rng: DeterministicRng,
     /// Fault injection configuration.
     faults: SimFaultConfig,
+    /// One-shot concurrency-violation injection counters per `persistence_id`.
+    ///
+    /// Each entry tells `append` to return a `ConcurrencyViolation` on the next
+    /// N calls for that id, then behave normally. Intended for deterministic
+    /// retry-path tests where probabilistic injection would be flaky. See
+    /// `inject_concurrency_violations`.
+    pending_concurrency_violations: BTreeMap<String, u64>,
 }
 
 impl SimEventStore {
@@ -132,8 +139,40 @@ impl SimEventStore {
                 snapshots: BTreeMap::new(),
                 rng: DeterministicRng::new(seed),
                 faults,
+                pending_concurrency_violations: BTreeMap::new(),
             })),
         }
+    }
+
+    /// Inject exactly `count` deterministic `ConcurrencyViolation` errors on
+    /// the next `count` `append` calls for `persistence_id`, then behave
+    /// normally.
+    ///
+    /// Use this for retry-path tests where the probabilistic fault injection
+    /// in `SimFaultConfig` would be flaky. Each injected violation reports
+    /// `actual = expected_sequence` (the journal has not actually moved), so
+    /// any callers with post-replay sequence assertions still hold after the
+    /// retry replays back to the same spot.
+    pub fn inject_concurrency_violations(&self, persistence_id: &str, count: u64) {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if count == 0 {
+            inner.pending_concurrency_violations.remove(persistence_id);
+        } else {
+            inner
+                .pending_concurrency_violations
+                .insert(persistence_id.to_string(), count);
+        }
+    }
+
+    /// Return the current count of pending injected concurrency violations for
+    /// `persistence_id`. Zero if none are queued.
+    pub fn pending_concurrency_violations(&self, persistence_id: &str) -> u64 {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner
+            .pending_concurrency_violations
+            .get(persistence_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Create a SimEventStore with no fault injection.
@@ -208,7 +247,34 @@ impl EventStore for SimEventStore {
     ) -> Result<u64, PersistenceError> {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
 
-        // Fault injection: spurious concurrency violation.
+        // Deterministic one-shot injection (see `inject_concurrency_violations`).
+        // Consumes one counter per call; falls back to normal flow once drained.
+        //
+        // The reported `actual` equals `expected_sequence` — the journal has
+        // not actually moved, so an authoritative replay will land back at
+        // `expected_sequence`. Any code that asserts
+        // `post_replay_sequence >= actual` still holds without this injection
+        // lying about journal state.
+        let pending_cv = inner
+            .pending_concurrency_violations
+            .get(persistence_id)
+            .copied()
+            .unwrap_or(0);
+        if pending_cv > 0 {
+            if pending_cv == 1 {
+                inner.pending_concurrency_violations.remove(persistence_id);
+            } else {
+                inner
+                    .pending_concurrency_violations
+                    .insert(persistence_id.to_string(), pending_cv - 1);
+            }
+            return Err(PersistenceError::ConcurrencyViolation {
+                expected: expected_sequence,
+                actual: expected_sequence,
+            });
+        }
+
+        // Fault injection: spurious concurrency violation (probabilistic).
         let cv_prob = inner.faults.concurrency_violation_prob;
         if inner.rng.chance(cv_prob) {
             return Err(PersistenceError::ConcurrencyViolation {

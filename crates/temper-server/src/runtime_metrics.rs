@@ -248,7 +248,8 @@ pub enum ConcurrencyRetryOutcome {
 }
 
 impl ConcurrencyRetryOutcome {
-    fn as_str(&self) -> &'static str {
+    /// Short string identifier for metric labels and span attributes.
+    pub fn as_str(&self) -> &'static str {
         match self {
             ConcurrencyRetryOutcome::Success => "success",
             ConcurrencyRetryOutcome::Exhausted => "exhausted",
