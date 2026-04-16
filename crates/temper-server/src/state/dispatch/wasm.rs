@@ -225,6 +225,7 @@ impl crate::state::ServerState {
         otel.name = tracing::field::Empty,
         integration = %integration.name,
         wasm.module = tracing::field::Empty,
+        wasm.timeout_source = tracing::field::Empty,
         gen_ai.system = tracing::field::Empty,
         gen_ai.system_instructions = tracing::field::Empty,
         gen_ai.request.model = tracing::field::Empty,
@@ -333,12 +334,42 @@ impl crate::state::ServerState {
             tenant_secrets.get("blob_endpoint").cloned(),
         );
         // Use integration config timeout for both WASM execution and HTTP client.
-        let http_timeout = integration
+        //
+        // When no explicit `timeout_secs` is configured, fall back to the
+        // platform default (`WasmResourceLimits::default().max_duration`, 120s
+        // per ADR-0045). The fallback is observable:
+        //   - `tracing::warn!` for human debugging
+        //   - counter `temper_wasm_integration_default_timeout_used_total` for alerting
+        //   - span attribute `wasm.timeout_source = default` for APM correlation
+        //
+        // Apps that fire the counter frequently should wire an explicit
+        // `timeout_secs` in their integration config.
+        let explicit_timeout = integration
             .config
             .get("timeout_secs")
             .and_then(|s| s.parse::<u64>().ok())
-            .map(std::time::Duration::from_secs)
-            .unwrap_or(std::time::Duration::from_secs(30));
+            .map(std::time::Duration::from_secs);
+        let http_timeout =
+            explicit_timeout.unwrap_or_else(|| WasmResourceLimits::default().max_duration);
+        if explicit_timeout.is_some() {
+            active_span.record("wasm.timeout_source", "explicit");
+        } else {
+            active_span.record("wasm.timeout_source", "default");
+            tracing::warn!(
+                tenant = %ctx.entity_ref.tenant,
+                entity_type = ctx.entity_ref.entity_type,
+                entity_id = ctx.entity_ref.entity_id,
+                integration = %integration.name,
+                module = %module_name,
+                default_timeout_secs = http_timeout.as_secs(),
+                "WASM integration falling back to default timeout — wire `timeout_secs` explicitly in integration config"
+            );
+            crate::runtime_metrics::record_wasm_default_timeout_used(
+                ctx.entity_ref.tenant.as_str(),
+                ctx.entity_ref.entity_type,
+                module_name.as_str(),
+            );
+        }
         let progress_emitter = progress_emitter_fn(
             self.clone(),
             ctx.entity_ref.tenant.to_string(),
