@@ -113,6 +113,13 @@ pub trait PlatformStore: Send + Sync {
     /// Upsert Cedar policy text for a tenant.
     async fn upsert_tenant_policy(&self, tenant: &str, policy_text: &str) -> Result<(), String>;
 
+    /// Upsert tenant-level cross-entity constraint definitions.
+    async fn upsert_tenant_constraints(
+        &self,
+        tenant: &str,
+        cross_invariants_toml: &str,
+    ) -> Result<(), String>;
+
     /// Load all tenant Cedar policies.
     async fn load_tenant_policies(&self) -> Result<Vec<(String, String)>, String>;
 
@@ -239,6 +246,16 @@ impl PlatformStore for TursoEventStore {
 
     async fn upsert_tenant_policy(&self, tenant: &str, policy_text: &str) -> Result<(), String> {
         self.upsert_tenant_policy(tenant, policy_text)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn upsert_tenant_constraints(
+        &self,
+        tenant: &str,
+        cross_invariants_toml: &str,
+    ) -> Result<(), String> {
+        self.upsert_tenant_constraints(tenant, cross_invariants_toml)
             .await
             .map_err(|e| e.to_string())
     }
@@ -433,6 +450,8 @@ mod sim_platform_store {
         verification_cache: BTreeMap<(String, String), (String, bool)>,
         /// Cedar policies keyed by tenant.
         policies: BTreeMap<String, String>,
+        /// Cross-invariant definitions keyed by tenant.
+        constraints: BTreeMap<String, String>,
         /// Installed apps: (tenant, app_name).
         installed_apps: BTreeSet<(String, String)>,
         /// Pending decisions: id -> JSON data.
@@ -451,6 +470,7 @@ mod sim_platform_store {
                     specs: BTreeMap::new(),
                     verification_cache: BTreeMap::new(),
                     policies: BTreeMap::new(),
+                    constraints: BTreeMap::new(),
                     installed_apps: BTreeSet::new(),
                     pending_decisions: BTreeMap::new(),
                     wasm_modules: BTreeMap::new(),
@@ -625,6 +645,24 @@ mod sim_platform_store {
             inner
                 .policies
                 .insert(tenant.to_string(), policy_text.to_string());
+            Ok(())
+        }
+
+        async fn upsert_tenant_constraints(
+            &self,
+            tenant: &str,
+            cross_invariants_toml: &str,
+        ) -> Result<(), String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+
+            let prob = inner.faults.policy_write_failure_prob;
+            if inner.rng.chance(prob) {
+                return Err("SimPlatformStore: injected constraints write failure".into());
+            }
+
+            inner
+                .constraints
+                .insert(tenant.to_string(), cross_invariants_toml.to_string());
             Ok(())
         }
 
