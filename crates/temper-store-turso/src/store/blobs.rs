@@ -24,19 +24,55 @@ fn blob_retry_backoff(attempt: usize) -> Duration {
 
 impl TursoEventStore {
     /// Store a blob by key (content-addressed path like `temper-fs/sha256:abc...`).
+    ///
+    /// Writes with `expires_at = NULL` (permanent). Use `put_blob_with_ttl`
+    /// for opt-in expiration. See ADR-0047.
     pub async fn put_blob(&self, key: &str, data: &[u8]) -> Result<(), String> {
+        self.put_blob_with_ttl(key, data, None).await
+    }
+
+    /// Store a blob with an optional TTL.
+    ///
+    /// `ttl = None` writes `expires_at = NULL` (permanent; same as `put_blob`).
+    /// `ttl = Some(d)` writes `expires_at = datetime('now', '+N seconds')` so
+    /// `sweep_expired_blobs` can reclaim the row once the deadline passes.
+    ///
+    /// Content-addressed dedup via `INSERT OR IGNORE` preserves the first
+    /// writer's `expires_at`. A caller that later re-puts the same bytes with
+    /// a different TTL does not override the existing row's expiry; this is
+    /// correct semantics for "if any writer considered this transient, the
+    /// storage contract is transient." See ADR-0047.
+    pub async fn put_blob_with_ttl(
+        &self,
+        key: &str,
+        data: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), String> {
+        let ttl_seconds = ttl.map(|d| d.as_secs() as i64);
         for attempt in 1..=BLOB_STORE_ATTEMPTS {
             let conn = self
                 .configured_connection()
                 .await
                 .map_err(|e| e.to_string())?;
-            match conn
-                .execute(
-                    "INSERT OR IGNORE INTO blobs (blob_key, data, size_bytes) VALUES (?1, ?2, ?3)",
-                    params![key, data.to_vec(), data.len() as i64],
-                )
-                .await
-            {
+            let result = match ttl_seconds {
+                Some(secs) => {
+                    let expr = format!("datetime('now', '+{secs} seconds')");
+                    let sql = format!(
+                        "INSERT OR IGNORE INTO blobs (blob_key, data, size_bytes, expires_at) \
+                         VALUES (?1, ?2, ?3, {expr})"
+                    );
+                    conn.execute(&sql, params![key, data.to_vec(), data.len() as i64])
+                        .await
+                }
+                None => {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO blobs (blob_key, data, size_bytes) VALUES (?1, ?2, ?3)",
+                        params![key, data.to_vec(), data.len() as i64],
+                    )
+                    .await
+                }
+            };
+            match result {
                 Ok(_) => return Ok(()),
                 Err(error) => {
                     let message = error.to_string();
@@ -58,6 +94,32 @@ impl TursoEventStore {
         }
 
         Err("blob put failed: exhausted retry budget".to_string())
+    }
+
+    /// Delete up to `max_rows` expired blob rows. Returns the number of rows
+    /// actually deleted. Callers loop until the count is `< max_rows`.
+    ///
+    /// Predicate: `expires_at IS NOT NULL AND expires_at < datetime('now')`.
+    /// Rows with `expires_at = NULL` (the default) are never touched. See
+    /// ADR-0047.
+    pub async fn sweep_expired_blobs(&self, max_rows: u64) -> Result<u64, String> {
+        let conn = self
+            .configured_connection()
+            .await
+            .map_err(|e| e.to_string())?;
+        let sql = format!(
+            "DELETE FROM blobs \
+             WHERE blob_key IN ( \
+                 SELECT blob_key FROM blobs \
+                 WHERE expires_at IS NOT NULL AND expires_at < datetime('now') \
+                 LIMIT {max_rows} \
+             )"
+        );
+        let affected = conn
+            .execute(&sql, ())
+            .await
+            .map_err(|e| format!("blob sweep failed: {e}"))?;
+        Ok(affected)
     }
 
     /// Retrieve a blob by key. Returns `None` if not found.

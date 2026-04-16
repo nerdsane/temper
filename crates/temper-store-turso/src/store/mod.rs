@@ -243,8 +243,21 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
 
-        // Blob storage — content-addressed binary objects for TemperFS.
+        // Blob storage — content-addressed binary objects for TemperFS and
+        // field-overflow blob refs (ADR-0040).
         conn.execute(schema::CREATE_BLOBS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        // ADR-0047: idempotent migration that adds `expires_at` to pre-existing
+        // blobs tables. Duplicate-column errors are expected on newer deployments
+        // that already have the column from `CREATE_BLOBS_TABLE`; swallow them.
+        if let Err(error) = conn.execute(schema::ALTER_BLOBS_ADD_EXPIRES_AT, ()).await {
+            let message = error.to_string().to_ascii_lowercase();
+            if !message.contains("duplicate column") {
+                return Err(storage_error(error));
+            }
+        }
+        conn.execute(schema::CREATE_BLOBS_EXPIRES_AT_INDEX, ())
             .await
             .map_err(storage_error)?;
 
