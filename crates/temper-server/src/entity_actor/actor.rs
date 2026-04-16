@@ -362,7 +362,7 @@ impl EntityActor {
                             // like Title, Description, Priority survive replay.
                             let field_sync_mode = match store {
                                 ServerEventStore::Turso(_) | ServerEventStore::TenantRouted(_) => {
-                                    FieldSyncMode::BlobRefs
+                                    FieldSyncMode::blob_refs_default()
                                 }
                                 _ => FieldSyncMode::InlineTruncate,
                             };
@@ -558,7 +558,7 @@ impl Actor for EntityActor {
                 let state_before = state.clone();
                 let field_sync_mode = match self.event_store.as_ref().map(Arc::as_ref) {
                     Some(ServerEventStore::Turso(_) | ServerEventStore::TenantRouted(_)) => {
-                        FieldSyncMode::BlobRefs
+                        FieldSyncMode::blob_refs_default()
                     }
                     _ => FieldSyncMode::InlineTruncate,
                 };

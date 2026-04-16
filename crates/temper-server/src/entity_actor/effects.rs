@@ -118,8 +118,29 @@ pub struct ProcessResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldSyncMode {
+    /// Values exceeding the inline ceiling are replaced with a placeholder string.
+    /// Used by stores without blob-backed overflow (Postgres, memory).
     InlineTruncate,
-    BlobRefs,
+    /// Values exceeding `default_inline_max` are written to the Turso blob store
+    /// and replaced with a content-addressed reference object.
+    BlobRefs { default_inline_max: usize },
+}
+
+impl FieldSyncMode {
+    /// Construct `BlobRefs` with the crate-wide default ceiling.
+    pub fn blob_refs_default() -> Self {
+        FieldSyncMode::BlobRefs {
+            default_inline_max: DEFAULT_FIELD_INLINE_MAX,
+        }
+    }
+
+    /// Returns the inline-size ceiling in bytes for this mode.
+    fn inline_max(self) -> usize {
+        match self {
+            FieldSyncMode::InlineTruncate => DEFAULT_FIELD_INLINE_MAX,
+            FieldSyncMode::BlobRefs { default_inline_max } => default_inline_max,
+        }
+    }
 }
 
 /// Process an action through the transition table.
@@ -494,17 +515,22 @@ pub fn apply_new_state_fallback(state: &mut EntityState, from_status: &str, new_
     }
 }
 
-/// Maximum size (in bytes) for a single field value projected into entity state.
-/// Adapter outputs like `raw_output` and `stream` can be huge and bloat the
-/// WASM invocation context beyond CTX_BUF_LEN (256 KB). Capping individual
-/// values prevents this while keeping declared entity params intact.
-const MAX_FIELD_VALUE_BYTES: usize = 32_768; // 32 KB
+/// Default inline ceiling for a single field value projected into entity state.
+///
+/// Values above this size are either truncated (`InlineTruncate`) or moved to
+/// the content-addressed blob store (`BlobRefs`) per ADR-0040. The ceiling is
+/// sized to fit comfortably inside `CTX_BUF_LEN` (512 KB) with headroom for the
+/// rest of `entity_state` (counters, booleans, lists, other fields) while
+/// covering p99 of observed oversize-field traffic.
+///
+/// See ADR-0045.
+pub const DEFAULT_FIELD_INLINE_MAX: usize = 131_072; // 128 KB
 
 /// Sync all state variables into the `fields` JSON object.
 ///
 /// This projects status, counters, booleans, lists, and action params
 /// into the entity's fields for OData queries. Fields whose serialized
-/// value exceeds `MAX_FIELD_VALUE_BYTES` are either truncated or projected
+/// value exceeds `mode.inline_max()` are either truncated or projected
 /// through blob refs, depending on `mode`.
 pub fn sync_fields(
     state: &mut EntityState,
@@ -512,15 +538,20 @@ pub fn sync_fields(
     mode: FieldSyncMode,
 ) -> Vec<OverflowBlobWrite> {
     let mut overflow_blobs = Vec::new();
+    let entity_type = state.entity_type.clone();
+    let entity_id = state.entity_id.clone();
     if let Some(obj) = state.fields.as_object_mut() {
         obj.insert(
             "Status".to_string(),
             serde_json::Value::String(state.status.clone()),
         );
-        // Project action params into fields (skip oversized values)
+        // Project action params into fields
         if let Some(p) = params.as_object() {
             for (k, v) in p {
-                obj.insert(k.clone(), project_field_value(v, mode, &mut overflow_blobs));
+                obj.insert(
+                    k.clone(),
+                    project_field_value(k, v, mode, &entity_type, &entity_id, &mut overflow_blobs),
+                );
             }
         }
         // Sync counters into fields
@@ -539,7 +570,14 @@ pub fn sync_fields(
                 .collect();
             obj.insert(
                 k.clone(),
-                project_field_value(&serde_json::Value::Array(arr), mode, &mut overflow_blobs),
+                project_field_value(
+                    k,
+                    &serde_json::Value::Array(arr),
+                    mode,
+                    &entity_type,
+                    &entity_id,
+                    &mut overflow_blobs,
+                ),
             );
         }
     }
@@ -547,22 +585,37 @@ pub fn sync_fields(
 }
 
 fn project_field_value(
+    field_name: &str,
     value: &serde_json::Value,
     mode: FieldSyncMode,
+    entity_type: &str,
+    entity_id: &str,
     overflow_blobs: &mut Vec<OverflowBlobWrite>,
 ) -> serde_json::Value {
     let serialized = serde_json::to_vec(value).unwrap_or_else(|_| value.to_string().into_bytes());
     let serialized_len = serialized.len();
-    if serialized_len <= MAX_FIELD_VALUE_BYTES {
+    let inline_max = mode.inline_max();
+    if serialized_len <= inline_max {
         return value.clone();
     }
 
     match mode {
-        FieldSyncMode::InlineTruncate => serde_json::Value::String(format!(
-            "[truncated: {} bytes exceeds {} limit]",
-            serialized_len, MAX_FIELD_VALUE_BYTES
-        )),
-        FieldSyncMode::BlobRefs => {
+        FieldSyncMode::InlineTruncate => {
+            tracing::warn!(
+                entity_type,
+                entity_id,
+                field = field_name,
+                size_bytes = serialized_len,
+                inline_max,
+                "field truncated under InlineTruncate store — value replaced with placeholder; \
+                 consider migrating this tenant to a Turso-backed store to preserve large values"
+            );
+            serde_json::Value::String(format!(
+                "[truncated: {} bytes exceeds {} limit]",
+                serialized_len, inline_max
+            ))
+        }
+        FieldSyncMode::BlobRefs { .. } => {
             let digest = Sha256::digest(&serialized);
             let blob_key = format!("{FIELD_OVERFLOW_BLOB_PREFIX}{digest:x}.json");
             if !overflow_blobs.iter().any(|blob| blob.key == blob_key) {
@@ -977,5 +1030,157 @@ effect = [
             req.copied_field_values.get("model").unwrap(),
             "claude-3-opus"
         );
+    }
+
+    fn make_state(entity_type: &str, entity_id: &str) -> EntityState {
+        EntityState {
+            entity_type: entity_type.into(),
+            entity_id: entity_id.into(),
+            status: "Initial".into(),
+            item_count: 0,
+            counters: std::collections::BTreeMap::new(),
+            booleans: std::collections::BTreeMap::new(),
+            lists: std::collections::BTreeMap::new(),
+            fields: serde_json::json!({}),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            sequence_nr: 0,
+        }
+    }
+
+    #[test]
+    fn default_field_inline_max_is_128kb() {
+        assert_eq!(DEFAULT_FIELD_INLINE_MAX, 131_072);
+    }
+
+    #[test]
+    fn blob_refs_default_carries_default_ceiling() {
+        let mode = FieldSyncMode::blob_refs_default();
+        assert_eq!(
+            mode,
+            FieldSyncMode::BlobRefs {
+                default_inline_max: DEFAULT_FIELD_INLINE_MAX
+            }
+        );
+    }
+
+    #[test]
+    fn field_under_ceiling_stays_inline_blob_refs() {
+        let mut state = make_state("Session", "s-1");
+        let under = "x".repeat(64 * 1024); // 64 KB, under 128 KB ceiling
+        let params = serde_json::json!({ "user_message": under });
+
+        let overflow = sync_fields(&mut state, &params, FieldSyncMode::blob_refs_default());
+
+        assert!(overflow.is_empty(), "no blob overflow for field under ceiling");
+        assert_eq!(
+            state.fields.get("user_message").and_then(|v| v.as_str()).map(str::len),
+            Some(64 * 1024),
+            "inline value preserved"
+        );
+    }
+
+    #[test]
+    fn field_over_default_ceiling_overflows_to_blob() {
+        let mut state = make_state("Session", "s-1");
+        let over = "y".repeat(200 * 1024); // 200 KB, over 128 KB ceiling
+        let params = serde_json::json!({ "user_message": over });
+
+        let overflow = sync_fields(&mut state, &params, FieldSyncMode::blob_refs_default());
+
+        assert_eq!(overflow.len(), 1, "one overflow blob written");
+        let ref_obj = state
+            .fields
+            .get("user_message")
+            .and_then(|v| v.as_object())
+            .expect("blob ref object present");
+        assert!(ref_obj.contains_key(crate::blobs::FIELD_OVERFLOW_REF_KEY));
+        assert!(ref_obj.contains_key(crate::blobs::FIELD_OVERFLOW_SIZE_KEY));
+    }
+
+    #[test]
+    fn field_over_legacy_32k_stays_inline_under_new_ceiling() {
+        // Regression test for ADR-0045: fields in the 32KB-128KB band that
+        // previously overflowed now stay inline.
+        let mut state = make_state("Session", "s-1");
+        let mid = "z".repeat(80 * 1024); // 80 KB — above old 32KB cap, below new 128KB
+        let params = serde_json::json!({ "mid_field": mid });
+
+        let overflow = sync_fields(&mut state, &params, FieldSyncMode::blob_refs_default());
+
+        assert!(overflow.is_empty(), "80KB field stays inline under new ceiling");
+        assert_eq!(
+            state.fields.get("mid_field").and_then(|v| v.as_str()).map(str::len),
+            Some(80 * 1024)
+        );
+    }
+
+    #[test]
+    fn inline_truncate_mode_truncates_and_warns_above_ceiling() {
+        let mut state = make_state("Session", "s-1");
+        let huge = "q".repeat(200 * 1024);
+        let params = serde_json::json!({ "user_message": huge });
+
+        let overflow = sync_fields(&mut state, &params, FieldSyncMode::InlineTruncate);
+
+        assert!(overflow.is_empty(), "InlineTruncate never writes blobs");
+        let v = state
+            .fields
+            .get("user_message")
+            .and_then(|v| v.as_str())
+            .expect("truncation produces a string placeholder");
+        assert!(v.starts_with("[truncated:"), "placeholder shape preserved");
+    }
+
+    #[test]
+    fn custom_inline_max_overrides_default() {
+        // A caller constructing BlobRefs with a non-default ceiling must see
+        // that ceiling applied, not the crate default.
+        let mut state = make_state("Session", "s-1");
+        let mid = "m".repeat(50 * 1024); // 50 KB
+        let params = serde_json::json!({ "mid_field": mid });
+
+        let tight = FieldSyncMode::BlobRefs {
+            default_inline_max: 32 * 1024, // 32 KB — tighter than default
+        };
+        let overflow = sync_fields(&mut state, &params, tight);
+
+        assert_eq!(overflow.len(), 1, "50KB overflows under 32KB ceiling");
+    }
+
+    #[test]
+    fn oversize_list_field_also_overflows_to_blob() {
+        // Regression guard: sync_fields threads project_field_value through the
+        // lists loop as well as the params loop. Both branches must respect
+        // the ceiling.
+        let mut state = make_state("Session", "s-1");
+        let big = "L".repeat(10 * 1024);
+        state.lists.insert(
+            "tool_outputs".to_string(),
+            (0..16).map(|_| big.clone()).collect(), // 160 KB serialized
+        );
+
+        let overflow = sync_fields(&mut state, &serde_json::json!({}), FieldSyncMode::blob_refs_default());
+
+        assert_eq!(overflow.len(), 1, "oversize list overflows to blob");
+        let ref_obj = state
+            .fields
+            .get("tool_outputs")
+            .and_then(|v| v.as_object())
+            .expect("blob ref object present for list field");
+        assert!(ref_obj.contains_key(crate::blobs::FIELD_OVERFLOW_REF_KEY));
+    }
+
+    #[test]
+    fn duplicate_oversize_value_produces_single_blob_write() {
+        // Content-addressed dedupe: two params with identical oversize content
+        // share one blob write.
+        let mut state = make_state("Session", "s-1");
+        let big = "d".repeat(200 * 1024);
+        let params = serde_json::json!({ "a": &big, "b": &big });
+
+        let overflow = sync_fields(&mut state, &params, FieldSyncMode::blob_refs_default());
+
+        assert_eq!(overflow.len(), 1, "dedupe by content hash");
     }
 }
