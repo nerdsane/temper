@@ -71,11 +71,26 @@ impl TransitionTable {
                 .push(i);
         }
 
+        // ADR-0045 / ADR-0047: collect per-state-variable overflow metadata.
+        let mut state_var_metadata = std::collections::BTreeMap::new();
+        for sv in &automaton.state {
+            if sv.overflow_inline_max_bytes.is_some() || sv.overflow_ttl_seconds.is_some() {
+                state_var_metadata.insert(
+                    sv.name.clone(),
+                    super::types::StateVarMetadata {
+                        overflow_inline_max_bytes: sv.overflow_inline_max_bytes,
+                        overflow_ttl_seconds: sv.overflow_ttl_seconds,
+                    },
+                );
+            }
+        }
+
         TransitionTable {
             entity_name: automaton.automaton.name.clone(),
             states: automaton.automaton.states.clone(),
             initial_state: automaton.automaton.initial.clone(),
             rules,
+            state_var_metadata,
             rule_index,
         }
     }

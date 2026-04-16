@@ -121,6 +121,12 @@ pub(crate) struct HostState {
     /// None for wasm32-unknown-unknown modules. When present, WASI
     /// syscalls (clock_time_get, random_get, etc.) are available.
     pub(crate) wasi_ctx: Option<WasiP1Ctx>,
+    /// Pre-fetched bytes for oversize blob-ref fields referenced by
+    /// `context_json`. Populated by the dispatcher before the invocation
+    /// enters `spawn_blocking`, so `host_read_field_stream` can resolve
+    /// blob refs synchronously. Keyed by blob key (e.g.
+    /// `field-overflow/sha256/<hex>.json`). See ADR-0046.
+    pub(crate) blob_cache: BTreeMap<String, Vec<u8>>,
 }
 
 /// WASM engine: compile, cache, invoke modules.
@@ -268,6 +274,26 @@ impl WasmEngine {
         limits: &WasmResourceLimits,
         streams: Arc<RwLock<StreamRegistry>>,
     ) -> Result<WasmInvocationResult, WasmError> {
+        self.invoke_with_blobs(module_hash, context, host, limits, streams, BTreeMap::new())
+            .await
+    }
+
+    /// Invoke a cached WASM module with pre-fetched blob-ref bytes available to
+    /// the guest via `host_read_field_stream`. See ADR-0046.
+    ///
+    /// `blob_cache` maps blob keys (e.g. `field-overflow/sha256/<hex>.json`) to
+    /// their decoded bytes. Keys correspond to oversize blob refs present in
+    /// `context.entity_state` that exceed the caller's declared inline ceiling.
+    /// Keys the guest does not read are discarded with the invocation.
+    pub async fn invoke_with_blobs(
+        &self,
+        module_hash: &str,
+        context: &WasmInvocationContext,
+        host: Arc<dyn WasmHost>,
+        limits: &WasmResourceLimits,
+        streams: Arc<RwLock<StreamRegistry>>,
+        blob_cache: BTreeMap<String, Vec<u8>>,
+    ) -> Result<WasmInvocationResult, WasmError> {
         let cached = {
             let cache = self.cache.read().expect("cache lock poisoned");
             cache
@@ -283,7 +309,15 @@ impl WasmEngine {
 
         tokio::task::spawn_blocking(move || {
             let _entered = span.enter();
-            Self::invoke_blocking(engine, cached, context_owned, host, limits_owned, streams)
+            Self::invoke_blocking(
+                engine,
+                cached,
+                context_owned,
+                host,
+                limits_owned,
+                streams,
+                blob_cache,
+            )
         })
         .await
         .map_err(|e| WasmError::Invocation(format!("blocking wasm task failed: {e}")))?
@@ -296,6 +330,7 @@ impl WasmEngine {
         host: Arc<dyn WasmHost>,
         limits: WasmResourceLimits,
         streams: Arc<RwLock<StreamRegistry>>,
+        blob_cache: BTreeMap<String, Vec<u8>>,
     ) -> Result<WasmInvocationResult, WasmError> {
         let start = std::time::Instant::now(); // determinism-ok: wall-clock timing for WASM sandbox
         let context_json = serde_json::to_string(&context)
@@ -331,6 +366,7 @@ impl WasmEngine {
             },
             streams,
             wasi_ctx,
+            blob_cache,
         };
         let mut store = Store::new(&engine, host_state);
         store

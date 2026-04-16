@@ -362,12 +362,46 @@ impl EntityActor {
                             // like Title, Description, Priority survive replay.
                             let field_sync_mode = match store {
                                 ServerEventStore::Turso(_) | ServerEventStore::TenantRouted(_) => {
-                                    FieldSyncMode::BlobRefs
+                                    FieldSyncMode::blob_refs_default()
                                 }
                                 _ => FieldSyncMode::InlineTruncate,
                             };
-                            let _ =
-                                super::effects::sync_fields(state, &event.params, field_sync_mode);
+                            let overflow_blobs = super::effects::sync_fields_with_metadata(
+                                state,
+                                &event.params,
+                                field_sync_mode,
+                                Some(&table.state_var_metadata),
+                            );
+                            // Persist replayed overflow blobs so blob-ref envelopes
+                            // resolve on subsequent OData reads. Content-addressed
+                            // dedup makes this idempotent — if the original live
+                            // action already persisted the blob, INSERT OR IGNORE
+                            // is a no-op. If the prior server died between emitting
+                            // the event and persisting the blob, this is the
+                            // recovery path. See ADR-0040, ADR-0045.
+                            if !overflow_blobs.is_empty() {
+                                if let Some(blob_store) = store.turso_for_tenant(tenant).await {
+                                    if let Err(e) = crate::blobs::put_overflow_blobs(
+                                        &blob_store,
+                                        &overflow_blobs,
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            entity = %state.entity_id,
+                                            error = %e,
+                                            overflow_count = overflow_blobs.len(),
+                                            "failed to persist replayed overflow blobs — blob-ref envelopes may dangle"
+                                        );
+                                    }
+                                } else {
+                                    tracing::warn!(
+                                        entity = %state.entity_id,
+                                        overflow_count = overflow_blobs.len(),
+                                        "replay produced overflow blobs but no Turso store available for tenant"
+                                    );
+                                }
+                            }
 
                             state.push_event_bounded(event);
                         }
@@ -561,7 +595,7 @@ impl Actor for EntityActor {
                 let mut state_before = state.clone();
                 let field_sync_mode = match self.event_store.as_ref().map(Arc::as_ref) {
                     Some(ServerEventStore::Turso(_) | ServerEventStore::TenantRouted(_)) => {
-                        FieldSyncMode::BlobRefs
+                        FieldSyncMode::blob_refs_default()
                     }
                     _ => FieldSyncMode::InlineTruncate,
                 };

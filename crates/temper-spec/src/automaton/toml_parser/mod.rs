@@ -126,6 +126,17 @@ impl ParseState {
             "name" => state_var.name = value.to_string(),
             "type" => state_var.var_type = value.to_string(),
             "initial" => state_var.initial = value.to_string(),
+            // ADR-0045 / ADR-0047: per-field overflow knobs.
+            "overflow_inline_max_bytes" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    state_var.overflow_inline_max_bytes = Some(v);
+                }
+            }
+            "overflow_ttl_seconds" => {
+                if let Ok(v) = value.parse::<u64>() {
+                    state_var.overflow_ttl_seconds = Some(v);
+                }
+            }
             _ => {}
         }
     }
@@ -243,6 +254,8 @@ impl ParseState {
             name: String::new(),
             var_type: "string".into(),
             initial: String::new(),
+            overflow_inline_max_bytes: None,
+            overflow_ttl_seconds: None,
         });
         self.current_section = Section::State;
         true

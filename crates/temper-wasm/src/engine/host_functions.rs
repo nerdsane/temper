@@ -4,10 +4,71 @@
 //! (logging, secrets, HTTP, streaming, caching, hashing). Functions are
 //! linked once per invocation via a fresh `Linker<HostState>`.
 
+use std::collections::BTreeMap;
+
 use sha2::{Digest, Sha256};
 use wasmtime::{Caller, Linker};
 
 use super::{HostState, WasmError};
+
+/// Outcome of resolving an entity-state field against a `HostState`.
+///
+/// Pulled out of the `host_read_field` closure so the pure logic is unit-testable
+/// without a wasmtime instance.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FieldResolution {
+    /// Bytes to hand back to the WASM guest.
+    Bytes(Vec<u8>),
+    /// Field not present in `entity_state.fields`.
+    NotFound,
+    /// Field is a blob ref but the pre-fetch `blob_cache` is missing the key.
+    BlobRefMissing { key: String },
+    /// JSON parse or unexpected shape; caller should treat as host error.
+    HostError,
+}
+
+/// Resolve an entity-state field against the invocation context JSON and the
+/// per-invocation blob cache. Plain strings come back as UTF-8 bytes (unquoted);
+/// blob-ref envelopes come back as the decoded blob payload. See ADR-0046.
+pub(crate) fn resolve_field_bytes(
+    context_json: &str,
+    blob_cache: &BTreeMap<String, Vec<u8>>,
+    field_name: &str,
+) -> FieldResolution {
+    let Ok(ctx_value) = serde_json::from_str::<serde_json::Value>(context_json) else {
+        return FieldResolution::HostError;
+    };
+    let field_value = ctx_value
+        .get("entity_state")
+        .and_then(|es| es.get("fields"))
+        .and_then(|f| f.get(field_name))
+        .cloned();
+    let Some(field_value) = field_value else {
+        return FieldResolution::NotFound;
+    };
+
+    if let Some(blob_key) = field_value
+        .get("__temper_blob_ref")
+        .and_then(|k| k.as_str())
+    {
+        return match blob_cache.get(blob_key) {
+            Some(bytes) => FieldResolution::Bytes(bytes.clone()),
+            None => FieldResolution::BlobRefMissing {
+                key: blob_key.to_string(),
+            },
+        };
+    }
+
+    let bytes = match &field_value {
+        serde_json::Value::String(s) => s.as_bytes().to_vec(),
+        serde_json::Value::Null => Vec::new(),
+        _ => match serde_json::to_vec(&field_value) {
+            Ok(b) => b,
+            Err(_) => return FieldResolution::HostError,
+        },
+    };
+    FieldResolution::Bytes(bytes)
+}
 
 /// Link all host functions into the WASM linker.
 pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmError> {
@@ -523,6 +584,78 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
         )
         .map_err(|e| WasmError::Compilation(format!("failed to link host_cache_to_stream: {e}")))?;
 
+    // host_read_field(field_name_ptr, field_name_len, buf_ptr, buf_len) -> i32
+    //
+    // Resolves an entity-state field into a WASM memory buffer.
+    // - Plain string values are written as their raw UTF-8 bytes (unquoted)
+    //   so guests see identical bytes regardless of inline vs blob-ref storage.
+    // - Non-string JSON values are written as their UTF-8 JSON serialization.
+    // - Blob-ref values ({"__temper_blob_ref": "..."}) are resolved from the
+    //   per-invocation blob_cache pre-populated by the dispatcher.
+    //
+    // Return contract (matches `host_get_context`):
+    //   >= 0 with value <= buf_len — bytes written; read `value` bytes from buf_ptr.
+    //   >  buf_len                 — needed buffer size; caller should resize + retry.
+    //     -1                       — field not in entity_state.fields.
+    //     -2                       — field is a blob ref; pre-fetch did not populate blob_cache.
+    //     -3                       — generic host error (memory access, JSON parse).
+    //
+    // See ADR-0046.
+    linker
+        .func_wrap(
+            "env",
+            "host_read_field",
+            |mut caller: Caller<'_, HostState>,
+             field_name_ptr: i32,
+             field_name_len: i32,
+             buf_ptr: i32,
+             buf_len: i32|
+             -> i32 {
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                let Some(memory) = memory else {
+                    return -3;
+                };
+
+                let mut name_buf = vec![0u8; field_name_len as usize];
+                if memory
+                    .read(&caller, field_name_ptr as usize, &mut name_buf)
+                    .is_err()
+                {
+                    return -3;
+                }
+                let field_name = String::from_utf8_lossy(&name_buf).to_string();
+
+                let bytes = match resolve_field_bytes(
+                    &caller.data().context_json,
+                    &caller.data().blob_cache,
+                    &field_name,
+                ) {
+                    FieldResolution::Bytes(b) => b,
+                    FieldResolution::NotFound => return -1,
+                    FieldResolution::BlobRefMissing { key } => {
+                        tracing::warn!(
+                            field = %field_name,
+                            blob_key = %key,
+                            "host_read_field: blob ref not in prefetch cache"
+                        );
+                        return -2;
+                    }
+                    FieldResolution::HostError => return -3,
+                };
+
+                let needed = bytes.len() as i32;
+                if needed > buf_len {
+                    // Buffer too small — signal needed size; caller retries with larger buf.
+                    return needed;
+                }
+                if memory.write(&mut caller, buf_ptr as usize, &bytes).is_err() {
+                    return -3;
+                }
+                needed
+            },
+        )
+        .map_err(|e| WasmError::Compilation(format!("failed to link host_read_field: {e}")))?;
+
     // host_cache_from_stream(key_ptr, key_len, stream_id_ptr, stream_id_len) -> i32
     // Caches bytes from a stream. Returns 0 on success, -1 on error.
     linker
@@ -761,4 +894,107 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
         .map_err(|e| WasmError::Compilation(format!("failed to link host_evaluate_spec: {e}")))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx_json_with_fields(fields: serde_json::Value) -> String {
+        serde_json::json!({
+            "entity_state": { "fields": fields }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn resolve_missing_field_returns_not_found() {
+        let ctx = ctx_json_with_fields(serde_json::json!({ "other": "value" }));
+        let cache = BTreeMap::new();
+        assert_eq!(
+            resolve_field_bytes(&ctx, &cache, "missing"),
+            FieldResolution::NotFound
+        );
+    }
+
+    #[test]
+    fn resolve_plain_string_returns_utf8_bytes() {
+        let ctx = ctx_json_with_fields(serde_json::json!({ "message": "hello world" }));
+        let cache = BTreeMap::new();
+        assert_eq!(
+            resolve_field_bytes(&ctx, &cache, "message"),
+            FieldResolution::Bytes(b"hello world".to_vec())
+        );
+    }
+
+    #[test]
+    fn resolve_null_returns_empty_bytes() {
+        let ctx = ctx_json_with_fields(serde_json::json!({ "thing": null }));
+        let cache = BTreeMap::new();
+        assert_eq!(
+            resolve_field_bytes(&ctx, &cache, "thing"),
+            FieldResolution::Bytes(Vec::new())
+        );
+    }
+
+    #[test]
+    fn resolve_object_returns_json_bytes() {
+        let ctx = ctx_json_with_fields(serde_json::json!({ "obj": { "k": "v" } }));
+        let cache = BTreeMap::new();
+        let resolved = resolve_field_bytes(&ctx, &cache, "obj");
+        match resolved {
+            FieldResolution::Bytes(bytes) => {
+                let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+                assert_eq!(parsed, serde_json::json!({ "k": "v" }));
+            }
+            other => panic!("expected Bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_blob_ref_uses_blob_cache() {
+        let blob_key = "field-overflow/sha256/abc.json";
+        let ctx = ctx_json_with_fields(serde_json::json!({
+            "big_field": {
+                "__temper_blob_ref": blob_key,
+                "__temper_blob_size": 1024,
+                "__temper_blob_encoding": "json",
+            }
+        }));
+        let mut cache = BTreeMap::new();
+        let payload = br#""the big value""#.to_vec();
+        cache.insert(blob_key.to_string(), payload.clone());
+
+        assert_eq!(
+            resolve_field_bytes(&ctx, &cache, "big_field"),
+            FieldResolution::Bytes(payload)
+        );
+    }
+
+    #[test]
+    fn resolve_blob_ref_missing_cache_entry() {
+        let ctx = ctx_json_with_fields(serde_json::json!({
+            "big_field": {
+                "__temper_blob_ref": "field-overflow/sha256/absent.json",
+                "__temper_blob_size": 2048,
+            }
+        }));
+        let cache = BTreeMap::new();
+
+        match resolve_field_bytes(&ctx, &cache, "big_field") {
+            FieldResolution::BlobRefMissing { key } => {
+                assert!(key.ends_with("absent.json"));
+            }
+            other => panic!("expected BlobRefMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_malformed_context_returns_host_error() {
+        let cache = BTreeMap::new();
+        assert_eq!(
+            resolve_field_bytes("not json", &cache, "anything"),
+            FieldResolution::HostError
+        );
+    }
 }
