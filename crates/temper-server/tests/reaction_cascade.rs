@@ -65,6 +65,7 @@ fn ecommerce_registry() -> ReactionRegistry {
                 entity_type: "Payment".to_string(),
                 action: "AuthorizePayment".to_string(),
                 params: serde_json::json!({}),
+                params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::SameId,
         }],
@@ -196,6 +197,7 @@ fn field_based_target_resolution() {
                 entity_type: "Payment".to_string(),
                 action: "AuthorizePayment".to_string(),
                 params: serde_json::json!({}),
+                params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::Field {
                 field: "payment_id".to_string(),
@@ -287,6 +289,7 @@ fn multi_step_cascade_with_chained_reactions() {
                     entity_type: "Payment".to_string(),
                     action: "AuthorizePayment".to_string(),
                     params: serde_json::json!({}),
+                    params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
             },
@@ -301,6 +304,7 @@ fn multi_step_cascade_with_chained_reactions() {
                     entity_type: "Payment".to_string(),
                     action: "CapturePayment".to_string(),
                     params: serde_json::json!({}),
+                    params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
             },
@@ -329,6 +333,91 @@ fn multi_step_cascade_with_chained_reactions() {
     assert_eq!(results[0].depth, 0);
     assert_eq!(results[1].rule_name, "authorize_triggers_capture");
     assert_eq!(results[1].depth, 1);
+}
+
+// =========================================================================
+// Phase 1: params_from — cascade fires with dynamic params declared,
+// missing source fields don't break the cascade (warn + skip policy).
+// =========================================================================
+
+#[test]
+fn cascade_with_params_from_fires_even_when_source_fields_missing() {
+    let (_guard, clock, _id_gen) = install_deterministic_context(42);
+
+    let mut reg = ReactionRegistry::new();
+    let mut params_from = std::collections::BTreeMap::new();
+    // Reference a field that ConfirmOrder doesn't produce — the dispatcher
+    // should log a warning and skip the key, not fail the reaction.
+    params_from.insert("dynamic_key".to_string(), "missing_field".to_string());
+    reg.register_tenant_rules(
+        "shop-pf",
+        vec![ReactionRule {
+            name: "order_confirmed_with_params_from".to_string(),
+            when: ReactionTrigger {
+                entity_type: "Order".to_string(),
+                action: Some("ConfirmOrder".to_string()),
+                to_state: Some("Confirmed".to_string()),
+            },
+            then: ReactionTarget {
+                entity_type: "Payment".to_string(),
+                action: "AuthorizePayment".to_string(),
+                params: serde_json::json!({"static_key": "static_value"}),
+                params_from,
+            },
+            resolve_target: TargetResolver::SameId,
+        }],
+    );
+
+    let mut sys = SimReactionSystem::new(sim_config(), reg, "shop-pf");
+    sys.register_entity("order-pf1", "Order", "pf1", order_table());
+    sys.register_entity("payment-pf1", "Payment", "pf1", payment_table());
+
+    clock.advance();
+    sys.step("order-pf1", "AddItem", "{}").unwrap();
+    clock.advance();
+    sys.step("order-pf1", "SubmitOrder", "{}").unwrap();
+    clock.advance();
+    sys.step("order-pf1", "ConfirmOrder", "{}").unwrap();
+
+    sys.assert_status("order-pf1", "Confirmed");
+    sys.assert_status("payment-pf1", "Authorized");
+
+    let results = sys.last_results();
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0].success,
+        "reaction should fire with partial params"
+    );
+    assert_eq!(results[0].rule_name, "order_confirmed_with_params_from");
+}
+
+#[test]
+fn parse_reactions_toml_with_params_from_loads_through_registry() {
+    let toml = r#"
+[[reaction]]
+name = "order_confirmed_pipes_payment"
+[reaction.when]
+entity_type = "Order"
+action = "ConfirmOrder"
+[reaction.then]
+entity_type = "Payment"
+action = "AuthorizePayment"
+params = { source = "reaction" }
+params_from = { origin_order = "order_id" }
+[reaction.resolve_target]
+type = "same_id"
+"#;
+    let rules = parse_reactions(toml).expect("parse");
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].then.params_from.len(), 1);
+    assert_eq!(
+        rules[0]
+            .then
+            .params_from
+            .get("origin_order")
+            .map(String::as_str),
+        Some("order_id")
+    );
 }
 
 // =========================================================================

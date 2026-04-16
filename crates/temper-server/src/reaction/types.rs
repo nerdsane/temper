@@ -2,6 +2,8 @@
 //!
 //! All types use `BTreeMap` for deterministic iteration order (DST compliance).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Maximum reaction rules per tenant (TigerStyle budget).
@@ -41,9 +43,20 @@ pub struct ReactionTarget {
     pub entity_type: String,
     /// The action to dispatch (e.g., "AuthorizePayment").
     pub action: String,
-    /// Additional parameters to pass to the target action.
+    /// Static parameters to pass to the target action.
     #[serde(default)]
     pub params: serde_json::Value,
+    /// Dynamic params: target-param-name → source-entity-field-name.
+    ///
+    /// At dispatch time, each key is read from the source entity's fields and
+    /// merged into the effective params object. Collides with `params` keys
+    /// are rejected at registry parse time. A missing source field logs a
+    /// warning and skips the key — the reaction still fires with a partial
+    /// param map (consistent with `resolver::Field`'s `None`-on-missing posture).
+    ///
+    /// `BTreeMap` for deterministic iteration order (DST compliance).
+    #[serde(default)]
+    pub params_from: BTreeMap<String, String>,
 }
 
 /// How to resolve the target entity ID for a reaction.
@@ -101,6 +114,7 @@ mod tests {
                 entity_type: "Payment".to_string(),
                 action: "AuthorizePayment".to_string(),
                 params: serde_json::json!({}),
+                params_from: BTreeMap::new(),
             },
             resolve_target: TargetResolver::Field {
                 field: "payment_id".to_string(),
@@ -112,6 +126,34 @@ mod tests {
         assert_eq!(deserialized.name, rule.name);
         assert_eq!(deserialized.when.entity_type, "Order");
         assert_eq!(deserialized.then.action, "AuthorizePayment");
+    }
+
+    #[test]
+    fn reaction_target_serialises_params_from() {
+        let mut pf = BTreeMap::new();
+        pf.insert("job_type".to_string(), "next_stage".to_string());
+        let target = ReactionTarget {
+            entity_type: "CurationJob".to_string(),
+            action: "Submit".to_string(),
+            params: serde_json::json!({}),
+            params_from: pf,
+        };
+        let json = serde_json::to_string(&target).unwrap();
+        assert!(json.contains("\"params_from\""));
+        assert!(json.contains("\"job_type\":\"next_stage\""));
+
+        let back: ReactionTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.params_from.get("job_type").map(String::as_str),
+            Some("next_stage")
+        );
+    }
+
+    #[test]
+    fn reaction_target_defaults_params_from_empty() {
+        let json = r#"{"entity_type":"B","action":"Do"}"#;
+        let target: ReactionTarget = serde_json::from_str(json).unwrap();
+        assert!(target.params_from.is_empty());
     }
 
     #[test]

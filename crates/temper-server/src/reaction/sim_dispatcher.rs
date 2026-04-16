@@ -178,7 +178,9 @@ impl SimReactionSystem {
             };
 
             // Execute the target action
-            let params_str = match serde_json::to_string(&rule.then.params) {
+            let effective_params =
+                super::params::build_effective_params(&rule.then, fields, &rule.name);
+            let params_str = match serde_json::to_string(&effective_params) {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(

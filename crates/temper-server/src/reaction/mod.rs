@@ -9,6 +9,7 @@
 //! fulfilment cascades.
 
 pub mod dispatcher;
+pub(crate) mod params;
 pub mod registry;
 pub(crate) mod resolver;
 pub mod sim_dispatcher;

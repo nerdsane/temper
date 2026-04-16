@@ -102,6 +102,9 @@ impl ReactionDispatcher {
                 "Dispatching reaction"
             );
 
+            let effective_params =
+                super::params::build_effective_params(&rule.then, fields, &rule.name);
+
             // Fire the target action via the core dispatch (no reaction cascade
             // to avoid infinite async recursion — we handle cascading ourselves).
             let dispatch_result = state
@@ -110,7 +113,7 @@ impl ReactionDispatcher {
                     &rule.then.entity_type,
                     &target_entity_id,
                     &rule.then.action,
-                    rule.then.params.clone(),
+                    effective_params,
                     &AgentContext::system(),
                     false,
                 )

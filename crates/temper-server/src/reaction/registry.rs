@@ -136,6 +136,8 @@ struct TargetToml {
     action: String,
     #[serde(default)]
     params: Option<serde_json::Value>,
+    #[serde(default)]
+    params_from: Option<BTreeMap<String, String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -207,6 +209,26 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
             }
         };
 
+        let static_params = r.then.params.unwrap_or(serde_json::json!({}));
+        let params_from = r.then.params_from.unwrap_or_default();
+
+        // Collision check: static `params` and dynamic `params_from` must not
+        // name the same target key. We only enforce this when `params` is an
+        // object (the only shape that could collide). Non-object `params`
+        // (null, scalar, array) are tolerated — `build_effective_params` will
+        // skip the dynamic merge and log a warning at dispatch time.
+        if let serde_json::Value::Object(ref map) = static_params {
+            for key in params_from.keys() {
+                if map.contains_key(key) {
+                    return Err(format!(
+                        "Reaction '{}': key '{}' appears in both `params` and `params_from`; \
+                         pick one source",
+                        r.name, key
+                    ));
+                }
+            }
+        }
+
         rules.push(ReactionRule {
             name: r.name,
             when: ReactionTrigger {
@@ -217,7 +239,8 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
             then: ReactionTarget {
                 entity_type: r.then.entity_type,
                 action: r.then.action,
-                params: r.then.params.unwrap_or(serde_json::json!({})),
+                params: static_params,
+                params_from,
             },
             resolve_target,
         });
@@ -249,6 +272,7 @@ mod tests {
                 entity_type: target_type.to_string(),
                 action: target_action.to_string(),
                 params: serde_json::json!({}),
+                params_from: BTreeMap::new(),
             },
             resolve_target: TargetResolver::SameId,
         }
@@ -519,6 +543,77 @@ id_field = "b_id"
         assert!(
             matches!(rules[3].resolve_target, TargetResolver::CreateIfMissing { ref id_field } if id_field == "b_id")
         );
+    }
+
+    #[test]
+    fn parse_reactions_accepts_params_from() {
+        let toml = r#"
+[[reaction]]
+name = "pipeline_chain"
+[reaction.when]
+entity_type = "CurationJob"
+action = "Complete"
+[reaction.then]
+entity_type = "CurationJob"
+action = "Submit"
+params = { requested_by = "system" }
+params_from = { job_type = "next_stage", input = "output" }
+[reaction.resolve_target]
+type = "create_if_missing"
+id_field = "next_job_id"
+"#;
+        let rules = parse_reactions(toml).unwrap();
+        assert_eq!(rules.len(), 1);
+        let target = &rules[0].then;
+        assert_eq!(
+            target.params_from.get("job_type").map(String::as_str),
+            Some("next_stage")
+        );
+        assert_eq!(
+            target.params_from.get("input").map(String::as_str),
+            Some("output")
+        );
+        assert_eq!(target.params, serde_json::json!({"requested_by": "system"}));
+    }
+
+    #[test]
+    fn parse_reactions_rejects_params_collision() {
+        let toml = r#"
+[[reaction]]
+name = "collide"
+[reaction.when]
+entity_type = "A"
+[reaction.then]
+entity_type = "B"
+action = "Do"
+params = { shared = "static" }
+params_from = { shared = "src" }
+[reaction.resolve_target]
+type = "same_id"
+"#;
+        let err = parse_reactions(toml).unwrap_err();
+        assert!(
+            err.contains("key 'shared' appears in both `params` and `params_from`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_reactions_missing_params_from_defaults_empty() {
+        let toml = r#"
+[[reaction]]
+name = "static_only"
+[reaction.when]
+entity_type = "A"
+[reaction.then]
+entity_type = "B"
+action = "Do"
+params = { a = 1 }
+[reaction.resolve_target]
+type = "same_id"
+"#;
+        let rules = parse_reactions(toml).unwrap();
+        assert!(rules[0].then.params_from.is_empty());
     }
 
     #[test]

@@ -120,6 +120,7 @@ pub(super) fn synthesize_agent_trigger_reactions(
                 entity_type: "Agent".to_string(),
                 action: "Assign".to_string(),
                 params,
+                params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::CreateIfMissing {
                 id_field: "id".to_string(),
@@ -137,6 +138,7 @@ pub(super) fn synthesize_agent_trigger_reactions(
                 entity_type: "Agent".to_string(),
                 action: "Start".to_string(),
                 params: serde_json::json!({}),
+                params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::SameId,
         },
