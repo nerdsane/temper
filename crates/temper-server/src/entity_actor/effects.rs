@@ -1072,9 +1072,16 @@ effect = [
 
         let overflow = sync_fields(&mut state, &params, FieldSyncMode::blob_refs_default());
 
-        assert!(overflow.is_empty(), "no blob overflow for field under ceiling");
+        assert!(
+            overflow.is_empty(),
+            "no blob overflow for field under ceiling"
+        );
         assert_eq!(
-            state.fields.get("user_message").and_then(|v| v.as_str()).map(str::len),
+            state
+                .fields
+                .get("user_message")
+                .and_then(|v| v.as_str())
+                .map(str::len),
             Some(64 * 1024),
             "inline value preserved"
         );
@@ -1108,9 +1115,16 @@ effect = [
 
         let overflow = sync_fields(&mut state, &params, FieldSyncMode::blob_refs_default());
 
-        assert!(overflow.is_empty(), "80KB field stays inline under new ceiling");
+        assert!(
+            overflow.is_empty(),
+            "80KB field stays inline under new ceiling"
+        );
         assert_eq!(
-            state.fields.get("mid_field").and_then(|v| v.as_str()).map(str::len),
+            state
+                .fields
+                .get("mid_field")
+                .and_then(|v| v.as_str())
+                .map(str::len),
             Some(80 * 1024)
         );
     }
@@ -1160,7 +1174,11 @@ effect = [
             (0..16).map(|_| big.clone()).collect(), // 160 KB serialized
         );
 
-        let overflow = sync_fields(&mut state, &serde_json::json!({}), FieldSyncMode::blob_refs_default());
+        let overflow = sync_fields(
+            &mut state,
+            &serde_json::json!({}),
+            FieldSyncMode::blob_refs_default(),
+        );
 
         assert_eq!(overflow.len(), 1, "oversize list overflows to blob");
         let ref_obj = state
