@@ -4,6 +4,8 @@
 //! simulation [`SimReactionSystem`] to determine which entity instance
 //! a reaction rule targets.
 
+use temper_runtime::scheduler::sim_uuid;
+
 use super::types::TargetResolver;
 
 /// Resolve the target entity ID for a reaction rule.
@@ -30,6 +32,11 @@ pub(crate) fn resolve_target_id(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .or_else(|| Some(format!("{source_entity_id}-derived"))),
+        // Fresh UUID on every dispatch. `sim_uuid()` is DST-safe: in
+        // simulation it comes from the seeded `DeterministicIdGen`, in
+        // production it's `Uuid::now_v7()`. Reaction cascades under
+        // `SimReactionSystem` stay reproducible across seeded runs.
+        TargetResolver::Create => Some(sim_uuid().to_string()),
     }
 }
 
@@ -97,6 +104,55 @@ mod tests {
         assert_eq!(
             resolve_target_id(&resolver, "src-1", &json!({})),
             Some("src-1-derived".to_string())
+        );
+    }
+
+    #[test]
+    fn create_resolver_returns_fresh_id_each_call() {
+        use temper_runtime::scheduler::install_deterministic_context;
+        // Same seed — under the sim context, ids are deterministic but each
+        // call advances the seeded generator, so two consecutive calls yield
+        // distinct ids.
+        let (_guard, _clock, _id_gen) = install_deterministic_context(1234);
+
+        let resolver = TargetResolver::Create;
+        let id1 = resolve_target_id(&resolver, "src-1", &json!({})).unwrap();
+        let id2 = resolve_target_id(&resolver, "src-1", &json!({})).unwrap();
+        assert_ne!(
+            id1, id2,
+            "Create resolver must produce a fresh id each call"
+        );
+        assert!(!id1.is_empty());
+        assert!(!id2.is_empty());
+    }
+
+    #[test]
+    fn create_resolver_is_deterministic_across_seeded_runs() {
+        use temper_runtime::scheduler::install_deterministic_context;
+
+        let ids_run1 = {
+            let (_guard, _clock, _id_gen) = install_deterministic_context(42);
+            let resolver = TargetResolver::Create;
+            vec![
+                resolve_target_id(&resolver, "s", &json!({})).unwrap(),
+                resolve_target_id(&resolver, "s", &json!({})).unwrap(),
+                resolve_target_id(&resolver, "s", &json!({})).unwrap(),
+            ]
+        };
+
+        let ids_run2 = {
+            let (_guard, _clock, _id_gen) = install_deterministic_context(42);
+            let resolver = TargetResolver::Create;
+            vec![
+                resolve_target_id(&resolver, "s", &json!({})).unwrap(),
+                resolve_target_id(&resolver, "s", &json!({})).unwrap(),
+                resolve_target_id(&resolver, "s", &json!({})).unwrap(),
+            ]
+        };
+
+        assert_eq!(
+            ids_run1, ids_run2,
+            "Create resolver must produce the same id sequence under the same seed"
         );
     }
 }

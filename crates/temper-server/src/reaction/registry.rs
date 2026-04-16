@@ -201,6 +201,7 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
                 })?;
                 TargetResolver::CreateIfMissing { id_field }
             }
+            "create" => TargetResolver::Create,
             other => {
                 return Err(format!(
                     "Reaction '{}': unknown resolver type '{other}'",
@@ -521,7 +522,7 @@ type = "static"
 entity_id = "singleton-1"
 
 [[reaction]]
-name = "create_resolver"
+name = "create_if_missing_resolver"
 [reaction.when]
 entity_type = "A"
 [reaction.then]
@@ -530,9 +531,19 @@ action = "Do"
 [reaction.resolve_target]
 type = "create_if_missing"
 id_field = "b_id"
+
+[[reaction]]
+name = "create_resolver"
+[reaction.when]
+entity_type = "A"
+[reaction.then]
+entity_type = "B"
+action = "Do"
+[reaction.resolve_target]
+type = "create"
 "#;
         let rules = parse_reactions(toml).unwrap();
-        assert_eq!(rules.len(), 4);
+        assert_eq!(rules.len(), 5);
         assert!(
             matches!(rules[0].resolve_target, TargetResolver::Field { ref field } if field == "b_id")
         );
@@ -543,6 +554,7 @@ id_field = "b_id"
         assert!(
             matches!(rules[3].resolve_target, TargetResolver::CreateIfMissing { ref id_field } if id_field == "b_id")
         );
+        assert!(matches!(rules[4].resolve_target, TargetResolver::Create));
     }
 
     #[test]

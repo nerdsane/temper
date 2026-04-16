@@ -80,6 +80,20 @@ pub enum TargetResolver {
         /// Field name containing the target entity ID (or derive from source).
         id_field: String,
     },
+    /// Create a genuinely new target entity with a fresh UUID on every
+    /// reaction dispatch.
+    ///
+    /// Unlike [`TargetResolver::CreateIfMissing`] — which keys off a field
+    /// on the source entity and is intended for per-source-entity singletons
+    /// (one FileVersion per File, etc.) — `Create` returns a new
+    /// [`temper_runtime::scheduler::sim_uuid`] every time. This is the
+    /// correct resolver for pipeline chaining: each source action spawns a
+    /// brand new target entity instance.
+    ///
+    /// `sim_uuid()` (not `uuid::Uuid::new_v4`) is required for DST
+    /// compliance — reaction cascades under `SimReactionSystem` must be
+    /// deterministic across seeded runs.
+    Create,
 }
 
 /// The result of dispatching a single reaction.
@@ -179,5 +193,9 @@ mod tests {
         };
         let json = serde_json::to_string(&create).unwrap();
         assert!(json.contains("\"type\":\"CreateIfMissing\""));
+
+        let fresh = TargetResolver::Create;
+        let json = serde_json::to_string(&fresh).unwrap();
+        assert!(json.contains("\"type\":\"Create\""));
     }
 }
