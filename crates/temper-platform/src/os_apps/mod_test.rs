@@ -903,12 +903,45 @@ startup_loading = "lazy"
 
     let bundle = load_app_bundle(&temp_dir).expect("bundle should load");
     assert!(bundle.wasm_modules.contains_key("echo"));
+    assert!(bundle.cross_invariants_toml.is_none());
     let config = bundle
         .wasm_module_configs
         .get("echo")
         .expect("wasm module config should be present");
     assert_eq!(config.startup_loading, WasmStartupLoading::Lazy);
     assert_eq!(config.criticality, WasmModuleCriticality::AppRequired);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_load_app_bundle_reads_cross_invariants() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "temper-cross-invariants-bundle-test-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let specs_dir = temp_dir.join("specs");
+    fs::create_dir_all(&specs_dir).unwrap();
+
+    fs::write(
+        temp_dir.join("app.toml"),
+        r#"name = "cross-invariants-app"
+description = "Cross invariants app"
+version = "1.0.0"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        specs_dir.join("cross-invariants.toml"),
+        "version = 1\ndefault_delete_policy = \"restrict\"\n",
+    )
+    .unwrap();
+
+    let bundle = load_app_bundle(&temp_dir).expect("bundle should load");
+    assert_eq!(
+        bundle.cross_invariants_toml.as_deref(),
+        Some("version = 1\ndefault_delete_policy = \"restrict\"\n")
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
