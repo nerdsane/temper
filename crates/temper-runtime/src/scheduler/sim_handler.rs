@@ -23,8 +23,9 @@ pub struct SpecInvariant {
 /// A checkable assertion from the spec.
 ///
 /// These map to the small set of invariant patterns that the framework can
-/// check automatically. Domain-specific invariants that don't fit these
-/// patterns still need a manual `set_invariant_checker()`.
+/// check automatically. Compound variants (`And`/`Or`) compose them, so
+/// `migrations_ok && typecheck_ok` becomes
+/// `And(vec![BoolRequired{"migrations_ok", true}, BoolRequired{"typecheck_ok", true}])`.
 #[derive(Debug, Clone)]
 pub enum SpecAssert {
     /// A counter variable must be positive (e.g., `items > 0`).
@@ -43,6 +44,14 @@ pub enum SpecAssert {
         op: CompareOp,
         value: usize,
     },
+    /// A boolean state variable must match an expected value.
+    ///
+    /// `expect = true` for `flag`; `expect = false` for `!flag`.
+    BoolRequired { var: String, expect: bool },
+    /// All subexpressions must hold.
+    And(Vec<SpecAssert>),
+    /// At least one subexpression must hold.
+    Or(Vec<SpecAssert>),
 }
 
 /// Comparison operators for counter invariants.
@@ -93,6 +102,15 @@ pub trait SimActorHandler: Send {
     /// successful transition. Returns empty by default.
     fn spec_invariants(&self) -> &[SpecInvariant] {
         &[]
+    }
+
+    /// Read a boolean state variable by name for invariant evaluation.
+    ///
+    /// Returns `None` when the variable is absent (treated as `false` by
+    /// `BoolRequired` evaluators). Override this to expose booleans
+    /// from the underlying entity state. Default: no boolean state.
+    fn bool_field(&self, _var: &str) -> Option<bool> {
+        None
     }
 
     /// Custom effects (integration triggers) emitted by the last action.
