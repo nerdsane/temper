@@ -208,21 +208,21 @@ pub(crate) async fn hydrate_blob_refs_in_value_with_ceiling(
 
         // Fast-path: if the envelope declares a size above the ceiling, don't
         // fetch inline — just fetch once into the deferred map.
-        if let Some(size) = declared_size {
-            if size > max_inline_bytes {
-                match get_blob_bytes(store, &key).await {
-                    Ok(Some(bytes)) => {
-                        deferred_blobs.insert(key, bytes);
-                    }
-                    Ok(None) => {
-                        tracing::warn!(%key, "deferred field-overflow blob missing");
-                    }
-                    Err(error) => {
-                        tracing::warn!(%key, %error, "failed to fetch deferred field-overflow blob");
-                    }
+        if let Some(size) = declared_size
+            && size > max_inline_bytes
+        {
+            match get_blob_bytes(store, &key).await {
+                Ok(Some(bytes)) => {
+                    deferred_blobs.insert(key, bytes);
                 }
-                continue;
+                Ok(None) => {
+                    tracing::warn!(%key, "deferred field-overflow blob missing");
+                }
+                Err(error) => {
+                    tracing::warn!(%key, %error, "failed to fetch deferred field-overflow blob");
+                }
             }
+            continue;
         }
 
         match get_blob_bytes(store, &key).await {
