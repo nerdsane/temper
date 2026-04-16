@@ -656,7 +656,23 @@ impl Actor for EntityActor {
                                 expected: _,
                                 actual,
                             }) => {
+                                // ADR-0046 Sub-Decision 3: dedicated APM span
+                                // covering the retry cycle. `attempts` and
+                                // `outcome` are recorded at the end so Datadog
+                                // APM can filter and chart conflict-handling
+                                // activity per entity type.
+                                let retry_span = tracing::info_span!(
+                                    "temper.entity.persist_with_retry",
+                                    "entity.type" = %self.entity_type,
+                                    "entity.id" = %state.entity_id,
+                                    action = %name,
+                                    initial_actual = actual,
+                                    attempts = tracing::field::Empty,
+                                    outcome = tracing::field::Empty,
+                                );
+
                                 tracing::warn!(
+                                    parent: &retry_span,
                                     entity = %state.entity_id,
                                     action = %name,
                                     actual_seq = actual,
@@ -811,6 +827,7 @@ impl Actor for EntityActor {
                                             // against the right target.
                                             last_actual = new_actual;
                                             tracing::warn!(
+                                                parent: &retry_span,
                                                 entity = %state.entity_id,
                                                 action = %name,
                                                 attempt = retry_idx + 1,
@@ -845,6 +862,11 @@ impl Actor for EntityActor {
                                 // 1-based; `retry_idx` counts completed retries.
                                 let total_attempts = u64::from(1 + retry_idx);
                                 if let Some((outcome, err_msg)) = retry_final {
+                                    // Close the ADR-0046 APM span with the
+                                    // final attempt count + outcome so APM
+                                    // views can filter by either.
+                                    retry_span.record("attempts", total_attempts);
+                                    retry_span.record("outcome", outcome.as_str());
                                     crate::runtime_metrics::record_entity_concurrency_retry(
                                         &self.entity_type,
                                         outcome,
