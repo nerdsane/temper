@@ -581,6 +581,11 @@ Evolution records reference these as portable SQL. Swapping providers doesn't br
 
 ## 9. Integration Engine
 
+Two mechanisms fire work after an action commits:
+
+- **Cross-entity reactions** — in-system choreography (another entity's action). Declarative TOML, no code. Fire-and-forget, bounded cascade, deterministic under `SimReactionSystem`. Use reactions when both source and target are Temper entities. See [`docs/reactions.md`](reactions.md) for the full reference and [ADR-0045](adrs/0045-reactions-first-class-app-primitive.md) for the design.
+- **WASM integrations** — out-of-system work (external HTTP, LLM calls, third-party APIs). Described below. Use integrations when you need computation, I/O beyond the Temper cluster, or explicit retry / timeout semantics.
+
 Integrations follow the **Outbox Pattern**: the state machine stays pure and deterministically verifiable; external calls happen out-of-band. `[[integration]]` declarations in IOA TOML are metadata — they don't affect state transitions or verification.
 
 ### Spec Syntax
