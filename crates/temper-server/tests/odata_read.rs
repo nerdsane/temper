@@ -8,9 +8,20 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{build_default_state, dispatch};
+use std::sync::Arc;
+use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::build_router;
+use temper_server::registry::{
+    EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
+};
+use temper_server::{ServerEventStore, ServerState};
+use temper_spec::csdl::parse_csdl;
+use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
+
+const CSDL_XML: &str = common::CSDL_XML;
+const ORDER_IOA: &str = common::ORDER_IOA;
 
 /// Send a GET request to the router and return status + parsed JSON body.
 async fn get_json(
@@ -26,6 +37,80 @@ async fn get_json(
         .unwrap();
     let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, body)
+}
+
+async fn post_json(
+    state: &ServerState,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let router = build_router(state.clone());
+    let req = Request::post(path)
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+async fn patch_json(
+    state: &ServerState,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let router = build_router(state.clone());
+    let req = Request::builder()
+        .method(axum::http::Method::PATCH)
+        .uri(path)
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+fn build_turso_state(system_name: &str, store: TursoEventStore) -> ServerState {
+    let mut registry = SpecRegistry::new();
+    let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
+    registry.register_tenant(
+        "default",
+        csdl,
+        CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA)],
+    );
+
+    let state = ServerState::from_registry(ActorSystem::new(system_name), registry);
+    {
+        let mut registry = state.registry.write().unwrap();
+        registry.set_verification_status(
+            &TenantId::default(),
+            "Order",
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: true,
+                levels: vec![EntityLevelSummary {
+                    level: "L0 SMT".to_string(),
+                    passed: true,
+                    summary: "OK".to_string(),
+                    details: None,
+                }],
+                verified_at: "2026-04-15T00:00:00Z".to_string(),
+            }),
+        );
+    }
+
+    let mut state = state;
+    state.event_store = Some(Arc::new(ServerEventStore::Turso(store)));
+    state
 }
 
 #[tokio::test]
@@ -132,4 +217,88 @@ async fn metadata_returns_csdl_xml() {
         .unwrap();
     let body_str = String::from_utf8(bytes.to_vec()).unwrap();
     assert!(body_str.contains("edmx:Edmx"), "should return CSDL XML");
+}
+
+#[tokio::test]
+async fn filtered_entity_set_returns_entities_created_via_odata_post() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-odata-read-create-filter-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let state = build_turso_state("odata-read-create-filter", store);
+
+    let (status, body) = post_json(
+        &state,
+        "/tdata/Orders",
+        serde_json::json!({
+            "id": "ord-created-filter",
+            "Currency": "USD",
+            "Notes": "created through odata"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    let (status, body) = get_json(&state, "/tdata/Orders?$filter=Currency%20eq%20'USD'").await;
+    assert_eq!(status, StatusCode::OK);
+    let values = body["value"].as_array().expect("value array");
+    assert_eq!(
+        values.len(),
+        1,
+        "filtered reads should include entities created via OData POST: {body:?}"
+    );
+    assert_eq!(values[0]["entity_id"].as_str(), Some("ord-created-filter"));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn filtered_entity_set_reflects_odata_patch_updates() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-odata-read-patch-filter-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let state = build_turso_state("odata-read-patch-filter", store);
+
+    let (status, body) = post_json(
+        &state,
+        "/tdata/Orders",
+        serde_json::json!({
+            "id": "ord-patched-filter",
+            "Currency": "EUR",
+            "Notes": "starts in eur"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    let (status, body) = patch_json(
+        &state,
+        "/tdata/Orders('ord-patched-filter')",
+        serde_json::json!({
+            "Currency": "USD"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body:?}");
+
+    let (status, body) = get_json(&state, "/tdata/Orders?$filter=Currency%20eq%20'USD'").await;
+    assert_eq!(status, StatusCode::OK);
+    let values = body["value"].as_array().expect("value array");
+    assert!(
+        values
+            .iter()
+            .any(|value| value["entity_id"].as_str() == Some("ord-patched-filter")),
+        "filtered reads should reflect OData PATCH updates: {body:?}"
+    );
+
+    let _ = std::fs::remove_file(db_path);
 }

@@ -499,6 +499,31 @@ impl ServerState {
         );
         let _ = self.event_tx.send(change);
 
+        if let Some(store) = self.event_store.as_ref() {
+            let status = response.state.status.clone();
+            let fields = response.state.fields.clone();
+            let sequence_nr = response.state.sequence_nr;
+            if let Err(e) = store
+                .upsert_query_projection(
+                    tenant.as_str(),
+                    entity_type,
+                    entity_id,
+                    &status,
+                    &fields,
+                    sequence_nr,
+                )
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    tenant = %tenant,
+                    entity_type = %entity_type,
+                    entity_id = %entity_id,
+                    "failed to update query projection during create"
+                );
+            }
+        }
+
         Ok(response)
     }
 
@@ -518,13 +543,42 @@ impl ServerState {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
 
-        actor_ref
+        let response = actor_ref
             .ask::<EntityResponse>(
                 EntityMsg::UpdateFields { fields, replace },
                 self.action_dispatch_timeout,
             )
             .await
-            .map_err(|e| format!("Actor update failed: {e}"))
+            .map_err(|e| format!("Actor update failed: {e}"))?;
+
+        if response.success
+            && let Some(store) = self.event_store.as_ref()
+        {
+            let status = response.state.status.clone();
+            let fields = response.state.fields.clone();
+            let sequence_nr = response.state.sequence_nr;
+            if let Err(e) = store
+                .upsert_query_projection(
+                    tenant.as_str(),
+                    entity_type,
+                    entity_id,
+                    &status,
+                    &fields,
+                    sequence_nr,
+                )
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    tenant = %tenant,
+                    entity_type = %entity_type,
+                    entity_id = %entity_id,
+                    "failed to update query projection during field update"
+                );
+            }
+        }
+
+        Ok(response)
     }
 
     /// Delete an entity.

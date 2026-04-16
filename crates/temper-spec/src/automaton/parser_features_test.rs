@@ -194,3 +194,39 @@ effect = [
     ));
     assert!(matches!(add_task.effect.get(1), Some(Effect::Emit { .. })));
 }
+
+#[test]
+fn test_field_invariant_section_does_not_overwrite_previous_action() {
+    let spec = r#"
+[automaton]
+name = "Session"
+states = ["Open", "Closed"]
+initial = "Open"
+
+[[action]]
+name = "Archive"
+kind = "input"
+from = ["Open"]
+to = "Closed"
+hint = "Archive the session."
+
+[[field_invariant]]
+name = "ClosedRequiresArchivedAt"
+when = { field = "Status", equals = "Closed" }
+require = { not = { field = "ArchivedAt", absent = true } }
+message = "Closed sessions must set ArchivedAt"
+"#;
+
+    let automaton = parse_automaton(spec).expect("should parse field invariants");
+    let action_names: Vec<&str> = automaton
+        .actions
+        .iter()
+        .map(|action| action.name.as_str())
+        .collect();
+    assert_eq!(action_names, vec!["Archive"]);
+    assert_eq!(automaton.field_invariants.len(), 1);
+    assert_eq!(
+        automaton.field_invariants[0].name,
+        "ClosedRequiresArchivedAt"
+    );
+}
