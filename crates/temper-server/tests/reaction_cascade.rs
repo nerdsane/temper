@@ -397,6 +397,23 @@ fn cascade_with_params_from_fires_even_when_source_fields_missing() {
 }
 
 #[test]
+fn paw_fs_reactions_toml_loads_through_parser() {
+    // Regression guard: the real os-apps/temper-fs/reactions/reactions.toml
+    // must load through parse_reactions. Prior to the Phase 3 audit this
+    // file was effectively dead data (PascalCase resolver types silently
+    // rejected by the snake_case parser). Ensures future edits keep the
+    // file valid against the parser.
+    let source = include_str!("../../../os-apps/temper-fs/reactions/reactions.toml");
+    let rules = parse_reactions(source).expect("paw-fs reactions.toml must parse");
+    assert_eq!(rules.len(), 3, "expected 3 rules in paw-fs reactions.toml");
+
+    let names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
+    assert!(names.contains(&"file_stream_updated_creates_version"));
+    assert!(names.contains(&"file_stream_updated_supersedes_old_version"));
+    assert!(names.contains(&"file_stream_updated_increments_workspace_usage"));
+}
+
+#[test]
 fn parse_reactions_toml_with_params_from_loads_through_registry() {
     let toml = r#"
 [[reaction]]
