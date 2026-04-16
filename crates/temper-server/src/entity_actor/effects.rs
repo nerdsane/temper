@@ -221,7 +221,12 @@ pub fn process_action_with_xref_and_field_mode(
             let (custom_effects, scheduled_actions, spawn_requests, schedule_at_requests) =
                 apply_effects(state, &transition_result.effects, params);
             apply_new_state_fallback(state, &from_status, &to_status);
-            let overflow_blobs = sync_fields(state, params, field_sync_mode);
+            let overflow_blobs = sync_fields_with_metadata(
+                state,
+                params,
+                field_sync_mode,
+                Some(&table.state_var_metadata),
+            );
 
             // Resolve deferred schedule_at requests now that fields are synced
             let mut all_scheduled = scheduled_actions;
@@ -528,14 +533,29 @@ pub const DEFAULT_FIELD_INLINE_MAX: usize = 131_072; // 128 KB
 
 /// Sync all state variables into the `fields` JSON object.
 ///
-/// This projects status, counters, booleans, lists, and action params
-/// into the entity's fields for OData queries. Fields whose serialized
-/// value exceeds `mode.inline_max()` are either truncated or projected
-/// through blob refs, depending on `mode`.
+/// Projects status, counters, booleans, lists, and action params into the
+/// entity's fields for OData queries. Values whose serialized size exceeds
+/// the effective per-field inline ceiling are either truncated or projected
+/// through blob refs, depending on `mode`. When `state_var_metadata` is
+/// `Some`, per-field `overflow_inline_max_bytes` and `overflow_ttl_seconds`
+/// overrides are consulted (ADR-0045, ADR-0047).
 pub fn sync_fields(
     state: &mut EntityState,
     params: &serde_json::Value,
     mode: FieldSyncMode,
+) -> Vec<OverflowBlobWrite> {
+    sync_fields_with_metadata(state, params, mode, None)
+}
+
+/// Metadata-aware variant of [`sync_fields`]. Threads per-field overflow
+/// declarations from the IOA spec's `[[state]]` blocks into the projection.
+pub fn sync_fields_with_metadata(
+    state: &mut EntityState,
+    params: &serde_json::Value,
+    mode: FieldSyncMode,
+    state_var_metadata: Option<
+        &std::collections::BTreeMap<String, temper_jit::table::StateVarMetadata>,
+    >,
 ) -> Vec<OverflowBlobWrite> {
     let mut overflow_blobs = Vec::new();
     let entity_type = state.entity_type.clone();
@@ -548,9 +568,18 @@ pub fn sync_fields(
         // Project action params into fields
         if let Some(p) = params.as_object() {
             for (k, v) in p {
+                let field_meta = state_var_metadata.and_then(|m| m.get(k.as_str()));
                 obj.insert(
                     k.clone(),
-                    project_field_value(k, v, mode, &entity_type, &entity_id, &mut overflow_blobs),
+                    project_field_value(
+                        k,
+                        v,
+                        mode,
+                        &entity_type,
+                        &entity_id,
+                        field_meta,
+                        &mut overflow_blobs,
+                    ),
                 );
             }
         }
@@ -568,6 +597,7 @@ pub fn sync_fields(
                 .iter()
                 .map(|s| serde_json::Value::String(s.clone()))
                 .collect();
+            let field_meta = state_var_metadata.and_then(|m| m.get(k.as_str()));
             obj.insert(
                 k.clone(),
                 project_field_value(
@@ -576,6 +606,7 @@ pub fn sync_fields(
                     mode,
                     &entity_type,
                     &entity_id,
+                    field_meta,
                     &mut overflow_blobs,
                 ),
             );
@@ -590,11 +621,16 @@ fn project_field_value(
     mode: FieldSyncMode,
     entity_type: &str,
     entity_id: &str,
+    field_meta: Option<&temper_jit::table::StateVarMetadata>,
     overflow_blobs: &mut Vec<OverflowBlobWrite>,
 ) -> serde_json::Value {
     let serialized = serde_json::to_vec(value).unwrap_or_else(|_| value.to_string().into_bytes());
     let serialized_len = serialized.len();
-    let inline_max = mode.inline_max();
+    // Per-field override wins over the mode default; mode default wins over
+    // crate default (baked into FieldSyncMode::inline_max).
+    let inline_max = field_meta
+        .and_then(|m| m.overflow_inline_max_bytes)
+        .unwrap_or_else(|| mode.inline_max());
     if serialized_len <= inline_max {
         return value.clone();
     }
@@ -618,10 +654,12 @@ fn project_field_value(
         FieldSyncMode::BlobRefs { .. } => {
             let digest = Sha256::digest(&serialized);
             let blob_key = format!("{FIELD_OVERFLOW_BLOB_PREFIX}{digest:x}.json");
+            let ttl_seconds = field_meta.and_then(|m| m.overflow_ttl_seconds);
             if !overflow_blobs.iter().any(|blob| blob.key == blob_key) {
                 overflow_blobs.push(OverflowBlobWrite {
                     key: blob_key.clone(),
                     body: serialized,
+                    ttl_seconds,
                 });
             }
             blob_ref_value(&blob_key, serialized_len)

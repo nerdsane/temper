@@ -89,9 +89,9 @@ async fn sweep_removes_expired_rows_and_preserves_permanent() {
         .await
         .expect("put_blob_with_ttl future");
 
-    // Wait just past the 1-second TTL so the expired row's expires_at is
-    // strictly in the past relative to `datetime('now')` in the sweep query.
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    // Wait past the 1-second TTL with enough margin for SQLite's
+    // second-granularity `datetime('now')` to have advanced.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
 
     let deleted = store
         .sweep_expired_blobs(1000)

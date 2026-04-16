@@ -366,8 +366,12 @@ impl EntityActor {
                                 }
                                 _ => FieldSyncMode::InlineTruncate,
                             };
-                            let overflow_blobs =
-                                super::effects::sync_fields(state, &event.params, field_sync_mode);
+                            let overflow_blobs = super::effects::sync_fields_with_metadata(
+                                state,
+                                &event.params,
+                                field_sync_mode,
+                                Some(&table.state_var_metadata),
+                            );
                             // Persist replayed overflow blobs so blob-ref envelopes
                             // resolve on subsequent OData reads. Content-addressed
                             // dedup makes this idempotent — if the original live

@@ -26,6 +26,9 @@ pub(crate) const FIELD_OVERFLOW_ENCODING_KEY: &str = "__temper_blob_encoding";
 pub struct OverflowBlobWrite {
     pub key: String,
     pub body: Vec<u8>,
+    /// Optional per-field TTL carried from IOA spec
+    /// (`overflow_ttl_seconds`, ADR-0047). `None` means permanent.
+    pub ttl_seconds: Option<u64>,
 }
 
 fn blob_io_semaphore() -> &'static Semaphore {
@@ -84,9 +87,32 @@ pub(crate) async fn put_overflow_blobs(
     blobs: &[OverflowBlobWrite],
 ) -> Result<(), String> {
     for blob in blobs {
-        put_blob_bytes(store, &blob.key, &blob.body).await?;
+        let ttl = blob.ttl_seconds.map(std::time::Duration::from_secs);
+        put_blob_bytes_with_ttl(store, &blob.key, &blob.body, ttl).await?;
     }
     Ok(())
+}
+
+/// TTL-aware variant of `put_blob_bytes` (ADR-0047).
+pub(crate) async fn put_blob_bytes_with_ttl(
+    store: &temper_store_turso::TursoEventStore,
+    key: &str,
+    body: &[u8],
+    ttl: Option<std::time::Duration>,
+) -> Result<(), String> {
+    let queued_at = Instant::now();
+    let _permit = blob_io_semaphore()
+        .acquire()
+        .await
+        .expect("blob semaphore closed"); // ci-ok: semaphore is process-global and never closed
+    let wait_duration = queued_at.elapsed();
+    let wait_ms = wait_duration.as_millis() as u64;
+    crate::runtime_metrics::record_blob_io_wait_duration(wait_duration, "put");
+    if wait_ms > 0 {
+        tracing::info!(path = %key, wait_ms, ttl = ?ttl, "blob put queued");
+    }
+
+    store.put_blob_with_ttl(key, body, ttl).await
 }
 
 pub(crate) fn blob_ref_value(key: &str, size_bytes: usize) -> Value {
@@ -436,6 +462,111 @@ mod tests {
         let decoded: serde_json::Value =
             serde_json::from_slice(deferred_bytes).expect("deferred bytes decode as JSON");
         assert_eq!(decoded.as_str().unwrap(), huge);
+    }
+
+    /// Per-field `overflow_inline_max_bytes` in the spec overrides the mode
+    /// default. Declaring a 1024-byte ceiling forces a 4KB field into the
+    /// overflow path even though the default 128KB ceiling would keep it
+    /// inline. ADR-0045 Phase 4b.
+    #[tokio::test]
+    async fn per_field_inline_max_override_forces_overflow() {
+        use crate::entity_actor::effects::sync_fields_with_metadata;
+        use std::collections::BTreeMap;
+        use temper_jit::table::StateVarMetadata;
+
+        let (store, _dir) = open_store().await;
+        let mut state = make_state("Session", "s-metadata-1");
+        let value = "Z".repeat(4 * 1024); // 4 KB — normally inline, but override forces overflow
+        let params = json!({ "tiny": value });
+
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "tiny".to_string(),
+            StateVarMetadata {
+                overflow_inline_max_bytes: Some(1024),
+                overflow_ttl_seconds: None,
+            },
+        );
+
+        let overflow = sync_fields_with_metadata(
+            &mut state,
+            &params,
+            crate::entity_actor::effects::FieldSyncMode::blob_refs_default(),
+            Some(&metadata),
+        );
+        assert_eq!(
+            overflow.len(),
+            1,
+            "per-field 1KB ceiling overrides default 128KB ceiling"
+        );
+        assert!(
+            overflow[0].ttl_seconds.is_none(),
+            "no TTL declared → permanent"
+        );
+
+        put_overflow_blobs(&store, &overflow)
+            .await
+            .expect("put_overflow_blobs");
+    }
+
+    /// Per-field `overflow_ttl_seconds` propagates through `OverflowBlobWrite`
+    /// into `put_blob_with_ttl`. The blob should be swept after its TTL
+    /// expires. ADR-0047 Phase 4b.
+    #[tokio::test]
+    async fn per_field_ttl_propagates_to_sweep() {
+        use crate::entity_actor::effects::sync_fields_with_metadata;
+        use std::collections::BTreeMap;
+        use std::time::Duration;
+        use temper_jit::table::StateVarMetadata;
+
+        let (store, _dir) = open_store().await;
+        let mut state = make_state("WebQuery", "wq-ttl-1");
+        // 200 KB — well over default ceiling, so overflow fires.
+        let value = "P".repeat(200 * 1024);
+        let params = json!({ "results": value });
+
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "results".to_string(),
+            StateVarMetadata {
+                overflow_inline_max_bytes: None, // use default 128KB ceiling
+                overflow_ttl_seconds: Some(1),   // 1-second TTL
+            },
+        );
+
+        let overflow = sync_fields_with_metadata(
+            &mut state,
+            &params,
+            crate::entity_actor::effects::FieldSyncMode::blob_refs_default(),
+            Some(&metadata),
+        );
+        assert_eq!(overflow.len(), 1);
+        assert_eq!(
+            overflow[0].ttl_seconds,
+            Some(1),
+            "ttl propagates from StateVarMetadata into OverflowBlobWrite"
+        );
+
+        put_overflow_blobs(&store, &overflow)
+            .await
+            .expect("put_overflow_blobs");
+
+        // The blob should exist immediately.
+        let key = &overflow[0].key;
+        assert!(
+            store.get_blob(key).await.unwrap().is_some(),
+            "freshly-written blob is readable"
+        );
+
+        // Wait past the 1-second TTL + margin, then sweep. Use 2.5s to
+        // clear any sub-second boundary effects in SQLite's datetime('now').
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let deleted = store.sweep_expired_blobs(1000).await.unwrap();
+        assert_eq!(deleted, 1, "TTL'd blob swept");
+        assert!(
+            store.get_blob(key).await.unwrap().is_none(),
+            "blob gone after sweep"
+        );
     }
 
     /// Regression test for the replay-path blob-persist bug: a blob written by
