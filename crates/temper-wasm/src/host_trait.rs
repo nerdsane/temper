@@ -261,8 +261,11 @@ fn remote_blob_backend<'a>(secrets: &'a BTreeMap<String, String>, url: &str) -> 
 
 impl ProductionWasmHost {
     /// Create with pre-loaded secrets and default HTTP timeout.
+    ///
+    /// The default timeout matches `WasmResourceLimits::default().max_duration`
+    /// (120s per ADR-0045).
     pub fn new(secrets: BTreeMap<String, String>) -> Self {
-        Self::with_timeout(secrets, std::time::Duration::from_secs(30))
+        Self::with_timeout(secrets, crate::WasmResourceLimits::default().max_duration)
     }
 
     /// Create with pre-loaded secrets and a custom HTTP request timeout.

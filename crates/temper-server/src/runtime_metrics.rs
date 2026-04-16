@@ -24,6 +24,9 @@ struct RuntimeMetrics {
     monty_repl_acquisitions_total: Counter<u64>,
     monty_repl_observed_active_invocations: Histogram<f64>,
     monty_repl_wait_duration_ms: Histogram<f64>,
+    wasm_integration_default_timeout_used_total: Counter<u64>,
+    entity_concurrency_retry_total: Counter<u64>,
+    entity_concurrency_retry_attempts: Histogram<u64>,
 }
 
 fn metrics() -> &'static RuntimeMetrics {
@@ -80,6 +83,31 @@ fn metrics() -> &'static RuntimeMetrics {
                 .f64_histogram("temper_monty_repl_wait_duration_ms")
                 .with_unit("ms")
                 .with_description("Time spent waiting to acquire the monty_repl execution gate.")
+                .build(),
+            wasm_integration_default_timeout_used_total: meter
+                .u64_counter("temper_wasm_integration_default_timeout_used_total")
+                .with_description(
+                    "WASM integration dispatches that fell back to the default timeout because the \
+                     spec did not set `timeout_secs`. Apps firing this frequently should wire an \
+                     explicit timeout in their integration config. See ADR-0045.",
+                )
+                .build(),
+            entity_concurrency_retry_total: meter
+                .u64_counter("temper_entity_concurrency_retry_total")
+                .with_description(
+                    "Entity-actor persist attempts that hit an optimistic concurrency conflict \
+                     and either recovered, exhausted the retry budget, or found the action no \
+                     longer legal after replay. Treat sustained activity as a canary for an \
+                     unknown scheduler race — not a retry budget to raise. See ADR-0046.",
+                )
+                .build(),
+            entity_concurrency_retry_attempts: meter
+                .u64_histogram("temper_entity_concurrency_retry_attempts")
+                .with_description(
+                    "Number of persist attempts a single action consumed before success or \
+                     exhaustion. Value of 1 is the no-retry happy path; anything higher is a \
+                     canary. See ADR-0046.",
+                )
                 .build(),
         }
     })
@@ -188,6 +216,64 @@ pub fn record_monty_repl_wait_duration(duration: Duration, max_concurrency: usiz
             i64::try_from(max_concurrency).unwrap_or(i64::MAX),
         )],
     );
+}
+
+/// Record a WASM integration dispatch that fell back to the default timeout
+/// because the integration spec did not set `timeout_secs`.
+///
+/// See ADR-0045.
+pub fn record_wasm_default_timeout_used(tenant: &str, entity_type: &str, module: &str) {
+    metrics().wasm_integration_default_timeout_used_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("module", module.to_string()),
+        ],
+    );
+}
+
+/// Possible outcomes for an entity-actor concurrency retry cycle.
+///
+/// See ADR-0046.
+#[derive(Debug, Clone, Copy)]
+pub enum ConcurrencyRetryOutcome {
+    /// The action persisted successfully (possibly after one or more retries).
+    Success,
+    /// All retry attempts hit `ConcurrencyViolation`; the action was dropped.
+    Exhausted,
+    /// Replay caught the entity in a state where the action is no longer legal
+    /// (e.g., the entity reached a terminal state during the race).
+    ActionIllegal,
+}
+
+impl ConcurrencyRetryOutcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ConcurrencyRetryOutcome::Success => "success",
+            ConcurrencyRetryOutcome::Exhausted => "exhausted",
+            ConcurrencyRetryOutcome::ActionIllegal => "action_illegal",
+        }
+    }
+}
+
+/// Record the outcome of an entity-actor concurrency retry cycle plus the
+/// number of attempts consumed. Attempts is 1-based (1 = no retries).
+///
+/// See ADR-0046.
+pub fn record_entity_concurrency_retry(
+    entity_type: &str,
+    outcome: ConcurrencyRetryOutcome,
+    attempts: u64,
+) {
+    let attrs = [
+        KeyValue::new("entity_type", entity_type.to_string()),
+        KeyValue::new("outcome", outcome.as_str()),
+    ];
+    metrics().entity_concurrency_retry_total.add(1, &attrs);
+    metrics()
+        .entity_concurrency_retry_attempts
+        .record(attempts, &attrs);
 }
 
 /// Read process resident memory (RSS) in bytes from Linux procfs.

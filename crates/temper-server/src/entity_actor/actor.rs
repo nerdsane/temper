@@ -554,8 +554,11 @@ impl Actor for EntityActor {
                     return Ok(());
                 }
 
-                let event_count_before = state.total_event_count;
-                let state_before = state.clone();
+                // Captured BEFORE the action applies. The retry path (ADR-0046)
+                // updates these in lockstep with replay so postconditions hold
+                // across the race window.
+                let mut event_count_before = state.total_event_count;
+                let mut state_before = state.clone();
                 let field_sync_mode = match self.event_store.as_ref().map(Arc::as_ref) {
                     Some(ServerEventStore::Turso(_) | ServerEventStore::TenantRouted(_)) => {
                         FieldSyncMode::BlobRefs
@@ -563,7 +566,11 @@ impl Actor for EntityActor {
                     _ => FieldSyncMode::InlineTruncate,
                 };
 
-                let result = process_action_with_xref_and_field_mode(
+                // `result` and `event` are `mut` so that a successful ADR-0046
+                // retry can replace them with values re-evaluated against the
+                // caught-up state. The downstream telemetry and reply use
+                // whichever pair last succeeded in persist.
+                let mut result = process_action_with_xref_and_field_mode(
                     state,
                     &table,
                     &name,
@@ -574,8 +581,11 @@ impl Actor for EntityActor {
 
                 if result.success {
                     // process_action returned a successful transition with event.
-                    let event = result
+                    // Clone out so `result.event` stays populated for re-use if
+                    // the retry path needs to re-emit (simplifies lifetime here).
+                    let mut event = result
                         .event
+                        .clone()
                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
 
                     if !result.overflow_blobs.is_empty() {
@@ -629,23 +639,248 @@ impl Actor for EntityActor {
                         }
                     }
 
-                    // Persist to Postgres (if configured)
-                    if let Some(ref store) = self.event_store
-                        && let Err(e) =
-                            Self::persist_event(store, &self.persistence_id(), state, &event).await
-                    {
-                        // Roll back speculative in-memory state if durability failed.
-                        *state = state_before;
-                        ctx.reply(EntityResponse {
-                            success: false,
-                            state: state.clone(),
-                            error: Some(format!("persistence failed: {e}")),
-                            custom_effects: vec![],
-                            scheduled_actions: vec![],
-                            spawn_requests: vec![],
-                            spec_governed: true,
-                        });
-                        return Ok(());
+                    // Persist to Postgres (if configured). On
+                    // `ConcurrencyViolation` enter the ADR-0046 retry cycle —
+                    // replay events, re-evaluate the action against the caught-up
+                    // state, and retry the persist up to two more times. Other
+                    // error variants fail immediately (same as before).
+                    if let Some(ref store) = self.event_store {
+                        let first_persist =
+                            Self::persist_event(store, &self.persistence_id(), state, &event).await;
+
+                        match first_persist {
+                            Ok(_) => {
+                                // Happy path — fall through to downstream telemetry.
+                            }
+                            Err(PersistenceError::ConcurrencyViolation {
+                                expected: _,
+                                actual,
+                            }) => {
+                                tracing::warn!(
+                                    entity = %state.entity_id,
+                                    action = %name,
+                                    actual_seq = actual,
+                                    "persist hit optimistic-concurrency violation; entering ADR-0046 retry"
+                                );
+
+                                // 2 retries + 1 initial = 3 total attempts (ADR-0046).
+                                const MAX_RETRIES: u32 = 2;
+                                let mut retry_idx: u32 = 0;
+                                let mut retry_final: Option<(
+                                    crate::runtime_metrics::ConcurrencyRetryOutcome,
+                                    Option<String>,
+                                )> = None;
+                                // ADR-0046 Sub-Decision 4: track the most
+                                // recent authoritative sequence across retries
+                                // so the post-replay assertion catches a
+                                // divergent replay even on a multi-conflict
+                                // cycle. Seeded from the initial violation;
+                                // refreshed from each subsequent violation.
+                                let mut last_actual: u64 = actual;
+
+                                while retry_idx < MAX_RETRIES {
+                                    retry_idx += 1;
+
+                                    // Rollback speculative state.
+                                    *state = state_before.clone();
+
+                                    // Catch up to the authoritative sequence.
+                                    Self::replay_events(
+                                        &table,
+                                        store,
+                                        &self.persistence_id(),
+                                        state,
+                                        &self.tenant,
+                                    )
+                                    .await;
+
+                                    // ADR-0046 Sub-Decision 4: replay must at
+                                    // minimum reach the sequence the store
+                                    // reported. Reaching further is fine (a
+                                    // later writer may have appended during
+                                    // our own round trip).
+                                    debug_assert!(
+                                        state.sequence_nr >= last_actual,
+                                        "POSTCONDITION: replay under-reached authoritative sequence \
+                                         (state.sequence_nr={} < last_actual={last_actual})",
+                                        state.sequence_nr
+                                    );
+
+                                    // Refresh baselines so postconditions hold
+                                    // against the replayed state, not the
+                                    // pre-race snapshot.
+                                    state_before = state.clone();
+                                    event_count_before = state.total_event_count;
+
+                                    // Re-evaluate the action against the caught-up
+                                    // state. It may now fail (entity reached a
+                                    // terminal state during the race) — if so,
+                                    // surface that error rather than silently
+                                    // dropping the caller.
+                                    let retry_result = process_action_with_xref_and_field_mode(
+                                        state,
+                                        &table,
+                                        &name,
+                                        &params,
+                                        &cross_entity_booleans,
+                                        field_sync_mode,
+                                    );
+
+                                    if !retry_result.success {
+                                        retry_final = Some((
+                                            crate::runtime_metrics::ConcurrencyRetryOutcome::ActionIllegal,
+                                            Some(retry_result.error.unwrap_or_else(|| {
+                                                format!(
+                                                    "action {name} no longer legal after concurrency replay"
+                                                )
+                                            })),
+                                        ));
+                                        break;
+                                    }
+
+                                    let retry_event = retry_result
+                                        .event
+                                        .clone()
+                                        .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
+
+                                    // Overflow blobs for the re-evaluated result.
+                                    if !retry_result.overflow_blobs.is_empty() {
+                                        match store.turso_for_tenant(&self.tenant).await {
+                                            Some(blob_store) => {
+                                                if let Err(e) = crate::blobs::put_overflow_blobs(
+                                                    &blob_store,
+                                                    &retry_result.overflow_blobs,
+                                                )
+                                                .await
+                                                {
+                                                    retry_final = Some((
+                                                        crate::runtime_metrics::ConcurrencyRetryOutcome::Exhausted,
+                                                        Some(format!(
+                                                            "field-overflow blob persistence failed during retry: {e}"
+                                                        )),
+                                                    ));
+                                                    break;
+                                                }
+                                            }
+                                            None => {
+                                                retry_final = Some((
+                                                    crate::runtime_metrics::ConcurrencyRetryOutcome::Exhausted,
+                                                    Some(
+                                                        "field-overflow blobs require a Turso-backed store"
+                                                            .to_string(),
+                                                    ),
+                                                ));
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    // Backoff: retry 1 → 10ms, retry 2 → 50ms.
+                                    let backoff_ms = if retry_idx == 1 { 10 } else { 50 };
+                                    tokio::time::sleep(std::time::Duration::from_millis(
+                                        backoff_ms,
+                                    ))
+                                    .await; // determinism-ok: rare retry backoff (ADR-0046)
+
+                                    match Self::persist_event(
+                                        store,
+                                        &self.persistence_id(),
+                                        state,
+                                        &retry_event,
+                                    )
+                                    .await
+                                    {
+                                        Ok(_) => {
+                                            // Commit re-evaluated event + result into
+                                            // downstream telemetry and reply.
+                                            event = retry_event;
+                                            result = retry_result;
+                                            retry_final = Some((
+                                                crate::runtime_metrics::ConcurrencyRetryOutcome::Success,
+                                                None,
+                                            ));
+                                            break;
+                                        }
+                                        Err(PersistenceError::ConcurrencyViolation {
+                                            actual: new_actual,
+                                            ..
+                                        }) if retry_idx < MAX_RETRIES => {
+                                            // Capture the fresh authoritative
+                                            // sequence so the next iteration's
+                                            // post-replay assertion checks
+                                            // against the right target.
+                                            last_actual = new_actual;
+                                            tracing::warn!(
+                                                entity = %state.entity_id,
+                                                action = %name,
+                                                attempt = retry_idx + 1,
+                                                actual_seq = new_actual,
+                                                "retry persist hit another concurrency violation; retrying"
+                                            );
+                                            continue;
+                                        }
+                                        Err(PersistenceError::ConcurrencyViolation { .. }) => {
+                                            retry_final = Some((
+                                                crate::runtime_metrics::ConcurrencyRetryOutcome::Exhausted,
+                                                Some(
+                                                    "persistence failed: optimistic concurrency retry exhausted"
+                                                        .to_string(),
+                                                ),
+                                            ));
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            retry_final = Some((
+                                                crate::runtime_metrics::ConcurrencyRetryOutcome::Exhausted,
+                                                Some(format!(
+                                                    "persistence failed during retry: {e}"
+                                                )),
+                                            ));
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // Record the retry outcome. `total_attempts` is
+                                // 1-based; `retry_idx` counts completed retries.
+                                let total_attempts = u64::from(1 + retry_idx);
+                                if let Some((outcome, err_msg)) = retry_final {
+                                    crate::runtime_metrics::record_entity_concurrency_retry(
+                                        &self.entity_type,
+                                        outcome,
+                                        total_attempts,
+                                    );
+                                    if let Some(msg) = err_msg {
+                                        *state = state_before;
+                                        ctx.reply(EntityResponse {
+                                            success: false,
+                                            state: state.clone(),
+                                            error: Some(msg),
+                                            custom_effects: vec![],
+                                            scheduled_actions: vec![],
+                                            spawn_requests: vec![],
+                                            spec_governed: true,
+                                        });
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // Non-concurrency persistence error — unchanged:
+                                // roll back and fail.
+                                *state = state_before;
+                                ctx.reply(EntityResponse {
+                                    success: false,
+                                    state: state.clone(),
+                                    error: Some(format!("persistence failed: {e}")),
+                                    custom_effects: vec![],
+                                    scheduled_actions: vec![],
+                                    spawn_requests: vec![],
+                                    spec_governed: true,
+                                });
+                                return Ok(());
+                            }
+                        }
                     }
 
                     // Telemetry as Views: emit wide event → OTEL span + metrics.
