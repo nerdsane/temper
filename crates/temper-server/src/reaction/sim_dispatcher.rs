@@ -146,6 +146,30 @@ impl SimReactionSystem {
             .collect();
 
         for rule in rules {
+            // Guard evaluation: skip rules whose guard fails. Guard-skipped
+            // rules do not emit a `ReactionResult` — they never fired.
+            if let Some(guard) = &rule.when.guard {
+                let mut queries = Vec::new();
+                super::guard::collect_cross_entity_queries(guard, fields, &mut queries);
+                let mut resolved = super::guard::CrossStatusMap::new();
+                for q in &queries {
+                    let key = format!("{}:{}", q.entity_type, q.target_entity_id);
+                    let matched = self
+                        .entity_to_actor
+                        .get(&key)
+                        .map(|actor_id| self.inner.status(actor_id))
+                        .map(|status| q.matches(&status))
+                        .unwrap_or(false);
+                    resolved.insert(q.key(), matched);
+                }
+                let passed = super::guard::evaluate_with_resolved(
+                    guard, fields, to_state, &resolved, &rule.name,
+                );
+                if !passed {
+                    continue;
+                }
+            }
+
             let target_entity_id =
                 match super::resolver::resolve_target_id(&rule.resolve_target, entity_id, fields) {
                     Some(id) => id,

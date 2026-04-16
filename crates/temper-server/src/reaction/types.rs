@@ -12,6 +12,13 @@ pub const MAX_REACTIONS_PER_TENANT: usize = 256;
 /// Maximum cascade depth for recursive reaction dispatch (TigerStyle budget).
 pub const MAX_REACTION_DEPTH: u32 = 8;
 
+/// Maximum nesting depth for composite reaction guards
+/// (`AllOf` / `AnyOf` / `Not`). TigerStyle: bound budgets rather than hope.
+///
+/// Enforced at parse time in [`super::registry::parse_reactions`] so drift is
+/// caught before any reaction fires.
+pub const MAX_GUARD_DEPTH: u32 = 4;
+
 /// A reaction rule: when a trigger fires, dispatch an action on a target entity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReactionRule {
@@ -34,6 +41,107 @@ pub struct ReactionTrigger {
     pub action: Option<String>,
     /// The target state after the action. `None` = any resulting state.
     pub to_state: Option<String>,
+    /// Optional guard evaluated against the source entity's post-action state
+    /// (and optionally another entity's current state via
+    /// [`ReactionGuard::CrossEntityStateIn`]). When `Some`, the reaction only
+    /// fires if the guard evaluates `true`. Guard-skipped rules do NOT emit
+    /// a [`ReactionResult`] — they never fired.
+    #[serde(default)]
+    pub guard: Option<ReactionGuard>,
+}
+
+/// Conditional firing predicate for a reaction rule.
+///
+/// Evaluated *after* the source action commits, against the source entity's
+/// post-action fields (sync variants) or another entity's current state
+/// (`CrossEntityStateIn`).
+///
+/// Mirrors the IOA guard variant names (see ADR-0015) so developers transfer
+/// knowledge between the two evaluation paths without coupling them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReactionGuard {
+    /// Source field equals the given JSON value.
+    FieldEquals {
+        /// Field name on the source entity.
+        field: String,
+        /// Expected value (string, number, bool, null).
+        value: serde_json::Value,
+    },
+    /// Source field is one of the given JSON values.
+    FieldIn {
+        /// Field name on the source entity.
+        field: String,
+        /// Allowed values.
+        values: Vec<serde_json::Value>,
+    },
+    /// Source field is a JSON boolean `true`.
+    BoolTrue {
+        /// Field name on the source entity.
+        field: String,
+    },
+    /// Source field is a JSON boolean `false`.
+    BoolFalse {
+        /// Field name on the source entity.
+        field: String,
+    },
+    /// Source entity's post-action status is one of the given values.
+    /// Complements [`ReactionTrigger::to_state`] when you need multiple
+    /// allowed states expressed as a single rule.
+    StateIn {
+        /// Allowed states.
+        values: Vec<String>,
+    },
+    /// Another entity's current status must be one of the given values.
+    /// The target entity is identified by reading `entity_id_source` from
+    /// the source entity's fields. Empty / missing target IDs count as
+    /// failure (not vacuous truth) — the reaction author must be explicit
+    /// about expected wiring.
+    CrossEntityStateIn {
+        /// Target entity type.
+        entity_type: String,
+        /// Source-entity field name holding the target entity id.
+        entity_id_source: String,
+        /// Target entity statuses that satisfy the guard.
+        required_status: Vec<String>,
+    },
+    /// All child guards must pass. Bounded by [`MAX_GUARD_DEPTH`].
+    AllOf {
+        /// Child guards.
+        guards: Vec<ReactionGuard>,
+    },
+    /// At least one child guard must pass. Bounded by [`MAX_GUARD_DEPTH`].
+    AnyOf {
+        /// Child guards.
+        guards: Vec<ReactionGuard>,
+    },
+    /// Inverted child guard. Bounded by [`MAX_GUARD_DEPTH`].
+    Not {
+        /// Inner guard.
+        guard: Box<ReactionGuard>,
+    },
+}
+
+impl ReactionGuard {
+    /// Compute the maximum composite nesting depth of this guard.
+    ///
+    /// Leaf variants are depth 1. `AllOf` / `AnyOf` / `Not` add one level.
+    /// Used by [`super::registry::parse_reactions`] to reject guards deeper
+    /// than [`MAX_GUARD_DEPTH`] at parse time.
+    pub fn depth(&self) -> u32 {
+        match self {
+            ReactionGuard::FieldEquals { .. }
+            | ReactionGuard::FieldIn { .. }
+            | ReactionGuard::BoolTrue { .. }
+            | ReactionGuard::BoolFalse { .. }
+            | ReactionGuard::StateIn { .. }
+            | ReactionGuard::CrossEntityStateIn { .. } => 1,
+            ReactionGuard::AllOf { guards } | ReactionGuard::AnyOf { guards } => {
+                1 + guards.iter().map(Self::depth).max().unwrap_or(0)
+            }
+            ReactionGuard::Not { guard } => 1 + guard.depth(),
+        }
+    }
 }
 
 /// The target action to dispatch when a reaction fires.
@@ -123,6 +231,7 @@ mod tests {
                 entity_type: "Order".to_string(),
                 action: Some("ConfirmOrder".to_string()),
                 to_state: Some("Confirmed".to_string()),
+                guard: None,
             },
             then: ReactionTarget {
                 entity_type: "Payment".to_string(),
@@ -197,5 +306,64 @@ mod tests {
         let fresh = TargetResolver::Create;
         let json = serde_json::to_string(&fresh).unwrap();
         assert!(json.contains("\"type\":\"Create\""));
+    }
+
+    #[test]
+    fn reaction_guard_serde_variants() {
+        let g = ReactionGuard::FieldEquals {
+            field: "job_type".to_string(),
+            value: serde_json::json!("source_search"),
+        };
+        let j = serde_json::to_string(&g).unwrap();
+        assert!(j.contains("\"type\":\"field_equals\""));
+        let back: ReactionGuard = serde_json::from_str(&j).unwrap();
+        assert!(matches!(back, ReactionGuard::FieldEquals { .. }));
+
+        let g = ReactionGuard::CrossEntityStateIn {
+            entity_type: "Workspace".to_string(),
+            entity_id_source: "workspace_id".to_string(),
+            required_status: vec!["Active".to_string()],
+        };
+        let j = serde_json::to_string(&g).unwrap();
+        assert!(j.contains("\"type\":\"cross_entity_state_in\""));
+
+        let g = ReactionGuard::AllOf {
+            guards: vec![
+                ReactionGuard::BoolTrue {
+                    field: "a".to_string(),
+                },
+                ReactionGuard::Not {
+                    guard: Box::new(ReactionGuard::BoolFalse {
+                        field: "b".to_string(),
+                    }),
+                },
+            ],
+        };
+        let j = serde_json::to_string(&g).unwrap();
+        assert!(j.contains("\"type\":\"all_of\""));
+        assert!(j.contains("\"type\":\"not\""));
+    }
+
+    #[test]
+    fn reaction_guard_depth() {
+        let leaf = ReactionGuard::BoolTrue {
+            field: "x".to_string(),
+        };
+        assert_eq!(leaf.depth(), 1);
+
+        let pair = ReactionGuard::AllOf {
+            guards: vec![leaf.clone(), leaf.clone()],
+        };
+        assert_eq!(pair.depth(), 2);
+
+        let nested = ReactionGuard::Not {
+            guard: Box::new(pair.clone()),
+        };
+        assert_eq!(nested.depth(), 3);
+
+        let deep = ReactionGuard::AnyOf {
+            guards: vec![nested],
+        };
+        assert_eq!(deep.depth(), 4);
     }
 }

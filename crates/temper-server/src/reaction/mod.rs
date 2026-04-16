@@ -9,6 +9,7 @@
 //! fulfilment cascades.
 
 pub mod dispatcher;
+pub(crate) mod guard;
 pub(crate) mod params;
 pub mod registry;
 pub(crate) mod resolver;
@@ -19,6 +20,6 @@ pub use dispatcher::ReactionDispatcher;
 pub use registry::ReactionRegistry;
 pub use sim_dispatcher::SimReactionSystem;
 pub use types::{
-    MAX_REACTION_DEPTH, MAX_REACTIONS_PER_TENANT, ReactionResult, ReactionRule, ReactionTarget,
-    ReactionTrigger, TargetResolver,
+    MAX_GUARD_DEPTH, MAX_REACTION_DEPTH, MAX_REACTIONS_PER_TENANT, ReactionGuard, ReactionResult,
+    ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
 };

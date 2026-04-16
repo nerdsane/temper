@@ -72,6 +72,33 @@ impl ReactionDispatcher {
         let mut results = Vec::new();
 
         for rule in rules {
+            // Guard evaluation: skip rules whose guard evaluates to false.
+            // Guard-skipped rules do not produce a `ReactionResult` — they
+            // never fired.
+            if let Some(guard) = &rule.when.guard {
+                let mut queries = Vec::new();
+                super::guard::collect_cross_entity_queries(guard, fields, &mut queries);
+                let mut resolved = super::guard::CrossStatusMap::new();
+                for q in &queries {
+                    let status = state
+                        .resolve_entity_status(tenant, &q.entity_type, &q.target_entity_id)
+                        .await;
+                    let matched = status.as_deref().map(|s| q.matches(s)).unwrap_or(false);
+                    resolved.insert(q.key(), matched);
+                }
+                let passed = super::guard::evaluate_with_resolved(
+                    guard, fields, to_state, &resolved, &rule.name,
+                );
+                if !passed {
+                    tracing::debug!(
+                        rule = rule.name,
+                        cross_entity_queries = queries.len(),
+                        "reaction guard failed; skipping rule"
+                    );
+                    continue;
+                }
+            }
+
             let target_entity_id =
                 match super::resolver::resolve_target_id(&rule.resolve_target, entity_id, fields) {
                     Some(id) => id,

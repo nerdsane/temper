@@ -115,6 +115,7 @@ pub(super) fn synthesize_agent_trigger_reactions(
                 entity_type: entity_type.to_string(),
                 action: Some(trigger.on_action.clone()),
                 to_state: trigger.to_state.clone(),
+                guard: None,
             },
             then: ReactionTarget {
                 entity_type: "Agent".to_string(),
@@ -133,6 +134,7 @@ pub(super) fn synthesize_agent_trigger_reactions(
                 entity_type: "Agent".to_string(),
                 action: Some("Assign".to_string()),
                 to_state: Some("Assigned".to_string()),
+                guard: None,
             },
             then: ReactionTarget {
                 entity_type: "Agent".to_string(),
