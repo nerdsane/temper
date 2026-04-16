@@ -115,11 +115,13 @@ pub(super) fn synthesize_agent_trigger_reactions(
                 entity_type: entity_type.to_string(),
                 action: Some(trigger.on_action.clone()),
                 to_state: trigger.to_state.clone(),
+                guard: None,
             },
             then: ReactionTarget {
                 entity_type: "Agent".to_string(),
                 action: "Assign".to_string(),
                 params,
+                params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::CreateIfMissing {
                 id_field: "id".to_string(),
@@ -132,11 +134,13 @@ pub(super) fn synthesize_agent_trigger_reactions(
                 entity_type: "Agent".to_string(),
                 action: Some("Assign".to_string()),
                 to_state: Some("Assigned".to_string()),
+                guard: None,
             },
             then: ReactionTarget {
                 entity_type: "Agent".to_string(),
                 action: "Start".to_string(),
                 params: serde_json::json!({}),
+                params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::SameId,
         },

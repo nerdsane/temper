@@ -11,7 +11,7 @@ use temper_runtime::scheduler::{FaultConfig, SimActorSystemConfig, install_deter
 use temper_server::reaction::registry::{ReactionRegistry, parse_reactions};
 use temper_server::reaction::sim_dispatcher::SimReactionSystem;
 use temper_server::reaction::types::{
-    ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
+    ReactionGuard, ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
 };
 
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
@@ -60,11 +60,13 @@ fn ecommerce_registry() -> ReactionRegistry {
                 entity_type: "Order".to_string(),
                 action: Some("ConfirmOrder".to_string()),
                 to_state: Some("Confirmed".to_string()),
+                guard: None,
             },
             then: ReactionTarget {
                 entity_type: "Payment".to_string(),
                 action: "AuthorizePayment".to_string(),
                 params: serde_json::json!({}),
+                params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::SameId,
         }],
@@ -191,11 +193,13 @@ fn field_based_target_resolution() {
                 entity_type: "Order".to_string(),
                 action: Some("ConfirmOrder".to_string()),
                 to_state: Some("Confirmed".to_string()),
+                guard: None,
             },
             then: ReactionTarget {
                 entity_type: "Payment".to_string(),
                 action: "AuthorizePayment".to_string(),
                 params: serde_json::json!({}),
+                params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::Field {
                 field: "payment_id".to_string(),
@@ -282,11 +286,13 @@ fn multi_step_cascade_with_chained_reactions() {
                     entity_type: "Order".to_string(),
                     action: Some("ConfirmOrder".to_string()),
                     to_state: Some("Confirmed".to_string()),
+                    guard: None,
                 },
                 then: ReactionTarget {
                     entity_type: "Payment".to_string(),
                     action: "AuthorizePayment".to_string(),
                     params: serde_json::json!({}),
+                    params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
             },
@@ -296,11 +302,13 @@ fn multi_step_cascade_with_chained_reactions() {
                     entity_type: "Payment".to_string(),
                     action: Some("AuthorizePayment".to_string()),
                     to_state: Some("Authorized".to_string()),
+                    guard: None,
                 },
                 then: ReactionTarget {
                     entity_type: "Payment".to_string(),
                     action: "CapturePayment".to_string(),
                     params: serde_json::json!({}),
+                    params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
             },
@@ -329,6 +337,235 @@ fn multi_step_cascade_with_chained_reactions() {
     assert_eq!(results[0].depth, 0);
     assert_eq!(results[1].rule_name, "authorize_triggers_capture");
     assert_eq!(results[1].depth, 1);
+}
+
+// =========================================================================
+// Phase 1: params_from — cascade fires with dynamic params declared,
+// missing source fields don't break the cascade (warn + skip policy).
+// =========================================================================
+
+#[test]
+fn cascade_with_params_from_fires_even_when_source_fields_missing() {
+    let (_guard, clock, _id_gen) = install_deterministic_context(42);
+
+    let mut reg = ReactionRegistry::new();
+    let mut params_from = std::collections::BTreeMap::new();
+    // Reference a field that ConfirmOrder doesn't produce — the dispatcher
+    // should log a warning and skip the key, not fail the reaction.
+    params_from.insert("dynamic_key".to_string(), "missing_field".to_string());
+    reg.register_tenant_rules(
+        "shop-pf",
+        vec![ReactionRule {
+            name: "order_confirmed_with_params_from".to_string(),
+            when: ReactionTrigger {
+                entity_type: "Order".to_string(),
+                action: Some("ConfirmOrder".to_string()),
+                to_state: Some("Confirmed".to_string()),
+                guard: None,
+            },
+            then: ReactionTarget {
+                entity_type: "Payment".to_string(),
+                action: "AuthorizePayment".to_string(),
+                params: serde_json::json!({"static_key": "static_value"}),
+                params_from,
+            },
+            resolve_target: TargetResolver::SameId,
+        }],
+    );
+
+    let mut sys = SimReactionSystem::new(sim_config(), reg, "shop-pf");
+    sys.register_entity("order-pf1", "Order", "pf1", order_table());
+    sys.register_entity("payment-pf1", "Payment", "pf1", payment_table());
+
+    clock.advance();
+    sys.step("order-pf1", "AddItem", "{}").unwrap();
+    clock.advance();
+    sys.step("order-pf1", "SubmitOrder", "{}").unwrap();
+    clock.advance();
+    sys.step("order-pf1", "ConfirmOrder", "{}").unwrap();
+
+    sys.assert_status("order-pf1", "Confirmed");
+    sys.assert_status("payment-pf1", "Authorized");
+
+    let results = sys.last_results();
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0].success,
+        "reaction should fire with partial params"
+    );
+    assert_eq!(results[0].rule_name, "order_confirmed_with_params_from");
+}
+
+#[test]
+fn paw_fs_reactions_toml_loads_through_parser() {
+    // Regression guard: the real os-apps/temper-fs/reactions/reactions.toml
+    // must load through parse_reactions. Prior to the Phase 3 audit this
+    // file was effectively dead data (PascalCase resolver types silently
+    // rejected by the snake_case parser). Ensures future edits keep the
+    // file valid against the parser.
+    let source = include_str!("../../../os-apps/temper-fs/reactions/reactions.toml");
+    let rules = parse_reactions(source).expect("paw-fs reactions.toml must parse");
+    assert_eq!(rules.len(), 3, "expected 3 rules in paw-fs reactions.toml");
+
+    let names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
+    assert!(names.contains(&"file_stream_updated_creates_version"));
+    assert!(names.contains(&"file_stream_updated_supersedes_old_version"));
+    assert!(names.contains(&"file_stream_updated_increments_workspace_usage"));
+}
+
+#[test]
+fn parse_reactions_toml_with_params_from_loads_through_registry() {
+    let toml = r#"
+[[reaction]]
+name = "order_confirmed_pipes_payment"
+[reaction.when]
+entity_type = "Order"
+action = "ConfirmOrder"
+[reaction.then]
+entity_type = "Payment"
+action = "AuthorizePayment"
+params = { source = "reaction" }
+params_from = { origin_order = "order_id" }
+[reaction.resolve_target]
+type = "same_id"
+"#;
+    let rules = parse_reactions(toml).expect("parse");
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].then.params_from.len(), 1);
+    assert_eq!(
+        rules[0]
+            .then
+            .params_from
+            .get("origin_order")
+            .map(String::as_str),
+        Some("order_id")
+    );
+}
+
+// =========================================================================
+// Phase 3: Guard on reaction.when — rule skips when guard fails, fires
+// when guard passes. Guard-skipped rules do NOT emit a ReactionResult.
+// =========================================================================
+
+#[test]
+fn guard_passing_rule_fires_guard_failing_rule_skipped() {
+    let (_guard, clock, _id_gen) = install_deterministic_context(42);
+
+    // Two rules on the same trigger; one guarded state_in = Confirmed,
+    // one guarded state_in = Cancelled. Only the Confirmed-guarded rule
+    // should fire.
+    let mut reg = ReactionRegistry::new();
+    reg.register_tenant_rules(
+        "shop-g",
+        vec![
+            ReactionRule {
+                name: "fires_on_confirmed".to_string(),
+                when: ReactionTrigger {
+                    entity_type: "Order".to_string(),
+                    action: Some("ConfirmOrder".to_string()),
+                    to_state: None,
+                    guard: Some(ReactionGuard::StateIn {
+                        values: vec!["Confirmed".to_string()],
+                    }),
+                },
+                then: ReactionTarget {
+                    entity_type: "Payment".to_string(),
+                    action: "AuthorizePayment".to_string(),
+                    params: serde_json::json!({}),
+                    params_from: std::collections::BTreeMap::new(),
+                },
+                resolve_target: TargetResolver::SameId,
+            },
+            ReactionRule {
+                name: "skipped_on_cancelled".to_string(),
+                when: ReactionTrigger {
+                    entity_type: "Order".to_string(),
+                    action: Some("ConfirmOrder".to_string()),
+                    to_state: None,
+                    guard: Some(ReactionGuard::StateIn {
+                        values: vec!["Cancelled".to_string()],
+                    }),
+                },
+                then: ReactionTarget {
+                    entity_type: "Payment".to_string(),
+                    action: "FailPayment".to_string(),
+                    params: serde_json::json!({}),
+                    params_from: std::collections::BTreeMap::new(),
+                },
+                resolve_target: TargetResolver::SameId,
+            },
+        ],
+    );
+
+    let mut sys = SimReactionSystem::new(sim_config(), reg, "shop-g");
+    sys.register_entity("order-g1", "Order", "g1", order_table());
+    sys.register_entity("payment-g1", "Payment", "g1", payment_table());
+
+    clock.advance();
+    sys.step("order-g1", "AddItem", "{}").unwrap();
+    clock.advance();
+    sys.step("order-g1", "SubmitOrder", "{}").unwrap();
+    clock.advance();
+    sys.step("order-g1", "ConfirmOrder", "{}").unwrap();
+
+    sys.assert_status("order-g1", "Confirmed");
+    sys.assert_status("payment-g1", "Authorized");
+
+    let results = sys.last_results();
+    // Only the passing rule emits a result; the skipped rule does not.
+    assert_eq!(results.len(), 1, "exactly one reaction should have fired");
+    assert_eq!(results[0].rule_name, "fires_on_confirmed");
+}
+
+#[test]
+fn not_guard_skips_rule_when_inner_passes() {
+    let (_guard, clock, _id_gen) = install_deterministic_context(42);
+
+    // Rule guarded with Not(StateIn[Confirmed]) — should skip because
+    // source post-state IS Confirmed.
+    let mut reg = ReactionRegistry::new();
+    reg.register_tenant_rules(
+        "shop-not",
+        vec![ReactionRule {
+            name: "skipped_when_confirmed".to_string(),
+            when: ReactionTrigger {
+                entity_type: "Order".to_string(),
+                action: Some("ConfirmOrder".to_string()),
+                to_state: None,
+                guard: Some(ReactionGuard::Not {
+                    guard: Box::new(ReactionGuard::StateIn {
+                        values: vec!["Confirmed".to_string()],
+                    }),
+                }),
+            },
+            then: ReactionTarget {
+                entity_type: "Payment".to_string(),
+                action: "AuthorizePayment".to_string(),
+                params: serde_json::json!({}),
+                params_from: std::collections::BTreeMap::new(),
+            },
+            resolve_target: TargetResolver::SameId,
+        }],
+    );
+
+    let mut sys = SimReactionSystem::new(sim_config(), reg, "shop-not");
+    sys.register_entity("order-n1", "Order", "n1", order_table());
+    sys.register_entity("payment-n1", "Payment", "n1", payment_table());
+
+    clock.advance();
+    sys.step("order-n1", "AddItem", "{}").unwrap();
+    clock.advance();
+    sys.step("order-n1", "SubmitOrder", "{}").unwrap();
+    clock.advance();
+    sys.step("order-n1", "ConfirmOrder", "{}").unwrap();
+
+    sys.assert_status("order-n1", "Confirmed");
+    // Payment should still be in its initial state — guard skipped the rule.
+    sys.assert_status("payment-n1", "Pending");
+    assert!(
+        sys.last_results().is_empty(),
+        "guard-skipped rule must not emit a ReactionResult"
+    );
 }
 
 // =========================================================================

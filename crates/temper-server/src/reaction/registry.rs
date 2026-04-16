@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use temper_runtime::tenant::TenantId;
 
 use super::types::{
-    MAX_REACTIONS_PER_TENANT, ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
+    MAX_GUARD_DEPTH, MAX_REACTIONS_PER_TENANT, ReactionGuard, ReactionRule, ReactionTarget,
+    ReactionTrigger, TargetResolver,
 };
 
 /// Registry of reaction rules, indexed per-tenant for fast lookup.
@@ -128,6 +129,8 @@ struct TriggerToml {
     entity_type: String,
     action: Option<String>,
     to_state: Option<String>,
+    #[serde(default)]
+    guard: Option<ReactionGuard>,
 }
 
 #[derive(serde::Deserialize)]
@@ -136,6 +139,8 @@ struct TargetToml {
     action: String,
     #[serde(default)]
     params: Option<serde_json::Value>,
+    #[serde(default)]
+    params_from: Option<BTreeMap<String, String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -199,6 +204,7 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
                 })?;
                 TargetResolver::CreateIfMissing { id_field }
             }
+            "create" => TargetResolver::Create,
             other => {
                 return Err(format!(
                     "Reaction '{}': unknown resolver type '{other}'",
@@ -207,17 +213,51 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
             }
         };
 
+        let static_params = r.then.params.unwrap_or(serde_json::json!({}));
+        let params_from = r.then.params_from.unwrap_or_default();
+
+        // Collision check: static `params` and dynamic `params_from` must not
+        // name the same target key. We only enforce this when `params` is an
+        // object (the only shape that could collide). Non-object `params`
+        // (null, scalar, array) are tolerated — `build_effective_params` will
+        // skip the dynamic merge and log a warning at dispatch time.
+        if let serde_json::Value::Object(ref map) = static_params {
+            for key in params_from.keys() {
+                if map.contains_key(key) {
+                    return Err(format!(
+                        "Reaction '{}': key '{}' appears in both `params` and `params_from`; \
+                         pick one source",
+                        r.name, key
+                    ));
+                }
+            }
+        }
+
+        // Guard depth budget — enforced at parse time so drift is caught
+        // before any reaction fires (TigerStyle).
+        if let Some(ref g) = r.when.guard {
+            let d = g.depth();
+            if d > MAX_GUARD_DEPTH {
+                return Err(format!(
+                    "Reaction '{}': guard nesting depth {d} exceeds budget of {MAX_GUARD_DEPTH}",
+                    r.name
+                ));
+            }
+        }
+
         rules.push(ReactionRule {
             name: r.name,
             when: ReactionTrigger {
                 entity_type: r.when.entity_type,
                 action: r.when.action,
                 to_state: r.when.to_state,
+                guard: r.when.guard,
             },
             then: ReactionTarget {
                 entity_type: r.then.entity_type,
                 action: r.then.action,
-                params: r.then.params.unwrap_or(serde_json::json!({})),
+                params: static_params,
+                params_from,
             },
             resolve_target,
         });
@@ -244,11 +284,13 @@ mod tests {
                 entity_type: entity_type.to_string(),
                 action: action.map(|s| s.to_string()),
                 to_state: to_state.map(|s| s.to_string()),
+                guard: None,
             },
             then: ReactionTarget {
                 entity_type: target_type.to_string(),
                 action: target_action.to_string(),
                 params: serde_json::json!({}),
+                params_from: BTreeMap::new(),
             },
             resolve_target: TargetResolver::SameId,
         }
@@ -497,7 +539,7 @@ type = "static"
 entity_id = "singleton-1"
 
 [[reaction]]
-name = "create_resolver"
+name = "create_if_missing_resolver"
 [reaction.when]
 entity_type = "A"
 [reaction.then]
@@ -506,9 +548,19 @@ action = "Do"
 [reaction.resolve_target]
 type = "create_if_missing"
 id_field = "b_id"
+
+[[reaction]]
+name = "create_resolver"
+[reaction.when]
+entity_type = "A"
+[reaction.then]
+entity_type = "B"
+action = "Do"
+[reaction.resolve_target]
+type = "create"
 "#;
         let rules = parse_reactions(toml).unwrap();
-        assert_eq!(rules.len(), 4);
+        assert_eq!(rules.len(), 5);
         assert!(
             matches!(rules[0].resolve_target, TargetResolver::Field { ref field } if field == "b_id")
         );
@@ -519,6 +571,191 @@ id_field = "b_id"
         assert!(
             matches!(rules[3].resolve_target, TargetResolver::CreateIfMissing { ref id_field } if id_field == "b_id")
         );
+        assert!(matches!(rules[4].resolve_target, TargetResolver::Create));
+    }
+
+    #[test]
+    fn parse_reactions_accepts_params_from() {
+        let toml = r#"
+[[reaction]]
+name = "pipeline_chain"
+[reaction.when]
+entity_type = "CurationJob"
+action = "Complete"
+[reaction.then]
+entity_type = "CurationJob"
+action = "Submit"
+params = { requested_by = "system" }
+params_from = { job_type = "next_stage", input = "output" }
+[reaction.resolve_target]
+type = "create_if_missing"
+id_field = "next_job_id"
+"#;
+        let rules = parse_reactions(toml).unwrap();
+        assert_eq!(rules.len(), 1);
+        let target = &rules[0].then;
+        assert_eq!(
+            target.params_from.get("job_type").map(String::as_str),
+            Some("next_stage")
+        );
+        assert_eq!(
+            target.params_from.get("input").map(String::as_str),
+            Some("output")
+        );
+        assert_eq!(target.params, serde_json::json!({"requested_by": "system"}));
+    }
+
+    #[test]
+    fn parse_reactions_rejects_params_collision() {
+        let toml = r#"
+[[reaction]]
+name = "collide"
+[reaction.when]
+entity_type = "A"
+[reaction.then]
+entity_type = "B"
+action = "Do"
+params = { shared = "static" }
+params_from = { shared = "src" }
+[reaction.resolve_target]
+type = "same_id"
+"#;
+        let err = parse_reactions(toml).unwrap_err();
+        assert!(
+            err.contains("key 'shared' appears in both `params` and `params_from`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_reactions_accepts_source_field_guard() {
+        let toml = r#"
+[[reaction]]
+name = "guarded"
+[reaction.when]
+entity_type = "CurationJob"
+action = "Complete"
+[reaction.when.guard]
+type = "field_equals"
+field = "job_type"
+value = "source_search"
+[reaction.then]
+entity_type = "CurationJob"
+action = "Submit"
+[reaction.resolve_target]
+type = "create"
+"#;
+        let rules = parse_reactions(toml).expect("parse");
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(
+            rules[0].when.guard,
+            Some(ReactionGuard::FieldEquals { ref field, .. }) if field == "job_type"
+        ));
+    }
+
+    #[test]
+    fn parse_reactions_accepts_cross_entity_guard() {
+        let toml = r#"
+[[reaction]]
+name = "parent_active_only"
+[reaction.when]
+entity_type = "Session"
+action = "Complete"
+[reaction.when.guard]
+type = "cross_entity_state_in"
+entity_type = "Workspace"
+entity_id_source = "workspace_id"
+required_status = ["Active"]
+[reaction.then]
+entity_type = "Workspace"
+action = "Ack"
+[reaction.resolve_target]
+type = "field"
+field = "workspace_id"
+"#;
+        let rules = parse_reactions(toml).expect("parse");
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(
+            rules[0].when.guard,
+            Some(ReactionGuard::CrossEntityStateIn { ref entity_type, .. })
+                if entity_type == "Workspace"
+        ));
+    }
+
+    #[test]
+    fn parse_reactions_accepts_composite_guard() {
+        let toml = r#"
+[[reaction]]
+name = "composite"
+[reaction.when]
+entity_type = "A"
+[reaction.when.guard]
+type = "all_of"
+guards = [
+  { type = "bool_true", field = "ready" },
+  { type = "state_in", values = ["Complete"] },
+]
+[reaction.then]
+entity_type = "B"
+action = "Do"
+[reaction.resolve_target]
+type = "same_id"
+"#;
+        let rules = parse_reactions(toml).expect("parse");
+        assert!(matches!(
+            rules[0].when.guard,
+            Some(ReactionGuard::AllOf { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_reactions_rejects_deeply_nested_guard() {
+        // depth 5 > MAX_GUARD_DEPTH = 4 — should be rejected at parse.
+        let toml = r#"
+[[reaction]]
+name = "too_deep"
+[reaction.when]
+entity_type = "A"
+[reaction.when.guard]
+type = "not"
+[reaction.when.guard.guard]
+type = "not"
+[reaction.when.guard.guard.guard]
+type = "not"
+[reaction.when.guard.guard.guard.guard]
+type = "not"
+[reaction.when.guard.guard.guard.guard.guard]
+type = "bool_true"
+field = "x"
+[reaction.then]
+entity_type = "B"
+action = "Do"
+[reaction.resolve_target]
+type = "same_id"
+"#;
+        let err = parse_reactions(toml).unwrap_err();
+        assert!(
+            err.contains("guard nesting depth 5 exceeds budget of 4"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_reactions_missing_params_from_defaults_empty() {
+        let toml = r#"
+[[reaction]]
+name = "static_only"
+[reaction.when]
+entity_type = "A"
+[reaction.then]
+entity_type = "B"
+action = "Do"
+params = { a = 1 }
+[reaction.resolve_target]
+type = "same_id"
+"#;
+        let rules = parse_reactions(toml).unwrap();
+        assert!(rules[0].then.params_from.is_empty());
     }
 
     #[test]

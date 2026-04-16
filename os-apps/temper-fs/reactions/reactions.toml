@@ -17,7 +17,7 @@ entity_type = "FileVersion"
 action = "Create"
 
 [reaction.resolve_target]
-type = "CreateIfMissing"
+type = "create_if_missing"
 id_field = "last_version_id"
 
 # When a new version is created, supersede the previous FileVersion.
@@ -33,7 +33,7 @@ entity_type = "FileVersion"
 action = "Supersede"
 
 [reaction.resolve_target]
-type = "Field"
+type = "field"
 field = "last_version_id"
 
 # When a file's content is updated, increment the workspace's used bytes.
@@ -49,5 +49,5 @@ entity_type = "Workspace"
 action = "IncrementUsage"
 
 [reaction.resolve_target]
-type = "Field"
+type = "field"
 field = "workspace_id"
