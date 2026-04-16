@@ -136,6 +136,8 @@ pub struct AppBundle {
     pub specs: Vec<(String, String)>,
     /// CSDL XML source (None if app has no IOA specs).
     pub csdl: Option<String>,
+    /// Optional tenant-scoped cross-invariants source.
+    pub cross_invariants_toml: Option<String>,
     /// Cedar policy sources (may be empty).
     pub cedar_policies: Vec<String>,
     /// WASM module binaries as `(module_name, wasm_bytes)` pairs.

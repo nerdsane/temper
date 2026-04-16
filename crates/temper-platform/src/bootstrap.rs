@@ -93,6 +93,7 @@ pub(crate) fn bootstrap_tenant_specs(
     merge: bool,
     label: &str,
     verified_cache: &BTreeMap<String, (String, bool)>,
+    cross_invariants_source: Option<&str>,
 ) -> Vec<(String, String)> {
     bootstrap_tenant_specs_inner(
         state,
@@ -102,6 +103,7 @@ pub(crate) fn bootstrap_tenant_specs(
         label,
         verified_cache,
         merge,
+        cross_invariants_source,
     )
 }
 
@@ -113,6 +115,7 @@ fn bootstrap_tenant_specs_inner(
     label: &str,
     verified_cache: &BTreeMap<String, (String, bool)>,
     merge: bool,
+    cross_invariants_source: Option<&str>,
 ) -> Vec<(String, String)> {
     tracing::info!(
         "Bootstrapping {label} specs for tenant '{tenant}' with {} entities",
@@ -171,7 +174,7 @@ fn bootstrap_tenant_specs_inner(
                 csdl_source.to_string(),
                 specs,
                 Vec::new(),
-                None,
+                cross_invariants_source.map(str::to_string),
                 merge,
             )
             .unwrap_or_else(|e| panic!("failed to register {label} specs for '{tenant}': {e}"));
@@ -219,6 +222,7 @@ pub fn bootstrap_system_tenant(
         false,
         "System",
         verified_cache,
+        None,
     )
 }
 
@@ -241,6 +245,7 @@ pub fn bootstrap_agent_specs(
         merge,
         "Agent",
         verified_cache,
+        None,
     )
 }
 
