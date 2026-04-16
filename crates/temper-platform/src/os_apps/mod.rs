@@ -1079,6 +1079,8 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
 
     // Read CSDL (optional — apps without specs won't have CSDL).
     let csdl = find_csdl(app_dir).and_then(|p| std::fs::read_to_string(&p).ok());
+    let cross_invariants_toml =
+        std::fs::read_to_string(app_dir.join("specs").join("cross-invariants.toml")).ok();
 
     // Read Cedar policies.
     let cedar_policies: Vec<String> = find_cedar_policies(app_dir)
@@ -1118,6 +1120,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         && seed_instances.is_empty()
         && app_guide.is_none()
         && csdl.is_none()
+        && cross_invariants_toml.is_none()
     {
         return None;
     }
@@ -1125,6 +1128,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     Some(AppBundle {
         specs,
         csdl,
+        cross_invariants_toml,
         cedar_policies,
         wasm_modules,
         wasm_module_configs,
@@ -1332,6 +1336,12 @@ async fn install_os_app_without_dependencies(
                 .await
                 .map_err(|e| format!("Failed to persist and commit specs: {e}"))?;
         }
+        if let Some(ref cross_invariants_toml) = bundle.cross_invariants_toml {
+            turso
+                .upsert_tenant_constraints(tenant, cross_invariants_toml)
+                .await
+                .map_err(|e| format!("Failed to persist cross-invariants: {e}"))?;
+        }
     } else if let Some(ref store) = state.server.event_store
         && let Some(ps) = store.platform_store()
     {
@@ -1347,6 +1357,11 @@ async fn install_os_app_without_dependencies(
             ps.upsert_tenant_policy(tenant, policy_text)
                 .await
                 .map_err(|e| format!("Failed to persist Cedar policy: {e}"))?;
+        }
+        if let Some(ref cross_invariants_toml) = bundle.cross_invariants_toml {
+            ps.upsert_tenant_constraints(tenant, cross_invariants_toml)
+                .await
+                .map_err(|e| format!("Failed to persist cross-invariants: {e}"))?;
         }
         ps.record_installed_app(tenant, app_name)
             .await
@@ -1395,6 +1410,7 @@ async fn install_os_app_without_dependencies(
                 true,
                 &format!("OsApp({app_name})"),
                 &verified_cache,
+                bundle.cross_invariants_toml.as_deref(),
             );
 
             if let Some(ref store) = state.server.event_store
