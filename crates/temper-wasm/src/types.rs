@@ -53,7 +53,9 @@ pub struct WasmResourceLimits {
     pub max_fuel: u64,
     /// Maximum memory in bytes. Default: 64 MB.
     pub max_memory: usize,
-    /// Maximum execution duration. Default: 30 seconds.
+    /// Maximum execution duration. Default: 120 seconds.
+    ///
+    /// Raised from 30s in ADR-0045 to cover HTTP-fronted integrations under load.
     pub max_duration: std::time::Duration,
     /// Maximum HTTP response body size. Default: 1 MB.
     pub max_response_bytes: usize,
@@ -64,7 +66,7 @@ impl Default for WasmResourceLimits {
         Self {
             max_fuel: 1_000_000_000,
             max_memory: 64 * 1024 * 1024,
-            max_duration: std::time::Duration::from_secs(30),
+            max_duration: std::time::Duration::from_secs(120),
             max_response_bytes: 1024 * 1024,
         }
     }
@@ -175,7 +177,8 @@ mod tests {
         let limits = WasmResourceLimits::default();
         assert_eq!(limits.max_fuel, 1_000_000_000);
         assert_eq!(limits.max_memory, 64 * 1024 * 1024);
-        assert_eq!(limits.max_duration, std::time::Duration::from_secs(30));
+        // ADR-0045: raised from 30s to cover HTTP-fronted integrations under load.
+        assert_eq!(limits.max_duration, std::time::Duration::from_secs(120));
         assert_eq!(limits.max_response_bytes, 1024 * 1024);
     }
 
