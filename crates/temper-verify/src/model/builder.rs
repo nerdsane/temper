@@ -173,57 +173,78 @@ fn resolve_invariants(automaton: &Automaton) -> Vec<ResolvedInvariant> {
     for inv in &automaton.invariants {
         let expr = inv.assert.trim();
 
-        // Primary: use the shared assertion parser
-        if let Some(parsed) = parse_assert_expr(expr) {
-            let kind = match parsed {
-                ParsedAssert::CounterPositive { var } => InvariantKind::CounterPositive { var },
-                ParsedAssert::NoFurtherTransitions => InvariantKind::NoFurtherTransitions,
-                ParsedAssert::NeverState { state } => InvariantKind::NeverState { state },
-                ParsedAssert::CounterCompare { var, op, value } => {
-                    InvariantKind::CounterCompare { var, op, value }
-                }
-                ParsedAssert::OrderingConstraint { .. } => {
-                    // Not encodable at model level (requires path history tracking).
-                    // The runtime sim_handler handles this directly.
-                    InvariantKind::Unverifiable {
-                        expression: expr.to_string(),
-                    }
-                }
-            };
-            result.push(ResolvedInvariant {
-                name: inv.name.clone(),
-                trigger_states: inv.when.clone(),
-                required_states: vec![],
-                kind,
-            });
-            continue;
-        }
-
-        // Fallback: bare identifier → BoolRequired (if it's a known boolean)
-        if !expr.contains(' ') && bool_names.contains(&expr) {
-            result.push(ResolvedInvariant {
-                name: inv.name.clone(),
-                trigger_states: inv.when.clone(),
-                required_states: vec![],
-                kind: InvariantKind::BoolRequired {
-                    var: expr.to_string(),
-                },
-            });
-            continue;
-        }
-
-        // Unrecognized: explicit Unverifiable instead of silent Implication
+        let kind = match parse_assert_expr(expr) {
+            Some(parsed) => translate_parsed_assert(parsed, expr, &bool_names),
+            None => InvariantKind::Unverifiable {
+                expression: expr.to_string(),
+            },
+        };
         result.push(ResolvedInvariant {
             name: inv.name.clone(),
             trigger_states: inv.when.clone(),
             required_states: vec![],
-            kind: InvariantKind::Unverifiable {
-                expression: expr.to_string(),
-            },
+            kind,
         });
     }
 
     result
+}
+
+/// Translate a [`ParsedAssert`] into an [`InvariantKind`].
+///
+/// Bare boolean references are only accepted when the variable is declared
+/// as a `bool` in the automaton state; otherwise the whole expression falls
+/// through to `Unverifiable`. This preserves the pre-compound behavior of
+/// rejecting unknown identifiers rather than silently asserting on them.
+fn translate_parsed_assert(
+    parsed: ParsedAssert,
+    raw: &str,
+    bool_names: &[&str],
+) -> InvariantKind {
+    match try_translate(&parsed, bool_names) {
+        Some(kind) => kind,
+        None => InvariantKind::Unverifiable {
+            expression: raw.to_string(),
+        },
+    }
+}
+
+fn try_translate(parsed: &ParsedAssert, bool_names: &[&str]) -> Option<InvariantKind> {
+    match parsed {
+        ParsedAssert::CounterPositive { var } => Some(InvariantKind::CounterPositive {
+            var: var.clone(),
+        }),
+        ParsedAssert::NoFurtherTransitions => Some(InvariantKind::NoFurtherTransitions),
+        ParsedAssert::NeverState { state } => Some(InvariantKind::NeverState {
+            state: state.clone(),
+        }),
+        ParsedAssert::CounterCompare { var, op, value } => Some(InvariantKind::CounterCompare {
+            var: var.clone(),
+            op: op.clone(),
+            value: *value,
+        }),
+        ParsedAssert::BoolRequired { var, expect } => {
+            if bool_names.contains(&var.as_str()) {
+                Some(InvariantKind::BoolRequired {
+                    var: var.clone(),
+                    expect: *expect,
+                })
+            } else {
+                None
+            }
+        }
+        ParsedAssert::OrderingConstraint { .. } => None,
+        ParsedAssert::And(parts) => {
+            let mapped: Option<Vec<_>> =
+                parts.iter().map(|p| try_translate(p, bool_names)).collect();
+            mapped.map(InvariantKind::And)
+        }
+        ParsedAssert::Or(parts) => {
+            let mapped: Option<Vec<_>> =
+                parts.iter().map(|p| try_translate(p, bool_names)).collect();
+            mapped.map(InvariantKind::Or)
+        }
+    }
 }
 
 /// Translate IOA liveness properties into resolved liveness.
@@ -421,5 +442,126 @@ mod tests {
                 t.name, t.from_states, t.to_state, t.guard, t.effects
             );
         }
+    }
+
+    // --- Compound invariant tests ---------------------------------------
+
+    const COMPOUND_IOA: &str = r#"
+[automaton]
+name = "Release"
+states = ["Planning", "Testing", "Shipped"]
+initial = "Planning"
+
+[[state]]
+name = "migrations_ok"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "typecheck_ok"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "unit_tests_ok"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "EnterTesting"
+kind = "input"
+from = ["Planning"]
+to = "Testing"
+
+[[action]]
+name = "Ship"
+kind = "internal"
+from = ["Testing"]
+to = "Shipped"
+
+[[invariant]]
+name = "TestingRequiresAllGates"
+when = ["Testing", "Shipped"]
+assert = "migrations_ok && typecheck_ok && unit_tests_ok"
+
+[[invariant]]
+name = "EitherReviewer"
+when = ["Shipped"]
+assert = "migrations_ok || typecheck_ok"
+"#;
+
+    #[test]
+    fn test_compound_and_invariant_resolves_to_and() {
+        let model = build_model_from_ioa(COMPOUND_IOA, 2).unwrap();
+        let inv = model
+            .invariants
+            .iter()
+            .find(|i| i.name == "TestingRequiresAllGates")
+            .expect("TestingRequiresAllGates invariant must be present");
+        match &inv.kind {
+            InvariantKind::And(parts) => {
+                assert_eq!(parts.len(), 3);
+                for p in parts {
+                    assert!(
+                        matches!(p, InvariantKind::BoolRequired { expect: true, .. }),
+                        "part should be BoolRequired{{expect:true}}, got {p:?}"
+                    );
+                }
+            }
+            other => panic!("expected And, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_compound_or_invariant_resolves_to_or() {
+        let model = build_model_from_ioa(COMPOUND_IOA, 2).unwrap();
+        let inv = model
+            .invariants
+            .iter()
+            .find(|i| i.name == "EitherReviewer")
+            .expect("EitherReviewer invariant must be present");
+        match &inv.kind {
+            InvariantKind::Or(parts) => {
+                assert_eq!(parts.len(), 2);
+            }
+            other => panic!("expected Or, got {other:?}"),
+        }
+    }
+
+    const COMPOUND_UNDECLARED_IOA: &str = r#"
+[automaton]
+name = "Release"
+states = ["Planning", "Shipped"]
+initial = "Planning"
+
+[[state]]
+name = "migrations_ok"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "Ship"
+kind = "internal"
+from = ["Planning"]
+to = "Shipped"
+
+[[invariant]]
+name = "MixedDeclaredUndeclared"
+when = ["Shipped"]
+assert = "migrations_ok && undeclared_flag"
+"#;
+
+    #[test]
+    fn test_compound_with_undeclared_bool_becomes_unverifiable() {
+        let model = build_model_from_ioa(COMPOUND_UNDECLARED_IOA, 2).unwrap();
+        let inv = model
+            .invariants
+            .iter()
+            .find(|i| i.name == "MixedDeclaredUndeclared")
+            .unwrap();
+        assert!(
+            matches!(inv.kind, InvariantKind::Unverifiable { .. }),
+            "compound expression referencing an undeclared bool must fall back to Unverifiable"
+        );
     }
 }

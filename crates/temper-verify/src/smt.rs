@@ -162,8 +162,15 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                     var,
                     max_counter,
                 ),
-                InvariantKind::BoolRequired { var } => {
-                    check_bool_required_induction_z3(model, &inv.trigger_states, var)
+                InvariantKind::BoolRequired { var, expect } => {
+                    // Induction checker assumes `expect = true`. For `!flag`,
+                    // fall back to runtime simulation (model checking still
+                    // exercises it via proptest_gen and simulation).
+                    if *expect {
+                        check_bool_required_induction_z3(model, &inv.trigger_states, var)
+                    } else {
+                        true
+                    }
                 }
                 InvariantKind::NoFurtherTransitions => {
                     // For each trigger state: no transitions should have it
@@ -214,6 +221,18 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                         .iter()
                         .any(|t| t.to_state.as_ref().is_some_and(|to| to == state))
                 }
+                InvariantKind::And(parts) => {
+                    // Sound over-approximation: `a && b` is inductive iff each
+                    // part is inductive under the same trigger_states.
+                    parts.iter().all(|p| {
+                        kind_inductive_smt(model, &inv.trigger_states, p, max_counter)
+                    })
+                }
+                InvariantKind::Or(_) => {
+                    // Disjunctive induction requires joint encoding; runtime
+                    // simulation (proptest_gen/simulation) catches violations.
+                    true
+                }
                 InvariantKind::Unverifiable { .. } => {
                     // Not checkable at model level — trivially inductive.
                     true
@@ -223,6 +242,60 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
             (inv.name.clone(), inductive)
         })
         .collect()
+}
+
+/// Recursive induction check for a single [`InvariantKind`] — used by `And`.
+///
+/// Mirrors the per-variant logic in [`check_invariant_induction`]; compound
+/// recursion is sound at the And layer (all parts must hold). For Or, returns
+/// `true` (see note above — runtime catches disjunctive violations).
+fn kind_inductive_smt(
+    model: &TemperModel,
+    trigger_states: &[String],
+    kind: &InvariantKind,
+    max_counter: usize,
+) -> bool {
+    match kind {
+        InvariantKind::StatusInSet => model.transitions.iter().all(|t| {
+            t.to_state
+                .as_ref()
+                .map(|s| model.states.contains(s))
+                .unwrap_or(true)
+        }),
+        InvariantKind::CounterPositive { var } => {
+            check_counter_positive_induction_z3(model, trigger_states, var, max_counter)
+        }
+        InvariantKind::BoolRequired { var, expect } => {
+            if *expect {
+                check_bool_required_induction_z3(model, trigger_states, var)
+            } else {
+                true
+            }
+        }
+        InvariantKind::NoFurtherTransitions => trigger_states.iter().all(|trigger| {
+            !model
+                .transitions
+                .iter()
+                .any(|t| t.from_states.contains(trigger) || t.from_states.is_empty())
+        }),
+        InvariantKind::Implication => true,
+        InvariantKind::CounterCompare { var, op, value } => check_counter_compare_induction_z3(
+            model,
+            trigger_states,
+            var,
+            op,
+            *value,
+            max_counter,
+        ),
+        InvariantKind::NeverState { state } => !model
+            .transitions
+            .iter()
+            .any(|t| t.to_state.as_ref().is_some_and(|to| to == state)),
+        InvariantKind::And(parts) => parts
+            .iter()
+            .all(|p| kind_inductive_smt(model, trigger_states, p, max_counter)),
+        InvariantKind::Or(_) | InvariantKind::Unverifiable { .. } => true,
+    }
 }
 
 /// Z3 induction check for CounterPositive invariants.

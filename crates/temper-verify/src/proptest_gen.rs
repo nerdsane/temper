@@ -58,51 +58,66 @@ fn check_invariants(model: &TemperModel, state: &TemperModelState) -> Result<(),
             continue;
         }
 
-        let violated = match &inv.kind {
-            InvariantKind::StatusInSet => !model.states.contains(&state.status),
-            InvariantKind::CounterPositive { var } => {
-                state.counters.get(var).copied().unwrap_or(0) == 0
-            }
-            InvariantKind::BoolRequired { var } => {
-                !state.booleans.get(var).copied().unwrap_or(false)
-            }
-            InvariantKind::NoFurtherTransitions => {
-                let mut actions = Vec::new();
-                model.actions(state, &mut actions);
-                !actions.is_empty()
-            }
-            InvariantKind::Implication => {
-                let valid_required: Vec<&String> = inv
-                    .required_states
-                    .iter()
-                    .filter(|s| model.states.contains(s))
-                    .collect();
-                if valid_required.is_empty() {
-                    false // constrains non-status variables
-                } else {
-                    !valid_required.contains(&&state.status)
-                }
-            }
-            InvariantKind::CounterCompare { var, op, value } => {
-                let val = state.counters.get(var).copied().unwrap_or(0);
-                let holds = match op {
-                    AssertCompareOp::Gt => val > *value,
-                    AssertCompareOp::Gte => val >= *value,
-                    AssertCompareOp::Lt => val < *value,
-                    AssertCompareOp::Lte => val <= *value,
-                    AssertCompareOp::Eq => val == *value,
-                };
-                !holds
-            }
-            InvariantKind::NeverState { state: forbidden } => state.status == *forbidden,
-            InvariantKind::Unverifiable { .. } => false, // not checkable, never violated
-        };
-
-        if violated {
+        if kind_violated(&inv.kind, &inv.required_states, model, state) {
             return Err(inv.name.clone());
         }
     }
     Ok(())
+}
+
+/// Evaluate whether an [`InvariantKind`] is violated given model+state.
+///
+/// Pure recursion over compound variants; does not consult `trigger_states`.
+fn kind_violated(
+    kind: &InvariantKind,
+    required_states: &[String],
+    model: &TemperModel,
+    state: &TemperModelState,
+) -> bool {
+    match kind {
+        InvariantKind::StatusInSet => !model.states.contains(&state.status),
+        InvariantKind::CounterPositive { var } => {
+            state.counters.get(var).copied().unwrap_or(0) == 0
+        }
+        InvariantKind::BoolRequired { var, expect } => {
+            state.booleans.get(var).copied().unwrap_or(false) != *expect
+        }
+        InvariantKind::NoFurtherTransitions => {
+            let mut actions = Vec::new();
+            model.actions(state, &mut actions);
+            !actions.is_empty()
+        }
+        InvariantKind::Implication => {
+            let valid_required: Vec<&String> = required_states
+                .iter()
+                .filter(|s| model.states.contains(s))
+                .collect();
+            if valid_required.is_empty() {
+                false
+            } else {
+                !valid_required.contains(&&state.status)
+            }
+        }
+        InvariantKind::CounterCompare { var, op, value } => {
+            let val = state.counters.get(var).copied().unwrap_or(0);
+            let holds = match op {
+                AssertCompareOp::Gt => val > *value,
+                AssertCompareOp::Gte => val >= *value,
+                AssertCompareOp::Lt => val < *value,
+                AssertCompareOp::Lte => val <= *value,
+                AssertCompareOp::Eq => val == *value,
+            };
+            !holds
+        }
+        InvariantKind::NeverState { state: forbidden } => state.status == *forbidden,
+        InvariantKind::And(parts) => parts
+            .iter()
+            .any(|k| kind_violated(k, required_states, model, state)),
+        InvariantKind::Or(parts) => parts
+            .iter()
+            .all(|k| kind_violated(k, required_states, model, state)),
+        InvariantKind::Unverifiable { .. } => false,
+    }
 }
 
 /// Collect enabled actions for a state.

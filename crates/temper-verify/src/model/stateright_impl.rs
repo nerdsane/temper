@@ -37,18 +37,86 @@ fn check_counter_positive(model: &TemperModel, state: &TemperModelState) -> bool
     true
 }
 
-/// Check all BoolRequired invariants: when status is in triggers, bool must be true.
+/// Check all BoolRequired invariants: when status is in triggers, bool matches `expect`.
 fn check_bool_required(model: &TemperModel, state: &TemperModelState) -> bool {
     for inv in &model.invariants {
-        if let InvariantKind::BoolRequired { ref var } = inv.kind {
+        if let InvariantKind::BoolRequired { ref var, expect } = inv.kind {
             let triggered =
                 inv.trigger_states.is_empty() || inv.trigger_states.contains(&state.status);
             if triggered {
                 let val = state.booleans.get(var).copied().unwrap_or(false);
-                if !val {
+                if val != expect {
                     return false;
                 }
             }
+        }
+    }
+    true
+}
+
+/// Evaluate a single [`InvariantKind`] against state. Returns `true` if holds.
+///
+/// Shared by `check_compound_invariants` for `And`/`Or` recursion.
+fn kind_holds(
+    kind: &InvariantKind,
+    required_states: &[String],
+    model: &TemperModel,
+    state: &TemperModelState,
+) -> bool {
+    match kind {
+        InvariantKind::StatusInSet => model.states.contains(&state.status),
+        InvariantKind::CounterPositive { var } => {
+            state.counters.get(var).copied().unwrap_or(0) > 0
+        }
+        InvariantKind::BoolRequired { var, expect } => {
+            state.booleans.get(var).copied().unwrap_or(false) == *expect
+        }
+        InvariantKind::NoFurtherTransitions => {
+            // Holds iff no transitions are enabled from current state.
+            !model.transitions.iter().any(|t| {
+                let status_ok = t.from_states.is_empty()
+                    || t.from_states.iter().any(|s| s == &state.status);
+                status_ok && evaluate_guard(&t.guard, state)
+            })
+        }
+        InvariantKind::Implication => {
+            let valid: Vec<&String> = required_states
+                .iter()
+                .filter(|s| model.states.contains(s))
+                .collect();
+            valid.is_empty() || valid.contains(&&state.status)
+        }
+        InvariantKind::CounterCompare { var, op, value } => {
+            let val = state.counters.get(var).copied().unwrap_or(0);
+            match op {
+                AssertCompareOp::Gt => val > *value,
+                AssertCompareOp::Gte => val >= *value,
+                AssertCompareOp::Lt => val < *value,
+                AssertCompareOp::Lte => val <= *value,
+                AssertCompareOp::Eq => val == *value,
+            }
+        }
+        InvariantKind::NeverState { state: forbidden } => state.status != *forbidden,
+        InvariantKind::And(parts) => parts
+            .iter()
+            .all(|k| kind_holds(k, required_states, model, state)),
+        InvariantKind::Or(parts) => parts
+            .iter()
+            .any(|k| kind_holds(k, required_states, model, state)),
+        InvariantKind::Unverifiable { .. } => true,
+    }
+}
+
+/// Check all compound (And/Or) invariants via recursive `kind_holds`.
+fn check_compound_invariants(model: &TemperModel, state: &TemperModelState) -> bool {
+    for inv in &model.invariants {
+        if !matches!(inv.kind, InvariantKind::And(_) | InvariantKind::Or(_)) {
+            continue;
+        }
+        let triggered =
+            inv.trigger_states.is_empty() || inv.trigger_states.contains(&state.status);
+        if triggered && !kind_holds(&inv.kind, &inv.required_states, model, state) {
+            return false;
         }
     }
     true
@@ -352,6 +420,18 @@ impl Model for TemperModel {
             .any(|i| matches!(i.kind, InvariantKind::NeverState { .. }));
         if has_never_state {
             props.push(Property::always("NeverStateInvariants", check_never_state));
+        }
+
+        // Safety: Compound (And/Or) invariants
+        let has_compound = self
+            .invariants
+            .iter()
+            .any(|i| matches!(i.kind, InvariantKind::And(_) | InvariantKind::Or(_)));
+        if has_compound {
+            props.push(Property::always(
+                "CompoundInvariants",
+                check_compound_invariants,
+            ));
         }
 
         // Note: Unverifiable invariants generate no properties (skipped).
