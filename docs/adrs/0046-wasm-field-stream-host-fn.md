@@ -1,5 +1,7 @@
 # ADR-0046: WASM Host Function for Blob-Ref Field Reads
 
+> **Implementation note:** the shipped host function is `host_read_field(field_name_ptr, field_name_len, buf_ptr, buf_len) -> i32`, a direct memory-buffer write matching the `host_get_context` pattern. The ADR text below references an earlier stream-based draft (`host_read_field_stream`) — that shape was dropped during implementation because Temper's host has no stream-read-back primitive (streams are one-way: host → HTTP / hash / cache, never into WASM memory). The behavioral contract (plain vs. blob-ref resolution, return codes `-1`/`-2`/`-3`, inline-ceiling split, pre-fetched `blob_cache`) is identical; only the byte transport changes. Return shape matches `host_get_context`: if `needed > buf_len` the caller resizes and retries.
+
 - Status: Accepted
 - Date: 2026-04-16
 - Deciders: Temper core maintainers

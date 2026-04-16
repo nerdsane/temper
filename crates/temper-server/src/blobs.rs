@@ -132,33 +132,93 @@ pub(crate) async fn hydrate_blob_refs_in_value(
     store: &temper_store_turso::TursoEventStore,
     value: &mut Value,
 ) {
+    // OData callers want full inline hydration regardless of size.
+    let _deferred = hydrate_blob_refs_in_value_with_ceiling(store, value, usize::MAX).await;
+}
+
+/// Hydrate blob refs in `value` below `max_inline_bytes` in place; return a
+/// `BTreeMap` of blob keys to bytes for refs at or above the ceiling (the
+/// "deferred" set). Callers that hand `value` off to a WASM guest forward
+/// the deferred map as `blob_cache` so guests can resolve oversize fields
+/// via `host_read_field_stream`. See ADR-0046.
+pub(crate) async fn hydrate_blob_refs_in_value_with_ceiling(
+    store: &temper_store_turso::TursoEventStore,
+    value: &mut Value,
+    max_inline_bytes: usize,
+) -> std::collections::BTreeMap<String, Vec<u8>> {
+    use std::collections::BTreeMap;
+
+    let mut deferred_blobs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut pointers = Vec::new();
     collect_blob_ref_pointers(value, "", &mut pointers);
+    // DST: deterministic fetch order across runs with the same ref set.
+    pointers.sort();
 
     for pointer in pointers {
-        let key = if pointer.is_empty() {
-            blob_ref_key(value).map(str::to_owned)
-        } else {
-            value
-                .pointer(&pointer)
-                .and_then(blob_ref_key)
-                .map(str::to_owned)
+        let (key, declared_size) = {
+            let slot = if pointer.is_empty() {
+                Some(&*value)
+            } else {
+                value.pointer(&pointer)
+            };
+            let Some(slot) = slot else {
+                continue;
+            };
+            let key = slot
+                .as_object()
+                .and_then(|obj| obj.get(FIELD_OVERFLOW_REF_KEY))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            let size = slot
+                .as_object()
+                .and_then(|obj| obj.get(FIELD_OVERFLOW_SIZE_KEY))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+            match key {
+                Some(k) => (k, size),
+                None => continue,
+            }
         };
-        let Some(key) = key else { continue };
 
-        match get_blob_bytes(store, &key).await {
-            Ok(Some(bytes)) => match serde_json::from_slice::<Value>(&bytes) {
-                Ok(restored) => {
-                    if pointer.is_empty() {
-                        *value = restored;
-                    } else if let Some(slot) = value.pointer_mut(&pointer) {
-                        *slot = restored;
+        // Fast-path: if the envelope declares a size above the ceiling, don't
+        // fetch inline — just fetch once into the deferred map.
+        if let Some(size) = declared_size {
+            if size > max_inline_bytes {
+                match get_blob_bytes(store, &key).await {
+                    Ok(Some(bytes)) => {
+                        deferred_blobs.insert(key, bytes);
+                    }
+                    Ok(None) => {
+                        tracing::warn!(%key, "deferred field-overflow blob missing");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%key, %error, "failed to fetch deferred field-overflow blob");
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(%key, %error, "failed to decode hydrated field-overflow blob");
+                continue;
+            }
+        }
+
+        match get_blob_bytes(store, &key).await {
+            Ok(Some(bytes)) => {
+                // Post-fetch size check in case the envelope lied (missing size key).
+                if bytes.len() > max_inline_bytes {
+                    deferred_blobs.insert(key, bytes);
+                    continue;
                 }
-            },
+                match serde_json::from_slice::<Value>(&bytes) {
+                    Ok(restored) => {
+                        if pointer.is_empty() {
+                            *value = restored;
+                        } else if let Some(slot) = value.pointer_mut(&pointer) {
+                            *slot = restored;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%key, %error, "failed to decode hydrated field-overflow blob");
+                    }
+                }
+            }
             Ok(None) => {
                 tracing::warn!(%key, "field-overflow blob missing during hydration");
             }
@@ -167,6 +227,8 @@ pub(crate) async fn hydrate_blob_refs_in_value(
             }
         }
     }
+
+    deferred_blobs
 }
 
 pub(crate) async fn hydrate_blob_refs_for_tenant(
@@ -178,6 +240,23 @@ pub(crate) async fn hydrate_blob_refs_for_tenant(
         return;
     };
     hydrate_blob_refs_in_value(&store, value).await;
+}
+
+/// Tenant-scoped variant of `hydrate_blob_refs_in_value_with_ceiling`.
+///
+/// Returns an empty map if no Turso store is configured for the tenant — in
+/// that case, the entity state stays untouched, which is consistent with
+/// `hydrate_blob_refs_for_tenant`'s no-op behavior.
+pub(crate) async fn hydrate_blob_refs_for_tenant_with_ceiling(
+    state: &ServerState,
+    tenant: &TenantId,
+    value: &mut Value,
+    max_inline_bytes: usize,
+) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let Some(store) = state.persistent_store_for_tenant(tenant.as_str()).await else {
+        return std::collections::BTreeMap::new();
+    };
+    hydrate_blob_refs_in_value_with_ceiling(&store, value, max_inline_bytes).await
 }
 
 /// `PUT /_internal/blobs/{*path}` — store a blob.

@@ -397,4 +397,58 @@ impl Context {
             );
         }
     }
+
+    /// Read an entity-state field as raw bytes, transparently resolving
+    /// blob-ref envelopes via the host. Works for both inline values and
+    /// oversize blob-ref fields (populated by the dispatcher's blob prefetch).
+    ///
+    /// For plain string fields the return bytes are the UTF-8 text (unquoted);
+    /// for blob-ref fields the return bytes are the original decoded payload;
+    /// for other JSON values the return bytes are the JSON serialization.
+    ///
+    /// See ADR-0046.
+    pub fn read_field_bytes(&self, field_name: &str) -> Result<Vec<u8>, String> {
+        // Probe with a zero-length buffer to get the required size.
+        let needed = unsafe {
+            host::host_read_field(field_name.as_ptr() as i32, field_name.len() as i32, 0, 0)
+        };
+        if needed == -1 {
+            return Err(format!("field '{field_name}' not found"));
+        }
+        if needed == -2 {
+            return Err(format!(
+                "field '{field_name}' is a blob ref; pre-fetch missing"
+            ));
+        }
+        if needed == -3 {
+            return Err(format!("host_read_field error for '{field_name}'"));
+        }
+        if needed == 0 {
+            return Ok(Vec::new());
+        }
+        let mut buf = vec![0u8; needed as usize];
+        let written = unsafe {
+            host::host_read_field(
+                field_name.as_ptr() as i32,
+                field_name.len() as i32,
+                buf.as_mut_ptr() as i32,
+                buf.len() as i32,
+            )
+        };
+        if written < 0 || (written as usize) > buf.len() {
+            return Err(format!(
+                "host_read_field second call failed for '{field_name}': {written}"
+            ));
+        }
+        buf.truncate(written as usize);
+        Ok(buf)
+    }
+
+    /// Read an entity-state field as a UTF-8 string. Convenience wrapper
+    /// over [`read_field_bytes`] for the common string-field case.
+    pub fn read_field_string(&self, field_name: &str) -> Result<String, String> {
+        let bytes = self.read_field_bytes(field_name)?;
+        String::from_utf8(bytes)
+            .map_err(|e| format!("field '{field_name}' is not valid UTF-8: {e}"))
+    }
 }
