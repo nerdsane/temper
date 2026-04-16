@@ -93,6 +93,7 @@ mod tests {
                 guard: Guard::Always,
                 effects: vec![],
             }],
+            state_var_metadata: Default::default(),
             rule_index: Default::default(),
         };
         table.rebuild_index();

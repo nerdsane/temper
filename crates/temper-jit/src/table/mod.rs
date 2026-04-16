@@ -8,4 +8,6 @@ mod builder;
 mod evaluate;
 pub mod types;
 
-pub use types::{Effect, EvalContext, Guard, TransitionResult, TransitionRule, TransitionTable};
+pub use types::{
+    Effect, EvalContext, Guard, StateVarMetadata, TransitionResult, TransitionRule, TransitionTable,
+};

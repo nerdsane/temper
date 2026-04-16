@@ -62,6 +62,7 @@ temper-store-sim = { workspace = true }
 temper-server = { path = ".", features = ["sim"] }
 temper-wasm = { workspace = true, features = ["test-helpers"] }
 temper-platform = { workspace = true }
+tempfile = "3"
 
 [[bench]]
 name = "actor_throughput"

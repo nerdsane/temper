@@ -360,18 +360,36 @@ CREATE TABLE IF NOT EXISTS tenant_secrets (
 // Blob storage (content-addressed binary objects for TemperFS)
 // ---------------------------------------------------------------------------
 
-/// Content-addressed blob storage for TemperFS `$value` endpoints.
+/// Content-addressed blob storage for TemperFS `$value` endpoints and
+/// field-overflow blob refs (ADR-0040).
 ///
 /// Blobs are keyed by `{bucket}/{content_hash}` (e.g. `temper-fs/sha256:abc...`).
 /// This provides persistent local blob storage so the blob_adapter WASM module
 /// can upload/download via HTTP without requiring external S3/R2 in development.
+///
+/// `expires_at` is `NULL` by default (permanent). Callers opt specific rows
+/// into TTL via `put_blob_with_ttl`; `sweep_expired_blobs` deletes expired rows.
+/// See ADR-0047.
 pub const CREATE_BLOBS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS blobs (
     blob_key TEXT PRIMARY KEY,
     data BLOB NOT NULL,
     size_bytes INTEGER NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT
 );";
+
+/// Migration: add `expires_at` column to existing `blobs` tables that pre-date
+/// ADR-0047. Idempotent — the caller treats "duplicate column" errors as
+/// success so the migration runs safely on every startup.
+pub const ALTER_BLOBS_ADD_EXPIRES_AT: &str = "\
+ALTER TABLE blobs ADD COLUMN expires_at TEXT;";
+
+/// Partial index on `expires_at` so the sweeper query (`WHERE expires_at < now`)
+/// stays cheap without costing storage for the default (permanent) rows. The
+/// `WHERE` clause excludes NULL, making the index a small-to-moderate overlay.
+pub const CREATE_BLOBS_EXPIRES_AT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_blobs_expires_at ON blobs(expires_at) WHERE expires_at IS NOT NULL;";
 
 // ---------------------------------------------------------------------------
 // OTS trajectory storage (full agent execution traces)

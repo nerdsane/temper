@@ -8,6 +8,7 @@ pub mod adapters;
 #[cfg(feature = "observe")]
 mod api;
 pub mod authz;
+pub mod blob_sweeper;
 pub mod blobs;
 pub mod channels;
 pub mod entity_actor;

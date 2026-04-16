@@ -113,4 +113,16 @@ unsafe extern "C" {
         result_buf_ptr: i32,
         result_buf_len: i32,
     ) -> i32;
+
+    /// Read an entity-state field into a buffer, transparently resolving
+    /// blob-ref envelopes. Returns bytes written, needed size if > buf_len,
+    /// -1 if field not found, -2 if blob ref pre-fetch missing, -3 on error.
+    ///
+    /// See ADR-0046.
+    pub fn host_read_field(
+        field_name_ptr: i32,
+        field_name_len: i32,
+        buf_ptr: i32,
+        buf_len: i32,
+    ) -> i32;
 }

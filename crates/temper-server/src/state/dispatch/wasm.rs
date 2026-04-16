@@ -301,7 +301,7 @@ impl crate::state::ServerState {
             entity_type: ctx.entity_ref.entity_type.to_string(),
             trigger_action: ctx.action.to_string(),
         };
-        let inv_ctx = WasmInvocationContext {
+        let mut inv_ctx = WasmInvocationContext {
             tenant: ctx.entity_ref.tenant.to_string(),
             entity_type: ctx.entity_ref.entity_type.to_string(),
             entity_id: ctx.entity_ref.entity_id.to_string(),
@@ -322,6 +322,16 @@ impl crate::state::ServerState {
                 .or_else(|| ctx.agent_ctx.trace_id.clone())
                 .unwrap_or_default(),
         };
+        // ADR-0046: inline-hydrate blob refs below the 128KB ceiling; defer
+        // oversize refs into a blob_cache the WASM guest can read via
+        // host_read_field_stream. No-op on tenants without a Turso store.
+        let blob_cache = crate::blobs::hydrate_blob_refs_for_tenant_with_ceiling(
+            self,
+            ctx.entity_ref.tenant,
+            &mut inv_ctx.entity_state,
+            crate::entity_actor::effects::DEFAULT_FIELD_INLINE_MAX,
+        )
+        .await;
         let denial_tracker = HttpCallAuthzDenialTracker::default();
         let gate: Arc<dyn WasmAuthzGate> = Arc::new(TrackingWasmAuthzGate::new(
             base_gate.clone(),
@@ -453,6 +463,7 @@ impl crate::state::ServerState {
             host,
             &limits,
             &denial_tracker,
+            blob_cache,
         );
 
         if let Some(span) = llm_root_span {
@@ -639,6 +650,7 @@ impl crate::state::ServerState {
         host: Arc<dyn WasmHost>,
         limits: &WasmResourceLimits,
         denial_tracker: &HttpCallAuthzDenialTracker,
+        blob_cache: std::collections::BTreeMap<String, Vec<u8>>,
     ) -> Result<Option<EntityResponse>, String> {
         // Existing action-triggered invocations don't use streams — pass empty registry.
         let streams = Arc::new(std::sync::RwLock::new(StreamRegistry::default()));
@@ -649,7 +661,7 @@ impl crate::state::ServerState {
         };
         match self
             .wasm_engine
-            .invoke(hash, &inv_ctx, host, limits, streams)
+            .invoke_with_blobs(hash, &inv_ctx, host, limits, streams, blob_cache)
             .await
         {
             Ok(mut result) if result.success => {

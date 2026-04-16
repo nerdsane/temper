@@ -64,6 +64,18 @@ pub struct StateVar {
     pub var_type: String,
     /// Initial value (as a string, parsed by type).
     pub initial: String,
+    /// Optional per-field inline ceiling in bytes for the field-overflow
+    /// primitive (ADR-0045). Values above this size are moved to the blob
+    /// store; values at or below stay inline in `fields`. When `None`, the
+    /// crate-wide `DEFAULT_FIELD_INLINE_MAX` applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow_inline_max_bytes: Option<usize>,
+    /// Optional per-field TTL in seconds for overflow blobs (ADR-0047). When
+    /// `None`, overflow blobs are permanent (match pre-ADR behavior). When
+    /// set, the blob's `expires_at` is written as `datetime('now', '+N s')`
+    /// and the sweeper deletes rows past their expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow_ttl_seconds: Option<u64>,
 }
 
 /// An action in the I/O Automaton.

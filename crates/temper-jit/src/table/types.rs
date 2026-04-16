@@ -23,12 +23,32 @@ pub struct TransitionTable {
     pub initial_state: String,
     /// Ordered list of transition rules.
     pub rules: Vec<TransitionRule>,
+    /// Per-state-variable metadata for platform primitives (ADR-0045, ADR-0047).
+    /// Keyed by state-variable name. Empty map when the IOA spec did not
+    /// declare any per-field overrides.
+    #[serde(default)]
+    pub state_var_metadata: BTreeMap<String, StateVarMetadata>,
     /// Pre-built index: action name → indices into `rules`.
     ///
     /// Eliminates the O(N) linear scan + Vec allocation in [`evaluate_ctx()`].
     /// Rebuilt automatically during construction and deserialization.
     #[serde(skip)]
     pub(crate) rule_index: BTreeMap<String, Vec<usize>>,
+}
+
+/// Platform-primitive metadata for a single state variable.
+///
+/// - `overflow_inline_max_bytes` (ADR-0045): serialized-byte ceiling above
+///   which the value is moved to the content-addressed blob store. `None`
+///   falls back to the crate-wide `DEFAULT_FIELD_INLINE_MAX` (128KB).
+/// - `overflow_ttl_seconds` (ADR-0047): TTL for overflow blobs written on
+///   behalf of this field. `None` = permanent (pre-ADR behavior).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateVarMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow_inline_max_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow_ttl_seconds: Option<u64>,
 }
 
 impl<'de> Deserialize<'de> for TransitionTable {
@@ -43,6 +63,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             states: Vec<String>,
             initial_state: String,
             rules: Vec<TransitionRule>,
+            #[serde(default)]
+            state_var_metadata: BTreeMap<String, StateVarMetadata>,
         }
 
         let raw = TransitionTableRaw::deserialize(deserializer)?;
@@ -51,6 +73,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             states: raw.states,
             initial_state: raw.initial_state,
             rules: raw.rules,
+            state_var_metadata: raw.state_var_metadata,
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();
@@ -369,6 +392,7 @@ mod tests {
                     effects: vec![],
                 },
             ],
+            state_var_metadata: BTreeMap::new(),
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();
