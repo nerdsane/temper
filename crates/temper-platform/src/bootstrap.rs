@@ -85,26 +85,21 @@ const AGENT_SPECS: &[(&str, &str)] = &[
 /// so the caller can persist them to the backing store.
 ///
 /// Panics if any spec fails to parse or verify (fatal startup error).
+pub(crate) struct BootstrapTenantSpecsOptions<'a> {
+    pub(crate) merge: bool,
+    pub(crate) label: &'a str,
+    pub(crate) verified_cache: &'a BTreeMap<String, (String, bool)>,
+    pub(crate) cross_invariants_source: Option<&'a str>,
+}
+
 pub(crate) fn bootstrap_tenant_specs(
     state: &PlatformState,
     tenant: &str,
     csdl_source: &str,
     specs: &[(&str, &str)],
-    merge: bool,
-    label: &str,
-    verified_cache: &BTreeMap<String, (String, bool)>,
-    cross_invariants_source: Option<&str>,
+    options: BootstrapTenantSpecsOptions<'_>,
 ) -> Vec<(String, String)> {
-    bootstrap_tenant_specs_inner(
-        state,
-        tenant,
-        csdl_source,
-        specs,
-        label,
-        verified_cache,
-        merge,
-        cross_invariants_source,
-    )
+    bootstrap_tenant_specs_inner(state, tenant, csdl_source, specs, options)
 }
 
 fn bootstrap_tenant_specs_inner(
@@ -112,11 +107,15 @@ fn bootstrap_tenant_specs_inner(
     tenant: &str,
     csdl_source: &str,
     specs: &[(&str, &str)],
-    label: &str,
-    verified_cache: &BTreeMap<String, (String, bool)>,
-    merge: bool,
-    cross_invariants_source: Option<&str>,
+    options: BootstrapTenantSpecsOptions<'_>,
 ) -> Vec<(String, String)> {
+    let BootstrapTenantSpecsOptions {
+        merge,
+        label,
+        verified_cache,
+        cross_invariants_source,
+    } = options;
+
     tracing::info!(
         "Bootstrapping {label} specs for tenant '{tenant}' with {} entities",
         specs.len()
@@ -219,10 +218,12 @@ pub fn bootstrap_system_tenant(
         SYSTEM_TENANT,
         SYSTEM_CSDL,
         SYSTEM_SPECS,
-        false,
-        "System",
-        verified_cache,
-        None,
+        BootstrapTenantSpecsOptions {
+            merge: false,
+            label: "System",
+            verified_cache,
+            cross_invariants_source: None,
+        },
     )
 }
 
@@ -242,10 +243,12 @@ pub fn bootstrap_agent_specs(
         tenant,
         AGENT_CSDL,
         AGENT_SPECS,
-        merge,
-        "Agent",
-        verified_cache,
-        None,
+        BootstrapTenantSpecsOptions {
+            merge,
+            label: "Agent",
+            verified_cache,
+            cross_invariants_source: None,
+        },
     )
 }
 

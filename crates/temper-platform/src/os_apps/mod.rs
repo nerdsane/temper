@@ -1407,10 +1407,12 @@ async fn install_os_app_without_dependencies(
                 tenant,
                 merged,
                 &specs_to_bootstrap,
-                true,
-                &format!("OsApp({app_name})"),
-                &verified_cache,
-                bundle.cross_invariants_toml.as_deref(),
+                bootstrap::BootstrapTenantSpecsOptions {
+                    merge: true,
+                    label: &format!("OsApp({app_name})"),
+                    verified_cache: &verified_cache,
+                    cross_invariants_source: bundle.cross_invariants_toml.as_deref(),
+                },
             );
 
             if let Some(ref store) = state.server.event_store
