@@ -26,6 +26,8 @@ enum Section {
     Invariant,
     Liveness,
     Integration,
+    AgentTrigger,
+    FieldInvariant,
     Webhook,
 }
 
@@ -56,6 +58,8 @@ impl ParseState {
             "[[invariant]]" => self.start_invariant_section(),
             "[[liveness]]" => self.start_liveness_section(),
             "[[integration]]" => self.start_integration_section(),
+            "[[agent_trigger]]" => self.start_passthrough_section(Section::AgentTrigger),
+            "[[field_invariant]]" => self.start_passthrough_section(Section::FieldInvariant),
             "[[webhook]]" => self.start_webhook_section(),
             _ if line.starts_with("[webhook.") => self.start_webhook_section(),
             _ => false,
@@ -70,7 +74,7 @@ impl ParseState {
             Section::Invariant => self.apply_invariant_field(key, &value),
             Section::Liveness => self.apply_liveness_field(key, &value),
             Section::Integration => self.apply_integration_field(key, &value),
-            Section::Webhook | Section::None => {}
+            Section::AgentTrigger | Section::FieldInvariant | Section::Webhook | Section::None => {}
         }
 
         Ok(())
@@ -301,9 +305,13 @@ impl ParseState {
     }
 
     fn start_webhook_section(&mut self) -> bool {
+        self.start_passthrough_section(Section::Webhook)
+    }
+
+    fn start_passthrough_section(&mut self, section: Section) -> bool {
         self.flush_items();
         self.flush_integration();
-        self.current_section = Section::Webhook;
+        self.current_section = section;
         true
     }
 }
