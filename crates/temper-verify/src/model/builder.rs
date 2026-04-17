@@ -196,11 +196,7 @@ fn resolve_invariants(automaton: &Automaton) -> Vec<ResolvedInvariant> {
 /// as a `bool` in the automaton state; otherwise the whole expression falls
 /// through to `Unverifiable`. This preserves the pre-compound behavior of
 /// rejecting unknown identifiers rather than silently asserting on them.
-fn translate_parsed_assert(
-    parsed: ParsedAssert,
-    raw: &str,
-    bool_names: &[&str],
-) -> InvariantKind {
+fn translate_parsed_assert(parsed: ParsedAssert, raw: &str, bool_names: &[&str]) -> InvariantKind {
     match try_translate(&parsed, bool_names) {
         Some(kind) => kind,
         None => InvariantKind::Unverifiable {
@@ -211,9 +207,9 @@ fn translate_parsed_assert(
 
 fn try_translate(parsed: &ParsedAssert, bool_names: &[&str]) -> Option<InvariantKind> {
     match parsed {
-        ParsedAssert::CounterPositive { var } => Some(InvariantKind::CounterPositive {
-            var: var.clone(),
-        }),
+        ParsedAssert::CounterPositive { var } => {
+            Some(InvariantKind::CounterPositive { var: var.clone() })
+        }
         ParsedAssert::NoFurtherTransitions => Some(InvariantKind::NoFurtherTransitions),
         ParsedAssert::NeverState { state } => Some(InvariantKind::NeverState {
             state: state.clone(),

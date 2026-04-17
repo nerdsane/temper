@@ -246,3 +246,73 @@ method = "GET"
     assert!(!integration.config.contains_key("type"));
     assert!(!integration.config.contains_key("module"));
 }
+
+#[test]
+fn test_integration_llm_flag_parsed() {
+    let toml = r#"
+[automaton]
+name = "Chat"
+states = ["Preparing", "Calling", "Applying", "Done", "Failed"]
+initial = "Preparing"
+
+[[action]]
+name = "CallProvider"
+from = ["Preparing"]
+to = "Calling"
+effect = "trigger call_provider"
+
+[[action]]
+name = "ProviderResponseReady"
+kind = "input"
+from = ["Calling"]
+to = "Applying"
+
+[[action]]
+name = "ApplyProviderResponse"
+from = ["Applying"]
+to = "Done"
+effect = "trigger apply_provider_response"
+
+[[action]]
+name = "Fail"
+kind = "input"
+from = ["Calling", "Applying"]
+to = "Failed"
+
+[[integration]]
+name = "call_provider"
+trigger = "call_provider"
+type = "wasm"
+module = "provider_caller"
+llm = true
+on_failure = "Fail"
+
+[[integration]]
+name = "apply_provider_response"
+trigger = "apply_provider_response"
+type = "wasm"
+module = "provider_response_applier"
+on_failure = "Fail"
+"#;
+    let automaton = parse_automaton(toml).expect("should parse");
+    let call_provider = automaton
+        .integrations
+        .iter()
+        .find(|i| i.name == "call_provider")
+        .expect("call_provider integration present");
+    assert!(call_provider.llm, "llm = true should set Integration::llm");
+    assert!(
+        !call_provider.config.contains_key("llm"),
+        "llm flag must not leak into config bag"
+    );
+
+    let apply = automaton
+        .integrations
+        .iter()
+        .find(|i| i.name == "apply_provider_response")
+        .expect("apply_provider_response integration present");
+    assert!(
+        !apply.llm,
+        "integration without llm key should default to false"
+    );
+}

@@ -257,9 +257,10 @@ impl crate::state::ServerState {
             return Ok(None);
         };
 
-        // Keep llm_caller on its own root trace so LLM Observability lands on
-        // the content-bearing LLM span rather than the parent workflow span.
-        let llm_root_span = if module_name == "llm_caller" {
+        // Keep LLM integrations on their own root trace so LLM Observability
+        // lands on the content-bearing LLM span rather than the parent workflow
+        // span. Integrations opt in via `llm = true` in the IOA spec.
+        let llm_root_span = if integration.llm {
             Some(build_llm_root_span(
                 ctx,
                 integration,
@@ -665,7 +666,7 @@ impl crate::state::ServerState {
             .await
         {
             Ok(mut result) if result.success => {
-                if module_name == "llm_caller" {
+                if integration.llm {
                     attach_llm_parent_context(&Span::current(), &mut result.callback_params);
                 }
 
@@ -740,7 +741,7 @@ impl crate::state::ServerState {
                 );
                 if let Some(reason) = denial_tracker.take_denial() {
                     let error_str = http_call_authz_denied_error(&reason);
-                    if module_name == "llm_caller" {
+                    if integration.llm {
                         Span::current().record("error.type", llm_error_type(&error_str).as_str());
                     }
                     return self
@@ -755,7 +756,7 @@ impl crate::state::ServerState {
                         .await;
                 }
 
-                if module_name == "llm_caller" {
+                if integration.llm {
                     let event =
                         llm_call_wide_event(ctx, entity_state, callback_params, result.duration_ms);
                     temper_observe::wide_event::emit_span(&event);
@@ -833,7 +834,7 @@ impl crate::state::ServerState {
                 if let Some(reason) = denial_tracker.take_denial() {
                     error_str = http_call_authz_denied_error(&reason);
                 }
-                if module_name == "llm_caller" {
+                if integration.llm {
                     Span::current().record("error.type", llm_error_type(&error_str).as_str());
                 }
                 self.handle_wasm_failure(
@@ -874,7 +875,7 @@ impl crate::state::ServerState {
                 {
                     error_str = http_call_authz_denied_error(&reason);
                 }
-                if module_name == "llm_caller" {
+                if integration.llm {
                     Span::current().record("error.type", llm_error_type(&error_str).as_str());
                 }
                 self.handle_wasm_failure(

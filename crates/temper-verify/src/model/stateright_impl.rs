@@ -65,17 +65,15 @@ fn kind_holds(
 ) -> bool {
     match kind {
         InvariantKind::StatusInSet => model.states.contains(&state.status),
-        InvariantKind::CounterPositive { var } => {
-            state.counters.get(var).copied().unwrap_or(0) > 0
-        }
+        InvariantKind::CounterPositive { var } => state.counters.get(var).copied().unwrap_or(0) > 0,
         InvariantKind::BoolRequired { var, expect } => {
             state.booleans.get(var).copied().unwrap_or(false) == *expect
         }
         InvariantKind::NoFurtherTransitions => {
             // Holds iff no transitions are enabled from current state.
             !model.transitions.iter().any(|t| {
-                let status_ok = t.from_states.is_empty()
-                    || t.from_states.iter().any(|s| s == &state.status);
+                let status_ok =
+                    t.from_states.is_empty() || t.from_states.iter().any(|s| s == &state.status);
                 status_ok && evaluate_guard(&t.guard, state)
             })
         }
@@ -113,8 +111,7 @@ fn check_compound_invariants(model: &TemperModel, state: &TemperModelState) -> b
         if !matches!(inv.kind, InvariantKind::And(_) | InvariantKind::Or(_)) {
             continue;
         }
-        let triggered =
-            inv.trigger_states.is_empty() || inv.trigger_states.contains(&state.status);
+        let triggered = inv.trigger_states.is_empty() || inv.trigger_states.contains(&state.status);
         if triggered && !kind_holds(&inv.kind, &inv.required_states, model, state) {
             return false;
         }
