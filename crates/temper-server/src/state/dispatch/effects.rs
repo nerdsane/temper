@@ -426,6 +426,11 @@ impl crate::state::ServerState {
             );
         }
 
+        // 7b. ADR-0049 state-timeout arming. Arms (or re-arms) a timer on
+        // state entry and on any reset_on action. Sequence-based
+        // cancellation ensures stale timers become no-ops.
+        self.arm_state_timeouts_if_needed(ctx, &response);
+
         // 8. Update the durable query plane for collection reads
         if let Some(store) = self.event_store.as_ref() {
             let tenant = ctx.tenant.to_string();

@@ -39,6 +39,11 @@ pub enum EntityMsg {
         params: serde_json::Value,
         /// Pre-resolved cross-entity state booleans (injected by dispatch layer).
         cross_entity_booleans: BTreeMap<String, bool>,
+        /// ADR-0048 sub-decision 5: idempotency key threaded through so the
+        /// actor can dedupe against `IdempotencyCache` before executing.
+        /// Covers the race where a dispatch-layer retry produces a second
+        /// in-flight ask after the first one already processed.
+        idempotency_key: Option<String>,
     },
     /// Get the current entity state.
     GetState,

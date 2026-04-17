@@ -28,6 +28,7 @@ enum Section {
     Integration,
     AgentTrigger,
     FieldInvariant,
+    StateTimeout,
     Webhook,
 }
 
@@ -36,6 +37,7 @@ struct ParseState {
     meta_name: String,
     meta_states: Vec<String>,
     meta_initial: String,
+    meta_allow_indefinite_states: Vec<String>,
     state_vars: Vec<StateVar>,
     actions: Vec<Action>,
     invariants: Vec<Invariant>,
@@ -60,6 +62,9 @@ impl ParseState {
             "[[integration]]" => self.start_integration_section(),
             "[[agent_trigger]]" => self.start_passthrough_section(Section::AgentTrigger),
             "[[field_invariant]]" => self.start_passthrough_section(Section::FieldInvariant),
+            // ADR-0049: state_timeouts use nested inline tables for params;
+            // parse via serde in the second pass rather than field-by-field.
+            "[[state_timeout]]" => self.start_passthrough_section(Section::StateTimeout),
             "[[webhook]]" => self.start_webhook_section(),
             _ if line.starts_with("[webhook.") => self.start_webhook_section(),
             _ => false,
@@ -74,7 +79,11 @@ impl ParseState {
             Section::Invariant => self.apply_invariant_field(key, &value),
             Section::Liveness => self.apply_liveness_field(key, &value),
             Section::Integration => self.apply_integration_field(key, &value),
-            Section::AgentTrigger | Section::FieldInvariant | Section::Webhook | Section::None => {}
+            Section::AgentTrigger
+            | Section::FieldInvariant
+            | Section::StateTimeout
+            | Section::Webhook
+            | Section::None => {}
         }
 
         Ok(())
@@ -95,6 +104,7 @@ impl ParseState {
                 name: self.meta_name,
                 states: self.meta_states,
                 initial: self.meta_initial,
+                allow_indefinite_states: self.meta_allow_indefinite_states,
             },
             state: self.state_vars,
             actions: self.actions,
@@ -105,6 +115,8 @@ impl ParseState {
             context_entities: Vec::new(),
             agent_triggers: extract_agent_triggers(input),
             field_invariants: Vec::new(),
+            state_timeouts: Vec::new(),
+            admission: None,
         }
     }
 
@@ -113,6 +125,10 @@ impl ParseState {
             "name" => self.meta_name = value.to_string(),
             "initial" => self.meta_initial = value.to_string(),
             "states" => self.meta_states = parse_string_array(value),
+            // ADR-0050: allowlist of states permitted to be indefinite.
+            "allow_indefinite_states" => {
+                self.meta_allow_indefinite_states = parse_string_array(value);
+            }
             _ => {}
         }
     }
@@ -363,6 +379,12 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
     // triggers, parse errors are surfaced — a silently-dropped field invariant
     // means the constraint is not enforced, which is a safety bug.
     automaton.field_invariants = extract_field_invariants(input)?;
+    // ADR-0049: state_timeouts use nested params tables; parse via serde in
+    // an isolated pass. Errors are propagated — a silently-dropped timeout
+    // would mean a trap state at runtime.
+    automaton.state_timeouts = extract_state_timeouts(input)?;
+    // ADR-0051: optional [admission] block.
+    automaton.admission = extract_admission(input)?;
     Ok(automaton)
 }
 
@@ -421,6 +443,107 @@ fn extract_field_invariants(
     toml::from_str::<FieldInvariantWrapper>(&slice)
         .map(|w| w.field_invariants)
         .map_err(|e| AutomatonParseError::Toml(format!("field_invariant: {e}")))
+}
+
+/// Extract the optional `[admission]` block from TOML source via serde
+/// (ADR-0051).
+///
+/// Only one admission block is allowed per entity. The block lives at the
+/// top level and accepts inline-table overrides, so serde handles it
+/// entirely — the hand-rolled parser would need separate handling for the
+/// `max_concurrent_actions = { ... }` inline table otherwise.
+fn extract_admission(
+    source: &str,
+) -> Result<Option<super::types::Admission>, AutomatonParseError> {
+    let slice = isolate_single_table(source, "[admission]");
+    if slice.trim().is_empty() {
+        return Ok(None);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct AdmissionWrapper {
+        admission: super::types::Admission,
+    }
+    toml::from_str::<AdmissionWrapper>(&slice)
+        .map(|w| Some(w.admission))
+        .map_err(|e| AutomatonParseError::Toml(format!("admission: {e}")))
+}
+
+/// Return a minimal TOML document containing only the single-table
+/// `[header]` block (e.g., `[admission]`) from `source`. Other top-level
+/// sections are skipped. Used for single-instance configuration blocks
+/// where array-of-tables semantics do not apply.
+fn isolate_single_table(source: &str, marker: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let is_header = trimmed.starts_with('[');
+        if is_header {
+            inside = trimmed.starts_with(marker);
+            if inside {
+                out.push_str(marker);
+                out.push('\n');
+            }
+            continue;
+        }
+        if inside {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Return a minimal TOML document containing only the sections with the
+/// given `marker` header (e.g. `"[[state_timeout]]"`) from `source`. Other
+/// top-level sections are skipped; content inside target sections is copied
+/// verbatim so inline tables (`params = { ... }`) parse correctly.
+fn isolate_sections(source: &str, marker: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let is_header = trimmed.starts_with('[');
+        if is_header {
+            inside = trimmed.starts_with(marker);
+            if inside {
+                out.push_str(marker);
+                out.push('\n');
+            }
+            continue;
+        }
+        if inside {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Extract `[[state_timeout]]` sections from TOML source via serde
+/// (ADR-0049).
+///
+/// Uses the same isolation pattern as `extract_field_invariants` so
+/// unrelated TOML quirks in other sections cannot break parsing. Errors
+/// are propagated — a silently dropped state timeout would mean a
+/// declared liveness contract is not enforced at runtime.
+fn extract_state_timeouts(
+    source: &str,
+) -> Result<Vec<super::types::StateTimeout>, AutomatonParseError> {
+    let slice = isolate_sections(source, "[[state_timeout]]");
+    if slice.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct StateTimeoutWrapper {
+        #[serde(default, rename = "state_timeout")]
+        state_timeouts: Vec<super::types::StateTimeout>,
+    }
+    toml::from_str::<StateTimeoutWrapper>(&slice)
+        .map(|w| w.state_timeouts)
+        .map_err(|e| AutomatonParseError::Toml(format!("state_timeout: {e}")))
 }
 
 /// Return a minimal TOML document containing only the `[[field_invariant]]`

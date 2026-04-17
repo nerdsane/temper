@@ -334,6 +334,38 @@ pub(super) async fn dispatch_bound_action(
             http_span.set_attribute(OtelKeyValue::new("http.status_code", 404i64));
             odata_error(StatusCode::NOT_FOUND, "EntityTypeNotGoverned", &reason).into_response()
         }
+        // ADR-0048: transient exhaustion → 503 Retry-After so clients and
+        // proxies back off instead of paging someone.
+        Err(e @ DispatchError::Transient { .. }) => {
+            let reason = e.to_string();
+            http_span.set_status(Status::error(reason.clone()));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 503i64));
+            let mut resp =
+                odata_error(StatusCode::SERVICE_UNAVAILABLE, "DispatchTransient", &reason)
+                    .into_response();
+            // Retry-After is per-RFC seconds; 1s is a conservative default
+            // until admission control (ADR-0051) can supply a tuned value.
+            resp.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+            resp
+        }
+        // ADR-0051: admission control declined; caller should back off.
+        Err(DispatchError::Deferred { retry_after_ms }) => {
+            let seconds = retry_after_ms.div_ceil(1000).max(1);
+            let reason = format!("dispatch deferred: retry after {retry_after_ms}ms");
+            http_span.set_status(Status::error("DispatchDeferred"));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 503i64));
+            let mut resp =
+                odata_error(StatusCode::SERVICE_UNAVAILABLE, "DispatchDeferred", &reason)
+                    .into_response();
+            let value = axum::http::HeaderValue::from_str(&seconds.to_string())
+                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("1"));
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+            resp
+        }
         Err(e) => {
             let reason = e.to_string();
             http_span.set_status(Status::error(reason.clone()));

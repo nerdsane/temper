@@ -1,5 +1,6 @@
 //! Server state shared across all request handlers.
 
+pub mod admission;
 pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
@@ -13,7 +14,8 @@ mod runtime_metrics;
 pub mod trajectory;
 pub mod wasm_invocation_log;
 
-pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions};
+pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
+pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{
@@ -254,6 +256,14 @@ pub struct ServerState {
         Arc<Mutex<lru::LruCache<String, (String, chrono::DateTime<chrono::Utc>)>>>,
     /// Configurable timeout for actor ask operations (default: 5s).
     pub action_dispatch_timeout: Duration,
+    /// Admission control (ADR-0051). Gates concurrent action dispatches per
+    /// `(tenant, entity_type, action)` based on caps declared in entity
+    /// specs' `[admission]` blocks.
+    pub admission: Arc<AdmissionController>,
+    /// State-timeout arm-sequence tracker (ADR-0049). Per-entity in-memory
+    /// counter used to cancel stale timers when the entity transitions out
+    /// of a declared state or reset_on fires.
+    pub state_timeout_tracker: Arc<StateTimeoutTracker>,
     /// Eventual invariant convergence tracker.
     pub eventual_tracker: Arc<RwLock<crate::eventual_invariants::EventualInvariantTracker>>,
     /// Idempotency cache for deduplicating agent retries.
@@ -297,10 +307,23 @@ pub struct ServerState {
     pub custom_effect_handler: Option<Arc<dyn custom_effects::CustomEffectHandler>>,
 }
 
+/// Install a one-time hook so liveness violations surfaced by temper-spec
+/// emit OTel counters (ADR-0050). Idempotent — subsequent calls are no-ops.
+fn install_liveness_metrics_reporter_once() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        temper_spec::automaton::set_liveness_violation_reporter(|v| {
+            crate::runtime_metrics::record_spec_liveness_violation(&v.entity, &v.state);
+        });
+    });
+}
+
 #[allow(deprecated)] // ADR-0025 Phase 4: RecordStore used until chain validation replaced
 impl ServerState {
     /// Create ServerState from CSDL XML and optional specification sources.
     pub fn new(system: ActorSystem, csdl: CsdlDocument, csdl_xml: String) -> Self {
+        install_liveness_metrics_reporter_once();
         let mut entity_set_map = BTreeMap::new();
         for schema in &csdl.schemas {
             for container in &schema.entity_containers {
@@ -353,6 +376,8 @@ impl ServerState {
                 NonZeroUsize::new(state_cache_budget()).expect("cache budget must be > 0"),
             ))),
             action_dispatch_timeout: env_timeout(),
+            admission: Arc::new(AdmissionController::new()),
+            state_timeout_tracker: Arc::new(StateTimeoutTracker::new()),
             eventual_tracker: Arc::new(RwLock::new(
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
@@ -582,6 +607,8 @@ impl ServerState {
                 NonZeroUsize::new(state_cache_budget()).expect("cache budget must be > 0"),
             ))),
             action_dispatch_timeout: env_timeout(),
+            admission: Arc::new(AdmissionController::new()),
+            state_timeout_tracker: Arc::new(StateTimeoutTracker::new()),
             eventual_tracker: Arc::new(RwLock::new(
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),

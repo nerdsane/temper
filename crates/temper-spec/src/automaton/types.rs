@@ -41,6 +41,16 @@ pub struct Automaton {
     /// Cross-field validation rules evaluated on OData `POST`/`PATCH`.
     #[serde(default, rename = "field_invariant")]
     pub field_invariants: Vec<FieldInvariant>,
+    /// State-entry timeouts (ADR-0049). Each entry declares that entering
+    /// `state` arms a timer that fires `on_timeout` after `after_seconds`
+    /// unless the entity leaves the state or a `reset_on` action fires.
+    #[serde(default, rename = "state_timeout")]
+    pub state_timeouts: Vec<StateTimeout>,
+    /// Admission control caps (ADR-0051). When present, the dispatch layer
+    /// gates concurrent calls per `(tenant, entity_type, action)` before
+    /// reaching the actor.
+    #[serde(default)]
+    pub admission: Option<Admission>,
 }
 
 /// Automaton metadata.
@@ -52,6 +62,12 @@ pub struct AutomatonMeta {
     pub states: Vec<String>,
     /// Initial status value.
     pub initial: String,
+    /// States that are permitted to be indefinite (no `[[state_timeout]]`
+    /// declaration required). Used by ADR-0050's liveness rule. Each entry
+    /// must be a declared state name. Convention: authors add a nearby
+    /// `# justification:` comment explaining why the state is indefinite.
+    #[serde(default)]
+    pub allow_indefinite_states: Vec<String>,
 }
 
 /// A state variable declaration.
@@ -352,6 +368,80 @@ pub struct AgentTrigger {
     /// Optional AgentType ID for the spawned agent.
     #[serde(default)]
     pub agent_type_id: Option<String>,
+}
+
+/// A state-entry timeout declaration (ADR-0049).
+///
+/// Declares that entering `state` should schedule `on_timeout` to fire
+/// after `after_seconds`. If the entity leaves `state` before the timer
+/// fires, the timer is cancelled. If any action listed in `reset_on`
+/// fires while the entity is in `state`, the timer is re-armed from now.
+///
+/// Authors write the declaration once; the spec compiler (see
+/// `metadata::validate_state_timeouts` and the durable scheduler) generates
+/// the supporting state variables (`{state}_entered_at`, `{state}_timeout_seq`)
+/// and wires `state` into the target action's `from` list if it is not
+/// already present.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateTimeout {
+    /// The state whose entry arms the timer. Must be a declared state.
+    pub state: String,
+    /// Wall-clock delay before `on_timeout` fires, in seconds.
+    pub after_seconds: u64,
+    /// Action to dispatch when the timer fires. Must be a declared action.
+    pub on_timeout: String,
+    /// Maximum times the timer can fire across repeated entries into `state`.
+    /// Defaults to 1. Set higher for states entered multiple times where
+    /// each entry should receive its own budget (e.g., `Recovering` with
+    /// `max_occurrences = 3`).
+    #[serde(default = "default_one")]
+    pub max_occurrences: u32,
+    /// Actions that, when fired while in `state`, re-arm the timer from
+    /// the current moment. Progress signals such as `Heartbeat` go here.
+    #[serde(default)]
+    pub reset_on: Vec<String>,
+    /// Params applied to the `on_timeout` action when it fires. Typically
+    /// includes an `error_message` field for observability.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+}
+
+fn default_one() -> u32 {
+    1
+}
+
+/// Admission control declaration (ADR-0051).
+///
+/// Declared as a `[admission]` block inside the top-level entity spec:
+///
+/// ```toml
+/// [admission]
+/// max_concurrent_creates = 5
+/// max_concurrent_actions = { "Submit" = 3 }
+/// queue_depth = 50
+/// queue_timeout_seconds = 30
+/// ```
+///
+/// All fields are optional. A missing admission block means no gating for
+/// that entity type (backward compatible).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct Admission {
+    /// Max concurrent pending `Create` (entity-instantiation) calls per
+    /// tenant. `None` = unlimited.
+    #[serde(default)]
+    pub max_concurrent_creates: Option<u32>,
+    /// Per-action caps. Key is the action name. Values are max-concurrent
+    /// permits per tenant.
+    #[serde(default)]
+    pub max_concurrent_actions: BTreeMap<String, u32>,
+    /// Max pending acquirers before new acquisitions are rejected with
+    /// `Deferred`. Defaults to 100 when admission is configured at all.
+    #[serde(default)]
+    pub queue_depth: Option<u32>,
+    /// Max wait an acquirer tolerates before `Deferred` is returned.
+    /// Defaults to 30 seconds when admission is configured.
+    #[serde(default)]
+    pub queue_timeout_seconds: Option<u32>,
 }
 
 #[cfg(test)]
