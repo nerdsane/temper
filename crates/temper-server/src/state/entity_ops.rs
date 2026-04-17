@@ -10,6 +10,7 @@ use temper_runtime::persistence::{EventStore, PersistenceEnvelope};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
+use super::dispatch::retry;
 use super::{ServerState, projection_backfill};
 use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 use crate::events::EntityStateChange;
@@ -276,6 +277,8 @@ impl ServerState {
         })?;
 
         // Build actor instance (spawn guarded below to avoid duplicate races).
+        // ADR-0048 sub-decision 5: every actor gets the shared idempotency
+        // cache so it can dedupe duplicate asks produced by retry storms.
         let actor = match &self.event_store {
             Some(store) => EntityActor::with_persistence(
                 entity_type,
@@ -284,9 +287,11 @@ impl ServerState {
                 initial_fields,
                 store.clone(),
             )
-            .with_tenant(tenant.as_str()),
+            .with_tenant(tenant.as_str())
+            .with_idempotency_cache(self.idempotency_cache.clone()),
             None => EntityActor::new(entity_type, entity_id, table, initial_fields)
-                .with_tenant(tenant.as_str()),
+                .with_tenant(tenant.as_str())
+                .with_idempotency_cache(self.idempotency_cache.clone()),
         };
 
         // Slow-path: atomically re-check and spawn under write lock.
@@ -451,10 +456,17 @@ impl ServerState {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
 
-        actor_ref
-            .ask::<EntityResponse>(EntityMsg::GetState, self.action_dispatch_timeout)
-            .await
-            .map_err(|e| format!("Actor query failed: {e}"))
+        // ADR-0048: retry transient ask failures (AskTimeout, MailboxFull)
+        // so a single slow actor reply does not surface as HTTP 500.
+        let policy = self.dispatch_retry_policy();
+        retry::ask_with_backoff::<_, EntityResponse, _>(
+            &actor_ref,
+            || EntityMsg::GetState,
+            &policy,
+        )
+        .await
+        .result
+        .map_err(|e| format!("Actor query failed: {e}"))
     }
 
     /// Create a new entity with initial fields and return its state.
@@ -472,10 +484,15 @@ impl ServerState {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
 
-        let response = actor_ref
-            .ask::<EntityResponse>(EntityMsg::GetState, self.action_dispatch_timeout)
-            .await
-            .map_err(|e| format!("Actor query failed: {e}"))?;
+        let policy = self.dispatch_retry_policy();
+        let response = retry::ask_with_backoff::<_, EntityResponse, _>(
+            &actor_ref,
+            || EntityMsg::GetState,
+            &policy,
+        )
+        .await
+        .result
+        .map_err(|e| format!("Actor query failed: {e}"))?;
 
         // Broadcast entity creation event for SSE subscribers
         let seq = self.next_entity_event_sequence(tenant.as_str(), entity_type, entity_id);
@@ -543,13 +560,19 @@ impl ServerState {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
 
-        let response = actor_ref
-            .ask::<EntityResponse>(
-                EntityMsg::UpdateFields { fields, replace },
-                self.action_dispatch_timeout,
-            )
-            .await
-            .map_err(|e| format!("Actor update failed: {e}"))?;
+        let policy = self.dispatch_retry_policy();
+        let fields_for_retry = fields;
+        let response = retry::ask_with_backoff::<_, EntityResponse, _>(
+            &actor_ref,
+            || EntityMsg::UpdateFields {
+                fields: fields_for_retry.clone(),
+                replace,
+            },
+            &policy,
+        )
+        .await
+        .result
+        .map_err(|e| format!("Actor update failed: {e}"))?;
 
         if response.success
             && let Some(store) = self.event_store.as_ref()
@@ -595,10 +618,15 @@ impl ServerState {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
 
-        let response = actor_ref
-            .ask::<EntityResponse>(EntityMsg::Delete, self.action_dispatch_timeout)
-            .await
-            .map_err(|e| format!("Actor delete failed: {e}"))?;
+        let policy = self.dispatch_retry_policy();
+        let response = retry::ask_with_backoff::<_, EntityResponse, _>(
+            &actor_ref,
+            || EntityMsg::Delete,
+            &policy,
+        )
+        .await
+        .result
+        .map_err(|e| format!("Actor delete failed: {e}"))?;
 
         if response.success {
             if let Some(store) = self.event_store.as_ref()
@@ -680,10 +708,14 @@ impl ServerState {
             return false;
         };
 
-        match actor_ref
-            .ask::<EntityResponse>(EntityMsg::GetState, self.action_dispatch_timeout)
-            .await
-        {
+        let policy = self.dispatch_retry_policy();
+        let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
+            &actor_ref,
+            || EntityMsg::GetState,
+            &policy,
+        )
+        .await;
+        match outcome.result {
             Ok(response) if response.state.status == "Deleted" => {
                 let _ = actor_ref.stop();
                 self.remove_entity(tenant, entity_type, entity_id);
@@ -747,11 +779,18 @@ impl ServerState {
         }
 
         let mut passivated = 0usize;
+        let policy = self.dispatch_retry_policy();
         for (actor_key, actor_ref) in candidates {
+            // ADR-0048: retry transient failures so passivation is not skipped
+            // by a single AskTimeout under load.
+            let snapshot_outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
+                &actor_ref,
+                || EntityMsg::GetState,
+                &policy,
+            )
+            .await;
             if let Some(ref store) = self.event_store
-                && let Ok(response) = actor_ref
-                    .ask::<EntityResponse>(EntityMsg::GetState, self.action_dispatch_timeout)
-                    .await
+                && let Ok(response) = snapshot_outcome.result
                 && response.state.sequence_nr > 0
             {
                 // Snapshot excludes bounded in-memory recent event history.

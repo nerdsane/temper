@@ -609,6 +609,7 @@ impl DiscordTransport {
             intent: None,
             trace_id: None,
             parent_span_id: None,
+            idempotency_key: None,
         };
 
         // Create the TemperAgent entity.
@@ -729,6 +730,7 @@ impl DiscordTransport {
             intent: None,
             trace_id: None,
             parent_span_id: None,
+            idempotency_key: None,
         };
 
         // Create a new TemperAgent entity for this turn.

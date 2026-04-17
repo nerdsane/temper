@@ -57,6 +57,10 @@ pub struct EntityActor {
     event_store: Option<Arc<ServerEventStore>>,
     /// Trace ID for correlating all events from this actor.
     trace_id: String,
+    /// Shared idempotency cache (ADR-0048 sub-decision 5). Consulted before
+    /// executing an action whose `idempotency_key` is set, so dispatch-layer
+    /// retries that race past the caller's timeout cannot double-execute.
+    idempotency_cache: Option<Arc<crate::idempotency::IdempotencyCache>>,
 }
 
 impl EntityActor {
@@ -157,6 +161,7 @@ impl EntityActor {
             initial_fields,
             event_store: None,
             trace_id: sim_uuid().to_string(),
+            idempotency_cache: None,
         }
     }
 
@@ -176,12 +181,23 @@ impl EntityActor {
             initial_fields,
             event_store: Some(store),
             trace_id: sim_uuid().to_string(),
+            idempotency_cache: None,
         }
     }
 
     /// Set the tenant for this actor (must be called before spawning).
     pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
         self.tenant = tenant.into();
+        self
+    }
+
+    /// Attach a shared idempotency cache for actor-side dedup
+    /// (ADR-0048 sub-decision 5).
+    pub fn with_idempotency_cache(
+        mut self,
+        cache: Arc<crate::idempotency::IdempotencyCache>,
+    ) -> Self {
+        self.idempotency_cache = Some(cache);
         self
     }
 
@@ -542,10 +558,27 @@ impl Actor for EntityActor {
                 name,
                 params,
                 cross_entity_booleans,
+                idempotency_key,
             } => {
                 // Capture start time for span duration (DST-safe: sim_now()
                 // returns logical clock in simulation, wall clock in production).
                 let action_start = sim_now();
+
+                // ADR-0048 sub-decision 5: actor-side idempotency dedup.
+                // A dispatch-layer retry can produce a second `ask` after the
+                // caller's budget expires while the first ask is still in
+                // flight to this actor. Without this check, both asks would
+                // execute. Here we consult the shared cache keyed on the
+                // caller's `Idempotency-Key` before executing; on a hit, the
+                // previously-computed response is returned as the reply.
+                let actor_key = self.persistence_id();
+                if let (Some(key), Some(cache)) =
+                    (idempotency_key.as_ref(), self.idempotency_cache.as_ref())
+                    && let Some(cached) = cache.get(&actor_key, key)
+                {
+                    ctx.reply(cached);
+                    return Ok(());
+                }
 
                 // Snapshot the current table for this action dispatch.
                 // On the next action, any hot-swapped table will be picked up.
@@ -1009,7 +1042,7 @@ impl Actor for EntityActor {
                         "transition applied"
                     );
 
-                    ctx.reply(EntityResponse {
+                    let response = EntityResponse {
                         success: true,
                         state: state.clone(),
                         error: None,
@@ -1017,7 +1050,16 @@ impl Actor for EntityActor {
                         scheduled_actions: result.scheduled_actions,
                         spawn_requests: result.spawn_requests,
                         spec_governed: true,
-                    });
+                    };
+                    // ADR-0048 sub-decision 5: cache the successful response
+                    // so a racing retry that lands after this reply returns
+                    // the cached value instead of re-executing.
+                    if let (Some(key), Some(cache)) =
+                        (idempotency_key.as_ref(), self.idempotency_cache.as_ref())
+                    {
+                        cache.put(&actor_key, key, response.clone());
+                    }
+                    ctx.reply(response);
                 } else {
                     // Transition failed — emit telemetry
                     let action_end = sim_now();

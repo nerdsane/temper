@@ -11,8 +11,12 @@ mod actions;
 mod adapter;
 mod cross_entity;
 mod effects;
+pub(crate) mod retry;
+pub(crate) mod state_timeouts;
 mod wasm;
 mod wasm_secrets;
+
+pub use state_timeouts::StateTimeoutTracker;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum WasmDispatchMode {
@@ -48,9 +52,40 @@ pub(crate) struct WasmDispatchRequest<'a> {
 /// Replaces bare `String` errors in the dispatch chain with structured
 /// variants that preserve error context and enable pattern matching at
 /// the HTTP boundary.
+///
+/// See ADR-0048 (Dispatch retry and error taxonomy) for the classification
+/// contract. `Transient` and `Permanent` are the two error shapes an ask
+/// site can produce after retry exhaustion; `Deferred` is reserved for
+/// ADR-0051 (Admission control).
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
-    /// The actor mailbox ask failed (timeout, mailbox full, actor stopped).
+    /// The actor was reachable but retry budget was exhausted. The caller
+    /// (or intermediary proxy) may retry with a fresh budget.
+    ///
+    /// `attempts` is how many tries were made before giving up; useful for
+    /// metrics and log correlation.
+    #[error("actor dispatch exhausted after {attempts} attempt(s): {source}")]
+    Transient {
+        source: temper_runtime::actor::ActorError,
+        attempts: u32,
+    },
+
+    /// The actor returned a permanent error — retrying will not help.
+    /// Includes stopped / panicked / init-failed / etc.
+    #[error("actor dispatch permanently failed: {source}")]
+    Permanent {
+        source: temper_runtime::actor::ActorError,
+    },
+
+    /// Admission control denied the call and the caller should retry
+    /// after `retry_after_ms` (ADR-0051).
+    #[error("dispatch deferred: retry after {retry_after_ms}ms")]
+    #[allow(dead_code)] // ADR-0051 will populate this from the admission layer
+    Deferred { retry_after_ms: u64 },
+
+    /// Legacy: generic actor failure as a string. Retained while callers
+    /// migrate to `Transient`/`Permanent`. Prefer the classified variants.
+    #[deprecated(note = "Use DispatchError::Transient or DispatchError::Permanent (ADR-0048)")]
     #[error("actor dispatch failed: {0}")]
     ActorFailed(String),
 
@@ -71,6 +106,77 @@ pub enum DispatchError {
     /// An internal error (serialization, persistence, unexpected state).
     #[error("{0}")]
     Internal(String),
+}
+
+impl DispatchError {
+    /// Classify an `ActorError` into the appropriate `DispatchError` variant
+    /// based on ADR-0048's transient/permanent taxonomy.
+    ///
+    /// `attempts` should be the number of retry attempts made before giving
+    /// up (1 if no retry was attempted).
+    pub(crate) fn from_actor_error(err: temper_runtime::actor::ActorError, attempts: u32) -> Self {
+        if err.is_transient() {
+            Self::Transient {
+                source: err,
+                attempts,
+            }
+        } else {
+            Self::Permanent { source: err }
+        }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_error_tests {
+    use super::*;
+    use std::time::Duration;
+    use temper_runtime::actor::ActorError;
+
+    #[test]
+    fn transient_actor_errors_map_to_transient_dispatch_variant() {
+        let transient = ActorError::AskTimeout(Duration::from_secs(5));
+        match DispatchError::from_actor_error(transient, 3) {
+            DispatchError::Transient { attempts, .. } => assert_eq!(attempts, 3),
+            other => panic!("expected Transient, got {other:?}"),
+        }
+        let mailbox = ActorError::MailboxFull;
+        match DispatchError::from_actor_error(mailbox, 1) {
+            DispatchError::Transient { attempts, .. } => assert_eq!(attempts, 1),
+            other => panic!("expected Transient, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn permanent_actor_errors_map_to_permanent_dispatch_variant() {
+        for err in [
+            ActorError::Stopped,
+            ActorError::SendFailed,
+            ActorError::Panicked("boom".into()),
+            ActorError::InitFailed("init".into()),
+            ActorError::MaxRestartsExceeded(4),
+            ActorError::custom("misc"),
+        ] {
+            let label = format!("{err:?}");
+            match DispatchError::from_actor_error(err, 7) {
+                DispatchError::Permanent { .. } => {}
+                other => panic!("expected Permanent for {label}, got {other:?}"),
+            }
+        }
+    }
+}
+
+impl crate::state::ServerState {
+    /// Build a retry policy for entity-ops ask sites (GetState, UpdateFields,
+    /// Delete, etc.). Per-attempt timeout inherits from `action_dispatch_timeout`
+    /// so existing server-level tuning still applies.
+    ///
+    /// See ADR-0048.
+    pub(crate) fn dispatch_retry_policy(&self) -> retry::RetryPolicy {
+        retry::RetryPolicy {
+            per_attempt_timeout: self.action_dispatch_timeout,
+            ..retry::RetryPolicy::default()
+        }
+    }
 }
 
 impl From<String> for DispatchError {

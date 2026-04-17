@@ -36,6 +36,10 @@ pub struct AgentContext {
     pub trace_id: Option<String>,
     /// Parent span ID from the `traceparent` header.
     pub parent_span_id: Option<String>,
+    /// ADR-0048 sub-decision 5: idempotency key extracted from the
+    /// `Idempotency-Key` header. Threaded into `EntityMsg::Action` so the
+    /// actor can dedupe duplicate asks produced by dispatch-layer retries.
+    pub idempotency_key: Option<String>,
 }
 
 impl AgentContext {
@@ -52,6 +56,7 @@ impl AgentContext {
             intent: None,
             trace_id: None,
             parent_span_id: None,
+            idempotency_key: None,
         }
     }
 }
@@ -88,6 +93,12 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         .map(|(t, s)| (Some(t), Some(s)))
         .unwrap_or((None, None));
 
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
     AgentContext {
         agent_id: None,
         session_id,
@@ -95,6 +106,7 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         intent,
         trace_id,
         parent_span_id,
+        idempotency_key,
     }
 }
 

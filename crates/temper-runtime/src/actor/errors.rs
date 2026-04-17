@@ -33,6 +33,27 @@ impl ActorError {
     pub fn custom(msg: impl Into<String>) -> Self {
         Self::Custom(anyhow::anyhow!("{}", msg.into()))
     }
+
+    /// Returns `true` if retrying the operation may succeed because the cause
+    /// is timing or capacity related rather than logic.
+    ///
+    /// Transient variants:
+    /// - `AskTimeout` — the actor did not reply within the per-attempt budget.
+    /// - `MailboxFull` — the actor's bounded mailbox refused the message.
+    ///
+    /// See ADR-0048 (Dispatch-layer retry and error taxonomy).
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::AskTimeout(_) | Self::MailboxFull)
+    }
+
+    /// Returns `true` if the error reflects a terminal condition and retries
+    /// are pointless. Every variant is classified as either transient or
+    /// permanent, never both.
+    ///
+    /// See ADR-0048 (Dispatch-layer retry and error taxonomy).
+    pub fn is_permanent(&self) -> bool {
+        !self.is_transient()
+    }
 }
 
 // Needed because anyhow::Error doesn't implement PartialEq
@@ -88,5 +109,42 @@ mod tests {
     #[test]
     fn partial_eq_different_variant() {
         assert_ne!(ActorError::Stopped, ActorError::MailboxFull);
+    }
+
+    #[test]
+    fn transient_classification_is_exhaustive() {
+        // Transient variants — retrying may succeed.
+        assert!(ActorError::AskTimeout(Duration::from_secs(5)).is_transient());
+        assert!(ActorError::MailboxFull.is_transient());
+
+        // Permanent variants — retrying is pointless.
+        assert!(ActorError::Stopped.is_permanent());
+        assert!(ActorError::SendFailed.is_permanent());
+        assert!(ActorError::Panicked("x".into()).is_permanent());
+        assert!(ActorError::InitFailed("x".into()).is_permanent());
+        assert!(ActorError::MaxRestartsExceeded(3).is_permanent());
+        assert!(ActorError::custom("boom").is_permanent());
+    }
+
+    #[test]
+    fn transient_and_permanent_are_mutually_exclusive() {
+        // Every variant must be exactly one of transient or permanent.
+        let all = [
+            ActorError::Stopped,
+            ActorError::MailboxFull,
+            ActorError::SendFailed,
+            ActorError::AskTimeout(Duration::from_millis(1)),
+            ActorError::Panicked("p".into()),
+            ActorError::InitFailed("i".into()),
+            ActorError::MaxRestartsExceeded(1),
+            ActorError::custom("c"),
+        ];
+        for err in all {
+            assert_ne!(
+                err.is_transient(),
+                err.is_permanent(),
+                "variant {err:?} is both (or neither) transient and permanent"
+            );
+        }
     }
 }

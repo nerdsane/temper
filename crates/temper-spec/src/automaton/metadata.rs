@@ -88,7 +88,86 @@ impl SpecMetadata {
     }
 }
 
+/// A single liveness-coverage violation (ADR-0050).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LivenessViolation {
+    /// Entity type name.
+    pub entity: String,
+    /// Non-terminal state with no timeout and no allow-indefinite entry.
+    pub state: String,
+}
+
+impl std::fmt::Display for LivenessViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "entity '{}' state '{}' is non-terminal but has no [[state_timeout]] and is not in allow_indefinite_states",
+            self.entity, self.state
+        )
+    }
+}
+
 impl Automaton {
+    /// Compute the set of states that are non-terminal.
+    ///
+    /// A state is terminal when no action lists it in its `from`. This is
+    /// the same computation as [`SpecMetadata::terminal_states`] — kept as
+    /// its own method so the liveness validator can re-use it without
+    /// building the full flat metadata.
+    pub fn non_terminal_states(&self) -> Vec<String> {
+        let mut from_states: std::collections::BTreeSet<&str> =
+            std::collections::BTreeSet::new();
+        for action in &self.actions {
+            for f in &action.from {
+                from_states.insert(f.as_str());
+            }
+        }
+        self.automaton
+            .states
+            .iter()
+            .filter(|s| from_states.contains(s.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    /// Validate that every non-terminal state has a liveness-coverage
+    /// commitment: either a `[[state_timeout]]` declaration or membership in
+    /// `allow_indefinite_states` (ADR-0050).
+    ///
+    /// Returns the full list of violations so callers can report all
+    /// problems at once rather than fixing one state at a time.
+    pub fn validate_liveness_coverage(&self) -> Result<(), Vec<LivenessViolation>> {
+        let states_with_timeout: std::collections::BTreeSet<&str> = self
+            .state_timeouts
+            .iter()
+            .map(|t| t.state.as_str())
+            .collect();
+        let allowlist: std::collections::BTreeSet<&str> = self
+            .automaton
+            .allow_indefinite_states
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+
+        let violations: Vec<LivenessViolation> = self
+            .non_terminal_states()
+            .into_iter()
+            .filter(|s| {
+                !states_with_timeout.contains(s.as_str()) && !allowlist.contains(s.as_str())
+            })
+            .map(|state| LivenessViolation {
+                entity: self.automaton.name.clone(),
+                state,
+            })
+            .collect();
+
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(violations)
+        }
+    }
+
     /// Extract flat metadata suitable for Cedar policy evaluation.
     pub fn extract_metadata(&self) -> SpecMetadata {
         let states = self.automaton.states.clone();

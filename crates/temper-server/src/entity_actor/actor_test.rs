@@ -45,6 +45,7 @@ async fn dst_add_item_then_submit() {
                 name: "AddItem".into(),
                 params: serde_json::json!({"ProductId": "prod-1"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             Duration::from_secs(1),
         )
@@ -61,6 +62,7 @@ async fn dst_add_item_then_submit() {
                 name: "SubmitOrder".into(),
                 params: serde_json::json!({"ShippingAddressId": "addr-1"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             Duration::from_secs(1),
         )
@@ -85,6 +87,7 @@ async fn dst_cannot_submit_without_items() {
                 name: "SubmitOrder".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             Duration::from_secs(1),
         )
@@ -127,6 +130,7 @@ async fn dst_full_order_lifecycle() {
                     name: action.into(),
                     params,
                     cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
                 },
                 Duration::from_secs(1),
             )
@@ -161,6 +165,7 @@ async fn dst_cancel_from_draft() {
                 name: "CancelOrder".into(),
                 params: serde_json::json!({"Reason": "changed mind"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             Duration::from_secs(1),
         )
@@ -191,6 +196,7 @@ async fn dst_cannot_cancel_shipped_order() {
                     name: action.to_string(),
                     params: serde_json::json!({}),
                     cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
                 },
                 Duration::from_secs(1),
             )
@@ -205,6 +211,7 @@ async fn dst_cannot_cancel_shipped_order() {
                 name: "CancelOrder".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             Duration::from_secs(1),
         )
@@ -236,6 +243,7 @@ async fn dst_multiple_actors_independent() {
                 name: "CancelOrder".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             Duration::from_secs(1),
         )
@@ -249,6 +257,7 @@ async fn dst_multiple_actors_independent() {
                 name: "AddItem".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             Duration::from_secs(1),
         )
