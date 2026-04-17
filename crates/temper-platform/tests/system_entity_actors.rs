@@ -50,6 +50,7 @@ async fn actor_project_full_lifecycle() {
                 name: "UpdateSpecs".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -65,6 +66,7 @@ async fn actor_project_full_lifecycle() {
                 name: "Verify".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -80,6 +82,7 @@ async fn actor_project_full_lifecycle() {
                 name: "Archive".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -103,6 +106,7 @@ async fn actor_project_verify_requires_building_state() {
                 name: "Verify".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -132,6 +136,7 @@ async fn actor_tenant_full_lifecycle() {
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -147,6 +152,7 @@ async fn actor_tenant_full_lifecycle() {
                 name: "Suspend".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -162,6 +168,7 @@ async fn actor_tenant_full_lifecycle() {
                 name: "Reactivate".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -177,6 +184,7 @@ async fn actor_tenant_full_lifecycle() {
                 name: "Archive".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -199,6 +207,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -210,6 +219,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 name: "Archive".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -223,6 +233,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -257,6 +268,7 @@ async fn actor_catalog_publish_and_fork() {
                 name: "Publish".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -272,6 +284,7 @@ async fn actor_catalog_publish_and_fork() {
                 name: "Fork".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -287,6 +300,7 @@ async fn actor_catalog_publish_and_fork() {
                 name: "Deprecate".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -320,6 +334,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 name: "Accept".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -335,6 +350,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 name: "ChangeRole".into(),
                 params: serde_json::json!({"role": "editor"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -349,6 +365,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 name: "Remove".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -377,6 +394,7 @@ async fn actor_version_lifecycle() {
                 name: "MarkDeployed".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -391,6 +409,7 @@ async fn actor_version_lifecycle() {
                 name: "Supersede".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -443,6 +462,7 @@ async fn actor_multiple_system_entities_independent() {
                 name: "UpdateSpecs".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -454,6 +474,7 @@ async fn actor_multiple_system_entities_independent() {
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )
@@ -465,6 +486,7 @@ async fn actor_multiple_system_entities_independent() {
                 name: "Publish".into(),
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
             },
             TIMEOUT,
         )

@@ -178,3 +178,186 @@ fn guard_is_false_prefix() {
 fn guard_unsupported_syntax() {
     assert!(parse_guard_clause("two words bad").is_err());
 }
+
+// --- ADR-0049: [[state_timeout]] parsing --------------------------------
+
+const SESSION_SPEC_WITH_TIMEOUTS: &str = r#"
+[automaton]
+name = "Session"
+states = ["Created", "Provisioning", "Running", "Completed", "Failed", "WaitingForApproval"]
+initial = "Created"
+allow_indefinite_states = ["WaitingForApproval"]
+
+[[action]]
+name = "Configure"
+from = ["Created"]
+to = "Provisioning"
+
+[[action]]
+name = "TimeoutFail"
+from = []
+to = "Failed"
+params = ["error_message"]
+
+[[state_timeout]]
+state = "Provisioning"
+after_seconds = 180
+on_timeout = "TimeoutFail"
+reset_on = ["Heartbeat"]
+params = { error_message = "provisioning did not complete within 180s" }
+
+[[state_timeout]]
+state = "Running"
+after_seconds = 300
+on_timeout = "TimeoutFail"
+max_occurrences = 3
+"#;
+
+#[test]
+fn state_timeout_parses_all_fields() {
+    let auto = parse_toml_to_automaton(SESSION_SPEC_WITH_TIMEOUTS).unwrap();
+    assert_eq!(auto.state_timeouts.len(), 2);
+
+    let provisioning = &auto.state_timeouts[0];
+    assert_eq!(provisioning.state, "Provisioning");
+    assert_eq!(provisioning.after_seconds, 180);
+    assert_eq!(provisioning.on_timeout, "TimeoutFail");
+    assert_eq!(provisioning.max_occurrences, 1, "default should be 1");
+    assert_eq!(provisioning.reset_on, vec!["Heartbeat".to_string()]);
+    assert_eq!(
+        provisioning.params.get("error_message").map(|s| s.as_str()),
+        Some("provisioning did not complete within 180s")
+    );
+}
+
+#[test]
+fn state_timeout_max_occurrences_override() {
+    let auto = parse_toml_to_automaton(SESSION_SPEC_WITH_TIMEOUTS).unwrap();
+    let running = &auto.state_timeouts[1];
+    assert_eq!(running.state, "Running");
+    assert_eq!(running.max_occurrences, 3);
+    assert!(
+        running.reset_on.is_empty(),
+        "reset_on omitted should default to empty"
+    );
+    assert!(running.params.is_empty());
+}
+
+#[test]
+fn allow_indefinite_states_parses_from_automaton_block() {
+    let auto = parse_toml_to_automaton(SESSION_SPEC_WITH_TIMEOUTS).unwrap();
+    assert_eq!(
+        auto.automaton.allow_indefinite_states,
+        vec!["WaitingForApproval".to_string()]
+    );
+}
+
+#[test]
+fn state_timeout_absent_yields_empty_vec() {
+    let minimal = r#"
+[automaton]
+name = "Trivial"
+states = ["Idle"]
+initial = "Idle"
+"#;
+    let auto = parse_toml_to_automaton(minimal).unwrap();
+    assert!(auto.state_timeouts.is_empty());
+    assert!(auto.automaton.allow_indefinite_states.is_empty());
+}
+
+#[test]
+fn state_timeout_isolation_ignores_other_sections() {
+    // Ensures extract_state_timeouts' isolation doesn't pick up keys that
+    // happen to share a name with state_timeout fields in other sections.
+    let spec = r#"
+[automaton]
+name = "X"
+states = ["A", "B"]
+initial = "A"
+
+[[state]]
+name = "state"
+type = "string"
+initial = "irrelevant"
+
+[[action]]
+name = "OnTimeout"
+from = ["A"]
+to = "B"
+params = ["error_message"]
+
+[[integration]]
+name = "noop"
+trigger = "noop"
+type = "webhook"
+
+[[state_timeout]]
+state = "A"
+after_seconds = 10
+on_timeout = "OnTimeout"
+"#;
+    let auto = parse_toml_to_automaton(spec).unwrap();
+    assert_eq!(auto.state_timeouts.len(), 1);
+    assert_eq!(auto.state_timeouts[0].state, "A");
+}
+
+#[test]
+fn admission_block_parses_inline_action_map() {
+    let spec = r#"
+[automaton]
+name = "X"
+states = ["A"]
+initial = "A"
+
+[admission]
+max_concurrent_creates = 5
+max_concurrent_actions = { "Submit" = 3, "Configure" = 10 }
+queue_depth = 75
+queue_timeout_seconds = 20
+"#;
+    let auto = parse_toml_to_automaton(spec).unwrap();
+    let admission = auto.admission.as_ref().expect("admission block parsed");
+    assert_eq!(admission.max_concurrent_creates, Some(5));
+    assert_eq!(admission.max_concurrent_actions.get("Submit").copied(), Some(3));
+    assert_eq!(
+        admission.max_concurrent_actions.get("Configure").copied(),
+        Some(10)
+    );
+    assert_eq!(admission.queue_depth, Some(75));
+    assert_eq!(admission.queue_timeout_seconds, Some(20));
+}
+
+#[test]
+fn admission_block_absent_yields_none() {
+    let minimal = r#"
+[automaton]
+name = "Trivial"
+states = ["Idle"]
+initial = "Idle"
+"#;
+    let auto = parse_toml_to_automaton(minimal).unwrap();
+    assert!(auto.admission.is_none());
+}
+
+#[test]
+fn state_timeout_malformed_surfaces_error() {
+    // `after_seconds = "not a number"` should produce a serde error,
+    // not a silent drop.
+    let spec = r#"
+[automaton]
+name = "Bad"
+states = ["A"]
+initial = "A"
+
+[[state_timeout]]
+state = "A"
+after_seconds = "not a number"
+on_timeout = "X"
+"#;
+    let err = parse_toml_to_automaton(spec).expect_err("malformed after_seconds must surface");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("state_timeout"),
+        "error should be scoped to state_timeout: {msg}"
+    );
+}

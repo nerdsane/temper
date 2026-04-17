@@ -5,6 +5,7 @@
 //! ensuring the same logic verified by DST runs in production.
 
 pub mod adapters;
+mod admin;
 #[cfg(feature = "observe")]
 mod api;
 pub mod authz;

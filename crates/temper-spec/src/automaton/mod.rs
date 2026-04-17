@@ -30,7 +30,10 @@ pub use initial::{
 pub use lint::{
     BundleLintFinding, LintFinding, LintSeverity, lint_automata_bundle, lint_automaton,
 };
-pub use metadata::SpecMetadata;
-pub use parser::{parse_automaton, to_state_machine};
+pub use metadata::{LivenessViolation, SpecMetadata};
+pub use parser::{
+    LivenessEnforcement, LivenessViolationReporter, parse_automaton,
+    parse_automaton_with_liveness, set_liveness_violation_reporter, to_state_machine,
+};
 pub use translate::{ResolvedAction, ResolvedEffect, ResolvedGuard, translate_actions};
 pub use types::*;

@@ -19,14 +19,144 @@ pub enum AutomatonParseError {
     Validation(String),
 }
 
+/// Liveness enforcement mode (ADR-0050).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LivenessEnforcement {
+    /// Missing coverage logs `tracing::warn!` and the spec loads. Default
+    /// during rollout.
+    WarnOnly,
+    /// Missing coverage produces `AutomatonParseError::Validation`.
+    Enforce,
+}
+
+impl LivenessEnforcement {
+    /// Read the mode from `TEMPER_LIVENESS_ENFORCE`. Recognized truthy
+    /// values: `"1"`, `"true"`, `"on"`, `"yes"` (case-insensitive).
+    pub fn from_env() -> Self {
+        // determinism-ok: env read once at parse time; deterministic under DST
+        // because the env var is set before the simulation begins.
+        let enforce = std::env::var("TEMPER_LIVENESS_ENFORCE")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes"
+                )
+            })
+            .unwrap_or(false);
+        if enforce {
+            Self::Enforce
+        } else {
+            Self::WarnOnly
+        }
+    }
+}
+
 /// Parse an I/O Automaton specification from TOML.
+///
+/// Liveness coverage (ADR-0050) is checked in the mode specified by
+/// `TEMPER_LIVENESS_ENFORCE` (default: warn-only). For deterministic tests,
+/// use [`parse_automaton_with_liveness`].
 pub fn parse_automaton(toml_str: &str) -> Result<Automaton, AutomatonParseError> {
-    // TOML parsing — we use a minimal manual approach since we don't have
-    // the toml crate. Parse the TOML as serde_json via a two-step conversion.
-    // For now, use serde_json with our own simple TOML-to-JSON converter.
-    let automaton: Automaton = toml_parser::parse_toml_to_automaton(toml_str)?;
+    parse_automaton_with_liveness(toml_str, LivenessEnforcement::from_env())
+}
+
+/// Parse with an explicit liveness enforcement mode. Tests should call this
+/// directly so they do not rely on process-global env state.
+pub fn parse_automaton_with_liveness(
+    toml_str: &str,
+    mode: LivenessEnforcement,
+) -> Result<Automaton, AutomatonParseError> {
+    let mut automaton: Automaton = toml_parser::parse_toml_to_automaton(toml_str)?;
     validate(&automaton)?;
+    // ADR-0049: wire each state_timeout's `state` into the target action's
+    // `from` list so the action is actually enabled from that state.
+    wire_state_timeout_from_states(&mut automaton);
+    // ADR-0050: enforce (or warn on) liveness coverage.
+    check_liveness_coverage(&automaton, mode)?;
     Ok(automaton)
+}
+
+/// Callback invoked for each liveness violation encountered at spec parse
+/// time. Allows downstream crates to emit metrics (ADR-0050) without
+/// temper-spec taking a dependency on an observability stack.
+pub type LivenessViolationReporter =
+    dyn Fn(&super::metadata::LivenessViolation) + Send + Sync + 'static;
+
+use std::sync::OnceLock;
+static VIOLATION_REPORTER: OnceLock<Box<LivenessViolationReporter>> = OnceLock::new();
+
+/// Install a global reporter used whenever a liveness violation is observed
+/// during `parse_automaton*`. Callable at most once per process.
+pub fn set_liveness_violation_reporter<F>(reporter: F)
+where
+    F: Fn(&super::metadata::LivenessViolation) + Send + Sync + 'static,
+{
+    let _ = VIOLATION_REPORTER.set(Box::new(reporter));
+}
+
+fn check_liveness_coverage(
+    automaton: &Automaton,
+    mode: LivenessEnforcement,
+) -> Result<(), AutomatonParseError> {
+    let Err(violations) = automaton.validate_liveness_coverage() else {
+        return Ok(());
+    };
+
+    if let Some(reporter) = VIOLATION_REPORTER.get() {
+        for v in &violations {
+            reporter(v);
+        }
+    }
+
+    match mode {
+        LivenessEnforcement::Enforce => {
+            let summary = violations
+                .iter()
+                .map(|v| format!("  - {v}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(AutomatonParseError::Validation(format!(
+                "{} non-terminal state(s) missing liveness coverage (ADR-0050):\n{summary}",
+                violations.len()
+            )))
+        }
+        LivenessEnforcement::WarnOnly => {
+            for v in &violations {
+                tracing::warn!(
+                    entity = %v.entity,
+                    state = %v.state,
+                    "liveness coverage missing (ADR-0050): non-terminal state has no state_timeout and is not in allow_indefinite_states"
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Ensure each `[[state_timeout]]` target action has the timer's `state` in
+/// its `from` list. Safe to call after `validate` has confirmed every
+/// `on_timeout` references an existing action.
+fn wire_state_timeout_from_states(automaton: &mut Automaton) {
+    // Build a (action_name -> target states) map so we touch each action once.
+    let mut to_add: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for st in &automaton.state_timeouts {
+        to_add
+            .entry(st.on_timeout.clone())
+            .or_default()
+            .push(st.state.clone());
+    }
+
+    for action in automaton.actions.iter_mut() {
+        if let Some(states) = to_add.get(&action.name) {
+            for s in states {
+                if !action.from.contains(s) {
+                    action.from.push(s.clone());
+                }
+            }
+        }
+    }
 }
 
 /// Convert an I/O Automaton to the legacy StateMachine format.
@@ -226,6 +356,65 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
                     ig.name
                 )));
             }
+        }
+    }
+
+    // 4. Validate [[state_timeout]] declarations (ADR-0049).
+    //    - `state` must be a declared state.
+    //    - `on_timeout` must be a declared action.
+    //    - each `reset_on` entry must be a declared action.
+    //    - `after_seconds` must be > 0 (a zero delay is almost certainly a typo).
+    //    - `max_occurrences` must be >= 1.
+    //    - the same state must not be declared twice (ambiguous timer contract).
+    let mut seen_states: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for st in &automaton.state_timeouts {
+        if !automaton.automaton.states.contains(&st.state) {
+            return Err(AutomatonParseError::Validation(format!(
+                "state_timeout references undeclared state '{}'",
+                st.state
+            )));
+        }
+        if !seen_states.insert(st.state.as_str()) {
+            return Err(AutomatonParseError::Validation(format!(
+                "state_timeout declared twice for state '{}'",
+                st.state
+            )));
+        }
+        if st.after_seconds == 0 {
+            return Err(AutomatonParseError::Validation(format!(
+                "state_timeout for '{}' must have after_seconds > 0",
+                st.state
+            )));
+        }
+        if st.max_occurrences == 0 {
+            return Err(AutomatonParseError::Validation(format!(
+                "state_timeout for '{}' must have max_occurrences >= 1",
+                st.state
+            )));
+        }
+        if !action_names.contains(&st.on_timeout.as_str()) {
+            return Err(AutomatonParseError::Validation(format!(
+                "state_timeout for '{}' references unknown on_timeout action '{}'",
+                st.state, st.on_timeout
+            )));
+        }
+        for reset in &st.reset_on {
+            if !action_names.contains(&reset.as_str()) {
+                return Err(AutomatonParseError::Validation(format!(
+                    "state_timeout for '{}' references unknown reset_on action '{reset}'",
+                    st.state
+                )));
+            }
+        }
+    }
+
+    // 5. Validate allow_indefinite_states entries are declared states
+    //    (ADR-0050 support).
+    for state in &automaton.automaton.allow_indefinite_states {
+        if !automaton.automaton.states.contains(state) {
+            return Err(AutomatonParseError::Validation(format!(
+                "allow_indefinite_states references undeclared state '{state}'"
+            )));
         }
     }
 

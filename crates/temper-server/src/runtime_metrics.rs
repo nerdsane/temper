@@ -27,6 +27,36 @@ struct RuntimeMetrics {
     wasm_integration_default_timeout_used_total: Counter<u64>,
     entity_concurrency_retry_total: Counter<u64>,
     entity_concurrency_retry_attempts: Histogram<u64>,
+    // --- ADR-0048: dispatch retry + error taxonomy ------------------------
+    dispatch_ask_attempts: Histogram<u64>,
+    dispatch_ask_latency_ms: Histogram<f64>,
+    dispatch_ask_outcome_total: Counter<u64>,
+    dispatch_ask_error_total: Counter<u64>,
+    // --- ADR-0049: state-entry timeouts -----------------------------------
+    state_timeout_fired_total: Counter<u64>,
+    state_timeout_cancelled_total: Counter<u64>,
+    state_timeout_reset_total: Counter<u64>,
+    scheduler_overdue_on_replay_total: Counter<u64>,
+    scheduler_pending_timers: Gauge<u64>,
+    // --- ADR-0050: liveness coverage enforcement --------------------------
+    spec_liveness_violations_total: Counter<u64>,
+    spec_allow_indefinite_states: Gauge<u64>,
+    // --- ADR-0051: admission control --------------------------------------
+    admission_granted_total: Counter<u64>,
+    admission_queued_total: Counter<u64>,
+    admission_deferred_total: Counter<u64>,
+    admission_wait_time_ms: Histogram<f64>,
+    admission_active_permits: Gauge<u64>,
+    admission_queue_depth: Gauge<u64>,
+    admission_permit_hold_time_ms: Histogram<f64>,
+    // --- Actor runtime (mailbox + ask) ------------------------------------
+    actor_mailbox_depth: Gauge<u64>,
+    actor_mailbox_utilization: Gauge<f64>,
+    actor_mailbox_full_drop_total: Counter<u64>,
+    actor_ask_reply_latency_ms: Histogram<f64>,
+    // --- Katagami (consumer-side outcome) ---------------------------------
+    curation_job_duration_ms: Histogram<f64>,
+    curation_job_outcome_total: Counter<u64>,
 }
 
 fn metrics() -> &'static RuntimeMetrics {
@@ -109,6 +139,122 @@ fn metrics() -> &'static RuntimeMetrics {
                      canary. See ADR-0046.",
                 )
                 .build(),
+            dispatch_ask_attempts: meter
+                .u64_histogram("temper_dispatch_ask_attempts")
+                .with_description("ADR-0048: retry attempts consumed per dispatch call.")
+                .build(),
+            dispatch_ask_latency_ms: meter
+                .f64_histogram("temper_dispatch_ask_latency_ms")
+                .with_unit("ms")
+                .with_description("ADR-0048: end-to-end dispatch latency including retries.")
+                .build(),
+            dispatch_ask_outcome_total: meter
+                .u64_counter("temper_dispatch_ask_outcome_total")
+                .with_description(
+                    "ADR-0048: dispatch outcomes — ok, transient_retried_ok, \
+                     transient_exhausted, permanent, deferred.",
+                )
+                .build(),
+            dispatch_ask_error_total: meter
+                .u64_counter("temper_dispatch_ask_error_total")
+                .with_description(
+                    "ADR-0048: ActorError kind breakdown (ask_timeout, mailbox_full, \
+                     stopped, send_failed, panicked, init_failed, max_restarts_exceeded).",
+                )
+                .build(),
+            state_timeout_fired_total: meter
+                .u64_counter("temper_state_timeout_fired_total")
+                .with_description("ADR-0049: state_timeout declarations that fired.")
+                .build(),
+            state_timeout_cancelled_total: meter
+                .u64_counter("temper_state_timeout_cancelled_total")
+                .with_description("ADR-0049: timers cancelled due to state exit.")
+                .build(),
+            state_timeout_reset_total: meter
+                .u64_counter("temper_state_timeout_reset_total")
+                .with_description("ADR-0049: timers re-armed via reset_on.")
+                .build(),
+            scheduler_overdue_on_replay_total: meter
+                .u64_counter("temper_scheduler_overdue_on_replay_total")
+                .with_description(
+                    "ADR-0049: scheduled actions whose deadline passed before \
+                     replay detected them; fired with overdue=true.",
+                )
+                .build(),
+            scheduler_pending_timers: meter
+                .u64_gauge("temper_scheduler_pending_timers")
+                .with_description("ADR-0049: live in-memory timer count per entity type.")
+                .build(),
+            spec_liveness_violations_total: meter
+                .u64_counter("temper_spec_liveness_violations_total")
+                .with_description(
+                    "ADR-0050: non-terminal states found without [[state_timeout]] \
+                     or allow_indefinite_states coverage.",
+                )
+                .build(),
+            spec_allow_indefinite_states: meter
+                .u64_gauge("temper_spec_allow_indefinite_states")
+                .with_description("ADR-0050: explicitly allowlisted indefinite states per entity.")
+                .build(),
+            admission_granted_total: meter
+                .u64_counter("temper_admission_granted_total")
+                .with_description("ADR-0051: permits granted immediately or after queueing.")
+                .build(),
+            admission_queued_total: meter
+                .u64_counter("temper_admission_queued_total")
+                .with_description("ADR-0051: acquirers that had to wait before being granted.")
+                .build(),
+            admission_deferred_total: meter
+                .u64_counter("temper_admission_deferred_total")
+                .with_description("ADR-0051: acquirers that hit queue_timeout_seconds.")
+                .build(),
+            admission_wait_time_ms: meter
+                .f64_histogram("temper_admission_wait_time_ms")
+                .with_unit("ms")
+                .with_description("ADR-0051: time spent waiting in the admission queue.")
+                .build(),
+            admission_active_permits: meter
+                .u64_gauge("temper_admission_active_permits")
+                .with_description("ADR-0051: permits currently held per (tenant, entity, action).")
+                .build(),
+            admission_queue_depth: meter
+                .u64_gauge("temper_admission_queue_depth")
+                .with_description("ADR-0051: pending acquirers per (tenant, entity, action).")
+                .build(),
+            admission_permit_hold_time_ms: meter
+                .f64_histogram("temper_admission_permit_hold_time_ms")
+                .with_unit("ms")
+                .with_description("ADR-0051: duration permits were held before release.")
+                .build(),
+            actor_mailbox_depth: meter
+                .u64_gauge("temper_actor_mailbox_depth")
+                .with_description("Per-actor instantaneous mailbox queue depth.")
+                .build(),
+            actor_mailbox_utilization: meter
+                .f64_gauge("temper_actor_mailbox_utilization")
+                .with_description("Per-entity-type aggregate mailbox utilization [0.0..1.0].")
+                .build(),
+            actor_mailbox_full_drop_total: meter
+                .u64_counter("temper_actor_mailbox_full_drop_total")
+                .with_description(
+                    "Real MailboxFull occurrences. Drives ADR-0048 retry — and ADR-0051 \
+                     admission is supposed to suppress it.",
+                )
+                .build(),
+            actor_ask_reply_latency_ms: meter
+                .f64_histogram("temper_actor_ask_reply_latency_ms")
+                .with_unit("ms")
+                .with_description("Inside-actor ask handling latency (excludes dispatch overhead).")
+                .build(),
+            curation_job_duration_ms: meter
+                .f64_histogram("temper_curation_job_duration_ms")
+                .with_unit("ms")
+                .with_description("End-to-end CurationJob latency (Katagami).")
+                .build(),
+            curation_job_outcome_total: meter
+                .u64_counter("temper_curation_job_outcome_total")
+                .with_description("CurationJob outcomes — completed, failed, deferred.")
+                .build(),
         }
     })
 }
@@ -117,9 +263,38 @@ fn metrics() -> &'static RuntimeMetrics {
 pub fn record_server_state_metrics(state: &ServerState) {
     if let Ok(registry) = state.actor_registry.read() {
         record_active_actor_count(registry.len());
+        record_actor_mailbox_metrics(&registry);
     }
     if let Ok(index) = state.entity_index.read() {
         record_active_entity_counts(&index);
+    }
+}
+
+/// Walk the actor registry and emit per-actor mailbox depth + per-entity-type
+/// aggregate utilization gauges (ADR-0048 observability baseline).
+fn record_actor_mailbox_metrics(
+    registry: &BTreeMap<String, temper_runtime::actor::ActorRef<crate::entity_actor::EntityMsg>>,
+) {
+    // actor_key format is "{tenant}:{entity_type}:{entity_id}"; we aggregate
+    // utilization per entity type and sample individual depth per actor.
+    let mut per_type_total_util: BTreeMap<String, (f64, u64)> = BTreeMap::new();
+    for (key, actor_ref) in registry.iter() {
+        let entity_type = key
+            .split(':')
+            .nth(1)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "_unknown_".to_string());
+        record_actor_mailbox_depth(&entity_type, key, actor_ref.mailbox_depth() as u64);
+        let entry = per_type_total_util
+            .entry(entity_type)
+            .or_insert((0.0, 0));
+        entry.0 += actor_ref.mailbox_utilization();
+        entry.1 += 1;
+    }
+    for (entity_type, (sum_util, count)) in per_type_total_util {
+        if count > 0 {
+            record_actor_mailbox_utilization(&entity_type, sum_util / count as f64);
+        }
     }
 }
 
@@ -275,6 +450,326 @@ pub fn record_entity_concurrency_retry(
     metrics()
         .entity_concurrency_retry_attempts
         .record(attempts, &attrs);
+}
+
+// ============================================================================
+// ADR-0048: dispatch retry + error taxonomy.
+// ============================================================================
+
+/// Dispatch outcome classifications surfaced as the `outcome` metric label.
+#[derive(Debug, Clone, Copy)]
+pub enum DispatchOutcome {
+    Ok,
+    TransientRetriedOk,
+    TransientExhausted,
+    Permanent,
+    Deferred,
+}
+
+impl DispatchOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::TransientRetriedOk => "transient_retried_ok",
+            Self::TransientExhausted => "transient_exhausted",
+            Self::Permanent => "permanent",
+            Self::Deferred => "deferred",
+        }
+    }
+}
+
+/// Record the outcome of a dispatch call along with attempt count and
+/// elapsed latency.
+pub fn record_dispatch_outcome(
+    tenant: &str,
+    entity_type: &str,
+    action: &str,
+    outcome: DispatchOutcome,
+    attempts: u32,
+    elapsed: Duration,
+) {
+    let attrs = [
+        KeyValue::new("tenant", tenant.to_string()),
+        KeyValue::new("entity_type", entity_type.to_string()),
+        KeyValue::new("action", action.to_string()),
+        KeyValue::new("outcome", outcome.as_str()),
+    ];
+    metrics().dispatch_ask_outcome_total.add(1, &attrs);
+    metrics()
+        .dispatch_ask_attempts
+        .record(attempts as u64, &attrs);
+    metrics()
+        .dispatch_ask_latency_ms
+        .record(elapsed.as_secs_f64() * 1000.0, &attrs);
+}
+
+/// Record a specific ActorError variant that a dispatch attempt surfaced.
+pub fn record_dispatch_error(
+    tenant: &str,
+    entity_type: &str,
+    action: &str,
+    error_kind: &'static str,
+) {
+    metrics().dispatch_ask_error_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+            KeyValue::new("error_kind", error_kind),
+        ],
+    );
+}
+
+// ============================================================================
+// ADR-0049: state-entry timeouts.
+// ============================================================================
+
+/// Record that a state_timeout fired for a specific (entity, state, action).
+pub fn record_state_timeout_fired(
+    tenant: &str,
+    entity_type: &str,
+    state: &str,
+    action: &str,
+) {
+    metrics().state_timeout_fired_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("state", state.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+/// Record a state_timeout cancellation triggered by a state exit.
+pub fn record_state_timeout_cancelled(tenant: &str, entity_type: &str, state: &str) {
+    metrics().state_timeout_cancelled_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("state", state.to_string()),
+        ],
+    );
+}
+
+/// Record a state_timeout re-arm triggered by a reset_on action.
+pub fn record_state_timeout_reset(
+    tenant: &str,
+    entity_type: &str,
+    state: &str,
+    reset_action: &str,
+) {
+    metrics().state_timeout_reset_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("state", state.to_string()),
+            KeyValue::new("reset_action", reset_action.to_string()),
+        ],
+    );
+}
+
+/// Record a timer that missed its deadline across a restart and had to be
+/// re-fired with `overdue=true`.
+pub fn record_scheduler_overdue_on_replay(tenant: &str, entity_type: &str) {
+    metrics().scheduler_overdue_on_replay_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+        ],
+    );
+}
+
+/// Report the current in-memory pending-timer count per entity type.
+pub fn record_scheduler_pending_timers(entity_type: &str, count: u64) {
+    metrics().scheduler_pending_timers.record(
+        count,
+        &[KeyValue::new("entity_type", entity_type.to_string())],
+    );
+}
+
+// ============================================================================
+// ADR-0050: liveness coverage enforcement.
+// ============================================================================
+
+pub fn record_spec_liveness_violation(entity_type: &str, state: &str) {
+    metrics().spec_liveness_violations_total.add(
+        1,
+        &[
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("state", state.to_string()),
+        ],
+    );
+}
+
+pub fn record_spec_allow_indefinite_states(entity_type: &str, count: u64) {
+    metrics().spec_allow_indefinite_states.record(
+        count,
+        &[KeyValue::new("entity_type", entity_type.to_string())],
+    );
+}
+
+// ============================================================================
+// ADR-0051: admission control.
+// ============================================================================
+
+pub fn record_admission_granted(tenant: &str, entity_type: &str, action: &str, waited: Duration) {
+    let attrs = [
+        KeyValue::new("tenant", tenant.to_string()),
+        KeyValue::new("entity_type", entity_type.to_string()),
+        KeyValue::new("action", action.to_string()),
+    ];
+    metrics().admission_granted_total.add(1, &attrs);
+    metrics()
+        .admission_wait_time_ms
+        .record(waited.as_secs_f64() * 1000.0, &attrs);
+}
+
+pub fn record_admission_queued(tenant: &str, entity_type: &str, action: &str) {
+    metrics().admission_queued_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+pub fn record_admission_deferred(
+    tenant: &str,
+    entity_type: &str,
+    action: &str,
+    waited: Duration,
+) {
+    let attrs = [
+        KeyValue::new("tenant", tenant.to_string()),
+        KeyValue::new("entity_type", entity_type.to_string()),
+        KeyValue::new("action", action.to_string()),
+    ];
+    metrics().admission_deferred_total.add(1, &attrs);
+    metrics()
+        .admission_wait_time_ms
+        .record(waited.as_secs_f64() * 1000.0, &attrs);
+}
+
+pub fn record_admission_active_permits(
+    tenant: &str,
+    entity_type: &str,
+    action: &str,
+    count: u64,
+) {
+    metrics().admission_active_permits.record(
+        count,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+pub fn record_admission_queue_depth(tenant: &str, entity_type: &str, action: &str, depth: u64) {
+    metrics().admission_queue_depth.record(
+        depth,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+pub fn record_admission_permit_hold(
+    tenant: &str,
+    entity_type: &str,
+    action: &str,
+    held: Duration,
+) {
+    metrics().admission_permit_hold_time_ms.record(
+        held.as_secs_f64() * 1000.0,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+// ============================================================================
+// Actor runtime (mailbox + ask).
+// ============================================================================
+
+/// Bucket an actor id hash into a low-cardinality slot so per-actor gauges
+/// stay within Datadog cardinality limits.
+pub fn actor_id_bucket(actor_id: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    actor_id.hash(&mut h);
+    format!("{:02x}", h.finish() % 64)
+}
+
+pub fn record_actor_mailbox_depth(entity_type: &str, actor_id: &str, depth: u64) {
+    metrics().actor_mailbox_depth.record(
+        depth,
+        &[
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("actor_id_hash", actor_id_bucket(actor_id)),
+        ],
+    );
+}
+
+pub fn record_actor_mailbox_utilization(entity_type: &str, utilization: f64) {
+    metrics().actor_mailbox_utilization.record(
+        utilization,
+        &[KeyValue::new("entity_type", entity_type.to_string())],
+    );
+}
+
+pub fn record_actor_mailbox_full_drop(entity_type: &str, action: &str) {
+    metrics().actor_mailbox_full_drop_total.add(
+        1,
+        &[
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+pub fn record_actor_ask_reply_latency(entity_type: &str, action: &str, elapsed: Duration) {
+    metrics().actor_ask_reply_latency_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &[
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+// ============================================================================
+// Katagami.
+// ============================================================================
+
+pub fn record_curation_job_duration(job_type: &str, duration: Duration) {
+    metrics().curation_job_duration_ms.record(
+        duration.as_secs_f64() * 1000.0,
+        &[KeyValue::new("job_type", job_type.to_string())],
+    );
+}
+
+pub fn record_curation_job_outcome(job_type: &str, outcome: &'static str) {
+    metrics().curation_job_outcome_total.add(
+        1,
+        &[
+            KeyValue::new("job_type", job_type.to_string()),
+            KeyValue::new("outcome", outcome),
+        ],
+    );
 }
 
 /// Read process resident memory (RSS) in bytes from Linux procfs.

@@ -110,6 +110,22 @@ impl<M: Message> ActorRef<M> {
     pub fn id(&self) -> &ActorId {
         &self.id
     }
+
+    /// Current in-flight mailbox depth (messages queued but not yet processed).
+    /// Exposed for observability; see `runtime_metrics::record_actor_mailbox_depth`.
+    pub fn mailbox_depth(&self) -> usize {
+        self.sender.depth()
+    }
+
+    /// Mailbox utilization in `[0.0, 1.0]`.
+    pub fn mailbox_utilization(&self) -> f64 {
+        self.sender.utilization()
+    }
+
+    /// Mailbox total capacity.
+    pub fn mailbox_capacity(&self) -> usize {
+        self.sender.capacity()
+    }
 }
 
 impl<M: Message> Clone for ActorRef<M> {

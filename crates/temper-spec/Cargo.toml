@@ -12,3 +12,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
+tracing = { workspace = true }
+
+[[bin]]
+name = "verify_specs"
+path = "src/bin/verify_specs.rs"

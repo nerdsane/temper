@@ -7,7 +7,9 @@ use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
 use super::effects::PostDispatchContext;
+use super::retry;
 use super::{DispatchCommand, DispatchError, DispatchExtOptions};
+use crate::state::admission::AdmissionOutcome;
 
 impl crate::state::ServerState {
     /// Dispatch an action using the unified command object.
@@ -232,17 +234,124 @@ impl crate::state::ServerState {
             .await;
 
         let action_params = params.clone();
-        let response = match actor_ref
-            .ask::<EntityResponse>(
-                EntityMsg::Action {
-                    name: action.to_string(),
-                    params,
-                    cross_entity_booleans,
-                },
-                self.action_dispatch_timeout,
-            )
+        let admission_start = std::time::Instant::now();
+        // ADR-0051: acquire an admission permit before spending retry budget.
+        // Caps are pulled inline from the spec registry so `[admission]`
+        // declarations take effect at spec load with no separate
+        // registration step.
+        let admission_caps = self.admission_caps_for(tenant, entity_type);
+        let admission_was_capped = admission_caps.is_some();
+        let _admission_permit = match self
+            .admission
+            .try_acquire_with_caps(tenant, entity_type, action, admission_caps.as_ref())
             .await
         {
+            AdmissionOutcome::Passthrough => None,
+            AdmissionOutcome::Granted(permit) => {
+                let waited = admission_start.elapsed();
+                crate::runtime_metrics::record_admission_granted(
+                    tenant.as_str(),
+                    entity_type,
+                    action,
+                    waited,
+                );
+                if waited > std::time::Duration::from_millis(1) {
+                    crate::runtime_metrics::record_admission_queued(
+                        tenant.as_str(),
+                        entity_type,
+                        action,
+                    );
+                }
+                Some(permit)
+            }
+            AdmissionOutcome::Deferred {
+                retry_after_ms,
+                waited,
+            } => {
+                crate::runtime_metrics::record_admission_deferred(
+                    tenant.as_str(),
+                    entity_type,
+                    action,
+                    waited,
+                );
+                crate::runtime_metrics::record_dispatch_outcome(
+                    tenant.as_str(),
+                    entity_type,
+                    action,
+                    crate::runtime_metrics::DispatchOutcome::Deferred,
+                    0,
+                    admission_start.elapsed(),
+                );
+                return Err(DispatchError::Deferred { retry_after_ms });
+            }
+        };
+        let _ = admission_was_capped; // reserved for active-permits gauge
+        // ADR-0048: wrap the ask in a bounded retry that classifies
+        // transient (AskTimeout / MailboxFull) vs permanent failures.
+        let policy = self.dispatch_retry_policy();
+        let action_name = action.to_string();
+        let params_for_retry = params;
+        let cross_for_retry = cross_entity_booleans;
+        let idempotency_key = agent_ctx.idempotency_key.clone();
+        let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
+            &actor_ref,
+            || EntityMsg::Action {
+                name: action_name.clone(),
+                params: params_for_retry.clone(),
+                cross_entity_booleans: cross_for_retry.clone(),
+                idempotency_key: idempotency_key.clone(),
+            },
+            &policy,
+        )
+        .await;
+        // ADR-0048: emit dispatch outcome / attempts / latency metrics.
+        let ask_outcome_for_metrics = match &outcome.result {
+            Ok(_) => {
+                if outcome.retried_after_transient {
+                    crate::runtime_metrics::DispatchOutcome::TransientRetriedOk
+                } else {
+                    crate::runtime_metrics::DispatchOutcome::Ok
+                }
+            }
+            Err(e) => {
+                let kind: &'static str = match e {
+                    temper_runtime::actor::ActorError::AskTimeout(_) => "ask_timeout",
+                    temper_runtime::actor::ActorError::MailboxFull => "mailbox_full",
+                    temper_runtime::actor::ActorError::Stopped => "stopped",
+                    temper_runtime::actor::ActorError::SendFailed => "send_failed",
+                    temper_runtime::actor::ActorError::Panicked(_) => "panicked",
+                    temper_runtime::actor::ActorError::InitFailed(_) => "init_failed",
+                    temper_runtime::actor::ActorError::MaxRestartsExceeded(_) => {
+                        "max_restarts_exceeded"
+                    }
+                    temper_runtime::actor::ActorError::Custom(_) => "custom",
+                };
+                crate::runtime_metrics::record_dispatch_error(
+                    tenant.as_str(),
+                    entity_type,
+                    action,
+                    kind,
+                );
+                if e == &temper_runtime::actor::ActorError::MailboxFull {
+                    crate::runtime_metrics::record_actor_mailbox_full_drop(entity_type, action);
+                }
+                if e.is_transient() {
+                    crate::runtime_metrics::DispatchOutcome::TransientExhausted
+                } else {
+                    crate::runtime_metrics::DispatchOutcome::Permanent
+                }
+            }
+        };
+        crate::runtime_metrics::record_dispatch_outcome(
+            tenant.as_str(),
+            entity_type,
+            action,
+            ask_outcome_for_metrics,
+            outcome.attempts,
+            outcome.elapsed,
+        );
+
+        let response = match outcome.result {
             Ok(response) => response,
             Err(e) => {
                 let entry = TrajectoryEntry {
@@ -309,7 +418,7 @@ impl crate::state::ServerState {
                 if let Err(persist_err) = self.persist_trajectory_entry(&entry).await {
                     tracing::error!(error = %persist_err, "failed to persist trajectory entry");
                 }
-                return Err(DispatchError::ActorFailed(e.to_string()));
+                return Err(DispatchError::from_actor_error(e, outcome.attempts));
             }
         };
 

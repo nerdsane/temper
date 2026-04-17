@@ -43,6 +43,7 @@ async fn dispatch_action(
                 name: action.to_string(),
                 params,
                 cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: None,
             },
             Duration::from_secs(5),
         )
