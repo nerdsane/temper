@@ -200,6 +200,7 @@ impl ParseState {
             "module" => integration.module = Some(value.to_string()),
             "on_success" => integration.on_success = Some(value.to_string()),
             "on_failure" => integration.on_failure = Some(value.to_string()),
+            "llm" => integration.llm = value == "true",
             _ => {
                 integration
                     .config
@@ -311,6 +312,7 @@ impl ParseState {
             module: None,
             on_success: None,
             on_failure: None,
+            llm: false,
             config: std::collections::BTreeMap::new(),
         });
         self.current_section = Section::Integration;

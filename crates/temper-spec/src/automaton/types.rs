@@ -254,6 +254,11 @@ pub struct Integration {
     /// Action to dispatch on failed WASM execution (required when `type = "wasm"`).
     #[serde(default)]
     pub on_failure: Option<String>,
+    /// Marks this integration as an LLM call. The dispatcher upgrades matching
+    /// spans to an LLM-kind root span so `gen_ai.*` content surfaces correctly
+    /// in observability backends (e.g., Datadog LLM Obs). Defaults to false.
+    #[serde(default)]
+    pub llm: bool,
     /// Arbitrary config passed to the WASM module at invocation time.
     /// Common keys: `url`, `method`, `headers`.
     #[serde(flatten, default)]
