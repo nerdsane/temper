@@ -224,9 +224,9 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                 InvariantKind::And(parts) => {
                     // Sound over-approximation: `a && b` is inductive iff each
                     // part is inductive under the same trigger_states.
-                    parts.iter().all(|p| {
-                        kind_inductive_smt(model, &inv.trigger_states, p, max_counter)
-                    })
+                    parts
+                        .iter()
+                        .all(|p| kind_inductive_smt(model, &inv.trigger_states, p, max_counter))
                 }
                 InvariantKind::Or(_) => {
                     // Disjunctive induction requires joint encoding; runtime
@@ -279,14 +279,9 @@ fn kind_inductive_smt(
                 .any(|t| t.from_states.contains(trigger) || t.from_states.is_empty())
         }),
         InvariantKind::Implication => true,
-        InvariantKind::CounterCompare { var, op, value } => check_counter_compare_induction_z3(
-            model,
-            trigger_states,
-            var,
-            op,
-            *value,
-            max_counter,
-        ),
+        InvariantKind::CounterCompare { var, op, value } => {
+            check_counter_compare_induction_z3(model, trigger_states, var, op, *value, max_counter)
+        }
         InvariantKind::NeverState { state } => !model
             .transitions
             .iter()

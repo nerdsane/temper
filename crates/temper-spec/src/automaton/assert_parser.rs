@@ -166,9 +166,7 @@ fn tokenize(input: &str) -> Option<Vec<Tok>> {
             }
             b if b.is_ascii_alphabetic() || b == b'_' => {
                 let start = i;
-                while i < bytes.len()
-                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-                {
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
                 }
                 out.push(Tok::Ident(input[start..i].to_string()));
@@ -494,8 +492,14 @@ mod tests {
         assert_eq!(
             parse_assert_expr("a && b"),
             Some(ParsedAssert::And(vec![
-                ParsedAssert::BoolRequired { var: "a".into(), expect: true },
-                ParsedAssert::BoolRequired { var: "b".into(), expect: true },
+                ParsedAssert::BoolRequired {
+                    var: "a".into(),
+                    expect: true
+                },
+                ParsedAssert::BoolRequired {
+                    var: "b".into(),
+                    expect: true
+                },
             ]))
         );
     }
@@ -505,9 +509,18 @@ mod tests {
         assert_eq!(
             parse_assert_expr("migrations_ok && typecheck_ok && unit_tests_ok"),
             Some(ParsedAssert::And(vec![
-                ParsedAssert::BoolRequired { var: "migrations_ok".into(), expect: true },
-                ParsedAssert::BoolRequired { var: "typecheck_ok".into(), expect: true },
-                ParsedAssert::BoolRequired { var: "unit_tests_ok".into(), expect: true },
+                ParsedAssert::BoolRequired {
+                    var: "migrations_ok".into(),
+                    expect: true
+                },
+                ParsedAssert::BoolRequired {
+                    var: "typecheck_ok".into(),
+                    expect: true
+                },
+                ParsedAssert::BoolRequired {
+                    var: "unit_tests_ok".into(),
+                    expect: true
+                },
             ]))
         );
     }
@@ -517,8 +530,14 @@ mod tests {
         assert_eq!(
             parse_assert_expr("reviewed_by_code || reviewed_by_dst"),
             Some(ParsedAssert::Or(vec![
-                ParsedAssert::BoolRequired { var: "reviewed_by_code".into(), expect: true },
-                ParsedAssert::BoolRequired { var: "reviewed_by_dst".into(), expect: true },
+                ParsedAssert::BoolRequired {
+                    var: "reviewed_by_code".into(),
+                    expect: true
+                },
+                ParsedAssert::BoolRequired {
+                    var: "reviewed_by_dst".into(),
+                    expect: true
+                },
             ]))
         );
     }
@@ -530,10 +549,19 @@ mod tests {
         assert_eq!(
             parse_assert_expr("a && (b || c)"),
             Some(ParsedAssert::And(vec![
-                ParsedAssert::BoolRequired { var: "a".into(), expect: true },
+                ParsedAssert::BoolRequired {
+                    var: "a".into(),
+                    expect: true
+                },
                 ParsedAssert::Or(vec![
-                    ParsedAssert::BoolRequired { var: "b".into(), expect: true },
-                    ParsedAssert::BoolRequired { var: "c".into(), expect: true },
+                    ParsedAssert::BoolRequired {
+                        var: "b".into(),
+                        expect: true
+                    },
+                    ParsedAssert::BoolRequired {
+                        var: "c".into(),
+                        expect: true
+                    },
                 ]),
             ]))
         );
@@ -545,10 +573,19 @@ mod tests {
         assert_eq!(
             parse_assert_expr("a || b && c"),
             Some(ParsedAssert::Or(vec![
-                ParsedAssert::BoolRequired { var: "a".into(), expect: true },
+                ParsedAssert::BoolRequired {
+                    var: "a".into(),
+                    expect: true
+                },
                 ParsedAssert::And(vec![
-                    ParsedAssert::BoolRequired { var: "b".into(), expect: true },
-                    ParsedAssert::BoolRequired { var: "c".into(), expect: true },
+                    ParsedAssert::BoolRequired {
+                        var: "b".into(),
+                        expect: true
+                    },
+                    ParsedAssert::BoolRequired {
+                        var: "c".into(),
+                        expect: true
+                    },
                 ]),
             ]))
         );
@@ -558,7 +595,10 @@ mod tests {
     fn test_nested_parens() {
         assert_eq!(
             parse_assert_expr("((a))"),
-            Some(ParsedAssert::BoolRequired { var: "a".into(), expect: true })
+            Some(ParsedAssert::BoolRequired {
+                var: "a".into(),
+                expect: true
+            })
         );
     }
 
@@ -567,8 +607,13 @@ mod tests {
         assert_eq!(
             parse_assert_expr("items > 0 && payment_captured"),
             Some(ParsedAssert::And(vec![
-                ParsedAssert::CounterPositive { var: "items".into() },
-                ParsedAssert::BoolRequired { var: "payment_captured".into(), expect: true },
+                ParsedAssert::CounterPositive {
+                    var: "items".into()
+                },
+                ParsedAssert::BoolRequired {
+                    var: "payment_captured".into(),
+                    expect: true
+                },
             ]))
         );
     }
@@ -584,8 +629,14 @@ mod tests {
         assert_eq!(
             parse_assert_expr("  a   &&   b  "),
             Some(ParsedAssert::And(vec![
-                ParsedAssert::BoolRequired { var: "a".into(), expect: true },
-                ParsedAssert::BoolRequired { var: "b".into(), expect: true },
+                ParsedAssert::BoolRequired {
+                    var: "a".into(),
+                    expect: true
+                },
+                ParsedAssert::BoolRequired {
+                    var: "b".into(),
+                    expect: true
+                },
             ]))
         );
     }
@@ -595,8 +646,14 @@ mod tests {
         assert_eq!(
             parse_assert_expr("a && !b"),
             Some(ParsedAssert::And(vec![
-                ParsedAssert::BoolRequired { var: "a".into(), expect: true },
-                ParsedAssert::BoolRequired { var: "b".into(), expect: false },
+                ParsedAssert::BoolRequired {
+                    var: "a".into(),
+                    expect: true
+                },
+                ParsedAssert::BoolRequired {
+                    var: "b".into(),
+                    expect: false
+                },
             ]))
         );
     }
