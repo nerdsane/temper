@@ -34,13 +34,17 @@ Without profiles, temper#146 is blocked on guesswork. Beyond that incident, any 
 
 Enable Datadog Continuous Profiler on every Temper deployment, gated by an env flag, with CPU + wall-clock profiles on by default and heap in canary only. Wire `@runtime-id` into spans so profile-to-trace stitching works automatically.
 
-### Sub-Decision 1: Crate choice — `datadog-profiling`
+### Sub-Decision 1: Crate choice — `pprof` + custom Datadog uploader
 
-Add `datadog-profiling` to `crates/temper-server/Cargo.toml`. This is the official Rust crate from DataDog/libdatadog; it wraps pprof-style sampling, formats profiles as pprof, and uploads to the Datadog Agent over UDP/HTTP.
+**Status correction (2026-04-18)**: the crates.io `datadog-profiling` package is an empty placeholder (`"An empty Datadog crate — Head over to docs.datadoghq.com"`). Datadog does not ship a production-ready Rust profiling SDK today. We therefore go with what was listed as the fallback immediately.
 
-Fallback (if the crate's API is insufficient for a case that surfaces): `pprof-rs` with a custom uploader targeting the Datadog Agent profile intake endpoint. Not the default.
+**Primary**: `pprof-rs` (`pprof = "0.14"`) for CPU + wall-clock sampling. Produces pprof-format profiles.
 
-**Why not always `pprof-rs`**: the Datadog crate handles profile metadata (service, env, version, runtime-id, embodiment tags) in the format the Datadog UI expects. Custom pprof uploads require replicating that envelope correctly, which is brittle.
+**Uploader**: a small in-repo component (~100 lines) that POSTs the pprof blob to the Datadog Agent profile intake endpoint (`/profiling/v1/input`) with the required multipart envelope (`service`, `env`, `version`, `runtime-id`, `profile.component`, `embodiment` tags).
+
+**Why this path**: pprof-rs is mature (used by tikv and much of the tokio-console ecosystem). The Datadog intake endpoint format is documented and stable. Building the uploader is lower total maintenance than waiting for the Datadog Rust SDK to ship.
+
+**Revisit**: if Datadog publishes a real Rust SDK, migrate in a follow-up ADR.
 
 ### Sub-Decision 2: Profile types
 
