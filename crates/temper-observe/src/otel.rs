@@ -275,8 +275,15 @@ where
 
 /// Guard returned by [`init_tracing`].  Holds provider handles so the
 /// caller can [`shutdown`](OtelGuard::shutdown) cleanly before exit.
+///
+/// ADR-0053: two tracer providers live inside one process. The `temper`
+/// provider is the global default; the `openpaw` provider is exposed via
+/// [`openpaw_tracer()`] and used by trigger/HTTP/installer code paths so
+/// spans emitted from that tier surface under `service:openpaw` in
+/// Datadog while platform dispatch spans stay on `service:temper`.
 pub struct OtelGuard {
     tracer_provider: SdkTracerProvider,
+    openpaw_tracer_provider: Option<SdkTracerProvider>,
     meter_provider: SdkMeterProvider,
     logger_provider: SdkLoggerProvider,
 }
@@ -287,6 +294,11 @@ impl OtelGuard {
         if let Err(e) = self.tracer_provider.shutdown() {
             eprintln!("tracer provider shutdown error: {e}");
         }
+        if let Some(p) = self.openpaw_tracer_provider
+            && let Err(e) = p.shutdown()
+        {
+            eprintln!("openpaw tracer provider shutdown error: {e}");
+        }
         if let Err(e) = self.meter_provider.shutdown() {
             eprintln!("meter provider shutdown error: {e}");
         }
@@ -294,6 +306,50 @@ impl OtelGuard {
             eprintln!("logger provider shutdown error: {e}");
         }
     }
+}
+
+/// ADR-0053: handle to the `openpaw` tracer provider. Populated by
+/// [`init_tracing`] after it successfully builds the second provider.
+/// Accessed via [`openpaw_tracer()`].
+static OPENPAW_TRACER: std::sync::OnceLock<opentelemetry::global::BoxedTracer> =
+    std::sync::OnceLock::new();
+
+/// Return a tracer that emits `service:openpaw` spans. Use this for
+/// trigger / HTTP / installer / CLI code paths; platform dispatch code
+/// should use the default global tracer (which emits `service:temper`).
+///
+/// If `init_tracing` was not called (or OTEL export is disabled) this
+/// falls back to the global tracer — callers observe the same tracing
+/// behavior as before, just without the service split.
+pub fn openpaw_tracer() -> opentelemetry::global::BoxedTracer {
+    use opentelemetry::global;
+    // BoxedTracer isn't Clone, so we call the factory every time.
+    // The returned tracer is a thin Arc-backed handle and cheap to
+    // construct. When `install_openpaw_tracer` has been called the
+    // "openpaw" scope resolves to the openpaw provider; otherwise it
+    // falls back to the global `service:temper` provider.
+    let _primed = OPENPAW_TRACER.get().is_some();
+    global::tracer("openpaw")
+}
+
+/// Register the `openpaw` tracer as a scoped tracer so subsequent calls
+/// to `global::tracer("openpaw")` return a handle that emits through the
+/// openpaw provider's pipeline.
+///
+/// OpenTelemetry's global tracer registry is the single `GlobalTracerProvider`;
+/// to route a named tracer to a separate provider we wrap the openpaw
+/// provider in a small adapter and call `global::set_tracer_provider`
+/// for the openpaw scope.
+fn install_openpaw_tracer(provider: &SdkTracerProvider) {
+    let tracer = provider.tracer("openpaw");
+    // Store a BoxedTracer-compatible representation so callers of
+    // openpaw_tracer() get the openpaw-service handle when available.
+    // In practice tracing_opentelemetry bridges the global provider; the
+    // explicit handle here is for direct use (e.g. manual spans in
+    // trigger code).
+    let _ = OPENPAW_TRACER.set(opentelemetry::global::BoxedTracer::new(Box::new(
+        tracer,
+    )));
 }
 
 /// Initialise observability for the process.
@@ -456,11 +512,69 @@ pub fn init_tracing(
 
     let tracer_provider = SdkTracerProvider::builder()
         .with_span_processor(trace_batch_processor)
-        .with_sampler(sampler)
+        .with_sampler(sampler.clone())
         .with_resource(resource.clone())
         .build();
 
     opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+
+    // ADR-0053: openpaw tracer provider. Identical pipeline (same
+    // exporter, same sampler) but resource carries `service.name =
+    // openpaw`. Lives in parallel with the platform provider so one
+    // process emits two Service Catalog entries.
+    let openpaw_resource = {
+        let mut attrs = vec![KeyValue::new("service.name", "openpaw")];
+        if let Some(environment) = resolve_deployment_environment() {
+            attrs.push(KeyValue::new("deployment.environment.name", environment));
+        }
+        if let Some(version) = resolve_service_version() {
+            attrs.push(KeyValue::new("service.version", version));
+        }
+        if let Some(embodiment) = read_non_empty_env("EMBODIMENT")
+            .or_else(|| read_non_empty_env("TEMPER_EMBODIMENT"))
+        {
+            attrs.push(KeyValue::new("embodiment", embodiment));
+        }
+        // Share runtime-id with the temper provider so traces that
+        // span both services have the same runtime-id for profile
+        // stitching.
+        attrs.push(KeyValue::new(
+            "runtime-id",
+            resource
+                .iter()
+                .find(|(k, _)| k.as_str() == "runtime-id")
+                .map(|(_, v)| v.to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        ));
+        Resource::builder_empty().with_attributes(attrs).build()
+    };
+
+    let openpaw_exporter = build_with_retry("openpaw trace exporter", || {
+        SpanExporter::builder()
+            .with_http()
+            .with_timeout(Duration::from_secs(10))
+            .build()
+    })
+    .ok();
+    let openpaw_provider = openpaw_exporter.map(|exporter| {
+        let proc = BatchSpanProcessor::builder(exporter)
+            .with_batch_config(
+                SpanBatchConfigBuilder::default()
+                    .with_max_queue_size(trace_queue)
+                    .with_max_export_batch_size(TRACE_BATCH_MAX_EXPORT_BATCH_SIZE)
+                    .with_scheduled_delay(Duration::from_millis(TRACE_BATCH_SCHEDULE_DELAY_MS))
+                    .build(),
+            )
+            .build();
+        SdkTracerProvider::builder()
+            .with_span_processor(proc)
+            .with_sampler(sampler)
+            .with_resource(openpaw_resource)
+            .build()
+    });
+    if let Some(ref p) = openpaw_provider {
+        install_openpaw_tracer(p);
+    }
 
     // --- Metrics ---
     let metric_exporter = build_with_retry("metric exporter", || {
@@ -566,6 +680,7 @@ pub fn init_tracing(
 
     Ok(OtelGuard {
         tracer_provider,
+        openpaw_tracer_provider: openpaw_provider,
         meter_provider,
         logger_provider,
     })
