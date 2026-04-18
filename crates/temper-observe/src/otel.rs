@@ -477,14 +477,19 @@ pub fn init_tracing(
 
     // --- Tracing subscriber ---
     // Three layers:
-    //   1. fmt  → stderr (human-readable for local dev)
+    //   1. fmt  → stderr; JSON by default (ADR-0054), pretty if FOREGROUND_LOGS=pretty
     //   2. OTEL → spans (bridges #[instrument] / info_span! to OTEL traces)
     //   3. OTEL → logs  (bridges info!/warn!/error! to OTEL log records)
+    //
+    // JSON emits trace_id / span_id automatically via the OTEL trace layer
+    // so log lines can be joined to their parent span in Datadog.
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new("info,hyper=warn,h2=warn,opentelemetry=warn,tonic=warn")
     });
 
-    let fmt_layer = tracing_subscriber::fmt::layer().with_target(true);
+    let pretty_logs = std::env::var("FOREGROUND_LOGS") // determinism-ok: startup config
+        .map(|v| v.eq_ignore_ascii_case("pretty"))
+        .unwrap_or(false);
 
     let otel_trace_layer =
         tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("temper"));
@@ -493,6 +498,20 @@ pub fn init_tracing(
     // endpoint with high-volume info events.  Traces already capture info-level
     // spans via the otel_trace_layer, so no diagnostic value is lost.
     let otel_log_layer = OpenTelemetryTracingBridge::new(&logger_provider);
+
+    // `.boxed()` unifies the pretty and JSON fmt layer types so a single
+    // subscriber chain compiles.
+    use tracing_subscriber::Layer;
+    let fmt_layer = if pretty_logs {
+        tracing_subscriber::fmt::layer().with_target(true).boxed()
+    } else {
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_target(true)
+            .boxed()
+    };
 
     tracing_subscriber::registry()
         .with(env_filter)
@@ -529,9 +548,25 @@ pub fn init_stderr_only() {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,hyper=warn,h2=warn"));
 
+    let pretty = std::env::var("FOREGROUND_LOGS") // determinism-ok: startup config
+        .map(|v| v.eq_ignore_ascii_case("pretty"))
+        .unwrap_or(false);
+
+    use tracing_subscriber::Layer;
+    let fmt_layer = if pretty {
+        tracing_subscriber::fmt::layer().with_target(true).boxed()
+    } else {
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_target(true)
+            .boxed()
+    };
+
     if let Err(e) = tracing_subscriber::registry()
         .with(env_filter)
-        .with(tracing_subscriber::fmt::layer().with_target(true))
+        .with(fmt_layer)
         .try_init()
     {
         eprintln!("stderr tracing subscriber already initialized: {e}");
