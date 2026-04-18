@@ -563,6 +563,10 @@ impl Actor for EntityActor {
                 // Capture start time for span duration (DST-safe: sim_now()
                 // returns logical clock in simulation, wall clock in production).
                 let action_start = sim_now();
+                // Wall-clock start for `temper_actor_ask_reply_latency_ms`.
+                // Separate from `action_start` because metrics emission is
+                // outside the DST boundary; using Instant here is safe.
+                let ask_reply_start = Instant::now(); // determinism-ok: observability only
 
                 // ADR-0048 sub-decision 5: actor-side idempotency dedup.
                 // A dispatch-layer retry can produce a second `ask` after the
@@ -1092,6 +1096,15 @@ impl Actor for EntityActor {
                         spec_governed: true,
                     });
                 }
+                // Inside-actor ask reply latency (excludes dispatch and retry
+                // overhead). Early-exit error paths above `return Ok(())` are
+                // not counted; the signal of interest is normal action
+                // handling latency.
+                crate::runtime_metrics::record_actor_ask_reply_latency(
+                    &state.entity_type,
+                    &name,
+                    ask_reply_start.elapsed(),
+                );
             }
             EntityMsg::GetState => {
                 ctx.reply(EntityResponse {

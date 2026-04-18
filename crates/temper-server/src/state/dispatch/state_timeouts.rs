@@ -59,6 +59,9 @@ impl EntityKey {
 #[derive(Default, Debug)]
 pub struct StateTimeoutTracker {
     seqs: Mutex<HashMap<EntityKey, u64>>,
+    /// ADR-0049: per-entity-type count of armed-but-unfired timers.
+    /// Emitted as `temper_scheduler_pending_timers` by the canary loop.
+    pending_by_type: Mutex<HashMap<String, u64>>,
 }
 
 impl StateTimeoutTracker {
@@ -80,6 +83,38 @@ impl StateTimeoutTracker {
             .get(key)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Increment the pending-timer count for `entity_type`. Called at arm.
+    pub fn inc_pending(&self, entity_type: &str) {
+        let mut map = self
+            .pending_by_type
+            .lock()
+            .expect("pending_by_type poisoned");
+        *map.entry(entity_type.to_string()).or_insert(0) += 1;
+    }
+
+    /// Decrement the pending-timer count for `entity_type`. Called when a
+    /// timer task exits (fired, cancelled by seq mismatch, or state changed).
+    pub fn dec_pending(&self, entity_type: &str) {
+        let mut map = self
+            .pending_by_type
+            .lock()
+            .expect("pending_by_type poisoned");
+        if let Some(v) = map.get_mut(entity_type)
+            && *v > 0
+        {
+            *v -= 1;
+        }
+    }
+
+    /// Snapshot pending counts per entity type for metric emission.
+    pub fn pending_snapshot(&self) -> Vec<(String, u64)> {
+        let map = self
+            .pending_by_type
+            .lock()
+            .expect("pending_by_type poisoned");
+        map.iter().map(|(k, v)| (k.clone(), *v)).collect()
     }
 
     /// Drop any seq for `key`. Called when an entity is deleted so the map
@@ -170,6 +205,7 @@ impl crate::state::ServerState {
             }
 
             let armed_seq = self.state_timeout_tracker.bump(&key);
+            self.state_timeout_tracker.inc_pending(ctx.entity_type);
             let params: serde_json::Value = serde_json::to_value(&st.params)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
 
@@ -183,6 +219,7 @@ impl crate::state::ServerState {
             let delay = Duration::from_secs(st.after_seconds);
             let agent_ctx = ctx.agent_ctx.clone();
             let key_for_task = key.clone();
+            let entity_type_for_dec = ctx.entity_type.to_string();
 
             tokio::spawn(
                 // determinism-ok: wall-clock timer fires a side-effect action;
@@ -194,6 +231,7 @@ impl crate::state::ServerState {
                     // state change that bumped the seq on exit) renders
                     // this timer a no-op.
                     if tracker.current(&key_for_task) != armed_seq {
+                        tracker.dec_pending(&entity_type_for_dec);
                         return;
                     }
 
@@ -228,6 +266,7 @@ impl crate::state::ServerState {
                             // State changed or fetch failed — nothing to do.
                         }
                     }
+                    tracker.dec_pending(&entity_type_for_dec);
                 }
                 .instrument(tracing::info_span!(
                     "dispatch.state_timeout",
