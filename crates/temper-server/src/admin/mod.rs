@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::Admission;
 
-use crate::profiling::cpu_profile_handler;
+use crate::profiling::{cpu_profile_handler, wall_profile_handler};
 use crate::state::ServerState;
 
 /// Build the `/admin` sub-router.
@@ -23,9 +23,10 @@ pub fn build_admin_router() -> Router<ServerState> {
             "/admission/{tenant}/{entity_type}",
             patch(override_admission),
         )
-        // ADR-0055: on-demand CPU profile capture. Gated by
-        // TEMPER_PROFILING_ENABLED at request time.
+        // ADR-0055: on-demand CPU and wall-clock profile capture.
+        // Gated by TEMPER_PROFILING_ENABLED at request time.
         .route("/profile/cpu", get(cpu_profile_handler))
+        .route("/profile/wall", get(wall_profile_handler))
 }
 
 /// PATCH /admin/admission/{tenant}/{entity_type}
