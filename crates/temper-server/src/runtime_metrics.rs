@@ -54,6 +54,9 @@ struct RuntimeMetrics {
     actor_mailbox_utilization: Gauge<f64>,
     actor_mailbox_full_drop_total: Counter<u64>,
     actor_ask_reply_latency_ms: Histogram<f64>,
+    // --- Dispatch contention (W2 / temper#146) ----------------------------
+    actor_registry_lock_wait_ms: Histogram<f64>,
+    actor_cold_start_duration_ms: Histogram<f64>,
     // --- Katagami (consumer-side outcome) ---------------------------------
     curation_job_duration_ms: Histogram<f64>,
     curation_job_outcome_total: Counter<u64>,
@@ -245,6 +248,23 @@ fn metrics() -> &'static RuntimeMetrics {
                 .f64_histogram("temper_actor_ask_reply_latency_ms")
                 .with_unit("ms")
                 .with_description("Inside-actor ask handling latency (excludes dispatch overhead).")
+                .build(),
+            actor_registry_lock_wait_ms: meter
+                .f64_histogram("temper_actor_registry_lock_wait_ms")
+                .with_unit("ms")
+                .with_description(
+                    "Wall-clock time between actor-registry lookup request and grant. \
+                     Drives temper#146 investigation: under bursty cold-start load, high \
+                     p95 here points at the registry mutex as the bottleneck.",
+                )
+                .build(),
+            actor_cold_start_duration_ms: meter
+                .f64_histogram("temper_actor_cold_start_duration_ms")
+                .with_unit("ms")
+                .with_description(
+                    "End-to-end duration from first-message arrival to first-reply-ready \
+                     for a previously unhydrated actor. See temper#146.",
+                )
                 .build(),
             curation_job_duration_ms: meter
                 .f64_histogram("temper_curation_job_duration_ms")
@@ -748,6 +768,26 @@ pub fn record_actor_ask_reply_latency(entity_type: &str, action: &str, elapsed: 
             KeyValue::new("entity_type", entity_type.to_string()),
             KeyValue::new("action", action.to_string()),
         ],
+    );
+}
+
+/// Record time spent in actor-registry lookup / spawn. High p95 points at
+/// mutex contention on the registry — core signal for temper#146.
+pub fn record_actor_registry_lock_wait(entity_type: &str, was_cold_start: bool, elapsed: Duration) {
+    metrics().actor_registry_lock_wait_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &[
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("cold_start", was_cold_start),
+        ],
+    );
+}
+
+/// Record end-to-end cold-start duration for a freshly spawned actor.
+pub fn record_actor_cold_start_duration(entity_type: &str, elapsed: Duration) {
+    metrics().actor_cold_start_duration_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &[KeyValue::new("entity_type", entity_type.to_string())],
     );
 }
 

@@ -222,10 +222,30 @@ impl crate::state::ServerState {
             return Err(DispatchError::Ungoverned(entity_type.to_string()));
         }
 
+        // W2 / temper#146: measure registry lock wait — the hypothesis is
+        // cold-start burst contends on the registry mutex.
+        let registry_start = std::time::Instant::now();
+        let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
+        let actor_existed_before = self
+            .actor_registry
+            .read()
+            .map(|reg| reg.contains_key(&actor_key))
+            .unwrap_or(false);
         let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
             return Err(DispatchError::Internal(format!(
                 "failed to resolve actor for governed entity type '{entity_type}'"
             )));
+        };
+        let registry_elapsed = registry_start.elapsed();
+        crate::runtime_metrics::record_actor_registry_lock_wait(
+            entity_type,
+            !actor_existed_before,
+            registry_elapsed,
+        );
+        let cold_start_outcome_start = if !actor_existed_before {
+            Some(std::time::Instant::now())
+        } else {
+            None
         };
 
         // Pre-resolve cross-entity state gates (Gap 1: Agent OS).
@@ -350,6 +370,17 @@ impl crate::state::ServerState {
             outcome.attempts,
             outcome.elapsed,
         );
+
+        // W2 / temper#146: on a successful first-ask against a freshly
+        // spawned actor, record the cold-start duration.
+        if let Some(cold_start_begin) = cold_start_outcome_start
+            && outcome.result.is_ok()
+        {
+            crate::runtime_metrics::record_actor_cold_start_duration(
+                entity_type,
+                cold_start_begin.elapsed(),
+            );
+        }
 
         let response = match outcome.result {
             Ok(response) => response,
