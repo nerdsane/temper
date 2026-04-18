@@ -228,10 +228,19 @@ impl EntityActor {
             },
         };
 
-        match store
+        // W2 / temper#146: measure append wait — the hypothesis is that
+        // writer-lock / fsync serialization is a cold-start bottleneck.
+        let append_start = Instant::now();
+        let backend = store.backend_name();
+        let result = store
             .append(persistence_id, state.sequence_nr, &[envelope])
-            .await
-        {
+            .await;
+        crate::runtime_metrics::record_event_store_append_wait(
+            backend,
+            "append",
+            append_start.elapsed(),
+        );
+        match result {
             Ok(new_seq) => {
                 state.sequence_nr = new_seq;
                 tracing::debug!(entity = %state.entity_id, seq = new_seq, "event persisted");

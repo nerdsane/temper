@@ -327,6 +327,7 @@ impl AuthzEngine {
         policy_set: &PolicySet,
     ) -> AuthzDecision {
         cedar_evaluations_counter().add(1, &[]);
+        let eval_start = std::time::Instant::now();
 
         // Build Cedar principal
         let principal_type = match security_ctx.principal.kind {
@@ -466,7 +467,16 @@ impl AuthzEngine {
             .authorizer
             .is_authorized(&request, policy_set, &entities);
 
-        match response.decision() {
+        let decision = response.decision();
+        crate::metrics::record_cedar_evaluation(
+            eval_start.elapsed(),
+            match decision {
+                Decision::Allow => "allow",
+                Decision::Deny => "deny",
+            },
+        );
+
+        match decision {
             Decision::Allow => {
                 let policy_ids: Vec<String> = response
                     .diagnostics()

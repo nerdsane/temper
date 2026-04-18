@@ -57,6 +57,17 @@ struct RuntimeMetrics {
     // --- Dispatch contention (W2 / temper#146) ----------------------------
     actor_registry_lock_wait_ms: Histogram<f64>,
     actor_cold_start_duration_ms: Histogram<f64>,
+    event_store_append_wait_ms: Histogram<f64>,
+    // cedar_eval_duration is emitted from temper-authz (existing
+    // temper_cedar_evaluation_duration histogram) — no duplicate here.
+    // --- Handler-deadline primitive (W3 / temper#147 — reserved) ---------
+    // Names and tag shapes are frozen here so dashboards and monitors can
+    // be authored before the primitive lands. Emission sites wire on when
+    // the Wasmtime epoch-interruption layer ships.
+    handler_deadline_remaining_ms: Gauge<u64>,
+    handler_deadline_exceeded_total: Counter<u64>,
+    wasm_epoch_tick_interval_ms: Histogram<f64>,
+    handler_kill_latency_ms: Histogram<f64>,
     // --- Katagami (consumer-side outcome) ---------------------------------
     curation_job_duration_ms: Histogram<f64>,
     curation_job_outcome_total: Counter<u64>,
@@ -264,6 +275,50 @@ fn metrics() -> &'static RuntimeMetrics {
                 .with_description(
                     "End-to-end duration from first-message arrival to first-reply-ready \
                      for a previously unhydrated actor. See temper#146.",
+                )
+                .build(),
+            event_store_append_wait_ms: meter
+                .f64_histogram("temper_event_store_append_wait_ms")
+                .with_unit("ms")
+                .with_description(
+                    "Time between event-store append() call and return, including any \
+                     writer-lock or fsync serialization. High p95 points at storage as a \
+                     cold-start bottleneck. See temper#146.",
+                )
+                .build(),
+            handler_deadline_remaining_ms: meter
+                .u64_gauge("temper_handler_deadline_remaining_ms")
+                .with_unit("ms")
+                .with_description(
+                    "W3 reserved (temper#147): budget remaining at WASM dispatch start. \
+                     Gauges how tight current deadlines are relative to observed \
+                     handler latency. Emitted when the handler-deadline primitive \
+                     lands.",
+                )
+                .build(),
+            handler_deadline_exceeded_total: meter
+                .u64_counter("temper_handler_deadline_exceeded_total")
+                .with_description(
+                    "W3 reserved (temper#147): WASM handlers killed for exceeding their \
+                     deadline. Tagged with `dying_span` (which host function was running \
+                     when the guest was killed); without that tag the metric would be \
+                     uninvestigatable.",
+                )
+                .build(),
+            wasm_epoch_tick_interval_ms: meter
+                .f64_histogram("temper_wasm_epoch_tick_interval_ms")
+                .with_unit("ms")
+                .with_description(
+                    "W3 reserved (temper#147): Wasmtime epoch-interruption ticker \
+                     interval. Drift here makes deadlines imprecise.",
+                )
+                .build(),
+            handler_kill_latency_ms: meter
+                .f64_histogram("temper_handler_kill_latency_ms")
+                .with_unit("ms")
+                .with_description(
+                    "W3 reserved (temper#147): time from deadline breach to guest \
+                     actually exiting. Detects guest code that resists termination.",
                 )
                 .build(),
             curation_job_duration_ms: meter
@@ -786,6 +841,76 @@ pub fn record_actor_registry_lock_wait(entity_type: &str, was_cold_start: bool, 
 /// Record end-to-end cold-start duration for a freshly spawned actor.
 pub fn record_actor_cold_start_duration(entity_type: &str, elapsed: Duration) {
     metrics().actor_cold_start_duration_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &[KeyValue::new("entity_type", entity_type.to_string())],
+    );
+}
+
+/// Record time between event-store append() call and return.
+pub fn record_event_store_append_wait(backend: &str, operation: &str, elapsed: Duration) {
+    metrics().event_store_append_wait_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &[
+            KeyValue::new("backend", backend.to_string()),
+            KeyValue::new("operation", operation.to_string()),
+        ],
+    );
+}
+
+// Cedar evaluation duration is emitted from the temper-authz crate via the
+// existing `record_cedar_evaluation` helper. No duplicate metric here.
+
+// ============================================================================
+// W3 reserved (temper#147): handler-deadline primitive helpers.
+// ============================================================================
+//
+// These functions are the call-site surface the handler-deadline
+// implementation will use. They are public now so dashboards, monitors,
+// and tests can reference the metric names; the primitive wires them on
+// when epoch-interruption lands.
+
+/// Record the deadline headroom (budget remaining) at WASM dispatch start.
+pub fn record_handler_deadline_remaining(entity_type: &str, action: &str, remaining: Duration) {
+    metrics().handler_deadline_remaining_ms.record(
+        (remaining.as_secs_f64() * 1000.0).max(0.0) as u64,
+        &[
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+/// Record a handler killed for exceeding its deadline.
+///
+/// `dying_span` identifies which host function was running when the guest
+/// was terminated (e.g. `wasm.web_search`, `wasm.provider_call`). It is
+/// mandatory: without it the metric cannot be used to identify hang
+/// sources.
+pub fn record_handler_deadline_exceeded(
+    entity_type: &str,
+    action: &str,
+    dying_span: &'static str,
+) {
+    metrics().handler_deadline_exceeded_total.add(
+        1,
+        &[
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+            KeyValue::new("dying_span", dying_span),
+        ],
+    );
+}
+
+/// Record the observed interval between Wasmtime epoch ticks.
+pub fn record_wasm_epoch_tick_interval(elapsed: Duration) {
+    metrics()
+        .wasm_epoch_tick_interval_ms
+        .record(elapsed.as_secs_f64() * 1000.0, &[]);
+}
+
+/// Record the time from deadline breach to guest exit completion.
+pub fn record_handler_kill_latency(entity_type: &str, elapsed: Duration) {
+    metrics().handler_kill_latency_ms.record(
         elapsed.as_secs_f64() * 1000.0,
         &[KeyValue::new("entity_type", entity_type.to_string())],
     );
