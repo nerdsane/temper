@@ -1,6 +1,6 @@
 # ADR-0054: Log Standard — JSON, Trace-Correlated, Level-Disciplined
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-04-18
 - Deciders: Temper core maintainers
 - Related:

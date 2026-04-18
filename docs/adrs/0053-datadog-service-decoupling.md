@@ -1,6 +1,6 @@
 # ADR-0053: Datadog Service Decoupling — `temper` vs `openpaw`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-04-18
 - Deciders: Temper core maintainers
 - Related:

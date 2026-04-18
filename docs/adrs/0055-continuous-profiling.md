@@ -1,6 +1,6 @@
 # ADR-0055: Continuous Profiling for the Temper Runtime
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-04-18
 - Deciders: Temper core maintainers
 - Related:

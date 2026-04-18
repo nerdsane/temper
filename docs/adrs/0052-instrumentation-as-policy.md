@@ -1,6 +1,6 @@
 # ADR-0052: Instrumentation as Policy
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-04-18
 - Deciders: Temper core maintainers
 - Related:
