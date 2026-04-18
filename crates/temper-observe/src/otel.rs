@@ -23,7 +23,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
-use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::trace::{
+    Link, SamplingDecision, SamplingResult, SpanKind, TraceId, TraceState, TracerProvider as _,
+};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
@@ -32,10 +34,51 @@ use opentelemetry_sdk::logs::{
 };
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::{
-    BatchConfigBuilder as SpanBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider,
+    BatchConfigBuilder as SpanBatchConfigBuilder, BatchSpanProcessor, Sampler, SdkTracerProvider,
+    ShouldSample,
 };
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
+
+/// Span names dropped at the sampler layer — trace volume noise with no
+/// operator value. See ADR-0052/0053 (instrumentation policy + hygiene).
+///
+/// - `turso.configured_connection`: DB pool internal; no timing value.
+/// - `clock_time_get`: WASI guest syscall; fires per-LLM-token in high volume.
+const DROPPED_SPAN_NAMES: &[&str] = &["turso.configured_connection", "clock_time_get"];
+
+/// Sampler that drops specific span names outright and delegates every other
+/// span decision to the wrapped inner sampler (default: parent-based AlwaysOn).
+///
+/// Implemented here rather than configured via `OTEL_TRACES_SAMPLER_ARG` so
+/// the drop rules live in source (grep-able) and survive env-var rewrites by
+/// tenant/deploy tooling.
+#[derive(Debug, Clone)]
+struct NameBasedSampler {
+    inner: Sampler,
+}
+
+impl ShouldSample for NameBasedSampler {
+    fn should_sample(
+        &self,
+        parent_context: Option<&opentelemetry::Context>,
+        trace_id: TraceId,
+        name: &str,
+        span_kind: &SpanKind,
+        attributes: &[KeyValue],
+        links: &[Link],
+    ) -> SamplingResult {
+        if DROPPED_SPAN_NAMES.iter().any(|n| *n == name) {
+            return SamplingResult {
+                decision: SamplingDecision::Drop,
+                attributes: Vec::new(),
+                trace_state: TraceState::default(),
+            };
+        }
+        self.inner
+            .should_sample(parent_context, trace_id, name, span_kind, attributes, links)
+    }
+}
 
 /// Default OTLP endpoint for Logfire.
 const LOGFIRE_ENDPOINT: &str = "https://logfire-us.pydantic.dev";
@@ -334,6 +377,13 @@ pub fn init_tracing(
     if let Some(version) = resolve_service_version() {
         resource_attrs.push(KeyValue::new("service.version", version));
     }
+    // ADR-0055: runtime-id enables Datadog Profiler ↔ APM trace stitching.
+    // Generated once at process start; regenerates only on restart.
+    // determinism-ok: observability-only identifier, not a simulation variable.
+    resource_attrs.push(KeyValue::new(
+        "runtime-id",
+        uuid::Uuid::new_v4().to_string(),
+    ));
 
     let resource = Resource::builder_empty()
         .with_attributes(resource_attrs)
@@ -358,8 +408,14 @@ pub fn init_tracing(
         .with_batch_config(trace_batch_config)
         .build();
 
+    // ADR-0052 hygiene: drop known-noisy span names at ingestion.
+    let sampler = NameBasedSampler {
+        inner: Sampler::ParentBased(Box::new(Sampler::AlwaysOn)),
+    };
+
     let tracer_provider = SdkTracerProvider::builder()
         .with_span_processor(trace_batch_processor)
+        .with_sampler(sampler)
         .with_resource(resource.clone())
         .build();
 
@@ -559,6 +615,45 @@ mod tests {
                 assert_eq!(config.endpoint_source.as_str(), "LOGFIRE_TOKEN");
                 assert_eq!(config.logfire_token.as_deref(), Some("abc123"));
             },
+        );
+    }
+
+    #[test]
+    fn name_based_sampler_drops_configured_span_names() {
+        use opentelemetry::trace::TraceId;
+        let sampler = NameBasedSampler {
+            inner: Sampler::AlwaysOn,
+        };
+        let trace_id = TraceId::from_bytes([0u8; 16]);
+
+        for dropped in ["turso.configured_connection", "clock_time_get"] {
+            let result =
+                sampler.should_sample(None, trace_id, dropped, &SpanKind::Internal, &[], &[]);
+            assert!(
+                matches!(result.decision, SamplingDecision::Drop),
+                "sampler must drop {dropped}",
+            );
+        }
+    }
+
+    #[test]
+    fn name_based_sampler_delegates_other_spans() {
+        use opentelemetry::trace::TraceId;
+        let sampler = NameBasedSampler {
+            inner: Sampler::AlwaysOn,
+        };
+        let trace_id = TraceId::from_bytes([0u8; 16]);
+        let result = sampler.should_sample(
+            None,
+            trace_id,
+            "dispatch.dispatch_tenant_action_core",
+            &SpanKind::Internal,
+            &[],
+            &[],
+        );
+        assert!(
+            matches!(result.decision, SamplingDecision::RecordAndSample),
+            "non-dropped span must keep AlwaysOn decision",
         );
     }
 
