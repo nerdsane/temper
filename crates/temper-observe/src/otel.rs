@@ -47,8 +47,28 @@ use tracing_subscriber::prelude::*;
 /// - `clock_time_get`: WASI guest syscall; fires per-LLM-token in high volume.
 const DROPPED_SPAN_NAMES: &[&str] = &["turso.configured_connection", "clock_time_get"];
 
-/// Sampler that drops specific span names outright and delegates every other
-/// span decision to the wrapped inner sampler (default: parent-based AlwaysOn).
+/// Span name *prefixes* that are sampled at a reduced rate — they carry some
+/// debug value but produce enough volume to crowd out the dispatch-critical
+/// spans at 100%. Keep p99+ via `--log_with_p99` in the guest sampler; the
+/// host-level sampler drops 95% of them uniformly at random.
+const REDUCED_SAMPLE_PREFIXES: &[&str] = &["wasm:workspace_fs", "wasm:monty_repl"];
+
+/// Trace-id-based deterministic sampling: keep if `(trace_id_low_u64 % 100) < rate_pct`.
+/// Using trace_id instead of random keeps the decision consistent across
+/// span siblings in the same trace, so a sampled trace keeps all its spans.
+fn trace_id_sample_at(trace_id: TraceId, rate_pct: u8) -> bool {
+    let bytes = trace_id.to_bytes();
+    // Low 8 bytes as u64.
+    let mut low = 0u64;
+    for b in &bytes[8..16] {
+        low = (low << 8) | (*b as u64);
+    }
+    (low % 100) < rate_pct as u64
+}
+
+/// Sampler that drops specific span names outright, reduced-samples specific
+/// prefixes, and delegates every other span decision to the wrapped inner
+/// sampler (default: parent-based AlwaysOn).
 ///
 /// Implemented here rather than configured via `OTEL_TRACES_SAMPLER_ARG` so
 /// the drop rules live in source (grep-able) and survive env-var rewrites by
@@ -69,6 +89,17 @@ impl ShouldSample for NameBasedSampler {
         links: &[Link],
     ) -> SamplingResult {
         if DROPPED_SPAN_NAMES.iter().any(|n| *n == name) {
+            return SamplingResult {
+                decision: SamplingDecision::Drop,
+                attributes: Vec::new(),
+                trace_state: TraceState::default(),
+            };
+        }
+        if REDUCED_SAMPLE_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            && !trace_id_sample_at(trace_id, 5)
+        {
             return SamplingResult {
                 decision: SamplingDecision::Drop,
                 attributes: Vec::new(),
@@ -679,6 +710,36 @@ mod tests {
                 "sampler must drop {dropped}",
             );
         }
+    }
+
+    #[test]
+    fn reduced_sample_prefixes_keep_roughly_5_percent() {
+        let sampler = NameBasedSampler {
+            inner: Sampler::AlwaysOn,
+        };
+        let mut kept = 0usize;
+        let total = 10_000usize;
+        for i in 0..total {
+            let mut bytes = [0u8; 16];
+            bytes[8..].copy_from_slice(&(i as u64).to_be_bytes());
+            let trace_id = TraceId::from_bytes(bytes);
+            let r = sampler.should_sample(
+                None,
+                trace_id,
+                "wasm:workspace_fs.read",
+                &SpanKind::Internal,
+                &[],
+                &[],
+            );
+            if matches!(r.decision, SamplingDecision::RecordAndSample) {
+                kept += 1;
+            }
+        }
+        let kept_pct = (kept as f64 / total as f64) * 100.0;
+        assert!(
+            (3.0..=7.0).contains(&kept_pct),
+            "reduced sample should keep ~5%, got {kept_pct:.1}%"
+        );
     }
 
     #[test]
