@@ -579,6 +579,21 @@ pub(super) async fn bootstrap_installed_apps(state: &PlatformState, skills: &[St
         }
     }
 
+    // Fix (dark-helix): when TEMPER_AUTO_INSTALL_APPS=true, auto-install
+    // every app discovered in the OS-app catalog into the tenant named by
+    // TEMPER_TENANT (defaulting to "default"). Unblocks Postgres-only
+    // deployments whose registry is wiped on restart and where
+    // list_all_installed_apps isn't tracked in the store. See
+    // nerdsane/temper#150.
+    if std::env::var("TEMPER_AUTO_INSTALL_APPS").ok().as_deref() == Some("true") {
+        let auto_tenant = std::env::var("TEMPER_TENANT").unwrap_or_else(|_| "default".to_string());
+        for entry in temper_platform::os_apps::list_os_apps() {
+            requested
+                .entry((auto_tenant.clone(), entry.name.clone()))
+                .or_insert(AppBootstrapSource::Cli);
+        }
+    }
+
     for skill_name in skills {
         requested
             .entry(("default".to_string(), skill_name.clone()))
