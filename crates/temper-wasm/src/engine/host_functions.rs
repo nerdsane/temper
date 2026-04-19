@@ -5,11 +5,72 @@
 //! linked once per invocation via a fresh `Linker<HostState>`.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use wasmtime::{Caller, Linker};
 
 use super::{HostState, WasmError};
+
+/// Outer deadline for each host-side async call invoked from a WASM guest.
+///
+/// `WasmHost` implementations (notably `ProductionWasmHost` via `reqwest`)
+/// carry their own inner timeouts (currently 30 s for HTTP, 10 s for
+/// connect), so in the happy path this bound is never reached. The outer
+/// wrapper is defensive: if the inner timeout fails to fire — for example
+/// when the async host call is starved because the FFI thread is holding
+/// the current tokio worker via `block_in_place` — this deadline guarantees
+/// the guest always gets a result instead of pinning the entity actor until
+/// passivation. Observed in production: a hung `http_call` held an actor
+/// unresponsive for 6+ minutes until the passivation timer fired.
+const HOST_CALL_OUTER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run an async host-side future from a synchronous WASM FFI context with an
+/// outer deadline. See `HOST_CALL_OUTER_TIMEOUT` for rationale.
+///
+/// Returns `Err(())` on outer timeout (logged via `tracing::warn`); the
+/// caller should translate this to the WASM ABI's error sentinel (`-1`).
+///
+/// The `label` is used in the timeout log line so operators can tell which
+/// host function hit the deadline without attaching a debugger.
+pub(crate) fn run_host_call_with_timeout<T, F>(label: &'static str, fut: F) -> Result<T, ()>
+where
+    F: Future<Output = T>,
+{
+    run_host_call_with_timeout_impl(label, HOST_CALL_OUTER_TIMEOUT, fut)
+}
+
+/// Implementation seam for `run_host_call_with_timeout` that accepts the
+/// deadline as an argument so tests can drive the timeout path with a short
+/// real duration (paused-time testing is incompatible with this code path
+/// because `block_in_place` requires the multi-threaded runtime).
+fn run_host_call_with_timeout_impl<T, F>(
+    label: &'static str,
+    deadline: Duration,
+    fut: F,
+) -> Result<T, ()>
+where
+    F: Future<Output = T>,
+{
+    let outcome = tokio::task::block_in_place(|| {
+        // determinism-ok: blocking bridge for WASM host call
+        tokio::runtime::Handle::current()
+            .block_on(async move { tokio::time::timeout(deadline, fut).await })
+    });
+
+    match outcome {
+        Ok(value) => Ok(value),
+        Err(_elapsed) => {
+            tracing::warn!(
+                host_fn = label,
+                timeout_secs = deadline.as_secs(),
+                "WASM host call exceeded outer deadline; returning error to guest"
+            );
+            Err(())
+        }
+    }
+}
 
 /// Outcome of resolving an entity-state field against a `HostState`.
 ///
@@ -320,13 +381,14 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     String::new()
                 };
 
-                // Bridge async -> sync
+                // Bridge async -> sync with an outer deadline so a hanging
+                // host call can never pin the actor indefinitely.
                 let host = caller.data().host.clone();
-                let result = tokio::task::block_in_place(|| {
-                    // determinism-ok: blocking bridge for WASM host call
-                    tokio::runtime::Handle::current()
-                        .block_on(host.http_call(&method, &url, &headers, &body))
-                });
+                let Ok(result) = run_host_call_with_timeout("host_http_call", async move {
+                    host.http_call(&method, &url, &headers, &body).await
+                }) else {
+                    return -1;
+                };
 
                 match result {
                     Ok((status, resp_body)) => {
@@ -391,13 +453,14 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     String::new()
                 };
 
-                // Bridge async -> sync
+                // Bridge async -> sync with an outer deadline so a hanging
+                // host call can never pin the actor indefinitely.
                 let host = caller.data().host.clone();
-                let result = tokio::task::block_in_place(|| {
-                    // determinism-ok: blocking bridge for WASM host call
-                    tokio::runtime::Handle::current()
-                        .block_on(host.connect_call(&url, &headers, &body))
-                });
+                let Ok(result) = run_host_call_with_timeout("host_connect_call", async move {
+                    host.connect_call(&url, &headers, &body).await
+                }) else {
+                    return -1;
+                };
 
                 match result {
                     Ok(frames) => {
@@ -491,17 +554,17 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     Vec::new()
                 };
 
-                // Bridge async -> sync for HTTP call with binary body
+                // Bridge async -> sync with an outer deadline so a hanging
+                // host call can never pin the actor indefinitely.
                 let host = caller.data().host.clone();
-                let result = tokio::task::block_in_place(|| {
-                    // determinism-ok: blocking bridge for WASM host call
-                    tokio::runtime::Handle::current().block_on(host.http_call_binary(
-                        &method,
-                        &url,
-                        &headers,
-                        &body_bytes,
-                    ))
-                });
+                let Ok(result) =
+                    run_host_call_with_timeout("host_http_call_stream", async move {
+                        host.http_call_binary(&method, &url, &headers, &body_bytes)
+                            .await
+                    })
+                else {
+                    return -1;
+                };
 
                 match result {
                     Ok((status, resp_bytes)) => {
@@ -996,5 +1059,65 @@ mod tests {
             resolve_field_bytes("not json", &cache, "anything"),
             FieldResolution::HostError
         );
+    }
+
+    // ── run_host_call_with_timeout tests ─────────────────────────────────
+    //
+    // These tests exercise `run_host_call_with_timeout_impl` directly so we
+    // can supply a short deadline. Paused-time testing is incompatible with
+    // this code path because `block_in_place` requires a multi-threaded
+    // runtime while `start_paused` requires `current_thread`.
+
+    /// Fast futures complete normally and the returned value is passed through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_host_call_returns_fast_future_result() {
+        let result =
+            run_host_call_with_timeout_impl("test_fast", Duration::from_secs(5), async { 42i32 });
+        assert_eq!(result, Ok(42));
+    }
+
+    /// A future whose completion is driven by tokio tasks (simulating the real
+    /// reqwest pattern) still completes through the wrapper: the wrapper must
+    /// not deadlock against the runtime that owns it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_host_call_survives_runtime_spawned_work() {
+        let result = run_host_call_with_timeout_impl(
+            "test_spawned",
+            Duration::from_secs(5),
+            async {
+                let handle = tokio::spawn(async { "ok" });
+                handle.await.unwrap_or("err")
+            },
+        );
+        assert_eq!(result, Ok("ok"));
+    }
+
+    /// A hanging future must produce a timeout error within the outer deadline,
+    /// not hang forever. This is the core regression guard: prior to this fix,
+    /// a hung `http_call` could hold an entity actor unresponsive until the
+    /// 5-minute passivation timer fired.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_host_call_times_out_on_hung_future() {
+        let start = std::time::Instant::now();
+        let result = run_host_call_with_timeout_impl(
+            "test_hang",
+            Duration::from_millis(100),
+            std::future::pending::<()>(),
+        );
+        let elapsed = start.elapsed();
+
+        assert_eq!(result, Err(()), "Hung future must time out");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "Timeout must fire within a small multiple of the deadline (got {elapsed:?})"
+        );
+    }
+
+    /// Default public entrypoint resolves fast futures without touching the
+    /// production-length deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_host_call_public_wrapper_passes_fast_futures() {
+        let result = run_host_call_with_timeout("test_public_fast", async { "hello" });
+        assert_eq!(result, Ok("hello"));
     }
 }
