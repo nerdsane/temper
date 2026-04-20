@@ -125,6 +125,14 @@ pub struct Action {
     pub params: Vec<String>,
     /// Agent hint for this action.
     pub hint: Option<String>,
+    /// Outgoing triggers fired post-commit of this action (ADR-0046).
+    ///
+    /// Each trigger describes one cross-entity dispatch, WASM module
+    /// invocation, or webhook call. Triggers fire after the source action's
+    /// transition commits (fire-and-forget — failures do not roll back the
+    /// source). Kind-specific fields are validated at parse time.
+    #[serde(default, rename = "triggers")]
+    pub triggers: Vec<ActionTrigger>,
 }
 
 fn default_internal() -> String {
@@ -442,6 +450,259 @@ pub struct Admission {
     /// Defaults to 30 seconds when admission is configured.
     #[serde(default)]
     pub queue_timeout_seconds: Option<u32>,
+}
+
+// ─── ADR-0046: Unified Action Triggers ─────────────────────────────────────
+
+/// Maximum cascade depth for recursive trigger dispatch (TigerStyle budget).
+pub const MAX_TRIGGER_DEPTH: u32 = 8;
+
+/// Maximum nesting depth for composite trigger guards (AllOf/AnyOf/Not).
+pub const MAX_TRIGGER_GUARD_DEPTH: u32 = 4;
+
+/// Maximum number of triggers a tenant can register across all entities
+/// (TigerStyle budget).
+pub const MAX_TRIGGERS_PER_TENANT: usize = 1024;
+
+/// Kind of trigger: what kind of outgoing effect this trigger produces.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TriggerKind {
+    /// Cross-entity action dispatch. Target is another entity's action.
+    Entity,
+    /// WASM module execution. Optionally dispatches `on_success` / `on_failure`
+    /// actions on the source entity afterwards.
+    Wasm,
+    /// Outbound HTTP webhook. Optionally dispatches `on_success` / `on_failure`
+    /// actions on the source entity afterwards.
+    Webhook,
+}
+
+/// Liveness expectation for a trigger (ADR-0046, minimal hook).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerLiveness {
+    /// No liveness expectation. Verifier does not emit eventually-properties.
+    None,
+    /// Best-effort (default). Dispatcher attempts the trigger; liveness is not
+    /// asserted by the verifier.
+    #[default]
+    BestEffort,
+    /// Required. The composite verifier emits a `Property::eventually` that
+    /// the target action (entity kind) or on_success action (wasm/webhook
+    /// kinds) fires following the source action. Assumes weakly-fair dispatch.
+    Required,
+}
+
+/// How to resolve the target entity ID for a `kind = "entity"` trigger.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TargetResolver {
+    /// Read the target entity ID from a field on the source entity.
+    Field {
+        /// Field name on the source entity containing the target ID.
+        field: String,
+    },
+    /// Use the source entity's own ID as the target ID (self-trigger or
+    /// same-ID cross-entity dispatch).
+    SameId,
+    /// Use a fixed entity ID literal.
+    Static {
+        /// The fixed entity ID to target.
+        entity_id: String,
+    },
+    /// Read target ID from `id_field`; create the target if it does not exist.
+    CreateIfMissing {
+        /// Field name containing (or to receive) the target ID.
+        id_field: String,
+    },
+    /// Generate a fresh `sim_uuid()` for each trigger dispatch. Correct
+    /// resolver for pipeline chaining where each source commit spawns a new
+    /// target instance. `sim_uuid()` (not `Uuid::new_v4`) is required for DST
+    /// compliance across seeded runs.
+    Create,
+}
+
+/// Conditional firing predicate for a trigger.
+///
+/// Evaluated post-commit against the source entity's post-action fields
+/// (sync variants) or another entity's current state (`CrossEntityStateIn`).
+/// Guard-skipped triggers do not emit a dispatch record — they never fired.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TriggerGuard {
+    /// Source field equals the given JSON value.
+    FieldEquals {
+        /// Field name on the source entity.
+        field: String,
+        /// Expected value (string, number, bool, null).
+        value: serde_json::Value,
+    },
+    /// Source field is one of the given JSON values.
+    FieldIn {
+        /// Field name on the source entity.
+        field: String,
+        /// Allowed values.
+        values: Vec<serde_json::Value>,
+    },
+    /// Source field is a JSON boolean `true`.
+    BoolTrue {
+        /// Field name on the source entity.
+        field: String,
+    },
+    /// Source field is a JSON boolean `false`.
+    BoolFalse {
+        /// Field name on the source entity.
+        field: String,
+    },
+    /// Source entity's post-action status is one of the given values.
+    StateIn {
+        /// Allowed states.
+        values: Vec<String>,
+    },
+    /// Another entity's current status must be one of the given values.
+    CrossEntityStateIn {
+        /// Target entity type.
+        entity_type: String,
+        /// Source-entity field name holding the target entity id.
+        entity_id_source: String,
+        /// Target entity statuses that satisfy the guard.
+        required_status: Vec<String>,
+    },
+    /// All child guards must pass. Bounded by `MAX_TRIGGER_GUARD_DEPTH`.
+    AllOf {
+        /// Child guards.
+        guards: Vec<TriggerGuard>,
+    },
+    /// At least one child guard must pass. Bounded by `MAX_TRIGGER_GUARD_DEPTH`.
+    AnyOf {
+        /// Child guards.
+        guards: Vec<TriggerGuard>,
+    },
+    /// Inverted child guard. Bounded by `MAX_TRIGGER_GUARD_DEPTH`.
+    Not {
+        /// Inner guard.
+        guard: Box<TriggerGuard>,
+    },
+}
+
+impl TriggerGuard {
+    /// Compute the maximum composite nesting depth of this guard.
+    ///
+    /// Leaf variants are depth 1. `AllOf` / `AnyOf` / `Not` add one level.
+    /// Used at parse time to reject guards deeper than
+    /// `MAX_TRIGGER_GUARD_DEPTH`.
+    pub fn depth(&self) -> u32 {
+        match self {
+            TriggerGuard::FieldEquals { .. }
+            | TriggerGuard::FieldIn { .. }
+            | TriggerGuard::BoolTrue { .. }
+            | TriggerGuard::BoolFalse { .. }
+            | TriggerGuard::StateIn { .. }
+            | TriggerGuard::CrossEntityStateIn { .. } => 1,
+            TriggerGuard::AllOf { guards } | TriggerGuard::AnyOf { guards } => {
+                1 + guards.iter().map(Self::depth).max().unwrap_or(0)
+            }
+            TriggerGuard::Not { guard } => 1 + guard.depth(),
+        }
+    }
+}
+
+/// An outgoing trigger declared inline on an `Action` (ADR-0046).
+///
+/// Unifies cross-entity dispatch (former `reactions.toml`), WASM execution
+/// (former `[[integration]] type = "wasm"`), and outbound webhooks (former
+/// `[[integration]] type = "webhook"`) under a single `kind`-discriminated
+/// schema.
+///
+/// Fields are a superset across kinds; parse-time validation enforces
+/// presence per `kind`:
+/// - `Entity`: requires `target_entity` + `target_action`.
+/// - `Wasm`: requires `module`.
+/// - `Webhook`: requires `url` + `method`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ActionTrigger {
+    /// Human-readable name for logging and debugging.
+    pub name: String,
+    /// Discriminator — determines which field set applies.
+    pub kind: TriggerKind,
+    /// Optional principal (names a registered `AgentType`). When `None`, the
+    /// trigger inherits the invoking principal's `SecurityContext`. When
+    /// `Some`, a synthetic `SecurityContext` is built with every Cedar
+    /// attribute (`role`, `agent_type`, `id`) populated from this name.
+    /// Parse-time verification fails if the named `AgentType` is not
+    /// registered in the tenant.
+    #[serde(default)]
+    pub principal: Option<String>,
+    /// Only fire when the source action transitions to this state. `None` =
+    /// fire on any outcome.
+    #[serde(default)]
+    pub to_state: Option<String>,
+    /// Optional firing predicate evaluated post-commit.
+    #[serde(default)]
+    pub guard: Option<TriggerGuard>,
+    /// Liveness expectation (see `TriggerLiveness`).
+    #[serde(default)]
+    pub liveness: TriggerLiveness,
+    /// Marks this trigger as an LLM call for observability. The dispatcher
+    /// promotes matching spans to LLM-kind root spans so `gen_ai.*` content
+    /// surfaces correctly in observability backends (e.g., Datadog LLM Obs).
+    #[serde(default)]
+    pub llm: bool,
+
+    // ─── Entity-kind fields ─────────────────────────────────────────────
+    /// Target entity type (required for `Entity` kind).
+    #[serde(default)]
+    pub target_entity: Option<String>,
+    /// Target action to dispatch (required for `Entity` kind).
+    #[serde(default)]
+    pub target_action: Option<String>,
+    /// Static parameters to pass to the target action.
+    #[serde(default)]
+    pub params: serde_json::Value,
+    /// Dynamic params: target-param-name → source-entity-field-name.
+    ///
+    /// At dispatch time, each key is read from the source entity's fields and
+    /// merged with `params`. Collisions between `params` and `params_from`
+    /// keys are rejected at parse time. A missing source field logs a warning
+    /// and skips the key.
+    #[serde(default)]
+    pub params_from: BTreeMap<String, String>,
+    /// How to find the target entity ID (required for `Entity` kind).
+    #[serde(default)]
+    pub resolve_target: Option<TargetResolver>,
+
+    // ─── Wasm-kind fields ───────────────────────────────────────────────
+    /// WASM module name (required for `Wasm` kind).
+    #[serde(default)]
+    pub module: Option<String>,
+    /// Action to dispatch on the source entity on successful module
+    /// execution.
+    #[serde(default)]
+    pub on_success: Option<String>,
+    /// Action to dispatch on the source entity on failed module execution.
+    #[serde(default)]
+    pub on_failure: Option<String>,
+    /// Arbitrary config passed to the WASM module at invocation time.
+    /// Common keys: `url`, `method`, `headers`, `api_key_ref`.
+    #[serde(default)]
+    pub config: BTreeMap<String, String>,
+
+    // ─── Webhook-kind fields ────────────────────────────────────────────
+    /// Outbound HTTP URL (required for `Webhook` kind).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// HTTP method (required for `Webhook` kind — typically POST/PUT/PATCH).
+    #[serde(default)]
+    pub method: Option<String>,
+    /// HTTP headers. Values may contain `{secret:key}` templates resolved
+    /// from tenant-scoped secret storage.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// Template for the HTTP request body. `${field}` placeholders are
+    /// resolved from the source entity's post-action fields.
+    #[serde(default)]
+    pub body_template: Option<String>,
 }
 
 #[cfg(test)]
