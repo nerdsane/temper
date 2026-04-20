@@ -185,9 +185,7 @@ impl AdmissionController {
         // Drop any cached semaphores for this entity so new caps take effect.
         // Existing borrowed permits stay alive on their original Arc<Semaphore>
         // and release normally.
-        inner
-            .semaphores
-            .retain(|k, _| k.entity_type != entity_type);
+        inner.semaphores.retain(|k, _| k.entity_type != entity_type);
     }
 
     /// Runtime override: replace caps for an entity without a redeploy.
@@ -416,7 +414,10 @@ mod tests {
         // Third acquirer hits the queue_timeout and is deferred.
         match ac.try_acquire(&t, "Session", "Submit").await {
             AdmissionOutcome::Deferred { retry_after_ms, .. } => {
-                assert_eq!(retry_after_ms, 1000, "retry_after_ms should match queue_timeout");
+                assert_eq!(
+                    retry_after_ms, 1000,
+                    "retry_after_ms should match queue_timeout"
+                );
             }
             _ => panic!("third acquire must defer"),
         }

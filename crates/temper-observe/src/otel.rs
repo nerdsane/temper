@@ -347,9 +347,7 @@ fn install_openpaw_tracer(provider: &SdkTracerProvider) {
     // In practice tracing_opentelemetry bridges the global provider; the
     // explicit handle here is for direct use (e.g. manual spans in
     // trigger code).
-    let _ = OPENPAW_TRACER.set(opentelemetry::global::BoxedTracer::new(Box::new(
-        tracer,
-    )));
+    let _ = OPENPAW_TRACER.set(opentelemetry::global::BoxedTracer::new(Box::new(tracer)));
 }
 
 /// Initialise observability for the process.
@@ -530,8 +528,8 @@ pub fn init_tracing(
         if let Some(version) = resolve_service_version() {
             attrs.push(KeyValue::new("service.version", version));
         }
-        if let Some(embodiment) = read_non_empty_env("EMBODIMENT")
-            .or_else(|| read_non_empty_env("TEMPER_EMBODIMENT"))
+        if let Some(embodiment) =
+            read_non_empty_env("EMBODIMENT").or_else(|| read_non_empty_env("TEMPER_EMBODIMENT"))
         {
             attrs.push(KeyValue::new("embodiment", embodiment));
         }

@@ -42,7 +42,14 @@ const ALLOWED_UNCALLED: &[&str] = &[
 
 fn main() -> ExitCode {
     let repo_root = std::env::var("CARGO_MANIFEST_DIR")
-        .map(|p| PathBuf::from(p).parent().unwrap().parent().unwrap().to_path_buf())
+        .map(|p| {
+            PathBuf::from(p)
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf()
+        })
         .unwrap_or_else(|_| std::env::current_dir().unwrap());
 
     let crates_root = repo_root.join("crates");

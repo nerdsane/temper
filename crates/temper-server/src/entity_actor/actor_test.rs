@@ -130,7 +130,7 @@ async fn dst_full_order_lifecycle() {
                     name: action.into(),
                     params,
                     cross_entity_booleans: std::collections::BTreeMap::new(),
-                idempotency_key: None,
+                    idempotency_key: None,
                 },
                 Duration::from_secs(1),
             )
@@ -196,7 +196,7 @@ async fn dst_cannot_cancel_shipped_order() {
                     name: action.to_string(),
                     params: serde_json::json!({}),
                     cross_entity_booleans: std::collections::BTreeMap::new(),
-                idempotency_key: None,
+                    idempotency_key: None,
                 },
                 Duration::from_secs(1),
             )

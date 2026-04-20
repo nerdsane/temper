@@ -25,8 +25,8 @@ use axum::extract::Query;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use opentelemetry::KeyValue;
+use opentelemetry::global;
 use opentelemetry::metrics::Counter;
-use opentelemetry::{global};
 use pprof::protos::Message;
 use serde::Deserialize;
 
@@ -82,9 +82,7 @@ fn profiling_metrics() -> &'static ProfilingMetrics {
                 .build(),
             upload_errors: meter
                 .u64_counter("datadog.profiling.rust.upload_errors")
-                .with_description(
-                    "Profile upload attempts that failed to reach the Datadog Agent.",
-                )
+                .with_description("Profile upload attempts that failed to reach the Datadog Agent.")
                 .build(),
         }
     })
@@ -138,9 +136,10 @@ async fn upload_to_agent(pprof_bytes: Vec<u8>, profile_type: &str) {
     match client.post(&url).multipart(form).send().await {
         Ok(resp) if resp.status().is_success() => {
             tracing::info!(url = %url, "profile uploaded to Datadog Agent intake");
-            profiling_metrics()
-                .profiles_uploaded
-                .add(1, &[KeyValue::new("profile_type", profile_type.to_string())]);
+            profiling_metrics().profiles_uploaded.add(
+                1,
+                &[KeyValue::new("profile_type", profile_type.to_string())],
+            );
         }
         Ok(resp) => {
             tracing::warn!(
@@ -198,11 +197,7 @@ pub async fn cpu_profile_handler(Query(q): Query<CpuProfileQuery>) -> Response {
     let seconds = q.seconds.clamp(1, max_s);
     let frequency = q.frequency.clamp(10, 500);
 
-    tracing::info!(
-        seconds,
-        frequency,
-        "ADR-0055: starting CPU profile capture"
-    );
+    tracing::info!(seconds, frequency, "ADR-0055: starting CPU profile capture");
 
     let guard = match pprof::ProfilerGuardBuilder::default()
         .frequency(frequency)
@@ -285,9 +280,7 @@ pub async fn cpu_profile_handler(Query(q): Query<CpuProfileQuery>) -> Response {
             ),
             (
                 header::CONTENT_DISPOSITION,
-                format!(
-                    "attachment; filename=\"cpu-profile-{seconds}s.pb\""
-                ),
+                format!("attachment; filename=\"cpu-profile-{seconds}s.pb\""),
             ),
         ],
         body,

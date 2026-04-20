@@ -22,6 +22,7 @@ pub mod identity;
 pub mod observe;
 pub mod odata;
 pub mod platform_store;
+pub mod profiling;
 mod query_eval;
 pub mod reaction;
 pub mod registry;
@@ -29,7 +30,6 @@ pub mod registry_bootstrap;
 pub mod request_context;
 mod response;
 mod router;
-pub mod profiling;
 pub mod runtime_metrics;
 pub mod secrets;
 #[cfg(feature = "observe")]

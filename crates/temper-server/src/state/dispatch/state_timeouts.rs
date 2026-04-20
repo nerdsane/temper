@@ -705,9 +705,7 @@ queue_timeout_seconds = 0
             let idx = ((v.len() as f64 - 1.0) * q).round() as usize;
             v[idx.min(v.len() - 1)]
         };
-        eprintln!(
-            "TIGHT-CAP RESULT: granted={g} deferred={d} other={o} total={N}"
-        );
+        eprintln!("TIGHT-CAP RESULT: granted={g} deferred={d} other={o} total={N}");
         eprintln!(
             "TIGHT-CAP PERF:   wall={wall_ms:.1}ms throughput={tp:.0}/s",
             wall_ms = wall.as_secs_f64() * 1000.0,
