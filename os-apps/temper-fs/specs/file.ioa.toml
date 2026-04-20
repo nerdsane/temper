@@ -55,6 +55,46 @@ params = ["content_hash", "size_bytes", "mime_type"]
 effect = '[{ type = "increment", var = "version_count" }, { type = "set_bool", var = "has_content", value = "true" }]'
 hint = "Fired by $value PUT handler after WASM upload succeeds. Updates content metadata and advances to Ready. Not callable from Locked."
 
+# ADR-0046 migration: inline the three reactions from reactions/reactions.toml.
+# Runtime dispatch is still handled by the ReactionDispatcher until slice 5
+# swaps it for the new TriggerDispatcher; the inline declarations here are
+# parse-time only (see temper-spec validators). All three run as the
+# "file-service" platform service (see policies/file-service.cedar — pending).
+
+[[action.triggers]]
+name = "file_stream_updated_creates_version"
+kind = "entity"
+principal = "file-service"
+to_state = "Ready"
+target_entity = "FileVersion"
+target_action = "Create"
+
+[action.triggers.resolve_target]
+type = "create_if_missing"
+id_field = "last_version_id"
+
+[[action.triggers]]
+name = "file_stream_updated_supersedes_old_version"
+kind = "entity"
+principal = "file-service"
+target_entity = "FileVersion"
+target_action = "Supersede"
+
+[action.triggers.resolve_target]
+type = "field"
+field = "last_version_id"
+
+[[action.triggers]]
+name = "file_stream_updated_increments_workspace_usage"
+kind = "entity"
+principal = "file-service"
+target_entity = "Workspace"
+target_action = "IncrementUsage"
+
+[action.triggers.resolve_target]
+type = "field"
+field = "workspace_id"
+
 [[action]]
 name = "Lock"
 kind = "internal"
