@@ -186,7 +186,7 @@ fn test_action_triggers_wasm_kind() {
     let spec = r#"
 [automaton]
 name = "Order"
-states = ["Draft", "Confirmed"]
+states = ["Draft", "Confirmed", "Charged", "Failed"]
 initial = "Draft"
 
 [[action]]
@@ -201,9 +201,21 @@ module = "stripe_charge"
 on_success = "ChargeSucceeded"
 on_failure = "ChargeFailed"
 principal = "payment-service"
+
+[[action]]
+name = "ChargeSucceeded"
+from = ["Confirmed"]
+to = "Charged"
+
+[[action]]
+name = "ChargeFailed"
+from = ["Confirmed"]
+to = "Failed"
 "#;
     let automaton = parse_automaton(spec).expect("wasm trigger should parse");
-    let trigger = &automaton.actions[0].triggers[0];
+    let confirm = &automaton.actions[0];
+    assert_eq!(confirm.name, "ConfirmOrder");
+    let trigger = &confirm.triggers[0];
     assert_eq!(trigger.kind, TriggerKind::Wasm);
     assert_eq!(trigger.module.as_deref(), Some("stripe_charge"));
     assert_eq!(trigger.on_success.as_deref(), Some("ChargeSucceeded"));
@@ -215,7 +227,7 @@ fn test_action_triggers_webhook_kind() {
     let spec = r#"
 [automaton]
 name = "Order"
-states = ["Draft", "Confirmed"]
+states = ["Draft", "Confirmed", "Notified"]
 initial = "Draft"
 
 [[action]]
@@ -233,9 +245,15 @@ principal = "notification-service"
 
 [action.triggers.headers]
 "Content-Type" = "application/json"
+
+[[action]]
+name = "NotificationSent"
+from = ["Confirmed"]
+to = "Notified"
 "#;
     let automaton = parse_automaton(spec).expect("webhook trigger should parse");
-    let trigger = &automaton.actions[0].triggers[0];
+    let confirm = &automaton.actions[0];
+    let trigger = &confirm.triggers[0];
     assert_eq!(trigger.kind, TriggerKind::Webhook);
     assert_eq!(
         trigger.url.as_deref(),
@@ -319,6 +337,286 @@ field = "payment_id"
         trigger.params.get("requested_by").and_then(|v| v.as_str()),
         Some("system")
     );
+}
+
+// ─── ADR-0046: parse-time validator tests ──────────────────────────────────
+
+#[test]
+fn test_entity_trigger_requires_target_entity() {
+    let spec = r#"
+[automaton]
+name = "X"
+states = ["A"]
+initial = "A"
+
+[[action]]
+name = "Go"
+from = ["A"]
+
+[[action.triggers]]
+name = "bad"
+kind = "entity"
+target_action = "Do"
+
+[action.triggers.resolve_target]
+type = "same_id"
+"#;
+    let err = parse_automaton(spec).expect_err("missing target_entity must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("target_entity"), "error = {msg}");
+}
+
+#[test]
+fn test_entity_trigger_requires_target_action() {
+    let spec = r#"
+[automaton]
+name = "X"
+states = ["A"]
+initial = "A"
+
+[[action]]
+name = "Go"
+from = ["A"]
+
+[[action.triggers]]
+name = "bad"
+kind = "entity"
+target_entity = "Y"
+
+[action.triggers.resolve_target]
+type = "same_id"
+"#;
+    let err = parse_automaton(spec).expect_err("missing target_action must fail");
+    assert!(err.to_string().contains("target_action"));
+}
+
+#[test]
+fn test_entity_trigger_requires_resolve_target() {
+    let spec = r#"
+[automaton]
+name = "X"
+states = ["A"]
+initial = "A"
+
+[[action]]
+name = "Go"
+from = ["A"]
+
+[[action.triggers]]
+name = "bad"
+kind = "entity"
+target_entity = "Y"
+target_action = "Do"
+"#;
+    let err = parse_automaton(spec).expect_err("missing resolve_target must fail");
+    assert!(err.to_string().contains("resolve_target"));
+}
+
+#[test]
+fn test_wasm_trigger_requires_module() {
+    let spec = r#"
+[automaton]
+name = "X"
+states = ["A"]
+initial = "A"
+
+[[action]]
+name = "Go"
+from = ["A"]
+
+[[action.triggers]]
+name = "bad"
+kind = "wasm"
+"#;
+    let err = parse_automaton(spec).expect_err("missing module must fail");
+    assert!(err.to_string().contains("module"));
+}
+
+#[test]
+fn test_webhook_trigger_requires_url_and_method() {
+    let spec_no_url = r#"
+[automaton]
+name = "X"
+states = ["A"]
+initial = "A"
+
+[[action]]
+name = "Go"
+from = ["A"]
+
+[[action.triggers]]
+name = "bad"
+kind = "webhook"
+method = "POST"
+"#;
+    assert!(
+        parse_automaton(spec_no_url)
+            .expect_err("missing url must fail")
+            .to_string()
+            .contains("url")
+    );
+
+    let spec_no_method = r#"
+[automaton]
+name = "X"
+states = ["A"]
+initial = "A"
+
+[[action]]
+name = "Go"
+from = ["A"]
+
+[[action.triggers]]
+name = "bad"
+kind = "webhook"
+url = "https://example.com/hook"
+"#;
+    assert!(
+        parse_automaton(spec_no_method)
+            .expect_err("missing method must fail")
+            .to_string()
+            .contains("method")
+    );
+}
+
+#[test]
+fn test_to_state_must_be_declared_state() {
+    let spec = r#"
+[automaton]
+name = "X"
+states = ["A", "B"]
+initial = "A"
+
+[[action]]
+name = "Go"
+from = ["A"]
+to = "B"
+
+[[action.triggers]]
+name = "bad"
+kind = "entity"
+to_state = "NotAState"
+target_entity = "Y"
+target_action = "Do"
+
+[action.triggers.resolve_target]
+type = "same_id"
+"#;
+    let err = parse_automaton(spec).expect_err("bad to_state must fail");
+    assert!(err.to_string().contains("NotAState"));
+}
+
+#[test]
+fn test_on_success_must_be_declared_action() {
+    let spec = r#"
+[automaton]
+name = "X"
+states = ["A"]
+initial = "A"
+
+[[action]]
+name = "Go"
+from = ["A"]
+
+[[action.triggers]]
+name = "bad"
+kind = "wasm"
+module = "m"
+on_success = "NoSuchAction"
+"#;
+    let err = parse_automaton(spec).expect_err("unknown on_success action must fail");
+    assert!(err.to_string().contains("NoSuchAction"));
+}
+
+#[test]
+fn test_params_and_params_from_collision_rejected() {
+    let spec = r#"
+[automaton]
+name = "X"
+states = ["A"]
+initial = "A"
+
+[[action]]
+name = "Go"
+from = ["A"]
+
+[[action.triggers]]
+name = "bad"
+kind = "entity"
+target_entity = "Y"
+target_action = "Do"
+
+[action.triggers.params]
+amount = "fixed"
+
+[action.triggers.params_from]
+amount = "total"
+
+[action.triggers.resolve_target]
+type = "same_id"
+"#;
+    let err = parse_automaton(spec).expect_err("params/params_from collision must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("amount"), "error = {msg}");
+}
+
+#[test]
+fn test_trigger_name_uniqueness_per_action() {
+    let spec = r#"
+[automaton]
+name = "X"
+states = ["A"]
+initial = "A"
+
+[[action]]
+name = "Go"
+from = ["A"]
+
+[[action.triggers]]
+name = "dup"
+kind = "entity"
+target_entity = "Y"
+target_action = "Do"
+
+[action.triggers.resolve_target]
+type = "same_id"
+
+[[action.triggers]]
+name = "dup"
+kind = "entity"
+target_entity = "Z"
+target_action = "Go"
+
+[action.triggers.resolve_target]
+type = "same_id"
+"#;
+    let err = parse_automaton(spec).expect_err("duplicate trigger name must fail");
+    assert!(err.to_string().contains("dup"));
+}
+
+#[test]
+fn test_empty_trigger_name_rejected() {
+    let spec = r#"
+[automaton]
+name = "X"
+states = ["A"]
+initial = "A"
+
+[[action]]
+name = "Go"
+from = ["A"]
+
+[[action.triggers]]
+name = ""
+kind = "entity"
+target_entity = "Y"
+target_action = "Do"
+
+[action.triggers.resolve_target]
+type = "same_id"
+"#;
+    let err = parse_automaton(spec).expect_err("empty trigger name must fail");
+    assert!(err.to_string().contains("empty"));
 }
 
 #[test]
