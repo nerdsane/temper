@@ -289,6 +289,7 @@ impl ParseState {
             effect: Vec::new(),
             params: Vec::new(),
             hint: None,
+            triggers: Vec::new(),
         });
         self.current_section = Section::Action;
         true
