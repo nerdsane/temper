@@ -10,10 +10,7 @@
 //!
 //! 1. Walk the Temper crates tree.
 //! 2. Find metric registrations of the form:
-//!        field_name: meter
-//!            .u64_counter("temper_foo")
-//!            ...
-//!            .build(),
+//!    `field_name: meter.u64_counter("temper_foo")...build(),`
 //! 3. For each `(field_name, metric_name)` pair, scan all source files
 //!    for calls of the form `.<field_name>.record(`, `.<field_name>.add(`,
 //!    or `.<field_name>.observe(`. One or more matches = emitted.

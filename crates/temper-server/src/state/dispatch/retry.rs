@@ -59,6 +59,7 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// Disable retries entirely — equivalent to a plain `ActorRef::ask`
     /// call with the configured per-attempt timeout.
+    #[allow(dead_code)] // kept as a documented escape hatch for tests/tools
     pub fn single_attempt() -> Self {
         Self {
             max_attempts: 1,

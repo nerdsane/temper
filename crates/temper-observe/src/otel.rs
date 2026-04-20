@@ -88,7 +88,7 @@ impl ShouldSample for NameBasedSampler {
         attributes: &[KeyValue],
         links: &[Link],
     ) -> SamplingResult {
-        if DROPPED_SPAN_NAMES.iter().any(|n| *n == name) {
+        if DROPPED_SPAN_NAMES.contains(&name) {
             return SamplingResult {
                 decision: SamplingDecision::Drop,
                 attributes: Vec::new(),
