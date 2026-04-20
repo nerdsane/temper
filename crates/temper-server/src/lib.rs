@@ -22,6 +22,7 @@ pub mod identity;
 pub mod observe;
 pub mod odata;
 pub mod platform_store;
+pub mod profiling;
 mod query_eval;
 pub mod reaction;
 pub mod registry;

@@ -114,7 +114,7 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # HTTP client (for ClickHouse adapter + LLM API calls)
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 
 # Testing
 tokio-test = "0.4"

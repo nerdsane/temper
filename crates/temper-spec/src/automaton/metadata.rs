@@ -115,8 +115,7 @@ impl Automaton {
     /// its own method so the liveness validator can re-use it without
     /// building the full flat metadata.
     pub fn non_terminal_states(&self) -> Vec<String> {
-        let mut from_states: std::collections::BTreeSet<&str> =
-            std::collections::BTreeSet::new();
+        let mut from_states: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for action in &self.actions {
             for f in &action.from {
                 from_states.insert(f.as_str());

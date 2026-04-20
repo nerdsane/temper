@@ -89,10 +89,10 @@ fn walk(
         let path = entry.path();
         if path.is_dir() {
             // Skip build artefacts + vendored worktrees to keep CI fast.
-            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                if matches!(name, "target" | ".git" | "node_modules" | ".worktrees") {
-                    continue;
-                }
+            if let Some(name) = path.file_name().and_then(|s| s.to_str())
+                && matches!(name, "target" | ".git" | "node_modules" | ".worktrees")
+            {
+                continue;
             }
             walk(&path, specs_found, failures)?;
         } else if is_ioa_spec(&path) {

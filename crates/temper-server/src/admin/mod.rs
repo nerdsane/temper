@@ -7,20 +7,26 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::patch;
+use axum::routing::{get, patch};
 use axum::{Json, Router};
 
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::Admission;
 
+use crate::profiling::{cpu_profile_handler, wall_profile_handler};
 use crate::state::ServerState;
 
 /// Build the `/admin` sub-router.
 pub fn build_admin_router() -> Router<ServerState> {
-    Router::new().route(
-        "/admission/{tenant}/{entity_type}",
-        patch(override_admission),
-    )
+    Router::new()
+        .route(
+            "/admission/{tenant}/{entity_type}",
+            patch(override_admission),
+        )
+        // ADR-0055: on-demand CPU and wall-clock profile capture.
+        // Gated by TEMPER_PROFILING_ENABLED at request time.
+        .route("/profile/cpu", get(cpu_profile_handler))
+        .route("/profile/wall", get(wall_profile_handler))
 }
 
 /// PATCH /admin/admission/{tenant}/{entity_type}
@@ -103,7 +109,9 @@ mod tests {
                     .method("PATCH")
                     .uri("/_admin/admission/acme/Session")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::Value::Null).unwrap()))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::Value::Null).unwrap(),
+                    ))
                     .unwrap(),
             )
             .await

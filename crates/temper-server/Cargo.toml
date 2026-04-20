@@ -52,6 +52,10 @@ futures-util = "0.3"
 lru = { workspace = true }
 sha2 = { workspace = true }
 libc = { workspace = true }
+# ADR-0055: CPU profile capture. pprof-rs is used because crates.io
+# `datadog-profiling` is currently an empty placeholder (see ADR for
+# details). `flamegraph` feature brings in inferno for SVG rendering.
+pprof = { version = "0.14", features = ["protobuf", "protobuf-codec"] }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

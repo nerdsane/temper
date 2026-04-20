@@ -26,6 +26,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
@@ -111,6 +112,9 @@ struct Inner {
 struct SemaphoreEntry {
     semaphore: Arc<Semaphore>,
     built_for_cap: u32,
+    /// Pending acquirers waiting on this semaphore (queue depth). Incremented
+    /// before each `acquire_owned`, decremented after grant or timeout.
+    pending: Arc<AtomicU64>,
 }
 
 /// Admission controller owned by `ServerState`.
@@ -132,13 +136,26 @@ pub enum AdmissionOutcome {
     },
 }
 
-/// RAII permit. Dropping it releases the semaphore slot.
+/// RAII permit. Dropping it releases the semaphore slot and emits
+/// `temper_admission_permit_hold_time_ms`.
 pub struct AdmissionPermit {
     _permit: OwnedSemaphorePermit,
-    #[allow(dead_code)] // Consumed by observability wiring in task #12.
-    key: String,
-    #[allow(dead_code)]
+    tenant: String,
+    entity_type: String,
+    action: String,
     acquired_at: Instant,
+}
+
+impl Drop for AdmissionPermit {
+    fn drop(&mut self) {
+        let held = self.acquired_at.elapsed();
+        crate::runtime_metrics::record_admission_permit_hold(
+            &self.tenant,
+            &self.entity_type,
+            &self.action,
+            held,
+        );
+    }
 }
 
 impl AdmissionController {
@@ -168,9 +185,7 @@ impl AdmissionController {
         // Drop any cached semaphores for this entity so new caps take effect.
         // Existing borrowed permits stay alive on their original Arc<Semaphore>
         // and release normally.
-        inner
-            .semaphores
-            .retain(|k, _| k.entity_type != entity_type);
+        inner.semaphores.retain(|k, _| k.entity_type != entity_type);
     }
 
     /// Runtime override: replace caps for an entity without a redeploy.
@@ -213,7 +228,7 @@ impl AdmissionController {
         // Refresh cached caps so a cap change takes effect on subsequent
         // acquisitions. Existing borrowed permits release against their
         // original Arc<Semaphore> naturally.
-        let semaphore = {
+        let (semaphore, pending) = {
             let mut inner = self.inner.lock().await;
             inner.caps.insert(entity_type.to_string(), caps.clone());
             let needs_rebuild = inner
@@ -226,17 +241,25 @@ impl AdmissionController {
                     SemaphoreEntry {
                         semaphore: Arc::new(Semaphore::new(max as usize)),
                         built_for_cap: max,
+                        pending: Arc::new(AtomicU64::new(0)),
                     },
                 );
             }
-            inner.semaphores.get(&key).unwrap().semaphore.clone()
+            let entry = inner.semaphores.get(&key).unwrap();
+            (entry.semaphore.clone(), entry.pending.clone())
         };
         let queue_timeout = caps.queue_timeout;
 
-        match tokio::time::timeout(queue_timeout, semaphore.clone().acquire_owned()).await {
+        pending.fetch_add(1, Ordering::AcqRel);
+        let outcome = tokio::time::timeout(queue_timeout, semaphore.clone().acquire_owned()).await;
+        pending.fetch_sub(1, Ordering::AcqRel);
+
+        match outcome {
             Ok(Ok(permit)) => AdmissionOutcome::Granted(AdmissionPermit {
                 _permit: permit,
-                key: format!("{tenant}:{entity_type}:{action}"),
+                tenant: tenant.to_string(),
+                entity_type: entity_type.to_string(),
+                action: action.to_string(),
                 acquired_at: start,
             }),
             Ok(Err(_closed)) => AdmissionOutcome::Passthrough,
@@ -245,6 +268,30 @@ impl AdmissionController {
                 waited: start.elapsed(),
             },
         }
+    }
+
+    /// Snapshot the current per-`(tenant, entity_type, action)` semaphore
+    /// state for gauge emission. Called from the canary metrics loop.
+    ///
+    /// Returns `(tenant, entity_type, action, active_permits, queue_depth)`.
+    pub async fn snapshot_for_metrics(&self) -> Vec<(String, String, String, u64, u64)> {
+        let inner = self.inner.lock().await;
+        inner
+            .semaphores
+            .iter()
+            .map(|(key, entry)| {
+                let available = entry.semaphore.available_permits() as u64;
+                let active = (entry.built_for_cap as u64).saturating_sub(available);
+                let queue_depth = entry.pending.load(Ordering::Acquire);
+                (
+                    key.tenant.to_string(),
+                    key.entity_type.clone(),
+                    key.action.clone(),
+                    active,
+                    queue_depth,
+                )
+            })
+            .collect()
     }
 
     /// Attempt to acquire using only registered caps (no inline reference).
@@ -367,7 +414,10 @@ mod tests {
         // Third acquirer hits the queue_timeout and is deferred.
         match ac.try_acquire(&t, "Session", "Submit").await {
             AdmissionOutcome::Deferred { retry_after_ms, .. } => {
-                assert_eq!(retry_after_ms, 1000, "retry_after_ms should match queue_timeout");
+                assert_eq!(
+                    retry_after_ms, 1000,
+                    "retry_after_ms should match queue_timeout"
+                );
             }
             _ => panic!("third acquire must defer"),
         }
