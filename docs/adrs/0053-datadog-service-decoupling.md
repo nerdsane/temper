@@ -1,15 +1,41 @@
 # ADR-0053: Datadog Service Decoupling — `temper` vs `openpaw`
 
-- Status: Accepted
+- Status: **Superseded 2026-04-20**
 - Date: 2026-04-18
 - Deciders: Temper core maintainers
 - Related:
   - ADR-0052: Instrumentation as policy
   - ADR-0054: Log standard
   - ADR-0055: Continuous profiling
-  - `crates/temper-server/src/otel.rs` (to be created or modified)
-  - `crates/temper-server/src/main.rs` (tracer / meter init)
-  - `/Users/seshendranalla/Development/openpaw/dd-dashboards/` (dashboard split)
+
+## Supersession note (2026-04-20)
+
+This ADR proposed emitting two services — `service:temper` for platform spans and `service:openpaw` for embodiment spans — from a single process, via a second OpenTelemetry `SdkTracerProvider`.
+
+**That design was wrong.** OpenTelemetry's resource model pins `service.name` to the provider; emitting two from one process requires either explicit tracer-handle plumbing at every call site (loses `tracing::info_span!` / `#[instrument]` ergonomics) or span-name filter routing at the subscriber layer (policy-as-string — rename a span, routing silently breaks).
+
+The correct model is **one `service.name` per process**, named after the deployment:
+
+| Deployment | `service.name` | Temper presence |
+|---|---|---|
+| Railway openpaw server (today) | `openpaw` | Library linked in |
+| Standalone Temper server (hypothetical) | `temper` | It IS the service |
+| Tamago Mac app | `tamago` | Library linked in |
+| Future embodiment | whatever | Library linked in |
+
+Cross-deployment "all Temper activity" queries use span attributes (e.g. `span.name:dispatch.*`) or the existing `temper_*` metric prefix, not a service-level filter. Datadog's Service Catalog gains entries as embodiments ship — each deployment is one catalog row, which is what the catalog was designed for.
+
+**What changed in code 2026-04-20:**
+- Removed `openpaw_tracer()` / `install_openpaw_tracer()` / `OPENPAW_TRACER` static / second `SdkTracerProvider` from `crates/temper-observe/src/otel.rs`.
+- `OtelGuard` no longer carries `openpaw_tracer_provider`.
+- `embodiment` resource tag already removed in ADR-0053 Sub-Decision 3 rewrite (nerdsane/temper#153).
+
+**What did not change:**
+- `@runtime-id` resource tag stays (ADR-0055, profile↔trace stitching).
+- `service.name = openpaw` continues to be set via the `DD_SERVICE` env or the single `SdkTracerProvider`'s service-name resource attribute — unchanged from production today.
+- When a new deployment ships (Tamago, standalone Temper), it sets `DD_SERVICE` to its own name. No framework work required.
+
+The original decision text below is preserved for the historical record. Do not treat it as current design.
 
 ## Context
 
