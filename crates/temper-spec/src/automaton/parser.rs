@@ -418,6 +418,144 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
         }
     }
 
+    // 6. Validate [[action.triggers]] declarations (ADR-0046).
+    validate_action_triggers(automaton, &action_names)?;
+
+    Ok(())
+}
+
+/// Validate all `[[action.triggers]]` blocks per ADR-0046 rules.
+///
+/// Checks performed (parse-time, per-entity — cross-entity checks like
+/// target-action existence happen at registry load time):
+/// - Kind-specific required fields present.
+/// - `to_state` (if set) is a declared state.
+/// - Trigger guard nesting depth ≤ `MAX_TRIGGER_GUARD_DEPTH`.
+/// - `params` and `params_from` keys must not collide.
+/// - For `Wasm`/`Webhook` kinds: `on_success`/`on_failure` reference
+///   actions declared on the same source entity.
+/// - Trigger names within a single action must be unique.
+fn validate_action_triggers(
+    automaton: &Automaton,
+    action_names: &[&str],
+) -> Result<(), AutomatonParseError> {
+    for action in &automaton.actions {
+        let mut seen_names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for trigger in &action.triggers {
+            if trigger.name.is_empty() {
+                return Err(AutomatonParseError::Validation(format!(
+                    "action '{}' has an [[action.triggers]] block with empty name",
+                    action.name
+                )));
+            }
+            if !seen_names.insert(trigger.name.as_str()) {
+                return Err(AutomatonParseError::Validation(format!(
+                    "action '{}' declares trigger '{}' more than once",
+                    action.name, trigger.name
+                )));
+            }
+
+            // Kind-specific field presence.
+            match trigger.kind {
+                TriggerKind::Entity => {
+                    if trigger.target_entity.as_deref().is_none_or(str::is_empty) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"entity\" but missing 'target_entity'",
+                            trigger.name, action.name
+                        )));
+                    }
+                    if trigger.target_action.as_deref().is_none_or(str::is_empty) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"entity\" but missing 'target_action'",
+                            trigger.name, action.name
+                        )));
+                    }
+                    if trigger.resolve_target.is_none() {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"entity\" but missing 'resolve_target'",
+                            trigger.name, action.name
+                        )));
+                    }
+                }
+                TriggerKind::Wasm => {
+                    if trigger.module.as_deref().is_none_or(str::is_empty) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"wasm\" but missing 'module'",
+                            trigger.name, action.name
+                        )));
+                    }
+                }
+                TriggerKind::Webhook => {
+                    if trigger.url.as_deref().is_none_or(str::is_empty) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"webhook\" but missing 'url'",
+                            trigger.name, action.name
+                        )));
+                    }
+                    if trigger.method.as_deref().is_none_or(str::is_empty) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"webhook\" but missing 'method'",
+                            trigger.name, action.name
+                        )));
+                    }
+                }
+            }
+
+            // to_state filter must be a declared state if set.
+            if let Some(ref to_state) = trigger.to_state
+                && !automaton.automaton.states.contains(to_state)
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "trigger '{}' on action '{}' references undeclared to_state '{to_state}'",
+                    trigger.name, action.name
+                )));
+            }
+
+            // on_success / on_failure must reference actions declared on this
+            // source entity (they dispatch on the source after module/HTTP).
+            if let Some(ref cb) = trigger.on_success
+                && !action_names.contains(&cb.as_str())
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "trigger '{}' on action '{}' on_success references unknown action '{cb}'",
+                    trigger.name, action.name
+                )));
+            }
+            if let Some(ref cb) = trigger.on_failure
+                && !action_names.contains(&cb.as_str())
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "trigger '{}' on action '{}' on_failure references unknown action '{cb}'",
+                    trigger.name, action.name
+                )));
+            }
+
+            // Guard depth bound.
+            if let Some(ref guard) = trigger.guard {
+                let depth = guard.depth();
+                if depth > MAX_TRIGGER_GUARD_DEPTH {
+                    return Err(AutomatonParseError::Validation(format!(
+                        "trigger '{}' on action '{}' has guard nesting depth {depth} exceeding \
+                         MAX_TRIGGER_GUARD_DEPTH ({MAX_TRIGGER_GUARD_DEPTH})",
+                        trigger.name, action.name
+                    )));
+                }
+            }
+
+            // params / params_from key collision.
+            if let Some(params_obj) = trigger.params.as_object() {
+                for key in trigger.params_from.keys() {
+                    if params_obj.contains_key(key) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' has key '{key}' in both 'params' and 'params_from'",
+                            trigger.name, action.name
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
