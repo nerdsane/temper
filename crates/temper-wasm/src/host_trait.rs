@@ -499,17 +499,13 @@ impl WasmHost for ProductionWasmHost {
         // but this runs in WasmHost (not simulation), so wall-clock/network access is fine.
 
         // Auto-inject traceparent for cross-request trace correlation.
-        if let Some(ref trace_id) = self.trace_id
-            && !headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
+            && let Some(traceparent) =
+                current_traceparent_header(&tracing::Span::current(), self.trace_id.as_deref())
         {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            let span_id = format!("{nanos:016x}");
-            builder = builder.header("traceparent", format!("00-{trace_id}-{span_id}-01"));
+            builder = builder.header("traceparent", traceparent);
         }
 
         if !body.is_empty() {
@@ -740,6 +736,15 @@ impl WasmHost for ProductionWasmHost {
 
         for (k, v) in headers {
             builder = builder.header(k.as_str(), v.as_str());
+        }
+
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
+            && let Some(traceparent) =
+                current_traceparent_header(&tracing::Span::current(), self.trace_id.as_deref())
+        {
+            builder = builder.header("traceparent", traceparent);
         }
 
         if !body.is_empty() {
@@ -1017,6 +1022,37 @@ fn telemetry_url(url: &str) -> String {
     }
 }
 
+fn current_traceparent_header(
+    span: &tracing::Span,
+    fallback_trace_id: Option<&str>,
+) -> Option<String> {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let span_context = span.context().span().span_context().clone();
+    if span_context.is_valid() {
+        let flags = if span_context.trace_flags().is_sampled() {
+            "01"
+        } else {
+            "00"
+        };
+        return Some(format!(
+            "00-{}-{}-{}",
+            span_context.trace_id(),
+            span_context.span_id(),
+            flags
+        ));
+    }
+
+    let trace_id = fallback_trace_id.filter(|value| !value.is_empty())?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    let span_id = format!("{nanos:016x}");
+    Some(format!("00-{trace_id}-{span_id}-01"))
+}
+
 /// Parse Connect protocol binary frames from a response body.
 ///
 /// Each frame has a 5-byte prefix: 1 flag byte + 4 big-endian length bytes.
@@ -1259,6 +1295,10 @@ impl WasmHost for SimWasmHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    use tracing_subscriber::prelude::*;
 
     /// Build a Connect frame: [flags(1)][length(4 big-endian)][payload].
     fn make_frame(flags: u8, payload: &[u8]) -> Vec<u8> {
@@ -1273,7 +1313,7 @@ mod tests {
     fn parse_single_data_frame() {
         let payload = b"{\"stdout\":\"hello\"}";
         let data = make_frame(0x00, payload);
-        let frames = parse_connect_frames(&data).unwrap();
+        let frames = parse_connect_frames(&data).expect("single data frame should parse");
         assert_eq!(frames, vec!["{\"stdout\":\"hello\"}"]);
     }
 
@@ -1282,7 +1322,7 @@ mod tests {
         let mut data = make_frame(0x00, b"{\"stdout\":\"line1\"}");
         data.extend(make_frame(0x00, b"{\"stdout\":\"line2\"}"));
         data.extend(make_frame(0x02, b"trailer")); // trailer frame, should be skipped
-        let frames = parse_connect_frames(&data).unwrap();
+        let frames = parse_connect_frames(&data).expect("multiple connect frames should parse");
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0], "{\"stdout\":\"line1\"}");
         assert_eq!(frames[1], "{\"stdout\":\"line2\"}");
@@ -1290,7 +1330,7 @@ mod tests {
 
     #[test]
     fn parse_empty_input() {
-        let frames = parse_connect_frames(&[]).unwrap();
+        let frames = parse_connect_frames(&[]).expect("empty input should parse");
         assert!(frames.is_empty());
     }
 
@@ -1309,7 +1349,7 @@ mod tests {
     #[test]
     fn parse_trailer_only() {
         let data = make_frame(0x02, b"{}");
-        let frames = parse_connect_frames(&data).unwrap();
+        let frames = parse_connect_frames(&data).expect("trailer-only frame should parse");
         assert!(frames.is_empty());
     }
 
@@ -1337,5 +1377,38 @@ mod tests {
                 .unwrap_err()
                 .contains("incomplete Connect frame payload")
         );
+    }
+
+    #[test]
+    fn current_traceparent_header_prefers_active_span_context() {
+        let tracer_provider = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("temper-wasm-test")),
+        );
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let span = tracing::info_span!("wasm.reply");
+        let expected = {
+            let _guard = span.enter();
+            let span_context = tracing::Span::current()
+                .context()
+                .span()
+                .span_context()
+                .clone();
+            assert!(
+                span_context.is_valid(),
+                "test span should have an OTEL context"
+            );
+            format!(
+                "00-{}-{}-01",
+                span_context.trace_id(),
+                span_context.span_id()
+            )
+        };
+
+        let actual = span
+            .in_scope(|| current_traceparent_header(&tracing::Span::current(), None))
+            .expect("active span should produce a traceparent");
+        assert_eq!(actual, expected);
     }
 }
