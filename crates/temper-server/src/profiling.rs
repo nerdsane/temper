@@ -115,15 +115,11 @@ async fn upload_to_agent(pprof_bytes: Vec<u8>, profile_type: &str) {
     let version = std::env::var("BUILD_VERSION")
         .or_else(|_| std::env::var("DD_VERSION"))
         .unwrap_or_else(|_| "dev".to_string());
-    let embodiment = std::env::var("EMBODIMENT")
-        .or_else(|_| std::env::var("TEMPER_EMBODIMENT"))
-        .unwrap_or_else(|_| "openpaw".to_string());
 
     let form = reqwest::multipart::Form::new()
         .text("tags[]", format!("service:{service}"))
         .text("tags[]", format!("env:{env}"))
         .text("tags[]", format!("version:{version}"))
-        .text("tags[]", format!("embodiment:{embodiment}"))
         .text("tags[]", format!("profile.component:{profile_type}"))
         .part(
             "data[profile.pprof]",

@@ -54,27 +54,26 @@ Platform code paths (dispatch, actor, WASM host, state-timeouts, admission, Ceda
 
 Implementation: a per-meter resource override, same pattern as tracers. Two `Meter` handles, one per service.
 
-### Sub-Decision 3: `embodiment` tag on all emissions
+### Sub-Decision 3: Disambiguate instances via `env` + `host`, not a custom tag
 
-Every span, metric, and log emits `embodiment:<name>` as a resource attribute. Values:
+The earlier draft of this ADR introduced a custom `embodiment` resource attribute to distinguish Railway from local-Mac Temper instances. That was wrong: Datadog already ships `env` as a first-class resource attribute and auto-tags every span/metric/log with `host`. Together these disambiguate instances without any new concept:
 
-- `embodiment:openpaw` — the Railway-deployed OpenPaw server.
-- `embodiment:tamago` — the macOS menu bar app (when Temper is running embedded in it).
-- `embodiment:dev` — local developer runs.
-- Future values declared per deployment.
+- `env:prod` → the Railway Temper.
+- `env:dev` (auto-set by OTel or explicitly set locally) → any Mac instance.
+- Multiple local instances in parallel → `env:dev host:<hostname>` disambiguates them. If you need finer control, pass `DD_ENV=dev-<suffix>`.
 
-**Why**: this is what makes the Service Catalog useful. `service:temper embodiment:tamago` shows Temper's SLOs in the Tamago context; `service:temper embodiment:openpaw` shows them on Railway. One service, many homes.
+No `embodiment` tag. No parallel concept to explain. No dashboard filters that mix the two vocabularies. Correction issued 2026-04-20 before any dashboard or monitor shipped using the custom tag.
 
 ### Sub-Decision 4: Cross-service trace continuity
 
 A single user-initiated flow traverses both services:
 
 ```
-Slack webhook receive         (service:openpaw, embodiment:openpaw)
-  └─ trigger.dispatch         (service:openpaw, embodiment:openpaw)
-       └─ Session.Configure   (service:temper,  embodiment:openpaw)
-            └─ wasm.invoke    (service:temper,  embodiment:openpaw)
-                 └─ provider  (service:temper,  embodiment:openpaw)
+Slack webhook receive         (service:openpaw, env:prod)
+  └─ trigger.dispatch         (service:openpaw, env:prod)
+       └─ Session.Configure   (service:temper,  env:prod)
+            └─ wasm.invoke    (service:temper,  env:prod)
+                 └─ provider  (service:temper,  env:prod)
 ```
 
 Trace ID is preserved across service boundaries because both tracers share the same propagation context. Datadog's APM UI renders cross-service traces natively — no special configuration needed on the ingestion side.
