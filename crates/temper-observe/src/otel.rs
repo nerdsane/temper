@@ -469,17 +469,6 @@ pub fn init_tracing(
         "runtime-id",
         uuid::Uuid::new_v4().to_string(),
     ));
-    // ADR-0053: embodiment tag identifies which Temper host this process
-    // is. When Tamago (macOS menu bar) ships, its process emits
-    // embodiment:tamago; the openpaw-server process here emits
-    // embodiment:openpaw (or whatever EMBODIMENT is set to). Lets the
-    // Service Catalog surface one `service:temper` across many hosts.
-    if let Some(embodiment) = read_non_empty_env("EMBODIMENT") {
-        resource_attrs.push(KeyValue::new("embodiment", embodiment));
-    } else if let Some(embodiment) = read_non_empty_env("TEMPER_EMBODIMENT") {
-        resource_attrs.push(KeyValue::new("embodiment", embodiment));
-    }
-
     let resource = Resource::builder_empty()
         .with_attributes(resource_attrs)
         .build();
@@ -527,11 +516,6 @@ pub fn init_tracing(
         }
         if let Some(version) = resolve_service_version() {
             attrs.push(KeyValue::new("service.version", version));
-        }
-        if let Some(embodiment) =
-            read_non_empty_env("EMBODIMENT").or_else(|| read_non_empty_env("TEMPER_EMBODIMENT"))
-        {
-            attrs.push(KeyValue::new("embodiment", embodiment));
         }
         // Share runtime-id with the temper provider so traces that
         // span both services have the same runtime-id for profile
