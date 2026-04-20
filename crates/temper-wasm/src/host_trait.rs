@@ -433,18 +433,26 @@ impl WasmHost for ProductionWasmHost {
         body: &str,
     ) -> Result<(u16, String), String> {
         let started = Instant::now();
+        // Strip Temper span hint headers (X-Temper-Span-*) before the request
+        // is built, and capture them for the local tracing span. See
+        // ADR-0037: WASM guests annotate outgoing calls with
+        // `X-Temper-Span-Name` / `X-Temper-Span-Attr-*` so the resulting
+        // span has a semantically meaningful name (e.g., `tool.llm_call`)
+        // and attributes (e.g., `gen_ai.request.model`).
+        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
         let span = tracing::info_span!(
             "wasm.host.http_call",
             otel.name = "wasm.host.http_call",
             http.method = %method,
             http.url = %telemetry_url(url),
             request_bytes = body.len() as u64,
-            header_count = headers.len() as u64,
+            header_count = filtered_headers.len() as u64,
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
         );
         let _guard = span.enter();
+        apply_span_hints(&tracing::Span::current(), &span_hints);
 
         let mut builder = match method.to_uppercase().as_str() {
             "GET" => self.client.get(url),
@@ -455,7 +463,7 @@ impl WasmHost for ProductionWasmHost {
             other => return Err(format!("unsupported HTTP method: {other}")),
         };
 
-        for (k, v) in headers {
+        for (k, v) in &filtered_headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
 
@@ -468,7 +476,7 @@ impl WasmHost for ProductionWasmHost {
             .get("temper_api_url")
             .is_some_and(|api_url| url.starts_with(api_url.trim_end_matches('/')));
         if is_internal && let Some(ref inv_ctx) = self.invocation_context {
-            let has_principal = headers
+            let has_principal = filtered_headers
                 .iter()
                 .any(|(k, _)| k.eq_ignore_ascii_case("x-temper-principal-kind"));
             if !has_principal {
@@ -499,7 +507,7 @@ impl WasmHost for ProductionWasmHost {
         // but this runs in WasmHost (not simulation), so wall-clock/network access is fine.
 
         // Auto-inject traceparent for cross-request trace correlation.
-        if !headers
+        if !filtered_headers
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
             && let Some(traceparent) =
@@ -647,24 +655,27 @@ impl WasmHost for ProductionWasmHost {
         body: &[u8],
     ) -> Result<(u16, Vec<u8>), String> {
         let started = Instant::now();
+        // See http_call for the span-hint-header rationale (ADR-0037).
+        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
         let span = tracing::info_span!(
             "wasm.host.http_call_binary",
             otel.name = "wasm.host.http_call_binary",
             http.method = %method,
             http.url = %telemetry_url(url),
             request_bytes = body.len() as u64,
-            header_count = headers.len() as u64,
+            header_count = filtered_headers.len() as u64,
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
         );
         let _guard = span.enter();
+        apply_span_hints(&tracing::Span::current(), &span_hints);
 
         if let Some(ref interceptor) = self.binary_http_interceptor
             && let Some(result) = interceptor(
                 method.to_string(),
                 url.to_string(),
-                headers.to_vec(),
+                filtered_headers.clone(),
                 body.to_vec(),
             )
             .await
@@ -734,7 +745,7 @@ impl WasmHost for ProductionWasmHost {
             other => return Err(format!("unsupported HTTP method: {other}")),
         };
 
-        for (k, v) in headers {
+        for (k, v) in &filtered_headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
 
@@ -1051,6 +1062,88 @@ fn current_traceparent_header(
         .unwrap_or(0);
     let span_id = format!("{nanos:016x}");
     Some(format!("00-{trace_id}-{span_id}-01"))
+}
+
+/// Span hints extracted from a WASM HTTP call's headers. See
+/// [`split_span_hint_headers`].
+#[derive(Default, Debug, PartialEq, Eq)]
+pub(crate) struct SpanHints {
+    /// If set, override the `wasm.host.http_call` span's name (from
+    /// `X-Temper-Span-Name`).
+    pub span_name: Option<String>,
+    /// Additional span attributes to record (from `X-Temper-Span-Attr-<key>`
+    /// headers). Keys are stripped of the prefix; both key and value must be
+    /// non-empty.
+    pub attributes: Vec<(String, String)>,
+}
+
+/// Split a header list into headers forwarded to the upstream request and
+/// Temper-specific span hints. See ADR-0037.
+///
+/// WASM modules (e.g., `llm_caller`, `monty_repl`) can annotate their
+/// outgoing HTTP calls with semantically meaningful span names and
+/// attributes without introducing a new ABI, by prefixing headers with
+/// `X-Temper-Span-`. These headers are consumed by the host and removed
+/// from the outbound request.
+///
+/// Recognized hint headers (case-insensitive):
+/// - `X-Temper-Span-Name: <name>` — sets span name (e.g., `tool.llm_call`).
+/// - `X-Temper-Span-Attr-<key>: <value>` — adds `<key>=<value>` as a span
+///   attribute. Useful for `gen_ai.request.model`, `tool.name`,
+///   `tool.call_id`, etc.
+///
+/// Any `X-Temper-Span-*` header with an unrecognized suffix is stripped
+/// (reserved for forward-compat) but otherwise ignored.
+pub(crate) fn split_span_hint_headers(
+    headers: &[(String, String)],
+) -> (Vec<(String, String)>, SpanHints) {
+    const PREFIX: &str = "x-temper-span-";
+    const NAME_HEADER: &str = "x-temper-span-name";
+    const ATTR_PREFIX: &str = "x-temper-span-attr-";
+
+    let mut kept: Vec<(String, String)> = Vec::with_capacity(headers.len());
+    let mut hints = SpanHints::default();
+    for (k, v) in headers {
+        let lk = k.to_ascii_lowercase();
+        if lk == NAME_HEADER {
+            if !v.is_empty() {
+                hints.span_name = Some(v.clone());
+            }
+            continue;
+        }
+        if let Some(attr_key) = lk.strip_prefix(ATTR_PREFIX) {
+            if !attr_key.is_empty() && !v.is_empty() {
+                hints.attributes.push((attr_key.to_string(), v.clone()));
+            }
+            continue;
+        }
+        if lk.starts_with(PREFIX) {
+            // Unknown X-Temper-Span-* header — strip silently for
+            // forward compatibility.
+            continue;
+        }
+        kept.push((k.clone(), v.clone()));
+    }
+    (kept, hints)
+}
+
+/// Apply span hints to the currently-active tracing span's underlying OTel
+/// span. `update_name` overrides the span display name; `set_attribute`
+/// calls attach the key/value pairs. If no tracer subscriber is installed
+/// (tests, early startup), this is a no-op.
+pub(crate) fn apply_span_hints(span: &tracing::Span, hints: &SpanHints) {
+    use opentelemetry::KeyValue;
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let cx = span.context();
+    let otel_span = cx.span();
+    if let Some(ref name) = hints.span_name {
+        otel_span.update_name(name.clone());
+    }
+    for (k, v) in &hints.attributes {
+        otel_span.set_attribute(KeyValue::new(k.clone(), v.clone()));
+    }
 }
 
 /// Parse Connect protocol binary frames from a response body.
@@ -1410,5 +1503,103 @@ mod tests {
             .in_scope(|| current_traceparent_header(&tracing::Span::current(), None))
             .expect("active span should produce a traceparent");
         assert_eq!(actual, expected);
+    }
+
+    // --- Span-hint-header extraction (ADR-0037) ---
+
+    #[test]
+    fn split_span_hint_headers_preserves_regular_headers() {
+        let headers = vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            ("authorization".to_string(), "Bearer xyz".to_string()),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].0, "content-type");
+        assert_eq!(kept[1].0, "authorization");
+        assert!(hints.span_name.is_none());
+        assert!(hints.attributes.is_empty());
+    }
+
+    #[test]
+    fn split_span_hint_headers_extracts_span_name_case_insensitive() {
+        let headers = vec![
+            (
+                "X-Temper-Span-Name".to_string(),
+                "tool.anthropic".to_string(),
+            ),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert_eq!(hints.span_name.as_deref(), Some("tool.anthropic"));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].0, "content-type");
+    }
+
+    #[test]
+    fn split_span_hint_headers_extracts_generic_attributes() {
+        let headers = vec![
+            (
+                "X-Temper-Span-Attr-gen_ai.request.model".to_string(),
+                "claude-sonnet-4.6".to_string(),
+            ),
+            (
+                "x-temper-span-attr-tool.name".to_string(),
+                "temper_write".to_string(),
+            ),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(hints.attributes.len(), 2);
+        assert!(
+            hints
+                .attributes
+                .iter()
+                .any(|(k, v)| k == "gen_ai.request.model" && v == "claude-sonnet-4.6")
+        );
+        assert!(
+            hints
+                .attributes
+                .iter()
+                .any(|(k, v)| k == "tool.name" && v == "temper_write")
+        );
+    }
+
+    #[test]
+    fn split_span_hint_headers_strips_empty_values() {
+        let headers = vec![
+            ("X-Temper-Span-Name".to_string(), "".to_string()),
+            (
+                "X-Temper-Span-Attr-gen_ai.request.model".to_string(),
+                "".to_string(),
+            ),
+            ("X-Temper-Span-Attr-".to_string(), "ignored".to_string()),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert!(
+            kept.is_empty(),
+            "all x-temper-span-* headers should be stripped"
+        );
+        assert!(hints.span_name.is_none(), "empty name should be ignored");
+        assert!(
+            hints.attributes.is_empty(),
+            "empty key or value should be ignored"
+        );
+    }
+
+    #[test]
+    fn split_span_hint_headers_strips_reserved_unknown_prefix() {
+        // Future-proofing: unknown X-Temper-Span-* headers are stripped so they
+        // don't leak to upstream services, but we don't act on them either.
+        let headers = vec![
+            ("X-Temper-Span-Future".to_string(), "whatever".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].0, "content-type");
+        assert!(hints.span_name.is_none());
+        assert!(hints.attributes.is_empty());
     }
 }
