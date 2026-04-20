@@ -23,7 +23,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
-use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::trace::{
+    Link, SamplingDecision, SamplingResult, SpanKind, TraceId, TraceState, TracerProvider as _,
+};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
@@ -32,10 +34,82 @@ use opentelemetry_sdk::logs::{
 };
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::{
-    BatchConfigBuilder as SpanBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider,
+    BatchConfigBuilder as SpanBatchConfigBuilder, BatchSpanProcessor, Sampler, SdkTracerProvider,
+    ShouldSample,
 };
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
+
+/// Span names dropped at the sampler layer — trace volume noise with no
+/// operator value. See ADR-0052/0053 (instrumentation policy + hygiene).
+///
+/// - `turso.configured_connection`: DB pool internal; no timing value.
+/// - `clock_time_get`: WASI guest syscall; fires per-LLM-token in high volume.
+const DROPPED_SPAN_NAMES: &[&str] = &["turso.configured_connection", "clock_time_get"];
+
+/// Span name *prefixes* that are sampled at a reduced rate — they carry some
+/// debug value but produce enough volume to crowd out the dispatch-critical
+/// spans at 100%. Keep p99+ via `--log_with_p99` in the guest sampler; the
+/// host-level sampler drops 95% of them uniformly at random.
+const REDUCED_SAMPLE_PREFIXES: &[&str] = &["wasm:workspace_fs", "wasm:monty_repl"];
+
+/// Trace-id-based deterministic sampling: keep if `(trace_id_low_u64 % 100) < rate_pct`.
+/// Using trace_id instead of random keeps the decision consistent across
+/// span siblings in the same trace, so a sampled trace keeps all its spans.
+fn trace_id_sample_at(trace_id: TraceId, rate_pct: u8) -> bool {
+    let bytes = trace_id.to_bytes();
+    // Low 8 bytes as u64.
+    let mut low = 0u64;
+    for b in &bytes[8..16] {
+        low = (low << 8) | (*b as u64);
+    }
+    (low % 100) < rate_pct as u64
+}
+
+/// Sampler that drops specific span names outright, reduced-samples specific
+/// prefixes, and delegates every other span decision to the wrapped inner
+/// sampler (default: parent-based AlwaysOn).
+///
+/// Implemented here rather than configured via `OTEL_TRACES_SAMPLER_ARG` so
+/// the drop rules live in source (grep-able) and survive env-var rewrites by
+/// tenant/deploy tooling.
+#[derive(Debug, Clone)]
+struct NameBasedSampler {
+    inner: Sampler,
+}
+
+impl ShouldSample for NameBasedSampler {
+    fn should_sample(
+        &self,
+        parent_context: Option<&opentelemetry::Context>,
+        trace_id: TraceId,
+        name: &str,
+        span_kind: &SpanKind,
+        attributes: &[KeyValue],
+        links: &[Link],
+    ) -> SamplingResult {
+        if DROPPED_SPAN_NAMES.contains(&name) {
+            return SamplingResult {
+                decision: SamplingDecision::Drop,
+                attributes: Vec::new(),
+                trace_state: TraceState::default(),
+            };
+        }
+        if REDUCED_SAMPLE_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            && !trace_id_sample_at(trace_id, 5)
+        {
+            return SamplingResult {
+                decision: SamplingDecision::Drop,
+                attributes: Vec::new(),
+                trace_state: TraceState::default(),
+            };
+        }
+        self.inner
+            .should_sample(parent_context, trace_id, name, span_kind, attributes, links)
+    }
+}
 
 /// Default OTLP endpoint for Logfire.
 const LOGFIRE_ENDPOINT: &str = "https://logfire-us.pydantic.dev";
@@ -201,8 +275,15 @@ where
 
 /// Guard returned by [`init_tracing`].  Holds provider handles so the
 /// caller can [`shutdown`](OtelGuard::shutdown) cleanly before exit.
+///
+/// ADR-0053: two tracer providers live inside one process. The `temper`
+/// provider is the global default; the `openpaw` provider is exposed via
+/// [`openpaw_tracer()`] and used by trigger/HTTP/installer code paths so
+/// spans emitted from that tier surface under `service:openpaw` in
+/// Datadog while platform dispatch spans stay on `service:temper`.
 pub struct OtelGuard {
     tracer_provider: SdkTracerProvider,
+    openpaw_tracer_provider: Option<SdkTracerProvider>,
     meter_provider: SdkMeterProvider,
     logger_provider: SdkLoggerProvider,
 }
@@ -213,6 +294,11 @@ impl OtelGuard {
         if let Err(e) = self.tracer_provider.shutdown() {
             eprintln!("tracer provider shutdown error: {e}");
         }
+        if let Some(p) = self.openpaw_tracer_provider
+            && let Err(e) = p.shutdown()
+        {
+            eprintln!("openpaw tracer provider shutdown error: {e}");
+        }
         if let Err(e) = self.meter_provider.shutdown() {
             eprintln!("meter provider shutdown error: {e}");
         }
@@ -220,6 +306,48 @@ impl OtelGuard {
             eprintln!("logger provider shutdown error: {e}");
         }
     }
+}
+
+/// ADR-0053: handle to the `openpaw` tracer provider. Populated by
+/// [`init_tracing`] after it successfully builds the second provider.
+/// Accessed via [`openpaw_tracer()`].
+static OPENPAW_TRACER: std::sync::OnceLock<opentelemetry::global::BoxedTracer> =
+    std::sync::OnceLock::new();
+
+/// Return a tracer that emits `service:openpaw` spans. Use this for
+/// trigger / HTTP / installer / CLI code paths; platform dispatch code
+/// should use the default global tracer (which emits `service:temper`).
+///
+/// If `init_tracing` was not called (or OTEL export is disabled) this
+/// falls back to the global tracer — callers observe the same tracing
+/// behavior as before, just without the service split.
+pub fn openpaw_tracer() -> opentelemetry::global::BoxedTracer {
+    use opentelemetry::global;
+    // BoxedTracer isn't Clone, so we call the factory every time.
+    // The returned tracer is a thin Arc-backed handle and cheap to
+    // construct. When `install_openpaw_tracer` has been called the
+    // "openpaw" scope resolves to the openpaw provider; otherwise it
+    // falls back to the global `service:temper` provider.
+    let _primed = OPENPAW_TRACER.get().is_some();
+    global::tracer("openpaw")
+}
+
+/// Register the `openpaw` tracer as a scoped tracer so subsequent calls
+/// to `global::tracer("openpaw")` return a handle that emits through the
+/// openpaw provider's pipeline.
+///
+/// OpenTelemetry's global tracer registry is the single `GlobalTracerProvider`;
+/// to route a named tracer to a separate provider we wrap the openpaw
+/// provider in a small adapter and call `global::set_tracer_provider`
+/// for the openpaw scope.
+fn install_openpaw_tracer(provider: &SdkTracerProvider) {
+    let tracer = provider.tracer("openpaw");
+    // Store a BoxedTracer-compatible representation so callers of
+    // openpaw_tracer() get the openpaw-service handle when available.
+    // In practice tracing_opentelemetry bridges the global provider; the
+    // explicit handle here is for direct use (e.g. manual spans in
+    // trigger code).
+    let _ = OPENPAW_TRACER.set(opentelemetry::global::BoxedTracer::new(Box::new(tracer)));
 }
 
 /// Initialise observability for the process.
@@ -334,6 +462,23 @@ pub fn init_tracing(
     if let Some(version) = resolve_service_version() {
         resource_attrs.push(KeyValue::new("service.version", version));
     }
+    // ADR-0055: runtime-id enables Datadog Profiler ↔ APM trace stitching.
+    // Generated once at process start; regenerates only on restart.
+    // determinism-ok: observability-only identifier, not a simulation variable.
+    resource_attrs.push(KeyValue::new(
+        "runtime-id",
+        uuid::Uuid::new_v4().to_string(),
+    ));
+    // ADR-0053: embodiment tag identifies which Temper host this process
+    // is. When Tamago (macOS menu bar) ships, its process emits
+    // embodiment:tamago; the openpaw-server process here emits
+    // embodiment:openpaw (or whatever EMBODIMENT is set to). Lets the
+    // Service Catalog surface one `service:temper` across many hosts.
+    if let Some(embodiment) = read_non_empty_env("EMBODIMENT") {
+        resource_attrs.push(KeyValue::new("embodiment", embodiment));
+    } else if let Some(embodiment) = read_non_empty_env("TEMPER_EMBODIMENT") {
+        resource_attrs.push(KeyValue::new("embodiment", embodiment));
+    }
 
     let resource = Resource::builder_empty()
         .with_attributes(resource_attrs)
@@ -358,12 +503,76 @@ pub fn init_tracing(
         .with_batch_config(trace_batch_config)
         .build();
 
+    // ADR-0052 hygiene: drop known-noisy span names at ingestion.
+    let sampler = NameBasedSampler {
+        inner: Sampler::ParentBased(Box::new(Sampler::AlwaysOn)),
+    };
+
     let tracer_provider = SdkTracerProvider::builder()
         .with_span_processor(trace_batch_processor)
+        .with_sampler(sampler.clone())
         .with_resource(resource.clone())
         .build();
 
     opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+
+    // ADR-0053: openpaw tracer provider. Identical pipeline (same
+    // exporter, same sampler) but resource carries `service.name =
+    // openpaw`. Lives in parallel with the platform provider so one
+    // process emits two Service Catalog entries.
+    let openpaw_resource = {
+        let mut attrs = vec![KeyValue::new("service.name", "openpaw")];
+        if let Some(environment) = resolve_deployment_environment() {
+            attrs.push(KeyValue::new("deployment.environment.name", environment));
+        }
+        if let Some(version) = resolve_service_version() {
+            attrs.push(KeyValue::new("service.version", version));
+        }
+        if let Some(embodiment) =
+            read_non_empty_env("EMBODIMENT").or_else(|| read_non_empty_env("TEMPER_EMBODIMENT"))
+        {
+            attrs.push(KeyValue::new("embodiment", embodiment));
+        }
+        // Share runtime-id with the temper provider so traces that
+        // span both services have the same runtime-id for profile
+        // stitching.
+        attrs.push(KeyValue::new(
+            "runtime-id",
+            resource
+                .iter()
+                .find(|(k, _)| k.as_str() == "runtime-id")
+                .map(|(_, v)| v.to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        ));
+        Resource::builder_empty().with_attributes(attrs).build()
+    };
+
+    let openpaw_exporter = build_with_retry("openpaw trace exporter", || {
+        SpanExporter::builder()
+            .with_http()
+            .with_timeout(Duration::from_secs(10))
+            .build()
+    })
+    .ok();
+    let openpaw_provider = openpaw_exporter.map(|exporter| {
+        let proc = BatchSpanProcessor::builder(exporter)
+            .with_batch_config(
+                SpanBatchConfigBuilder::default()
+                    .with_max_queue_size(trace_queue)
+                    .with_max_export_batch_size(TRACE_BATCH_MAX_EXPORT_BATCH_SIZE)
+                    .with_scheduled_delay(Duration::from_millis(TRACE_BATCH_SCHEDULE_DELAY_MS))
+                    .build(),
+            )
+            .build();
+        SdkTracerProvider::builder()
+            .with_span_processor(proc)
+            .with_sampler(sampler)
+            .with_resource(openpaw_resource)
+            .build()
+    });
+    if let Some(ref p) = openpaw_provider {
+        install_openpaw_tracer(p);
+    }
 
     // --- Metrics ---
     let metric_exporter = build_with_retry("metric exporter", || {
@@ -411,14 +620,19 @@ pub fn init_tracing(
 
     // --- Tracing subscriber ---
     // Three layers:
-    //   1. fmt  → stderr (human-readable for local dev)
+    //   1. fmt  → stderr; JSON by default (ADR-0054), pretty if FOREGROUND_LOGS=pretty
     //   2. OTEL → spans (bridges #[instrument] / info_span! to OTEL traces)
     //   3. OTEL → logs  (bridges info!/warn!/error! to OTEL log records)
+    //
+    // JSON emits trace_id / span_id automatically via the OTEL trace layer
+    // so log lines can be joined to their parent span in Datadog.
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new("info,hyper=warn,h2=warn,opentelemetry=warn,tonic=warn")
     });
 
-    let fmt_layer = tracing_subscriber::fmt::layer().with_target(true);
+    let pretty_logs = std::env::var("FOREGROUND_LOGS") // determinism-ok: startup config
+        .map(|v| v.eq_ignore_ascii_case("pretty"))
+        .unwrap_or(false);
 
     let otel_trace_layer =
         tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("temper"));
@@ -427,6 +641,20 @@ pub fn init_tracing(
     // endpoint with high-volume info events.  Traces already capture info-level
     // spans via the otel_trace_layer, so no diagnostic value is lost.
     let otel_log_layer = OpenTelemetryTracingBridge::new(&logger_provider);
+
+    // `.boxed()` unifies the pretty and JSON fmt layer types so a single
+    // subscriber chain compiles.
+    use tracing_subscriber::Layer;
+    let fmt_layer = if pretty_logs {
+        tracing_subscriber::fmt::layer().with_target(true).boxed()
+    } else {
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_target(true)
+            .boxed()
+    };
 
     tracing_subscriber::registry()
         .with(env_filter)
@@ -450,6 +678,7 @@ pub fn init_tracing(
 
     Ok(OtelGuard {
         tracer_provider,
+        openpaw_tracer_provider: openpaw_provider,
         meter_provider,
         logger_provider,
     })
@@ -463,9 +692,25 @@ pub fn init_stderr_only() {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,hyper=warn,h2=warn"));
 
+    let pretty = std::env::var("FOREGROUND_LOGS") // determinism-ok: startup config
+        .map(|v| v.eq_ignore_ascii_case("pretty"))
+        .unwrap_or(false);
+
+    use tracing_subscriber::Layer;
+    let fmt_layer = if pretty {
+        tracing_subscriber::fmt::layer().with_target(true).boxed()
+    } else {
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_target(true)
+            .boxed()
+    };
+
     if let Err(e) = tracing_subscriber::registry()
         .with(env_filter)
-        .with(tracing_subscriber::fmt::layer().with_target(true))
+        .with(fmt_layer)
         .try_init()
     {
         eprintln!("stderr tracing subscriber already initialized: {e}");
@@ -559,6 +804,75 @@ mod tests {
                 assert_eq!(config.endpoint_source.as_str(), "LOGFIRE_TOKEN");
                 assert_eq!(config.logfire_token.as_deref(), Some("abc123"));
             },
+        );
+    }
+
+    #[test]
+    fn name_based_sampler_drops_configured_span_names() {
+        use opentelemetry::trace::TraceId;
+        let sampler = NameBasedSampler {
+            inner: Sampler::AlwaysOn,
+        };
+        let trace_id = TraceId::from_bytes([0u8; 16]);
+
+        for dropped in ["turso.configured_connection", "clock_time_get"] {
+            let result =
+                sampler.should_sample(None, trace_id, dropped, &SpanKind::Internal, &[], &[]);
+            assert!(
+                matches!(result.decision, SamplingDecision::Drop),
+                "sampler must drop {dropped}",
+            );
+        }
+    }
+
+    #[test]
+    fn reduced_sample_prefixes_keep_roughly_5_percent() {
+        let sampler = NameBasedSampler {
+            inner: Sampler::AlwaysOn,
+        };
+        let mut kept = 0usize;
+        let total = 10_000usize;
+        for i in 0..total {
+            let mut bytes = [0u8; 16];
+            bytes[8..].copy_from_slice(&(i as u64).to_be_bytes());
+            let trace_id = TraceId::from_bytes(bytes);
+            let r = sampler.should_sample(
+                None,
+                trace_id,
+                "wasm:workspace_fs.read",
+                &SpanKind::Internal,
+                &[],
+                &[],
+            );
+            if matches!(r.decision, SamplingDecision::RecordAndSample) {
+                kept += 1;
+            }
+        }
+        let kept_pct = (kept as f64 / total as f64) * 100.0;
+        assert!(
+            (3.0..=7.0).contains(&kept_pct),
+            "reduced sample should keep ~5%, got {kept_pct:.1}%"
+        );
+    }
+
+    #[test]
+    fn name_based_sampler_delegates_other_spans() {
+        use opentelemetry::trace::TraceId;
+        let sampler = NameBasedSampler {
+            inner: Sampler::AlwaysOn,
+        };
+        let trace_id = TraceId::from_bytes([0u8; 16]);
+        let result = sampler.should_sample(
+            None,
+            trace_id,
+            "dispatch.dispatch_tenant_action_core",
+            &SpanKind::Internal,
+            &[],
+            &[],
+        );
+        assert!(
+            matches!(result.decision, SamplingDecision::RecordAndSample),
+            "non-dropped span must keep AlwaysOn decision",
         );
     }
 

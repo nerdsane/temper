@@ -366,7 +366,10 @@ impl crate::state::ServerState {
             active_span.record("wasm.timeout_source", "explicit");
         } else {
             active_span.record("wasm.timeout_source", "default");
-            tracing::warn!(
+            // ADR-0054 warn-audit: default-timeout fallback is a configuration
+            // observation, not an actionable condition. The metric below is
+            // the alerting signal; this log is purely local-dev diagnostic.
+            tracing::debug!(
                 tenant = %ctx.entity_ref.tenant,
                 entity_type = ctx.entity_ref.entity_type,
                 entity_id = ctx.entity_ref.entity_id,

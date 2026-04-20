@@ -228,10 +228,19 @@ impl EntityActor {
             },
         };
 
-        match store
+        // W2 / temper#146: measure append wait — the hypothesis is that
+        // writer-lock / fsync serialization is a cold-start bottleneck.
+        let append_start = Instant::now();
+        let backend = store.backend_name();
+        let result = store
             .append(persistence_id, state.sequence_nr, &[envelope])
-            .await
-        {
+            .await;
+        crate::runtime_metrics::record_event_store_append_wait(
+            backend,
+            "append",
+            append_start.elapsed(),
+        );
+        match result {
             Ok(new_seq) => {
                 state.sequence_nr = new_seq;
                 tracing::debug!(entity = %state.entity_id, seq = new_seq, "event persisted");
@@ -563,6 +572,10 @@ impl Actor for EntityActor {
                 // Capture start time for span duration (DST-safe: sim_now()
                 // returns logical clock in simulation, wall clock in production).
                 let action_start = sim_now();
+                // Wall-clock start for `temper_actor_ask_reply_latency_ms`.
+                // Separate from `action_start` because metrics emission is
+                // outside the DST boundary; using Instant here is safe.
+                let ask_reply_start = Instant::now(); // determinism-ok: observability only
 
                 // ADR-0048 sub-decision 5: actor-side idempotency dedup.
                 // A dispatch-layer retry can produce a second `ask` after the
@@ -1092,6 +1105,15 @@ impl Actor for EntityActor {
                         spec_governed: true,
                     });
                 }
+                // Inside-actor ask reply latency (excludes dispatch and retry
+                // overhead). Early-exit error paths above `return Ok(())` are
+                // not counted; the signal of interest is normal action
+                // handling latency.
+                crate::runtime_metrics::record_actor_ask_reply_latency(
+                    &state.entity_type,
+                    &name,
+                    ask_reply_start.elapsed(),
+                );
             }
             EntityMsg::GetState => {
                 ctx.reply(EntityResponse {
