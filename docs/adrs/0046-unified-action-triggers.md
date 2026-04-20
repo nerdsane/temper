@@ -12,13 +12,15 @@
   - `crates/temper-verify/src/cascade.rs` (joint verification extension)
   - `crates/temper-authz/src/engine/mod.rs` (parse-time authority check + `is_system` bypass removal)
   - `crates/temper-spec/src/cross_invariant/` (integrates into cascade)
-  - `os-apps/temper-fs/reactions/reactions.toml` (sole production reactions file — migrates inline)
+  - `os-apps/temper-fs/reactions/reactions.toml` (temper repo — migrates inline)
+  - `openpaw/os-apps/paw-fs/reactions/reactions.toml` (openpaw/temperpaw repo — migrates inline)
+  - `openpaw/os-apps/katagami-curation/specs/reactions.toml` (openpaw/temperpaw repo — migrates inline)
 
 ## Context
 
 ADR-0045 established reactions as a separate primitive with their own TOML file (`reactions.toml`) and dispatcher (`ReactionDispatcher`), justified by verification tractability, authorization scope, transactional boundary, and bounded cascades. After implementation, four structural problems surfaced:
 
-1. **Discoverability failure.** Entity specs contain no hint of outgoing reactions. Developers consistently bypassed reactions in favor of WASM-as-plumbing, which IS visible on the source action (via `effect = "trigger <name>"`). Only `os-apps/temper-fs/reactions/reactions.toml` exists in the whole codebase. Every other app that needs cross-entity wiring writes a WASM module whose sole job is to call `temper_action()` on another entity — the pattern ADR-0045 was supposed to eliminate.
+1. **Discoverability failure.** Entity specs contain no hint of outgoing reactions. Developers consistently bypassed reactions in favor of WASM-as-plumbing, which IS visible on the source action (via `effect = "trigger <name>"`). Production consumers of hand-authored reactions span two repos: `os-apps/temper-fs/reactions/reactions.toml` in temper, plus `os-apps/paw-fs/reactions/reactions.toml` and `os-apps/katagami-curation/specs/reactions.toml` in openpaw (temperpaw). Every other app writes a WASM module whose sole job is to call `temper_action()` on another entity — the pattern ADR-0045 was supposed to eliminate.
 
 2. **Installation and recovery silently drop reactions.** Four bug sites:
    - `crates/temper-platform/src/os_apps/mod.rs:1128` — `AppBundle` has no `reactions` field; `load_app_bundle` never reads `{app_dir}/reactions/reactions.toml`.
@@ -67,11 +69,13 @@ resolve_target = { type = "create_if_missing", id_field = "last_version_id" }
 
 One primitive covers all outgoing effects. Deletes `[[integration]]` and `reactions.toml` entirely.
 
-- `kind = "entity"` — cross-entity action dispatch (former reactions).
+- `kind = "entity"` — cross-entity action dispatch (former reactions, former `[[agent_trigger]]`).
 - `kind = "wasm"` — WASM module execution (former `[[integration]] type = "wasm"`).
 - `kind = "webhook"` — outbound HTTP (former `[[integration]] type = "webhook"`).
 
 Kind-specific fields are validated at parse time: `Entity` requires `target_entity` + `target_action`; `Wasm` requires `module`; `Webhook` requires `url` + `method`. `on_success` / `on_failure` apply to `Wasm` and `Webhook` kinds and name entity actions on the source entity to dispatch after module/HTTP execution.
+
+**Why not a separate `kind = "agent"`**: "agent" means different things in different apps. The platform's generic `Agent` entity (states Idle → Assigned → Working → Completed) fits the `[[agent_trigger]]` spawn-and-auto-start pattern. But `paw-agent`'s `Agent` entity is a persistent team-member identity (Created → Active → Archived) with no spawn semantics. Katagami and paw-foresight have no "agent" concept at all. A `kind = "agent"` primitive would force every agent-like entity into the platform's Agent shape. Instead, spawning any agent uses `kind = "entity"` targeting whichever agent entity is registered in the tenant, and the "auto-start on Assign" behavior is expressed as a self-trigger on the target agent's own spec (see Sub-Decision 7). This generalizes across the platform's Agent, paw-agent's Agent, and any app-defined agent entity.
 
 **Why this shape**: today WASM integrations, webhooks, and reactions are three parallel systems with overlapping purposes (all are "things that happen when an action commits"). Unifying them under one schema with a kind discriminator eliminates duplication, makes the full outgoing surface visible in one place, and lets common machinery (guards, `to_state` filter, principal resolution, liveness annotations) apply uniformly.
 
@@ -125,11 +129,33 @@ Hard-kind cross-invariants (`cross-invariants.toml` with `kind = "hard"`) become
 
 **Why this shape**: the `related(Entity, field).Status in [...]` assertion grammar is already structured; it translates cleanly to a joint predicate `composite_state[target].status ∈ values`. No new DSL. The eventual kind genuinely needs temporal reasoning that exceeds the scope of snapshot model checking, so it stays runtime.
 
-### Sub-Decision 7: Delete legacy `[[agent_trigger]]`
+### Sub-Decision 7: Delete legacy `[[agent_trigger]]`; auto-start behavior moves to target entity's spec
 
-Agent spawning becomes an explicit `[[action.triggers]]` block with `kind = "entity"` targeting the `Agent` entity (with `principal = "agent-supervisor"` for elevation). The `synthesize_agent_trigger_reactions` function in `registry/relations.rs:91-148` is deleted. Apps using `[[agent_trigger]]` today (`plan.ioa.toml`, `task.ioa.toml`) are migrated in the same PR.
+Agent spawning becomes an explicit `[[action.triggers]]` block with `kind = "entity"` targeting whichever agent entity is registered in the tenant — the platform's generic `Agent`, paw-agent's identity `Agent`, or any app-defined agent entity. The `synthesize_agent_trigger_reactions` function at `registry/relations.rs:91-148` is deleted.
 
-**Why this removal**: `[[agent_trigger]]` is a specialized case of a general cross-entity trigger. Folding it into `[[action.triggers]]` eliminates a parallel primitive and the synthesis layer that bridges them.
+The "auto-start on Assign" behavior that `synthesize_agent_trigger_reactions` produced (a second `ReactionRule` firing `Agent.Start` when Agent reaches `Assigned` state) moves to the platform Agent's own spec as a self-trigger:
+
+```toml
+# crates/temper-platform/src/specs/agent.ioa.toml
+[[action]]
+name = "Assign"
+from = ["Idle"]
+to = "Assigned"
+params = ["role", "goal", "model", "agent_type_id"]
+
+[[action.triggers]]
+name = "auto_start_on_assign"
+kind = "entity"
+target_entity = "Agent"
+target_action = "Start"
+to_state = "Assigned"
+resolve_target = { type = "same_id" }
+principal = "agent-supervisor"
+```
+
+Callers that spawn an Agent just create + assign it with `kind = "entity"` + `resolve_target = { type = "create" }`; the auto-start happens because the platform Agent's own spec declares it.
+
+**Why this shape**: today's `[[agent_trigger]]` hard-codes a synthesis that only matches the platform's generic `Agent` entity (Idle → Assigned → Working → Completed). It doesn't fit paw-agent's `Agent` (Created → Active → Archived; no Assign/Start), and doesn't apply at all to Katagami or paw-foresight which have no agent concept. A `kind = "agent"` primitive would either force every "agent" into the platform Agent mold or would become `kind = "entity"` with sugar — either way worse than making the target entity responsible for its own post-spawn lifecycle. The auto-start behavior is a property of how the platform Agent chooses to behave after Assign, not a property of the caller's spawn trigger. Moving it to the target's spec makes this explicit, reusable for any agent-like entity in any app, and preserves byte-identical runtime behavior for today's migrations.
 
 ### Sub-Decision 8: Minimal liveness hook
 
