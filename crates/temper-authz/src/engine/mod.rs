@@ -563,8 +563,7 @@ impl AuthzEngine {
 /// credential rotation, recovery).
 const SYSTEM_PLATFORM_POLICY: &str = r#"
 @id("system-platform:broad-permit")
-permit(principal, action, resource)
-when { principal has kind && principal.kind == "System" };
+permit(principal is System, action, resource);
 "#;
 
 /// PolicyId prefix used for the built-in system-platform policies
