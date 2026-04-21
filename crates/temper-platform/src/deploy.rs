@@ -239,6 +239,7 @@ impl DeployPipeline {
                     levels: vec![],
                     warnings: vec![],
                     reachable_paths: None,
+                    composite_report: None,
                 }
             } else {
                 let cascade = VerificationCascade::from_ioa(&entity.ioa_source)
