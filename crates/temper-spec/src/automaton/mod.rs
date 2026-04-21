@@ -20,6 +20,7 @@ pub mod metadata;
 pub mod parser;
 mod toml_parser;
 pub mod translate;
+pub mod trigger_graph;
 mod types;
 
 pub use assert_parser::{AssertCompareOp, ParsedAssert, parse_assert_expr};
@@ -36,4 +37,5 @@ pub use parser::{
     parse_automaton_with_liveness, set_liveness_violation_reporter, to_state_machine,
 };
 pub use translate::{ResolvedAction, ResolvedEffect, ResolvedGuard, translate_actions};
+pub use trigger_graph::{TriggerEdge, TriggerGraph};
 pub use types::*;
