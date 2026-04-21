@@ -245,8 +245,21 @@ impl AdmissionController {
                     },
                 );
             }
-            let entry = inner.semaphores.get(&key).unwrap();
-            (entry.semaphore.clone(), entry.pending.clone())
+            if let Some(entry) = inner.semaphores.get(&key) {
+                (entry.semaphore.clone(), entry.pending.clone())
+            } else {
+                let semaphore = Arc::new(Semaphore::new(max as usize));
+                let pending = Arc::new(AtomicU64::new(0));
+                inner.semaphores.insert(
+                    key.clone(),
+                    SemaphoreEntry {
+                        semaphore: semaphore.clone(),
+                        built_for_cap: max,
+                        pending: pending.clone(),
+                    },
+                );
+                (semaphore, pending)
+            }
         };
         let queue_timeout = caps.queue_timeout;
 
