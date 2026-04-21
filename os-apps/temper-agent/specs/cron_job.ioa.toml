@@ -124,6 +124,19 @@ params = ["last_run_at"]
 hint = "Fire the cron job — creates and provisions a TemperAgent."
 effect = [{ type = "increment", var = "run_count" }, { type = "trigger", name = "cron_trigger" }]
 
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "cron_trigger"
+kind = "wasm"
+module = "cron_trigger"
+on_failure = "TriggerFailed"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
+
 [[action]]
 name = "TriggerComplete"
 kind = "input"
@@ -149,13 +162,3 @@ hint = "Max runs reached or manually expired."
 name = "ExpiredIsFinal"
 when = ["Expired"]
 assert = "no_further_transitions"
-
-[[integration]]
-name = "cron_trigger"
-trigger = "cron_trigger"
-type = "wasm"
-module = "cron_trigger"
-on_failure = "TriggerFailed"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
