@@ -35,6 +35,10 @@ struct RuntimeMetrics {
     state_timeout_reset_total: Counter<u64>,
     scheduler_overdue_on_replay_total: Counter<u64>,
     scheduler_pending_timers: Gauge<u64>,
+    // ADR-0056: re-arm on actor hydration.
+    state_timeout_armed_on_hydration_total: Counter<u64>,
+    // ADR-0056 Sub-Decision 3: silent-exit regression guard.
+    integration_silent_exit_total: Counter<u64>,
     // --- ADR-0050: liveness coverage enforcement --------------------------
     spec_liveness_violations_total: Counter<u64>,
     spec_allow_indefinite_states: Gauge<u64>,
@@ -180,6 +184,27 @@ fn metrics() -> &'static RuntimeMetrics {
             scheduler_pending_timers: meter
                 .u64_gauge("temper_scheduler_pending_timers")
                 .with_description("ADR-0049: live in-memory timer count per entity type.")
+                .build(),
+            state_timeout_armed_on_hydration_total: meter
+                .u64_counter("temper_state_timeout_armed_on_hydration_total")
+                .with_description(
+                    "ADR-0056: timers re-armed when an actor hydrated into a state with a \
+                     declared [[state_timeout]] but no live in-memory timer. `elapsed_bucket` \
+                     tag distinguishes overdue (fired immediately) from budgeted (armed with \
+                     remaining delay).",
+                )
+                .build(),
+            integration_silent_exit_total: meter
+                .u64_counter("temper_integration_silent_exit_total")
+                .with_description(
+                    "ADR-0056: inline WASM trigger-integration invocations that returned \
+                     successfully without causing any state transition on the triggering \
+                     entity. Under healthy operation this counter is permanently zero; any \
+                     nonzero reading is a regression of the consumer-side \
+                     exit-dispatches-an-action invariant (openpaw ADR-0039 Sub-Decision 3a) \
+                     or a transient persist failure that slipped past the retry layer \
+                     (ADR-0056 Sub-Decision 2). Alerts on this counter are critical-severity.",
+                )
                 .build(),
             spec_liveness_violations_total: meter
                 .u64_counter("temper_spec_liveness_violations_total")
@@ -586,6 +611,47 @@ pub fn record_state_timeout_reset(
             KeyValue::new("entity_type", entity_type.to_string()),
             KeyValue::new("state", state.to_string()),
             KeyValue::new("reset_action", reset_action.to_string()),
+        ],
+    );
+}
+
+/// Record a state_timeout re-armed by the hydration hook (ADR-0056). `bucket`
+/// is `"overdue"` when the timer fired immediately because elapsed >=
+/// after_seconds, or `"budgeted"` when armed with remaining delay.
+pub fn record_state_timeout_armed_on_hydration(
+    tenant: &str,
+    entity_type: &str,
+    state: &str,
+    bucket: &'static str,
+) {
+    metrics().state_timeout_armed_on_hydration_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("state", state.to_string()),
+            KeyValue::new("elapsed_bucket", bucket),
+        ],
+    );
+}
+
+/// Record a silent integration exit — an inline trigger invocation that
+/// returned successfully without causing a state transition on the
+/// triggering entity. Emits `temper_integration_silent_exit_total` (ADR-0056
+/// Sub-Decision 3).
+pub fn record_integration_silent_exit(
+    tenant: &str,
+    entity_type: &str,
+    triggering_action: &str,
+    state: &str,
+) {
+    metrics().integration_silent_exit_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", triggering_action.to_string()),
+            KeyValue::new("state", state.to_string()),
         ],
     );
 }
