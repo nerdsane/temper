@@ -1082,6 +1082,42 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     let cross_invariants_toml =
         std::fs::read_to_string(app_dir.join("specs").join("cross-invariants.toml")).ok();
 
+    // ADR-0046: Load reactions.toml if present. Apps following the convention
+    // put it at `<app>/reactions/reactions.toml` (temper-fs before migration,
+    // paw-fs in openpaw); some apps put it at `<app>/specs/reactions.toml`
+    // (katagami-curation in openpaw). Try both locations. Parse failures
+    // log a warning — they must not block install of an otherwise-valid app.
+    let reactions: Vec<temper_server::reaction::ReactionRule> = {
+        let candidates = [
+            app_dir.join("reactions").join("reactions.toml"),
+            app_dir.join("specs").join("reactions.toml"),
+        ];
+        let mut loaded = Vec::new();
+        for path in &candidates {
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            match temper_server::reaction::parse_reactions(&source) {
+                Ok(rules) => {
+                    tracing::info!(
+                        path = %path.display(),
+                        count = rules.len(),
+                        "Loaded reactions.toml for os-app bundle"
+                    );
+                    loaded.extend(rules);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "Failed to parse reactions.toml; skipping"
+                    );
+                }
+            }
+        }
+        loaded
+    };
+
     // Read Cedar policies.
     let cedar_policies: Vec<String> = find_cedar_policies(app_dir)
         .into_iter()
@@ -1121,6 +1157,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         && app_guide.is_none()
         && csdl.is_none()
         && cross_invariants_toml.is_none()
+        && reactions.is_empty()
     {
         return None;
     }
@@ -1130,6 +1167,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         csdl,
         cross_invariants_toml,
         cedar_policies,
+        reactions,
         wasm_modules,
         wasm_module_configs,
         agents,
@@ -1412,6 +1450,10 @@ async fn install_os_app_without_dependencies(
                     label: &format!("OsApp({app_name})"),
                     verified_cache: &verified_cache,
                     cross_invariants_source: bundle.cross_invariants_toml.as_deref(),
+                    // ADR-0046 bug fix: reactions from the app bundle's
+                    // reactions.toml must travel through install so Railway
+                    // restarts don't silently drop them.
+                    reactions: bundle.reactions.clone(),
                 },
             );
 

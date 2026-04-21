@@ -90,6 +90,11 @@ pub(crate) struct BootstrapTenantSpecsOptions<'a> {
     pub(crate) label: &'a str,
     pub(crate) verified_cache: &'a BTreeMap<String, (String, bool)>,
     pub(crate) cross_invariants_source: Option<&'a str>,
+    /// ADR-0046: reactions loaded from the app bundle's reactions.toml
+    /// (when present). Empty for platform system/agent specs and for apps
+    /// that use inline `[[action.triggers]]` exclusively. Closes the
+    /// ADR-0045 install-path bug.
+    pub(crate) reactions: Vec<temper_server::reaction::ReactionRule>,
 }
 
 pub(crate) fn bootstrap_tenant_specs(
@@ -114,6 +119,7 @@ fn bootstrap_tenant_specs_inner(
         label,
         verified_cache,
         cross_invariants_source,
+        reactions,
     } = options;
 
     tracing::info!(
@@ -172,7 +178,7 @@ fn bootstrap_tenant_specs_inner(
                 csdl,
                 csdl_source.to_string(),
                 specs,
-                Vec::new(),
+                reactions,
                 cross_invariants_source.map(str::to_string),
                 merge,
             )
@@ -223,6 +229,7 @@ pub fn bootstrap_system_tenant(
             label: "System",
             verified_cache,
             cross_invariants_source: None,
+            reactions: Vec::new(),
         },
     )
 }
@@ -248,6 +255,7 @@ pub fn bootstrap_agent_specs(
             label: "Agent",
             verified_cache,
             cross_invariants_source: None,
+            reactions: Vec::new(),
         },
     )
 }
