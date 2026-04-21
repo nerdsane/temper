@@ -43,6 +43,37 @@ fn test_system_bypass() {
     assert!(decision.is_allowed());
 }
 
+/// ADR-0046 regression: the `is_system → Allow` short-circuit is gone.
+/// System principals must be authorized by an explicit Cedar policy.
+/// [`AuthzEngine::empty`] now installs the built-in `system-platform`
+/// broad-permit, so System is still Allow (migration preserves behavior),
+/// but goes through Cedar evaluation — no more silent bypass.
+#[test]
+fn system_authorized_via_system_platform_policy_not_bypass() {
+    let engine = AuthzEngine::empty();
+    let attrs = HashMap::new();
+
+    // System is Allow via system-platform policy.
+    let sys = SecurityContext::system();
+    let decision = engine.authorize(&sys, "AnyAction", "AnyResource", &attrs);
+    assert!(
+        decision.is_allowed(),
+        "System must be authorized via system-platform policy, got: {decision:?}"
+    );
+
+    // Non-system principal against empty engine is denied (Cedar default-deny).
+    // This would have been silently bypassed if we still used is_system.
+    let customer = SecurityContext::from_headers(&[
+        ("X-Temper-Principal-Id".to_string(), "alice".to_string()),
+        ("X-Temper-Principal-Kind".to_string(), "customer".to_string()),
+    ]);
+    let decision = engine.authorize(&customer, "AnyAction", "AnyResource", &attrs);
+    assert!(
+        !decision.is_allowed(),
+        "Customer should hit Cedar default-deny with no user policy. Got: {decision:?}"
+    );
+}
+
 #[test]
 fn test_admin_permit_policy() {
     let policy = r#"
