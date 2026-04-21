@@ -8,6 +8,7 @@
 
 pub mod cascade;
 pub mod checker;
+pub mod composite;
 pub mod model;
 pub mod paths;
 pub mod proptest_gen;
@@ -16,6 +17,7 @@ pub mod smt;
 
 // Re-export key types.
 pub use cascade::{ActorSimResult, CascadeLevel, CascadeResult, LevelResult, VerificationCascade};
+pub use composite::{CompositePlanError, CompositeVerificationPlan};
 pub use checker::{VerificationResult, check_model};
 pub use model::{
     InvariantKind, ModelEffect, ModelGuard, ResolvedTransition, TemperModel, TemperModelAction,
