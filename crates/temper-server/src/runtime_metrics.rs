@@ -21,9 +21,6 @@ struct RuntimeMetrics {
     event_replay_duration: Histogram<f64>,
     blob_io_wait_duration_ms: Histogram<f64>,
     blob_local_fast_path_requests_total: Counter<u64>,
-    monty_repl_acquisitions_total: Counter<u64>,
-    monty_repl_observed_active_invocations: Histogram<f64>,
-    monty_repl_wait_duration_ms: Histogram<f64>,
     wasm_integration_default_timeout_used_total: Counter<u64>,
     entity_concurrency_retry_total: Counter<u64>,
     entity_concurrency_retry_attempts: Histogram<u64>,
@@ -112,21 +109,6 @@ fn metrics() -> &'static RuntimeMetrics {
                 .with_description(
                     "Requests served by the in-process local blob fast path without loopback HTTP.",
                 )
-                .build(),
-            monty_repl_acquisitions_total: meter
-                .u64_counter("temper_monty_repl_acquisitions_total")
-                .with_description("Total number of monty_repl execution gate acquisitions.")
-                .build(),
-            monty_repl_observed_active_invocations: meter
-                .f64_histogram("temper_monty_repl_observed_active_invocations")
-                .with_description(
-                    "Observed number of concurrent monty_repl WASM executions at acquire/release points.",
-                )
-                .build(),
-            monty_repl_wait_duration_ms: meter
-                .f64_histogram("temper_monty_repl_wait_duration_ms")
-                .with_unit("ms")
-                .with_description("Time spent waiting to acquire the monty_repl execution gate.")
                 .build(),
             wasm_integration_default_timeout_used_total: meter
                 .u64_counter("temper_wasm_integration_default_timeout_used_total")
@@ -431,39 +413,6 @@ pub fn record_blob_local_fast_path_request(method: &str) {
 /// Record process resident memory usage.
 pub fn record_process_resident_memory_bytes(bytes: u64) {
     metrics().process_resident_memory_bytes.record(bytes, &[]);
-}
-
-/// Record the number of concurrent monty_repl executions.
-pub fn record_monty_repl_active_invocations(count: u64, max_concurrency: usize) {
-    metrics().monty_repl_observed_active_invocations.record(
-        count as f64,
-        &[KeyValue::new(
-            "max_concurrency",
-            i64::try_from(max_concurrency).unwrap_or(i64::MAX),
-        )],
-    );
-}
-
-/// Record a successful monty_repl gate acquisition.
-pub fn record_monty_repl_acquisition(max_concurrency: usize) {
-    metrics().monty_repl_acquisitions_total.add(
-        1,
-        &[KeyValue::new(
-            "max_concurrency",
-            i64::try_from(max_concurrency).unwrap_or(i64::MAX),
-        )],
-    );
-}
-
-/// Record time spent waiting for the monty_repl execution gate.
-pub fn record_monty_repl_wait_duration(duration: Duration, max_concurrency: usize) {
-    metrics().monty_repl_wait_duration_ms.record(
-        duration.as_secs_f64() * 1000.0,
-        &[KeyValue::new(
-            "max_concurrency",
-            i64::try_from(max_concurrency).unwrap_or(i64::MAX),
-        )],
-    );
 }
 
 /// Record a WASM integration dispatch that fell back to the default timeout
