@@ -21,8 +21,8 @@ use temper_spec::automaton;
 use temper_spec::cross_invariant::parse_cross_invariants;
 use temper_spec::csdl::{CsdlDocument, emit_csdl_xml, merge_csdl};
 
-use crate::reaction::ReactionRegistry;
-use crate::reaction::types::ReactionRule;
+use crate::trigger::ReactionRegistry;
+use crate::trigger::types::ReactionRule;
 
 pub use types::*;
 

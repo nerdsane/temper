@@ -76,7 +76,7 @@ pub(crate) fn build_effective_params(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reaction::types::ReactionTarget;
+    use crate::trigger::types::ReactionTarget;
     use serde_json::json;
     use std::collections::BTreeMap;
 

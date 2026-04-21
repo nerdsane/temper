@@ -179,7 +179,7 @@ pub(crate) fn evaluate_with_resolved(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reaction::types::ReactionGuard;
+    use crate::trigger::types::ReactionGuard;
     use serde_json::json;
 
     fn empty_map() -> CrossStatusMap {

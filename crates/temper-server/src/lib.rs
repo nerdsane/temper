@@ -23,7 +23,7 @@ pub mod observe;
 pub mod odata;
 pub mod platform_store;
 mod query_eval;
-pub mod reaction;
+pub mod trigger;
 pub mod registry;
 pub mod registry_bootstrap;
 pub mod request_context;
