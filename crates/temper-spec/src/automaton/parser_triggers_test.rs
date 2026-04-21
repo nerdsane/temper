@@ -586,6 +586,151 @@ type = "same_id"
     assert!(err.to_string().contains("empty"));
 }
 
+// ─── ADR-0046: wasm/webhook expansion into integrations ─────────────────
+
+#[test]
+fn wasm_trigger_expands_into_integration_and_effect() {
+    let spec = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Confirmed", "Charged", "Failed"]
+initial = "Draft"
+
+[[action]]
+name = "ConfirmOrder"
+from = ["Draft"]
+to = "Confirmed"
+
+[[action.triggers]]
+name = "charge_payment"
+kind = "wasm"
+module = "stripe_charge"
+on_success = "ChargeSucceeded"
+on_failure = "ChargeFailed"
+
+[[action]]
+name = "ChargeSucceeded"
+from = ["Confirmed"]
+to = "Charged"
+
+[[action]]
+name = "ChargeFailed"
+from = ["Confirmed"]
+to = "Failed"
+"#;
+    let automaton = parse_automaton(spec).expect("wasm expansion should parse");
+
+    // A synthesized integration should be present.
+    let ig = automaton
+        .integrations
+        .iter()
+        .find(|i| i.name == "__trigger__:ConfirmOrder:charge_payment")
+        .expect("synthesized integration");
+    assert_eq!(ig.integration_type, "wasm");
+    assert_eq!(ig.module.as_deref(), Some("stripe_charge"));
+    assert_eq!(ig.on_success.as_deref(), Some("ChargeSucceeded"));
+    assert_eq!(ig.on_failure.as_deref(), Some("ChargeFailed"));
+
+    // The source action should gain a `trigger` effect pointing at the
+    // synthesized integration name.
+    let confirm = automaton
+        .actions
+        .iter()
+        .find(|a| a.name == "ConfirmOrder")
+        .unwrap();
+    let has_effect = confirm.effect.iter().any(|e| {
+        matches!(e, Effect::Trigger { name }
+            if name == "__trigger__:ConfirmOrder:charge_payment")
+    });
+    assert!(has_effect, "source action should have trigger effect");
+}
+
+#[test]
+fn webhook_trigger_expands_with_url_and_method_in_config() {
+    let spec = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Confirmed", "Notified"]
+initial = "Draft"
+
+[[action]]
+name = "ConfirmOrder"
+from = ["Draft"]
+to = "Confirmed"
+
+[[action.triggers]]
+name = "notify_slack"
+kind = "webhook"
+url = "https://hooks.slack.com/services/xxx"
+method = "POST"
+on_success = "NotificationSent"
+
+[action.triggers.headers]
+"Content-Type" = "application/json"
+
+[[action]]
+name = "NotificationSent"
+from = ["Confirmed"]
+to = "Notified"
+"#;
+    let automaton = parse_automaton(spec).expect("webhook expansion should parse");
+    let ig = automaton
+        .integrations
+        .iter()
+        .find(|i| i.name == "__trigger__:ConfirmOrder:notify_slack")
+        .expect("synthesized integration");
+    assert_eq!(ig.integration_type, "webhook");
+    assert_eq!(
+        ig.config.get("url").map(String::as_str),
+        Some("https://hooks.slack.com/services/xxx")
+    );
+    assert_eq!(ig.config.get("method").map(String::as_str), Some("POST"));
+    assert_eq!(
+        ig.config.get("header.Content-Type").map(String::as_str),
+        Some("application/json")
+    );
+    assert_eq!(ig.on_success.as_deref(), Some("NotificationSent"));
+}
+
+#[test]
+fn entity_kind_trigger_does_not_synthesize_integration() {
+    // Regression: only Wasm/Webhook expand. Entity-kind triggers go
+    // through the reaction dispatcher and must NOT appear as integrations.
+    let spec = r#"
+[automaton]
+name = "File"
+states = ["Created", "Ready"]
+initial = "Created"
+
+[[action]]
+name = "StreamUpdated"
+from = ["Created", "Ready"]
+to = "Ready"
+
+[[action.triggers]]
+name = "creates_version"
+kind = "entity"
+principal = "file-service"
+target_entity = "FileVersion"
+target_action = "Create"
+
+[action.triggers.resolve_target]
+type = "same_id"
+"#;
+    let automaton = parse_automaton(spec).expect("entity-kind should parse");
+    assert!(
+        automaton.integrations.is_empty(),
+        "entity-kind triggers must not synthesize integrations"
+    );
+    // The source action should NOT have a synthesized trigger effect.
+    let action = &automaton.actions[0];
+    let has_synthesized_effect = action.effect.iter().any(|e| {
+        matches!(e, Effect::Trigger { name }
+            if name.starts_with("__trigger__:"))
+    });
+    assert!(!has_synthesized_effect);
+}
+
 // test_agent_trigger_section_does_not_overwrite_previous_action removed —
 // ADR-0046 deleted the [[agent_trigger]] section. The equivalent
 // invariant ([[action.triggers]] body doesn't leak into action fields) is
