@@ -72,9 +72,95 @@ pub fn parse_automaton_with_liveness(
     // ADR-0049: wire each state_timeout's `state` into the target action's
     // `from` list so the action is actually enabled from that state.
     wire_state_timeout_from_states(&mut automaton);
+    // ADR-0046: expand `[[action.triggers]]` kind="wasm" / "webhook" blocks
+    // into synthesized `[[integration]]` entries + action effects so the
+    // existing WASM/webhook runtime picks them up without needing a parallel
+    // dispatch path. Entity-kind triggers are handled separately by the
+    // reaction dispatcher.
+    expand_wasm_and_webhook_triggers(&mut automaton);
     // ADR-0050: enforce (or warn on) liveness coverage.
     check_liveness_coverage(&automaton, mode)?;
     Ok(automaton)
+}
+
+/// ADR-0046: translate `[[action.triggers]]` kind="wasm" / "webhook"
+/// declarations into the existing `[[integration]]` + `Effect::Trigger`
+/// runtime. For each such trigger, synthesizes:
+///
+/// 1. A new `Integration` appended to `automaton.integrations` with
+///    fields copied from the trigger (module / url / method / config /
+///    on_success / on_failure).
+/// 2. A `trigger` effect on the source action so the transition table
+///    emits a `custom_effect` that the runtime's wasm/webhook dispatcher
+///    picks up by name.
+///
+/// Synthesized integrations are named
+/// `"__trigger__:{source_action}:{trigger_name}"` to avoid collisions
+/// with hand-authored `[[integration]]` blocks that share trigger names.
+///
+/// Entity-kind triggers are skipped (they dispatch through the reaction
+/// system, not the integration runtime).
+fn expand_wasm_and_webhook_triggers(automaton: &mut Automaton) {
+    use super::types::{Effect, Integration, TriggerKind};
+
+    let mut synthesized: Vec<Integration> = Vec::new();
+    for action in automaton.actions.iter_mut() {
+        for trigger in &action.triggers {
+            let synth_name = format!("__trigger__:{}:{}", action.name, trigger.name);
+            match trigger.kind {
+                TriggerKind::Entity => continue, // handled by reactions
+                TriggerKind::Wasm => {
+                    let Some(module) = trigger.module.as_ref() else {
+                        continue;
+                    };
+                    synthesized.push(Integration {
+                        name: synth_name.clone(),
+                        trigger: synth_name.clone(),
+                        integration_type: "wasm".to_string(),
+                        module: Some(module.clone()),
+                        on_success: trigger.on_success.clone(),
+                        on_failure: trigger.on_failure.clone(),
+                        llm: trigger.llm,
+                        config: trigger.config.clone(),
+                    });
+                }
+                TriggerKind::Webhook => {
+                    // Outbound webhooks today use the same runtime; the
+                    // config carries `url`, `method`, and `headers` which
+                    // the webhook module reads.
+                    let mut config = trigger.config.clone();
+                    if let Some(url) = &trigger.url {
+                        config.insert("url".to_string(), url.clone());
+                    }
+                    if let Some(method) = &trigger.method {
+                        config.insert("method".to_string(), method.clone());
+                    }
+                    for (k, v) in &trigger.headers {
+                        config.insert(format!("header.{k}"), v.clone());
+                    }
+                    if let Some(body) = &trigger.body_template {
+                        config.insert("body_template".to_string(), body.clone());
+                    }
+                    synthesized.push(Integration {
+                        name: synth_name.clone(),
+                        trigger: synth_name.clone(),
+                        integration_type: "webhook".to_string(),
+                        module: None,
+                        on_success: trigger.on_success.clone(),
+                        on_failure: trigger.on_failure.clone(),
+                        llm: false,
+                        config,
+                    });
+                }
+            }
+            // Append a `trigger` effect so the transition table emits it
+            // as a custom_effect the runtime can pick up.
+            action.effect.push(Effect::Trigger {
+                name: synth_name,
+            });
+        }
+    }
+    automaton.integrations.extend(synthesized);
 }
 
 /// Callback invoked for each liveness violation encountered at spec parse
