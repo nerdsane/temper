@@ -91,6 +91,41 @@ pub struct CascadeResult {
     /// Reachable paths extracted after L1 model check (if path extraction was configured).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachable_paths: Option<crate::paths::PathExtractionResult>,
+    /// Composite trigger-graph report (ADR-0046). Populated when the
+    /// cascade was configured with [`VerificationCascade::with_composite_scope`].
+    /// Reports what a future joint-state verifier would verify: the set
+    /// of participating entities, the trigger edges between them, cycle
+    /// detection, and a state-space upper bound for budgeting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composite_report: Option<CompositeCascadeReport>,
+}
+
+/// Serializable summary of a [`crate::composite::CompositeVerificationPlan`].
+///
+/// Intended for inclusion in CI output, dashboards, and telemetry. Does
+/// not hold the `TemperModel`s themselves — those are re-buildable from
+/// the entity type list when a future checker consumes the plan.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CompositeCascadeReport {
+    /// Seed entity the composite was rooted at.
+    pub seed: String,
+    /// Entity types in the composition scope (reachable from the seed
+    /// via `[[action.triggers]]` kind="entity" edges).
+    pub scope: Vec<String>,
+    /// Number of trigger edges within the scope.
+    pub edge_count: usize,
+    /// Whether the trigger graph contains a cycle reachable from the
+    /// seed. Legal (cascade depth bounds cycles at runtime) but surfaced
+    /// for visibility.
+    pub has_cycle: bool,
+    /// Conservative upper bound on joint state-space size — product of
+    /// per-entity reachable-status counts. Useful for budgeting whether
+    /// composite BFS is tractable.
+    pub state_space_bound: usize,
+    /// Whether any edge in scope requests `liveness = "required"`.
+    pub requires_liveness: bool,
+    /// Human-readable one-liner for logs / CI output.
+    pub summary: String,
 }
 
 impl CascadeResult {
@@ -118,6 +153,15 @@ pub struct VerificationCascade {
     fail_fast: bool,
     /// Optional path extraction config (runs after L1 passes).
     path_extraction_config: Option<crate::paths::PathExtractionConfig>,
+    /// Optional composite scope (ADR-0046). When set, the cascade
+    /// additionally builds a [`crate::composite::CompositeVerificationPlan`]
+    /// and reports it alongside single-entity results.
+    composite_scope: Option<CompositeScopeConfig>,
+}
+
+struct CompositeScopeConfig {
+    automatons: Vec<temper_spec::automaton::Automaton>,
+    seed: String,
 }
 
 impl VerificationCascade {
@@ -133,6 +177,7 @@ impl VerificationCascade {
             actor_sim_runner: None,
             fail_fast: false,
             path_extraction_config: None,
+            composite_scope: None,
         }
     }
 
@@ -172,13 +217,35 @@ impl VerificationCascade {
         self
     }
 
+    /// Attach additional parsed automatons so the cascade can also build
+    /// and report a [`crate::composite::CompositeVerificationPlan`]
+    /// rooted at `seed` (ADR-0046). The single-entity cascade still runs
+    /// on the `ioa_source` provided at construction time; the composite
+    /// plan is an additional report appended to the result as
+    /// [`CascadeResult::composite_report`].
+    ///
+    /// The `seed` entity must exist in `automatons` — otherwise the
+    /// composite step records a warning and skips without failing the
+    /// overall cascade.
+    pub fn with_composite_scope(
+        mut self,
+        automatons: Vec<temper_spec::automaton::Automaton>,
+        seed: impl Into<String>,
+    ) -> Self {
+        self.composite_scope = Some(CompositeScopeConfig {
+            automatons,
+            seed: seed.into(),
+        });
+        self
+    }
+
     /// Run the full verification cascade.
     pub fn run(&self) -> CascadeResult {
         let mut levels = Vec::new();
         let model = self.build_temper_model();
 
         // Collect warnings for Unverifiable invariants.
-        let warnings = collect_unverifiable_warnings(&model);
+        let mut warnings = collect_unverifiable_warnings(&model);
 
         // Level 0: SMT symbolic verification
         let l0 = self.run_symbolic_verification();
@@ -190,6 +257,7 @@ impl VerificationCascade {
                 levels,
                 warnings,
                 reachable_paths: None,
+                composite_report: None,
             };
         }
 
@@ -203,6 +271,7 @@ impl VerificationCascade {
                 levels,
                 warnings,
                 reachable_paths: None,
+                composite_report: None,
             };
         }
 
@@ -225,6 +294,7 @@ impl VerificationCascade {
                 levels,
                 warnings,
                 reachable_paths,
+                composite_report: None,
             };
         }
 
@@ -236,6 +306,7 @@ impl VerificationCascade {
             if self.fail_fast && !l2b_passed {
                 return CascadeResult {
                     all_passed: false,
+                    composite_report: None,
                     levels,
                     warnings,
                     reachable_paths,
@@ -247,12 +318,22 @@ impl VerificationCascade {
         let l3 = self.run_prop_tests_level(&model);
         levels.push(l3);
 
+        // ADR-0046: build composite report if a scope was configured.
+        // Does not fail the cascade — reported as a warning-level
+        // enrichment so developers see cross-entity structure alongside
+        // single-entity verification.
+        let composite_report =
+            self.composite_scope
+                .as_ref()
+                .and_then(|cfg| build_composite_report(cfg, &mut warnings));
+
         let all_passed = levels.iter().all(|l| l.passed);
         CascadeResult {
             all_passed,
             levels,
             warnings,
             reachable_paths,
+            composite_report,
         }
     }
 
@@ -508,6 +589,35 @@ fn collect_unverifiable_warnings(model: &TemperModel) -> Vec<String> {
         .collect()
 }
 
+/// Build a [`CompositeCascadeReport`] from the configured scope, appending
+/// any build-time warnings (e.g. missing seed) to the cascade's warning
+/// list. Returns `None` if the plan cannot be built — the cascade still
+/// completes; developers get a non-fatal warning.
+fn build_composite_report(
+    cfg: &CompositeScopeConfig,
+    warnings: &mut Vec<String>,
+) -> Option<CompositeCascadeReport> {
+    let automaton_refs: Vec<&temper_spec::automaton::Automaton> = cfg.automatons.iter().collect();
+    match crate::composite::CompositeVerificationPlan::new(&automaton_refs, &cfg.seed) {
+        Ok(plan) => Some(CompositeCascadeReport {
+            seed: plan.seed.clone(),
+            scope: plan.models.keys().cloned().collect(),
+            edge_count: plan.edge_count(),
+            has_cycle: plan.has_cycle,
+            state_space_bound: plan.state_space_bound(),
+            requires_liveness: plan.requires_liveness(),
+            summary: plan.summary(),
+        }),
+        Err(e) => {
+            warnings.push(format!(
+                "composite cascade: could not build plan for seed '{}': {e}",
+                cfg.seed
+            ));
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,5 +750,104 @@ guard = "count > 9"
         let result = cascade.run();
         // Without fail_fast, all 4 levels should run.
         assert_eq!(result.levels.len(), 4);
+    }
+
+    // ─── ADR-0046: composite cascade integration tests ─────────────────
+
+    #[test]
+    fn cascade_reports_composite_when_scope_configured() {
+        use temper_spec::automaton::parse_automaton;
+
+        let order_spec = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Confirmed"]
+initial = "Draft"
+
+[[action]]
+name = "ConfirmOrder"
+from = ["Draft"]
+to = "Confirmed"
+
+[[action.triggers]]
+name = "confirm_triggers_auth"
+kind = "entity"
+principal = "payment-service"
+target_entity = "Payment"
+target_action = "AuthorizePayment"
+
+[action.triggers.resolve_target]
+type = "same_id"
+"#;
+        let payment_spec = r#"
+[automaton]
+name = "Payment"
+states = ["Pending", "Authorized"]
+initial = "Pending"
+
+[[action]]
+name = "AuthorizePayment"
+from = ["Pending"]
+to = "Authorized"
+"#;
+        let order = parse_automaton(order_spec).unwrap();
+        let payment = parse_automaton(payment_spec).unwrap();
+
+        let cascade = VerificationCascade::from_ioa(order_spec)
+            .with_sim_seeds(2)
+            .with_prop_test_cases(10)
+            .with_composite_scope(vec![order, payment], "Order");
+
+        let result = cascade.run();
+        let report = result
+            .composite_report
+            .expect("composite scope was configured");
+        assert_eq!(report.seed, "Order");
+        assert!(report.scope.contains(&"Order".to_string()));
+        assert!(report.scope.contains(&"Payment".to_string()));
+        assert_eq!(report.edge_count, 1);
+        assert!(!report.has_cycle);
+        assert!(report.summary.contains("Order"));
+    }
+
+    #[test]
+    fn cascade_without_composite_scope_has_none_report() {
+        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
+            .with_sim_seeds(2)
+            .with_prop_test_cases(10);
+        let result = cascade.run();
+        assert!(result.composite_report.is_none());
+    }
+
+    #[test]
+    fn cascade_composite_missing_seed_records_warning_not_failure() {
+        use temper_spec::automaton::parse_automaton;
+        let order_spec = r#"
+[automaton]
+name = "Order"
+states = ["Draft"]
+initial = "Draft"
+
+[[action]]
+name = "A"
+from = ["Draft"]
+"#;
+        let order = parse_automaton(order_spec).unwrap();
+
+        let cascade = VerificationCascade::from_ioa(order_spec)
+            .with_sim_seeds(2)
+            .with_prop_test_cases(10)
+            .with_composite_scope(vec![order], "NotAnEntity");
+
+        let result = cascade.run();
+        assert!(result.composite_report.is_none());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("NotAnEntity")),
+            "warning should mention missing seed. Got: {:?}",
+            result.warnings
+        );
     }
 }
