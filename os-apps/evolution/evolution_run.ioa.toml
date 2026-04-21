@@ -52,23 +52,68 @@ effect = [{ type = "increment", var = "candidate_count" }, { type = "trigger", n
 params = ["CandidateId", "SpecSource", "TrajectoryActions", "Trajectories"]
 hint = "Select a candidate spec from the Pareto frontier or seed pool."
 
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "evaluate_candidate"
+kind = "wasm"
+module = "gepa-replay"
+on_success = "RecordEvaluation"
+on_failure = "Fail"
+
+
 [[action]]
 name = "RecordEvaluation"
 kind = "input"
 from = ["Evaluating"]
 to = "Reflecting"
-effect = "trigger build_reflective_dataset"
 params = ["ReplayResultJson"]
 hint = "Record evaluation (replay) results from the WASM replay module."
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "build_reflective_dataset"
+kind = "wasm"
+module = "gepa-reflective"
+on_success = "RecordDataset"
+on_failure = "Fail"
+
 
 [[action]]
 name = "RecordDataset"
 kind = "input"
 from = ["Reflecting"]
 to = "Proposing"
-effect = "trigger propose_mutation"
 params = ["DatasetJson"]
 hint = "Record reflective dataset built by WASM module from OTS traces."
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "propose_mutation"
+kind = "wasm"
+module = "gepa-proposer-agent"
+on_success = "RecordMutation"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "http://127.0.0.1:4455"
+temper_api_key = "{secret:temper_api_key}"
+sandbox_url = "http://127.0.0.1:9999"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+max_turns = "8"
+poll_attempts = "600"
+poll_sleep_ms = "250"
+max_agent_retries = "2"
+tools_enabled = ""
+workdir = "/workspace"
+timeout_secs = "420"
+
 
 [[action]]
 name = "RecordMutation"
@@ -79,14 +124,37 @@ effect = [{ type = "increment", var = "mutation_attempts" }, { type = "trigger",
 params = ["MutatedSpecSource", "MutationSummary"]
 hint = "Record the LLM-proposed spec mutation."
 
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "verify_candidate"
+kind = "wasm"
+module = "gepa-verify"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "http://127.0.0.1:4455"
+
+
 [[action]]
 name = "RecordVerificationPass"
 kind = "input"
 from = ["Verifying"]
 to = "Scoring"
-effect = "trigger score_candidate"
 params = ["VerificationReport"]
 hint = "Record successful L0-L3 verification of the mutated spec."
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "score_candidate"
+kind = "wasm"
+module = "gepa-score"
+on_success = "RecordScore"
+on_failure = "Fail"
+
 
 [[action]]
 name = "RecordVerificationFailure"
@@ -109,9 +177,19 @@ name = "RecordScore"
 kind = "input"
 from = ["Scoring"]
 to = "Updating"
-effect = "trigger update_frontier"
 params = ["ScoresJson"]
 hint = "Record multi-objective scores from WASM scoring module."
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "update_frontier"
+kind = "wasm"
+module = "gepa-pareto"
+on_success = "RecordFrontier"
+on_failure = "Fail"
+
 
 [[action]]
 name = "RecordFrontier"
@@ -126,9 +204,18 @@ name = "RecordFrontierAutoApprove"
 kind = "input"
 from = ["Updating"]
 to = "Deploying"
-effect = "trigger deploy_candidate"
 params = ["FrontierUpdateJson"]
 hint = "Frontier updated, auto-approved for deployment."
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "deploy_candidate"
+kind = "wasm"
+module = "gepa-deploy"
+on_failure = "Fail"
+
 
 [[action]]
 name = "ContinueEvolution"
@@ -173,76 +260,3 @@ params = ["FailureReason"]
 hint = "Unrecoverable error — evolution run failed."
 
 # --- Integrations ---
-
-[[integration]]
-name = "evaluate_candidate"
-trigger = "evaluate_candidate"
-type = "wasm"
-module = "gepa-replay"
-on_success = "RecordEvaluation"
-on_failure = "Fail"
-
-[[integration]]
-name = "build_reflective_dataset"
-trigger = "build_reflective_dataset"
-type = "wasm"
-module = "gepa-reflective"
-on_success = "RecordDataset"
-on_failure = "Fail"
-
-[[integration]]
-name = "propose_mutation"
-trigger = "propose_mutation"
-type = "wasm"
-module = "gepa-proposer-agent"
-on_success = "RecordMutation"
-on_failure = "Fail"
-prompt = "You are the GEPA evolution agent. Read trigger_params.DatasetJson with workflow-level triplets and patterns. Preserve triplets where preserve=true and improve failed/partial workflows using feedback. GEPA is optimizer-only here: do not introduce/remove entities, actions, or states. If missing_capabilities indicates net-new functionality, emit it as unmet-intent handoff suggestions instead of changing structure. Return the full mutated spec source and a summary."
-
-[integration.config]
-temper_api_url = "http://127.0.0.1:4455"
-temper_api_key = "{secret:temper_api_key}"
-temper_api_key = "{secret:temper_api_key}"
-sandbox_url = "http://127.0.0.1:9999"
-model = "claude-sonnet-4-20250514"
-provider = "anthropic"
-max_turns = "8"
-poll_attempts = "600"
-poll_sleep_ms = "250"
-max_agent_retries = "2"
-tools_enabled = ""
-workdir = "/workspace"
-timeout_secs = "420"
-
-[[integration]]
-name = "verify_candidate"
-trigger = "verify_candidate"
-type = "wasm"
-module = "gepa-verify"
-on_failure = "Fail"
-
-[integration.config]
-temper_api_url = "http://127.0.0.1:4455"
-
-[[integration]]
-name = "score_candidate"
-trigger = "score_candidate"
-type = "wasm"
-module = "gepa-score"
-on_success = "RecordScore"
-on_failure = "Fail"
-
-[[integration]]
-name = "update_frontier"
-trigger = "update_frontier"
-type = "wasm"
-module = "gepa-pareto"
-on_success = "RecordFrontier"
-on_failure = "Fail"
-
-[[integration]]
-name = "deploy_candidate"
-trigger = "deploy_candidate"
-type = "wasm"
-module = "gepa-deploy"
-on_failure = "Fail"

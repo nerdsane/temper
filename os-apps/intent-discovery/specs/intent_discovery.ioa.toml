@@ -42,6 +42,20 @@ params = ["reason", "source", "trigger_context_json"]
 effect = [{ type = "trigger", name = "gather_signals" }]
 hint = "Begin one intent-discovery cycle and gather current system signals."
 
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "gather_signals"
+kind = "wasm"
+module = "gather_signals"
+on_success = "GatheringComplete"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
+
 [[action]]
 name = "GatheringComplete"
 kind = "input"
@@ -53,6 +67,29 @@ effect = [
   { type = "trigger", name = "spawn_analyst" }
 ]
 hint = "Persist gathered signals and spawn the analyst TemperAgent."
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "spawn_analyst"
+kind = "wasm"
+module = "spawn_analyst"
+on_success = "AnalysisComplete"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+sandbox_url = "http://127.0.0.1:9999"
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+timeout_secs = "420"
+max_turns = "10"
+agent_wait_timeout_ms = "300000"
+agent_wait_poll_ms = "250"
+tools_enabled = "logfire_query"
+workdir = "/workspace"
+
 
 [[action]]
 name = "AnalysisComplete"
@@ -66,6 +103,20 @@ effect = [
   { type = "trigger", name = "create_proposals" }
 ]
 hint = "Store analyst output and materialize proposals."
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "create_proposals"
+kind = "wasm"
+module = "create_proposals"
+on_success = "ProposalComplete"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
 
 [[action]]
 name = "ProposalComplete"
@@ -108,45 +159,3 @@ assert = "no_further_transitions"
 name = "FailedIsFinal"
 when = ["Failed"]
 assert = "no_further_transitions"
-
-[[integration]]
-name = "gather_signals"
-trigger = "gather_signals"
-type = "wasm"
-module = "gather_signals"
-on_success = "GatheringComplete"
-on_failure = "Fail"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
-
-[[integration]]
-name = "spawn_analyst"
-trigger = "spawn_analyst"
-type = "wasm"
-module = "spawn_analyst"
-on_success = "AnalysisComplete"
-on_failure = "Fail"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
-sandbox_url = "http://127.0.0.1:9999"
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-timeout_secs = "420"
-max_turns = "10"
-agent_wait_timeout_ms = "300000"
-agent_wait_poll_ms = "250"
-tools_enabled = "logfire_query"
-workdir = "/workspace"
-
-[[integration]]
-name = "create_proposals"
-trigger = "create_proposals"
-type = "wasm"
-module = "create_proposals"
-on_success = "ProposalComplete"
-on_failure = "Fail"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
