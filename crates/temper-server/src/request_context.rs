@@ -59,6 +59,34 @@ impl AgentContext {
             idempotency_key: None,
         }
     }
+
+    /// ADR-0046: Create an `AgentContext` for a named platform service.
+    ///
+    /// Used in place of [`AgentContext::system`] to give callers an
+    /// explicit, auditable identity. The service name populates
+    /// `agent_type` so Cedar policies can match on
+    /// `principal.agent_type == "<service>"` — narrower than the
+    /// broad-permit `system-platform` policy.
+    ///
+    /// Recommended service names (see `docs/adrs/0046-unified-action-triggers.md`
+    /// migration audit):
+    /// - `platform-bootstrap` — tenant/app install, credential rotation
+    /// - `governance-service` — ADR-0014 governance callbacks
+    /// - `evolution-engine` — Observation/Problem/Analysis materialization
+    /// - `timeout-scheduler` — state-timeout firings (ADR-0049)
+    /// - `platform-dispatch` — dispatch fallback paths
+    /// - `wasm-runtime` — WASM invocation artifact creation
+    pub fn for_service(service_name: &str) -> Self {
+        Self {
+            agent_id: Some(format!("service:{service_name}")),
+            session_id: None,
+            agent_type: Some(service_name.to_string()),
+            intent: None,
+            trace_id: None,
+            parent_span_id: None,
+            idempotency_key: None,
+        }
+    }
 }
 
 /// Extract observability context from request headers.

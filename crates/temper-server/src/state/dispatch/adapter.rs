@@ -291,7 +291,7 @@ impl crate::state::ServerState {
                     entity_ref.entity_id,
                     callback_action,
                     callback_params,
-                    &AgentContext::system(),
+                    &AgentContext::for_service("platform-dispatch"),
                 )
                 .await
                 .map_err(|e| {
@@ -349,7 +349,7 @@ impl crate::state::ServerState {
                 &key_hash,
                 "Issue",
                 issue_params,
-                &AgentContext::system(),
+                &AgentContext::for_service("platform-dispatch"),
             )
             .await;
 

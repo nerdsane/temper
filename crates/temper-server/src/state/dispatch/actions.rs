@@ -43,7 +43,7 @@ impl crate::state::ServerState {
             entity_id,
             action,
             params,
-            &AgentContext::system(),
+            &AgentContext::for_service("platform-dispatch"),
         )
         .await
     }

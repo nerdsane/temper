@@ -215,7 +215,7 @@ pub(crate) async fn record_authz_denial(
             &gd_id,
             "CreateGovernanceDecision",
             gd_params,
-            &AgentContext::system(),
+            &AgentContext::for_service("platform-dispatch"),
         )
         .await
     {

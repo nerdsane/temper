@@ -103,7 +103,7 @@ pub(super) async fn dispatch_system_action(
             entity_id,
             action,
             params,
-            &AgentContext::system(),
+            &AgentContext::for_service("evolution-engine"),
         )
         .await
 }
