@@ -239,7 +239,7 @@ pub(crate) async fn handle_approve_decision(
                         "scope": "narrow",
                         "generated_policy": generated_policy,
                     }),
-                    &AgentContext::system(),
+                    &AgentContext::for_service("platform-dispatch"),
                 )
                 .await
             {
@@ -356,7 +356,7 @@ pub(crate) async fn handle_deny_decision(
                         "decided_by": decided_by_val,
                         "denial_reason": "Denied by human reviewer",
                     }),
-                    &AgentContext::system(),
+                    &AgentContext::for_service("platform-dispatch"),
                 )
                 .await
             {

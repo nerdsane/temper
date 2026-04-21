@@ -349,7 +349,7 @@ pub async fn bootstrap_operator_credential(state: &PlatformState, api_key: &str,
     use temper_server::identity::hash_token;
 
     let tenant_id = temper_runtime::tenant::TenantId::new(tenant);
-    let agent_ctx = temper_server::request_context::AgentContext::system();
+    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
     let agent_type_id = "operator-type";
     let instance_id = "operator";
 

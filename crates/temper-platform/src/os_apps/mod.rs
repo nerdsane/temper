@@ -1651,7 +1651,7 @@ async fn bootstrap_app_entity(
         return None;
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::system();
+    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
 
     // Look for an existing App entity with this name.
     let existing_ids = state.server.list_entity_ids(tenant_id, "App");
@@ -1851,7 +1851,7 @@ async fn bootstrap_skills(
         return Vec::new();
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::system();
+    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
 
     // Ensure workspace exists.
     if let Err(e) = ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
@@ -2131,7 +2131,7 @@ async fn bootstrap_adrs(
         return Vec::new();
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::system();
+    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
     if let Err(error) = ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
         tracing::warn!(
             tenant,
@@ -2532,7 +2532,7 @@ async fn bootstrap_seed_data(
         return Vec::new();
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::system();
+    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
     let mut created = Vec::new();
 
     for instance in instances {

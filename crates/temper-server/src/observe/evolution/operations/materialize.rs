@@ -293,7 +293,7 @@ async fn create_issue_for_finding(
         )
         .await?;
 
-    let system_ctx = AgentContext::system();
+    let system_ctx = AgentContext::for_service("evolution-engine");
     let _ = state
         .dispatch_tenant_action(
             tenant,
