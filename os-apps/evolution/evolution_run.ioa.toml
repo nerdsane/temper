@@ -101,6 +101,7 @@ on_success = "RecordMutation"
 on_failure = "Fail"
 
 [action.triggers.config]
+prompt = "You are the GEPA evolution agent. Read trigger_params.DatasetJson with workflow-level triplets and patterns. Preserve triplets where preserve=true and improve failed/partial workflows using feedback. GEPA is optimizer-only here: do not introduce/remove entities, actions, or states. If missing_capabilities indicates net-new functionality, emit it as unmet-intent handoff suggestions instead of changing structure. Return the full mutated spec source and a summary."
 temper_api_url = "http://127.0.0.1:4455"
 temper_api_key = "{secret:temper_api_key}"
 sandbox_url = "http://127.0.0.1:9999"
