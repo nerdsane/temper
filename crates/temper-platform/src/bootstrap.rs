@@ -94,7 +94,7 @@ pub(crate) struct BootstrapTenantSpecsOptions<'a> {
     /// (when present). Empty for platform system/agent specs and for apps
     /// that use inline `[[action.triggers]]` exclusively. Closes the
     /// ADR-0045 install-path bug.
-    pub(crate) reactions: Vec<temper_server::reaction::ReactionRule>,
+    pub(crate) reactions: Vec<temper_server::trigger::ReactionRule>,
 }
 
 pub(crate) fn bootstrap_tenant_specs(

@@ -7,7 +7,7 @@ use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy};
 use temper_spec::csdl::CsdlDocument;
 
 use super::types::{EntitySpec, RelationEdge, RelationGraph};
-use crate::reaction::types::{
+use crate::trigger::types::{
     ReactionGuard, ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
 };
 
@@ -151,7 +151,7 @@ pub(super) fn synthesize_action_trigger_reaction(
 }
 
 /// Convert a [`temper_spec::automaton::TargetResolver`] to a
-/// [`crate::reaction::types::TargetResolver`]. Structurally identical; the
+/// [`crate::trigger::types::TargetResolver`]. Structurally identical; the
 /// two enums exist because the spec layer can't depend on the server layer.
 fn target_resolver_to_target_resolver(
     spec_resolver: &temper_spec::automaton::TargetResolver,

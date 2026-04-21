@@ -1087,7 +1087,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     // paw-fs in openpaw); some apps put it at `<app>/specs/reactions.toml`
     // (katagami-curation in openpaw). Try both locations. Parse failures
     // log a warning — they must not block install of an otherwise-valid app.
-    let reactions: Vec<temper_server::reaction::ReactionRule> = {
+    let reactions: Vec<temper_server::trigger::ReactionRule> = {
         let candidates = [
             app_dir.join("reactions").join("reactions.toml"),
             app_dir.join("specs").join("reactions.toml"),
@@ -1097,7 +1097,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
             };
-            match temper_server::reaction::parse_reactions(&source) {
+            match temper_server::trigger::parse_reactions(&source) {
                 Ok(rules) => {
                     tracing::info!(
                         path = %path.display(),

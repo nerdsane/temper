@@ -48,7 +48,7 @@ use crate::entity_actor::EntityMsg;
 use crate::event_store::ServerEventStore;
 use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
-use crate::reaction::ReactionDispatcher;
+use crate::trigger::ReactionDispatcher;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
 use crate::wasm_registry::WasmModuleRegistry;

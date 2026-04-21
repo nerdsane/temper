@@ -7,7 +7,7 @@ use temper_spec::cross_invariant::{
 };
 use tracing::instrument;
 
-use crate::reaction::registry::parse_reactions;
+use crate::trigger::registry::parse_reactions;
 use crate::state::ServerState;
 
 use super::super::specs_helpers::{

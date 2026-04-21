@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::scheduler::{FaultConfig, SimActorSystemConfig, install_deterministic_context};
-use temper_server::reaction::registry::{ReactionRegistry, parse_reactions};
-use temper_server::reaction::sim_dispatcher::SimReactionSystem;
-use temper_server::reaction::types::{
+use temper_server::trigger::registry::{ReactionRegistry, parse_reactions};
+use temper_server::trigger::sim_dispatcher::SimReactionSystem;
+use temper_server::trigger::types::{
     ReactionGuard, ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
 };
 

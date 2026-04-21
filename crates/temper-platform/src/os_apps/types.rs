@@ -145,7 +145,7 @@ pub struct AppBundle {
     /// ADR-0046 inline `[[action.triggers]]` exclusively. Closes the
     /// ADR-0045 install-path bug where `AppBundle` had no reactions
     /// field and `install_os_app` silently dropped reactions on Railway.
-    pub reactions: Vec<temper_server::reaction::ReactionRule>,
+    pub reactions: Vec<temper_server::trigger::ReactionRule>,
     /// WASM module binaries as `(module_name, wasm_bytes)` pairs.
     pub wasm_modules: BTreeMap<String, Vec<u8>>,
     /// WASM module contracts declared in `app.toml`.
