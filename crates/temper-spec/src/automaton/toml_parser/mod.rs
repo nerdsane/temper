@@ -26,7 +26,6 @@ enum Section {
     Invariant,
     Liveness,
     Integration,
-    AgentTrigger,
     FieldInvariant,
     StateTimeout,
     Webhook,
@@ -64,7 +63,6 @@ impl ParseState {
             "[[invariant]]" => self.start_invariant_section(),
             "[[liveness]]" => self.start_liveness_section(),
             "[[integration]]" => self.start_integration_section(),
-            "[[agent_trigger]]" => self.start_passthrough_section(Section::AgentTrigger),
             "[[field_invariant]]" => self.start_passthrough_section(Section::FieldInvariant),
             // ADR-0049: state_timeouts use nested inline tables for params;
             // parse via serde in the second pass rather than field-by-field.
@@ -91,8 +89,7 @@ impl ParseState {
             Section::Invariant => self.apply_invariant_field(key, &value),
             Section::Liveness => self.apply_liveness_field(key, &value),
             Section::Integration => self.apply_integration_field(key, &value),
-            Section::AgentTrigger
-            | Section::FieldInvariant
+            Section::FieldInvariant
             | Section::StateTimeout
             | Section::Webhook
             | Section::ActionTrigger
@@ -136,7 +133,6 @@ impl ParseState {
             integrations: self.integrations,
             webhooks: extract_webhooks(input),
             context_entities: Vec::new(),
-            agent_triggers: extract_agent_triggers(input),
             field_invariants: Vec::new(),
             state_timeouts: Vec::new(),
             admission: None,
@@ -424,18 +420,6 @@ fn extract_webhooks(source: &str) -> Vec<super::types::Webhook> {
     }
     toml::from_str::<WebhookWrapper>(source)
         .map(|w| w.webhooks)
-        .unwrap_or_default()
-}
-
-/// Extract `[[agent_trigger]]` sections from TOML source via serde.
-fn extract_agent_triggers(source: &str) -> Vec<super::types::AgentTrigger> {
-    #[derive(serde::Deserialize)]
-    struct AgentTriggerWrapper {
-        #[serde(default, rename = "agent_trigger")]
-        agent_triggers: Vec<super::types::AgentTrigger>,
-    }
-    toml::from_str::<AgentTriggerWrapper>(source)
-        .map(|w| w.agent_triggers)
         .unwrap_or_default()
 }
 
