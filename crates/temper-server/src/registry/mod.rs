@@ -26,7 +26,10 @@ use crate::reaction::types::ReactionRule;
 
 pub use types::*;
 
-use relations::{build_relation_graph, build_webhook_routes, synthesize_agent_trigger_reactions};
+use relations::{
+    build_relation_graph, build_webhook_routes, synthesize_action_trigger_reaction,
+    synthesize_agent_trigger_reactions,
+};
 
 /// Multi-tenant specification registry.
 ///
@@ -357,6 +360,22 @@ impl SpecRegistry {
             for (entity_type, spec) in &config.entities {
                 for trigger in &spec.automaton.agent_triggers {
                     rules.extend(synthesize_agent_trigger_reactions(entity_type, trigger));
+                }
+                // ADR-0046: synthesize reaction rules from [[action.triggers]]
+                // entity-kind blocks. Wasm/Webhook kinds are handled by a
+                // separate runtime path (slice 5b+). Until principal resolution
+                // is wired (slice 6), these dispatch under AgentContext::system()
+                // just like all other reactions today.
+                for action in &spec.automaton.actions {
+                    for trigger in &action.triggers {
+                        if let Some(rule) = synthesize_action_trigger_reaction(
+                            entity_type,
+                            &action.name,
+                            trigger,
+                        ) {
+                            rules.push(rule);
+                        }
+                    }
                 }
             }
             if !rules.is_empty() {
