@@ -46,6 +46,7 @@ impl ReactionDispatcher {
         to_state: &str,
         fields: &serde_json::Value,
         depth: u32,
+        invoking_ctx: &AgentContext,
     ) -> Vec<ReactionResult> {
         if depth >= MAX_REACTION_DEPTH {
             tracing::warn!(
@@ -132,6 +133,13 @@ impl ReactionDispatcher {
             let effective_params =
                 super::params::build_effective_params(&rule.then, fields, &rule.name);
 
+            // ADR-0046: resolve the dispatch principal. If the rule declares
+            // an explicit `principal`, build a synthetic elevated context;
+            // otherwise inherit the invoking principal. Reactions loaded
+            // from legacy `reactions.toml` have `principal = None` and thus
+            // inherit — preserving the pre-ADR-0046 semantics for them.
+            let dispatch_ctx = resolve_trigger_principal(rule.principal.as_deref(), invoking_ctx);
+
             // Fire the target action via the core dispatch (no reaction cascade
             // to avoid infinite async recursion — we handle cascading ourselves).
             let dispatch_result = state
@@ -141,7 +149,7 @@ impl ReactionDispatcher {
                     &target_entity_id,
                     &rule.then.action,
                     effective_params,
-                    &AgentContext::system(),
+                    &dispatch_ctx,
                     false,
                 )
                 .await;
@@ -161,7 +169,9 @@ impl ReactionDispatcher {
                         depth,
                     });
 
-                    // Recurse if the target action succeeded
+                    // Recurse if the target action succeeded. The cascade
+                    // fires under the same dispatch context as this rule —
+                    // elevation propagates down the chain.
                     if response.success {
                         let cascade_results = Box::pin(self.dispatch_reactions(
                             state,
@@ -172,6 +182,7 @@ impl ReactionDispatcher {
                             &target_status,
                             &serde_json::to_value(&response.state.fields).unwrap_or_default(),
                             depth + 1,
+                            &dispatch_ctx,
                         ))
                         .await;
                         results.extend(cascade_results);
@@ -199,3 +210,34 @@ impl ReactionDispatcher {
 }
 
 // Target resolver logic consolidated in super::resolver::resolve_target_id.
+
+/// ADR-0046: resolve the dispatch context for a reaction.
+///
+/// - When the rule declares a principal (`Some(service_name)`), build a
+///   synthetic `AgentContext` identifying the named service. Cedar policies
+///   can match on `principal.role`, `principal.agent_type`, or
+///   `principal.id == Service::"<name>"` — whichever style the tenant
+///   prefers. The `agent_type` slot carries the name so the Cedar request
+///   sees it via `principal.agent_type == "<name>"`.
+/// - When the rule has no principal (`None`), inherit the invoking context
+///   directly — the reaction runs as whoever called the source action.
+///   For legacy reactions loaded from `reactions.toml` (which had no
+///   principal concept), this preserves pre-ADR-0046 behavior when the
+///   invoker was already `AgentContext::system()`.
+fn resolve_trigger_principal(
+    declared_principal: Option<&str>,
+    invoking_ctx: &AgentContext,
+) -> AgentContext {
+    match declared_principal {
+        Some(service_name) if !service_name.is_empty() => {
+            // Synthetic elevated context. Clone other fields (trace_id,
+            // session_id, idempotency_key) from the invoker so observability
+            // continuity is preserved across the reaction hop.
+            let mut ctx = invoking_ctx.clone();
+            ctx.agent_id = Some(format!("service:{service_name}"));
+            ctx.agent_type = Some(service_name.to_string());
+            ctx
+        }
+        _ => invoking_ctx.clone(),
+    }
+}

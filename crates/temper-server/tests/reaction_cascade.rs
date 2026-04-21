@@ -69,6 +69,7 @@ fn ecommerce_registry() -> ReactionRegistry {
                 params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::SameId,
+            principal: None,
         }],
     );
     reg
@@ -204,6 +205,7 @@ fn field_based_target_resolution() {
             resolve_target: TargetResolver::Field {
                 field: "payment_id".to_string(),
             },
+            principal: None,
         }],
     );
 
@@ -295,6 +297,7 @@ fn multi_step_cascade_with_chained_reactions() {
                     params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
+            principal: None,
             },
             ReactionRule {
                 name: "authorize_triggers_capture".to_string(),
@@ -311,6 +314,7 @@ fn multi_step_cascade_with_chained_reactions() {
                     params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
+            principal: None,
             },
         ],
     );
@@ -370,6 +374,7 @@ fn cascade_with_params_from_fires_even_when_source_fields_missing() {
                 params_from,
             },
             resolve_target: TargetResolver::SameId,
+            principal: None,
         }],
     );
 
@@ -517,6 +522,7 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
                     params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
+            principal: None,
             },
             ReactionRule {
                 name: "skipped_on_cancelled".to_string(),
@@ -535,6 +541,7 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
                     params_from: std::collections::BTreeMap::new(),
                 },
                 resolve_target: TargetResolver::SameId,
+            principal: None,
             },
         ],
     );
@@ -587,6 +594,7 @@ fn not_guard_skips_rule_when_inner_passes() {
                 params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::SameId,
+            principal: None,
         }],
     );
 
