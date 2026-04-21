@@ -24,6 +24,20 @@ params = ["heartbeat_interval_seconds"]
 hint = "Begin the heartbeat loop. Triggers the first schedule check."
 effect = [{ type = "trigger", name = "crucible_check_schedules" }]
 
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "crucible_check_schedules"
+kind = "wasm"
+module = "crucible_scheduler_check"
+on_success = "CheckComplete"
+on_failure = "CheckFailed"
+
+[action.triggers.config]
+temper_api_url = "http://127.0.0.1:3000"
+
+
 [[action]]
 name = "ScheduledCheck"
 kind = "input"
@@ -40,6 +54,17 @@ to = "Idle"
 params = ["schedules_triggered"]
 hint = "Check cycle finished. Triggers the heartbeat wait."
 effect = [{ type = "trigger", name = "crucible_schedule_next_check" }]
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "crucible_schedule_next_check"
+kind = "wasm"
+module = "crucible_scheduler_heartbeat"
+on_success = "ScheduledCheck"
+on_failure = "ScheduleFailed"
+
 
 [[action]]
 name = "CheckFailed"
@@ -59,22 +84,3 @@ params = ["error"]
 hint = "Heartbeat wait failed. Loop stops — call Start again to restart."
 
 # --- Integrations ---
-
-[[integration]]
-name = "crucible_check_schedules"
-trigger = "crucible_check_schedules"
-type = "wasm"
-module = "crucible_scheduler_check"
-on_success = "CheckComplete"
-on_failure = "CheckFailed"
-
-[integration.config]
-temper_api_url = "http://127.0.0.1:3000"
-
-[[integration]]
-name = "crucible_schedule_next_check"
-trigger = "crucible_schedule_next_check"
-type = "wasm"
-module = "crucible_scheduler_heartbeat"
-on_success = "ScheduledCheck"
-on_failure = "ScheduleFailed"

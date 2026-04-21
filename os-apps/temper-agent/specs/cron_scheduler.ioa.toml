@@ -31,6 +31,19 @@ to = "Checking"
 hint = "Begin checking for due cron jobs."
 effect = [{ type = "trigger", name = "check_due_jobs" }]
 
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "check_due_jobs"
+kind = "wasm"
+module = "cron_scheduler_check"
+on_failure = "CheckFailed"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
+
 [[action]]
 name = "CheckComplete"
 kind = "input"
@@ -39,6 +52,19 @@ to = "Idle"
 params = ["last_check_at", "jobs_triggered"]
 hint = "Check finished. Schedule next check."
 effect = [{ type = "increment", var = "jobs_triggered" }, { type = "trigger", name = "schedule_next_check" }]
+
+# ADR-0046: inline trigger — migrated from [[integration]] below.
+# Post-parse expansion re-synthesizes the equivalent Integration so
+# the existing WASM/webhook runtime handles execution unchanged.
+[[action.triggers]]
+name = "schedule_next_check"
+kind = "wasm"
+module = "cron_scheduler_heartbeat"
+on_failure = "ScheduleFailed"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
 
 [[action]]
 name = "ScheduledCheck"
@@ -62,23 +88,3 @@ kind = "input"
 from = ["Idle"]
 params = ["error_message"]
 hint = "Schedule WASM failed. Stay Idle."
-
-[[integration]]
-name = "check_due_jobs"
-trigger = "check_due_jobs"
-type = "wasm"
-module = "cron_scheduler_check"
-on_failure = "CheckFailed"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
-
-[[integration]]
-name = "schedule_next_check"
-trigger = "schedule_next_check"
-type = "wasm"
-module = "cron_scheduler_heartbeat"
-on_failure = "ScheduleFailed"
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
