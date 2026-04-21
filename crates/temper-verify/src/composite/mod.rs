@@ -10,24 +10,27 @@
 //! 2. Builds a [`TemperModel`] for each participating entity.
 //! 3. Materialises a [`CompositeVerificationPlan`] describing what the
 //!    joint state-machine verifier would check.
-//!
-//! **Scope of this slice**: the plan and model composition are complete,
-//! including joint-invariant aggregation. Full joint-state BFS via
-//! Stateright's `Model` trait is deferred — this slice gives the verifier
-//! machinery a first-class input it can consume in the next slice, and
-//! offers an introspection API for CI/dashboards today.
+//! 4. (Slice 8d) Implements [`stateright::Model`] over the composition
+//!    ([`CompositeTemperModel`]), so the verifier can BFS the joint
+//!    state space with cross-entity cascades applied within each step.
 //!
 //! Example:
 //!
 //! ```ignore
-//! use temper_verify::composite::CompositeVerificationPlan;
+//! use temper_verify::composite::{CompositeVerificationPlan, CompositeTemperModel};
 //! use temper_spec::automaton::parse_automaton;
 //!
 //! let order = parse_automaton(order_ioa)?;
 //! let payment = parse_automaton(payment_ioa)?;
 //! let plan = CompositeVerificationPlan::new(&[&order, &payment], "Order")?;
-//! println!("Composition: {} entities, {} edges", plan.scope_size(), plan.edge_count());
+//! let model = CompositeTemperModel::from_plan(plan);
+//! // Model is Stateright-checkable from here.
 //! ```
+
+pub mod invariant_eval;
+pub mod model;
+
+pub use model::{CompositeAction, CompositeState, CompositeTemperModel};
 
 use std::collections::BTreeMap;
 use std::fmt;
