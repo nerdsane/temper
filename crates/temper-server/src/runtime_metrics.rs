@@ -35,6 +35,8 @@ struct RuntimeMetrics {
     state_timeout_reset_total: Counter<u64>,
     scheduler_overdue_on_replay_total: Counter<u64>,
     scheduler_pending_timers: Gauge<u64>,
+    // ADR-0056: re-arm on actor hydration.
+    state_timeout_armed_on_hydration_total: Counter<u64>,
     // --- ADR-0050: liveness coverage enforcement --------------------------
     spec_liveness_violations_total: Counter<u64>,
     spec_allow_indefinite_states: Gauge<u64>,
@@ -180,6 +182,15 @@ fn metrics() -> &'static RuntimeMetrics {
             scheduler_pending_timers: meter
                 .u64_gauge("temper_scheduler_pending_timers")
                 .with_description("ADR-0049: live in-memory timer count per entity type.")
+                .build(),
+            state_timeout_armed_on_hydration_total: meter
+                .u64_counter("temper_state_timeout_armed_on_hydration_total")
+                .with_description(
+                    "ADR-0056: timers re-armed when an actor hydrated into a state with a \
+                     declared [[state_timeout]] but no live in-memory timer. `elapsed_bucket` \
+                     tag distinguishes overdue (fired immediately) from budgeted (armed with \
+                     remaining delay).",
+                )
                 .build(),
             spec_liveness_violations_total: meter
                 .u64_counter("temper_spec_liveness_violations_total")
@@ -586,6 +597,26 @@ pub fn record_state_timeout_reset(
             KeyValue::new("entity_type", entity_type.to_string()),
             KeyValue::new("state", state.to_string()),
             KeyValue::new("reset_action", reset_action.to_string()),
+        ],
+    );
+}
+
+/// Record a state_timeout re-armed by the hydration hook (ADR-0056). `bucket`
+/// is `"overdue"` when the timer fired immediately because elapsed >=
+/// after_seconds, or `"budgeted"` when armed with remaining delay.
+pub fn record_state_timeout_armed_on_hydration(
+    tenant: &str,
+    entity_type: &str,
+    state: &str,
+    bucket: &'static str,
+) {
+    metrics().state_timeout_armed_on_hydration_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("state", state.to_string()),
+            KeyValue::new("elapsed_bucket", bucket),
         ],
     );
 }
