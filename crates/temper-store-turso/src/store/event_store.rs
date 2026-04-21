@@ -1,6 +1,7 @@
 //! [`EventStore`] trait implementation for Turso/libSQL.
 
 use libsql::{TransactionBehavior, params};
+use std::time::Duration;
 use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, PersistenceError, storage_error,
 };
@@ -9,6 +10,8 @@ use tracing::instrument;
 
 use super::TursoEventStore;
 use super::instrumentation::record_turso_query_duration;
+use crate::metrics::record_turso_write_retry;
+use crate::retry::{RETRY_DELAYS_MS, is_transient_write_error};
 
 impl EventStore for TursoEventStore {
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
@@ -18,102 +21,46 @@ impl EventStore for TursoEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let conn = self.configured_connection().await?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(storage_error)?;
-
-        let select_start = std::time::Instant::now();
-        let rows_result = tx
-            .query(
-                "SELECT COALESCE(MAX(sequence_nr), 0)
-                 FROM events
-                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
-                params![tenant, entity_type, entity_id],
-            )
-            .await;
-        record_turso_query_duration(
-            select_start.elapsed(),
-            "query",
-            "transaction",
-            rows_result.is_ok(),
-        );
-        let mut rows = rows_result.map_err(storage_error)?;
-
-        let current_seq = match rows.next().await.map_err(storage_error)? {
-            Some(row) => row.get::<i64>(0).map_err(storage_error)? as u64,
-            None => 0,
-        };
-        drop(rows);
-
-        if current_seq != expected_sequence {
-            tracing::error!(
-                expected = expected_sequence,
-                actual = current_seq,
-                "concurrency violation on append"
-            );
-            let _ = tx.rollback().await;
-            return Err(PersistenceError::ConcurrencyViolation {
-                expected: expected_sequence,
-                actual: current_seq,
-            });
-        }
-
-        let mut new_seq = expected_sequence;
-        for event in events {
-            new_seq += 1;
-            let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
-                tracing::error!(error = %e, "failed to serialize event payload");
-                PersistenceError::Serialization(e.to_string())
-            })?;
-            let metadata_json = serde_json::to_string(&event.metadata).map_err(|e| {
-                tracing::error!(error = %e, "failed to serialize event metadata");
-                PersistenceError::Serialization(e.to_string())
-            })?;
-
-            let insert_start = std::time::Instant::now();
-            let insert_result = tx
-                .execute(
-                    "INSERT INTO events
-                     (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        tenant,
-                        entity_type,
-                        entity_id,
-                        new_seq as i64,
-                        event.event_type.as_str(),
-                        payload_json,
-                        metadata_json
-                    ],
-                )
-                .await;
-            record_turso_query_duration(
-                insert_start.elapsed(),
-                "execute",
-                "transaction",
-                insert_result.is_ok(),
-            );
-
-            if let Err(e) = insert_result {
-                let msg = e.to_string();
-                tracing::error!(error = %e, "event insert failed");
-                let _ = tx.rollback().await;
-                if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
-                    return Err(PersistenceError::ConcurrencyViolation {
-                        expected: expected_sequence,
-                        actual: new_seq,
-                    });
+        // Retry transient Hrana BLOCKED / stream errors with backoff (ADR-0056).
+        // The whole function body is the retry unit: each attempt opens a fresh
+        // transaction. Event-store's UNIQUE (entity_type, entity_id, sequence_nr)
+        // makes retries safe — if a prior attempt partially committed before
+        // erroring, the retry's pre-check detects it as ConcurrencyViolation
+        // (non-transient, propagates to caller via normal event-store contract).
+        let total_attempts = RETRY_DELAYS_MS.len() + 1;
+        let mut last_err: Option<PersistenceError> = None;
+        for attempt in 0..total_attempts {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt - 1])).await;
+            }
+            match self
+                .append_inner(persistence_id, expected_sequence, events)
+                .await
+            {
+                Ok(seq) => {
+                    if attempt > 0 {
+                        record_turso_write_retry(
+                            "turso.append",
+                            attempt as u64,
+                            "succeeded",
+                        );
+                    }
+                    return Ok(seq);
                 }
-                return Err(PersistenceError::Storage(msg));
+                Err(err) => {
+                    let transient = match &err {
+                        PersistenceError::Storage(msg) => is_transient_write_error(msg),
+                        _ => false,
+                    };
+                    if !transient {
+                        return Err(err);
+                    }
+                    last_err = Some(err);
+                }
             }
         }
-
-        tx.commit().await.map_err(storage_error)?;
-        Ok(new_seq)
+        record_turso_write_retry("turso.append", total_attempts as u64, "exhausted");
+        Err(last_err.expect("retry loop captured at least one error"))
     }
 
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.read_events"))]
@@ -261,5 +208,122 @@ impl EventStore for TursoEventStore {
             out.push((entity_type, entity_id));
         }
         Ok(out)
+    }
+}
+
+impl TursoEventStore {
+    /// Single-attempt implementation of [`EventStore::append`]. Callers go
+    /// through the public `append` which wraps this in retry-with-backoff
+    /// (ADR-0056). Kept as an inherent `async fn` on the concrete type so the
+    /// transactional body can borrow `self` cleanly across retries without
+    /// fighting `FnMut` + future-lifetime rules.
+    ///
+    /// Safe to retry after a transient transport failure: the UNIQUE
+    /// constraint on `events.(entity_type, entity_id, sequence_nr)` means a
+    /// prior-attempt partial commit is detected as `ConcurrencyViolation`,
+    /// which the retry layer treats as non-transient and propagates to the
+    /// caller via the normal event-store contract.
+    async fn append_inner(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+    ) -> Result<u64, PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+
+        let select_start = std::time::Instant::now();
+        let rows_result = tx
+            .query(
+                "SELECT COALESCE(MAX(sequence_nr), 0)
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await;
+        record_turso_query_duration(
+            select_start.elapsed(),
+            "query",
+            "transaction",
+            rows_result.is_ok(),
+        );
+        let mut rows = rows_result.map_err(storage_error)?;
+
+        let current_seq = match rows.next().await.map_err(storage_error)? {
+            Some(row) => row.get::<i64>(0).map_err(storage_error)? as u64,
+            None => 0,
+        };
+        drop(rows);
+
+        if current_seq != expected_sequence {
+            tracing::error!(
+                expected = expected_sequence,
+                actual = current_seq,
+                "concurrency violation on append"
+            );
+            let _ = tx.rollback().await;
+            return Err(PersistenceError::ConcurrencyViolation {
+                expected: expected_sequence,
+                actual: current_seq,
+            });
+        }
+
+        let mut new_seq = expected_sequence;
+        for event in events {
+            new_seq += 1;
+            let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
+                tracing::error!(error = %e, "failed to serialize event payload");
+                PersistenceError::Serialization(e.to_string())
+            })?;
+            let metadata_json = serde_json::to_string(&event.metadata).map_err(|e| {
+                tracing::error!(error = %e, "failed to serialize event metadata");
+                PersistenceError::Serialization(e.to_string())
+            })?;
+
+            let insert_start = std::time::Instant::now();
+            let insert_result = tx
+                .execute(
+                    "INSERT INTO events
+                     (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        new_seq as i64,
+                        event.event_type.as_str(),
+                        payload_json,
+                        metadata_json
+                    ],
+                )
+                .await;
+            record_turso_query_duration(
+                insert_start.elapsed(),
+                "execute",
+                "transaction",
+                insert_result.is_ok(),
+            );
+
+            if let Err(e) = insert_result {
+                let msg = e.to_string();
+                tracing::error!(error = %e, "event insert failed");
+                let _ = tx.rollback().await;
+                if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
+                    return Err(PersistenceError::ConcurrencyViolation {
+                        expected: expected_sequence,
+                        actual: new_seq,
+                    });
+                }
+                return Err(PersistenceError::Storage(msg));
+            }
+        }
+
+        tx.commit().await.map_err(storage_error)?;
+        Ok(new_seq)
     }
 }
