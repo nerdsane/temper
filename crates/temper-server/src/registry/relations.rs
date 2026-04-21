@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use temper_spec::automaton::{ActionTrigger, AgentTrigger, TriggerGuard, TriggerKind, Webhook};
+use temper_spec::automaton::{ActionTrigger, TriggerGuard, TriggerKind, Webhook};
 use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy};
 use temper_spec::csdl::CsdlDocument;
 
@@ -85,71 +85,10 @@ fn nav_target_entity(type_name: &str) -> String {
     inner.rsplit('.').next().unwrap_or(inner).to_string()
 }
 
-/// Synthesize reaction rules from an `[[agent_trigger]]` section.
-///
-/// Produces two rules:
-/// 1. Source action -> create + assign an Agent entity
-/// 2. Agent.Assign -> Agent.Start (auto-start the assigned agent)
-pub(super) fn synthesize_agent_trigger_reactions(
-    entity_type: &str,
-    trigger: &AgentTrigger,
-) -> Vec<ReactionRule> {
-    let model = trigger
-        .agent_model
-        .clone()
-        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
-    let agent_type_id = trigger.agent_type_id.clone().unwrap_or_default();
-
-    let mut params = serde_json::json!({
-        "role": trigger.agent_role,
-        "goal": trigger.agent_goal,
-        "model": model,
-    });
-    if !agent_type_id.is_empty() {
-        params["agent_type_id"] = serde_json::Value::String(agent_type_id);
-    }
-
-    vec![
-        // Rule 1: Source action -> create + assign Agent
-        ReactionRule {
-            name: format!("{}:agent_trigger:{}", entity_type, trigger.name),
-            when: ReactionTrigger {
-                entity_type: entity_type.to_string(),
-                action: Some(trigger.on_action.clone()),
-                to_state: trigger.to_state.clone(),
-                guard: None,
-            },
-            then: ReactionTarget {
-                entity_type: "Agent".to_string(),
-                action: "Assign".to_string(),
-                params,
-                params_from: std::collections::BTreeMap::new(),
-            },
-            resolve_target: TargetResolver::CreateIfMissing {
-                id_field: "id".to_string(),
-            },
-            principal: None,
-        },
-        // Rule 2: Agent.Assign -> Agent.Start (auto-start the assigned agent)
-        ReactionRule {
-            name: format!("{}:agent_trigger:{}:start", entity_type, trigger.name),
-            when: ReactionTrigger {
-                entity_type: "Agent".to_string(),
-                action: Some("Assign".to_string()),
-                to_state: Some("Assigned".to_string()),
-                guard: None,
-            },
-            then: ReactionTarget {
-                entity_type: "Agent".to_string(),
-                action: "Start".to_string(),
-                params: serde_json::json!({}),
-                params_from: std::collections::BTreeMap::new(),
-            },
-            resolve_target: TargetResolver::SameId,
-            principal: None,
-        },
-    ]
-}
+// ADR-0046: `synthesize_agent_trigger_reactions` removed. Agent spawning
+// is now an `[[action.triggers]]` block with kind="entity"; auto-start-on-
+// Assign behavior lives on the target agent entity's own spec as a
+// self-trigger (see ADR-0046 Sub-Decision 7).
 
 /// Synthesize a `ReactionRule` from an `[[action.triggers]]` entry (ADR-0046).
 ///
