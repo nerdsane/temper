@@ -6337,7 +6337,10 @@ dependencies = [
 name = "temper-wasm"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "async-trait",
+ "axum 0.8.8",
+ "bytes",
  "chrono",
  "futures-util",
  "opentelemetry",
@@ -6349,6 +6352,7 @@ dependencies = [
  "temper-observe",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-test",
  "tracing",
  "tracing-opentelemetry",
@@ -6362,6 +6366,7 @@ dependencies = [
 name = "temper-wasm-sdk"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
 ]
 
