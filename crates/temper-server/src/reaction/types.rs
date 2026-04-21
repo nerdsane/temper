@@ -30,6 +30,15 @@ pub struct ReactionRule {
     pub then: ReactionTarget,
     /// How to resolve the target entity ID.
     pub resolve_target: TargetResolver,
+    /// Optional principal (registered AgentType name) for elevation
+    /// (ADR-0046). When `Some`, dispatch uses a synthetic
+    /// `SecurityContext` with every Cedar attribute (`role`, `agent_type`,
+    /// `id`) populated from this name. When `None`, dispatch inherits
+    /// the invoking principal — the trigger runs as whoever called the
+    /// source action. Serde-default preserves backwards compatibility
+    /// for reactions loaded from the pre-ADR-0046 `reactions.toml`.
+    #[serde(default)]
+    pub principal: Option<String>,
 }
 
 /// Trigger condition for a reaction rule.
@@ -242,6 +251,7 @@ mod tests {
             resolve_target: TargetResolver::Field {
                 field: "payment_id".to_string(),
             },
+            principal: None,
         };
 
         let json = serde_json::to_string(&rule).unwrap();

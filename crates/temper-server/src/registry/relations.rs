@@ -128,6 +128,7 @@ pub(super) fn synthesize_agent_trigger_reactions(
             resolve_target: TargetResolver::CreateIfMissing {
                 id_field: "id".to_string(),
             },
+            principal: None,
         },
         // Rule 2: Agent.Assign -> Agent.Start (auto-start the assigned agent)
         ReactionRule {
@@ -145,6 +146,7 @@ pub(super) fn synthesize_agent_trigger_reactions(
                 params_from: std::collections::BTreeMap::new(),
             },
             resolve_target: TargetResolver::SameId,
+            principal: None,
         },
     ]
 }
@@ -205,6 +207,7 @@ pub(super) fn synthesize_action_trigger_reaction(
             params_from: trigger.params_from.clone(),
         },
         resolve_target: target_resolver_to_target_resolver(&resolve_target),
+        principal: trigger.principal.clone(),
     })
 }
 
