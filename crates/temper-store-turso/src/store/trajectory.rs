@@ -10,6 +10,7 @@ use super::{
 };
 use crate::TursoTrajectoryInsert;
 use crate::metrics::TursoQueryTimer;
+use crate::retry::retry_persistence;
 
 impl TursoEventStore {
     /// Persist a trajectory entry (all columns including agent/authz fields).
@@ -25,51 +26,62 @@ impl TursoEventStore {
         entry: TursoTrajectoryInsert<'_>,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.persist_trajectory");
-        let conn = self.configured_connection().await?;
-        let execute_res = conn
-            .execute(
-            "INSERT INTO trajectories \
-             (tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-              agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-            params![
-                entry.tenant,
-                entry.entity_type,
-                entry.entity_id,
-                entry.action,
-                entry.success as i64,
-                entry.from_status,
-                entry.to_status,
-                entry.error,
-                entry.agent_id,
-                entry.session_id,
-                entry.authz_denied.map(|b| b as i64),
-                entry.denied_resource,
-                entry.denied_module,
-                entry.source,
-                entry.spec_governed.map(|b| b as i64),
-                entry.created_at,
-                entry.request_body,
-                entry.intent,
-                entry.matched_policy_ids
-            ],
-        )
-        .await
-        .map_err(storage_error);
-        if let Err(ref error) = execute_res {
-            tracing::warn!(
-                tenant = entry.tenant,
-                entity_type = entry.entity_type,
-                entity_id = entry.entity_id,
-                action = entry.action,
-                success = entry.success,
-                source = ?entry.source,
-                authz_denied = ?entry.authz_denied,
-                error = %error,
-                "trajectory.store.write"
-            );
-        }
-        execute_res?;
+        // Retry transient Hrana BLOCKED / stream errors with backoff (ADR-0056).
+        // The INSERT itself is not naturally idempotent (no UNIQUE constraint on
+        // trajectory rows), so a successful retry after a lost-ACK can produce
+        // a duplicate row. Trajectories are append-only forensic records; a
+        // duplicate row with identical fields is acceptable and rare. The
+        // alternative (losing the trajectory during Turso wobbles) is worse —
+        // trajectories are the observability record of what the entity did.
+        retry_persistence("turso.persist_trajectory", || async {
+            let conn = self.configured_connection().await?;
+            let execute_res = conn
+                .execute(
+                "INSERT INTO trajectories \
+                 (tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
+                  agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                params![
+                    entry.tenant,
+                    entry.entity_type,
+                    entry.entity_id,
+                    entry.action,
+                    entry.success as i64,
+                    entry.from_status,
+                    entry.to_status,
+                    entry.error,
+                    entry.agent_id,
+                    entry.session_id,
+                    entry.authz_denied.map(|b| b as i64),
+                    entry.denied_resource,
+                    entry.denied_module,
+                    entry.source,
+                    entry.spec_governed.map(|b| b as i64),
+                    entry.created_at,
+                    entry.request_body,
+                    entry.intent,
+                    entry.matched_policy_ids
+                ],
+            )
+            .await
+            .map_err(storage_error);
+            if let Err(ref error) = execute_res {
+                tracing::warn!(
+                    tenant = entry.tenant,
+                    entity_type = entry.entity_type,
+                    entity_id = entry.entity_id,
+                    action = entry.action,
+                    success = entry.success,
+                    source = ?entry.source,
+                    authz_denied = ?entry.authz_denied,
+                    error = %error,
+                    "trajectory.store.write"
+                );
+            }
+            execute_res?;
+            Ok(())
+        })
+        .await?;
         tracing::Span::current().record("rows_written", 1u64);
         tracing::info!(
             tenant = entry.tenant,
