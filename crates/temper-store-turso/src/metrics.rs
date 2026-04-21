@@ -44,7 +44,11 @@ pub(crate) fn record_turso_query_duration(duration: Duration, operation: &str) {
 /// Record a Turso write-retry event. `outcome` is `"succeeded"` if the retry
 /// eventually produced a successful write, or `"exhausted"` if all attempts
 /// failed and the caller received the error.
-pub(crate) fn record_turso_write_retry(operation: &'static str, attempt: u64, outcome: &'static str) {
+pub(crate) fn record_turso_write_retry(
+    operation: &'static str,
+    attempt: u64,
+    outcome: &'static str,
+) {
     metrics().write_retries.add(
         1,
         &[

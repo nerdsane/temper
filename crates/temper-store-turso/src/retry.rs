@@ -127,8 +127,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn is_transient_matches_hrana_blocked() {
@@ -159,9 +159,7 @@ mod tests {
 
     #[test]
     fn is_transient_rejects_syntax_error() {
-        assert!(!is_transient_write_error(
-            "near \"SELET\": syntax error"
-        ));
+        assert!(!is_transient_write_error("near \"SELET\": syntax error"));
     }
 
     #[tokio::test]

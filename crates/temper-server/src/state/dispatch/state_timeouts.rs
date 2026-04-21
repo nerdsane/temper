@@ -69,9 +69,9 @@ fn compute_state_clock_reset_ts(
     // Find the most recent state entry: last event whose to_status ==
     // current_state AND from_status != current_state. Scanning backward
     // because recent events are at the back.
-    let entry_idx = events.iter().rposition(|e| {
-        e.to_status == current_state && e.from_status != current_state
-    })?;
+    let entry_idx = events
+        .iter()
+        .rposition(|e| e.to_status == current_state && e.from_status != current_state)?;
     let entry_ts = events[entry_idx].timestamp;
 
     // Among events after the entry, find the latest reset_on event.
@@ -250,9 +250,8 @@ impl crate::state::ServerState {
             // handles actors that hydrated from snapshot after a restart or
             // passivation without the benefit of a state transition to arm
             // the timer.
-            let needs_hydration_rearm = !is_entry
-                && !is_reset
-                && self.state_timeout_tracker.current(&key) == 0;
+            let needs_hydration_rearm =
+                !is_entry && !is_reset && self.state_timeout_tracker.current(&key) == 0;
             if !is_entry && !is_reset && !needs_hydration_rearm {
                 continue;
             }
@@ -274,11 +273,8 @@ impl crate::state::ServerState {
             //   and the on_timeout action fires on the next tokio tick.
             let mut delay = Duration::from_secs(st.after_seconds);
             if needs_hydration_rearm {
-                let clock_reset = compute_state_clock_reset_ts(
-                    &response.state.events,
-                    &post_state,
-                    &st.reset_on,
-                );
+                let clock_reset =
+                    compute_state_clock_reset_ts(&response.state.events, &post_state, &st.reset_on);
                 if let Some(reset_ts) = clock_reset {
                     let now = sim_now();
                     let elapsed = now

@@ -37,6 +37,8 @@ struct RuntimeMetrics {
     scheduler_pending_timers: Gauge<u64>,
     // ADR-0056: re-arm on actor hydration.
     state_timeout_armed_on_hydration_total: Counter<u64>,
+    // ADR-0056 Sub-Decision 3: silent-exit regression guard.
+    integration_silent_exit_total: Counter<u64>,
     // --- ADR-0050: liveness coverage enforcement --------------------------
     spec_liveness_violations_total: Counter<u64>,
     spec_allow_indefinite_states: Gauge<u64>,
@@ -190,6 +192,18 @@ fn metrics() -> &'static RuntimeMetrics {
                      declared [[state_timeout]] but no live in-memory timer. `elapsed_bucket` \
                      tag distinguishes overdue (fired immediately) from budgeted (armed with \
                      remaining delay).",
+                )
+                .build(),
+            integration_silent_exit_total: meter
+                .u64_counter("temper_integration_silent_exit_total")
+                .with_description(
+                    "ADR-0056: inline WASM trigger-integration invocations that returned \
+                     successfully without causing any state transition on the triggering \
+                     entity. Under healthy operation this counter is permanently zero; any \
+                     nonzero reading is a regression of the consumer-side \
+                     exit-dispatches-an-action invariant (openpaw ADR-0039 Sub-Decision 3a) \
+                     or a transient persist failure that slipped past the retry layer \
+                     (ADR-0056 Sub-Decision 2). Alerts on this counter are critical-severity.",
                 )
                 .build(),
             spec_liveness_violations_total: meter
@@ -617,6 +631,27 @@ pub fn record_state_timeout_armed_on_hydration(
             KeyValue::new("entity_type", entity_type.to_string()),
             KeyValue::new("state", state.to_string()),
             KeyValue::new("elapsed_bucket", bucket),
+        ],
+    );
+}
+
+/// Record a silent integration exit — an inline trigger invocation that
+/// returned successfully without causing a state transition on the
+/// triggering entity. Emits `temper_integration_silent_exit_total` (ADR-0056
+/// Sub-Decision 3).
+pub fn record_integration_silent_exit(
+    tenant: &str,
+    entity_type: &str,
+    triggering_action: &str,
+    state: &str,
+) {
+    metrics().integration_silent_exit_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", triggering_action.to_string()),
+            KeyValue::new("state", state.to_string()),
         ],
     );
 }

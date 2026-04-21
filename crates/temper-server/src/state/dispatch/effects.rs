@@ -311,6 +311,12 @@ impl crate::state::ServerState {
             if ctx.await_integration {
                 let mut inline_response: Option<EntityResponse> = None;
 
+                // ADR-0056 Sub-Decision 3: snapshot pre-integration state so
+                // we can detect silent exits (integrations that returned
+                // without causing a state transition) after the inline WASM
+                // call returns.
+                let pre_integration_status = response.state.status.clone();
+
                 let req = super::WasmDispatchRequest {
                     tenant: ctx.tenant,
                     entity_type: ctx.entity_type,
@@ -325,6 +331,30 @@ impl crate::state::ServerState {
                 if let Ok(Some(final_response)) =
                     Box::pin(self.dispatch_wasm_integrations_internal(&req)).await
                 {
+                    // Silent-exit regression guard: trigger integration
+                    // returned but state didn't advance. Under healthy
+                    // operation the consumer-side WASM invariant (openpaw
+                    // ADR-0039 Sub-Decision 3a) and the Turso persist retry
+                    // (ADR-0056 Sub-Decision 2) prevent this; any nonzero
+                    // reading of the counter is a critical-severity alert
+                    // that something regressed.
+                    if final_response.state.status == pre_integration_status {
+                        tracing::warn!(
+                            target: "temper_server::integration",
+                            tenant = %ctx.tenant,
+                            entity_type = ctx.entity_type,
+                            entity_id = ctx.entity_id,
+                            action = ctx.action,
+                            state = %pre_integration_status,
+                            "integration returned without state transition \u{2014} invariant violation"
+                        );
+                        crate::runtime_metrics::record_integration_silent_exit(
+                            ctx.tenant.as_str(),
+                            ctx.entity_type,
+                            ctx.action,
+                            &pre_integration_status,
+                        );
+                    }
                     inline_response = Some(final_response);
                 }
 

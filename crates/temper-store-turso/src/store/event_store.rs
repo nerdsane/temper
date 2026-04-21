@@ -39,11 +39,7 @@ impl EventStore for TursoEventStore {
             {
                 Ok(seq) => {
                     if attempt > 0 {
-                        record_turso_write_retry(
-                            "turso.append",
-                            attempt as u64,
-                            "succeeded",
-                        );
+                        record_turso_write_retry("turso.append", attempt as u64, "succeeded");
                     }
                     return Ok(seq);
                 }
