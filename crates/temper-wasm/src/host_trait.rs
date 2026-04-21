@@ -636,6 +636,11 @@ impl WasmHost for ProductionWasmHost {
         tracing::Span::current().record("status_code", status);
         tracing::Span::current().record("response_bytes", resp_body.len() as u64);
         tracing::Span::current().record("duration_ms", duration_ms);
+        apply_response_captures(
+            &tracing::Span::current(),
+            &resp_body,
+            &span_hints.response_captures,
+        );
         metrics::record_host_http_call(
             method,
             "text",
@@ -1075,7 +1080,22 @@ pub(crate) struct SpanHints {
     /// headers). Keys are stripped of the prefix; both key and value must be
     /// non-empty.
     pub attributes: Vec<(String, String)>,
+    /// Post-response captures (from `X-Temper-Span-Capture-Response-<attr>:
+    /// <json-pointer>` headers). Each pair is (attr_name, RFC-6901 pointer);
+    /// the host applies them after the response body is received by parsing
+    /// the body as JSON and recording the value at `pointer` as span attr
+    /// `attr_name` (truncated). Enables LLM Observability content capture
+    /// (e.g., `gen_ai.completion` from `/content/0/text`).
+    pub response_captures: Vec<(String, String)>,
 }
+
+/// Upper bound on any single span attribute value derived from a response
+/// capture. Datadog's per-attribute size budget is ~25 KB; we stay well
+/// under so a single attr can't dominate the span payload. Truncated values
+/// are suffixed with `MAX_RESPONSE_CAPTURE_TRUNCATION_SUFFIX` so consumers
+/// can tell the value was cut.
+pub(crate) const MAX_RESPONSE_CAPTURE_BYTES: usize = 20 * 1024;
+const MAX_RESPONSE_CAPTURE_TRUNCATION_SUFFIX: &str = "…[truncated]";
 
 /// Split a header list into headers forwarded to the upstream request and
 /// Temper-specific span hints. See ADR-0037.
@@ -1100,6 +1120,7 @@ pub(crate) fn split_span_hint_headers(
     const PREFIX: &str = "x-temper-span-";
     const NAME_HEADER: &str = "x-temper-span-name";
     const ATTR_PREFIX: &str = "x-temper-span-attr-";
+    const CAPTURE_PREFIX: &str = "x-temper-span-capture-response-";
 
     let mut kept: Vec<(String, String)> = Vec::with_capacity(headers.len());
     let mut hints = SpanHints::default();
@@ -1114,6 +1135,14 @@ pub(crate) fn split_span_hint_headers(
         if let Some(attr_key) = lk.strip_prefix(ATTR_PREFIX) {
             if !attr_key.is_empty() && !v.is_empty() {
                 hints.attributes.push((attr_key.to_string(), v.clone()));
+            }
+            continue;
+        }
+        if let Some(attr_key) = lk.strip_prefix(CAPTURE_PREFIX) {
+            if !attr_key.is_empty() && !v.is_empty() {
+                hints
+                    .response_captures
+                    .push((attr_key.to_string(), v.clone()));
             }
             continue;
         }
@@ -1144,6 +1173,69 @@ pub(crate) fn apply_span_hints(span: &tracing::Span, hints: &SpanHints) {
     for (k, v) in &hints.attributes {
         otel_span.set_attribute(KeyValue::new(k.clone(), v.clone()));
     }
+}
+
+/// Resolve each `(attr, json_pointer)` pair from `response_captures` against
+/// `response_body`, and record the resolved value as a span attribute.
+///
+/// Used to capture LLM response content (`gen_ai.completion`) onto the
+/// `tool.llm_call.*` span so DD LLM Observability populates its Output
+/// panel. Request-side attrs (`gen_ai.prompt`, model, system) are handled
+/// by the request-header path; this function is the post-response half.
+///
+/// Behaviour:
+/// - Non-JSON `response_body` → silently skipped (not all captures succeed;
+///   the call may have errored upstream and returned HTML, empty, etc.).
+/// - Pointer missing in body → attr not recorded (no panic, no error log).
+/// - String values passed through; non-string (number, object, array) are
+///   re-serialized via `serde_json`.
+/// - Values over [`MAX_RESPONSE_CAPTURE_BYTES`] are truncated at a UTF-8
+///   boundary with [`MAX_RESPONSE_CAPTURE_TRUNCATION_SUFFIX`] appended.
+pub(crate) fn apply_response_captures(
+    span: &tracing::Span,
+    response_body: &str,
+    response_captures: &[(String, String)],
+) {
+    use opentelemetry::KeyValue;
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    if response_captures.is_empty() {
+        return;
+    }
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(response_body) else {
+        return;
+    };
+
+    let cx = span.context();
+    let otel_span = cx.span();
+    for (attr, pointer) in response_captures {
+        let Some(value) = root.pointer(pointer) else {
+            continue;
+        };
+        let raw = match value {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let truncated = truncate_for_span_attr(&raw);
+        otel_span.set_attribute(KeyValue::new(attr.clone(), truncated));
+    }
+}
+
+/// Truncate `value` to at most [`MAX_RESPONSE_CAPTURE_BYTES`] bytes on a
+/// UTF-8 boundary, appending a marker suffix if truncated.
+pub(crate) fn truncate_for_span_attr(value: &str) -> String {
+    if value.len() <= MAX_RESPONSE_CAPTURE_BYTES {
+        return value.to_string();
+    }
+    let mut cut = MAX_RESPONSE_CAPTURE_BYTES;
+    while cut > 0 && !value.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = String::with_capacity(cut + MAX_RESPONSE_CAPTURE_TRUNCATION_SUFFIX.len());
+    out.push_str(&value[..cut]);
+    out.push_str(MAX_RESPONSE_CAPTURE_TRUNCATION_SUFFIX);
+    out
 }
 
 /// Parse Connect protocol binary frames from a response body.
@@ -1601,5 +1693,107 @@ mod tests {
         assert_eq!(kept[0].0, "content-type");
         assert!(hints.span_name.is_none());
         assert!(hints.attributes.is_empty());
+    }
+
+    // --- Response-capture headers (LLM Obs output) ---
+
+    #[test]
+    fn split_span_hint_headers_extracts_response_captures() {
+        let headers = vec![
+            (
+                "X-Temper-Span-Capture-Response-gen_ai.completion".to_string(),
+                "/content/0/text".to_string(),
+            ),
+            (
+                "x-temper-span-capture-response-tool.result".to_string(),
+                "/result".to_string(),
+            ),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(hints.response_captures.len(), 2);
+        assert!(
+            hints
+                .response_captures
+                .iter()
+                .any(|(k, v)| k == "gen_ai.completion" && v == "/content/0/text")
+        );
+        assert!(
+            hints
+                .response_captures
+                .iter()
+                .any(|(k, v)| k == "tool.result" && v == "/result")
+        );
+    }
+
+    #[test]
+    fn split_span_hint_headers_ignores_empty_response_capture() {
+        let headers = vec![
+            (
+                "X-Temper-Span-Capture-Response-gen_ai.completion".to_string(),
+                "".to_string(),
+            ),
+            (
+                "X-Temper-Span-Capture-Response-".to_string(),
+                "/foo".to_string(),
+            ),
+        ];
+        let (kept, hints) = split_span_hint_headers(&headers);
+        assert!(
+            kept.is_empty(),
+            "all x-temper-span-* headers should be stripped"
+        );
+        assert!(hints.response_captures.is_empty());
+    }
+
+    #[test]
+    fn truncate_for_span_attr_passes_through_short_values() {
+        let s = "hello world";
+        assert_eq!(truncate_for_span_attr(s), s);
+    }
+
+    #[test]
+    fn truncate_for_span_attr_truncates_long_values_on_utf8_boundary() {
+        // Build a string just over the budget with a multi-byte char near the cut.
+        let mut s = "a".repeat(MAX_RESPONSE_CAPTURE_BYTES - 1);
+        s.push('🎉'); // 4 bytes, starts at MAX - 1, extends past MAX.
+        s.push_str("extra");
+        let truncated = truncate_for_span_attr(&s);
+        assert!(truncated.ends_with("…[truncated]"));
+        assert!(
+            truncated.len() <= MAX_RESPONSE_CAPTURE_BYTES + "…[truncated]".len(),
+            "truncated length {} exceeded expected cap",
+            truncated.len()
+        );
+        // Must remain valid UTF-8 (call site requires it for span attrs).
+        let _ = std::str::from_utf8(truncated.as_bytes()).expect("truncated must be valid utf-8");
+    }
+
+    #[test]
+    fn apply_response_captures_is_safe_when_body_is_not_json() {
+        // Should not panic on malformed JSON; call site passes through raw body.
+        let span = tracing::Span::none();
+        apply_response_captures(
+            &span,
+            "this is not JSON",
+            &[(
+                "gen_ai.completion".to_string(),
+                "/content/0/text".to_string(),
+            )],
+        );
+    }
+
+    #[test]
+    fn apply_response_captures_is_safe_when_pointer_misses() {
+        let span = tracing::Span::none();
+        apply_response_captures(
+            &span,
+            r#"{"nope": "not here"}"#,
+            &[(
+                "gen_ai.completion".to_string(),
+                "/content/0/text".to_string(),
+            )],
+        );
     }
 }
