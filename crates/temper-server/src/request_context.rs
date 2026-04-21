@@ -5,6 +5,7 @@
 //! observability, and reaction modules.
 
 use axum::http::HeaderMap;
+use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 
 /// Agent identity context extracted from HTTP headers and credential resolution.
 ///
@@ -110,16 +111,30 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
     }
 }
 
+pub(crate) fn remote_parent_context(agent_ctx: &AgentContext) -> Option<opentelemetry::Context> {
+    let trace_id = TraceId::from_hex(agent_ctx.trace_id.as_deref()?).ok()?;
+    let span_id = SpanId::from_hex(agent_ctx.parent_span_id.as_deref()?).ok()?;
+    let span_context = SpanContext::new(
+        trace_id,
+        span_id,
+        TraceFlags::SAMPLED,
+        true,
+        TraceState::default(),
+    );
+    Some(opentelemetry::Context::new().with_remote_span_context(span_context))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, HeaderValue};
+    use opentelemetry::trace::TraceContextExt;
 
     #[test]
     fn extract_agent_context_session_and_intent() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-session-id", "sess-abc".parse().unwrap());
-        headers.insert("x-intent", "approve the invoice".parse().unwrap());
+        headers.insert("x-session-id", HeaderValue::from_static("sess-abc"));
+        headers.insert("x-intent", HeaderValue::from_static("approve the invoice"));
         let ctx = extract_agent_context(&headers);
         assert_eq!(ctx.session_id.as_deref(), Some("sess-abc"));
         assert_eq!(ctx.intent.as_deref(), Some("approve the invoice"));
@@ -131,9 +146,15 @@ mod tests {
     #[test]
     fn extract_agent_context_ignores_identity_headers() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-temper-principal-id", "cc-a1b2c3".parse().unwrap());
-        headers.insert("x-temper-agent-type", "claude-code".parse().unwrap());
-        headers.insert("x-session-id", "sess-abc".parse().unwrap());
+        headers.insert(
+            "x-temper-principal-id",
+            HeaderValue::from_static("cc-a1b2c3"),
+        );
+        headers.insert(
+            "x-temper-agent-type",
+            HeaderValue::from_static("claude-code"),
+        );
+        headers.insert("x-session-id", HeaderValue::from_static("sess-abc"));
         let ctx = extract_agent_context(&headers);
         // Identity headers are ignored — only credential resolution sets these.
         assert!(ctx.agent_id.is_none());
@@ -144,7 +165,7 @@ mod tests {
     #[test]
     fn extract_agent_context_ignores_empty_x_intent() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-intent", "".parse().unwrap());
+        headers.insert("x-intent", HeaderValue::from_static(""));
         let ctx = extract_agent_context(&headers);
         assert!(ctx.intent.is_none());
     }
@@ -162,8 +183,27 @@ mod tests {
     #[test]
     fn extract_agent_context_empty_session() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-session-id", "".parse().unwrap());
+        headers.insert("x-session-id", HeaderValue::from_static(""));
         let ctx = extract_agent_context(&headers);
         assert!(ctx.session_id.is_none());
+    }
+
+    #[test]
+    fn remote_parent_context_builds_remote_span_context() {
+        let agent_ctx = AgentContext {
+            trace_id: Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string()),
+            parent_span_id: Some("00f067aa0ba902b7".to_string()),
+            ..AgentContext::default()
+        };
+
+        let remote = remote_parent_context(&agent_ctx).expect("valid remote trace context");
+        let span_context = remote.span().span_context().clone();
+
+        assert!(span_context.is_remote());
+        assert_eq!(
+            span_context.trace_id().to_string(),
+            "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
+        assert_eq!(span_context.span_id().to_string(), "00f067aa0ba902b7");
     }
 }

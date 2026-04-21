@@ -6,6 +6,7 @@ use opentelemetry::KeyValue as OtelKeyValue;
 use opentelemetry::trace::{Span, Status, Tracer};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use temper_authz::SecurityContext;
 
@@ -47,7 +48,7 @@ pub(super) async fn dispatch_bound_action(
             OtelKeyValue::new("odata.action", action.to_string()),
             OtelKeyValue::new("tenant", tenant.as_str().to_string()),
         ])
-        .start(&tracer);
+        .start_with_context(&tracer, &tracing::Span::current().context());
 
     if let Some(ref aid) = agent_ctx.agent_id {
         http_span.set_attribute(OtelKeyValue::new("agent.id", aid.clone()));
