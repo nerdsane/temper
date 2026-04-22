@@ -69,6 +69,29 @@ pub struct HttpStreamHandles {
     pub response_body: StreamHandle,
 }
 
+/// Full set of endpoints the kernel dispatcher + guest share for one
+/// inbound exchange (ADR-0056 dispatch + ADR-0057 Phase 2).
+///
+/// Mirror of [`OutboundExchange`] with the directions inverted:
+///   * Request body: KERNEL writes (axum body chunks), GUEST reads.
+///   * Response body: GUEST writes, KERNEL reads (to stream to axum).
+///   * Head: GUEST sends (via `host_http_stream_send_response_head`),
+///     KERNEL awaits via `await_inbound_response_head`.
+pub struct InboundExchange {
+    /// Guest-facing handle: guest reads request body here.
+    pub guest_request_body: StreamHandle,
+    /// Guest-facing handle: guest writes response body here.
+    pub guest_response_body: StreamHandle,
+    /// Kernel-facing handle: kernel writes axum body chunks here.
+    pub kernel_request_body: StreamHandle,
+    /// Kernel-facing handle: kernel reads response chunks here.
+    pub kernel_response_body: StreamHandle,
+    /// Kernel awaits the response head via the registry's
+    /// `await_inbound_response_head(guest_response_body)` once
+    /// the guest calls `submit_inbound_response_head(...)`.
+    pub kernel_head_receiver_slot: StreamHandle,
+}
+
 /// Full set of endpoints the bridge task + guest share for one
 /// outbound exchange.
 ///
@@ -147,10 +170,16 @@ pub struct HttpStreamRegistry {
 struct RegistryState {
     next_id: u32,
     handles: BTreeMap<u32, ChannelEnd>,
-    /// Oneshot receivers keyed on response-body handle ID. Bridge
-    /// task holds the Sender and fires once the HTTP response head
-    /// is received. Guest consumes via `take_response_head_receiver`.
+    /// Outbound: oneshot receivers keyed on response-body handle ID.
+    /// Bridge task holds the Sender and fires once the HTTP response
+    /// head is received. Guest consumes via `await_response_head`.
     response_head_receivers: BTreeMap<u32, oneshot::Receiver<HttpResponseHead>>,
+    /// Inbound: oneshot senders keyed on response-body handle ID.
+    /// Guest fires the sender via `submit_inbound_response_head`
+    /// once it has the head ready; kernel awaits the matching
+    /// receiver via `await_inbound_response_head`.
+    inbound_head_senders: BTreeMap<u32, oneshot::Sender<HttpResponseHead>>,
+    inbound_head_receivers: BTreeMap<u32, oneshot::Receiver<HttpResponseHead>>,
 }
 
 impl HttpStreamRegistry {
@@ -160,6 +189,8 @@ impl HttpStreamRegistry {
                 next_id: 1,
                 handles: BTreeMap::new(),
                 response_head_receivers: BTreeMap::new(),
+                inbound_head_senders: BTreeMap::new(),
+                inbound_head_receivers: BTreeMap::new(),
             }),
         }
     }
@@ -273,6 +304,71 @@ impl HttpStreamRegistry {
         };
         rx.await
             .map_err(|_| StreamError::Aborted("response head sender dropped".into()))
+    }
+
+    /// Open a full inbound exchange for a single HTTP request
+    /// dispatched via HttpEndpoint (ADR-0056). Kernel writes axum
+    /// body chunks into `kernel_request_body`, guest reads them
+    /// from `guest_request_body`. Guest writes its response body
+    /// to `guest_response_body`; kernel streams chunks out via
+    /// `kernel_response_body`. Guest fires the response head with
+    /// `submit_inbound_response_head`; kernel awaits it via
+    /// `await_inbound_response_head`.
+    pub async fn open_inbound_exchange(&self) -> InboundExchange {
+        let (kern_req_writer, guest_req_reader) = self.create_pair().await;
+        let (guest_resp_writer, kern_resp_reader) = self.create_pair().await;
+        let (head_tx, head_rx) = oneshot::channel();
+        {
+            let mut state = self.inner.lock().await;
+            state
+                .inbound_head_senders
+                .insert(guest_resp_writer.0, head_tx);
+            state
+                .inbound_head_receivers
+                .insert(guest_resp_writer.0, head_rx);
+        }
+        InboundExchange {
+            guest_request_body: guest_req_reader,
+            guest_response_body: guest_resp_writer,
+            kernel_request_body: kern_req_writer,
+            kernel_response_body: kern_resp_reader,
+            kernel_head_receiver_slot: guest_resp_writer,
+        }
+    }
+
+    /// Guest-called: submit the response head for an inbound
+    /// exchange. Identified by the guest's response-body handle
+    /// (the same handle it writes response chunks into).
+    pub async fn submit_inbound_response_head(
+        &self,
+        guest_response_body: StreamHandle,
+        head: HttpResponseHead,
+    ) -> Result<(), StreamError> {
+        let tx = {
+            let mut state = self.inner.lock().await;
+            match state.inbound_head_senders.remove(&guest_response_body.0) {
+                Some(tx) => tx,
+                None => return Err(StreamError::InvalidHandle),
+            }
+        };
+        tx.send(head)
+            .map_err(|_| StreamError::Aborted("kernel head receiver dropped".into()))
+    }
+
+    /// Kernel-called: await the head submitted by the guest.
+    pub async fn await_inbound_response_head(
+        &self,
+        guest_response_body: StreamHandle,
+    ) -> Result<HttpResponseHead, StreamError> {
+        let rx = {
+            let mut state = self.inner.lock().await;
+            match state.inbound_head_receivers.remove(&guest_response_body.0) {
+                Some(rx) => rx,
+                None => return Err(StreamError::InvalidHandle),
+            }
+        };
+        rx.await
+            .map_err(|_| StreamError::Aborted("guest head sender dropped".into()))
     }
 
     /// Current handle count — for metrics and leak detection in tests.
@@ -390,6 +486,65 @@ mod tests {
     async fn close_unknown_handle_errs() {
         let reg = HttpStreamRegistry::new();
         let err = reg.close(StreamHandle(9999)).await.unwrap_err();
+        assert_eq!(err, StreamError::InvalidHandle);
+    }
+
+    #[tokio::test]
+    async fn inbound_exchange_roundtrips_head_and_body() {
+        let reg = HttpStreamRegistry::new();
+        let exchange = reg.open_inbound_exchange().await;
+
+        // Kernel pushes request body.
+        reg.write(exchange.kernel_request_body, b"git-upload-pack-request-body".to_vec())
+            .await
+            .unwrap();
+        reg.close(exchange.kernel_request_body).await.unwrap();
+
+        // Guest reads request, produces response body + head.
+        let chunk = reg.read(exchange.guest_request_body).await.unwrap();
+        assert_eq!(&chunk, b"git-upload-pack-request-body");
+        let eof = reg.read(exchange.guest_request_body).await.unwrap();
+        assert!(eof.is_empty());
+
+        // Guest submits head.
+        let head = HttpResponseHead {
+            status: 200,
+            headers: vec![(
+                "content-type".into(),
+                "application/x-git-upload-pack-result".into(),
+            )],
+        };
+        reg.submit_inbound_response_head(exchange.guest_response_body, head.clone())
+            .await
+            .unwrap();
+
+        // Guest writes response body and closes.
+        reg.write(exchange.guest_response_body, b"packfile-bytes".to_vec())
+            .await
+            .unwrap();
+        reg.close(exchange.guest_response_body).await.unwrap();
+
+        // Kernel awaits head, then drains response body.
+        let kernel_head = reg
+            .await_inbound_response_head(exchange.kernel_head_receiver_slot)
+            .await
+            .unwrap();
+        assert_eq!(kernel_head.status, head.status);
+        assert_eq!(kernel_head.headers, head.headers);
+        let body_chunk = reg.read(exchange.kernel_response_body).await.unwrap();
+        assert_eq!(&body_chunk, b"packfile-bytes");
+        let eof2 = reg.read(exchange.kernel_response_body).await.unwrap();
+        assert!(eof2.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inbound_submit_head_unknown_handle() {
+        let reg = HttpStreamRegistry::new();
+        let head = HttpResponseHead::default();
+        let err = reg
+            .submit_inbound_response_head(StreamHandle(9999), head)
+            .await
+            .unwrap_err();
         assert_eq!(err, StreamError::InvalidHandle);
     }
 
