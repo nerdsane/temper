@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// Chunk size used by SDK adapters when splitting writes. A single
 /// chunk may be smaller (short writes), but never larger — the
@@ -67,6 +67,34 @@ pub struct HttpStreamHandles {
     pub request_body: StreamHandle,
     /// Guest reads response body chunks here. Empty chunk = EOF.
     pub response_body: StreamHandle,
+}
+
+/// Full set of endpoints the bridge task + guest share for one
+/// outbound exchange.
+///
+/// Guest-facing pair (`guest_request_body`, `guest_response_body`)
+/// becomes [`HttpStreamHandles`] returned by
+/// `http_stream_begin_outbound`. The bridge task owns the other
+/// three pieces: reading request chunks from `bridge_request_body`,
+/// sending the response head via `bridge_head_sender`, then writing
+/// response chunks into `bridge_response_body`.
+pub struct OutboundExchange {
+    pub guest_request_body: StreamHandle,
+    pub guest_response_body: StreamHandle,
+    pub bridge_request_body: StreamHandle,
+    pub bridge_response_body: StreamHandle,
+    pub bridge_head_sender: oneshot::Sender<HttpResponseHead>,
+}
+
+impl OutboundExchange {
+    /// Guest-facing handles packaged for return from
+    /// `http_stream_begin_outbound`.
+    pub fn guest_handles(&self) -> HttpStreamHandles {
+        HttpStreamHandles {
+            request_body: self.guest_request_body,
+            response_body: self.guest_response_body,
+        }
+    }
 }
 
 /// Errors surfaced by stream read/write operations. Guests map these
@@ -119,6 +147,10 @@ pub struct HttpStreamRegistry {
 struct RegistryState {
     next_id: u32,
     handles: BTreeMap<u32, ChannelEnd>,
+    /// Oneshot receivers keyed on response-body handle ID. Bridge
+    /// task holds the Sender and fires once the HTTP response head
+    /// is received. Guest consumes via `take_response_head_receiver`.
+    response_head_receivers: BTreeMap<u32, oneshot::Receiver<HttpResponseHead>>,
 }
 
 impl HttpStreamRegistry {
@@ -127,6 +159,7 @@ impl HttpStreamRegistry {
             inner: Mutex::new(RegistryState {
                 next_id: 1,
                 handles: BTreeMap::new(),
+                response_head_receivers: BTreeMap::new(),
             }),
         }
     }
@@ -195,6 +228,51 @@ impl HttpStreamRegistry {
             Some(_) => Ok(()),
             None => Err(StreamError::InvalidHandle),
         }
+    }
+
+    /// Open a full outbound exchange: request-body channel + response-
+    /// body channel + response-head oneshot. Host bridge task gets
+    /// (request_body_reader, response_body_writer, head_sender); guest
+    /// gets (request_body_writer, response_body_reader). The head_sender
+    /// is kept on the bridge task until the HTTP response arrives; the
+    /// receiver is stored in the registry and handed to the guest on
+    /// its first `await_response_head(response_body)` call.
+    pub async fn open_outbound_exchange(&self) -> OutboundExchange {
+        let (req_writer, req_reader) = self.create_pair().await;
+        let (resp_writer, resp_reader) = self.create_pair().await;
+        let (head_tx, head_rx) = oneshot::channel();
+        {
+            let mut state = self.inner.lock().await;
+            state
+                .response_head_receivers
+                .insert(resp_reader.0, head_rx);
+        }
+        OutboundExchange {
+            guest_request_body: req_writer,
+            guest_response_body: resp_reader,
+            bridge_request_body: req_reader,
+            bridge_response_body: resp_writer,
+            bridge_head_sender: head_tx,
+        }
+    }
+
+    /// Await the response head for the given response-body handle.
+    /// Returns once the bridge task has sent it, or an error if the
+    /// handle is unknown / head is already taken / bridge dropped
+    /// the sender without sending.
+    pub async fn await_response_head(
+        &self,
+        response_body: StreamHandle,
+    ) -> Result<HttpResponseHead, StreamError> {
+        let rx = {
+            let mut state = self.inner.lock().await;
+            match state.response_head_receivers.remove(&response_body.0) {
+                Some(rx) => rx,
+                None => return Err(StreamError::InvalidHandle),
+            }
+        };
+        rx.await
+            .map_err(|_| StreamError::Aborted("response head sender dropped".into()))
     }
 
     /// Current handle count — for metrics and leak detection in tests.
