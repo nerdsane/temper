@@ -16,6 +16,7 @@ pub mod entity_actor;
 pub mod event_store;
 pub mod events;
 pub mod eventual_invariants;
+pub mod http_endpoint;
 pub mod idempotency;
 pub mod identity;
 #[cfg(feature = "observe")]
