@@ -719,7 +719,7 @@ impl crate::state::ServerState {
                         .dispatch_wasm_callback(
                             ctx.entity_ref,
                             callback_action,
-                            result.callback_params,
+                            strip_private_observability_params(result.callback_params),
                             ctx.agent_ctx,
                             ctx.mode,
                         )
@@ -1224,6 +1224,15 @@ fn attach_llm_parent_context(span: &Span, callback_params: &mut Value) {
     );
 }
 
+fn strip_private_observability_params(mut params: Value) -> Value {
+    let Some(object) = params.as_object_mut() else {
+        return params;
+    };
+
+    object.retain(|key, _| !key.starts_with("_gen_ai_") && key.as_str() != "_dd_llmobs_tool_spans");
+    params
+}
+
 fn llm_error_type(error: &str) -> String {
     let normalized = error.to_ascii_lowercase();
     if normalized.contains("rate limit") {
@@ -1326,4 +1335,36 @@ fn progress_emitter_fn(
         state.broadcast_agent_progress(event);
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_private_llm_observability_params_before_callback_dispatch() {
+        let params = json!({
+            "provider_response_file_id": "file-123",
+            "input_tokens": 10,
+            "_gen_ai_input_messages": "[{\"role\":\"user\"}]",
+            "_gen_ai_output_messages": "[{\"role\":\"assistant\"}]",
+            "_gen_ai_system_instructions": "system",
+            "_gen_ai_provider": "anthropic",
+            "_gen_ai_finish_reason": "end_turn",
+            "_dd_llmobs_tool_spans": "[]",
+            "gen_ai_parent_trace_id": "trace-public",
+        });
+
+        let stripped = strip_private_observability_params(params);
+
+        assert_eq!(stripped["provider_response_file_id"], "file-123");
+        assert_eq!(stripped["input_tokens"], 10);
+        assert_eq!(stripped["gen_ai_parent_trace_id"], "trace-public");
+        assert!(stripped.get("_gen_ai_input_messages").is_none());
+        assert!(stripped.get("_gen_ai_output_messages").is_none());
+        assert!(stripped.get("_gen_ai_system_instructions").is_none());
+        assert!(stripped.get("_gen_ai_provider").is_none());
+        assert!(stripped.get("_gen_ai_finish_reason").is_none());
+        assert!(stripped.get("_dd_llmobs_tool_spans").is_none());
+    }
 }
