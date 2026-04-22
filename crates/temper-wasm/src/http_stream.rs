@@ -56,6 +56,19 @@ pub struct HttpResponseHead {
     pub headers: Vec<(String, String)>,
 }
 
+/// Pair of handles returned to a guest when it opens a streaming
+/// exchange. The request_body handle is write-only (guest pushes
+/// request chunks into it); the response_body handle is read-only
+/// (guest pulls response chunks from it). See ADR-0057 Sub-Decision 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpStreamHandles {
+    /// Guest writes request body chunks here. Host reads them.
+    /// Close to signal end-of-request-body.
+    pub request_body: StreamHandle,
+    /// Guest reads response body chunks here. Empty chunk = EOF.
+    pub response_body: StreamHandle,
+}
+
 /// Errors surfaced by stream read/write operations. Guests map these
 /// to FFI return codes (negative ints) and `std::io::ErrorKind` in
 /// the SDK adapters.

@@ -91,6 +91,76 @@ pub trait WasmHost: Send + Sync {
         self.http_call(method, url, headers, body).await
     }
 
+    // --- ADR-0057 streaming primitive (outbound, Phase 1) ---
+    //
+    // Opens a bidirectional streaming exchange for a single HTTP
+    // call. Guests write request body chunks into
+    // `handles.request_body` (closing it to signal end of request),
+    // retrieve response head once available via
+    // `http_stream_response_head`, then read response body chunks
+    // from `handles.response_body` (empty chunk = EOF).
+    //
+    // Default impl: "not supported" — hosts opt in by overriding.
+
+    /// Open an outbound streaming HTTP exchange. Returns handles
+    /// the guest uses to push request body + pull response body.
+    /// The host begins sending the request as soon as the first
+    /// chunk is written (or immediately if body is empty and the
+    /// guest closes `handles.request_body`).
+    async fn http_stream_begin_outbound(
+        &self,
+        _request: crate::http_stream::HttpRequestHead,
+    ) -> Result<crate::http_stream::HttpStreamHandles, String> {
+        Err("http_stream_begin_outbound not supported by this host".to_string())
+    }
+
+    /// Read the next chunk from a stream handle. Returns empty
+    /// vector on clean EOF. Blocks if no chunk is available and
+    /// the peer has not closed.
+    async fn http_stream_read(
+        &self,
+        _handle: crate::http_stream::StreamHandle,
+    ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
+        Err(crate::http_stream::StreamError::Aborted(
+            "http_stream_read not supported by this host".into(),
+        ))
+    }
+
+    /// Non-blocking write to a stream handle. Returns WouldBlock
+    /// if the channel is full.
+    async fn http_stream_try_write(
+        &self,
+        _handle: crate::http_stream::StreamHandle,
+        _chunk: Vec<u8>,
+    ) -> Result<usize, crate::http_stream::StreamError> {
+        Err(crate::http_stream::StreamError::Aborted(
+            "http_stream_try_write not supported by this host".into(),
+        ))
+    }
+
+    /// Close a stream handle. Release of a sender signals EOF to
+    /// the receiver; release of a receiver turns subsequent sender
+    /// writes into Closed errors.
+    async fn http_stream_close(
+        &self,
+        _handle: crate::http_stream::StreamHandle,
+    ) -> Result<(), crate::http_stream::StreamError> {
+        Err(crate::http_stream::StreamError::Aborted(
+            "http_stream_close not supported by this host".into(),
+        ))
+    }
+
+    /// Block until the response head (status + headers) is
+    /// available for the given response-body handle, then return
+    /// it. Guests typically call this once, after closing the
+    /// request body, and before reading the response body.
+    async fn http_stream_response_head(
+        &self,
+        _response_body: crate::http_stream::StreamHandle,
+    ) -> Result<crate::http_stream::HttpResponseHead, String> {
+        Err("http_stream_response_head not supported by this host".to_string())
+    }
+
     /// Log a message at the given level.
     fn log(&self, level: &str, message: &str);
 
