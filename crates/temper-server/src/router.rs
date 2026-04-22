@@ -13,6 +13,13 @@ use crate::odata;
 use crate::state::ServerState;
 use crate::webhooks::receiver as webhook_receiver;
 
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::http::Uri;
+use axum::response::Response;
+use temper_runtime::tenant::TenantId;
+
 const TEMPER_CLIENT_JS: &str = include_str!("../static/temper-client.js");
 
 async fn serve_temper_client() -> (
@@ -70,7 +77,14 @@ pub fn build_router(state: ServerState) -> Router {
         .route(
             "/_internal/blobs/{*path}",
             put(blobs::put_blob).get(blobs::get_blob),
-        );
+        )
+        // ADR-0056 Phase 2 dispatcher fallback. Matched paths that
+        // aren't served by any built-in route above fall through to
+        // this handler, which consults the per-tenant HttpEndpoint
+        // table and dispatches to the bound WASM integration. Slice
+        // 2 of Phase 2 returns 501 on match; slice 3 wires the
+        // streaming dispatch on top of the ADR-0057 primitive.
+        .fallback(http_endpoint_fallback);
 
     #[cfg(feature = "observe")]
     let router = router.nest("/observe", crate::observe::build_observe_router());
@@ -125,6 +139,84 @@ pub fn build_router(state: ServerState) -> Router {
         )
         .layer(cors)
         .with_state(state)
+}
+
+/// Fallback handler for paths not served by any built-in route.
+/// Resolves the tenant from `X-Tenant-Id`, consults the tenant's
+/// `HttpEndpointTable`, and (in slice 2) returns 501 on match, 404
+/// otherwise. Slice 3 of K-1 Phase 2 replaces the 501 with a real
+/// streaming dispatch into the bound WASM integration.
+#[tracing::instrument(skip_all, fields(http.method = %method, http.route = %uri.path()))]
+async fn http_endpoint_fallback(
+    State(state): State<ServerState>,
+    method: axum::http::Method,
+    uri: Uri,
+    headers: HeaderMap,
+    _body: Body,
+) -> Response {
+    let tenant_header = headers
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    // In single-tenant mode, fall back to the first registered tenant
+    // if the header is absent — same convention as the OData router.
+    let tenant_id = match tenant_header {
+        Some(t) if !t.is_empty() => TenantId::new(&t),
+        _ => {
+            if state.single_tenant_mode {
+                let registry = state.registry.read().unwrap();
+                match registry.tenant_ids().first() {
+                    Some(t) => (*t).clone(),
+                    None => return http_404_response(uri.path()),
+                }
+            } else {
+                return axum::http::Response::builder()
+                    .status(axum::http::StatusCode::BAD_REQUEST)
+                    .body(Body::from(
+                        "missing X-Tenant-Id header (required in multi-tenant mode)",
+                    ))
+                    .expect("response builder");
+            }
+        }
+    };
+
+    let table = state.http_endpoint_tables.table_for(&tenant_id).await;
+    let matched = table.match_request(method.as_str(), uri.path()).await;
+
+    let Some(route) = matched else {
+        return http_404_response(uri.path());
+    };
+
+    // Slice 2 of K-1 Phase 2: route matches but dispatch isn't
+    // wired. Return 501 with a descriptive payload so operators can
+    // tell the difference from a genuine 404. Slice 3 replaces this
+    // with real streaming dispatch.
+    tracing::info!(
+        tenant = %tenant_id.as_str(),
+        endpoint_id = %route.route.id,
+        integration = %route.route.integration_module,
+        path_prefix = %route.route.path_prefix,
+        "HttpEndpoint match (dispatch not yet wired — returning 501)"
+    );
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::NOT_IMPLEMENTED)
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            "{{\"error\":\"HttpEndpoint dispatch not yet implemented\",\"endpoint_id\":\"{}\",\"integration\":\"{}\"}}",
+            route.route.id, route.route.integration_module
+        )))
+        .expect("response builder")
+}
+
+fn http_404_response(path: &str) -> Response {
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::NOT_FOUND)
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            "{{\"error\":\"no route matches\",\"path\":\"{path}\"}}"
+        )))
+        .expect("response builder")
 }
 
 #[cfg(test)]

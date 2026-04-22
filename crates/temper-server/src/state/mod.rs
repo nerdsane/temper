@@ -305,6 +305,10 @@ pub struct ServerState {
     /// point that `temper-platform` uses to wire `hooks.rs` into the
     /// dispatch pipeline.
     pub custom_effect_handler: Option<Arc<dyn custom_effects::CustomEffectHandler>>,
+    /// Per-tenant HttpEndpoint route tables (ADR-0056 Phase 2).
+    /// Consulted by the router fallback to dispatch to WASM
+    /// integrations registered via the HttpEndpoint entity.
+    pub http_endpoint_tables: Arc<crate::http_endpoint::HttpEndpointTables>,
 }
 
 /// Install a one-time hook so liveness violations surfaced by temper-spec
@@ -394,6 +398,7 @@ impl ServerState {
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
             custom_effect_handler: None,
+            http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -625,6 +630,7 @@ impl ServerState {
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
             custom_effect_handler: None,
+            http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
         };
         state.register_builtin_wasm_modules();
         state
