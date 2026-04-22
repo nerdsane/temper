@@ -125,4 +125,51 @@ unsafe extern "C" {
         buf_ptr: i32,
         buf_len: i32,
     ) -> i32;
+
+    // --- ADR-0057 streaming primitive (outbound, Phase 1) ---
+
+    /// Open an outbound streaming HTTP exchange. Writes two u32
+    /// handle IDs (little-endian) at `out_req_handle_ptr` and
+    /// `out_resp_handle_ptr`. Returns 0 on success, negative on
+    /// error (see the stream_read/write error convention).
+    ///
+    /// Headers are a JSON array of `[key, value]` pairs, matching
+    /// `host_http_call`.
+    pub fn host_http_stream_begin_outbound(
+        method_ptr: i32,
+        method_len: i32,
+        url_ptr: i32,
+        url_len: i32,
+        headers_ptr: i32,
+        headers_len: i32,
+        out_req_handle_ptr: i32,
+        out_resp_handle_ptr: i32,
+    ) -> i32;
+
+    /// Read the next chunk from a stream handle into `buf_ptr`.
+    /// Blocks until a chunk is available or the peer closes.
+    /// Returns: positive = bytes read, 0 = clean EOF, -1 = WouldBlock,
+    /// -2 = Closed, -3 = InvalidHandle, -4 = other error.
+    pub fn host_http_stream_read(handle: i32, buf_ptr: i32, buf_cap: i32) -> i32;
+
+    /// Non-blocking write to a stream handle. Returns:
+    /// positive = bytes written, -1 = WouldBlock (retry after yielding),
+    /// -2 = Closed, -3 = InvalidHandle, -4 = other error.
+    pub fn host_http_stream_try_write(handle: i32, data_ptr: i32, data_len: i32) -> i32;
+
+    /// Close a stream handle, freeing its registry slot.
+    /// Returns 0 on success, -3 on InvalidHandle, -4 on other error.
+    pub fn host_http_stream_close(handle: i32) -> i32;
+
+    /// Block until the HTTP response head (status + headers) is
+    /// available for the given response-body handle. Writes a JSON
+    /// object `{"status":N, "headers":[["k","v"],...]}` to
+    /// `buf_ptr` up to `buf_cap` bytes.
+    /// Returns: positive = bytes written, -2 = buffer too small,
+    /// -4 = other error.
+    pub fn host_http_stream_response_head(
+        resp_handle: i32,
+        buf_ptr: i32,
+        buf_cap: i32,
+    ) -> i32;
 }
