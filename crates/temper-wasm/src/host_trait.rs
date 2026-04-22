@@ -244,6 +244,9 @@ pub struct ProductionWasmHost {
     binary_http_interceptor: Option<BinaryHttpInterceptorFn>,
     /// Invocation context for auto-enriching guest telemetry.
     invocation_context: Option<WasmInvocationContext>,
+    /// Registry of active streaming HTTP exchanges (ADR-0057).
+    /// One per host instance; handle IDs are unique within the host.
+    http_streams: Arc<crate::http_stream::HttpStreamRegistry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -372,6 +375,7 @@ impl ProductionWasmHost {
             trace_id: None,
             binary_http_interceptor: None,
             invocation_context: None,
+            http_streams: Arc::new(crate::http_stream::HttpStreamRegistry::new()),
         }
     }
 
@@ -1066,6 +1070,145 @@ impl WasmHost for ProductionWasmHost {
             }
         }
         Ok(())
+    }
+
+    // --- ADR-0057 streaming primitive (outbound, Phase 1) ---
+    //
+    // Flow on begin_outbound:
+    //   1. Registry mints an OutboundExchange — two paired mpsc
+    //      channels and a oneshot for the response head.
+    //   2. Spawn a tokio task that bridges to reqwest:
+    //        * Reads request body chunks from bridge_request_body,
+    //          feeds them into reqwest::Body::wrap_stream.
+    //        * Sends the HTTP request.
+    //        * On response, fires the head oneshot, then streams
+    //          response.bytes_stream() into bridge_response_body.
+    //        * Closes both bridge handles on completion / error.
+    //   3. Return guest_handles to the guest.
+    //
+    // Guest sees the handle pair and the head delivery promise; the
+    // bridge task owns the reqwest call for its entire lifetime.
+
+    async fn http_stream_begin_outbound(
+        &self,
+        request: crate::http_stream::HttpRequestHead,
+    ) -> Result<crate::http_stream::HttpStreamHandles, String> {
+        use futures_util::StreamExt;
+
+        let exchange = self.http_streams.open_outbound_exchange().await;
+        let guest = exchange.guest_handles();
+        let bridge_req = exchange.bridge_request_body;
+        let bridge_resp = exchange.bridge_response_body;
+        let head_tx = exchange.bridge_head_sender;
+        let streams = self.http_streams.clone();
+        let client = self.client.clone();
+
+        // Build the request head before moving into the task so we
+        // can surface malformed-method errors synchronously.
+        let builder = match request.method.to_uppercase().as_str() {
+            "GET" => client.get(&request.url),
+            "POST" => client.post(&request.url),
+            "PUT" => client.put(&request.url),
+            "DELETE" => client.delete(&request.url),
+            "PATCH" => client.patch(&request.url),
+            other => return Err(format!("unsupported HTTP method: {other}")),
+        };
+        let mut builder = builder;
+        for (k, v) in &request.headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+
+        tokio::spawn(async move {
+            // Pull request body chunks from the registry; wrap as a
+            // Stream<Item = Result<Bytes, _>> for reqwest.
+            let req_streams = streams.clone();
+            let body_stream = async_stream::stream! {
+                loop {
+                    match req_streams.read(bridge_req).await {
+                        Ok(chunk) if chunk.is_empty() => break, // EOF
+                        Ok(chunk) => yield Ok::<_, std::io::Error>(bytes::Bytes::from(chunk)),
+                        Err(_) => break,
+                    }
+                }
+            };
+            let req_body = reqwest::Body::wrap_stream(body_stream);
+
+            let send_result = builder.body(req_body).send().await;
+            let resp = match send_result {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = head_tx.send(crate::http_stream::HttpResponseHead {
+                        status: 0,
+                        headers: vec![("x-temper-stream-error".into(), format!("{e}"))],
+                    });
+                    let _ = streams.close(bridge_resp).await;
+                    return;
+                }
+            };
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .filter_map(|(k, v)| {
+                    v.to_str()
+                        .ok()
+                        .map(|s| (k.as_str().to_string(), s.to_string()))
+                })
+                .collect();
+            let _ = head_tx.send(crate::http_stream::HttpResponseHead { status, headers });
+
+            let mut body_stream = resp.bytes_stream();
+            while let Some(chunk) = body_stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        if streams
+                            .write(bridge_resp, bytes.to_vec())
+                            .await
+                            .is_err()
+                        {
+                            break; // guest hung up
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = streams.close(bridge_resp).await;
+        });
+
+        Ok(guest)
+    }
+
+    async fn http_stream_read(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+    ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
+        self.http_streams.read(handle).await
+    }
+
+    async fn http_stream_try_write(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+        chunk: Vec<u8>,
+    ) -> Result<usize, crate::http_stream::StreamError> {
+        self.http_streams.try_write(handle, chunk).await
+    }
+
+    async fn http_stream_close(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+    ) -> Result<(), crate::http_stream::StreamError> {
+        self.http_streams.close(handle).await
+    }
+
+    async fn http_stream_response_head(
+        &self,
+        response_body: crate::http_stream::StreamHandle,
+    ) -> Result<crate::http_stream::HttpResponseHead, String> {
+        self.http_streams
+            .await_response_head(response_body)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
