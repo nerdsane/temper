@@ -19,9 +19,12 @@
 //!   * `Paused` / `Deleted` endpoints never match.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use temper_runtime::tenant::TenantId;
 use tokio::sync::RwLock;
+
+const ACTOR_ASK_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// One row of the table. Derived from an `HttpEndpoint` entity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +157,127 @@ impl Default for HttpEndpointTables {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Rebuild the route table for `tenant` by enumerating every
+/// `HttpEndpoint` row that the tenant owns, asking each entity
+/// actor for its current state, and projecting Active rows into
+/// routes. Called on boot and on every HttpEndpoint state change
+/// (see [`spawn_reconciler`]).
+///
+/// Fails silently on per-row problems (actor unreachable, state
+/// parse failure, etc.): a single malformed row should not sink
+/// the rest of the table. Metrics + warn-level logs cover
+/// visibility.
+pub async fn rebuild_tenant_table(state: &crate::state::ServerState, tenant: &TenantId) {
+    use crate::entity_actor::types::{EntityMsg, EntityResponse};
+
+    let index_key = format!("{}:HttpEndpoint", tenant.as_str());
+    let ids: Vec<String> = {
+        let Ok(index) = state.entity_index.read() else {
+            return;
+        };
+        index
+            .get(&index_key)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+
+    let mut routes: Vec<HttpEndpointRoute> = Vec::with_capacity(ids.len());
+    for entity_id in ids {
+        let actor_key = format!("{}:HttpEndpoint:{}", tenant.as_str(), entity_id);
+        let actor_ref = {
+            let Ok(registry) = state.actor_registry.read() else {
+                continue;
+            };
+            registry.get(&actor_key).cloned()
+        };
+        let Some(actor_ref) = actor_ref else {
+            continue; // actor passivated — will rematerialize on next request
+        };
+        let response: EntityResponse = match actor_ref
+            .ask(EntityMsg::GetState, ACTOR_ASK_TIMEOUT)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    tenant = %tenant.as_str(),
+                    entity_id,
+                    error = %e,
+                    "HttpEndpoint actor ask failed during rebuild"
+                );
+                continue;
+            }
+        };
+        if response.state.status != "Active" {
+            continue;
+        }
+        if let Some(route) = route_from_entity_fields(&entity_id, &response.state.fields) {
+            routes.push(route);
+        } else {
+            tracing::warn!(
+                tenant = %tenant.as_str(),
+                entity_id,
+                status = %response.state.status,
+                "HttpEndpoint row failed projection — skipped"
+            );
+        }
+    }
+
+    let table = state.http_endpoint_tables.table_for(tenant).await;
+    let count = routes.len();
+    table.replace(routes).await;
+    tracing::info!(
+        tenant = %tenant.as_str(),
+        route_count = count,
+        "HttpEndpoint route table rebuilt"
+    );
+}
+
+/// Spawn a long-running task that watches entity state changes and
+/// rebuilds the tenant's route table whenever an HttpEndpoint row
+/// transitions. Must be called once per server instance, after
+/// `ServerState::new` but before `axum::serve`.
+///
+/// Rebuild semantics are eager: any HttpEndpoint-typed transition
+/// (Create, Pause, Resume, Delete) triggers a full re-enumeration.
+/// Cost is O(active_rows) per change, acceptable at our expected
+/// row count (O(hundreds) per tenant per ADR-0056).
+pub fn spawn_reconciler(state: crate::state::ServerState) {
+    let mut rx = state.event_tx.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(change) if change.entity_type == "HttpEndpoint" => {
+                    let tenant = TenantId::new(&change.tenant);
+                    rebuild_tenant_table(&state, &tenant).await;
+                }
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        skipped,
+                        "HttpEndpoint reconciler lagged; rebuilding all tenant tables as a recovery"
+                    );
+                    let tenants: Vec<TenantId> = {
+                        let Ok(reg) = state.registry.read() else {
+                            continue;
+                        };
+                        reg.tenant_ids().iter().map(|t| (*t).clone()).collect()
+                    };
+                    for tenant in tenants {
+                        rebuild_tenant_table(&state, &tenant).await;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::info!("HttpEndpoint reconciler stopping (broadcast closed)");
+                    return;
+                }
+            }
+        }
+    });
 }
 
 /// Project a raw `fields` JSON object from an `HttpEndpoint`
