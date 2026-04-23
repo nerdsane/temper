@@ -1,6 +1,8 @@
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use opentelemetry::trace::Status;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use wasmtime::Store;
 
 use crate::metrics;
@@ -58,12 +60,11 @@ pub(super) fn empty_result(
     needs_wasi: bool,
     duration_ms: u64,
 ) -> WasmInvocationResult {
-    metrics::record_wasm_invoke(
-        &context.entity_type,
-        &context.trigger_action,
+    record_failure(
+        context,
         needs_wasi,
-        false,
         duration_ms as f64,
+        "module returned empty result",
     );
     WasmInvocationResult {
         callback_action: String::new(),
@@ -81,14 +82,9 @@ pub(super) fn parse_result_json(
     duration_ms: u64,
 ) -> Result<serde_json::Value, WasmError> {
     serde_json::from_str(result_json).map_err(|error| {
-        metrics::record_wasm_invoke(
-            &context.entity_type,
-            &context.trigger_action,
-            needs_wasi,
-            false,
-            duration_ms as f64,
-        );
-        WasmError::Invocation(format!("failed to parse result JSON: {error}"))
+        let message = format!("failed to parse result JSON: {error}");
+        record_failure(context, needs_wasi, duration_ms as f64, &message);
+        WasmError::Invocation(message)
     })
 }
 
@@ -124,6 +120,16 @@ pub(super) fn finalize_result(
     if let Some(ref error_message) = error {
         tracing::Span::current().record("error", error_message.as_str());
     }
+    if !success {
+        let error_message = error
+            .as_deref()
+            .unwrap_or("module returned unsuccessful result");
+        let error_type = wasm_error_type(error_message);
+        tracing::Span::current().record("error.type", error_type);
+        tracing::Span::current().record("error.message", error_message);
+        tracing::Span::current().record("exception.message", error_message);
+        tracing::Span::current().set_status(Status::error(error_message.to_string()));
+    }
     metrics::record_wasm_invoke(
         &context.entity_type,
         &context.trigger_action,
@@ -150,8 +156,13 @@ fn record_failure(
     duration_ms: f64,
     error: &str,
 ) {
+    let error_type = wasm_error_type(error);
     tracing::Span::current().record("success", false);
     tracing::Span::current().record("error", error);
+    tracing::Span::current().record("error.type", error_type);
+    tracing::Span::current().record("error.message", error);
+    tracing::Span::current().record("exception.message", error);
+    tracing::Span::current().set_status(Status::error(error.to_string()));
     metrics::record_wasm_invoke(
         &context.entity_type,
         &context.trigger_action,
@@ -159,4 +170,17 @@ fn record_failure(
         false,
         duration_ms,
     );
+}
+
+fn wasm_error_type(error: &str) -> &'static str {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("timeout") {
+        "timeout"
+    } else if normalized.contains("fuel") {
+        "fuel_exhausted"
+    } else if normalized.contains("memory") {
+        "memory_limit_exceeded"
+    } else {
+        "wasm_invocation_error"
+    }
 }
