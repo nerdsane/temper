@@ -3,7 +3,7 @@ use tracing::instrument;
 use crate::entity_actor::{EntityMsg, EntityResponse};
 use crate::request_context::AgentContext;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
-use temper_runtime::scheduler::sim_now;
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use super::effects::PostDispatchContext;
@@ -328,7 +328,12 @@ impl crate::state::ServerState {
         let action_name = action.to_string();
         let params_for_retry = params;
         let cross_for_retry = cross_entity_booleans;
-        let idempotency_key = agent_ctx.idempotency_key.clone();
+        let idempotency_key = Some(agent_ctx.idempotency_key.clone().unwrap_or_else(|| {
+            format!(
+                "dispatch:{tenant}:{entity_type}:{entity_id}:{action}:{}",
+                sim_uuid()
+            )
+        }));
         // W2 phase: ask_reply — round-trip through the retry layer to the
         // actor and back. Aggregates with other phase spans by prefix.
         let ask_span = tracing::info_span!(
@@ -492,6 +497,13 @@ impl crate::state::ServerState {
             await_integration,
         };
         let response = self.run_post_dispatch_effects(&ctx, response).await;
+        if response.success
+            && let Some(ref idem_key) = idempotency_key
+        {
+            let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
+            self.idempotency_cache
+                .mark_effects_applied(&actor_key, idem_key);
+        }
 
         tracing::Span::current().record("success", response.success);
         if let Some(ref err) = response.error {
