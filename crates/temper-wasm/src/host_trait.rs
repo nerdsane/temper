@@ -850,6 +850,7 @@ impl WasmHost for ProductionWasmHost {
     }
 
     fn log(&self, level: &str, message: &str) {
+        record_guest_log_span_event(level, message, self.invocation_context.as_ref(), None);
         match level {
             "error" => tracing::error!(target: "wasm_guest", "{}", message),
             "warn" => tracing::warn!(target: "wasm_guest", "{}", message),
@@ -916,6 +917,13 @@ impl WasmHost for ProductionWasmHost {
             .and_then(|ctx| ctx.session_id.as_deref())
             .unwrap_or("");
         let trace_id = self.trace_id.as_deref().unwrap_or("");
+
+        record_guest_log_span_event(
+            &payload.level,
+            &payload.message,
+            self.invocation_context.as_ref(),
+            Some(&fields_json),
+        );
 
         match payload.level.as_str() {
             "error" => tracing::error!(
@@ -1015,6 +1023,155 @@ fn infer_guest_operation(kind: EventKind, tags: &BTreeMap<String, String>) -> Op
             .cloned()
             .or_else(|| Some("chat".to_string())),
         _ => tags.get("operation").cloned(),
+    }
+}
+
+fn guest_log_span_attrs(
+    level: &str,
+    message: &str,
+    context: Option<&WasmInvocationContext>,
+    fields_json: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut attrs = BTreeMap::new();
+    attrs.insert("log.severity".to_string(), level.to_string());
+    attrs.insert("log.message".to_string(), message.to_string());
+    attrs.insert("log.target".to_string(), "wasm_guest".to_string());
+    if let Some(context) = context {
+        attrs.insert("tenant".to_string(), context.tenant.clone());
+        attrs.insert("entity_type".to_string(), context.entity_type.clone());
+        attrs.insert("entity_id".to_string(), context.entity_id.clone());
+        attrs.insert("trigger_action".to_string(), context.trigger_action.clone());
+        if let Some(agent_id) = context
+            .agent_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            attrs.insert("agent_id".to_string(), agent_id.to_string());
+        }
+        if let Some(session_id) = context
+            .session_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            attrs.insert("gen_ai.conversation.id".to_string(), session_id.to_string());
+        }
+        if !context.trace_id.is_empty() {
+            attrs.insert("trace_id".to_string(), context.trace_id.clone());
+        }
+    }
+    if let Some(fields_json) = fields_json.filter(|value| !value.is_empty()) {
+        attrs.insert("fields_json".to_string(), fields_json.to_string());
+    }
+    attrs
+}
+
+fn record_guest_log_span_event(
+    level: &str,
+    message: &str,
+    context: Option<&WasmInvocationContext>,
+    fields_json: Option<&str>,
+) {
+    use opentelemetry::KeyValue;
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let attrs = guest_log_span_attrs(level, message, context, fields_json)
+        .into_iter()
+        .map(|(key, value)| KeyValue::new(key, value))
+        .collect::<Vec<_>>();
+    emit_named_guest_log_span_event(level, message, context, fields_json);
+    let span = tracing::Span::current();
+    let cx = span.context();
+    let otel_span = cx.span();
+    if otel_span.span_context().is_valid() {
+        otel_span.add_event("wasm_guest.log", attrs);
+    }
+}
+
+fn emit_named_guest_log_span_event(
+    level: &str,
+    message: &str,
+    context: Option<&WasmInvocationContext>,
+    fields_json: Option<&str>,
+) {
+    let tenant = context.map(|ctx| ctx.tenant.as_str()).unwrap_or("");
+    let entity_type = context.map(|ctx| ctx.entity_type.as_str()).unwrap_or("");
+    let entity_id = context.map(|ctx| ctx.entity_id.as_str()).unwrap_or("");
+    let trigger_action = context.map(|ctx| ctx.trigger_action.as_str()).unwrap_or("");
+    let agent_id = context
+        .and_then(|ctx| ctx.agent_id.as_deref())
+        .unwrap_or("");
+    let session_id = context
+        .and_then(|ctx| ctx.session_id.as_deref())
+        .unwrap_or("");
+    let trace_id = context.map(|ctx| ctx.trace_id.as_str()).unwrap_or("");
+    let fields_json = fields_json.unwrap_or("");
+
+    match level.to_ascii_lowercase().as_str() {
+        "error" => tracing::event!(
+            name: "wasm_guest.log",
+            target: "wasm_guest",
+            tracing::Level::ERROR,
+            guest_log.message = %message,
+            guest_log.severity = %level,
+            guest_log.target = "wasm_guest",
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            trigger_action = %trigger_action,
+            agent_id = %agent_id,
+            gen_ai.conversation.id = %session_id,
+            trace_id = %trace_id,
+            fields_json = %fields_json,
+        ),
+        "warn" => tracing::event!(
+            name: "wasm_guest.log",
+            target: "wasm_guest",
+            tracing::Level::WARN,
+            guest_log.message = %message,
+            guest_log.severity = %level,
+            guest_log.target = "wasm_guest",
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            trigger_action = %trigger_action,
+            agent_id = %agent_id,
+            gen_ai.conversation.id = %session_id,
+            trace_id = %trace_id,
+            fields_json = %fields_json,
+        ),
+        "info" => tracing::event!(
+            name: "wasm_guest.log",
+            target: "wasm_guest",
+            tracing::Level::INFO,
+            guest_log.message = %message,
+            guest_log.severity = %level,
+            guest_log.target = "wasm_guest",
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            trigger_action = %trigger_action,
+            agent_id = %agent_id,
+            gen_ai.conversation.id = %session_id,
+            trace_id = %trace_id,
+            fields_json = %fields_json,
+        ),
+        _ => tracing::event!(
+            name: "wasm_guest.log",
+            target: "wasm_guest",
+            tracing::Level::DEBUG,
+            guest_log.message = %message,
+            guest_log.severity = %level,
+            guest_log.target = "wasm_guest",
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            trigger_action = %trigger_action,
+            agent_id = %agent_id,
+            gen_ai.conversation.id = %session_id,
+            trace_id = %trace_id,
+            fields_json = %fields_json,
+        ),
     }
 }
 
@@ -1482,6 +1639,7 @@ mod tests {
     use super::*;
     use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
     use opentelemetry_sdk::trace::SdkTracerProvider;
+    use std::sync::{Arc, Mutex};
     use tracing_opentelemetry::OpenTelemetrySpanExt;
     use tracing_subscriber::prelude::*;
 
@@ -1595,6 +1753,96 @@ mod tests {
             .in_scope(|| current_traceparent_header(&tracing::Span::current(), None))
             .expect("active span should produce a traceparent");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn guest_log_span_attrs_include_message_and_invocation_context() {
+        let context = WasmInvocationContext {
+            tenant: "tenant-a".to_string(),
+            entity_type: "Session".to_string(),
+            entity_id: "ss-1".to_string(),
+            trigger_action: "ContextReady".to_string(),
+            trigger_params: serde_json::Value::Null,
+            entity_state: serde_json::Value::Null,
+            agent_id: Some("agent-1".to_string()),
+            session_id: Some("ss-1".to_string()),
+            integration_config: BTreeMap::new(),
+            trace_id: "0123456789abcdef0123456789abcdef".to_string(),
+        };
+
+        let attrs = guest_log_span_attrs(
+            "error",
+            "provider failed",
+            Some(&context),
+            Some(r#"{"status":500}"#),
+        );
+
+        assert_eq!(attrs["log.severity"], "error");
+        assert_eq!(attrs["log.message"], "provider failed");
+        assert_eq!(attrs["tenant"], "tenant-a");
+        assert_eq!(attrs["entity_type"], "Session");
+        assert_eq!(attrs["entity_id"], "ss-1");
+        assert_eq!(attrs["trigger_action"], "ContextReady");
+        assert_eq!(attrs["agent_id"], "agent-1");
+        assert_eq!(attrs["gen_ai.conversation.id"], "ss-1");
+        assert_eq!(attrs["trace_id"], "0123456789abcdef0123456789abcdef");
+        assert_eq!(attrs["fields_json"], r#"{"status":500}"#);
+    }
+
+    #[test]
+    fn guest_log_span_event_is_named_for_trace_export() {
+        #[derive(Clone)]
+        struct EventCapture {
+            names: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl<S> tracing_subscriber::Layer<S> for EventCapture
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.names
+                    .lock()
+                    .expect("event capture lock poisoned")
+                    .push(event.metadata().name().to_string());
+            }
+        }
+
+        let names = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(EventCapture {
+            names: names.clone(),
+        });
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let context = WasmInvocationContext {
+            tenant: "tenant-a".to_string(),
+            entity_type: "Session".to_string(),
+            entity_id: "ss-1".to_string(),
+            trigger_action: "ContextReady".to_string(),
+            trigger_params: serde_json::Value::Null,
+            entity_state: serde_json::Value::Null,
+            agent_id: Some("agent-1".to_string()),
+            session_id: Some("ss-1".to_string()),
+            integration_config: BTreeMap::new(),
+            trace_id: "0123456789abcdef0123456789abcdef".to_string(),
+        };
+
+        {
+            let span = tracing::info_span!("wasm.invoke");
+            let _guard = span.enter();
+            record_guest_log_span_event(
+                "error",
+                "provider failed",
+                Some(&context),
+                Some(r#"{"status":500}"#),
+            );
+        }
+
+        let names = names.lock().expect("event capture lock poisoned");
+        assert!(names.iter().any(|name| name == "wasm_guest.log"));
     }
 
     // --- Span-hint-header extraction (ADR-0037) ---

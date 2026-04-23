@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use opentelemetry::{Context as OtelContext, trace::TraceContextExt};
+use opentelemetry::{
+    Context as OtelContext,
+    trace::{Status, TraceContextExt},
+};
 use serde_json::{Value, json};
 use tracing::{Instrument, Span, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -167,6 +170,8 @@ impl crate::state::ServerState {
         gen_ai.input.messages = tracing::field::Empty,
         gen_ai.output.messages = tracing::field::Empty,
         error.type = tracing::field::Empty,
+        error.message = tracing::field::Empty,
+        exception.message = tracing::field::Empty,
     ))]
     async fn dispatch_single_integration(
         &self,
@@ -213,6 +218,8 @@ impl crate::state::ServerState {
         };
 
         let Some(hash) = module_hash else {
+            let error_str = format!("WASM module '{}' not found", module_name);
+            record_wasm_error_on_span(active_span, &error_str);
             return self
                 .handle_module_not_found(ctx, integration, &module_name)
                 .await;
@@ -671,9 +678,7 @@ impl crate::state::ServerState {
                 );
                 if let Some(reason) = denial_tracker.take_denial() {
                     let error_str = http_call_authz_denied_error(&reason);
-                    if integration.llm {
-                        Span::current().record("error.type", llm_error_type(&error_str).as_str());
-                    }
+                    record_wasm_error_on_current_span(&error_str);
                     return self
                         .handle_wasm_failure(
                             ctx,
@@ -770,9 +775,7 @@ impl crate::state::ServerState {
                 if let Some(reason) = denial_tracker.take_denial() {
                     error_str = http_call_authz_denied_error(&reason);
                 }
-                if integration.llm {
-                    Span::current().record("error.type", llm_error_type(&error_str).as_str());
-                }
+                record_wasm_error_on_current_span(&error_str);
                 self.handle_wasm_failure(
                     ctx,
                     &integration.name,
@@ -811,9 +814,7 @@ impl crate::state::ServerState {
                 {
                     error_str = http_call_authz_denied_error(&reason);
                 }
-                if integration.llm {
-                    Span::current().record("error.type", llm_error_type(&error_str).as_str());
-                }
+                record_wasm_error_on_current_span(&error_str);
                 self.handle_wasm_failure(
                     ctx,
                     &integration.name,
@@ -1188,6 +1189,19 @@ fn current_otel_trace_id(span: &Span) -> Option<String> {
     }
 }
 
+pub(super) fn record_wasm_error_on_current_span(error: &str) {
+    let span = Span::current();
+    record_wasm_error_on_span(&span, error);
+}
+
+fn record_wasm_error_on_span(span: &Span, error: &str) {
+    let error_type = integration_error_type(error);
+    span.record("error.type", error_type.as_str());
+    span.record("error.message", error);
+    span.record("exception.message", error);
+    span.set_status(Status::error(error.to_string()));
+}
+
 fn build_llm_root_span(
     ctx: &WasmDispatchCtx<'_>,
     integration: &temper_spec::automaton::Integration,
@@ -1229,6 +1243,8 @@ fn build_llm_root_span(
         gen_ai.input.messages = tracing::field::Empty,
         gen_ai.output.messages = tracing::field::Empty,
         error.type = tracing::field::Empty,
+        error.message = tracing::field::Empty,
+        exception.message = tracing::field::Empty,
     );
     span.set_parent(OtelContext::new());
     span
@@ -1271,7 +1287,7 @@ fn strip_private_observability_params(mut params: Value) -> Value {
     params
 }
 
-fn llm_error_type(error: &str) -> String {
+fn integration_error_type(error: &str) -> String {
     let normalized = error.to_ascii_lowercase();
     if normalized.contains("rate limit") {
         "rate_limit".to_string()
