@@ -886,9 +886,9 @@ async fn e2e_gepa_hotdeploy_and_verify() {
 
     // Now create a mutated Issue spec that adds Reassign.
     // We take the original and add a Reassign action.
-    let mutated_issue_spec = include_str!("../../../os-apps/project-management/issue.ioa.toml")
-        .to_string()
-        + r#"
+    let mutated_issue_spec =
+        include_str!("../../../os-apps/project-management/specs/issue.ioa.toml").to_string()
+            + r#"
 
 [[action]]
 name = "Reassign"
@@ -1148,9 +1148,9 @@ async fn e2e_gepa_full_loop() {
     assert_eq!(entity.state.status, "Deploying");
 
     // --- Step 6: Hot-deploy the mutated spec ---
-    let mutated_issue_spec = include_str!("../../../os-apps/project-management/issue.ioa.toml")
-        .to_string()
-        + r#"
+    let mutated_issue_spec =
+        include_str!("../../../os-apps/project-management/specs/issue.ioa.toml").to_string()
+            + r#"
 
 [[action]]
 name = "Reassign"
