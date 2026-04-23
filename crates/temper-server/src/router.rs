@@ -188,24 +188,176 @@ async fn http_endpoint_fallback(
         return http_404_response(uri.path());
     };
 
-    // Slice 2 of K-1 Phase 2: route matches but dispatch isn't
-    // wired. Return 501 with a descriptive payload so operators can
-    // tell the difference from a genuine 404. Slice 3 replaces this
-    // with real streaming dispatch.
-    tracing::info!(
-        tenant = %tenant_id.as_str(),
-        endpoint_id = %route.route.id,
-        integration = %route.route.integration_module,
-        path_prefix = %route.route.path_prefix,
-        "HttpEndpoint match (dispatch not yet wired — returning 501)"
+    dispatch_matched_route(state, tenant_id, method, uri, headers, _body, route).await
+}
+
+/// End-to-end dispatch: open an InboundExchange on the shared
+/// HttpStreamRegistry, spawn tasks to pump axum body into the
+/// guest-visible request-body handle and build an axum Response
+/// body that drains the guest's response-body handle, fire the
+/// WASM invocation, await the head, and stitch it into the
+/// response.
+async fn dispatch_matched_route(
+    state: ServerState,
+    tenant_id: TenantId,
+    method: axum::http::Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Body,
+    route: crate::http_endpoint::MatchedRoute,
+) -> Response {
+    use temper_wasm::http_stream::HttpResponseHead;
+    use temper_wasm::types::{HttpDispatchContext, WasmInvocationContext};
+
+    // Resolve the integration module hash. The WASM module must
+    // already be registered for this tenant (via app install).
+    let module_hash: Option<String> = state
+        .wasm_module_registry
+        .read()
+        .ok()
+        .and_then(|reg| {
+            reg.get_hash(&tenant_id, &route.route.integration_module)
+                .map(|s| s.to_string())
+        });
+    let Some(module_hash) = module_hash else {
+        tracing::warn!(
+            tenant = %tenant_id.as_str(),
+            integration = %route.route.integration_module,
+            "HttpEndpoint match but integration module not registered"
+        );
+        return axum::http::Response::builder()
+            .status(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                "{{\"error\":\"WASM integration '{}' not installed\"}}",
+                route.route.integration_module
+            )))
+            .expect("response builder");
+    };
+
+    // Open an inbound exchange on the shared registry.
+    let streams = state.http_stream_registry.clone();
+    let exchange = streams.open_inbound_exchange().await;
+    let guest_request_body = exchange.guest_request_body;
+    let guest_response_body = exchange.guest_response_body;
+    let kernel_request_body = exchange.kernel_request_body;
+    let kernel_response_body = exchange.kernel_response_body;
+
+    // Spawn task A: axum body → kernel_request_body handle.
+    let pump_streams = streams.clone();
+    tokio::spawn(async move {
+        use axum::body::to_bytes;
+        // TODO(slice 4): real streaming pump chunk-by-chunk. For
+        // v0 we collect to bytes (capped) then forward — simpler
+        // while we validate the dispatch path end-to-end.
+        const MAX_REQ_BODY: usize = 64 * 1024 * 1024;
+        match to_bytes(body, MAX_REQ_BODY).await {
+            Ok(bytes) => {
+                if !bytes.is_empty() {
+                    let _ = pump_streams.write(kernel_request_body, bytes.to_vec()).await;
+                }
+                let _ = pump_streams.close(kernel_request_body).await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "axum body → stream pump failed");
+                let _ = pump_streams.close(kernel_request_body).await;
+            }
+        }
+    });
+
+    // Build the invocation context.
+    let header_pairs: Vec<(String, String)> = headers
+        .iter()
+        .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+        .collect();
+    let ctx = WasmInvocationContext {
+        tenant: tenant_id.as_str().to_string(),
+        entity_type: "HttpEndpoint".to_string(),
+        entity_id: route.route.id.clone(),
+        trigger_action: "HandleHttp".to_string(),
+        trigger_params: serde_json::Value::Null,
+        entity_state: serde_json::Value::Null,
+        agent_id: None,
+        session_id: None,
+        integration_config: std::collections::BTreeMap::new(),
+        trace_id: String::new(),
+        http_request: Some(HttpDispatchContext {
+            method: method.as_str().to_uppercase(),
+            path: uri.path().to_string(),
+            params: route.params.clone(),
+            headers: header_pairs,
+            principal_id: None,
+            request_body_handle: guest_request_body.0,
+            response_body_handle: guest_response_body.0,
+        }),
+    };
+
+    // Build a per-request host that shares the registry.
+    let secrets: std::collections::BTreeMap<String, String> = state
+        .secrets_vault
+        .as_ref()
+        .map(|v| v.get_tenant_secrets(tenant_id.as_str()))
+        .unwrap_or_default();
+    let host: std::sync::Arc<dyn temper_wasm::WasmHost> = std::sync::Arc::new(
+        temper_wasm::ProductionWasmHost::with_shared_streams(secrets, streams.clone()),
     );
-    axum::http::Response::builder()
-        .status(axum::http::StatusCode::NOT_IMPLEMENTED)
-        .header("content-type", "application/json")
-        .body(Body::from(format!(
-            "{{\"error\":\"HttpEndpoint dispatch not yet implemented\",\"endpoint_id\":\"{}\",\"integration\":\"{}\"}}",
-            route.route.id, route.route.integration_module
-        )))
+
+    // Spawn task B: invoke the WASM module. Runs to completion
+    // (guest writes head + body via FFI; we drain on the axum side).
+    let limits = temper_wasm::types::WasmResourceLimits {
+        max_duration: std::time::Duration::from_secs(route.route.timeout_secs as u64),
+        ..Default::default()
+    };
+    let engine = state.wasm_engine.clone();
+    let invoke_streams = std::sync::Arc::new(std::sync::RwLock::new(
+        temper_wasm::stream::StreamRegistry::default(),
+    ));
+    tokio::spawn(async move {
+        let _ = engine
+            .invoke_with_blobs(
+                &module_hash,
+                &ctx,
+                host,
+                &limits,
+                invoke_streams,
+                std::collections::BTreeMap::new(),
+            )
+            .await;
+    });
+
+    // Await the guest's response head.
+    let head: HttpResponseHead = match streams
+        .await_inbound_response_head(guest_response_body)
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(error = %e, "HttpEndpoint: guest did not submit response head");
+            return axum::http::Response::builder()
+                .status(axum::http::StatusCode::BAD_GATEWAY)
+                .body(Body::from("guest integration failed to submit response head"))
+                .expect("response builder");
+        }
+    };
+
+    // Build the axum response whose body drains the
+    // kernel_response_body handle.
+    let drain_streams = streams.clone();
+    let body_stream = async_stream::stream! {
+        loop {
+            match drain_streams.read(kernel_response_body).await {
+                Ok(chunk) if chunk.is_empty() => break,
+                Ok(chunk) => yield Ok::<_, std::io::Error>(bytes::Bytes::from(chunk)),
+                Err(_) => break,
+            }
+        }
+    };
+
+    let mut resp = axum::http::Response::builder().status(head.status);
+    for (k, v) in &head.headers {
+        resp = resp.header(k, v);
+    }
+    resp.body(Body::from_stream(body_stream))
         .expect("response builder")
 }
 

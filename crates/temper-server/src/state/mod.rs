@@ -309,6 +309,13 @@ pub struct ServerState {
     /// Consulted by the router fallback to dispatch to WASM
     /// integrations registered via the HttpEndpoint entity.
     pub http_endpoint_tables: Arc<crate::http_endpoint::HttpEndpointTables>,
+    /// Shared HTTP stream registry for ADR-0057 streaming exchanges.
+    /// Held by ServerState so the dispatcher can mint inbound
+    /// exchanges before handing the guest-facing handles to the
+    /// WASM invocation. Per-request ProductionWasmHost instances
+    /// receive a clone of this Arc via `with_shared_streams` so
+    /// FFI calls from the guest resolve to the same handle IDs.
+    pub http_stream_registry: Arc<temper_wasm::http_stream::HttpStreamRegistry>,
 }
 
 /// Install a one-time hook so liveness violations surfaced by temper-spec
@@ -399,6 +406,7 @@ impl ServerState {
             verify_subprocess_bin: None,
             custom_effect_handler: None,
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
+            http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -631,6 +639,7 @@ impl ServerState {
             verify_subprocess_bin: None,
             custom_effect_handler: None,
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
+            http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
         };
         state.register_builtin_wasm_modules();
         state

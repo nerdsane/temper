@@ -27,6 +27,8 @@ temper-sandbox = { workspace = true }
 temper-verify = { workspace = true, optional = true }
 temper-store-sim = { workspace = true, optional = true }
 axum = { workspace = true }
+async-stream = "0.3"
+bytes = "1"
 hyper = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }

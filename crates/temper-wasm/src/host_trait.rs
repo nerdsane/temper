@@ -341,6 +341,25 @@ impl ProductionWasmHost {
         Self::with_timeout(secrets, crate::WasmResourceLimits::default().max_duration)
     }
 
+    /// Create with a pre-existing [`HttpStreamRegistry`] so the
+    /// ADR-0056 Phase 2 dispatcher and the per-request host share
+    /// the same registry — handles minted by the dispatcher are
+    /// reachable via FFI from the guest.
+    pub fn with_shared_streams(
+        secrets: BTreeMap<String, String>,
+        http_streams: Arc<crate::http_stream::HttpStreamRegistry>,
+    ) -> Self {
+        let mut host = Self::new(secrets);
+        host.http_streams = http_streams;
+        host
+    }
+
+    /// Borrow the host's shared stream registry. Used by the HTTP
+    /// dispatcher to mint inbound exchanges.
+    pub fn http_streams(&self) -> Arc<crate::http_stream::HttpStreamRegistry> {
+        self.http_streams.clone()
+    }
+
     /// Create with pre-loaded secrets and a custom HTTP request timeout.
     ///
     /// Secrets whose key starts with `ca_cert:` are treated as PEM-encoded
