@@ -156,6 +156,47 @@ impl Default for HttpEndpointTables {
     }
 }
 
+/// Project a raw `fields` JSON object from an `HttpEndpoint`
+/// entity row into a typed [`HttpEndpointRoute`]. Returns `None`
+/// if required fields are missing or malformed — caller treats
+/// that as "skip this row" in the reconciler path.
+pub fn route_from_entity_fields(
+    id: &str,
+    fields: &serde_json::Value,
+) -> Option<HttpEndpointRoute> {
+    let obj = fields.as_object()?;
+    let path_prefix = obj.get("PathPrefix")?.as_str()?.to_string();
+    let methods_raw = obj.get("Methods")?.as_str()?;
+    let methods: Vec<String> = methods_raw
+        .split(',')
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if methods.is_empty() {
+        return None;
+    }
+    let integration_module = obj.get("IntegrationModule")?.as_str()?.to_string();
+    if integration_module.is_empty() {
+        return None;
+    }
+    let requires_auth = obj
+        .get("RequiresAuth")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let timeout_secs = obj
+        .get("TimeoutSecs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60);
+    Some(HttpEndpointRoute {
+        id: id.to_string(),
+        path_prefix,
+        methods,
+        integration_module,
+        requires_auth,
+        timeout_secs: timeout_secs.min(u32::MAX as u64) as u32,
+    })
+}
+
 /// Match `path` against `template`. Template segments of the form
 /// `{name}` match any single path segment (no embedded `/`). Extra
 /// path segments beyond the template are ignored — callers get the
@@ -337,6 +378,59 @@ mod tests {
             .unwrap();
         assert_eq!(m.params.get("owner").unwrap(), "acme");
         assert_eq!(m.params.get("repo").unwrap(), "widgets");
+    }
+
+    #[tokio::test]
+    async fn route_from_entity_fields_projects_required() {
+        let fields = serde_json::json!({
+            "PathPrefix": "/repos/{owner}/{repo}.git/info/refs",
+            "Methods": "GET",
+            "IntegrationModule": "git_upload_pack",
+            "RequiresAuth": true,
+            "TimeoutSecs": 120,
+        });
+        let r = route_from_entity_fields("he-abc", &fields).unwrap();
+        assert_eq!(r.id, "he-abc");
+        assert_eq!(r.methods, vec!["GET".to_string()]);
+        assert_eq!(r.integration_module, "git_upload_pack");
+        assert!(r.requires_auth);
+        assert_eq!(r.timeout_secs, 120);
+    }
+
+    #[tokio::test]
+    async fn route_from_entity_fields_splits_comma_methods() {
+        let fields = serde_json::json!({
+            "PathPrefix": "/api/v3/repos/{owner}/{repo}/pulls",
+            "Methods": "GET, POST, PATCH",
+            "IntegrationModule": "github_rest_pulls",
+        });
+        let r = route_from_entity_fields("he-x", &fields).unwrap();
+        assert_eq!(
+            r.methods,
+            vec!["GET".to_string(), "POST".to_string(), "PATCH".to_string()]
+        );
+        // Missing optional fields defaulted.
+        assert!(r.requires_auth);
+        assert_eq!(r.timeout_secs, 60);
+    }
+
+    #[tokio::test]
+    async fn route_from_entity_fields_rejects_empty_methods() {
+        let fields = serde_json::json!({
+            "PathPrefix": "/x",
+            "Methods": "",
+            "IntegrationModule": "h",
+        });
+        assert!(route_from_entity_fields("he-y", &fields).is_none());
+    }
+
+    #[tokio::test]
+    async fn route_from_entity_fields_rejects_missing_integration() {
+        let fields = serde_json::json!({
+            "PathPrefix": "/x",
+            "Methods": "GET",
+        });
+        assert!(route_from_entity_fields("he-y", &fields).is_none());
     }
 
     #[tokio::test]
