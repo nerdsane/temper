@@ -69,11 +69,13 @@ resolve_target = { type = "create_if_missing", id_field = "last_version_id" }
 
 One primitive covers all outgoing effects. Deletes `[[integration]]` and `reactions.toml` entirely.
 
-- `kind = "entity"` — cross-entity action dispatch (former reactions, former `[[agent_trigger]]`).
-- `kind = "wasm"` — WASM module execution (former `[[integration]] type = "wasm"`).
-- `kind = "webhook"` — outbound HTTP (former `[[integration]] type = "webhook"`).
+- `kind = "entity"` — cross-entity action dispatch (former reactions, former `[[agent_trigger]]`). **Runtime: fully wired.**
+- `kind = "wasm"` — WASM module execution (former `[[integration]] type = "wasm"`). **Runtime: fully wired.**
+- `kind = "webhook"` — outbound HTTP (former `[[integration]] type = "webhook"`). **Runtime: NOT yet wired — parse + expand only.** See Known Gaps below.
 
 Kind-specific fields are validated at parse time: `Entity` requires `target_entity` + `target_action`; `Wasm` requires `module`; `Webhook` requires `url` + `method`. `on_success` / `on_failure` apply to `Wasm` and `Webhook` kinds and name entity actions on the source entity to dispatch after module/HTTP execution.
+
+**Known gap — `kind = "webhook"` is parse-only.** The expander synthesizes an `Integration { integration_type: "webhook", … }` record and appends a `trigger` effect to the source action, but no runtime dispatcher matches `integration_type == "webhook"`. Only `wasm` (`crates/temper-server/src/state/dispatch/wasm.rs:200`) and `adapter` (`crates/temper-server/src/state/dispatch/adapter.rs:96`) are dispatched today. Declaring `kind = "webhook"` with a real URL in a spec will silently install but never fire HTTP. Outbound webhook delivery today goes through the separate `WebhookDispatcher` + root-level `webhooks.toml` path (`crates/temper-server/src/webhooks/dispatcher.rs`), which keys on `TrajectoryEntry` matches rather than action-trigger dispatch. A follow-up ADR will add `crates/temper-server/src/state/dispatch/webhook.rs` (parallel to `wasm.rs`) to close this gap and collapse the two webhook paths.
 
 **Why not a separate `kind = "agent"`**: "agent" means different things in different apps. The platform's generic `Agent` entity (states Idle → Assigned → Working → Completed) fits the `[[agent_trigger]]` spawn-and-auto-start pattern. But `paw-agent`'s `Agent` entity is a persistent team-member identity (Created → Active → Archived) with no spawn semantics. Katagami and paw-foresight have no "agent" concept at all. A `kind = "agent"` primitive would force every agent-like entity into the platform's Agent shape. Instead, spawning any agent uses `kind = "entity"` targeting whichever agent entity is registered in the tenant, and the "auto-start on Assign" behavior is expressed as a self-trigger on the target agent's own spec (see Sub-Decision 7). This generalizes across the platform's Agent, paw-agent's Agent, and any app-defined agent entity.
 
