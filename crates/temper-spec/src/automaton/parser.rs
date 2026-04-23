@@ -125,9 +125,17 @@ fn expand_wasm_and_webhook_triggers(automaton: &mut Automaton) {
                     });
                 }
                 TriggerKind::Webhook => {
-                    // Outbound webhooks today use the same runtime; the
-                    // config carries `url`, `method`, and `headers` which
-                    // the webhook module reads.
+                    // ADR-0046 known gap: we synthesize the Integration record
+                    // but no runtime dispatcher keys on integration_type ==
+                    // "webhook" today (only "wasm" via wasm.rs:200 and
+                    // "adapter" via adapter.rs:96). A spec-declared webhook
+                    // trigger parses and installs but never fires HTTP. Real
+                    // outbound webhook delivery currently runs through
+                    // temper-server's separate WebhookDispatcher + webhooks.toml
+                    // path. A follow-up will add state/dispatch/webhook.rs
+                    // and collapse the two paths. The config-flattening below
+                    // stays so the Integration record is immediately usable
+                    // once that dispatcher lands.
                     let mut config = trigger.config.clone();
                     if let Some(url) = &trigger.url {
                         config.insert("url".to_string(), url.clone());
