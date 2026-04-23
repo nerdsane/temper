@@ -251,6 +251,7 @@ impl crate::state::ServerState {
             trace_id: current_otel_trace_id(active_span)
                 .or_else(|| ctx.agent_ctx.trace_id.clone())
                 .unwrap_or_default(),
+            http_request: None,
         };
         // ADR-0046: inline-hydrate blob refs below the 128KB ceiling; defer
         // oversize refs into a blob_cache the WASM guest can read via

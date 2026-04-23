@@ -63,6 +63,7 @@ fn make_context() -> WasmInvocationContext {
         session_id: None,
         integration_config: std::collections::BTreeMap::new(),
         trace_id: String::new(),
+        http_request: None,
     }
 }
 

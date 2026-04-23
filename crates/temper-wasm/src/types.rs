@@ -29,6 +29,54 @@ pub struct WasmInvocationContext {
     /// W3C trace ID for cross-request trace correlation.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub trace_id: String,
+    /// When the invocation was triggered by an HttpEndpoint dispatch
+    /// (ADR-0056 Phase 2), carries the HTTP-specific context so the
+    /// guest can unpack method, path params, headers, and the stream
+    /// handle IDs needed to read the request body + write the
+    /// response. `None` for entity-action-triggered invocations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_request: Option<HttpDispatchContext>,
+}
+
+/// HTTP-specific invocation context, attached to `WasmInvocationContext`
+/// when the invocation is driven by an `HttpEndpoint` dispatch.
+///
+/// Guests read this to:
+///   * dispatch on `method` + `path`;
+///   * extract named path parameters from `params`;
+///   * access headers;
+///   * stream the request body from `request_body_handle`;
+///   * write the response body to `response_body_handle`;
+///   * fire the response head via `host_http_stream_send_response_head`
+///     keyed on `response_body_handle`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpDispatchContext {
+    /// Uppercase HTTP method (GET, POST, PUT, PATCH, DELETE).
+    pub method: String,
+    /// Full request path (including leading slash). The router has
+    /// already matched it against the HttpEndpoint's `path_prefix`;
+    /// this is the verbatim value as received by axum so guests can
+    /// inspect the tail after the prefix.
+    pub path: String,
+    /// Path parameters extracted from the prefix's `{name}` segments.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub params: std::collections::BTreeMap<String, String>,
+    /// Request headers, lowercase keys, string values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<(String, String)>,
+    /// Resolved principal (if the route had `requires_auth = true`).
+    /// Guests can use this for Cedar lookups; kernel has already
+    /// validated the bearer token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_id: Option<String>,
+    /// Stream handle ID the guest reads request body chunks from.
+    /// Dispatched into by the kernel from the axum body pump task.
+    pub request_body_handle: u32,
+    /// Stream handle ID the guest writes response body chunks to.
+    /// Dispatched out by the kernel into the axum response stream.
+    /// Same handle is passed to `host_http_stream_send_response_head`
+    /// to deliver the HTTP response head.
+    pub response_body_handle: u32,
 }
 
 /// Result returned from a WASM module invocation.
@@ -127,6 +175,7 @@ mod tests {
             session_id: None,
             integration_config: std::collections::BTreeMap::new(),
             trace_id: String::new(),
+            http_request: None,
         };
         let json = serde_json::to_string(&ctx).unwrap();
         let back: WasmInvocationContext = serde_json::from_str(&json).unwrap();
@@ -149,11 +198,69 @@ mod tests {
             session_id: None,
             integration_config: std::collections::BTreeMap::new(),
             trace_id: String::new(),
+            http_request: None,
         };
         let json = serde_json::to_string(&ctx).unwrap();
         assert!(!json.contains("agent_id"));
         assert!(!json.contains("session_id"));
         assert!(!json.contains("integration_config"));
+        assert!(!json.contains("http_request"));
+    }
+
+    #[test]
+    fn http_dispatch_context_serde_roundtrip() {
+        let http = HttpDispatchContext {
+            method: "POST".into(),
+            path: "/repos/acme/widgets.git/git-upload-pack".into(),
+            params: std::collections::BTreeMap::from([
+                ("owner".to_string(), "acme".to_string()),
+                ("repo".to_string(), "widgets".to_string()),
+            ]),
+            headers: vec![(
+                "content-type".into(),
+                "application/x-git-upload-pack-request".into(),
+            )],
+            principal_id: Some("gt-01".into()),
+            request_body_handle: 1,
+            response_body_handle: 2,
+        };
+        let json = serde_json::to_string(&http).unwrap();
+        let back: HttpDispatchContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.method, "POST");
+        assert_eq!(back.params.get("owner"), Some(&"acme".to_string()));
+        assert_eq!(back.request_body_handle, 1);
+        assert_eq!(back.response_body_handle, 2);
+    }
+
+    #[test]
+    fn invocation_context_with_http_request_serializes() {
+        let ctx = WasmInvocationContext {
+            tenant: "temper-git".into(),
+            entity_type: "HttpEndpoint".into(),
+            entity_id: "he-1".into(),
+            trigger_action: "HandleHttp".into(),
+            trigger_params: serde_json::Value::Null,
+            entity_state: serde_json::Value::Null,
+            agent_id: None,
+            session_id: None,
+            integration_config: std::collections::BTreeMap::new(),
+            trace_id: String::new(),
+            http_request: Some(HttpDispatchContext {
+                method: "GET".into(),
+                path: "/repos/acme/widgets.git/info/refs".into(),
+                params: std::collections::BTreeMap::new(),
+                headers: vec![],
+                principal_id: None,
+                request_body_handle: 10,
+                response_body_handle: 11,
+            }),
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        assert!(json.contains("http_request"));
+        assert!(json.contains("request_body_handle"));
+        let back: WasmInvocationContext = serde_json::from_str(&json).unwrap();
+        assert!(back.http_request.is_some());
+        assert_eq!(back.http_request.unwrap().method, "GET");
     }
 
     #[test]
